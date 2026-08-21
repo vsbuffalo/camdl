@@ -37,6 +37,55 @@ pub enum AcceptanceKernel {
     Nuts,
 }
 
+impl AcceptanceKernel {
+    /// The healthy acceptance band `(lo, hi)`, inclusive at both ends.
+    ///
+    /// **The only place these numbers live.** They were previously spelled
+    /// three ways — `[15%, 50%]` in the message a user reads, `[10%, 50%]` in
+    /// the predicate that decides whether to emit it, and a third pair in
+    /// `severity()` — so a random-walk chain accepting 12% was inside the
+    /// applied band and outside the published one, and passed silently.
+    ///
+    /// Random-walk MH: optimal scaling for a high-dimensional target is 0.234
+    /// (Roberts, Gelman & Gilks 1997, _Ann. Appl. Probab._ 7(1):110-120), and
+    /// `[0.15, 0.50]` is the band around it that camdl publishes in
+    /// `docs/workflow.md`. NUTS: dual averaging targets 0.8 by construction, so
+    /// a rate of 0.9-0.99 is the sampler working, not failing (gh#631).
+    pub fn healthy_band(self) -> (f64, f64) {
+        match self {
+            Self::RandomWalk => (0.15, 0.50),
+            Self::Nuts => (0.60, 0.95),
+        }
+    }
+
+    /// The band as it appears in a message, naming the kernel it belongs to.
+    pub fn band_label(self) -> String {
+        let (lo, hi) = self.healthy_band();
+        let who = match self {
+            Self::RandomWalk => "random-walk MH",
+            Self::Nuts => "NUTS block; ~80% is the target",
+        };
+        format!("[{:.0}%, {:.0}%] ({})", lo * 100.0, hi * 100.0, who)
+    }
+}
+
+/// The diagnostic an acceptance `rate` deserves under `kernel`, or `None` when
+/// it is inside that kernel's healthy band.
+///
+/// Every emitter routes through this rather than re-deriving the comparison:
+/// a band that is decided in one place and rendered from another is how the
+/// NUTS false-firing of gh#631 and the 10%-vs-15% discrepancy of gh#299 item 3
+/// both arose.
+pub fn acceptance_diagnostic(
+    rate: f64,
+    param: Option<String>,
+    kernel: AcceptanceKernel,
+) -> Option<DiagnosticKind> {
+    let (lo, hi) = kernel.healthy_band();
+    (!(lo..=hi).contains(&rate))
+        .then(|| DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel })
+}
+
 /// Machine-readable diagnostic classification.
 ///
 /// Each variant carries exactly the data needed for programmatic decisions.
@@ -281,12 +330,8 @@ impl DiagnosticKind {
                 format!("Gamma density disabled: {}", reason),
             Self::AcceptanceRateUnhealthy { rate, param, kernel } => {
                 let target = if param.is_some() { "parameter" } else { "chain" };
-                let band = match kernel {
-                    AcceptanceKernel::RandomWalk => "[15%, 50%] (random-walk MH)",
-                    AcceptanceKernel::Nuts => "[60%, 95%] (NUTS block; ~80% is the target)",
-                };
                 format!("{} acceptance rate {:.1}% is outside healthy range {}.",
-                    target, rate * 100.0, band)
+                    target, rate * 100.0, kernel.band_label())
             }
             Self::ParamNearBound { param, value, bound, bound_type } =>
                 format!("'{}' = {:.4} is near {} bound {:.4}.",
@@ -504,5 +549,55 @@ mod tests {
             rate: 0.83, param: None, kernel: AcceptanceKernel::RandomWalk,
         }.render();
         assert!(m.contains("[15%, 50%]"), "RW message keeps its band: {m}");
+    }
+
+    /// gh#299 item 3. The band a user is told about and the band the emitter
+    /// applies must be the same band. They were not: the message read
+    /// `[15%, 50%]` while both emitters compared against 0.10, so a random-walk
+    /// chain accepting 12% was silently in-band while being told, if it ever
+    /// tripped, that 15% was the floor.
+    #[test]
+    fn the_published_band_is_the_band_that_fires() {
+        for kernel in [AcceptanceKernel::RandomWalk, AcceptanceKernel::Nuts] {
+            let (lo, hi) = kernel.healthy_band();
+            let msg = DiagnosticKind::AcceptanceRateUnhealthy {
+                rate: lo - 0.01, param: None, kernel,
+            }.render();
+            assert!(msg.contains(&format!("[{:.0}%, {:.0}%]", lo * 100.0, hi * 100.0)),
+                "{kernel:?}: message must name the band that fires: {msg}");
+            // Just inside both ends: silent. Just outside: reported.
+            assert!(acceptance_diagnostic(lo, None, kernel).is_none(),
+                "{kernel:?}: the lower edge is healthy");
+            assert!(acceptance_diagnostic(hi, None, kernel).is_none(),
+                "{kernel:?}: the upper edge is healthy");
+            assert!(acceptance_diagnostic(lo - 1e-6, None, kernel).is_some(),
+                "{kernel:?}: below the lower edge must be reported");
+            assert!(acceptance_diagnostic(hi + 1e-6, None, kernel).is_some(),
+                "{kernel:?}: above the upper edge must be reported");
+        }
+        assert_eq!(AcceptanceKernel::RandomWalk.healthy_band(), (0.15, 0.50),
+            "the random-walk band camdl publishes starts at 15%, not 10%");
+    }
+
+    /// The gh#299 item 3 regression proper: NUTS runs at 0.90-0.99 and targets
+    /// ~0.8. Under the random-walk band every one of those is a finding —
+    /// which is what buried the genuinely fatal 0.4%-stuck chain of gh#607 in
+    /// forty identical-looking entries per run.
+    #[test]
+    fn a_well_tuned_nuts_block_draws_no_finding_but_a_random_walk_one_would() {
+        for rate in [0.80, 0.87, 0.92, 0.95] {
+            assert!(
+                acceptance_diagnostic(rate, None, AcceptanceKernel::Nuts).is_none(),
+                "{rate} is a healthy NUTS block and must not be reported"
+            );
+            assert!(
+                acceptance_diagnostic(rate, None, AcceptanceKernel::RandomWalk).is_some(),
+                "fixture premise: {rate} IS outside the random-walk band"
+            );
+        }
+        // A collapsed NUTS kernel still lands, and still as an error.
+        let stuck = acceptance_diagnostic(0.004, None, AcceptanceKernel::Nuts)
+            .expect("0.4% under NUTS is a finding");
+        assert_eq!(stuck.severity(), Severity::Error);
     }
 }
