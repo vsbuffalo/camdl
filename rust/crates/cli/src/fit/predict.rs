@@ -2336,6 +2336,55 @@ fn one_step_bands(
             .into());
     }
 
+    // ── The conditioning window, into the FILTER (gh#702) ──────────────────
+    //
+    // The one-step band is `p(y_t | y_{1:t-1})`, drawn from the filter's own
+    // accumulator — so unlike the free-forward path there is nothing to reseed
+    // after the fact: the filter has to be handed the same leading reset-only
+    // hole the fit's likelihood was, or its first predictive is an incidence
+    // bin that has been accumulating since `t_start`. Without it the band is
+    // wrong at the first observation AND the particle weights there are
+    // computed against the wrong bin, so the resampled cloud carries the error
+    // forward.
+    //
+    // Resolution routes through the shared per-stream resolver, so the fit and
+    // its predictive cannot disagree about where a stream's first bin opens.
+    // Label validation and the W329 enforcer stay at the fit
+    // (`apply_conditioning_windows`): they judge the whole spec against the
+    // whole bound stream set, which a `--stream`-filtered predict does not have.
+    let mut boundary_by_leaf: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    if config.condition_from.is_some() {
+        let t_start = compiled.model.simulation.t_start;
+        for s in obs_streams.iter_mut() {
+            let first_obs_s = s.data.iter().map(|o| o.time).fold(f64::INFINITY, f64::min);
+            if !first_obs_s.is_finite() {
+                continue;
+            }
+            let window = crate::fit::runner::stream_condition_window(
+                config.condition_from.as_ref(),
+                &s.obs_model_ir.source,
+                &s.name,
+                first_obs_s,
+                model,
+                t_start,
+                dt,
+            )?;
+            if let Some(cond_from) = window.boundary() {
+                // The same three-line prepend `apply_conditioning_windows`
+                // makes: `cells` is authoritative for scoring, and the `data`
+                // row's 0.0 is a never-read placeholder.
+                s.data.insert(
+                    0,
+                    sim::inference::if2::Observation { time: cond_from, value: 0.0 },
+                );
+                s.cells.insert(0, None);
+                s.aux.insert(0, Vec::new());
+                boundary_by_leaf.insert(s.name.clone(), cond_from);
+            }
+        }
+    }
+
     let specs = crate::fit::runner::stream_specs_from_obs_streams(&obs_streams);
     let (bound, _report) = BoundObs::bind(specs)
         .map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
@@ -2426,11 +2475,23 @@ fn one_step_bands(
             let leaf = leaf_of_name[stream_names[si].as_str()];
             let stratum: Vec<(String, String)> =
                 leaf.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
+            // This leaf's conditioning boundary, when it has one (gh#702).
+            let boundary = boundary_by_leaf.get(leaf.name.as_str()).copied();
             for (ti, &t) in obs_times.iter().enumerate() {
                 let cell = &pooled[si][ti];
                 if cell.is_empty() {
                     // This stream is not scheduled at this union time (all NaN,
                     // dropped) — emit no row for it (multi-cadence).
+                    continue;
+                }
+                if boundary.is_some_and(|b| (t - b).abs() < 1e-9) {
+                    // The conditioning boundary is a RESET, not an observation:
+                    // the filter is scheduled there (that is how the bin
+                    // reopens) and therefore drew a sample, but the bin it
+                    // predicts is the discarded warm-up and there is no
+                    // observed row to plot it against. Per leaf, so a sibling
+                    // stream genuinely observed at this union time keeps its
+                    // row (gh#702).
                     continue;
                 }
                 let quantiles = band(cell)

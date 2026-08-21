@@ -425,7 +425,6 @@ fn conditioning_boundary_off_the_output_grid_is_refused() {
 // ── The one-step horizon: same window, a different mechanism ────────────────
 
 #[test]
-#[ignore = "gh#702: red until the one-step filter is handed the conditioning hole"]
 fn one_step_first_bin_opens_at_the_conditioning_boundary() {
     let bin = skip_if_missing_binary();
     let tmp = setup("os", &fit_toml("100", "results"));
