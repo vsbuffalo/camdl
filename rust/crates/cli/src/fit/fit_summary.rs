@@ -2700,6 +2700,7 @@ mod tests {
                 ess_per_param: BTreeMap::from([
                     ("a2".to_string(), 145.0),
                     ("tau".to_string(), 42.0),
+                    ("phi".to_string(), f64::NAN),
                 ]),
                 // `tau` is piled on a bound: its 95% indicator is constant, so
                 // tail-ESS is genuinely undefined and must render as a dash
@@ -2716,6 +2717,7 @@ mod tests {
             posterior_mean: BTreeMap::from([
                 ("a2".to_string(), 0.5),
                 ("tau".to_string(), 1.0),
+                ("phi".to_string(), 0.25),
             ]),
             posterior_q025: BTreeMap::new(),
             posterior_q975: BTreeMap::new(),
@@ -2736,6 +2738,13 @@ mod tests {
             "the row for the parameter that failed must carry its R̂: {tau}");
         assert!(tau.contains("42"),
             "the row for the parameter that failed must carry its ESS: {tau}");
+        // gh#691 item 2: the `--exclude-chains` recompute KEEPS the key and
+        // stores NaN where the loaded path drops it, so the per-parameter cell
+        // must render both encodings the same way. `phi` here is the
+        // present-but-NaN form.
+        let phi = row("phi");
+        assert!(!phi.contains("NaN"),
+            "a suppressed ESS is a dash, never the literal NaN: {phi}");
         let a2 = row("a2");
         assert!(a2.contains("1.013"), "every assessed parameter carries its R̂: {a2}");
         assert!(a2.contains("145"), "every assessed parameter carries its ESS: {a2}");
