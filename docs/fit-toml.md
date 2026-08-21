@@ -242,6 +242,16 @@ loglik is computed over the same scored window as the fit's: they read the
 (per-stream shadow). The W329 wide-first-window hard error applies there
 identically.
 
+`camdl fit predict` carries the same window into both predictive horizons, so a
+predicted row and the observed row it is plotted against cover the same
+interval: the free-forward projection opens the first incidence bin at
+`condition_from`, and the one-step filter is handed the same leading reset. The
+boundary is a reset, not an observation — no predictive row is emitted at it.
+The free-forward projection reads the recorded cumulative flow at the boundary,
+so `condition_from` must also be a **recorded output time**; if it is not,
+`fit predict` refuses and names the fix (widen `output { trajectories { … } }`,
+or move the boundary onto an output time).
+
 ## Priors
 
 Externally-tagged inline tables (the wire format matches the IR emission):

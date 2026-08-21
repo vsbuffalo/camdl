@@ -1815,7 +1815,9 @@ fn write_obs_into_cas(
         // preflight (gh#561 + gh#589).
         let times =
             crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
-        crate::project_all_obs_times(traj, obs_ir, model, &times)?;
+        // `None`: an emit_schedule-driven synthetic stream binds no data, so
+        // there is no conditioning window to open the first bin at (gh#702).
+        crate::project_all_obs_times(traj, obs_ir, model, &times, None)?;
     }
 
     let obs_dir = run_dir.join("obs").join(format!(
@@ -1843,7 +1845,9 @@ fn write_obs_into_cas(
         // carries rows past the end of the trajectory beside it (gh#561).
         let obs_times =
             crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
-        let projected = crate::project_all_obs_times(traj, obs_ir, model, &obs_times)?;
+        // `None` — emit_schedule-driven, no data to condition on (gh#702).
+        let projected =
+            crate::project_all_obs_times(traj, obs_ir, model, &obs_times, None)?;
 
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
         let mut out = std::io::BufWriter::new(

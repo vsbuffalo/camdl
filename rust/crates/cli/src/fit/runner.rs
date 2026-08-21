@@ -1317,6 +1317,83 @@ pub(crate) fn condition_spec_from_cli_or_toml(
     Ok(fit_cfg.condition_from)
 }
 
+/// Where ONE stream's first scored bin opens, per the fit's `condition_from`.
+///
+/// The three cases are genuinely different and the callers act differently on
+/// each, so they are three variants rather than an `Option<f64>` that conflates
+/// the first two: "no spec at all" is what the W329 wide-first-window enforcer
+/// judges, while "a spec that resolved to the origin" is the user's explicit
+/// opt-in to scoring the whole leading window and is only ever announced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum StreamWindow {
+    /// No `condition_from` spec applies to this stream. Its first bin opens at
+    /// `t_start`; whether that is acceptable is W329's call.
+    Unspecified,
+    /// A spec applies and resolved to `t_start` — the documented opt-in to
+    /// scoring the full leading window, no warm-up discarded.
+    AtOrigin,
+    /// A spec applies: `[t_start, t)` is simulated as warm-up but not scored,
+    /// and the first scored bin is `(t, first_obs]`.
+    ConditionedFrom(f64),
+}
+
+impl StreamWindow {
+    /// The time the stream's first bin opens at, when that is NOT the model
+    /// origin. `None` for both [`StreamWindow::Unspecified`] and
+    /// [`StreamWindow::AtOrigin`], which open at `t_start` — the unseeded
+    /// default every accumulator already has.
+    pub(crate) fn boundary(self) -> Option<f64> {
+        match self {
+            StreamWindow::ConditionedFrom(t) => Some(t),
+            StreamWindow::Unspecified | StreamWindow::AtOrigin => None,
+        }
+    }
+}
+
+/// Resolve ONE stream's conditioning window: its per-stream shadow, else the
+/// all-streams default, else none — and then the spec string against that
+/// stream's own first observation.
+///
+/// This is the single answer to "where does this stream's first bin open".
+/// `fit run` / `pfilter` / `profile` reach it through
+/// [`apply_conditioning_windows`], which additionally prepends the reset-only
+/// hole and runs the W329 enforcer. `fit predict` calls it directly (gh#702):
+/// it needs the BOUNDARY without a hole, because its observation times are also
+/// the emitted axis and the `value_at` anchor axis, and a synthetic row must
+/// shift neither. Deciding the boundary twice, in two places, is exactly the
+/// fork gh#702 was filed on — the likelihood reset its incidence accumulator at
+/// the boundary and the predictive did not.
+///
+/// No label validation here: that is a property of the whole spec against the
+/// whole bound stream set, and belongs where the spec is first applied
+/// ([`apply_conditioning_windows`]), not at a per-stream read.
+pub(crate) fn stream_condition_window(
+    condition_from: Option<&crate::fit::config_v2::ConditionFrom>,
+    label: &str,
+    stream_name: &str,
+    first_obs_s: f64,
+    model: &ir::Model,
+    t_start: f64,
+    dt: f64,
+) -> Result<StreamWindow, String> {
+    let Some(raw) = condition_from.and_then(|c| c.resolve_for(label)) else {
+        return Ok(StreamWindow::Unspecified);
+    };
+    let resolved = resolve_condition_from(
+        raw,
+        first_obs_s,
+        t_start,
+        model.origin.as_deref(),
+        &model.time_unit,
+        dt,
+    )
+    .map_err(|e| format!("stream '{stream_name}': {e}"))?;
+    Ok(match resolved {
+        Some(cond_from) => StreamWindow::ConditionedFrom(cond_from),
+        None => StreamWindow::AtOrigin,
+    })
+}
+
 /// Apply the per-stream conditioning windows (gh#134 multi-cadence Phase 3,
 /// gh#621) to already-loaded observation streams: validate the spec's shadow
 /// labels, resolve each stream's `condition_from` boundary, prepend the
@@ -1364,72 +1441,62 @@ pub(crate) fn apply_conditioning_windows(
             .map(|o| o.time)
             .fold(f64::INFINITY, f64::min);
 
-        // The spec that applies to THIS stream: its shadow, else the
-        // all-streams default, else None (no conditioning).
-        let resolved_spec = condition_from.and_then(|c| c.resolve_for(label));
+        // Where THIS stream's first bin opens: its shadow, else the
+        // all-streams default, else nothing — resolved through the single
+        // shared resolver `fit predict` also reads (gh#702).
+        let window = stream_condition_window(
+            condition_from, label, &s.name, first_obs_s, model, t_start, dt,
+        )?;
 
-        match resolved_spec {
-            Some(raw) => {
-                // Explicit conditioning for this stream. Resolve against
-                // ITS first obs + validate ∈ [t_start, first_obs_s).
-                match resolve_condition_from(
-                    raw,
-                    first_obs_s,
-                    t_start,
-                    model.origin.as_deref(),
-                    &model.time_unit,
-                    dt,
-                ).map_err(|e| format!("stream '{}': {e}", s.name))? {
-                    Some(cond_from) => {
+        match window {
+            StreamWindow::ConditionedFrom(cond_from) => {
+                eprintln!(
+                    "  \x1b[36mconditioning window:\x1b[0m stream \
+                     '{}': warm-up [{t_start}, {cond_from}) simulated \
+                     but not scored; first scored bin is \
+                     ({cond_from}, {first_obs_s}]",
+                    s.name
+                );
+                // Prepend the per-stream leading reset-only hole.
+                // The `cells` are authoritative for scoring; the
+                // `data` row's value (0.0) is a never-read
+                // placeholder.
+                s.data.insert(0, Observation { time: cond_from, value: 0.0 });
+                s.cells.insert(0, None);
+                s.aux.insert(0, Vec::new());
+                union_inserts.push(cond_from);
+            }
+            StreamWindow::AtOrigin => {
+                // cond_from == t_start: the user explicitly set
+                // conditioning to the model origin — the documented
+                // "score the whole leading window" opt-in. No
+                // warm-up is discarded; the first bin is the full
+                // (t_start, first_obs_s]. This is the deliberate
+                // escape hatch out of W329, NOT a no-op to hide: on
+                // a WIDE incidence window (the gh#134 shape) say so
+                // loudly so the choice is visible, not silent.
+                if kind == TemporalKind::Interval {
+                    let obs_times: Vec<f64> =
+                        s.data.iter().map(|o| o.time).collect();
+                    if let Some(anomaly) =
+                        crate::util::check_first_interval_window(t_start, &obs_times)
+                    {
                         eprintln!(
-                            "  \x1b[36mconditioning window:\x1b[0m stream \
-                             '{}': warm-up [{t_start}, {cond_from}) simulated \
-                             but not scored; first scored bin is \
-                             ({cond_from}, {first_obs_s}]",
-                            s.name
+                            "  \x1b[36mconditioning window:\x1b[0m \
+                             incidence stream '{name}': condition_from \
+                             resolves to the model origin (t_start = \
+                             {t_start}) — scoring the FULL \
+                             {window}-{unit} leading window against the \
+                             first datum, no warm-up discarded (the \
+                             gh#134 wide window, opted into explicitly).",
+                            name = s.name,
+                            window = fmt_span(anomaly.first_window),
+                            unit = cadence_word(&model.time_unit),
                         );
-                        // Prepend the per-stream leading reset-only hole.
-                        // The `cells` are authoritative for scoring; the
-                        // `data` row's value (0.0) is a never-read
-                        // placeholder.
-                        s.data.insert(0, Observation { time: cond_from, value: 0.0 });
-                        s.cells.insert(0, None);
-                        s.aux.insert(0, Vec::new());
-                        union_inserts.push(cond_from);
-                    }
-                    None => {
-                        // cond_from == t_start: the user explicitly set
-                        // conditioning to the model origin — the documented
-                        // "score the whole leading window" opt-in. No
-                        // warm-up is discarded; the first bin is the full
-                        // (t_start, first_obs_s]. This is the deliberate
-                        // escape hatch out of W329, NOT a no-op to hide: on
-                        // a WIDE incidence window (the gh#134 shape) say so
-                        // loudly so the choice is visible, not silent.
-                        if kind == TemporalKind::Interval {
-                            let obs_times: Vec<f64> =
-                                s.data.iter().map(|o| o.time).collect();
-                            if let Some(anomaly) =
-                                crate::util::check_first_interval_window(t_start, &obs_times)
-                            {
-                                eprintln!(
-                                    "  \x1b[36mconditioning window:\x1b[0m \
-                                     incidence stream '{name}': condition_from \
-                                     resolves to the model origin (t_start = \
-                                     {t_start}) — scoring the FULL \
-                                     {window}-{unit} leading window against the \
-                                     first datum, no warm-up discarded (the \
-                                     gh#134 wide window, opted into explicitly).",
-                                    name = s.name,
-                                    window = fmt_span(anomaly.first_window),
-                                    unit = cadence_word(&model.time_unit),
-                                );
-                            }
-                        }
                     }
                 }
             }
-            None => {
+            StreamWindow::Unspecified => {
                 // No conditioning for this stream. The W329 detector
                 // decides whether that is fine (window ≈ one cadence) or
                 // the gh#134 wrong-number (anomalously wide window on an

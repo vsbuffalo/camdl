@@ -2246,7 +2246,8 @@ fn materialize_obs_for_quantities(
         };
         let sampler =
             sim::inference::obs_model::compile_obs_sample_pf(obs_ir, compiled.clone(), params);
-        let projected = project_all_obs_times(traj, obs_ir, model, &times)?;
+        // `None` — emit_schedule-driven, no data to condition on (gh#702).
+        let projected = project_all_obs_times(traj, obs_ir, model, &times, None)?;
         let mut vals = Vec::with_capacity(times.len());
         for (ti, &t) in times.iter().enumerate() {
             let snap = snap_at(traj, t);
@@ -2846,8 +2847,10 @@ impl engine::RunSink for StreamSink {
                     obs_ir, compiled.clone(), &params,
                 );
                 let obs_times = self.obs_times_cache[si].clone();
+                // `None` — `simulate --obs` emits on the model's own
+                // emit_schedule and binds no data (gh#702).
                 let projected_values = project_all_obs_times(
-                    traj, obs_ir, model, &obs_times,
+                    traj, obs_ir, model, &obs_times, None,
                 )?;
                 for (ti, &obs_t) in obs_times.iter().enumerate() {
                     // GH #6 fix: pass the actual compartment state at the obs
@@ -3191,6 +3194,27 @@ pub(crate) fn obs_emit_schedule_times(
 /// the resolvers' behaviour is a separate question from making them consistent.
 pub(crate) const OBS_SNAP_EPS: f64 = 1e-9;
 
+/// The recorded snapshot a projection time resolves to — the last snapshot at
+/// or before `t`, under [`OBS_SNAP_EPS`]. `None` when `t` precedes every
+/// recorded snapshot.
+///
+/// The single predicate: the on-grid guards below, the cumulative-flow walk,
+/// and the conditioning-boundary read all resolve through this one function, so
+/// a guard can never validate a relationship under a predicate the projection
+/// then resolves under a different one (gh#589 review).
+fn resolved_snapshot_index(traj: &sim::Trajectory, t: f64) -> Option<usize> {
+    traj.snapshots.iter().rposition(|s| s.t <= t + OBS_SNAP_EPS)
+}
+
+/// Whether `t` IS a recorded snapshot time (not merely resolvable to an earlier
+/// one). See [`resolved_snapshot_index`].
+fn is_recorded_snapshot(traj: &sim::Trajectory, t: f64) -> bool {
+    match resolved_snapshot_index(traj, t) {
+        Some(i) => (traj.snapshots[i].t - t).abs() <= OBS_SNAP_EPS,
+        None => false,
+    }
+}
+
 /// Every observation time must land on a recorded snapshot.
 ///
 /// The projection below reads the trajectory, not integrator state, so an
@@ -3229,14 +3253,8 @@ fn check_obs_times_on_snapshot_grid(
     // projection then snapped away from — reinstating the silent-wrong this
     // guard exists to prevent, one layer up. Validating a relationship under one
     // predicate and resolving it under another is the defect, so there is now
-    // one predicate.
-    let resolved_index = |t: f64| -> Option<usize> {
-        traj.snapshots.iter().rposition(|s| s.t <= t + OBS_SNAP_EPS)
-    };
-    let off_grid = obs_times.iter().find(|&&t| match resolved_index(t) {
-        Some(i) => (traj.snapshots[i].t - t).abs() > OBS_SNAP_EPS,
-        None => true,
-    });
+    // one predicate (`is_recorded_snapshot`).
+    let off_grid = obs_times.iter().find(|&&t| !is_recorded_snapshot(traj, t));
     let Some(&bad) = off_grid else {
         return Ok(());
     };
@@ -3276,20 +3294,37 @@ fn check_obs_times_on_snapshot_grid(
     ))
 }
 
+/// `window_start` is the fit's conditioning boundary for this stream
+/// (`condition_from`), when it has one. An INTERVAL (incidence) projection
+/// reports the flow accumulated since the previous emitted time; the first
+/// emitted time has no predecessor, so its bin opens at `window_start` —
+/// exactly where the likelihood resets that stream's accumulator. `None` opens
+/// it at the model origin, which is the behaviour for every caller with no data
+/// to condition on (synthetic emission, `simulate --obs`, `batch`).
+///
+/// Passing the wrong one is a first-row-only error, which is why gh#702 lived
+/// so long: one row among many on a long series, the ENTIRE artifact on a
+/// single-observation fit. It has no effect on an INSTANT (prevalence /
+/// expression) projection, which reads state at a time and has no accumulator
+/// to reset.
 pub(crate) fn project_all_obs_times(
     traj: &sim::Trajectory,
     obs_ir: &ir::observation::ObservationModel,
     model: &ir::Model,
     obs_times: &[f64],
+    window_start: Option<f64>,
 ) -> Result<Vec<f64>, String> {
     check_obs_times_on_snapshot_grid(traj, &obs_ir.name, &model.time_unit, obs_times)?;
     // Per-interval incidence over a set of transition flow indices: build the
     // running cumulative flow at each snapshot, read it at each obs time, then
     // difference consecutive obs times. Shared by CumulativeFlow (one exact
     // transition) and CumulativeFlowSum (explicit strata family per §25.4).
-    let incidence_over = |flow_indices: &[usize]| -> Vec<f64> {
+    let incidence_over = |flow_indices: &[usize]| -> Result<Vec<f64>, String> {
         // `f64` throughout: ODE flows are real-valued (the chain-binomial /
         // Gillespie integer flows widen losslessly via `Flows::value`).
+        // `cum_at_snap[i]` is the flow over (t_start, snapshots[i].t]: the
+        // trajectory's initial row carries zeroed flows by construction
+        // (`sim::state::Trajectory`), so the running sum needs no offset.
         let mut cum_at_snap: Vec<(f64, f64)> = Vec::with_capacity(traj.snapshots.len());
         let mut running = 0.0f64;
         for snap in &traj.snapshots {
@@ -3314,14 +3349,44 @@ pub(crate) fn project_all_obs_times(
             });
         }
 
-        // Difference: flow in interval (prev_obs_t, obs_t]
+        // Where the FIRST bin opens. Reading the cumulative flow at the
+        // conditioning boundary requires the boundary to BE a recorded
+        // snapshot: between snapshots it would resolve to an earlier one and
+        // silently hand part of the warm-up back to the first bin — the same
+        // class of silent-wrong gh#702 is about, reintroduced by the fix for
+        // it. So refuse, naming the boundary and the output schedule.
+        let seed = match window_start {
+            None => 0.0,
+            Some(t0) => {
+                let i = resolved_snapshot_index(traj, t0)
+                    .filter(|_| is_recorded_snapshot(traj, t0))
+                    .ok_or_else(|| format!(
+                        "observation stream '{}': the conditioning boundary \
+                         condition_from = {t0} is not a recorded output time, \
+                         so the flow accumulated up to it cannot be read.\n  \
+                         The first incidence bin is ({t0}, first_obs] — the \
+                         window this fit scored — and the projection reads it \
+                         as the difference of the recorded cumulative flow at \
+                         those two times.\n  \
+                         Fix: add {t0} to the output schedule \
+                         (`output {{ trajectories {{ every = ... }} }}`, or an \
+                         `at = [...]` list containing it), or move \
+                         condition_from onto a recorded output time.",
+                        obs_ir.name,
+                    ))?;
+                cum_at_snap[i].1
+            }
+        };
+
+        // Difference: flow in interval (prev_obs_t, obs_t], with the first bin
+        // opening at `seed`'s time rather than at t_start.
         let mut result = Vec::with_capacity(obs_times.len());
-        let mut prev_cum = 0.0f64;
+        let mut prev_cum = seed;
         for &cum in &cum_at_obs {
             result.push(cum - prev_cum);
             prev_cum = cum;
         }
-        result
+        Ok(result)
     };
     match &obs_ir.projection {
         ir::observation::Projection::CumulativeFlow(flow_name) => {
@@ -3329,14 +3394,14 @@ pub(crate) fn project_all_obs_times(
                 .filter(|(_, tr)| tr.name == *flow_name)
                 .map(|(i, _)| i)
                 .collect();
-            Ok(incidence_over(&flow_indices))
+            incidence_over(&flow_indices)
         }
         ir::observation::Projection::CumulativeFlowSum(flow_names) => {
             let flow_indices: Vec<usize> = flow_names.iter()
                 .filter_map(|fname| model.transitions.iter()
                     .position(|tr| tr.name == *fname))
                 .collect();
-            Ok(incidence_over(&flow_indices))
+            incidence_over(&flow_indices)
         }
         ir::observation::Projection::CurrentPop(comp_name) => {
             let loc = resolve_comp_local(model, &obs_ir.name, comp_name);

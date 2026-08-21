@@ -684,6 +684,11 @@ struct PredictiveSink {
     /// binomial denominator `n = n_examined`). Empty inner vec = no aux at that
     /// obs time (the likelihood's denominator then resolves data-free).
     leaf_aux: Vec<Vec<Vec<(String, f64)>>>,
+    /// Per leaf: the fit's `condition_from` boundary, where it has one — the
+    /// time the likelihood resets that stream's incidence accumulator at, and
+    /// therefore where the FIRST emitted bin opens (gh#702). `None` for a
+    /// stream with no conditioning; ignored by a prevalence projection.
+    leaf_window_start: Vec<Option<f64>>,
     /// The generated-quantities evaluator, `Some` iff the model declares a
     /// `quantities {}` block. Composed alongside the obs-sample accumulator (same
     /// draw, same params) — not a second [`RunSink`]. Held behind an `Arc` so a
@@ -760,7 +765,11 @@ impl crate::engine::RunSink for PredictiveSink {
                 self.compiled.clone(),
                 &params,
             );
-            let projected = crate::project_all_obs_times(&cell.traj, obs_ir, model, times)?;
+            // The first bin opens where the LIKELIHOOD opened it — at this
+            // stream's conditioning boundary, not at the model origin (gh#702).
+            let projected = crate::project_all_obs_times(
+                &cell.traj, obs_ir, model, times, self.leaf_window_start[si],
+            )?;
             let leaf_aux = &self.leaf_aux[si];
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
             for (ti, &t) in times.iter().enumerate() {
@@ -1208,6 +1217,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // below then have nothing to anchor to and say so.
     let quantity_obs_anchors: Option<sim::quantity::ObsAnchorTimes> =
         sim::quantity::ObsAnchorTimes::of_times(leaf_times.iter().flatten().copied());
+    // Per leaf, the conditioning boundary this fit scored from (gh#702). Read
+    // off `leaf_times` — the OBSERVED axis — because `condition_from`'s
+    // relative form is anchored to each stream's own first observation, which
+    // is what the fit anchored it to.
+    let leaf_window_start = leaf_condition_boundaries(&model, &config, &leaf_times, dt)?;
 
     // The rendered quantity sidecars (per logical quantity, all design cells
     // stacked) + the merged manifest, filled after the free-forward pass.
@@ -1398,6 +1412,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 compiled: compiled.clone(),
                 leaf_times: ff_emit_times.clone(),
                 leaf_aux: leaf_aux.clone(),
+                leaf_window_start: leaf_window_start.clone(),
                 quant_eval: quant_eval.clone(),
                 obs_anchors: quantity_obs_anchors,
                 by_scenario: IndexMap::new(),
@@ -1882,6 +1897,60 @@ fn load_leaf_obs(
         out.push(LeafObs { source: obs_model.source.clone(), stratum, times, observed, aux });
     }
     Ok(out)
+}
+
+/// Each leaf's conditioning boundary, in `model.observations` order and aligned
+/// 1:1 with `leaf_times`: the time the FIT reset that stream's incidence
+/// accumulator at, or `None` for a stream with no `condition_from` (and for one
+/// not bound to data at all, which has no window and emits nothing).
+///
+/// gh#702. A `condition_from` fit simulates `[t_start, cond_from)` as warm-up
+/// and scores its first incidence datum over `(cond_from, first_obs]`. The
+/// predictive is plotted against that same datum, so it must report the same
+/// interval — the free-forward projection would otherwise report
+/// `(t_start, first_obs]`, folding the whole warm-up into the first row.
+///
+/// Resolution routes through [`crate::fit::runner::stream_condition_window`],
+/// the same per-stream resolver `fit run` / `pfilter` / `profile` reach through
+/// `apply_conditioning_windows`, so the fit and its predictive cannot disagree
+/// about where a stream's first bin opens. What predict does NOT do is prepend
+/// the reset-only hole row: here the observation times are also the emitted
+/// axis and the axis `value_at(..., first_obs / last_obs)` anchors to
+/// (`main.rs`'s anchor resolution deliberately folds over the raw streams for
+/// the same reason), and a synthetic row must shift neither.
+///
+/// Label validation is not repeated here: it is a property of the whole spec
+/// against the whole bound stream set, already enforced when the fit ran, and
+/// re-running it under a `--stream` filter would reject a shadow naming a
+/// stream this invocation merely filtered out.
+fn leaf_condition_boundaries(
+    model: &ir::Model,
+    config: &crate::fit::config_v2::FitConfigV2,
+    leaf_times: &[Vec<f64>],
+    dt: f64,
+) -> Result<Vec<Option<f64>>, String> {
+    let spec = config.condition_from.as_ref();
+    if spec.is_none() {
+        return Ok(vec![None; model.observations.len()]);
+    }
+    let t_start = model.simulation.t_start;
+    model
+        .observations
+        .iter()
+        .enumerate()
+        .map(|(si, o)| {
+            // A stream with no observation times is unbound or filtered out: it
+            // emits nothing, so it has no first bin to open.
+            let first_obs = leaf_times[si].iter().copied().fold(f64::INFINITY, f64::min);
+            if !first_obs.is_finite() {
+                return Ok(None);
+            }
+            crate::fit::runner::stream_condition_window(
+                spec, &o.source, &o.name, first_obs, model, t_start, dt,
+            )
+            .map(|w| w.boundary())
+        })
+        .collect()
 }
 
 /// Whether a leaf passes the `--stream` filter — matches the logical source or

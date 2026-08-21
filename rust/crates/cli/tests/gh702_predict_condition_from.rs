@@ -256,7 +256,6 @@ fn fit_then_predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Out
 // ── The headline: the free-forward first bin ────────────────────────────────
 
 #[test]
-#[ignore = "gh#702: red until the projection is seeded at the conditioning boundary"]
 fn free_forward_first_bin_opens_at_the_conditioning_boundary() {
     let bin = skip_if_missing_binary();
     let tmp = setup("ff", &fit_toml("100", "results"));
@@ -328,7 +327,6 @@ fn free_forward_first_bin_opens_at_the_conditioning_boundary() {
 // ── The same defect on the ODE backend (where gh#702 was found) ─────────────
 
 #[test]
-#[ignore = "gh#702: red until the projection is seeded at the conditioning boundary"]
 fn free_forward_first_bin_is_backend_independent() {
     let bin = skip_if_missing_binary();
     let tmp = setup("ode", &ode_fit_toml("results"));
@@ -398,7 +396,6 @@ fn condition_from_at_the_origin_still_scores_the_whole_leading_window() {
 // ── A boundary off the recorded output grid is refused, never guessed ───────
 
 #[test]
-#[ignore = "gh#702: red until the projection is seeded at the conditioning boundary"]
 fn conditioning_boundary_off_the_output_grid_is_refused() {
     let bin = skip_if_missing_binary();
     // t = 125 is on the dt = 1 grid the fit's filter walks, so the FIT is fine;
