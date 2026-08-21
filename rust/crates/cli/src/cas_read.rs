@@ -141,39 +141,72 @@ fn walk_gated(subtree: &Path, gate: &LeafGate) -> Vec<(PathBuf, RunRecord)> {
     }
     let mut stack = vec![subtree.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let rj = dir.join("run.json");
-        if rj.is_file() {
-            if let Ok(bytes) = std::fs::read(&rj) {
-                // The cheap header decides whether this record is worth
-                // materializing. A header that does not read could not have
-                // parsed as a full `RunRecord` either, so treating it as
-                // not-admitted drops exactly what the full parse dropped.
-                let admitted = !gate.is_selective()
-                    || run_header(&bytes).is_some_and(|h| gate.admits(&h));
-                if admitted {
-                    #[cfg(test)]
-                    FULL_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Ok(rec) = serde_json::from_slice::<RunRecord>(&bytes) {
-                        out.push((dir.clone(), rec));
-                    }
-                }
+        // One `read_dir` answers both questions about this directory — which
+        // children to descend into, and whether it holds a `run.json` — from
+        // the entry types the directory listing already carries.
+        let run_json = match std::fs::read_dir(&dir) {
+            Ok(entries) => scan_dir(entries, &mut stack),
+            // A directory that cannot be listed may still hold a readable
+            // `run.json` (mode 0111); fall back to asking for it by name.
+            Err(_) => {
+                let rj = dir.join("run.json");
+                rj.is_file().then_some(rj)
             }
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if !p.is_dir() {
-                    continue;
-                }
-                let name = e.file_name();
-                if name.to_string_lossy().starts_with('.') {
-                    continue; // .staging / .quarantine
-                }
-                stack.push(p);
+        };
+        let Some(rj) = run_json else { continue };
+        let Ok(bytes) = std::fs::read(&rj) else { continue };
+        // The cheap header decides whether this record is worth materializing.
+        // A header that does not read could not have parsed as a full
+        // `RunRecord` either, so treating it as not-admitted drops exactly
+        // what the full parse dropped.
+        let admitted =
+            !gate.is_selective() || run_header(&bytes).is_some_and(|h| gate.admits(&h));
+        if admitted {
+            #[cfg(test)]
+            FULL_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(rec) = serde_json::from_slice::<RunRecord>(&bytes) {
+                out.push((dir, rec));
             }
         }
     }
     out
+}
+
+/// Sort one directory listing into "descend into this" (pushed onto `stack`)
+/// and "this is the leaf's `run.json`" (returned), reading each entry's type
+/// from the listing itself.
+///
+/// `DirEntry::file_type` answers from the directory entry on every filesystem
+/// camdl targets (APFS, ext4, XFS all populate `d_type`), where
+/// `Path::is_dir`/`is_file` cost a `stat` per entry — 274k of them on the
+/// synthetic 40k-leaf store, and the walk's dominant term.
+///
+/// A symlink is the exception: `file_type` reports the *link*, while
+/// `Path::is_dir`/`is_file` report the target, and following it is the
+/// behaviour a store with a symlinked subtree relies on. So a symlinked entry
+/// — and only a symlinked entry — is still resolved with a `stat`.
+fn scan_dir(entries: std::fs::ReadDir, stack: &mut Vec<PathBuf>) -> Option<PathBuf> {
+    let mut run_json = None;
+    for e in entries.flatten() {
+        let Ok(file_type) = e.file_type() else { continue };
+        let name = e.file_name();
+        let is_run_json = name == "run.json";
+        let (is_dir, is_file) = if file_type.is_symlink() {
+            let p = e.path();
+            (p.is_dir(), is_run_json && p.is_file())
+        } else {
+            (file_type.is_dir(), is_run_json && file_type.is_file())
+        };
+        if is_dir {
+            if name.to_string_lossy().starts_with('.') {
+                continue; // .staging / .quarantine
+            }
+            stack.push(e.path());
+        } else if is_file {
+            run_json = Some(e.path());
+        }
+    }
+    run_json
 }
 
 /// Every `RunRecord` under `subtree`, of every kind — the unfiltered walk.
@@ -529,6 +562,40 @@ pub(crate) mod tests {
             serde_json::from_slice::<RunRecord>(bytes.as_bytes()).is_err(),
             "the full record parse must fail on the same bytes"
         );
+    }
+
+    /// The walk follows symlinks, both to a subtree and to a `run.json`.
+    /// Reading entry types out of the directory listing (`DirEntry::file_type`)
+    /// instead of `stat`ing each path is what makes the walk cheap, but it
+    /// reports the *link*, not the target — so a symlinked subtree would
+    /// silently stop being walked, and a symlinked `run.json` would stop being
+    /// a leaf. Both are still resolved.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_subtrees_and_records_are_still_walked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // A leaf reached only through a symlinked directory.
+        let elsewhere = tmp.path().join("elsewhere");
+        plant_sim(&elsewhere, "m-1111/cfg-2222", &id("beef"));
+        std::fs::create_dir_all(root.join("sims")).unwrap();
+        std::os::unix::fs::symlink(
+            elsewhere.join("sims").join("m-1111"),
+            root.join("sims").join("linked-3333"),
+        )
+        .unwrap();
+
+        // A leaf whose `run.json` is itself a symlink to a record elsewhere.
+        let donor = plant_sim(&elsewhere, "donor-4444/cfg-5555", &id("cafe"));
+        let via_link = root.join("sims").join("via-link-6666");
+        std::fs::create_dir_all(&via_link).unwrap();
+        std::os::unix::fs::symlink(donor.join("run.json"), via_link.join("run.json")).unwrap();
+
+        let mut got: Vec<String> =
+            walk_sim_leaves(root).iter().map(|l| l.run_id_hex()).collect();
+        got.sort();
+        assert_eq!(got, vec![id("beef"), id("cafe")]);
     }
 
     /// Anything the header read rejects, the full parse rejects too — the
