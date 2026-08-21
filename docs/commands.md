@@ -222,6 +222,7 @@ ranges. To estimate parameters from data, use `fit`.
 ```bash
 camdl compare results/fits/a/posterior results/fits/b/posterior --baseline a
 camdl compare @baseline @candidate
+camdl compare @baseline @candidate --pointwise pointwise.tsv
 ```
 
 `compare` renders a baseline-centered table of prequential scores (per-step
@@ -237,6 +238,15 @@ the scores stay commensurable; they are ignored for an explicit
 in-sample-optimistic** — computed at a single θ fit to the whole series — so
 they support _relative_ comparison but are not a leave-future-out forecast
 score; `compare` prints this caveat on every run.
+
+`--pointwise PATH` writes the per-observation difference the table already
+computes in order to form `se(Δelpd)`, as a TSV with one row per candidate ×
+scored step, joint and per stream: `model`, `baseline`, `t`, `scope`, `stream`,
+`log_score`, `baseline_log_score`, `delta_log_score`. `Δelpd = 12 nats` says a
+model won; this says _where_ it won — on three weeks around an intervention, on
+one district, on a single reporting batch. A stream only one side scored gets an
+empty difference rather than a number, so an elpd gap taken across two different
+stream sets is visible instead of hidden inside the scalar.
 
 ## The boundaries, stated plainly
 

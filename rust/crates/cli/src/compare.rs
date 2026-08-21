@@ -182,11 +182,163 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         .unwrap_or_else(|| vec!["elpd".into(), "crps".into(), "pit_cov90".into()]);
     let fmt_final = cfg_format.unwrap_or(format);
 
+    if let Some(path) = &a.pointwise {
+        match write_pointwise(&rows, base_idx, path) {
+            Ok(n) => eprintln!("wrote {n} pointwise rows to {}", path.display()),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     match fmt_final {
         Format::Json  => render_json(&rows, base_idx, &metrics_chosen),
         Format::Md    => render_md(&rows, base_idx, &metrics_chosen, t_mismatch),
         Format::Table => render_table(&rows, base_idx, &metrics_chosen, t_mismatch),
     }
+}
+
+// ── the pointwise Δelpd vector (gh#706) ──────────────────────────────────
+
+/// One emitted row: a candidate's log score at one observation, the baseline's
+/// at the same observation, and their difference.
+///
+/// `log_score` and `baseline_log_score` are `Option` because a stream one model
+/// scored and the other did not is a real and load-bearing case — gh#570's
+/// failure mode, where an elpd difference is quietly taken across two different
+/// stream sets. Here it shows as an empty cell and an empty difference instead
+/// of being summed into a scalar.
+#[derive(Debug, Clone, PartialEq)]
+struct PointwiseRow {
+    model: String,
+    baseline: String,
+    t: f64,
+    /// `joint` for the cross-stream score, `stream` for one stream's own.
+    scope: &'static str,
+    /// The stream name; empty for `scope = joint`. A separate column rather
+    /// than a sentinel in the name column, so no real stream can collide with
+    /// it.
+    stream: String,
+    log_score: Option<f64>,
+    baseline_log_score: Option<f64>,
+}
+
+impl PointwiseRow {
+    fn delta(&self) -> Option<f64> {
+        Some(self.log_score? - self.baseline_log_score?)
+    }
+}
+
+/// Project every candidate against the baseline, step by step and stream by
+/// stream.
+///
+/// Steps are paired **by index**, which is what `paired_delta` does for the
+/// scalar — so this checks what that cannot afford to leave unchecked at a
+/// glance: that the paired steps carry the same `t`. A difference taken across
+/// two different observation axes is not a comparison, and the pointwise file
+/// is where such a mismatch would otherwise become a plot that looks fine.
+fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Vec<PointwiseRow>, String> {
+    let base = &rows[base_idx];
+    let mut out = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        if i == base_idx {
+            continue;
+        }
+        if r.trace.n_scored() != base.trace.n_scored() {
+            return Err(format!(
+                "'{}' scored {} observations and baseline '{}' scored {} — a \
+                 pointwise difference needs the same observations on both sides",
+                r.name, r.trace.n_scored(), base.name, base.trace.n_scored(),
+            ));
+        }
+        for (step, bstep) in r.trace.steps.iter().zip(&base.trace.steps) {
+            if step.t != bstep.t {
+                return Err(format!(
+                    "'{}' and baseline '{}' disagree on the observation time of a \
+                     paired step ({} vs {}) — the two traces are not on the same \
+                     observation axis",
+                    r.name, base.name, step.t, bstep.t,
+                ));
+            }
+            out.push(PointwiseRow {
+                model: r.name.clone(),
+                baseline: base.name.clone(),
+                t: step.t,
+                scope: "joint",
+                stream: String::new(),
+                log_score: Some(step.log_score),
+                baseline_log_score: Some(bstep.log_score),
+            });
+            // The union of both sides' streams, in the candidate's order then
+            // any the baseline alone scored — so a stream missing from either
+            // side is visible rather than dropped.
+            let mut names: Vec<&str> =
+                step.per_stream.iter().map(|s| s.stream.as_str()).collect();
+            for s in &bstep.per_stream {
+                if !names.contains(&s.stream.as_str()) {
+                    names.push(s.stream.as_str());
+                }
+            }
+            let find = |ss: &[sim::inference::prequential::StreamScore], n: &str| {
+                ss.iter().find(|s| s.stream == n).map(|s| s.log_score)
+            };
+            for n in names {
+                out.push(PointwiseRow {
+                    model: r.name.clone(),
+                    baseline: base.name.clone(),
+                    t: step.t,
+                    scope: "stream",
+                    stream: n.to_string(),
+                    log_score: find(&step.per_stream, n),
+                    baseline_log_score: find(&bstep.per_stream, n),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Render the pointwise rows as a TSV. An absent score is an EMPTY cell, never
+/// `NaN` or `0` — the reader must be able to tell "this model did not score
+/// here" from "this model scored zero here".
+fn render_pointwise_tsv(rows: &[PointwiseRow]) -> String {
+    let cell = |v: Option<f64>| v.map(|x| format!("{:.10}", x)).unwrap_or_default();
+    let mut s = String::new();
+    s.push_str("# camdl compare --pointwise: per-observation log predictive scores\n");
+    s.push_str("# delta_log_score = log_score - baseline_log_score, in nats.\n");
+    s.push_str("# scope=joint is the cross-stream score; scope=stream is one \
+                stream's own.\n");
+    s.push_str("# An empty cell means that side did not score that stream at \
+                that time.\n");
+    s.push_str("model\tbaseline\tt\tscope\tstream\tlog_score\t\
+                baseline_log_score\tdelta_log_score\n");
+    for r in rows {
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            r.model, r.baseline, fmt_pointwise_time(r.t), r.scope, r.stream,
+            cell(r.log_score), cell(r.baseline_log_score), cell(r.delta()),
+        ));
+    }
+    s
+}
+
+/// Observation times join the rows back to the data, so they are written the
+/// way the observation axis reads: `14`, not `14.0000000000`.
+fn fmt_pointwise_time(t: f64) -> String {
+    if t.fract() == 0.0 && t.abs() < 1e15 {
+        format!("{}", t as i64)
+    } else {
+        format!("{}", t)
+    }
+}
+
+fn write_pointwise(rows: &[Row], base_idx: usize, path: &Path) -> Result<usize, String> {
+    let pw = pointwise_rows(rows, base_idx)?;
+    let text = render_pointwise_tsv(&pw);
+    std::fs::write(path, text)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(pw.len())
 }
 
 /// Resolve a single comparison input to a `PrequentialTrace`. Two paths:
@@ -897,6 +1049,88 @@ fn option_finite(x: f64) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#706. `paired_delta` pairs steps BY INDEX, which is safe for the
+    /// scalar only because the T_score preflight refuses mismatched horizons.
+    /// Equal horizons are not equal observation axes: two traces can score the
+    /// same NUMBER of observations at different times (a hole in one series, a
+    /// different `t0`). Differencing those is not a comparison, and a pointwise
+    /// file is exactly where it would become a plot that looks fine — so it is
+    /// refused by name here.
+    #[test]
+    fn pointwise_refuses_traces_on_different_observation_axes() {
+        let base = || row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]);
+        let b = row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]);
+        let ok = pointwise_rows(&[b, base()], 1).expect("aligned traces score");
+        assert_eq!(ok.len(), 3, "one joint row per step (no per-stream data here)");
+        assert!((ok[0].delta().unwrap() - 1.0).abs() < 1e-12);
+
+        // Same count, different times.
+        let shifted = row_at("b", &[7.0, 14.0, 28.0], &[-5.0, -6.0, -6.0]);
+        let err = pointwise_rows(&[shifted, base()], 1)
+            .expect_err("a shifted observation axis must be refused");
+        assert!(err.contains("observation axis") && err.contains("21") && err.contains("28"),
+            "the refusal must name both times: {err}");
+
+        // Different counts.
+        let short = row_at("b", &[7.0, 14.0], &[-5.0, -6.0]);
+        let err = pointwise_rows(&[short, base()], 1)
+            .expect_err("a shorter trace must be refused");
+        assert!(err.contains("same observations"), "{err}");
+    }
+
+    /// An absent score is an EMPTY cell, never `NaN` and never `0` — a reader
+    /// must be able to tell "did not score here" from "scored zero here", and
+    /// zero is a perfectly ordinary log score.
+    #[test]
+    fn pointwise_tsv_writes_an_absent_score_as_an_empty_cell() {
+        let r = PointwiseRow {
+            model: "cand".into(),
+            baseline: "base".into(),
+            t: 14.0,
+            scope: "stream",
+            stream: "east".into(),
+            log_score: Some(-1.0),
+            baseline_log_score: None,
+        };
+        assert_eq!(r.delta(), None, "no difference without both sides");
+        let tsv = render_pointwise_tsv(&[r]);
+        let data = tsv.lines().find(|l| l.starts_with("cand")).expect("a data row");
+        let cells: Vec<&str> = data.split('\t').collect();
+        assert_eq!(cells.len(), 8, "eight columns: {cells:?}");
+        assert_eq!(cells[2], "14", "integral times are written as integers");
+        assert_eq!(cells[6], "", "the absent baseline score is empty: {cells:?}");
+        assert_eq!(cells[7], "", "the absent difference is empty: {cells:?}");
+        assert!(!tsv.contains("NaN"), "never NaN: {tsv}");
+    }
+
+    /// A trace with joint scores at the given times and no per-stream breakdown.
+    fn row_at(name: &str, times: &[f64], log_scores: &[f64]) -> Row {
+        use sim::inference::prequential::{Conditioning, PrequentialStep, Provenance};
+        let steps = times.iter().zip(log_scores).map(|(&t, &ls)| PrequentialStep {
+            t,
+            y_obs: 10.0,
+            y_pred_samples: Vec::new(),
+            log_score: ls,
+            crps: 1.0,
+            pit: 0.5,
+            ess: 900.0,
+            interval: Default::default(),
+            per_stream: Vec::new(),
+        }).collect();
+        Row {
+            name: name.to_string(),
+            path: name.to_string(),
+            trace: PrequentialTrace {
+                schema_version: 1,
+                t0: 1,
+                provenance: Provenance::PlugIn,
+                conditioning: Conditioning::InSample,
+                steps,
+                warnings: Vec::new(),
+            },
+        }
+    }
 
     /// gh#241 G3: `deny_unknown_fields` — a typo'd compare.toml key must ERROR.
     #[test]
