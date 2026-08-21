@@ -684,6 +684,10 @@ struct PredictiveSink {
     /// draw, same params) — not a second [`RunSink`]. Held behind an `Arc` so a
     /// fresh sink per sweep-point shares the one evaluator without rebuilding it.
     quant_eval: Option<std::sync::Arc<sim::quantity::QuantityEvaluator>>,
+    /// The run's resolved observation window — the two ends of `leaf_times`,
+    /// folded once by the caller so every consumer in this command (here and the
+    /// contrast reducer) anchors `value_at` to the same pair.
+    obs_anchors: Option<sim::quantity::ObsAnchorTimes>,
     /// Scenario name → its accumulator. Insertion order (= the engine's canonical
     /// `scenario → point → rep` order, scenario outermost) is preserved so the
     /// rendered files list scenarios in CLI order.
@@ -776,11 +780,8 @@ impl crate::engine::RunSink for PredictiveSink {
         // the predictive output above. The `value_at` anchors are the two ends of
         // the OBSERVED data axis — the min and max over the leaves' observation
         // times, which predict carries for the predicted-vs-observed join.
-        let obs_anchors = sim::quantity::ObsAnchorTimes::of_times(
-            self.leaf_times.iter().flat_map(|ts| ts.iter().copied()),
-        );
         let quant_results = self.quant_eval.as_ref().map(|eval| {
-            eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set), obs_anchors)
+            eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set), self.obs_anchors)
         });
         let snapshot_times: Vec<f64> = if quant_results.is_some() {
             cell.traj.snapshots.iter().map(|s| s.t).collect()
@@ -1177,6 +1178,28 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         } else {
             None
         };
+
+    // The observed-data axis, per leaf in `model.observations` order — the
+    // cadence the predictive is emitted at, and the axis a
+    // `value_at(..., last_obs)` quantity anchors to. Read once here, above the
+    // horizon blocks, because BOTH the free-forward sink and the contrast
+    // reducer need it and the contrast reducer runs whichever horizon was asked
+    // for.
+    let leaf_times: Vec<Vec<f64>> = model
+        .observations
+        .iter()
+        .map(|o| {
+            leaves.iter().find(|l| leaf_matches(o, l)).map(|l| l.times.clone()).unwrap_or_default()
+        })
+        .collect();
+    // The run's resolved observation window (gh#694). ONE window for the whole
+    // command: the ordinary `quantities/` sidecar and the contrast arms both
+    // fold through it, so they cannot disagree about what `last_obs` meant for
+    // this fit. `None` iff no leaf carries an observation time — the callers
+    // below then have nothing to anchor to and say so.
+    let quantity_obs_anchors: Option<sim::quantity::ObsAnchorTimes> =
+        sim::quantity::ObsAnchorTimes::of_times(leaf_times.iter().flatten().copied());
+
     // The rendered quantity sidecars (per logical quantity, all design cells
     // stacked) + the merged manifest, filled after the free-forward pass.
     let mut quantity_outputs: Vec<(String, String)> = Vec::new();
@@ -1210,25 +1233,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // `total_runs` and the same seed, so `process_seed_for` derives identical
     // per-draw seeds — the scenarios' pre-divergence trajectories are coupled.
     if want_free_forward {
-        // Leaf order = model.observations order; map the (possibly filtered)
-        // leaves back onto that order for the sink.
-        let leaf_times: Vec<Vec<f64>> = model
-            .observations
-            .iter()
-            .map(|o| {
-                leaves
-                    .iter()
-                    .find(|l| leaf_matches(o, l))
-                    .map(|l| l.times.clone())
-                    .unwrap_or_default()
-            })
-            .collect();
         // A `value_at(..., last_obs)` quantity anchors to the observed-data
         // axis; if no leaf carries any observation time the anchor is
         // unresolvable — refuse loudly rather than silently censoring every
         // draw (proposal 2026-08-17).
         if let Some(eval) = quant_eval.as_deref() {
-            if eval.references_obs_anchor() && leaf_times.iter().all(|ts| ts.is_empty()) {
+            if eval.references_obs_anchor() && quantity_obs_anchors.is_none() {
                 return Err(format!(
                     "quantity `{}` reads `value_at` at an observation anchor \
                      (`last_obs` / `first_obs`, with or without an offset), but \
@@ -1297,6 +1307,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 leaf_times: leaf_times.clone(),
                 leaf_aux: leaf_aux.clone(),
                 quant_eval: quant_eval.clone(),
+                obs_anchors: quantity_obs_anchors,
                 by_scenario: IndexMap::new(),
             };
 
@@ -1639,6 +1650,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             &model,
             posterior.backend,
             seed,
+            quantity_obs_anchors,
         )?;
         written.extend(paths);
     }

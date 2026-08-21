@@ -1107,3 +1107,362 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── gh#694: an observation-anchored `value_at` quantity + a `contrasts {}` block
+
+/// One banded row of a `fit predict` quantity sidecar, by column name. A
+/// censorable scalar's header is
+/// `scenario n_draws n_value n_censored p_censored q05 … q95`; `fit predict`
+/// writes one row per scenario and these fixtures predict a single (`fitted`)
+/// scenario, so the first data row is the row.
+fn quantity_row(path: &Path) -> std::collections::HashMap<String, String> {
+    let txt = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let row: Vec<&str> = lines.next().expect("one band row").split('\t').collect();
+    assert_eq!(row.len(), header.len(), "row matches header in {}", path.display());
+    header.iter().map(|h| h.to_string()).zip(row.iter().map(|v| v.to_string())).collect()
+}
+
+/// `MODEL`'s SIRD+SIA with three anchored `value_at` quantities added, none of
+/// which any contrast references. `at_literal` pins the anchor's expected value:
+/// the data ends at t = 56, and origin 2020-01-01 + 56 d = 2020-02-26, so a
+/// correctly resolved `last_obs` reads exactly where the literal date does.
+const ANCHORED_QUANTITY_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia] }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  total       = final(D)
+  at_last_obs = value_at(D, last_obs)
+  at_literal  = value_at(D, date("2020-02-26"))
+  at_first    = value_at(D, first_obs)
+}
+contrasts {
+  averted = no_sia.quantities.total - with_sia.quantities.total
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+/// gh#694: declaring `contrasts {}` must not cost the model its observation
+/// anchors. `fit predict` holds the fit's data and resolves `last_obs` for the
+/// ordinary `quantities/` sidecar; the contrast arms evaluate the same quantity
+/// list, so an anchored quantity NO contrast references must not fail the
+/// command — and the resolved value must be the one the data implies, not
+/// merely a non-error.
+#[test]
+fn anchored_quantity_no_contrast_references_still_predicts() {
+    let bin = skip_if_missing_binary();
+    let tmp = std::env::temp_dir().join(format!("camdl_contrasts_anchor_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), ANCHORED_QUANTITY_MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "an anchored quantity beside a contrasts block must not fail fit predict \
+         (gh#694); stderr:\n{stderr}"
+    );
+
+    let results = tmp.join("results");
+    let quantity = |name: &str| {
+        quantity_row(
+            &find_artifact(&results, "quantities", name)
+                .unwrap_or_else(|| panic!("quantities/{name}.tsv must be written")),
+        )
+    };
+
+    // The anchor resolved, and resolved to the END OF DATA (t = 56): the band is
+    // cell-for-cell the literal-date quantity's. Anchoring anywhere else — the
+    // horizon (t = 80), the fork, first_obs — moves at least one quantile.
+    let last = quantity("at_last_obs");
+    assert_eq!(last["n_censored"], "0", "last_obs = t 56 is inside [0, 80]: {last:?}");
+    assert!(
+        last["n_value"].parse::<usize>().unwrap() > 0,
+        "the anchored quantity must band over real draws: {last:?}"
+    );
+    let literal = quantity("at_literal");
+    assert_eq!(
+        last, literal,
+        "value_at(D, last_obs) must read exactly where value_at(D, date(\"2020-02-26\")) \
+         does — the data ends at t = 56"
+    );
+
+    // first_obs (t = 7) and last_obs (t = 56) must resolve SEPARATELY: D is
+    // non-decreasing, so the earlier read is strictly smaller. Equal medians
+    // would mean both anchors collapsed onto one time.
+    let first = quantity("at_first");
+    let (f50, l50) =
+        (first["q50"].parse::<f64>().unwrap(), last["q50"].parse::<f64>().unwrap());
+    assert!(
+        f50 < l50,
+        "first_obs (t 7) and last_obs (t 56) must resolve to different times; \
+         got q50 {f50} vs {l50}"
+    );
+
+    // The contrast itself is untouched by the anchored quantities beside it.
+    let averted = find_artifact(&results, "contrasts", "averted")
+        .expect("contrasts/averted.tsv must still be emitted");
+    let (q50, _, n_used) = scalar_band(&averted);
+    assert!(
+        n_used > 0 && q50 > 0.0,
+        "the deaths-averted contrast still bands: q50={q50} n_used={n_used}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The same fixture with the contrast taken OVER the anchored quantity, so the
+/// arms themselves must resolve `last_obs` — the ordinary `quantities/` path
+/// resolving it is not enough.
+const ANCHORED_CONTRAST_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia] }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  total       = final(D)
+  at_last_obs = value_at(D, last_obs)
+  at_literal  = value_at(D, date("2020-02-26"))
+}
+contrasts {
+  averted             = no_sia.quantities.total       - with_sia.quantities.total
+  averted_at_last_obs = no_sia.quantities.at_last_obs - with_sia.quantities.at_last_obs
+  averted_at_literal  = no_sia.quantities.at_literal  - with_sia.quantities.at_literal
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+/// gh#694: a contrast whose operands ARE the anchored quantity. The SIA fires at
+/// t = 28 and the data ends at t = 56, so the anchor is inside both arms'
+/// `[fork, 80]` replay window — every draw must yield a value (n_used > 0), and
+/// the SIA must still show as deaths averted by the end of the data.
+///
+/// The literal-time twin is the value oracle: the arms replay identically for
+/// every contrast (same fork, same per-draw seeds), so a `last_obs` operand and
+/// a `date("2020-02-26")` operand must produce the SAME file. Resolving the
+/// anchor anywhere else — the horizon, the fork — moves it.
+#[test]
+fn contrast_over_an_anchored_quantity_resolves_in_both_arms() {
+    let bin = skip_if_missing_binary();
+    let tmp =
+        std::env::temp_dir().join(format!("camdl_contrasts_anchor_op_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), ANCHORED_CONTRAST_MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "a contrast over an anchored quantity must predict (gh#694); stderr:\n{stderr}"
+    );
+
+    let results = tmp.join("results");
+    let anchored = find_artifact(&results, "contrasts", "averted_at_last_obs")
+        .expect("contrasts/averted_at_last_obs.tsv must be emitted");
+    let (q50, mean, n_used) = scalar_band(&anchored);
+    assert!(
+        n_used > 0,
+        "last_obs (t 56) lies inside the arms' replay window, so no draw may \
+         censor: n_used={n_used}"
+    );
+    assert!(
+        q50 > 0.0 && mean > 0.0,
+        "the SIA averts deaths by the end of the data too: q50={q50} mean={mean}"
+    );
+
+    // The arms resolved `last_obs` to t = 56 exactly: the literal-date twin
+    // contrast, replayed from the same fork with the same per-draw seeds, is the
+    // same file cell for cell.
+    let literal = find_artifact(&results, "contrasts", "averted_at_literal")
+        .expect("contrasts/averted_at_literal.tsv must be emitted");
+    assert_eq!(
+        std::fs::read_to_string(&anchored).unwrap(),
+        std::fs::read_to_string(&literal).unwrap(),
+        "a `last_obs` operand must read exactly where a date(\"2020-02-26\") \
+         operand does — the data ends at t = 56"
+    );
+
+    // The sibling final-horizon contrast is unaffected.
+    assert!(
+        find_artifact(&results, "contrasts", "averted").is_some(),
+        "the final(D) contrast must still be emitted alongside"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The one case an anchor genuinely cannot be read in an arm. The SIA fires at
+/// t = 28, so the arms replay `[fork = 21, 80]`, while `first_obs` is t = 7 —
+/// BEFORE the fork, outside the window the arms simulated. It right-censors,
+/// exactly as an out-of-window literal time does. (A bare `last_obs` cannot
+/// land there: the fork is the last SAVED snapshot before the toggle, and the
+/// saved smoothed paths stop at the end of the data, so `fork ≤ last_obs`
+/// always.)
+const EARLY_ANCHOR_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]   ~ beta(alpha = 2.0, beta = 5.0)
+  k     : positive     in [1.0, 100.0] ~ half_normal(sigma = 10.0)
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia] }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  at_first_obs = value_at(D, first_obs)
+}
+contrasts {
+  averted_at_first_obs = no_sia.quantities.at_first_obs - with_sia.quantities.at_first_obs
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+/// gh#694: the narrow case that keeps a diagnostic. An anchor resolving OUTSIDE
+/// the arms' replay window is right-censored (the existing censor-not-clamp
+/// contract), not refused — but the reader is told, per contrast and by name,
+/// why the band came back empty. Predict still succeeds and every other
+/// artifact is written.
+#[test]
+fn an_anchor_before_the_fork_censors_with_a_located_note() {
+    let bin = skip_if_missing_binary();
+    let tmp =
+        std::env::temp_dir().join(format!("camdl_contrasts_earlyanchor_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), EARLY_ANCHOR_MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
+
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "an out-of-window anchor censors, it does not fail the command; stderr:\n{stderr}"
+    );
+    // The note is located: the contrast, the quantity, the resolved anchor time,
+    // and the window the arms actually ran.
+    assert!(
+        stderr.contains("averted_at_first_obs")
+            && stderr.contains("at_first_obs")
+            && stderr.contains("outside the arms' replay window"),
+        "the out-of-window anchor must be reported per contrast and by name; \
+         stderr:\n{stderr}"
+    );
+
+    // The band is honestly empty rather than fabricated: no draw contributed.
+    let path = find_artifact(&tmp.join("results"), "contrasts", "averted_at_first_obs")
+        .expect("contrasts/averted_at_first_obs.tsv must still be written");
+    let txt = std::fs::read_to_string(&path).unwrap();
+    let row: Vec<&str> = txt.lines().nth(1).expect("one band row").split('\t').collect();
+    assert_eq!(
+        *row.last().unwrap(),
+        "0",
+        "every draw censored → n_used = 0, no fabricated band: {row:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

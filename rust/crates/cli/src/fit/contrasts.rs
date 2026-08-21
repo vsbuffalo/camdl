@@ -31,6 +31,14 @@
 //! Edge cases are loud-deferred (skip-with-note, never silent): a contrast with no
 //! toggled intervention (parameter-only scenario → gh#327), or one toggled by a
 //! parametric / reactive fire time (no single derivable fork).
+//!
+//! An operand that reads `value_at(..., last_obs)` resolves against the FIT'S
+//! observation window, threaded in from `fit predict` (gh#694) — the same window
+//! the ordinary `quantities/` sidecar uses, so the two cannot disagree about what
+//! `last_obs` meant. The window is a property of the data, not of an arm; whether
+//! the resolved instant lies inside an arm's `[fork, run_end]` replay window is
+//! the ordinary in-window question, answered by right-censoring plus a located
+//! note naming the quantity and both windows.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -120,12 +128,20 @@ struct ArmDrawResult {
 /// Returns the written file paths. A non-forkable fit (no saved paths) or an ODE
 /// fit emits NO file and a located stderr note (not a crash). A shape or dimension
 /// mismatch in a contrast body is a hard error (it fails `fit predict`).
+///
+/// `obs_anchors` is the run's resolved observation window — the same pair the
+/// ordinary `quantities/` sidecar anchors `value_at(..., last_obs)` to (gh#694).
+/// The window is a property of the FIT'S DATA, not of an arm, so both arms
+/// resolve an anchor to the same instant; whether that instant lies inside the
+/// arm's `[fork, run_end]` replay window is then the ordinary in-window question
+/// `value_at` already answers by right-censoring.
 pub fn emit_contrasts(
     segment: &Path,
     stage: Option<&str>,
     model: &ir::Model,
     backend: ForwardBackend,
     seed: u64,
+    obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
 ) -> Result<Vec<PathBuf>, String> {
     // The forkable subset, classified by LatentPath. A point-estimate fit is
     // already refused upstream by `fit predict` (PlugIn treatment), so here we
@@ -252,7 +268,29 @@ pub fn emit_contrasts(
     let mut arms: HashMap<String, Arm> = HashMap::new();
     for run in &runs_union {
         if !arms.contains_key(run) {
-            arms.insert(run.clone(), Arm::build(model, run, &placeholder)?);
+            arms.insert(run.clone(), Arm::build(model, run, &placeholder, obs_anchors)?);
+        }
+    }
+
+    // Every arm evaluates the WHOLE quantity list (the evaluator is built from
+    // `model.quantities`), so a model with an anchored quantity and no window to
+    // resolve it against cannot be replayed at all — `eval_draw` treats a missing
+    // window as a missing gate and panics (gh#616). That is unreachable from
+    // `fit predict`, which refuses upstream when no leaf carries an observation
+    // time; keep the arm side a loud skip rather than a panic, so the rest of the
+    // command's output still lands.
+    if obs_anchors.is_none() {
+        if let Some(arm) = runs_union.first().and_then(|r| arms.get(r)) {
+            if arm.quant_eval.references_obs_anchor() {
+                eprintln!(
+                    "fit predict: skipping {} contrast(s) — quantity `{}` reads \
+                     `value_at` at an observation anchor, and this fit binds no \
+                     observation times to resolve it against.",
+                    model.contrasts.len(),
+                    arm.quant_eval.obs_anchor_quantity_names().join("`, `"),
+                );
+                return Ok(Vec::new());
+            }
         }
     }
 
@@ -312,6 +350,32 @@ pub fn emit_contrasts(
                 String::new()
             },
         );
+
+        // gh#694: an observation anchor is resolved from the fit's DATA, so it
+        // can land outside the window the arms replayed — before the fork (a
+        // toggle scheduled after the data ends) or past `run_end`. `value_at`
+        // right-censors there rather than clamping, which is the honest answer
+        // but reaches the reader only as an empty band. Name it here, per
+        // contrast and per quantity, so `n_used = 0` is not a mystery.
+        if let Some(w) = obs_anchors {
+            let mut members: Vec<String> = Vec::new();
+            collect_members(&c.body, &mut members);
+            for m in &members {
+                for (qname, a) in quantity_obs_anchor_reads(model, m) {
+                    let t = w.at(a);
+                    if t < plan.fork_t - SNAPSHOT_TIME_TOL || t > run_end + SNAPSHOT_TIME_TOL {
+                        eprintln!(
+                            "fit predict: contrast '{}' — quantity `{qname}` reads at \
+                             `{a}` = t {t}, outside the arms' replay window [{}, {run_end}]; \
+                             it is right-censored in every draw, so the band is empty \
+                             (n_used = 0). An anchor is read off the FIT's data, which \
+                             need not overlap the window the arms replayed.",
+                            c.name, plan.fork_t,
+                        );
+                    }
+                }
+            }
+        }
 
         let mut shaped: Vec<ShapedValue> = Vec::with_capacity(forkable.len());
         for (draw_pos, (params_i, chain, draw)) in forkable.iter().enumerate() {
@@ -391,6 +455,11 @@ fn check_arm_horizons(model: &ir::Model, runs: &[String]) -> Result<(), String> 
 struct Arm {
     compiled: std::sync::Arc<sim::CompiledModel>,
     quant_eval: QuantityEvaluator,
+    /// The run's resolved observation window, for a `value_at(..., last_obs)`
+    /// operand. Not a property of the arm — `last_obs` is the end of the FIT'S
+    /// data, so every arm carries the same pair and the two arms of a contrast
+    /// read at the same instant.
+    obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
 }
 
 impl Arm {
@@ -403,7 +472,12 @@ impl Arm {
     /// must be materialized against concrete values. The model STRUCTURE (compartments,
     /// transitions, interventions after the scenario filter) is value-independent, so
     /// any draw serves; per-draw we rebuild the parameter vector below.
-    fn build(model: &ir::Model, run: &str, placeholder: &[(String, f64)]) -> Result<Arm, String> {
+    fn build(
+        model: &ir::Model,
+        run: &str,
+        placeholder: &[(String, f64)],
+        obs_anchors: Option<ir::anchor::ObsAnchorTimes>,
+    ) -> Result<Arm, String> {
         let resolved = resolve_arm(model, run, placeholder)?;
         let compiled = std::sync::Arc::new(
             sim::CompiledModel::new(resolved.model)
@@ -411,20 +485,7 @@ impl Arm {
         );
         let quant_eval = QuantityEvaluator::new(&model.quantities, compiled.as_ref())
             .map_err(|e| format!("contrast arm '{run}': building quantity evaluator: {e}"))?;
-        // Contrast arms are forked FORWARD simulations — no observed data, so an
-        // observation anchor is unresolvable here. Hard error naming the
-        // quantities (proposal 2026-08-17), never an empty/NaN operand.
-        if quant_eval.references_obs_anchor() {
-            return Err(format!(
-                "contrast arm '{run}': quantity `{}` reads `value_at` at an \
-                 observation anchor (`last_obs` / `first_obs`, with or without \
-                 an offset), which has no observed data to anchor to in a \
-                 forked forward run. Use a literal time \
-                 (`value_at(expr, date(\"...\"))`) for contrast operands.",
-                quant_eval.obs_anchor_quantity_names().join("`, `"),
-            ));
-        }
-        Ok(Arm { compiled, quant_eval })
+        Ok(Arm { compiled, quant_eval, obs_anchors })
     }
 
     /// Replay this arm for one draw from the derived fork: resolve the draw's θ
@@ -483,7 +544,18 @@ impl Arm {
         .map_err(|e| format!("contrast arm '{run}': forking at fork={fork_t}: {e:?}"))?;
 
         let times: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
-        let quant = self.quant_eval.eval_draw(&pvec, &traj, self.compiled.as_ref(), None, None);
+        // gh#694: the fit's observation window travels with the arm, so a
+        // `value_at(..., last_obs)` operand resolves here exactly as it does on
+        // the ordinary `quantities/` path. An anchor outside `[fork, run_end]`
+        // right-censors through `value_at_locf` — the same censor-not-clamp
+        // contract an out-of-window literal time gets.
+        let quant = self.quant_eval.eval_draw(
+            &pvec,
+            &traj,
+            self.compiled.as_ref(),
+            None,
+            self.obs_anchors,
+        );
         Ok(ArmDrawResult { quant, times })
     }
 }
@@ -784,10 +856,12 @@ fn validate_contrast(c: &Contrast, model: &ir::Model) -> Result<(), String> {
     walk(&c.body, model)
 }
 
-/// Whether the named quantity (any leaf, transitively through `Derived` QRefs)
-/// reduces an `observations.<stream>` source.
-fn quantity_reduces_observations(model: &ir::Model, name: &str) -> bool {
-    use ir::quantity::{QuantityBody, QuantitySource, ScalarExpr};
+/// Every quantity leaf the named quantity resolves to, transitively through
+/// `Derived` reduction arithmetic: a `Derived` value is a function of the leaves
+/// it QRefs, so a property of those leaves (an observation source, an
+/// observation anchor) is a property of it. Declaration order, deduped by name.
+fn quantity_closure<'a>(model: &'a ir::Model, name: &str) -> Vec<&'a ir::quantity::Quantity> {
+    use ir::quantity::{QuantityBody, ScalarExpr};
     fn qrefs(se: &ScalarExpr, out: &mut Vec<String>) {
         match se {
             ScalarExpr::Const(_) | ScalarExpr::Param(_) => {}
@@ -806,25 +880,67 @@ fn quantity_reduces_observations(model: &ir::Model, name: &str) -> bool {
     }
     let mut seen: HashSet<String> = HashSet::new();
     let mut stack = vec![name.to_string()];
+    let mut out: Vec<&ir::quantity::Quantity> = Vec::new();
     while let Some(n) = stack.pop() {
         if !seen.insert(n.clone()) {
             continue;
         }
         for q in model.quantities.iter().filter(|q| q.name == n) {
-            match &q.body {
-                QuantityBody::Reduced { source: QuantitySource::Observation { .. }, .. } => {
-                    return true
-                }
-                QuantityBody::Reduced { .. } => {}
-                QuantityBody::Derived(se) => {
-                    let mut refs = Vec::new();
-                    qrefs(se, &mut refs);
-                    stack.extend(refs);
-                }
+            out.push(q);
+            if let QuantityBody::Derived(se) = &q.body {
+                let mut refs = Vec::new();
+                qrefs(se, &mut refs);
+                stack.extend(refs);
             }
         }
     }
-    false
+    out
+}
+
+/// Whether the named quantity (any leaf, transitively through `Derived` QRefs)
+/// reduces an `observations.<stream>` source.
+fn quantity_reduces_observations(model: &ir::Model, name: &str) -> bool {
+    use ir::quantity::{QuantityBody, QuantitySource};
+    quantity_closure(model, name).iter().any(|q| {
+        matches!(&q.body, QuantityBody::Reduced { source: QuantitySource::Observation { .. }, .. })
+    })
+}
+
+/// The observation anchor each leaf of the named quantity reads at, as
+/// `(leaf name, anchored time)`. Empty for a quantity that reads only literal
+/// times — the ordinary case.
+fn quantity_obs_anchor_reads<'a>(
+    model: &'a ir::Model,
+    name: &str,
+) -> Vec<(&'a str, ir::anchor::AnchoredTime)> {
+    use ir::quantity::{QuantityBody, TemporalReduce, TimeAnchor, ValueReduce};
+    quantity_closure(model, name)
+        .into_iter()
+        .filter_map(|q| match &q.body {
+            QuantityBody::Reduced {
+                reduce: Some(TemporalReduce::Value(ValueReduce::ValueAt(TimeAnchor::Obs(a)))),
+                ..
+            } => Some((q.name.as_str(), *a)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Collect every distinct quantity `member` named by `expr` (preserving first
+/// appearance). The sibling of [`collect_runs`] on the other axis of a
+/// `RunMember`: which quantities this contrast actually reads.
+fn collect_members(expr: &ContrastExpr, out: &mut Vec<String>) {
+    match expr {
+        ContrastExpr::RunMember { member, .. } => {
+            if !out.iter().any(|m| m == member) {
+                out.push(member.clone());
+            }
+        }
+        ContrastExpr::BinOp { left, right, .. } => {
+            collect_members(left, out);
+            collect_members(right, out);
+        }
+    }
 }
 
 /// Evaluate a contrast body for ONE draw against the per-run arm results.
