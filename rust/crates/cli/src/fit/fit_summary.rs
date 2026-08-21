@@ -1160,11 +1160,17 @@ impl Formatter {
                 "param", "mean", "ESS bulk", "ESS tail", "R̂"
             ));
             for (name, mean) in posterior_mean.iter() {
-                let ess_v = ess.get(name).copied();
-                let ess_str = match ess_v {
-                    Some(v) => format!("{:>10.0}", v),
-                    None => format!("{:>10}", "—"),
-                };
+                // Both encodings of "no pooled ESS" — an absent key on the
+                // loaded path, a present NaN on the --exclude-chains recompute
+                // — render as the same dash (gh#691). One fact, one rendering.
+                let ess_str = format!(
+                    "{:>10}",
+                    ess.get(name)
+                        .copied()
+                        .filter(|v| v.is_finite())
+                        .map(|v| format!("{:.0}", v))
+                        .unwrap_or_else(|| "—".to_string())
+                );
                 let date_marker = match self.cal.date_for(name, *mean) {
                     Some(date) => format!("  ({})", date),
                     None => String::new(),
