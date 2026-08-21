@@ -2668,6 +2668,60 @@ mod tests {
         );
     }
 
+    /// gh#611. When a fit fails, `max R̂ = 6.571 ✗` says THAT it failed; the
+    /// per-parameter table is where a reader finds out WHICH parameter — which
+    /// is the whole diagnostic question at that moment. The table has an R̂
+    /// column and an ESS column and `diagnostics.json` carries both values per
+    /// parameter, but the R̂ cell was hard-coded empty, so every row read as a
+    /// dash and the answer had to be recovered by parsing the JSON by hand.
+    #[test]
+    fn bayesian_block_fills_the_per_param_rhat_and_ess_columns() {
+        use std::collections::BTreeMap;
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let r = PgasStageResult {
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: BTreeMap::from([
+                    ("a2".to_string(), 1.013),
+                    ("tau".to_string(), 6.571),
+                ]),
+                ess_per_param: BTreeMap::from([
+                    ("a2".to_string(), 145.0),
+                    ("tau".to_string(), 42.0),
+                ]),
+                n_samples: 500,
+                thin: 1,
+                wall_time_secs: Some(11.8),
+                n_chains: 4,
+            },
+            posterior_mean: BTreeMap::from([
+                ("a2".to_string(), 0.5),
+                ("tau".to_string(), 1.0),
+            ]),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            acceptance_per_param: BTreeMap::new(),
+        };
+        let out = fmt.bayesian_block(
+            "posterior", "pgas", no_traces, BayesianView::Pgas(&r), None,
+            LoglikType::CompleteData,
+        );
+        let row = |name: &str| -> String {
+            out.lines()
+                .find(|l| l.trim_start().starts_with(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("no `{name}` row in the table:\n{out}"))
+                .to_string()
+        };
+        let tau = row("tau");
+        assert!(tau.contains("6.571"),
+            "the row for the parameter that failed must carry its R̂: {tau}");
+        assert!(tau.contains("42"),
+            "the row for the parameter that failed must carry its ESS: {tau}");
+        let a2 = row("a2");
+        assert!(a2.contains("1.013"), "every assessed parameter carries its R̂: {a2}");
+        assert!(a2.contains("145"), "every assessed parameter carries its ESS: {a2}");
+    }
+
     #[test]
     fn bayesian_block_reports_ess_per_second_off_the_slowest_param() {
         use std::collections::BTreeMap;
