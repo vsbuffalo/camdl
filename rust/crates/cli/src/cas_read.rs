@@ -12,15 +12,19 @@ use runid::{ArtifactKind, ContentHash, RunRecord};
 
 use crate::cas_index;
 
-/// Full `RunRecord` parses performed by [`walk_records`] in this process.
-///
-/// The point of the gated walks below is that a leaf the caller is going to
-/// discard never costs a full parse — a claim about *work*, not about the rows
-/// returned, so counting the parses is the only way to assert it. Compiled out
-/// of the shipped binary.
 #[cfg(test)]
-pub(crate) static FULL_PARSES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// Full `RunRecord` parses performed by the walk **on this thread**.
+    ///
+    /// The point of the gated walks below is that a leaf the caller is going
+    /// to discard never costs a full parse — a claim about *work*, not about
+    /// the rows returned, which are required to stay identical — so counting
+    /// the parses is the only way to assert it. Thread-local because the test
+    /// harness gives each test its own thread and the walk is single-threaded,
+    /// so each test sees exactly its own count with no synchronization.
+    /// Compiled out of the shipped binary.
+    pub(crate) static FULL_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // The fit-level provenance sidecar (`fit.meta.json`) lives in
 // `run_meta::FitSidecar` (it carries `run_meta` provenance types —
@@ -163,7 +167,7 @@ fn walk_gated(subtree: &Path, gate: &LeafGate) -> Vec<(PathBuf, RunRecord)> {
             !gate.is_selective() || run_header(&bytes).is_some_and(|h| gate.admits(&h));
         if admitted {
             #[cfg(test)]
-            FULL_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            FULL_PARSES.with(|n| n.set(n.get() + 1));
             if let Ok(rec) = serde_json::from_slice::<RunRecord>(&bytes) {
                 out.push((dir, rec));
             }
@@ -384,23 +388,14 @@ pub fn resolve_sim_ensemble_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
-    use std::sync::{Mutex, MutexGuard};
 
-    /// Serializes the tests that read [`FULL_PARSES`] — the counter is process
-    /// -wide and `cargo test` runs test functions on parallel threads.
-    static PARSE_COUNT: Mutex<()> = Mutex::new(());
-
-    /// Take the parse-count lock and zero the counter. Hold the guard for the
-    /// duration of the walk being measured.
-    fn measuring() -> MutexGuard<'static, ()> {
-        let guard = PARSE_COUNT.lock().unwrap_or_else(|e| e.into_inner());
-        FULL_PARSES.store(0, Ordering::Relaxed);
-        guard
+    /// Zero this thread's parse counter before the walk being measured.
+    fn measuring() {
+        FULL_PARSES.with(|n| n.set(0));
     }
 
     fn full_parses() -> usize {
-        FULL_PARSES.load(Ordering::Relaxed)
+        FULL_PARSES.with(|n| n.get())
     }
 
     /// A 64-hex `run_id` from a short readable stem.
@@ -508,7 +503,7 @@ pub(crate) mod tests {
         let member_ids: HashSet<ContentHash> =
             members.iter().map(|m| ContentHash::from_hex(m).unwrap()).collect();
 
-        let _guard = measuring();
+        measuring();
         let leaves = walk_sim_leaves_excluding(root, &member_ids);
 
         // Correctness: exactly the non-member leaves, unchanged.
