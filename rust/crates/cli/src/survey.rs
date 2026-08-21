@@ -16,7 +16,8 @@
 //! <root>/surveys/<stem>-<hash[:8]>/
 //!   run.json            # RunRecord (kind = survey)
 //!   landscape.tsv       # primary artifact (always)
-//!   summary.json        # SE distribution, top-K stats, dimensionality info
+//!   summary.json        # SE distribution, top-K stats, dimensionality info,
+//!                       # feasibility of the sampled box (gh#670)
 //!   landscape.html      # interactive pair-plot (only when --render)
 //! ```
 //!
@@ -526,6 +527,16 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     }
     eprintln!("survey: wrote {} ({} rows)", landscape_path.display(), sorted.len());
 
+    // ── Feasibility of the sampled box (gh#670) ─────────────────────
+    // Reported before the ranking diagnostics below: a box that is mostly
+    // infeasible makes "where do the top points cluster" a question about
+    // whatever fraction survived, and the modeller should know that first.
+    let feasibility = FeasibilityTally::from_rows(&sorted);
+    eprintln!("{}", feasibility_summary_line(&feasibility));
+    if let Some(w) = feasibility_warning(&feasibility) {
+        eprintln!("{}", w);
+    }
+
     // ── SE-distribution warning (proposal §"Runtime warnings") ──────
     if eval_method == SurveyEvalMethod::Pfilter {
         emit_se_warning(&sorted);
@@ -557,7 +568,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     }
 
     // ── summary.json ────────────────────────────────────────────────
-    if let Err(e) = write_summary_json(&summary_path, &sorted, a, eval_method, d) {
+    if let Err(e) = write_summary_json(
+        &summary_path, &sorted, &feasibility, a, eval_method, d) {
         eprintln!("warning: could not write summary.json: {}", e);
     }
 
@@ -1052,6 +1064,86 @@ fn load_observations_from_tsv(
 
 // ─── Per-point evaluation ────────────────────────────────────────────────────
 
+/// Why one survey point's log-likelihood came back non-finite (gh#670).
+///
+/// The distinction is not cosmetic — the two named causes take different
+/// fixes. "The model cannot produce this data here" is repaired in the
+/// observation model or the data; "θ is outside the region the model can
+/// run in" is repaired in the bounds or the model. Both eval paths already
+/// carry the answer at no extra cost: `compute_ode_loglik` returns
+/// `Ok(-∞)` for a trajectory it produced and then could not score, and
+/// `Err(_)` for one it could not produce at all; the particle filter's bail
+/// kinds separate a swarm that died from a swarm that degenerated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfeasibleCause {
+    /// The trajectory ran to the end of the horizon and the **observation**
+    /// term scored non-finite at some observation time: the observation
+    /// model gives the data zero probability at this θ (a projection at or
+    /// below zero under a strictly-positive likelihood, a count outside a
+    /// binomial's size, …). A NaN score is folded in here — it too comes
+    /// from a run that completed.
+    Observation,
+    /// The model has **no trajectory** at this θ: the process refused to
+    /// step (a negative propensity, a compartment driven negative, a
+    /// degenerate rate expression). Under the particle filter this is the
+    /// swarm-wide limit case — every particle hit a per-particle
+    /// recoverable error and the filter bailed with `AllParticlesDead`.
+    Support,
+    /// The particle filter bailed for a reason that belongs to the
+    /// **filter**, not to either likelihood term: sustained ESS collapse,
+    /// or the deterministic substep budget. Kept in its own bucket rather
+    /// than folded into `Observation` — attributing it there would send a
+    /// modeller to rewrite an observation model when more particles is the
+    /// fix.
+    FilterDegenerate,
+}
+
+impl InfeasibleCause {
+    /// How far the evaluation got before it failed. A point is only
+    /// non-finite when *every* replicate was, and replicates can fail
+    /// differently; merging keeps the one that got furthest, because if any
+    /// replicate produced a whole trajectory then the model does have one
+    /// here and the point's real blocker is the observation term.
+    fn progress(self) -> u8 {
+        match self {
+            InfeasibleCause::Support => 0,
+            InfeasibleCause::FilterDegenerate => 1,
+            InfeasibleCause::Observation => 2,
+        }
+    }
+
+    /// Fold one replicate's cause into the point's running cause.
+    fn furthest(seen: Option<Self>, next: Self) -> Option<Self> {
+        match seen {
+            Some(prev) if prev.progress() >= next.progress() => Some(prev),
+            _ => Some(next),
+        }
+    }
+}
+
+/// Classify a failed evaluation into the cause a modeller should act on.
+///
+/// `PFDegenerate::AllParticlesDead` is the limit case of the per-particle
+/// death mask — it is reached only when every particle hit a
+/// per-particle-recoverable process error (`NegativeCount`,
+/// `NumericalCollapse`, `NonFiniteParameter`, `TableLookup`; see
+/// `sim::inference::degeneracy::DeathMask`) — so it reports the model's
+/// support, not a filter pathology. The remaining bail kinds and the
+/// substep budget are the filter's own. Everything else reaches the survey
+/// only because the process could not run at this θ.
+fn classify_eval_error(e: &sim::error::SimError) -> InfeasibleCause {
+    use sim::error::{PFDegenerateKind, SimError};
+    match e {
+        SimError::PFDegenerate { kind: PFDegenerateKind::AllParticlesDead, .. } => {
+            InfeasibleCause::Support
+        }
+        SimError::PFDegenerate { .. } | SimError::PFIterationBudget { .. } => {
+            InfeasibleCause::FilterDegenerate
+        }
+        _ => InfeasibleCause::Support,
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LandscapeRow {
     point_id: usize,
@@ -1062,6 +1154,10 @@ struct LandscapeRow {
     /// Mean ESS across observation times. NaN when --eval simulate.
     mean_ess: f64,
     n_replicates: usize,
+    /// `Some` exactly when `loglik` is non-finite: which term refused
+    /// (gh#670). Set at the eval site, where the failing `Result` is still
+    /// in hand; `None` on every scored point.
+    infeasible: Option<InfeasibleCause>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1081,6 +1177,8 @@ fn eval_point_pfilter(
     // Per-point per-replicate seed, derived from (seed_base, point_id, rep).
     let mut log_liks: Vec<f64> = Vec::with_capacity(n_replicates);
     let mut ess_values: Vec<f64> = Vec::new();
+    // gh#670: which term refused, kept across replicates by "got furthest".
+    let mut cause: Option<InfeasibleCause> = None;
     for rep in 0..n_replicates {
         let seed = derive_point_seed(seed_base, point_id, rep);
         let cfg = SMCConfig {
@@ -1102,9 +1200,16 @@ fn eval_point_pfilter(
                     let mean = ess_trace.iter().sum::<f64>() / ess_trace.len() as f64;
                     ess_values.push(mean);
                 }
+                // The filter ran the whole horizon; a non-finite score here
+                // is the observation term driving every weight to −∞.
+                if !log_likelihood.is_finite() {
+                    cause = InfeasibleCause::furthest(
+                        cause, InfeasibleCause::Observation);
+                }
             }
-            Err(_) => {
+            Err(e) => {
                 log_liks.push(f64::NEG_INFINITY);
+                cause = InfeasibleCause::furthest(cause, classify_eval_error(&e));
             }
         }
     }
@@ -1137,6 +1242,9 @@ fn eval_point_pfilter(
         loglik_se: se,
         mean_ess,
         n_replicates,
+        // `logmeanexp` is finite as soon as ONE replicate is, so a
+        // non-finite point means every replicate failed and `cause` is set.
+        infeasible: if logmeanexp.is_finite() { None } else { cause },
     }
 }
 
@@ -1162,11 +1270,19 @@ fn eval_point_simulate(
     // trajectory difference is larger and the user should prefer
     // `--eval pfilter`. SE remains undefined (single deterministic
     // trajectory; no replicates) → reported as 0.0.
-    let loglik = sim::inference::compute_ode_loglik(
+    // gh#670: the `Result` is the cause split. `Ok` means the ODE produced a
+    // whole trajectory, so a non-finite score is the observation term
+    // refusing it (`compute_ode_loglik` returns `Ok(-∞)` on the first
+    // non-finite per-observation score); `Err` means no trajectory exists at
+    // this θ.
+    let (loglik, cause) = match sim::inference::compute_ode_loglik(
         compiled, obs_model, obs_times, dt, params,
         dt, // burnin_dt = dt ⇒ coarse burn-in off (survey uses the fine step)
-    )
-    .unwrap_or(f64::NEG_INFINITY);
+    ) {
+        Ok(ll) if ll.is_finite() => (ll, None),
+        Ok(ll) => (ll, Some(InfeasibleCause::Observation)),
+        Err(e) => (f64::NEG_INFINITY, Some(classify_eval_error(&e))),
+    };
     LandscapeRow {
         point_id,
         param_values: estimated.iter()
@@ -1178,6 +1294,7 @@ fn eval_point_simulate(
         loglik_se: 0.0,
         mean_ess: f64::NAN,
         n_replicates: 1,
+        infeasible: cause,
     }
 }
 
@@ -1412,6 +1529,150 @@ fn emit_start_rank_report(
     }
 }
 
+// ─── Feasibility of the sampled box (gh#670) ─────────────────────────────────
+//
+// The one pre-run number a modeller most wants: what share of the bounds box
+// can the model not produce this data from at all? Every point already knows
+// — `row.loglik.is_finite()` was computed and thrown away — and each eval
+// path also knows which term refused (`InfeasibleCause`).
+//
+// It is the same quantity a fit discovers hours later as refused chains:
+// `init = "lhs"` / `"uniform"` draw starts from these same bounds, so the
+// infeasible fraction is, to a first approximation, the fraction of chains
+// that will be refused at initialisation.
+
+/// The share of surveyed points that must be infeasible before the summary
+/// escalates from a reported number to a warning.
+///
+/// **Why one half.** A bounds box is a hyperrectangle and the region a model
+/// can actually produce the data from is not, so *some* infeasible corner is
+/// normal — a threshold near zero would fire on healthy surveys and be tuned
+/// out within a week. At one half the box has stopped describing where the
+/// model works: more than half of any starts drawn uniformly or by LHS from
+/// these bounds land where the log-likelihood is −∞, so more than half of a
+/// fit's chains are refused at initialisation and its compute budget is
+/// halved before the first iteration. That is the reported failure this
+/// diagnostic comes from — an 8-chain fit that seated 4. Below the
+/// threshold the fraction is still reported, just without the escalation.
+const INFEASIBLE_LOUD_FRACTION: f64 = 0.5;
+
+/// How many surveyed points the model could not score, and which term
+/// refused. Pure tally over the landscape — no re-evaluation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FeasibilityTally {
+    n_points: usize,
+    n_observation: usize,
+    n_support: usize,
+    n_filter: usize,
+}
+
+impl FeasibilityTally {
+    fn from_rows(rows: &[LandscapeRow]) -> Self {
+        let mut t = FeasibilityTally { n_points: rows.len(), ..Default::default() };
+        for r in rows.iter().filter(|r| !r.loglik.is_finite()) {
+            // Every non-finite row is classified where it was evaluated; an
+            // unclassified one means a new eval path forgot to, which is a
+            // wiring bug — surface it in tests, and still count the point
+            // (as the completed-run case) rather than losing it in release.
+            debug_assert!(r.infeasible.is_some(),
+                "point {} has a non-finite loglik but no InfeasibleCause; \
+                 every eval path must classify its failures (gh#670)",
+                r.point_id);
+            match r.infeasible.unwrap_or(InfeasibleCause::Observation) {
+                InfeasibleCause::Observation => t.n_observation += 1,
+                InfeasibleCause::Support => t.n_support += 1,
+                InfeasibleCause::FilterDegenerate => t.n_filter += 1,
+            }
+        }
+        t
+    }
+
+    fn n_non_finite(&self) -> usize {
+        self.n_observation + self.n_support + self.n_filter
+    }
+
+    fn n_finite(&self) -> usize {
+        self.n_points - self.n_non_finite()
+    }
+
+    fn fraction(&self) -> f64 {
+        if self.n_points == 0 { 0.0 }
+        else { self.n_non_finite() as f64 / self.n_points as f64 }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "n_points":            self.n_points,
+            "n_non_finite":        self.n_non_finite(),
+            "fraction_non_finite": self.fraction(),
+            "n_observation":       self.n_observation,
+            "n_support":           self.n_support,
+            "n_filter_degenerate": self.n_filter,
+        })
+    }
+}
+
+/// The always-emitted line. Reported even at zero: "the whole box is
+/// feasible" is the answer a modeller ran `survey` for, not an absence of
+/// output. The by-cause split is appended only when there is something to
+/// attribute.
+fn feasibility_summary_line(t: &FeasibilityTally) -> String {
+    let n = t.n_non_finite();
+    let head = format!(
+        "survey: {} of {} points ({:.1}%) scored a non-finite log-likelihood",
+        n, t.n_points, 100.0 * t.fraction());
+    if n == 0 { return head; }
+    format!(
+        "{head} - {} observation term, {} model support, {} filter degeneracy",
+        t.n_observation, t.n_support, t.n_filter)
+}
+
+/// The loud line, and only above [`INFEASIBLE_LOUD_FRACTION`]. Each cause
+/// contributes its own remedy line, and only when that cause actually
+/// occurred — a modeller reading this should not have to work out which of
+/// three paragraphs applies to them.
+fn feasibility_warning(t: &FeasibilityTally) -> Option<String> {
+    if t.n_points == 0 || t.fraction() < INFEASIBLE_LOUD_FRACTION {
+        return None;
+    }
+    let mut s = format!(
+        "warning: most of this parameter box is infeasible - {:.1}% of the \
+         {} surveyed points scored a non-finite log-likelihood \
+         ({} observation term, {} model support, {} filter degeneracy). \
+         A fit drawing chain starts from these same bounds would have \
+         roughly that share refused at initialisation.",
+        100.0 * t.fraction(), t.n_points,
+        t.n_observation, t.n_support, t.n_filter);
+    if t.n_observation > 0 {
+        s.push_str(
+            "\n  observation term: the observation model gives the data zero \
+             probability over much of the box - typically a projection that \
+             reaches 0 or goes negative under a strictly-positive likelihood \
+             (a positive count scored by poisson / neg_binomial at rate 0), \
+             or a count outside a binomial's size. Check `projected` and the \
+             data at the observation times that fail.");
+    }
+    if t.n_support > 0 {
+        s.push_str(
+            "\n  model support: theta outside the region the model can run in \
+             - a rate expression going negative, or a compartment driven \
+             negative. Bounds wider than the model supports are the usual \
+             cause; narrow them to the region that integrates.");
+    }
+    if t.n_filter > 0 {
+        s.push_str(
+            "\n  filter degeneracy: the particle filter collapsed rather than \
+             either likelihood term refusing - raise --eval-particles before \
+             concluding anything about the model here.");
+    }
+    s.push_str(
+        "\n  Narrow the --estimate bounds to the feasible region, or fix the \
+         observation model, before fitting: chains started outside it are \
+         refused, and the survey itself is spending most of its points where \
+         there is nothing to rank.");
+    Some(s)
+}
+
 /// Compact float formatter for warning messages. Keeps log-scale
 /// values readable (1e-5 not 0.00001) and clamps precision.
 fn format_param_value_short(v: f64) -> String {
@@ -1427,6 +1688,7 @@ fn format_param_value_short(v: f64) -> String {
 fn write_summary_json(
     path: &Path,
     rows: &[LandscapeRow],
+    feasibility: &FeasibilityTally,
     a: &crate::args::SurveyArgs,
     eval_method: SurveyEvalMethod,
     d: usize,
@@ -1457,7 +1719,12 @@ fn write_summary_json(
         "top_loglik": top_loglik,
         "loglik_se_quartiles": se_q,
         "top_k_count": top_rows.len(),
-        "n_finite_loglik": finite_lls.len(),
+        // Derived from the same tally as `feasibility` so the two can never
+        // disagree about how many points scored.
+        "n_finite_loglik": feasibility.n_finite(),
+        // gh#670: how much of the sampled box the model could not score,
+        // and which term refused.
+        "feasibility": feasibility.to_json(),
     });
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&summary)
@@ -1526,6 +1793,7 @@ mod tests {
                 loglik_se: 0.5,
                 mean_ess: 180.0,
                 n_replicates: 3,
+                infeasible: None,
             },
         ];
         let dir = tempfile::tempdir().unwrap();
@@ -1567,6 +1835,7 @@ mod tests {
                 loglik_se: 0.0,
                 mean_ess: f64::NAN,
                 n_replicates: 1,
+                infeasible: None,
             },
         ];
         let dir = tempfile::tempdir().unwrap();
@@ -1591,6 +1860,177 @@ mod tests {
         // Standard 5-number summary on a known sequence.
         let q = quartiles(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         assert_eq!(q.get("median").and_then(|v| v.as_f64()), Some(3.0));
+    }
+
+    // ── gh#670: feasibility of the sampled box ──────────────────────
+
+    fn row(point_id: usize, loglik: f64, cause: Option<InfeasibleCause>)
+        -> LandscapeRow
+    {
+        LandscapeRow {
+            point_id,
+            param_values: vec![0.5],
+            loglik,
+            loglik_se: 0.0,
+            mean_ess: f64::NAN,
+            n_replicates: 1,
+            infeasible: cause,
+        }
+    }
+
+    /// The tally is the number the summary line and `summary.json` both
+    /// read, so it must count the split exactly, not just the total.
+    #[test]
+    fn tally_counts_non_finite_points_by_cause() {
+        let rows = vec![
+            row(0, -10.0, None),
+            row(1, -11.0, None),
+            row(2, f64::NEG_INFINITY, Some(InfeasibleCause::Observation)),
+            row(3, f64::NEG_INFINITY, Some(InfeasibleCause::Observation)),
+            row(4, f64::NEG_INFINITY, Some(InfeasibleCause::Support)),
+            row(5, f64::NAN,          Some(InfeasibleCause::FilterDegenerate)),
+        ];
+        let t = FeasibilityTally::from_rows(&rows);
+        assert_eq!(t.n_points, 6);
+        assert_eq!(t.n_non_finite(), 4, "NaN counts as non-finite, like -inf");
+        assert_eq!(t.n_finite(), 2);
+        assert_eq!((t.n_observation, t.n_support, t.n_filter), (2, 1, 1));
+        assert!((t.fraction() - 4.0 / 6.0).abs() < 1e-12);
+    }
+
+    /// An all-finite landscape reports zero — and an empty one does not
+    /// divide by zero.
+    #[test]
+    fn tally_is_zero_on_a_fully_feasible_box() {
+        let rows = vec![row(0, -1.0, None), row(1, -2.0, None)];
+        let t = FeasibilityTally::from_rows(&rows);
+        assert_eq!(t.n_non_finite(), 0);
+        assert_eq!(t.fraction(), 0.0);
+        assert_eq!(FeasibilityTally::from_rows(&[]).fraction(), 0.0);
+    }
+
+    /// The summary line carries the count, the percentage, and the split;
+    /// at zero it carries the count and percentage and nothing else (there
+    /// is no cause to attribute).
+    #[test]
+    fn summary_line_reports_count_percentage_and_split() {
+        let t = FeasibilityTally {
+            n_points: 200, n_observation: 30, n_support: 9, n_filter: 1,
+        };
+        assert_eq!(
+            feasibility_summary_line(&t),
+            "survey: 40 of 200 points (20.0%) scored a non-finite \
+             log-likelihood - 30 observation term, 9 model support, \
+             1 filter degeneracy");
+
+        let clean = FeasibilityTally { n_points: 200, ..Default::default() };
+        assert_eq!(
+            feasibility_summary_line(&clean),
+            "survey: 0 of 200 points (0.0%) scored a non-finite log-likelihood");
+    }
+
+    /// The escalation fires at the threshold and not below it, and names
+    /// the remedy for each cause that actually occurred — a run with no
+    /// support failures must not tell the modeller to narrow bounds.
+    #[test]
+    fn loud_line_fires_at_the_threshold_and_names_only_live_causes() {
+        let below = FeasibilityTally {
+            n_points: 10, n_observation: 4, n_support: 0, n_filter: 0,
+        };
+        assert!(below.fraction() < INFEASIBLE_LOUD_FRACTION);
+        assert!(feasibility_warning(&below).is_none(),
+            "40% must stay below the escalation");
+
+        let at = FeasibilityTally {
+            n_points: 10, n_observation: 5, n_support: 0, n_filter: 0,
+        };
+        assert_eq!(at.fraction(), INFEASIBLE_LOUD_FRACTION);
+        let w = feasibility_warning(&at).expect("50% must escalate");
+        assert!(w.starts_with("warning: most of this parameter box is infeasible"));
+        assert!(w.contains("50.0%"));
+        assert!(w.contains("observation term:"),
+            "the live cause must carry its remedy");
+        assert!(!w.contains("model support:"),
+            "a cause with zero points must not add a remedy line");
+        assert!(!w.contains("filter degeneracy:"));
+
+        // Every cause live → every remedy present.
+        let all = FeasibilityTally {
+            n_points: 4, n_observation: 1, n_support: 2, n_filter: 1,
+        };
+        let w = feasibility_warning(&all).expect("100% must escalate");
+        for marker in ["observation term:", "model support:", "filter degeneracy:"] {
+            assert!(w.contains(marker), "missing remedy line for {marker}");
+        }
+
+        // An empty landscape has no fraction to escalate on.
+        assert!(feasibility_warning(&FeasibilityTally::default()).is_none());
+    }
+
+    /// `summary.json`'s two feasibility-derived fields come from one tally,
+    /// so `n_finite_loglik` and the block can never disagree.
+    #[test]
+    fn summary_json_feasibility_block_matches_the_tally() {
+        let t = FeasibilityTally {
+            n_points: 8, n_observation: 2, n_support: 1, n_filter: 0,
+        };
+        let j = t.to_json();
+        assert_eq!(j["n_points"], 8);
+        assert_eq!(j["n_non_finite"], 3);
+        assert_eq!(j["n_observation"], 2);
+        assert_eq!(j["n_support"], 1);
+        assert_eq!(j["n_filter_degenerate"], 0);
+        assert_eq!(j["fraction_non_finite"].as_f64().unwrap(), 3.0 / 8.0);
+        assert_eq!(t.n_finite(), 5);
+    }
+
+    /// The cause classifier reads the bail kind, not the fact of an error:
+    /// a dead swarm is the model's support (every particle hit a
+    /// per-particle-recoverable process error), while ESS collapse and the
+    /// substep budget are the filter's own.
+    #[test]
+    fn eval_errors_classify_by_which_term_refused() {
+        use sim::error::{PFDegenerateKind, SimError};
+        let dead = SimError::PFDegenerate {
+            kind: PFDegenerateKind::AllParticlesDead,
+            obs_window: 3, elapsed_s: 0.1,
+        };
+        assert_eq!(classify_eval_error(&dead), InfeasibleCause::Support);
+
+        let collapsed = SimError::PFDegenerate {
+            kind: PFDegenerateKind::EssCollapsed { last_ess: vec![1.0, 1.0, 1.0] },
+            obs_window: 3, elapsed_s: 0.1,
+        };
+        assert_eq!(classify_eval_error(&collapsed), InfeasibleCause::FilterDegenerate);
+
+        let over_budget = SimError::PFIterationBudget {
+            obs_window: 0, attempted_substeps: 2, budget_substeps: 1,
+        };
+        assert_eq!(classify_eval_error(&over_budget), InfeasibleCause::FilterDegenerate);
+
+        // A process that refused to step is the model's support.
+        let neg = SimError::NegativePropensity {
+            transition: "infection".into(), value: -0.5, t: 0.0,
+        };
+        assert_eq!(classify_eval_error(&neg), InfeasibleCause::Support);
+    }
+
+    /// Replicates of one point can fail differently; the merged cause is
+    /// the one that got furthest, because a replicate that produced a whole
+    /// trajectory proves the model has one at this theta.
+    #[test]
+    fn replicate_causes_merge_to_the_furthest_progress() {
+        use InfeasibleCause::*;
+        // A completed run outranks a bail, in either arrival order.
+        assert_eq!(InfeasibleCause::furthest(Some(Support), Observation), Some(Observation));
+        assert_eq!(InfeasibleCause::furthest(Some(Observation), Support), Some(Observation));
+        // A bail outranks a dead swarm.
+        assert_eq!(InfeasibleCause::furthest(Some(Support), FilterDegenerate),
+            Some(FilterDegenerate));
+        assert_eq!(InfeasibleCause::furthest(Some(FilterDegenerate), Support),
+            Some(FilterDegenerate));
+        // First observation wins from nothing.
+        assert_eq!(InfeasibleCause::furthest(None, Support), Some(Support));
     }
 
     #[test]
