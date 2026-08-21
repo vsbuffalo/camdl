@@ -2615,7 +2615,7 @@ mod tests {
 
         // `tau` reports no ESS → no efficiency headline, and `tau` is named.
         let gapped = mk(BTreeMap::from([("a2".to_string(), 145.0)]));
-        let out = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&gapped), None);
+        let out = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&gapped), None, LoglikType::CompleteData);
         assert!(
             !out.contains("min-param ESS"),
             "no min-param ESS may be printed over the reporting subset: {out}"
@@ -2638,7 +2638,7 @@ mod tests {
         // Control: with `tau`'s ESS present the same block reports both ratios —
         // 145 / 500 raw iters and 145 / 11.8 s off the slower of the two.
         let complete = mk(BTreeMap::from([("a2".to_string(), 145.0), ("tau".to_string(), 300.0)]));
-        let ok = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&complete), None);
+        let ok = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&complete), None, LoglikType::CompleteData);
         assert!(
             ok.contains("ESS/iter = 0.290  (min-param ESS 145 / 500 raw sampling iters)"),
             "a complete map still reports ESS/iter off the slowest param: {ok}"
