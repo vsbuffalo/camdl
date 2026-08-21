@@ -779,6 +779,9 @@ fn a_backend_without_the_seam_is_refused() {
 
 /// The saved states are p(x_T | y) at ONE θ. Pairing them with unrelated
 /// posterior draws would be an incoherent (θ, x_T) product.
+///
+/// The refusal now points at `--init-state fit` (gh#697), which IS the paired
+/// (θ_i, X_i) source; before that landed it pointed at the blocker instead.
 #[test]
 fn pairing_with_draws_is_refused() {
     let bin = skip_if_missing();
@@ -794,7 +797,10 @@ fn pairing_with_draws_is_refused() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "--init-state + --draws must be refused");
     assert!(err.contains("cannot be combined with --draws"), "{err}");
-    assert!(err.contains("gh#607"), "the refusal must point at the paired source: {err}");
+    assert!(
+        err.contains("--init-state fit"),
+        "the refusal must point at the paired source: {err}"
+    );
 }
 
 /// Replicate i restores row i, so a mismatch is refused with both counts —

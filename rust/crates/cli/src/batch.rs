@@ -991,15 +991,16 @@ impl CasSink {
             scenario_label,
             base_seed: spec.process_seed,
             process_seed: spec.process_seed,
-            // gh#641: the state this cell restored. The FILE's bytes and the
-            // restored ROW both key the run — a re-filtered ensemble under an
-            // unchanged model must not serve the cached forecast, and two
-            // replicates sharing a `process_seed` (`--seeds 7,7`) must not
-            // collide while starting from different rows. `None` for every
-            // `batch run` cell (no `init_state` key — CLI-only, like `to`).
+            // gh#641 / gh#697: the state this cell restored. The origin
+            // ENSEMBLE's content digest and the restored ROW both key the run —
+            // a re-filtered / re-fitted ensemble under an unchanged model must
+            // not serve the cached forecast, and two cells sharing a
+            // `process_seed` (`--seeds 7,7`) must not collide while starting
+            // from different rows. `None` for every `batch run` cell (no
+            // `init_state` key — CLI-only, like `to`).
             init_state: spec.sim_run.init_state.as_ref().map(|i| {
                 runid::inputs::InitStateDigest {
-                    file: runid::inputs::DataDigest(i.file_digest),
+                    ensemble: runid::inputs::DataDigest(i.ensemble_digest),
                     row: i.row,
                 }
             }),

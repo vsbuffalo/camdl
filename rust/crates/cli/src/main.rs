@@ -651,6 +651,170 @@ fn cmd_reindex(a: &args::ReindexArgs) {
     }
 }
 
+/// Where `--init-state` draws its ensemble of forecast-origin states.
+///
+/// The two sources are different objects, not two spellings of one: a file is a
+/// particle swarm at a SINGLE θ (so it pairs with replicates and refuses
+/// `--draws`), while `fit` is one state PER POSTERIOR DRAW (so it requires
+/// `--draws posterior` and pairs with the draw axis). Parsing the flag into
+/// this type at the boundary is what keeps those two row axes from being one
+/// `usize` that a call site can pass the wrong index into.
+#[derive(Debug, Clone, PartialEq)]
+enum InitStateSourceArg {
+    /// A `camdl pfilter --save-final-state` TSV (gh#641).
+    File(std::path::PathBuf),
+    /// The `--fit` run's paired `(θ_i, X_i(T))` posterior (gh#697).
+    Fit,
+}
+
+impl InitStateSourceArg {
+    /// The bare word `fit` selects the paired source; anything else is a path.
+    /// Same convention as `--draws uniform|prior|posterior|<file>` — a keyword
+    /// wins over a file of that name.
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw {
+            None => None,
+            Some("fit") => Some(InitStateSourceArg::Fit),
+            Some(path) => Some(InitStateSourceArg::File(std::path::PathBuf::from(path))),
+        }
+    }
+}
+
+/// Resolve `--init-state fit --draws posterior`: ONE join producing both the θ
+/// cloud and the origin ensemble it is paired with (gh#697).
+///
+/// Returns `(θ rows, origin ensemble)` in the SAME order, which is what makes
+/// draw *i*'s state and draw *i*'s parameters impossible to mis-pair: they come
+/// out of one `Vec<ForecastDraw>` and are split only at the very end, into two
+/// structures the engine indexes with the same `point_idx`.
+///
+/// The forkable subset is used and REPORTED, never silently substituted for the
+/// posterior: only draws with a saved latent path have an `X_i(T)` to fork, and
+/// a cloud quietly banded over a fraction of the posterior looks exactly like
+/// the full one. A fit with no saved paths is refused by name — never a fall
+/// back to `init {}`, which would look like a forecast and be a free-forward
+/// replay.
+fn resolve_paired_posterior(
+    fit_ref: &str,
+    ir_path_compiled: &str,
+    n_draws: Option<usize>,
+) -> (Vec<HashMap<String, f64>>, crate::sim_job::InitStateSource) {
+    let (model, _) = util::load_model(ir_path_compiled).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+    let columns = io::trajectories::TrajColumnSpec::from_model(&model, &[]);
+    let ens = crate::fit::joint::resolve_forecast_ensemble(fit_ref, None, &columns)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+
+    if ens.draws.is_empty() {
+        eprintln!(
+            "error: --init-state fit: {fit_ref} has no forkable posterior draws \
+             (0/{} carry a saved latent path). The paired (θ_i, X_i(T)) origin comes \
+             from the smoothed latent paths a PGAS stage writes to \
+             <stage>/chain_*/trajectories.tsv; PMMH and particle-filter stages write \
+             none, and a stage run with `n_trajectories = 0` writes none either.\n  \
+             Refusing rather than starting from `init {{}}`: that would look like a \
+             forecast and be a free-forward replay.\n  Fix: re-fit with a PGAS stage \
+             (or raise `n_trajectories`), or forecast at a single θ with \
+             `camdl pfilter --save-final-state` + `--init-state <file>`.",
+            ens.n_total,
+        );
+        std::process::exit(1);
+    }
+
+    let n_forkable = ens.draws.len();
+    eprintln!(
+        "simulate: --init-state fit → {n_forkable}/{} posterior draws have a saved \
+         latent path; forecasting that paired (θ_i, X_i) subset from t = {}{}\n  \
+         stage '{}' ({})",
+        ens.n_total,
+        ens.origin_t,
+        if n_forkable < ens.n_total {
+            format!(" (the other {} draws have no state to fork)", ens.n_total - n_forkable)
+        } else {
+            String::new()
+        },
+        ens.stage,
+        ens.draws_path.display(),
+    );
+
+    // Same strided cap as the unpaired posterior path (never front-biased): a
+    // large forkable subset is still hours of forward solves.
+    let cap = n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);
+    if let Some(asked) = n_draws {
+        if asked > n_forkable {
+            eprintln!(
+                "simulate: --init-state fit → -n {asked} exceeds the {n_forkable} \
+                 forkable draws; forecasting all {n_forkable}."
+            );
+        }
+    }
+    let selected: Vec<crate::fit::joint::ForecastDraw> = if n_forkable > cap {
+        let picked: Vec<crate::fit::joint::ForecastDraw> =
+            crate::fit::predict::subsample_draws(&ens.draws, cap)
+                .into_iter().cloned().collect();
+        eprintln!(
+            "simulate: --init-state fit → subsampling {} of {n_forkable} forkable \
+             draws (strided across the subset; raise with --n-draws)",
+            picked.len()
+        );
+        picked
+    } else {
+        ens.draws
+    };
+
+    // The identity input: a content digest over the ensemble ACTUALLY used —
+    // origin time, and every selected draw's key + restored values, in
+    // selection order. Content, not the fit's run_id: keying on provenance
+    // means enumerating every knob that changes the selection, and a missed one
+    // is two different clouds sharing a cache entry.
+    let origin_t = runid::FiniteF64::new(ens.origin_t).unwrap_or_else(|e| {
+        eprintln!("error: --init-state fit: non-finite forecast origin ({e})");
+        std::process::exit(1);
+    });
+    let rows: Vec<runid::inputs::InitStateRow> = selected
+        .iter()
+        .map(|d| runid::inputs::InitStateRow {
+            chain: d.chain as u64,
+            draw: d.draw as u64,
+            counts: d.counts.clone(),
+            reals: d.reals.iter()
+                .map(|&v| runid::FiniteF64::new(v).unwrap_or_else(|e| {
+                    eprintln!(
+                        "error: --init-state fit: (chain {}, draw {}) has a non-finite \
+                         real compartment at the origin ({e})",
+                        d.chain, d.draw
+                    );
+                    std::process::exit(1);
+                }))
+                .collect(),
+        })
+        .collect();
+    let digest = runid::ContentAddressed::content_hash(
+        &runid::inputs::InitStateEnsemble { origin_t, rows },
+    );
+
+    let params: Vec<HashMap<String, f64>> =
+        selected.iter().map(|d| d.params.clone()).collect();
+    let states: Vec<crate::sim_job::OriginState> = selected
+        .into_iter()
+        .map(|d| crate::sim_job::OriginState { counts: d.counts, reals: d.reals })
+        .collect();
+    (
+        params,
+        crate::sim_job::InitStateSource {
+            origin_t: ens.origin_t,
+            states,
+            axis: crate::sim_job::InitStateRowAxis::Draw,
+            ensemble_digest: digest,
+        },
+    )
+}
+
 fn run_simulate(a: &args::SimulateArgs) {
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();
     sim::eval_stats::set_allow_degenerate_rates(a.allow_degenerate_rates);  // gh#audit-C6
@@ -964,6 +1128,29 @@ fn run_simulate(a: &args::SimulateArgs) {
             Some(resolved)
         }
     };
+    // ── `--init-state`: which ensemble of forecast origins ──────────────────
+    //
+    // Parsed HERE, ahead of the `--fit requires --draws` ergonomics check
+    // below, so a user who writes `--init-state fit` without the posterior it
+    // pairs against is told which flag completes the pairing rather than the
+    // generic thing.
+    let init_state_arg = InitStateSourceArg::parse(a.init_state.as_deref());
+    if matches!(init_state_arg, Some(InitStateSourceArg::Fit))
+        && draws_path.as_deref() != Some("posterior")
+    {
+        eprintln!(
+            "error: --init-state fit needs the posterior it pairs against: add \
+             --draws posterior --fit <fit results dir>.\n  \
+             The fit source restores draw i's OWN terminal latent state X_i(T) \
+             under draw i's OWN θ_i — without the posterior draws there is no θ_i \
+             to put a state with, and crossing states with unrelated parameters is \
+             the incoherent product this source exists to avoid.\n  Fix: add \
+             --draws posterior, or pass a `camdl pfilter --save-final-state` file \
+             to forecast at a single θ."
+        );
+        std::process::exit(1);
+    }
+
     // `--fit` without `--draws` is only meaningful when something needs the
     // fit's DATA rather than its posterior: an anchored `--to` (gh#626) or an
     // anchored model (gh#616). Otherwise keep the old ergonomics.
@@ -1055,20 +1242,53 @@ fn run_simulate(a: &args::SimulateArgs) {
         integrator: a.backend.integrator, // gh#166: CLI --integrator override
     };
 
-    // ── gh#641: load `--init-state` (forecast from a filtered state) ────────
+    // ── `--init-state`: the forecast-origin ensemble ────────────────────────
     //
     // Resolved once, up front, like `--to`: every cell shares one ensemble of
-    // particle states and the origin they sit at, and the replicate index picks
-    // the row. The reader owns the structural checks (compartments by name, a
-    // real-compartment model, the header's origin time); the checks HERE are
-    // the ones that need the rest of the invocation to be known.
-    let init_state_source = match a.init_state.as_deref() {
-        None => None,
-        Some(path) => {
-            let (model_is, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            });
+    // origin states and the time they sit at, and a grid index picks the row
+    // (`InitStateRowAxis` — replicate for a file, draw for a fit). The readers
+    // own the structural checks (compartments by name, the origin time); the
+    // checks HERE are the ones that need the rest of the invocation to be
+    // known.
+    //
+    // The fit source (gh#697) is resolved LATER, in the `--draws posterior`
+    // arm below: its ensemble and its θ cloud are the same join, so building
+    // them together is what makes draw i's state and draw i's parameters
+    // impossible to mis-pair. This block does its model-level refusals now, so
+    // a user hears about a reactive policy or the wrong backend before waiting
+    // on a fit read.
+    let mut init_state_source: Option<std::sync::Arc<crate::sim_job::InitStateSource>> = None;
+    if init_state_arg.is_some() {
+        let (model_is, _) = util::load_model(&ir_path_compiled).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+        // The seam refuses a reactive model too (`chain_binomial.rs`), but by
+        // then the user has waited for a compile; name the policy here.
+        let reactive: Vec<&str> = model_is.interventions.iter()
+            .filter(|iv| iv.fire.is_reactive())
+            .map(|iv| iv.name.as_str())
+            .collect();
+        if !reactive.is_empty() {
+            eprintln!(
+                "error: --init-state cannot restart a model with reactive \
+                 intervention(s) [{}]. A reactive policy carries mid-run state \
+                 the origin state does not hold — the observation history its \
+                 trigger reads, its once/cooldown gating, the queue of effects \
+                 already scheduled, and its own surveillance RNG stream — so the \
+                 forecast would silently begin with an empty agenda.\n  Fix: \
+                 run the scenario without the reactive policy, or simulate \
+                 continuously from the model's own t_start.",
+                reactive.join(", ")
+            );
+            std::process::exit(1);
+        }
+        if !matches!(backend, crate::args::types::ForwardBackend::ChainBinomial) {
+            eprintln!("error: {}", util::unseamed_backend_msg(backend.as_str()));
+            std::process::exit(1);
+        }
+
+        if let Some(InitStateSourceArg::File(path)) = init_state_arg.as_ref() {
             let columns = io::trajectories::TrajColumnSpec::from_model(&model_is, &[]);
             let bytes = std::fs::read(path).unwrap_or_else(|e| {
                 eprintln!("error: cannot read --init-state {}: {e}", path.display());
@@ -1078,43 +1298,19 @@ fn run_simulate(a: &args::SimulateArgs) {
                 eprintln!("error: --init-state: {e}");
                 std::process::exit(1);
             });
-
-            // The seam refuses a reactive model too (`chain_binomial.rs`), but
-            // by then the user has waited for a compile; name the policy here.
-            let reactive: Vec<&str> = model_is.interventions.iter()
-                .filter(|iv| iv.fire.is_reactive())
-                .map(|iv| iv.name.as_str())
-                .collect();
-            if !reactive.is_empty() {
-                eprintln!(
-                    "error: --init-state cannot restart a model with reactive \
-                     intervention(s) [{}]. A reactive policy carries mid-run state \
-                     the file does not hold — the observation history its trigger \
-                     reads, its once/cooldown gating, the queue of effects already \
-                     scheduled, and its own surveillance RNG stream — so the \
-                     forecast would silently begin with an empty agenda.\n  Fix: \
-                     run the scenario without the reactive policy, or simulate \
-                     continuously from the model's own t_start.",
-                    reactive.join(", ")
-                );
-                std::process::exit(1);
-            }
-            if !matches!(backend, crate::args::types::ForwardBackend::ChainBinomial) {
-                eprintln!("error: {}", util::unseamed_backend_msg(backend.as_str()));
-                std::process::exit(1);
-            }
             // `--save-final-state` is p(x_T | y_{1:T}) at ONE θ. Pairing those
             // rows with unrelated posterior draws would form an incoherent
             // (θ, x_T) product and read as a legitimate forecast cloud.
             if draws_path.is_some() {
                 eprintln!(
-                    "error: --init-state cannot be combined with --draws. The saved \
-                     particle states are the filtering distribution at the ONE θ the \
-                     filter ran at, so pairing row i with an unrelated posterior draw \
-                     would forecast a state and a parameter vector that never went \
-                     together.\n  Fix: run --init-state at that same θ (--params), or \
-                     wait for the paired (θ, X) source — PGAS trajectories, blocked on \
-                     gh#607."
+                    "error: --init-state <file> cannot be combined with --draws. The \
+                     saved particle states are the filtering distribution at the ONE θ \
+                     the filter ran at, so pairing row i with an unrelated posterior \
+                     draw would forecast a state and a parameter vector that never went \
+                     together.\n  Fix: run --init-state <file> at that same θ \
+                     (--params), or use `--init-state fit --draws posterior --fit <fit \
+                     results dir>`, which restores draw i's own state under draw i's \
+                     own θ."
                 );
                 std::process::exit(1);
             }
@@ -1137,13 +1333,17 @@ fn run_simulate(a: &args::SimulateArgs) {
                 "simulate: --init-state {} → {} particle states at t = {}",
                 path.display(), states.len(), states.origin_t
             );
-            Some(std::sync::Arc::new(crate::sim_job::InitStateSource {
+            let digest = runid::ContentHash::digest_bytes(&bytes);
+            init_state_source = Some(std::sync::Arc::new(crate::sim_job::InitStateSource {
                 origin_t: states.origin_t,
-                counts: states.counts,
-                file_digest: runid::ContentHash::digest_bytes(&bytes),
-            }))
+                states: states.counts.into_iter()
+                    .map(|counts| crate::sim_job::OriginState { counts, reals: Vec::new() })
+                    .collect(),
+                axis: crate::sim_job::InitStateRowAxis::Replicate,
+                ensemble_digest: digest,
+            }));
         }
-    };
+    }
 
     // ── Pre-flight: validate obs model availability ─────────────────────────
     // We need the model to check observation blocks, but we don't want to
@@ -1372,6 +1572,13 @@ fn run_simulate(a: &args::SimulateArgs) {
                     (the directory `camdl fit run` printed)");
                 std::process::exit(1);
             });
+            if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
+                let (rows, source) = resolve_paired_posterior(
+                    fit_ref, &ir_path_compiled, a.n_draws,
+                );
+                init_state_source = Some(std::sync::Arc::new(source));
+                rows
+            } else {
             let resolved = posterior_draws::resolve_posterior_draws(fit_ref, None)
                 .unwrap_or_else(|e| {
                     eprintln!("error: {}", e);
@@ -1408,6 +1615,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             eprintln!("draws: posterior — {} draws from {} stage '{}' ({})",
                 loaded.len(), method_label, resolved.stage, resolved.draws_path.display());
             loaded
+            }
         } else {
             // File path. #273: when --fit is supplied, backfill any parameter
             // absent from the draws columns from the fit's [fixed] block, never

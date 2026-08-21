@@ -100,24 +100,54 @@ pub struct SimulateJob {
     pub parallel: usize,
 }
 
-/// A loaded `--init-state` file (gh#641): the whole particle ensemble, the
-/// forecast origin it sits at, and the file's content digest.
+/// One forecast-origin state: the compartment values a cell restores instead of
+/// building them from the model's `init {}` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OriginState {
+    /// Integer compartment counts, in the model's integer-compartment order
+    /// (i.e. indexed like `sim::IntState::counts`).
+    pub counts: Vec<i64>,
+    /// Real compartment values, in the model's real-compartment order. Always
+    /// empty for a `--save-final-state` file — the particle filter's
+    /// `ParticleState` carries counts only, and the reader refuses a model with
+    /// a real compartment rather than defaulting the reservoir to zero.
+    pub reals: Vec<f64>,
+}
+
+/// Which grid axis picks a cell's row out of an [`InitStateSource`].
 ///
-/// One of these is shared by every cell of a job. Replicate `i` restores row
-/// `i` — deliberately not "the first N rows of a larger file", because a
-/// post-resampling swarm is ancestor-ordered, so a prefix is not an
-/// exchangeable subsample of the filtering distribution.
+/// The two sources index different things, and getting this wrong is a silent
+/// mis-pairing rather than a crash — so it is a type the row lookup matches on,
+/// not a convention a comment asserts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitStateRowAxis {
+    /// `--init-state FILE` (gh#641): one θ's particle swarm, so **replicate**
+    /// `i` restores row `i`. Deliberately not "the first N rows of a larger
+    /// file" — a post-resampling swarm is ancestor-ordered, so a prefix is not
+    /// an exchangeable subsample of the filtering distribution.
+    Replicate,
+    /// `--init-state fit` (gh#697): the paired `(θ_i, X_i(T))` posterior, so
+    /// **draw** `i` restores row `i` — its own inferred state, under its own θ.
+    Draw,
+}
+
+/// A loaded `--init-state` ensemble: every origin state, the time they all sit
+/// at, and the ensemble's content digest.
+///
+/// One of these is shared by every cell of a job; [`InitStateRowAxis`] says
+/// which index selects a cell's row.
 #[derive(Debug, Clone)]
 pub struct InitStateSource {
-    /// The model time the states sit at (the filter's last observation time),
-    /// from the file header. Becomes each cell's `simulation.t_start`.
+    /// The model time the states sit at (the filter's last observation time for
+    /// a state file; the terminal snapshot of the saved latent paths for a
+    /// fit). Becomes each cell's `simulation.t_start`.
     pub origin_t: f64,
-    /// `counts[particle][local_int_index]`, in the model's integer-compartment
-    /// order.
-    pub counts: Vec<Vec<i64>>,
-    /// SHA-256 of the file's bytes — the identity input (see
+    /// The ensemble, in the order the row axis indexes.
+    pub states: Vec<OriginState>,
+    pub axis: InitStateRowAxis,
+    /// Content digest of the ensemble — the identity input (see
     /// [`runid::inputs::InitStateDigest`]).
-    pub file_digest: runid::ContentHash,
+    pub ensemble_digest: runid::ContentHash,
 }
 
 /// Where parameter vectors come from — run-spec §3.2. Exactly one variant

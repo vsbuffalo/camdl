@@ -5370,11 +5370,20 @@ Run window
                               offset ("last_obs + 8 weeks"). Anchored forms need
                               --fit for the observed times. A scenario declaring a
                               different horizon is an error
-  --init-state FILE           start from a `pfilter --save-final-state` particle
-                              ensemble instead of init { }. The file's header carries
-                              the forecast origin, which becomes t_start; replicate i
-                              restores particle row i, so --replicates must equal the
-                              row count. chain_binomial only; conflicts with --draws
+  --init-state FILE|fit       start from an inferred state at the last observation
+                              time instead of init { }. The origin becomes t_start,
+                              and must coincide with an output-emit time.
+                              chain_binomial only. Two sources:
+                                FILE — a `pfilter --save-final-state` particle
+                                  ensemble at the filter's ONE θ. Its header carries
+                                  the origin; replicate i restores particle row i, so
+                                  --replicates must equal the row count. Conflicts
+                                  with --draws
+                                fit  — the --fit run's paired (θ_i, X_i(T)) posterior:
+                                  draw i restores the terminal row of its OWN saved
+                                  latent path under its OWN θ_i. Requires
+                                  --draws posterior; runs over the subset of draws
+                                  that have a saved path, and reports that count
 
 Ensemble
   --seed N                    single seed (default 1; env CAMDL_SEED)

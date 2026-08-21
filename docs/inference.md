@@ -1621,9 +1621,9 @@ defaulted:
 The origin must coincide with an output-emit time — a time between snapshots is
 an error, never snapped to a neighbour.
 
-Parameter uncertainty is **not** propagated: every replicate runs at the
-filter's θ, so the spread is process noise plus filtering uncertainty in x_T,
-not posterior uncertainty in θ.
+Parameter uncertainty is **not** propagated by this form: every replicate runs
+at the filter's θ, so the spread is process noise plus filtering uncertainty in
+x_T, not posterior uncertainty in θ.
 
 **What that costs: the intervals are too narrow.** Conditioning on a single θ̂
 discards a variance component the forecast genuinely has, so a 90% band from
@@ -1631,6 +1631,55 @@ this workflow will cover the truth less than 90% of the time, and increasingly
 so the further out you forecast (parameter error compounds over the horizon
 while process noise averages). Treat these bands as a lower bound on
 uncertainty, and do not report them as calibrated predictive intervals. Pairing
-each latent state with its own posterior draw is what fixes it, and needs the
-(θ, X) source that `camdl fit` writes as `trajectories.tsv` — not yet accepted
-here, see gh#607.
+each latent state with its own posterior draw is what fixes it — that is
+`--init-state fit`, below.
+
+### Forecasting from the paired (θ, X) posterior
+
+`--init-state <file>` conditions on where the epidemic is but runs at one θ;
+`--draws posterior` propagates parameter uncertainty but starts every draw from
+`init {}` at t = 0, which is a replay rather than a forecast. `--init-state fit`
+is both at once: draw _i_ restores the terminal state of its **own** saved
+latent path and runs forward under its **own** θ_i.
+
+```bash
+camdl simulate model.camdl --fit results/fits/<stem>-<hash>/ \
+    --draws posterior --init-state fit \
+    --to "last_obs + 8 weeks" --scenario control_25
+```
+
+The origin is the last snapshot of each posterior draw's saved latent path,
+which a PGAS stage writes to `<stage>/chain_*/trajectories.tsv`. At the terminal
+observation time the smoothing distribution equals the filtering distribution —
+no future data remains to condition on — so that row is a draw from p(x_T |
+y_{1:T}) carrying its own parameters. Interior origins are deliberately not
+offered: iterating forward from a smoothing distribution is not one of the three
+objects in Särkkä's taxonomy (Särkkä 2013, _Bayesian Filtering and Smoothing_,
+CUP, doi:10.1017/CBO9781139344203, §1.3). This is the published idiom for the
+workflow — Funk, Camacho, Kucharski, Lowe, Eggo & Edmunds (2019), _PLoS Comput
+Biol_ 15(2):e1006785, doi:10.1371/journal.pcbi.1006785, use "the final values of
+estimated state trajectories as initial values for the forecasts".
+
+**Only draws with a saved path can be forecast, and the run says how many.**
+`n_trajectories` and `thin` are independent knobs, so a stage that retains 606
+posterior draws may have saved only 300 latent paths. The run reports the subset
+it used against the full posterior:
+
+```
+simulate: --init-state fit → 300/606 posterior draws have a saved latent path;
+forecasting that paired (θ_i, X_i) subset from t = 196 (the other 306 draws have
+no state to fork)
+  stage 'posterior' (results/fits/…/draws.tsv)
+```
+
+Raise `n_trajectories` on the fit stage if you want the whole posterior
+forecastable. A PGAS fit that saved **no** paths — and every PMMH or
+particle-filter fit, which never writes any — is refused by name rather than
+falling back to `init {}`, which would look like a forecast and be a
+free-forward replay. An ODE fit is refused separately and for a different
+reason: it stores no paths because X is recomputed from θ, and the post-origin
+re-integration seam is not wired (gh#325).
+
+The refusals for a reactive policy, a non-chain-binomial `--backend` and an
+off-grid origin apply here exactly as they do to the file source. `--scenario`
+overlays and anchored `--to` horizons compose with both.

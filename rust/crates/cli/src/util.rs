@@ -2751,12 +2751,14 @@ pub struct SimRun {
     pub integrator: Option<crate::args::types::IntegratorArg>,
 }
 
-/// The forecast origin one cell starts from (gh#641): one particle row of a
-/// `pfilter --save-final-state` file, resolved against the model's compartments.
+/// The forecast origin one cell starts from: one row of a `--init-state`
+/// ensemble, resolved against the model's compartments. The ensemble is either
+/// a `pfilter --save-final-state` particle swarm at one θ (gh#641) or a fit's
+/// paired `(θ_i, X_i(T))` posterior (gh#697).
 ///
 /// ## What this restores, and what it does not
 ///
-/// **Restored:** the integer compartment counts, and the run's start time.
+/// **Restored:** the compartment values, and the run's start time.
 ///
 /// **Reset at the origin by construction:** interval accumulators. The forecast
 /// window begins a fresh accumulation — the resume seam drains the output
@@ -2766,25 +2768,25 @@ pub struct SimRun {
 /// cadence, which a new window cannot inherit.
 ///
 /// **Refused rather than defaulted** (checked before the run, in `run_simulate`,
-/// and again at the seam): a model with real-valued compartments (the filter
-/// saves no reservoir value, so `init {}` would silently supply one while the
-/// counts came from the filter), a model with reactive interventions (the
-/// agenda's observation history, once/cooldown gating, pending-effect heap and
-/// surveillance RNG stream are not reconstructible from counts alone), and any
-/// backend other than chain-binomial (which is the only one with a
-/// start-from-state seam, and the only one the states could have come from).
+/// and again at the seam): a state FILE for a model with real-valued
+/// compartments (the filter saves no reservoir value, so `init {}` would
+/// silently supply one while the counts came from the filter), a model with
+/// reactive interventions (the agenda's observation history, once/cooldown
+/// gating, pending-effect heap and surveillance RNG stream are not
+/// reconstructible from compartment values alone), and any backend other than
+/// chain-binomial (which is the only one with a start-from-state seam, and the
+/// only one the states could have come from).
 #[derive(Clone, Debug)]
 pub struct CellInitState {
     /// The model time the state sits at; becomes `simulation.t_start`.
     pub origin_t: f64,
-    /// Integer compartment counts, in the model's integer-compartment order
-    /// (i.e. indexed like `sim::IntState::counts`).
-    pub counts: Vec<i64>,
-    /// Which particle row this is. Identity, not provenance — two replicates
+    /// The compartment values this cell restores.
+    pub state: crate::sim_job::OriginState,
+    /// Which row of the ensemble this is. Identity, not provenance — two cells
     /// can share a `process_seed` and still restore different rows.
     pub row: u64,
-    /// SHA-256 of the state file's bytes. Identity.
-    pub file_digest: runid::ContentHash,
+    /// Content digest of the whole origin ensemble. Identity.
+    pub ensemble_digest: runid::ContentHash,
 }
 
 /// Apply a CLI integrator-method override (gh#166) to the model in place.
@@ -3329,12 +3331,13 @@ pub fn simulate_compiled(
         if progress.is_some() { Some(&mut tick) } else { None };
 
     // gh#641: the forecast-origin state, in the shape the resume seam takes.
-    // Real compartments are refused by the reader (the filter saves none), so
-    // the injected real state is empty; `RealState::new(0)` is what a model with
-    // no real compartments builds anyway.
+    // A state FILE carries no reals (the filter saves none, and the reader
+    // refuses such a model), so `reals` is empty there — which is exactly what
+    // a model with no real compartments builds anyway. A fit-sourced origin
+    // (gh#697) carries whatever the saved latent path recorded.
     let start_state = run.init_state.as_ref().map(|init| sim::chain_binomial::StartState {
-        int_s: sim::IntState::from_vec(init.counts.clone()),
-        real_s: sim::RealState::new(0),
+        int_s: sim::IntState::from_vec(init.state.counts.clone()),
+        real_s: sim::RealState::from_vec(init.state.reals.clone()),
         // Fresh RNG from this cell's process seed. The seam's RNG-restore path
         // is test-only (it exists to prove splice byte-identity); a forecast
         // re-rolls its forward noise, which is the point of the replicates.

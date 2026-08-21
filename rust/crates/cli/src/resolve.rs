@@ -73,10 +73,10 @@ pub struct TrajectoryCtx<'a> {
     /// (the actual trajectory driver, and the only seed value hashed).
     pub base_seed: u64,
     pub process_seed: u64,
-    /// gh#641: the filtered state this cell was seeded from (`simulate
+    /// gh#641 / gh#697: the inferred state this cell was seeded from (`simulate
     /// --init-state`), or `None` when it built its initial state from the
-    /// model's `init {}`. The file's bytes plus the restored row — see
-    /// [`runid::inputs::InitStateDigest`] for why both are identity.
+    /// model's `init {}`. The origin ensemble's content digest plus the restored
+    /// row — see [`runid::inputs::InitStateDigest`] for why both are identity.
     pub init_state: Option<runid::inputs::InitStateDigest>,
 }
 

@@ -173,7 +173,8 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
                 );
                 let obs_seed = process_seed ^ SEED_MIX_OBS;
                 let sim_run = build_cell_sim_run(
-                    job, scenario, point_overrides, &table_files, process_seed, rep,
+                    job, scenario, point_overrides, &table_files, process_seed,
+                    point_idx, rep,
                 );
                 specs.push(CellSpec {
                     run_idx,
@@ -423,6 +424,7 @@ pub fn build_cell_sim_run(
     point_overrides: &IndexMap<String, f64>,
     table_files: &HashMap<String, String>,
     process_seed: u64,
+    point_idx: usize,
     rep: usize,
 ) -> SimRun {
     // Draw row / sweep point → the draw/sweep tier (below scenario).
@@ -455,16 +457,23 @@ pub fn build_cell_sim_run(
         ),
     };
 
-    // gh#641: replicate `rep` restores particle row `rep`. The row-count guard
-    // in `run_simulate` has already refused a job whose replicate count exceeds
-    // the file's rows, so this index is in range; a defensive `get` keeps a
-    // future caller that skips the guard from panicking mid-grid.
+    // Which grid axis picks this cell's origin state (`InitStateRowAxis`):
+    // a state FILE is one θ's swarm, so replicate `rep` restores row `rep`
+    // (gh#641); a fit's paired ensemble is one state per posterior draw, so
+    // draw `point_idx` restores row `point_idx` — its own state under its own θ
+    // (gh#697). `run_simulate` has already refused a job whose index can run
+    // past the ensemble, so this is in range; a defensive `get` keeps a future
+    // caller that skips those guards from panicking mid-grid.
     let init_state = job.init_state.as_ref().and_then(|src| {
-        src.counts.get(rep).map(|counts| crate::util::CellInitState {
+        let row = match src.axis {
+            crate::sim_job::InitStateRowAxis::Replicate => rep,
+            crate::sim_job::InitStateRowAxis::Draw => point_idx,
+        };
+        src.states.get(row).map(|state| crate::util::CellInitState {
             origin_t: src.origin_t,
-            counts: counts.clone(),
-            row: rep as u64,
-            file_digest: src.file_digest,
+            state: state.clone(),
+            row: row as u64,
+            ensemble_digest: src.ensemble_digest,
         })
     });
 

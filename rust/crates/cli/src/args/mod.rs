@@ -495,18 +495,22 @@ pub struct SimulateArgs {
     #[arg(long, value_name = "SPEC")]
     pub to: Option<String>,
 
-    /// Start the run from a saved filtered state instead of the model's
-    /// `init {}` block (gh#641) — the forecast-from-filtered-state workflow.
-    /// FILE is a `camdl pfilter --save-final-state` TSV: one particle row per
-    /// replicate, drawn from p(x_T | y_{1:T}) at the filter's θ. Its header
-    /// records T, which becomes the run's `t_start`; pair it with
-    /// `--to "last_obs + 8 weeks"` for the forecast horizon. Replicate i
-    /// restores row i, so `--replicates` must equal the row count.
-    /// chain_binomial only, and mutually exclusive with `--draws` (the states
-    /// belong to one θ, so pairing them with unrelated posterior draws would
-    /// be an incoherent (θ, x_T) product).
-    #[arg(long, value_name = "FILE")]
-    pub init_state: Option<PathBuf>,
+    /// Start the run from an inferred state at the last observation time
+    /// instead of the model's `init {}` block — the forecast workflow. The
+    /// origin time becomes the run's `t_start`; pair it with
+    /// `--to "last_obs + 8 weeks"` for the horizon. chain_binomial only.
+    /// Two sources:
+    ///   FILE — a `camdl pfilter --save-final-state` TSV, drawn from
+    ///     p(x_T | y_{1:T}) at the filter's ONE θ (gh#641). Replicate i
+    ///     restores row i, so `--replicates` must equal the row count, and
+    ///     `--draws` is refused (unrelated θ crossed with these states is an
+    ///     incoherent (θ, x_T) product).
+    ///   fit — the paired (θ_i, X_i(T)) posterior of the `--fit` run: draw i
+    ///     restores its OWN terminal latent state under its OWN θ (gh#697).
+    ///     Requires `--draws posterior`; forecasts over the subset of draws
+    ///     that have a saved latent path, and reports that count.
+    #[arg(long, value_name = "FILE|fit")]
+    pub init_state: Option<String>,
 
     /// gh#audit-C6 / S1. See InferenceCore.allow_degenerate_rates.
     /// Forward sim is the most likely user of this flag — if a model

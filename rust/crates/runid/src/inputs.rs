@@ -89,26 +89,75 @@ pub struct InterventionId(pub String);
 pub struct DataDigest(pub ContentHash);
 
 /// The forecast origin state a run was seeded from (`simulate --init-state`,
-/// gh#641), when it did not build its initial state from the model's `init {}`
-/// block.
+/// gh#641 / gh#697), when it did not build its initial state from the model's
+/// `init {}` block.
 ///
 /// Both fields are identity, for different reasons:
 ///
-/// - `file` is the content digest of the state file's **bytes**, never its
-///   path. A re-filtered ensemble under an unchanged model must re-key, or the
-///   store serves yesterday's forecast for today's data.
-/// - `row` is which particle row this cell restored. It is needed *in addition*
-///   to the seed level because two replicates can share a `process_seed`
+/// - `ensemble` is the content digest of the **ensemble of origin states** this
+///   cell drew its row from — content, never a path or a run reference. A
+///   re-filtered / re-fitted ensemble under an unchanged model must re-key, or
+///   the store serves yesterday's forecast for today's data. There are two
+///   producers and both hash content:
+///   - `--init-state FILE` (one θ's particle swarm): SHA-256 of the state
+///     file's bytes.
+///   - `--init-state fit` (the paired `(θ_i, X_i(T))` posterior): the
+///     [`InitStateEnsemble`] digest over the *resolved* ensemble actually used.
+///     Deliberately **not** the fit's `run_id` + stage + selection rule —
+///     keying on provenance means enumerating every knob that changes which
+///     draws are selected, and a missed knob is two different clouds colliding
+///     on one cache entry. Keying on the ensemble's own content cannot miss
+///     one, and two fits that genuinely produce the same states at the same
+///     origin *should* share the entry.
+/// - `row` is which row of that ensemble this cell restored. It is needed *in
+///   addition* to the seed level because two cells can share a `process_seed`
 ///   (`--seeds 7,7`) while starting from different states; without it those two
 ///   cells would collide on one `run_id` and the store would serve one
 ///   trajectory for both (the count-in-the-key rule).
 ///
 /// The origin *time* is not here: it rides in [`SimConfig::t_start`], which the
-/// run already keys on.
+/// run already keys on (and, for the fit source, in the ensemble digest too).
 #[derive(Debug, Clone, PartialEq, Eq, RunInput)]
 pub struct InitStateDigest {
-    pub file: DataDigest,
+    pub ensemble: DataDigest,
     pub row: u64,
+}
+
+/// One restored origin state in a fit-sourced `--init-state` ensemble: the
+/// posterior draw it belongs to, and the compartment values at the origin.
+///
+/// The `(chain, draw)` key rides in the hash alongside the values because it is
+/// what makes the pairing checkable: a cloud that restored the same *states*
+/// against a different assignment of draws is a different run, and must not
+/// share a leaf with the correct one.
+#[derive(Debug, Clone, PartialEq, RunInput)]
+pub struct InitStateRow {
+    pub chain: u64,
+    pub draw: u64,
+    /// Integer compartment counts, in the model's integer-compartment order.
+    pub counts: Vec<i64>,
+    /// Real compartment values, in the model's real-compartment order.
+    pub reals: Vec<FiniteF64>,
+}
+
+/// The resolved paired `(θ_i, X_i(T))` origin ensemble a `--init-state fit` run
+/// forecasts from: the origin time, and every selected draw's restored state in
+/// selection order.
+///
+/// Its [`ContentAddressed::content_hash`] is what
+/// [`InitStateDigest::ensemble`] carries for the fit source. Whole-ensemble +
+/// row (rather than the row alone) mirrors the file source exactly: a change
+/// anywhere in the ensemble — a different fit, a different stage, a different
+/// forkable subset, a different draw cap, a different order — re-keys every
+/// cell. Conservative in the safe direction, and the same rule on both sources.
+///
+/// θ is **not** here: each draw's resolved parameter values are hashed at the
+/// `params` level ([`ResolvedParams`]), so a cell's `run_id` already carries
+/// both halves of its pair.
+#[derive(Debug, Clone, PartialEq, RunInput)]
+pub struct InitStateEnsemble {
+    pub origin_t: FiniteF64,
+    pub rows: Vec<InitStateRow>,
 }
 
 /// The runtime engine version string (e.g. `"0.3.0+abc1234"`), folded into
@@ -196,10 +245,12 @@ pub struct SimConfig {
     /// `--columns` allow-list of output column names, normalized to a set
     /// (order-invariant — emitted order follows the model). Empty = all.
     pub columns: BTreeSet<String>,
-    /// gh#641: the filtered state this run started from, when it did not start
-    /// from the model's `init {}`. `None` = the model's own initial conditions
-    /// (every run before `--init-state` existed). See [`InitStateDigest`] for
-    /// why both the file digest and the row index are identity.
+    /// gh#641 / gh#697: the inferred state this run started from, when it did
+    /// not start from the model's `init {}`. `None` = the model's own initial
+    /// conditions (every run before `--init-state` existed). See
+    /// [`InitStateDigest`] for why both the ensemble digest and the row index
+    /// are identity, and why the fit source keys on ensemble *content* rather
+    /// than on the fit it came from.
     pub init_state: Option<InitStateDigest>,
 }
 

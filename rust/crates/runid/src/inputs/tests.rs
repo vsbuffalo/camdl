@@ -360,10 +360,10 @@ fn init_state_is_keyed_into_config() {
         columns: BTreeSet::new(),
         init_state: None,
     };
-    let seeded = |file: u8, row: u64| {
+    let seeded = |ensemble: u8, row: u64| {
         let mut c = base.clone();
         c.init_state = Some(InitStateDigest {
-            file: DataDigest(ContentHash::from_bytes([file; 32])),
+            ensemble: DataDigest(ContentHash::from_bytes([ensemble; 32])),
             row,
         });
         c
@@ -373,17 +373,105 @@ fn init_state_is_keyed_into_config() {
     assert_ne!(base.content_hash(), seeded(1, 0).content_hash(),
         "--init-state must re-key the config level");
 
-    // TWO DIFFERENT STATE FILES → DISTINCT IDENTITY. The headline requirement.
+    // TWO DIFFERENT ORIGIN ENSEMBLES → DISTINCT IDENTITY. The headline
+    // requirement, and the same one for both sources: a state file's bytes and
+    // a fit's resolved (θ, X) join both arrive here as a content digest.
     assert_ne!(seeded(1, 0).content_hash(), seeded(2, 0).content_hash(),
-        "a different state file must produce a distinct config-level hash");
+        "a different origin ensemble must produce a distinct config-level hash");
 
-    // Two rows of the SAME file → distinct identity. Needed on top of the seed
-    // level because two replicates can share a process_seed (`--seeds 7,7`)
+    // Two rows of the SAME ensemble → distinct identity. Needed on top of the
+    // seed level because two cells can share a process_seed (`--seeds 7,7`)
     // while restoring different states; without the row in the key those cells
     // collide and the store serves one trajectory for both.
     assert_ne!(seeded(1, 0).content_hash(), seeded(1, 1).content_hash(),
         "a different restored row must produce a distinct config-level hash");
 
-    // Same file, same row → same identity (the cache still works).
+    // Same ensemble, same row → same identity (the cache still works).
     assert_eq!(seeded(1, 3).content_hash(), seeded(1, 3).content_hash());
+}
+
+/// gh#697: the fit-sourced origin ensemble is keyed by its own CONTENT — the
+/// origin time, and every selected draw's `(chain, draw)` key plus restored
+/// values, in selection order.
+///
+/// Content rather than provenance (the fit's `run_id` + stage + selection
+/// rule) because provenance keying means enumerating every knob that changes
+/// which draws are selected: miss one and two different clouds collide on one
+/// cache entry, which is the silent-wrong the store exists to prevent. Each
+/// axis below is one way the restored states can change without the model, θ,
+/// seed or horizon changing.
+#[test]
+fn a_fit_sourced_origin_ensemble_is_keyed_by_its_content() {
+    let row = |chain: u64, draw: u64, s: i64| InitStateRow {
+        chain,
+        draw,
+        counts: vec![s, 10, 0],
+        reals: vec![FiniteF64::new(0.5).unwrap()],
+    };
+    let base = InitStateEnsemble {
+        origin_t: FiniteF64::new(56.0).unwrap(),
+        rows: vec![row(0, 20, 9000), row(1, 25, 8800)],
+    };
+
+    // Identical content → identical digest: re-running the same command against
+    // the same fit must HIT the cache, not miss it.
+    let same = InitStateEnsemble {
+        origin_t: FiniteF64::new(56.0).unwrap(),
+        rows: vec![row(0, 20, 9000), row(1, 25, 8800)],
+    };
+    assert_eq!(base.content_hash(), same.content_hash(),
+        "an unchanged paired ensemble must re-key to itself");
+
+    // A changed restored VALUE — a re-fit under an unchanged model.
+    let bumped = InitStateEnsemble {
+        origin_t: base.origin_t,
+        rows: vec![row(0, 20, 9001), row(1, 25, 8800)],
+    };
+    assert_ne!(base.content_hash(), bumped.content_hash(),
+        "a changed origin state must re-key");
+
+    // A changed ORDER — the same states assigned to different draws. The cloud
+    // looks identical and every trajectory differs; without this, a shuffled
+    // pairing would be served the correct pairing's cached leaves.
+    let reordered = InitStateEnsemble {
+        origin_t: base.origin_t,
+        rows: vec![row(1, 25, 8800), row(0, 20, 9000)],
+    };
+    assert_ne!(base.content_hash(), reordered.content_hash(),
+        "a reordered ensemble is a different (θ, X) assignment and must re-key");
+
+    // A changed (chain, draw) KEY with identical values — the same states
+    // attributed to different posterior draws.
+    let rekeyed = InitStateEnsemble {
+        origin_t: base.origin_t,
+        rows: vec![row(0, 21, 9000), row(1, 25, 8800)],
+    };
+    assert_ne!(base.content_hash(), rekeyed.content_hash(),
+        "the same state under a different draw key must re-key");
+
+    // A changed SUBSET — one more forkable draw is a different cloud.
+    let bigger = InitStateEnsemble {
+        origin_t: base.origin_t,
+        rows: vec![row(0, 20, 9000), row(1, 25, 8800), row(1, 30, 8700)],
+    };
+    assert_ne!(base.content_hash(), bigger.content_hash(),
+        "a different forkable subset must re-key");
+
+    // A changed ORIGIN TIME with identical states — the same counts read at a
+    // different instant is a different forecast.
+    let later = InitStateEnsemble {
+        origin_t: FiniteF64::new(63.0).unwrap(),
+        rows: base.rows.clone(),
+    };
+    assert_ne!(base.content_hash(), later.content_hash(),
+        "a different forecast origin must re-key");
+
+    // Domain separation from the file source: a `--init-state FILE` digest is
+    // SHA-256 over the file's raw bytes, this is the structural hash of a
+    // distinct named type, so the two cannot alias without a SHA-256 collision.
+    assert_ne!(
+        base.content_hash(),
+        ContentHash::digest_bytes(b"# camdl-final-state v1\tt=56\n"),
+        "the two origin-ensemble producers must not share a digest by construction"
+    );
 }

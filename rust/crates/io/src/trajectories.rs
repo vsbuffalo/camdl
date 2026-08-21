@@ -474,6 +474,116 @@ pub fn snapshot_times(path: &Path, chain: usize, draw: usize) -> Result<Vec<f64>
     Ok(times)
 }
 
+/// The last saved snapshot of one posterior draw's latent path: where the path
+/// ends, and the state it ends at.
+///
+/// At the terminal observation time the smoothing distribution equals the
+/// filtering distribution — no future data remains to condition on — so this
+/// state is a draw from `p(x_T | y_{1:T})` paired with its own θ. That is the
+/// forecast origin `simulate --init-state fit` runs forward from (gh#697).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalState {
+    pub chain: usize,
+    pub draw: usize,
+    /// The model time of the path's last saved snapshot.
+    pub t: f64,
+    pub int_state: IntState,
+    pub real_state: RealState,
+}
+
+/// Every saved path's TERMINAL snapshot, in one pass over the file.
+///
+/// [`read_state_at`] answers "the state of one draw at time T"; this answers
+/// "the terminal state of every draw", which a forecast needs for the whole
+/// ensemble at once. It is a separate function rather than a loop over
+/// `read_state_at` because that loop re-reads and re-scans the whole file per
+/// draw — quadratic on a national-scale run, where the file is hundreds of
+/// megabytes and the forkable subset is in the hundreds.
+///
+/// The per-draw terminal time is returned rather than assumed equal across
+/// draws: whether one saved cadence covers every draw is the caller's check to
+/// make explicitly, not this reader's to paper over.
+///
+/// Returns one entry per `(chain, draw)` present, sorted by that key. An empty
+/// file (header only) yields an empty vector — "no saved paths" is a state the
+/// caller reports, not an error here.
+pub fn read_terminal_states(
+    path: &Path,
+    columns: &TrajColumnSpec,
+) -> Result<Vec<TerminalState>, String> {
+    let txt = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines
+        .next()
+        .ok_or_else(|| format!("empty trajectories file: {}", path.display()))?
+        .split('\t')
+        .collect();
+    let col = |name: &str| -> Result<usize, String> {
+        header
+            .iter()
+            .position(|c| *c == name)
+            .ok_or_else(|| format!("trajectories file {} has no `{name}` column", path.display()))
+    };
+    let (ci, di, ti) = (col("chain")?, col("draw")?, col("time")?);
+    // Compartments resolved BY NAME in model order — the same discipline
+    // `read_state_at` uses, so the (integer, real) split cannot drift from the
+    // writer's layout and the `flow_*` / `inc_*` / `date` columns are skipped
+    // without positional assumptions.
+    let int_idx: Vec<usize> = columns.int_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+    let real_idx: Vec<usize> =
+        columns.real_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+
+    let mut latest: std::collections::BTreeMap<(usize, usize), TerminalState> =
+        std::collections::BTreeMap::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        let bad = |what: &str| format!("trajectories file {}: bad {what} field", path.display());
+        let chain: usize = f.get(ci).and_then(|s| s.parse().ok()).ok_or_else(|| bad("chain"))?;
+        let draw: usize = f.get(di).and_then(|s| s.parse().ok()).ok_or_else(|| bad("draw"))?;
+        let t: f64 = f.get(ti).and_then(|s| s.parse().ok()).ok_or_else(|| bad("time"))?;
+        if latest.get(&(chain, draw)).is_some_and(|prev| prev.t >= t) {
+            continue;
+        }
+        let counts = int_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<i64>().ok()).ok_or_else(|| {
+                    format!(
+                        "trajectories file {}: bad integer compartment at column {i}",
+                        path.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<i64>, _>>()?;
+        let values = real_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<f64>().ok()).ok_or_else(|| {
+                    format!(
+                        "trajectories file {}: bad real compartment at column {i}",
+                        path.display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<f64>, _>>()?;
+        latest.insert(
+            (chain, draw),
+            TerminalState {
+                chain,
+                draw,
+                t,
+                int_state: IntState::from_vec(counts),
+                real_state: RealState::from_vec(values),
+            },
+        );
+    }
+    Ok(latest.into_values().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +708,53 @@ mod tests {
         // An unknown (chain, draw) → the same not-found error.
         let err2 = read_state_at(&path, &cols(), 9, 9, 7.0).unwrap_err();
         assert!(err2.contains("no saved snapshot"), "got: {err2}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// gh#697: the terminal snapshot of EVERY saved path, in one pass — each
+    /// draw's own last row, and each draw's own terminal time.
+    #[test]
+    fn read_terminal_states_returns_each_draws_own_last_row() {
+        // Two draws with DIFFERENT last times: draw 20 ends at 14, draw 21 at 7.
+        // A reader that assumed one shared cadence — or that took the file's
+        // last row for everyone — would return the same state twice.
+        let mut t0 = Trajectory::new();
+        t0.push(snap(0.0, vec![99, 1, 0], vec![0, 0]));
+        t0.push(snap(7.0, vec![80, 15, 5], vec![19, 5]));
+        t0.push(snap(14.0, vec![50, 30, 20], vec![30, 15]));
+        let mut t1 = Trajectory::new();
+        t1.push(snap(0.0, vec![99, 1, 0], vec![0, 0]));
+        t1.push(snap(7.0, vec![70, 20, 10], vec![29, 10]));
+        let draws = vec![
+            PosteriorDraw {
+                chain: 0,
+                draw: 20,
+                path: t0,
+                incidence: vec![vec![0.0], vec![19.0], vec![30.0]],
+            },
+            PosteriorDraw {
+                chain: 1,
+                draw: 21,
+                path: t1,
+                incidence: vec![vec![0.0], vec![29.0]],
+            },
+        ];
+        let tmp = std::env::temp_dir().join(format!("camdl_io_traj_term_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("trajectories.tsv");
+        write_trajectories_tsv(&path, &draws, &cols(), None, "h", "pgas", Granularity::Substep)
+            .unwrap();
+
+        let got = read_terminal_states(&path, &cols()).unwrap();
+        assert_eq!(got.len(), 2, "one entry per (chain, draw)");
+        assert_eq!((got[0].chain, got[0].draw), (0, 20));
+        assert_eq!(got[0].t, 14.0);
+        assert_eq!(got[0].int_state.counts, vec![50, 30, 20]);
+        assert_eq!((got[1].chain, got[1].draw), (1, 21));
+        assert_eq!(got[1].t, 7.0, "a draw's own terminal time, not the file's max");
+        assert_eq!(got[1].int_state.counts, vec![70, 20, 10]);
+        assert!(got[0].real_state.values.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

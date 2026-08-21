@@ -295,11 +295,11 @@ fn scenario_delta_re_keys_only_the_scenario_level() {
 // sensitivity + inertness — so a future change that leaks a presentation field
 // into identity, or drops a semantic one, fails here, not silently in the field.
 
-/// A stand-in `--init-state` digest: `file` byte-filled from `f`, restoring row
-/// `row`. gh#641.
+/// A stand-in `--init-state` digest: `ensemble` byte-filled from `f`, restoring
+/// row `row`. gh#641 / gh#697.
 fn init_state(f: u8, row: u64) -> runid::inputs::InitStateDigest {
     runid::inputs::InitStateDigest {
-        file: runid::inputs::DataDigest(ContentHash::from_bytes([f; 32])),
+        ensemble: runid::inputs::DataDigest(ContentHash::from_bytes([f; 32])),
         row,
     }
 }

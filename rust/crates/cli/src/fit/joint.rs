@@ -117,6 +117,155 @@ pub fn resolve_joint(fit_ref: &str, stage: Option<&str>) -> Result<JointEnsemble
     Ok(classify_joint(keyed, &traj_keys, is_ode))
 }
 
+// ── The terminal-origin specialization (gh#697) ─────────────────────────────
+
+/// One paired posterior draw at the forecast origin: its parameter vector θ_i
+/// and the terminal state X_i(T) of its own saved latent path.
+///
+/// θ and X live in **one struct**, not two parallel vectors, because the
+/// pairing is the whole point: `--init-state fit` exists so that draw i runs at
+/// its own parameters from its own inferred state, and a shuffled pairing still
+/// produces a plausible-looking cloud. Keeping them together means a shuffle
+/// has to be written deliberately rather than introduced by an index slip.
+#[derive(Debug, Clone)]
+pub struct ForecastDraw {
+    pub params: HashMap<String, f64>,
+    /// The `(chain, draw)` key this pair came from — provenance for the error
+    /// messages, and part of what keys the run (see `runid::inputs::
+    /// InitStateRow`).
+    pub chain: usize,
+    pub draw: usize,
+    /// Integer compartment counts at the origin, in model order.
+    pub counts: Vec<i64>,
+    /// Real compartment values at the origin, in model order.
+    pub reals: Vec<f64>,
+}
+
+/// The paired `(θ_i, X_i(T))` ensemble a terminal-origin forecast runs from,
+/// with the honest denominator alongside it.
+pub struct ForecastEnsemble {
+    /// The model time every path ends at — the forecast origin. Verified equal
+    /// across draws by [`resolve_forecast_ensemble`], never assumed. `NaN` when
+    /// `draws` is empty (there is no origin), which the caller never reads: an
+    /// empty ensemble is refused first, with `n_total` in the message.
+    pub origin_t: f64,
+    /// The forkable draws, in `draws.tsv` order.
+    pub draws: Vec<ForecastDraw>,
+    /// All posterior draws (the parameter-posterior size) — the denominator the
+    /// forkable subset must be reported against.
+    pub n_total: usize,
+    /// Provenance for the run's report: which stage's cloud this is, and the
+    /// `draws.tsv` it was read from. The unpaired `--draws posterior` path
+    /// prints the same two, so a user can tell the clouds apart in a log.
+    pub stage: String,
+    pub draws_path: std::path::PathBuf,
+}
+
+/// Resolve a fit's terminal-origin paired ensemble: every posterior draw that
+/// has a saved latent path, joined to the last snapshot of that path.
+///
+/// At the terminal observation time the smoothing distribution equals the
+/// filtering distribution (no future data remains to condition on), so the last
+/// row of each stored path is a draw from `p(x_T | y_{1:T})` carrying its own θ
+/// — the prediction distribution's origin in Särkkä's taxonomy. Interior
+/// origins are deliberately out of scope (gh#641): iterating forward from a
+/// *smoothing* draw has no cell in that taxonomy.
+///
+/// Errors, never guesses, when: the fit ran on a deterministic backend (no
+/// stored paths — ODE forking is the separate gh#325 follow-up); or the saved
+/// paths do not all end at the same time (one shared origin is what makes the
+/// cloud a single forecast, so a disagreement is named rather than averaged).
+/// A fit with *no* saved paths returns an empty `draws` with the real
+/// `n_total`, so the caller can refuse with both numbers in hand.
+pub fn resolve_forecast_ensemble(
+    fit_ref: &str,
+    stage: Option<&str>,
+    columns: &io::trajectories::TrajColumnSpec,
+) -> Result<ForecastEnsemble, String> {
+    let pref = crate::posterior_draws::resolve_posterior_draws(fit_ref, stage)?;
+    if pref.backend == Some(InferenceBackend::Ode) {
+        return Err(format!(
+            "--init-state fit: this fit ran on the ode backend, which stores no \
+             latent paths — X is recomputed from θ, and the re-integration seam a \
+             forecast would need is not wired (gh#325).\n  \
+             Fix: forecast from a chain_binomial (PGAS) fit, or run the ODE forward \
+             from the model's own t_start with --draws posterior."
+        ));
+    }
+    let keyed = crate::load_draws_tsv_keyed(&pref.draws_path.to_string_lossy())?;
+    let stage_dir = pref
+        .draws_path
+        .parent()
+        .ok_or_else(|| format!("draws path has no parent: {}", pref.draws_path.display()))?;
+
+    // One pass per chain file: every saved path's terminal snapshot, keyed by
+    // (chain, draw). This is also the "has a saved path" predicate the
+    // classifier below uses, so the forkable count and the states it resolves
+    // can never disagree.
+    let mut terminal: HashMap<(usize, usize), io::trajectories::TerminalState> = HashMap::new();
+    let mut chain_files: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(stage_dir) {
+        for e in entries.flatten() {
+            let traj = e.path().join("trajectories.tsv");
+            if traj.is_file() {
+                chain_files.push(traj);
+            }
+        }
+    }
+    chain_files.sort();
+    for traj in &chain_files {
+        for ts in io::trajectories::read_terminal_states(traj, columns)? {
+            terminal.insert((ts.chain, ts.draw), ts);
+        }
+    }
+
+    let traj_keys: BTreeSet<(usize, usize)> = terminal.keys().copied().collect();
+    let joint = classify_joint(keyed, &traj_keys, false);
+    let n_total = joint.n_total;
+
+    let mut draws: Vec<ForecastDraw> = Vec::with_capacity(joint.n_forkable);
+    let mut origin: Option<(f64, usize, usize)> = None;
+    for d in joint.draws {
+        let LatentPath::Sampled { chain, draw } = d.latent else {
+            continue;
+        };
+        let ts = terminal
+            .get(&(chain, draw))
+            .expect("classified Sampled from the terminal map's own keys");
+        match origin {
+            None => origin = Some((ts.t, chain, draw)),
+            Some((t0, c0, d0)) => {
+                if (ts.t - t0).abs() > io::trajectories::SNAPSHOT_TIME_TOL {
+                    return Err(format!(
+                        "--init-state fit: the saved latent paths do not share one \
+                         terminal time — (chain {c0}, draw {d0}) ends at t = {t0} but \
+                         (chain {chain}, draw {draw}) ends at t = {}. A forecast cloud \
+                         has ONE origin; forking these together would band states taken \
+                         at different instants.\n  \
+                         Fix: re-fit so every chain runs the same observation window.",
+                        ts.t
+                    ));
+                }
+            }
+        }
+        draws.push(ForecastDraw {
+            params: d.params,
+            chain,
+            draw,
+            counts: ts.int_state.counts.clone(),
+            reals: ts.real_state.values.clone(),
+        });
+    }
+
+    Ok(ForecastEnsemble {
+        origin_t: origin.map(|(t, _, _)| t).unwrap_or(f64::NAN),
+        draws,
+        n_total,
+        stage: pref.stage.clone(),
+        draws_path: pref.draws_path.clone(),
+    })
+}
+
 /// Collect every `(chain, draw)` key from the stage's `chain_*/trajectories.tsv`
 /// files. Skips the leading `# camdl-trajectories …` comment line and dedups
 /// the per-snapshot rows to one key per saved draw.
