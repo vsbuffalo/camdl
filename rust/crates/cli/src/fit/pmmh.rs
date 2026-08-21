@@ -6,7 +6,7 @@
 
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
-use crate::fit::runner::{self, FitRunConfig};
+use crate::fit::runner::{self, FitRunConfig, StageConvergence};
 use crate::cas::iso8601_utc;
 use rayon::prelude::*;
 use sim::inference::{
@@ -901,19 +901,9 @@ pub fn run_stage(
     }
 
     if n_chains > 1 {
-        eprintln!("\nRhat:");
-        for spec in &config.estimated_params {
-            if let Some(&rhat) = diagnostics.rhat.get(&spec.name) {
-                let status = if rhat < 1.1 { "\x1b[32m✓\x1b[0m" } else if rhat < 1.5 { "\x1b[33m~\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
-                let ess = diagnostics.ess.get(&spec.name).copied().unwrap_or(0.0);
-                eprintln!("  {:12} Rhat={:.3} {} ESS={:.0}", spec.name, rhat, status, ess);
-                if rhat > 1.1 {
-                    collector.push(DiagnosticKind::RhatHigh {
-                        param: spec.name.clone(), rhat, threshold: 1.1,
-                    });
-                }
-            }
-        }
+        // RHAT_REPORT_THRESHOLD is unchanged from the value this stage has
+        // always applied; only the STATISTIC it is applied to changed (gh#84).
+        eprint!("{}", diagnostics.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
     }
 
     // gh#110. All chains skipped via BadInit — no MAP to report.
@@ -1238,36 +1228,16 @@ fn load_scout_proposal_sd(dir: &str, if2_params: &[EstimatedParam]) -> Result<Ve
     Ok(sds)
 }
 
-struct Diagnostics {
-    rhat: HashMap<String, f64>,
-    ess: HashMap<String, f64>,
-    ess_per_chain: HashMap<String, Vec<f64>>,
-}
-
 fn compute_diagnostics(
     results: &[(usize, PMMHResult)],
     estimated_params: &[EstimatedParam],
-) -> Diagnostics {
-    let mut rhat_map = HashMap::new();
-    let mut ess_map = HashMap::new();
-    let mut ess_per_chain_map = HashMap::new();
-
-    for spec in estimated_params {
+) -> StageConvergence {
+    StageConvergence::compute(estimated_params.iter().map(|spec| {
         let chains: Vec<Vec<f64>> = results.iter()
             .map(|(_, r)| r.steps.iter().map(|s| s.params[spec.index]).collect())
             .collect();
-
-        let d = super::runner::compute_rhat_ess(&chains);
-        if d.rhat.is_finite() {
-            rhat_map.insert(spec.name.clone(), d.rhat);
-        }
-        ess_map.insert(spec.name.clone(), d.ess_total);
-        if !d.ess_per_chain.is_empty() {
-            ess_per_chain_map.insert(spec.name.clone(), d.ess_per_chain);
-        }
-    }
-
-    Diagnostics { rhat: rhat_map, ess: ess_map, ess_per_chain: ess_per_chain_map }
+        (spec.name.clone(), chains)
+    }))
 }
 
 // write_chain_traces removed — streaming callback now handles trace output
@@ -1278,7 +1248,7 @@ fn write_summary(
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
     thin: usize,
-    diagnostics: &Diagnostics,
+    diagnostics: &StageConvergence,
     algo: crate::run_meta::FitAlgorithm,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<f64> = results.iter().map(|(_, r)| r.acceptance_rate).collect();
@@ -1296,9 +1266,11 @@ fn write_summary(
         "n_chains": results.len(),
         "steps_per_chain": results.first().map(|(_, r)| r.n_steps).unwrap_or(0),
         "acceptance_rate": acceptance_rates,
-        "rhat": diagnostics.rhat,
-        "ess": diagnostics.ess,
-        "ess_per_chain": diagnostics.ess_per_chain,
+        "rhat": diagnostics.rhat(),
+        "rhat_classic": diagnostics.rhat_classic(),
+        "ess": diagnostics.ess_bulk(),
+        "ess_tail": diagnostics.ess_tail(),
+        "ess_per_chain": diagnostics.ess_per_chain(),
         "map_loglik": map_result.map_loglik,
         "map_chain": map_chain + 1,
         "map_params": map_params,

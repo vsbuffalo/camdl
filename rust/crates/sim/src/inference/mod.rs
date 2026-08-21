@@ -32,6 +32,7 @@ pub mod pgas_grad;
 pub mod nuts;
 pub mod linalg;
 pub mod diagnostic;
+pub mod convergence;  // gh#84 — Vehtari et al. 2021 rank-normalized R̂ / ESS
 pub mod prequential;
 pub mod ode_loglik;
 pub mod ode_grad;

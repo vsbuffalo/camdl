@@ -168,6 +168,31 @@ chains are real posterior draws. `camdl fit summary` reports e.g.
 off R̂, NUTS divergences, and trajectory renewal — never Â.** Importing R̂'s
 "above 1.01 keep sampling" reflex onto Â is the wrong mental model.
 
+### Which R̂, and which ESS
+
+The `rhat` camdl reports for a posterior is the rank-normalized split-R̂ of
+Vehtari et al. (2021), taken as the larger of the rank-normalized split
+statistic and its folded counterpart. Splitting each chain in half catches a
+chain that drifts across its own run; folding (`|x − median(x)|`) catches chains
+that agree on location and disagree on spread. Both are invisible to the classic
+Gelman & Rubin (1992) statistic, which compares chain _means_ only — and which
+each `*_summary.json` still carries as `rhat_classic` so an old fit and a new
+one stay comparable.
+
+`ESS` is the rank-normalized **bulk** effective sample size, with the **tail**
+ESS (the smaller of the 5% and 95% quantile-indicator ESS) beside it. Neither is
+suppressed when chains disagree: both use the between-chain variance rather than
+summing per-chain estimates, so they stay meaningful — and small — exactly when
+a fit has not mixed. Report ESS/N with the ESS: bulk-ESS 11 out of 11,200 draws
+means the estimator summed autocorrelations out to nearly the whole run and is
+reporting mostly about its own truncation point.
+
+> The healthy band below (`< 1.05`) was calibrated against the classic
+> statistic. Vehtari et al. recommend `< 1.01` for the rank-normalized one, and
+> `ESS > 400` before R̂ is trustworthy at all. Which band camdl certifies against
+> is an open decision — see gh#84. The estimator changed; the published band has
+> not.
+
 ### Diagnostics reference
 
 | Stage            | Diagnostic           | Healthy         | Warning           | Action                                         |
@@ -178,7 +203,7 @@ off R̂, NUTS divergences, and trajectory renewal — never Â.** Importing R̂'
 | IF2 (MLE)        | Â                    | < 1.05          | 1.1–1.5           | more iterations                                |
 | IF2 (MLE)        | Â                    | —               | > 1.5 + LL spread | multimodal surface, more chains                |
 | IF2 (MLE)        | logit position \|z\| | < 2             | > 3               | widen bounds or change transform               |
-| PGAS (posterior) | R̂                    | < 1.05          | > 1.1             | more sweeps; check multimodality with `survey` |
+| PGAS (posterior) | R̂ (rank-normalized)  | < 1.05          | > 1.1             | more sweeps; check multimodality with `survey` |
 | PGAS (posterior) | trajectory renewal   | > 30%           | < 10%             | more CSMC particles or tempering               |
 | PGAS (posterior) | NUTS divergences     | 0               | any               | reduce step size, reparameterize               |
 | PGAS (posterior) | NUTS max tree depth  | < 20% of sweeps | > 50%             | increase `max_treedepth`                       |
