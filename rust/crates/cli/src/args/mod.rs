@@ -2727,6 +2727,20 @@ pub struct CompareArgs {
     /// is a hard error.
     #[arg(long, value_name = "[@FIT:]IDS")]
     pub exclude_chains: Vec<String>,
+
+    /// Write the per-observation Δelpd vector to PATH as a TSV (gh#706).
+    ///
+    /// `Δelpd = 12 nats` says a model won; this says WHERE it won — on three
+    /// weeks around an intervention, on one district, on a single reporting
+    /// batch. One row per candidate × scored step, joint and per stream, with
+    /// the candidate's log score, the baseline's, and their difference. The
+    /// quantity is already computed to form `se(Δelpd)`; this stops discarding
+    /// it. The natural consumer is a plot faceted by stream.
+    ///
+    /// The per-step PIT is deliberately NOT published here until gh#629 (tie
+    /// bias in the PIT estimator) is fixed.
+    #[arg(long, value_name = "PATH")]
+    pub pointwise: Option<PathBuf>,
 }
 
 // ─── mre (minimal-reproducible-example bundles) ──────────────────────────────
