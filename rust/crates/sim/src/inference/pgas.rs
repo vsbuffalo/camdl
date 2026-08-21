@@ -300,6 +300,64 @@ pub struct IVPMapping {
     pub compartment_idx: usize,
 }
 
+/// Number of equal-width time bins `CSMCDiagnostics::renewal_by_bin` resolves
+/// renewal into.
+///
+/// Ten, so that the one number worth quoting on its own — renewal over the
+/// early window, where path degeneracy bites first — IS bin 0. It needs no
+/// separate accumulator and therefore cannot disagree with the profile.
+///
+/// Fixed, not proportional to the series length, so the profile is comparable
+/// across models and across particle counts: bin `b` is always the fraction of
+/// the series from `b/10` to `(b+1)/10`, whatever `n_substeps` is.
+pub const RENEWAL_BINS: usize = 10;
+
+/// Accumulator for renewal resolved in time: renewed / total substeps per bin.
+///
+/// Fixed-size arrays, so recording a substep is a bounds-checked increment with
+/// no allocation — it rides along in the traceback loop, which already walks
+/// every substep.
+#[derive(Clone, Debug)]
+pub struct RenewalBins {
+    n_substeps: usize,
+    renewed: [usize; RENEWAL_BINS],
+    total: [usize; RENEWAL_BINS],
+}
+
+impl RenewalBins {
+    pub fn new(n_substeps: usize) -> Self {
+        RenewalBins { n_substeps, renewed: [0; RENEWAL_BINS], total: [0; RENEWAL_BINS] }
+    }
+
+    /// Record the traceback's decision at substep `s`: `renewed` iff that
+    /// substep was taken from a non-reference particle. Order-independent —
+    /// the traceback walks backwards.
+    #[inline]
+    pub fn record(&mut self, s: usize, renewed: bool) {
+        debug_assert!(s < self.n_substeps, "substep {s} outside the series of {}", self.n_substeps);
+        let b = (s * RENEWAL_BINS / self.n_substeps).min(RENEWAL_BINS - 1);
+        self.total[b] += 1;
+        if renewed {
+            self.renewed[b] += 1;
+        }
+    }
+
+    /// Per-bin renewal fraction. A bin holding no substep reads `NaN`, not
+    /// `0.0` — the convention [`CSMCDiagnostics::as_accept_rate`] already uses,
+    /// and for the same reason: "no substep fell here" and "no substep here was
+    /// renewed" are different diagnoses, and collapsing them invents a
+    /// degeneracy that was never observed.
+    pub fn finish(&self) -> [f64; RENEWAL_BINS] {
+        let mut out = [f64::NAN; RENEWAL_BINS];
+        for ((slot, &renewed), &total) in out.iter_mut().zip(&self.renewed).zip(&self.total) {
+            if total > 0 {
+                *slot = renewed as f64 / total as f64;
+            }
+        }
+        out
+    }
+}
+
 /// Diagnostics from one CSMC-AS sweep.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CSMCDiagnostics {
@@ -307,6 +365,27 @@ pub struct CSMCDiagnostics {
     /// Near 0% = path degeneracy (reference never replaced, CSMC broken).
     /// Near 50%+ = healthy trajectory renewal.
     pub trajectory_renewal: f64,
+    /// The same renewal, resolved in time: bin `b` is the fraction of the
+    /// substeps in the `b`-th tenth of the series that the traceback took from
+    /// a non-reference particle. `NaN` for a bin holding no substep.
+    ///
+    /// This is the diagnostic the particle-Gibbs literature recommends in place
+    /// of a rule for choosing the particle count `N`, of which there is none:
+    /// Chopin & Singh (2015, *Bernoulli* 21:1855-1883) prove uniform ergodicity
+    /// for particle Gibbs existentially, with no rate in `N`, and Lindsten,
+    /// Jordan & Schön (2014, *JMLR* 15:2145-2184) call informative rates in `N`
+    /// open. Both recommend instead plotting the update rate of the state xₜ
+    /// against t — LJS Figure 1 (PG vs PGAS, N ∈ {5, 20, 100, 1000}, T = 400).
+    ///
+    /// Averaged over sweeps, this vector IS that plot. The shape is what the
+    /// aggregate throws away: under path degeneracy the update rate is ≈0 early
+    /// and rises to 1 near the end of the series, because every lineage has
+    /// coalesced onto the reference by the time the traceback reaches the early
+    /// states — and `trajectory_renewal` scores such a sweep identically to one
+    /// renewed uniformly in t. Early-time degeneracy is the failure ancestor
+    /// sampling exists to fix, and the early states are where the parameters
+    /// governing initial conditions and early dynamics get their information.
+    pub renewal_by_bin: [f64; RENEWAL_BINS],
     /// Number of substeps where all ancestor weights were -inf.
     pub n_degenerate: usize,
     /// Total substeps.
@@ -2306,8 +2385,14 @@ pub fn csmc_as(
     let mut trajectory_substeps = Vec::with_capacity(n_substeps);
     let mut particle = k;
     let mut n_from_ref = 0usize;
+    // gh#688: the same decision, kept resolved in time. Counters only — no RNG,
+    // no effect on the path — and the arrays are stack-allocated, so the loop
+    // gains one integer divide and one increment per substep.
+    let mut renewal_bins = RenewalBins::new(n_substeps);
     for s in (0..n_substeps).rev() {
-        if particle == j_ref { n_from_ref += 1; }
+        let renewed = particle != j_ref;
+        if !renewed { n_from_ref += 1; }
+        renewal_bins.record(s, renewed);
         trajectory_substeps.push(SubstepRecord {
             counts_before: history_counts_before[s][particle].clone(),
             counts_after: history_counts_after[s][particle].clone(),
@@ -2355,6 +2440,7 @@ pub fn csmc_as(
 
     let diag = CSMCDiagnostics {
         trajectory_renewal,
+        renewal_by_bin: renewal_bins.finish(),
         n_degenerate,
         n_substeps,
         n_as_proposed,
@@ -3564,7 +3650,8 @@ pub fn run_pgas(
             // Multiple CSMC sweeps per NUTS step improve trajectory convergence
             // on long time series where ancestor sampling is the bottleneck.
             let mut csmc_diag = CSMCDiagnostics {
-                trajectory_renewal: 0.0, n_degenerate: 0, n_substeps: 0,
+                trajectory_renewal: 0.0, renewal_by_bin: [f64::NAN; RENEWAL_BINS],
+                n_degenerate: 0, n_substeps: 0,
                 n_as_proposed: 0, n_as_accepted: 0, n_as_refused_inadmissible: 0,
             };
             for csmc_rep in 0..config.csmc_sweeps_per_nuts {

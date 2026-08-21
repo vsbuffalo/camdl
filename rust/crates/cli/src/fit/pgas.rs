@@ -12,7 +12,7 @@ use sim::inference::{
     if2::EstimatedParam,
     pmmh::Prior,
     prior::Density,
-    pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory},
+    pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory, RENEWAL_BINS},
     diagnostic::{DiagnosticCollector, DiagnosticKind},
 };
 use io::trajectories::{
@@ -22,6 +22,15 @@ use io::progress::{Heartbeat, RunState};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Trace column names for `CSMCDiagnostics::renewal_by_bin` (gh#688), one per
+/// tenth of the substep series. The array type is `[&str; RENEWAL_BINS]`, so a
+/// change to the bin count that this list does not follow is a compile error
+/// rather than a silently mislabelled column.
+const RENEWAL_BIN_COLUMNS: [&str; RENEWAL_BINS] = [
+    "renewal_b0", "renewal_b1", "renewal_b2", "renewal_b3", "renewal_b4",
+    "renewal_b5", "renewal_b6", "renewal_b7", "renewal_b8", "renewal_b9",
+];
 
 /// Per-stage knobs extracted from a `Stage::PGAS { ... }` variant by
 /// the `camdl fit run` dispatcher and passed verbatim into `run_stage`.
@@ -585,11 +594,25 @@ pub fn run_stage(
             let is_resuming = resume_states[chain_id].is_some();
             let param_names: Vec<String> = config.estimated_params.iter()
                 .map(|s| s.name.clone()).collect();
+            // gh#688: `renewal_b0 … renewal_b9` carry `trajectory_renewal`
+            // resolved in time — bin `b` is renewal over the `b`-th tenth of
+            // the substeps. Averaged down the column over post-burn-in sweeps
+            // they are the update-rate-against-t plot that Lindsten, Jordan &
+            // Schön (2014, JMLR 15:2145-2184, Fig. 1) and Chopin & Singh (2015,
+            // Bernoulli 21:1855-1883) both recommend in place of a rule for
+            // choosing the particle count. They sit between the aggregate and
+            // the ancestor-sampling counters because the three are read
+            // together: the profile says WHERE the path is stuck, `as_accept`
+            // and `as_proposed` say why.
+            let mut trace_columns: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 11);
+            trace_columns.push("trajectory_renewal");
+            trace_columns.extend(RENEWAL_BIN_COLUMNS);
+            trace_columns.extend(["as_accept", "as_proposed", "transition_ll", "obs_ll",
+                  "tree_depth", "n_leapfrog", "step_size", "accept_stat",
+                  "n_divergent", "energy"]);
             let trace_writer = super::trace_writer::TraceWriter::new(
                 &trace_path_str, "sweep", "log_complete_data_ll",
-                &["trajectory_renewal", "as_accept", "as_proposed", "transition_ll", "obs_ll",
-                  "tree_depth", "n_leapfrog", "step_size", "accept_stat",
-                  "n_divergent", "energy"],
+                &trace_columns,
                 &param_names, is_resuming,
             );
 
@@ -637,6 +660,12 @@ pub fn run_stage(
                 let param_vals: Vec<f64> = config.estimated_params.iter()
                     .map(|s| result.params[s.index]).collect();
                 let renewal = format!("{:.4}", result.csmc_diag.trajectory_renewal);
+                // gh#688: renewal per time bin. `NA` for a bin holding no
+                // substep — the same convention as `as_accept` below, and for
+                // the same reason: no data is not a renewal of zero.
+                let renewal_bins: Vec<String> = result.csmc_diag.renewal_by_bin.iter()
+                    .map(|&r| if r.is_finite() { format!("{r:.4}") } else { "NA".to_string() })
+                    .collect();
                 // gh#607 follow-up: the ancestor-sampling Metropolis acceptance
                 // rate, with its denominator alongside. `NA` means the step
                 // never ran (no alternative ancestor was admissible), which is
@@ -658,11 +687,18 @@ pub fn run_stage(
                 let accept_stat_str = format!("{:.4}", nd.accept_stat);
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
+                let mut extra: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 11);
+                extra.push(&renewal);
+                extra.extend(renewal_bins.iter().map(String::as_str));
+                extra.extend([
+                    as_accept_str.as_str(), as_proposed_str.as_str(),
+                    transition_ll_str.as_str(), obs_ll_str.as_str(),
+                    tree_depth_str.as_str(), n_leapfrog_str.as_str(), step_size_str.as_str(),
+                    accept_stat_str.as_str(), n_divergent_str.as_str(), energy_str.as_str(),
+                ]);
                 trace_writer.write_row(
                     sweep, result.log_complete_data_ll, log_posterior,
-                    &[&renewal, &as_accept_str, &as_proposed_str, &transition_ll_str, &obs_ll_str,
-                      &tree_depth_str, &n_leapfrog_str, &step_size_str,
-                      &accept_stat_str, &n_divergent_str, &energy_str],
+                    &extra,
                     &param_vals,
                 );
 
