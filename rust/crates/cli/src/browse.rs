@@ -26,10 +26,14 @@ struct SimRow {
     created: SystemTime,
 }
 
-/// Discover the new-format sim leaves under `root/sims/` for `list`.
-fn discover_sim_rows(root: &str) -> Vec<SimRow> {
+/// Discover the new-format sim leaves under `root/sims/` for `list`, skipping
+/// the per-cell leaves the already-discovered ensemble rows represent.
+fn discover_sim_rows(
+    root: &str,
+    ensemble_members: &std::collections::HashSet<runid::ContentHash>,
+) -> Vec<SimRow> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    cas_read::walk_sim_leaves(Path::new(root))
+    cas_read::walk_sim_leaves_excluding(Path::new(root), ensemble_members)
         .into_iter()
         .map(|leaf| {
             let created = leaf
@@ -139,10 +143,33 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     };
     let format_json = a.format.as_deref() == Some("json");
 
+    // Ensemble grouping: a multi-cell `simulate` writes N per-cell `Sim` leaves
+    // AND one `SimEnsemble` that references them (deps). In any view that shows
+    // ensembles, the ensemble row REPRESENTS its members — don't also print one
+    // row per replicate/cell (that's the messy N-row spam). `--kind sim`
+    // (ensembles excluded) keeps showing the individual leaves, since that's an
+    // explicit request for the per-cell level.
+    //
+    // The ensembles are read FIRST because their `deps` are what let the sim
+    // walk skip a member leaf without paying to parse it: on the store in
+    // gh#699 the ensembles are 88 leaves in 262 directories and the members
+    // they represent are 461,282 of 550,647 sim leaves. Membership is
+    // determined over the whole ensemble set, before any `--limit`/`--since`
+    // truncation, so the collapse does not depend on which ensembles print.
+    let ensembles = if !filter_kind.includes_ensembles() {
+        Vec::new()
+    } else {
+        discover_ensemble_rows(&root)
+    };
+    let ensemble_member_ids: std::collections::HashSet<runid::ContentHash> = ensembles
+        .iter()
+        .flat_map(|e| e.leaf.record.deps.iter().map(|d| d.run_id))
+        .collect();
+
     let runs = if !filter_kind.includes_sims() {
         Vec::new()
     } else {
-        discover_sim_rows(&root)
+        discover_sim_rows(&root, &ensemble_member_ids)
     };
     let fits = if !filter_kind.includes_fits() {
         Vec::new()
@@ -164,28 +191,9 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     } else {
         discover_pfilter_rows(&root)
     };
-    let ensembles = if !filter_kind.includes_ensembles() {
-        Vec::new()
-    } else {
-        discover_ensemble_rows(&root)
-    };
-
     let now = SystemTime::now();
 
-    // Ensemble grouping: a multi-cell `simulate` writes N per-cell `Sim` leaves
-    // AND one `SimEnsemble` that references them (deps). In any view that shows
-    // ensembles, the ensemble row REPRESENTS its members — don't also print one
-    // row per replicate/cell (that's the messy N-row spam). `--kind sim`
-    // (ensembles excluded) keeps showing the individual leaves, since that's an
-    // explicit request for the per-cell level. Built before truncation so the
-    // collapse is independent of `--limit`.
-    let ensemble_member_ids: std::collections::HashSet<runid::ContentHash> =
-        ensembles.iter()
-            .flat_map(|e| e.leaf.record.deps.iter().map(|d| d.run_id))
-            .collect();
-
     let mut filtered_runs: Vec<SimRow> = runs.into_iter()
-        .filter(|r| !ensemble_member_ids.contains(&r.leaf.record.run_id))
         .filter(|r| a.model.as_deref().is_none_or(|m| r.leaf.level_label("model").contains(m)))
         .filter(|r| a.scenario.as_deref().is_none_or(|s| r.leaf.level_label("scenario") == s))
         .filter(|r| match filter_since {
