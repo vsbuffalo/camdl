@@ -117,9 +117,17 @@ pub struct PosteriorDiagnostics {
     /// comment on `If2StageResult.max_chain_agreement`. Kept as the full map
     /// (not just the max) so a renderer can surface per-param convergence.
     pub rhat_per_param: BTreeMap<String, f64>,
-    /// Geyer effective sample size per estimated param. The *minimum* over
-    /// params bounds the usable ESS (the slowest-mixing param is the limit).
+    /// Rank-normalized bulk effective sample size per estimated param. The
+    /// *minimum* over params bounds the usable ESS (the slowest-mixing param is
+    /// the limit).
     pub ess_per_param: BTreeMap<String, f64>,
+    /// Tail effective sample size per estimated param — the smaller of the 5%
+    /// and 95% quantile-indicator ESS. A posterior can mix well in the bulk and
+    /// badly in the tail the interval endpoints are read from, so an interval
+    /// quoted off a small tail-ESS is not trustworthy even when bulk-ESS is
+    /// large. Empty on fits written before the statistic existed.
+    #[serde(default)]
+    pub ess_tail_per_param: BTreeMap<String, f64>,
     /// Number of post-burn-in thinned posterior samples across all chains (as
     /// written to `draws.tsv`).
     pub n_samples: usize,
@@ -142,6 +150,34 @@ impl PosteriorDiagnostics {
     /// convergence headline; **R̂, not IF2's Â**.
     pub fn max_rhat(&self) -> f64 {
         self.rhat_per_param.values().copied().fold(0.0_f64, f64::max)
+    }
+
+    /// One parameter's R̂ as a table cell, or `missing` when it has none.
+    ///
+    /// A fit that fails says so once, in the headline. WHICH parameter failed
+    /// is only readable here, and a column of dashes over values the run
+    /// already computed sends the reader to `diagnostics.json` to answer the
+    /// first question they have (gh#611).
+    pub fn rhat_cell(&self, name: &str, missing: &str) -> String {
+        Self::finite_cell(self.rhat_per_param.get(name).copied(), 3, missing)
+    }
+
+    /// One parameter's tail-ESS as a table cell, or `missing` when it has none
+    /// — including the parameter piled on a bound, whose tail indicator is
+    /// constant and whose tail-ESS is genuinely undefined.
+    pub fn ess_tail_cell(&self, name: &str, missing: &str) -> String {
+        Self::finite_cell(self.ess_tail_per_param.get(name).copied(), 0, missing)
+    }
+
+    /// A numeric cell that renders `missing` for both encodings of "no value":
+    /// an absent key (a NaN serialized to JSON `null` and dropped on load) and
+    /// a present NaN (the `--exclude-chains` recompute keeps the key). One
+    /// fact, one rendering.
+    fn finite_cell(v: Option<f64>, precision: usize, missing: &str) -> String {
+        match v {
+            Some(v) if v.is_finite() => format!("{:.*}", precision, v),
+            _ => missing.to_string(),
+        }
     }
 
     /// Minimum pooled ESS over the assessed params — the slowest param bounds
@@ -653,6 +689,7 @@ impl PgasStageResult {
 
         let rhat_map = read_f64_map(&summary, "rhat");
         let ess_map = read_f64_map(&summary, "ess");
+        let ess_tail_map = read_f64_map(&summary, "ess_tail");
 
         // Posterior moments: average each estimated-param column in
         // draws.tsv. The estimated-param key set is rhat_map's keys
@@ -707,6 +744,7 @@ impl PgasStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: rhat_map,
                 ess_per_param: ess_map,
+                ess_tail_per_param: ess_tail_map,
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -735,6 +773,7 @@ impl PmmhStageResult {
 
         let rhat_map = read_f64_map(&summary, "rhat");
         let ess_map = read_f64_map(&summary, "ess");
+        let ess_tail_map = read_f64_map(&summary, "ess_tail");
         let est_names: Vec<String> = if !rhat_map.is_empty() {
             rhat_map.keys().cloned().collect()
         } else {
@@ -766,6 +805,7 @@ impl PmmhStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: rhat_map,
                 ess_per_param: ess_map,
+                ess_tail_per_param: ess_tail_map,
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -792,6 +832,7 @@ impl NutsStageResult {
 
         let rhat_map = read_f64_map(&summary, "rhat");
         let ess_map = read_f64_map(&summary, "ess");
+        let ess_tail_map = read_f64_map(&summary, "ess_tail");
         let est_names: Vec<String> = if !rhat_map.is_empty() {
             rhat_map.keys().cloned().collect()
         } else {
@@ -810,6 +851,7 @@ impl NutsStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: rhat_map,
                 ess_per_param: ess_map,
+                ess_tail_per_param: ess_tail_map,
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -1326,6 +1368,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect(),
             ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            ess_tail_per_param: BTreeMap::new(),
             n_samples,
             thin,
             wall_time_secs: wall,
@@ -1379,6 +1422,7 @@ mod tests {
         PosteriorDiagnostics {
             rhat_per_param: rhat.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            ess_tail_per_param: BTreeMap::new(),
             n_samples,
             thin: 1,
             wall_time_secs: wall,
@@ -1531,6 +1575,7 @@ mod tests {
         let d = PosteriorDiagnostics {
             rhat_per_param: BTreeMap::new(),
             ess_per_param: BTreeMap::new(),
+            ess_tail_per_param: BTreeMap::new(),
             n_samples: 0,
             thin: 1,
             wall_time_secs: Some(5.0),
