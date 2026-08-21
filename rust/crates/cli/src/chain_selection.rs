@@ -275,6 +275,10 @@ pub struct SubsetDiagnostics {
     /// which still separates "not assessable" from "assessed but absent" for
     /// diagnostics loaded from older runs.
     pub ess_per_param: BTreeMap<String, f64>,
+    /// Per-param tail-ESS over the retained chains, same key set as
+    /// [`Self::ess_per_param`]. Non-finite where a tail indicator is constant
+    /// (a parameter piled on a bound).
+    pub ess_tail_per_param: BTreeMap<String, f64>,
     /// Retained draw count (rows kept).
     pub n_samples: usize,
     /// Retained chain count.
@@ -332,6 +336,7 @@ pub fn recompute_subset_diagnostics(
 
     let mut rhat_per_param = BTreeMap::new();
     let mut ess_per_param = BTreeMap::new();
+    let mut ess_tail_per_param = BTreeMap::new();
     for p in param_names {
         let chains: Vec<Vec<f64>> = grouped
             .values()
@@ -342,6 +347,7 @@ pub fn recompute_subset_diagnostics(
             rhat_per_param.insert(p.clone(), d.rhat);
         }
         ess_per_param.insert(p.clone(), d.ess_bulk);
+        ess_tail_per_param.insert(p.clone(), d.ess_tail);
     }
 
     Ok(SubsetDiagnostics {
@@ -351,6 +357,7 @@ pub fn recompute_subset_diagnostics(
         kept,
         rhat_per_param,
         ess_per_param,
+        ess_tail_per_param,
     })
 }
 

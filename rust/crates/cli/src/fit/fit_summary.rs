@@ -81,6 +81,7 @@ fn recompute_over_subset(
 
     diag.rhat_per_param = sub.rhat_per_param;
     diag.ess_per_param = sub.ess_per_param;
+    diag.ess_tail_per_param = sub.ess_tail_per_param;
     diag.n_samples = sub.n_samples;
     diag.n_chains = sub.n_chains;
     // `thin` and `wall_time_secs` are properties of the whole run, unchanged by
@@ -1155,8 +1156,8 @@ impl Formatter {
             s.push_str(&format!("    {}\n", self.dim("(no posterior parameters)")));
         } else {
             s.push_str(&format!(
-                "    {:14} {:>14} {:>10} {:>8}\n",
-                "param", "mean", "ESS", "R̂?"
+                "    {:14} {:>14} {:>10} {:>10} {:>8}\n",
+                "param", "mean", "ESS bulk", "ESS tail", "R̂"
             ));
             for (name, mean) in posterior_mean.iter() {
                 let ess_v = ess.get(name).copied();
@@ -1169,11 +1170,12 @@ impl Formatter {
                     None => String::new(),
                 };
                 s.push_str(&format!(
-                    "    {:14} {:>14.6} {} {:>8}{}\n",
+                    "    {:14} {:>14.6} {} {:>10} {:>8}{}\n",
                     name,
                     mean,
                     ess_str,
-                    "", // per-param R̂ not surfaced in this view
+                    diag.ess_tail_cell(name, "—"),
+                    diag.rhat_cell(name, "—"),
                     date_marker
                 ));
             }
@@ -2103,7 +2105,7 @@ fn render_md_stage(stage: &StageReport) -> String {
     // Method-specific posterior block.
     if let Some(MethodResult::Pgas(p)) = &stage.method_result {
         s.push_str(&format!("### Posterior summary (PGAS, max R̂ = {:.3})\n\n", p.diagnostics.max_rhat()));
-        s.push_str("| param | mean | q025 | q975 | ESS |\n|---|---|---|---|---|\n");
+        s.push_str("| param | mean | q025 | q975 | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
@@ -2112,7 +2114,8 @@ fn render_md_stage(stage: &StageReport) -> String {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
             };
-            s.push_str(&format!("| `{}` | {} | {} | {} | {} |\n", name, mean_cell, q025, q975, ess));
+            s.push_str(&format!("| `{}` | {} | {} | {} | {} | {} | {} |\n", name, mean_cell, q025, q975, ess,
+                p.diagnostics.ess_tail_cell(name, "—"), p.diagnostics.rhat_cell(name, "—")));
         }
         s.push('\n');
     } else if let Some(MethodResult::Pmmh(p)) = &stage.method_result {
@@ -2120,14 +2123,15 @@ fn render_md_stage(stage: &StageReport) -> String {
             "### Posterior summary (PMMH, max R̂ = {:.3}, acceptance = {:.3})\n\n",
             p.diagnostics.max_rhat(), p.acceptance_rate
         ));
-        s.push_str("| param | mean | ESS |\n|---|---|---|\n");
+        s.push_str("| param | mean | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
             let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "—".into());
             let mean_cell = match stage.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
             };
-            s.push_str(&format!("| `{}` | {} | {} |\n", name, mean_cell, ess));
+            s.push_str(&format!("| `{}` | {} | {} | {} | {} |\n", name, mean_cell, ess,
+                p.diagnostics.ess_tail_cell(name, "—"), p.diagnostics.rhat_cell(name, "—")));
         }
         s.push('\n');
     } else if let Some(MethodResult::Nuts(p)) = &stage.method_result {
@@ -2135,7 +2139,7 @@ fn render_md_stage(stage: &StageReport) -> String {
             "### Posterior summary (NUTS, max R̂ = {:.3}, divergences = {})\n\n",
             p.diagnostics.max_rhat(), p.n_divergent
         ));
-        s.push_str("| param | mean | q025 | q975 | ESS |\n|---|---|---|---|---|\n");
+        s.push_str("| param | mean | q025 | q975 | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
@@ -2144,7 +2148,8 @@ fn render_md_stage(stage: &StageReport) -> String {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
             };
-            s.push_str(&format!("| `{}` | {} | {} | {} | {} |\n", name, mean_cell, q025, q975, ess));
+            s.push_str(&format!("| `{}` | {} | {} | {} | {} | {} | {} |\n", name, mean_cell, q025, q975, ess,
+                p.diagnostics.ess_tail_cell(name, "—"), p.diagnostics.rhat_cell(name, "—")));
         }
         s.push('\n');
     }
@@ -2324,8 +2329,8 @@ fn render_latex_stage(stage: &StageReport) -> String {
             "Posterior summary (max $\\hat R$ = {:.3}):\n\n",
             p.diagnostics.max_rhat()
         ));
-        s.push_str("\\begin{tabular}{lrrrr}\n\\toprule\n");
-        s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS \\\\\n\\midrule\n");
+        s.push_str("\\begin{tabular}{lrrrrrr}\n\\toprule\n");
+        s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
@@ -2335,8 +2340,10 @@ fn render_latex_stage(stage: &StageReport) -> String {
                 None => format!("{:.6}", mean),
             };
             s.push_str(&format!(
-                "\\texttt{{{}}} & {} & {} & {} & {} \\\\\n",
+                "\\texttt{{{}}} & {} & {} & {} & {} & {} & {} \\\\\n",
                 escape_latex(name), mean_cell, q025, q975, ess,
+                p.diagnostics.ess_tail_cell(name, "---"),
+                p.diagnostics.rhat_cell(name, "---"),
             ));
         }
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
@@ -2345,8 +2352,8 @@ fn render_latex_stage(stage: &StageReport) -> String {
             "Posterior summary (max $\\hat R$ = {:.3}; acceptance = {:.3}):\n\n",
             p.diagnostics.max_rhat(), p.acceptance_rate
         ));
-        s.push_str("\\begin{tabular}{lrr}\n\\toprule\n");
-        s.push_str("Parameter & Mean & ESS \\\\\n\\midrule\n");
+        s.push_str("\\begin{tabular}{lrrrr}\n\\toprule\n");
+        s.push_str("Parameter & Mean & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
         for (name, mean) in &p.posterior_mean {
             let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "---".into());
             let mean_cell = match stage.param_dates.get(name) {
@@ -2354,8 +2361,10 @@ fn render_latex_stage(stage: &StageReport) -> String {
                 None => format!("{:.6}", mean),
             };
             s.push_str(&format!(
-                "\\texttt{{{}}} & {} & {} \\\\\n",
+                "\\texttt{{{}}} & {} & {} & {} & {} \\\\\n",
                 escape_latex(name), mean_cell, ess,
+                p.diagnostics.ess_tail_cell(name, "---"),
+                p.diagnostics.rhat_cell(name, "---"),
             ));
         }
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
@@ -2364,8 +2373,8 @@ fn render_latex_stage(stage: &StageReport) -> String {
             "Posterior summary (max $\\hat R$ = {:.3}; divergences = {}):\n\n",
             p.diagnostics.max_rhat(), p.n_divergent
         ));
-        s.push_str("\\begin{tabular}{lrrrr}\n\\toprule\n");
-        s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS \\\\\n\\midrule\n");
+        s.push_str("\\begin{tabular}{lrrrrrr}\n\\toprule\n");
+        s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
@@ -2375,8 +2384,10 @@ fn render_latex_stage(stage: &StageReport) -> String {
                 None => format!("{:.6}", mean),
             };
             s.push_str(&format!(
-                "\\texttt{{{}}} & {} & {} & {} & {} \\\\\n",
+                "\\texttt{{{}}} & {} & {} & {} & {} & {} & {} \\\\\n",
                 escape_latex(name), mean_cell, q025, q975, ess,
+                p.diagnostics.ess_tail_cell(name, "---"),
+                p.diagnostics.rhat_cell(name, "---"),
             ));
         }
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
@@ -2617,6 +2628,7 @@ mod tests {
                 // pooling threshold, so it carries no pooled ESS.
                 rhat_per_param: BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
                 ess_per_param: ess,
+                ess_tail_per_param: BTreeMap::new(),
                 n_samples: 500,
                 thin: 1,
                 wall_time_secs: Some(11.8),
@@ -2689,6 +2701,13 @@ mod tests {
                     ("a2".to_string(), 145.0),
                     ("tau".to_string(), 42.0),
                 ]),
+                // `tau` is piled on a bound: its 95% indicator is constant, so
+                // tail-ESS is genuinely undefined and must render as a dash
+                // rather than as `NaN`.
+                ess_tail_per_param: BTreeMap::from([
+                    ("a2".to_string(), 268.0),
+                    ("tau".to_string(), f64::NAN),
+                ]),
                 n_samples: 500,
                 thin: 1,
                 wall_time_secs: Some(11.8),
@@ -2720,6 +2739,11 @@ mod tests {
         let a2 = row("a2");
         assert!(a2.contains("1.013"), "every assessed parameter carries its R̂: {a2}");
         assert!(a2.contains("145"), "every assessed parameter carries its ESS: {a2}");
+        assert!(a2.contains("268"),
+            "bulk ESS alone does not say whether the interval endpoints mixed; \
+             the tail column does: {a2}");
+        assert!(!tau.contains("NaN"),
+            "an undefined tail-ESS is a dash, never the literal NaN: {tau}");
     }
 
     #[test]
@@ -2731,6 +2755,7 @@ mod tests {
                 rhat_per_param: BTreeMap::from([("a2".to_string(), 1.01), ("g".to_string(), 1.00)]),
                 // a2 mixes worst → it, not the mean, bounds usable ESS.
                 ess_per_param: BTreeMap::from([("a2".to_string(), 145.0), ("g".to_string(), 300.0)]),
+                ess_tail_per_param: BTreeMap::new(),
                 n_samples,
                 thin,
                 wall_time_secs: wall,
@@ -3583,6 +3608,7 @@ mod tests {
         let mut diag = PosteriorDiagnostics {
             rhat_per_param: BTreeMap::from([("beta".to_string(), rhat_all)]),
             ess_per_param: BTreeMap::from([("beta".to_string(), f64::NAN)]),
+            ess_tail_per_param: BTreeMap::new(),
             n_samples: 160,
             thin: 1,
             wall_time_secs: Some(10.0),
@@ -3617,6 +3643,7 @@ mod tests {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: BTreeMap::from([("R0".to_string(), 1.02)]),
                 ess_per_param: BTreeMap::new(),
+                ess_tail_per_param: BTreeMap::new(),
                 n_samples: 100,
                 thin: 1,
                 wall_time_secs: None,
@@ -3634,6 +3661,7 @@ mod tests {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: BTreeMap::from([("R0".to_string(), 1.03)]),
                 ess_per_param: BTreeMap::new(),
+                ess_tail_per_param: BTreeMap::new(),
                 n_samples: 100,
                 thin: 1,
                 wall_time_secs: None,
