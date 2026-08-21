@@ -13,6 +13,7 @@
 //! (IF2 / NLopt), which produce no draws cloud, are refused with an actionable
 //! message rather than silently plugged in.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,7 @@ use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::posterior_draws;
+use crate::fit::method_result::{min_ess_over, MinEss};
 use crate::run_meta::{FitAlgorithm, ObsSchema};
 
 // ── The two axes, as types ─────────────────────────────────────────────────
@@ -587,24 +589,31 @@ impl FitResult {
 }
 
 /// Read a Bayesian stage's convergence summary (`<algorithm>_summary.json`):
-/// `max` over its R̂ map, `min` over its ESS map. Returns
+/// `max` over its R̂ map, and the min-parameter ESS **through the shared
+/// classification** ([`min_ess_over`]) rather than a bare fold. Returns
 /// [`ConvergenceStatus::NotAssessed`] when no summary or no R̂ is present (a
 /// single-chain stage), so a band is never silently "converged".
 fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
         let bytes = std::fs::read(stage_dir.join(name)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        let rhat_max = v.get("rhat")?.as_object()?.values()
-            .filter_map(|x| x.as_f64())
-            .fold(f64::NEG_INFINITY, f64::max);
-        let ess_min = v.get("ess").and_then(|e| e.as_object()).map(|o| {
-            o.values().filter_map(|x| x.as_f64()).fold(f64::INFINITY, f64::min)
-        }).unwrap_or(f64::INFINITY);
-        if rhat_max.is_finite() {
-            Some(ConvergenceStatus::Reported { rhat_max, ess_min })
-        } else {
-            None
+        let map = |key: &str| -> BTreeMap<String, f64> {
+            v.get(key)
+                .and_then(|o| o.as_object())
+                .map(|o| o.iter()
+                    .filter_map(|(k, x)| x.as_f64().map(|f| (k.clone(), f)))
+                    .collect())
+                .unwrap_or_default()
+        };
+        let rhat = map("rhat");
+        let rhat_max = rhat.values().copied().fold(f64::NEG_INFINITY, f64::max);
+        if !rhat_max.is_finite() {
+            return None;
         }
+        Some(ConvergenceStatus::Reported {
+            rhat_max,
+            ess_min: min_ess_cell(&rhat, &map("ess")),
+        })
     };
     // Each method reads its OWN `<algorithm>_summary.json` via the naming seam —
     // no cross-name fallback. A missing summary (an unnamed stage dir, or a
@@ -616,6 +625,26 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
         .as_deref()
         .and_then(try_read)
         .unwrap_or(ConvergenceStatus::NotAssessed)
+}
+
+/// The `ess_min` a band carries, as a number — non-finite when the shared
+/// classification declines to report one, which [`ConvergenceStatus::ess_min_cell`]
+/// renders as an empty cell.
+///
+/// Not a bare `min` over the ESS map: `f64::min` returns the non-NaN operand,
+/// so a parameter whose ESS was suppressed because its chains disagree is
+/// walked past, and the result is a minimum over the CONVERGED SUBSET that
+/// rises as the fit gets worse (gh#687, gh#691). R̂ still reports — that half is
+/// assessable — so the band says "the chains disagree this much, and no honest
+/// efficiency number goes with it" rather than blanking both.
+fn min_ess_cell(
+    rhat: &BTreeMap<String, f64>,
+    ess: &BTreeMap<String, f64>,
+) -> f64 {
+    match min_ess_over(rhat, ess) {
+        MinEss::Reported(v) => v,
+        MinEss::Unreportable { .. } | MinEss::NoParams => f64::NAN,
+    }
 }
 
 /// Recompute a band's convergence over the RETAINED chains of a
@@ -642,11 +671,10 @@ fn subset_convergence(
     if !rhat_max.is_finite() {
         return Ok(ConvergenceStatus::NotAssessed);
     }
-    // Min ESS over the scored params; non-finite entries (non-finite-R̂ / R̂ > 1.1
-    // params) are skipped by `f64::min`, matching `min_ess`. `None` (no params)
-    // cannot occur here — a finite `rhat_max` proves at least one scored param.
-    let ess_min = sub.ess_per_param.values().copied().reduce(f64::min).unwrap_or(f64::INFINITY);
-    Ok(ConvergenceStatus::Reported { rhat_max, ess_min })
+    Ok(ConvergenceStatus::Reported {
+        rhat_max,
+        ess_min: min_ess_cell(&sub.rhat_per_param, &sub.ess_per_param),
+    })
 }
 
 // ── The engine sink: sample y_rep per draw on the emission grid ────────────

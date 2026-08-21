@@ -191,30 +191,7 @@ impl PosteriorDiagnostics {
     /// param *with* a finite R̂ has a pooled ESS iff R̂ ≤ 1.1, so its absence
     /// (or NaN) means exactly one thing: the chains disagree.
     pub fn min_ess_status(&self) -> MinEss {
-        let assessed: BTreeSet<&str> = self
-            .rhat_per_param
-            .iter()
-            .chain(self.ess_per_param.iter())
-            .filter(|(_, v)| v.is_finite())
-            .map(|(name, _)| name.as_str())
-            .collect();
-        if assessed.is_empty() {
-            return MinEss::NoParams;
-        }
-        let n_expected = assessed.len();
-        let mut missing: Vec<String> = Vec::new();
-        let mut min = f64::INFINITY;
-        for name in assessed {
-            match self.ess_per_param.get(name).copied() {
-                Some(v) if v.is_finite() => min = min.min(v),
-                _ => missing.push(name.to_string()),
-            }
-        }
-        if missing.is_empty() {
-            MinEss::Reported(min)
-        } else {
-            MinEss::Unreportable { missing, n_expected }
-        }
+        min_ess_over(&self.rhat_per_param, &self.ess_per_param)
     }
 
     /// The min-param ESS as a number, `None` when it is not reportable. Thin
@@ -251,6 +228,52 @@ impl PosteriorDiagnostics {
     pub fn ess_per_sec(&self) -> Option<f64> {
         let secs = self.wall_time_secs.filter(|s| *s > 0.0)?;
         Some(self.min_ess()? / secs)
+    }
+}
+
+/// Classify a `(R̂, ESS)` pair of per-parameter maps into a [`MinEss`].
+///
+/// A free function rather than a method because three surfaces need it and
+/// only one of them holds a [`PosteriorDiagnostics`]: `fit summary`'s headline,
+/// `fit predict`'s stored-summary band label, and `fit predict`'s
+/// `--exclude-chains` recompute. Each reducing the maps its own way is how the
+/// two sibling sites of gh#691 kept the reduce gh#687 replaced — and how a band
+/// and the summary for one fit + selection come to disagree, which is the
+/// property gh#409 established.
+///
+/// A param is *assessed* when it has a finite R̂, or already has a finite ESS.
+/// A param with no finite R̂ was never comparable across chains at all (fewer
+/// than two usable chains, or a column that does not vary — a fixed parameter
+/// swept in by `fit predict`'s all-columns subset recompute), so it has no
+/// pooled ESS to withhold. A param *with* a finite R̂ that has no ESS means
+/// exactly one thing: whatever suppressed it did so because the chains
+/// disagree.
+pub fn min_ess_over(
+    rhat_per_param: &BTreeMap<String, f64>,
+    ess_per_param: &BTreeMap<String, f64>,
+) -> MinEss {
+    let assessed: BTreeSet<&str> = rhat_per_param
+        .iter()
+        .chain(ess_per_param.iter())
+        .filter(|(_, v)| v.is_finite())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if assessed.is_empty() {
+        return MinEss::NoParams;
+    }
+    let n_expected = assessed.len();
+    let mut missing: Vec<String> = Vec::new();
+    let mut min = f64::INFINITY;
+    for name in assessed {
+        match ess_per_param.get(name).copied() {
+            Some(v) if v.is_finite() => min = min.min(v),
+            _ => missing.push(name.to_string()),
+        }
+    }
+    if missing.is_empty() {
+        MinEss::Reported(min)
+    } else {
+        MinEss::Unreportable { missing, n_expected }
     }
 }
 
