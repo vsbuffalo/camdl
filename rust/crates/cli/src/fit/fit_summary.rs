@@ -118,17 +118,21 @@ fn apply_selection_to_typed(
 /// the stdout summary): the identifiability nudge FIRST (when the per-chain
 /// outlier signal is strong — gh#406), then the loud, non-quietable exclusion
 /// warning. The flag is the second thing the user reads, not the first.
-fn chain_selection_advisory(stage_dir: &Path, info: &SubsetInfo) {
+fn chain_selection_advisory(
+    stage_dir: &Path,
+    info: &SubsetInfo,
+    kind: super::loglik::LoglikType,
+) {
     use super::chain_diagnostics as cd;
-    if let Some(means) = cd::read_chain_mean_logliks(stage_dir) {
-        let scores = cd::chain_loglik_mod_zscores(&means);
+    if let Some(means) = cd::read_chain_mean_logliks(stage_dir, kind) {
+        let scores = cd::chain_loglik_mod_zscores(&means.scored);
         let outliers = cd::outlier_labels(&scores);
         if !outliers.is_empty() {
             eprintln!(
-                "\x1b[33mnote:\x1b[0m {} disagree strongly with the others — before excluding, \
-                 ask whether a parameter is unidentified (a flat likelihood ridge). The \
-                 per-chain table below names them; the primary fix is the model, not the flag.",
-                outliers.join(", ")
+                "\x1b[33mnote:\x1b[0m {} disagree strongly with the others on `{}` — before \
+                 excluding, ask whether a parameter is unidentified (a flat likelihood ridge). \
+                 The per-chain table below names them; the primary fix is the model, not the flag.",
+                outliers.join(", "), means.scored_column
             );
         }
     }
@@ -490,6 +494,11 @@ fn format_text(
             }
         };
 
+        // The stage's log-likelihood class, derived once from the typed result
+        // (the single authority). It selects the per-chain trace column the
+        // outlier diagnostics may compare across chains (gh#667).
+        let ll_kind = crate::fit::loglik::LoglikType::from(&typed);
+
         // Chain selection: recompute this Bayesian stage's diagnostics over the
         // retained chains before rendering (an IF2 / NLopt stage has no chains
         // and is left untouched). The advisory prints once.
@@ -502,7 +511,7 @@ fn format_text(
                 match apply_selection_to_typed(&mut typed, &resolved.stage_dir, sel) {
                     Ok(info) => {
                         if !warned {
-                            chain_selection_advisory(&resolved.stage_dir, &info);
+                            chain_selection_advisory(&resolved.stage_dir, &info, ll_kind);
                             warned = true;
                         }
                         subset_info = Some(info);
@@ -552,7 +561,7 @@ fn format_text(
             MethodResult::Pgas(pgas) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "pgas", &resolved.stage_dir, BayesianView::Pgas(pgas), subset_info.as_ref())
+                    fmt.bayesian_block(&resolved.stage, "pgas", &resolved.stage_dir, BayesianView::Pgas(pgas), subset_info.as_ref(), ll_kind)
                 );
                 prev_stage_name = Some(resolved.stage.clone());
                 // Bayesian rows have no scalar best_loglik to chain
@@ -561,7 +570,7 @@ fn format_text(
             MethodResult::Pmmh(pmmh) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref())
+                    fmt.bayesian_block(&resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref(), ll_kind)
                 );
                 prev_loglik = Some(pmmh.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
@@ -569,7 +578,7 @@ fn format_text(
             MethodResult::Nuts(nuts) => {
                 print!(
                     "{}",
-                    fmt.bayesian_block(&resolved.stage, "nuts", &resolved.stage_dir, BayesianView::Nuts(nuts), subset_info.as_ref())
+                    fmt.bayesian_block(&resolved.stage, "nuts", &resolved.stage_dir, BayesianView::Nuts(nuts), subset_info.as_ref(), ll_kind)
                 );
                 prev_loglik = Some(nuts.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
@@ -981,7 +990,12 @@ impl Formatter {
     /// Gelman-Rubin R̂, ESS, and (for PMMH only) a scalar acceptance
     /// rate. The IF2 compound gate doesn't apply; convergence keys on
     /// `max R̂ < 1.05`.
-    fn bayesian_block(&self, stage: &str, method: &str, stage_dir: &Path, view: BayesianView<'_>, subset: Option<&SubsetInfo>) -> String {
+    /// `ll_kind` is the stage's log-likelihood class, derived once by the
+    /// caller from the typed `MethodResult` (the single authority — see
+    /// `loglik::LoglikType`). It decides which per-chain trace column the
+    /// outlier table may compare (gh#667); it is not re-derived here, so the
+    /// summary and every other surface cannot disagree about it.
+    fn bayesian_block(&self, stage: &str, method: &str, stage_dir: &Path, view: BayesianView<'_>, subset: Option<&SubsetInfo>, ll_kind: super::loglik::LoglikType) -> String {
         let mut s = String::new();
         s.push_str(&format!(
             "══ {} {} {}\n",
@@ -1116,8 +1130,9 @@ impl Formatter {
 
         // Per-chain loglik outlier diagnostic (gh#406). R̂/ESS above say WHETHER
         // the chains agreed; this says WHICH chain didn't. Same for every
-        // Bayesian sampler (mh/pmmh/pgas/nuts) — read from the per-chain traces.
-        s.push_str(&self.bayesian_chain_loglik_table(stage_dir, diag.n_chains));
+        // Bayesian sampler (mh/pmmh/pgas/nuts) — read from the per-chain traces,
+        // on the column this sampler's loglik CLASS makes comparable (gh#667).
+        s.push_str(&self.bayesian_chain_loglik_table(stage_dir, diag.n_chains, ll_kind));
 
         // Posterior parameter table.
         s.push_str(&format!("  {}\n", self.bold("posterior summary")));
@@ -1152,60 +1167,116 @@ impl Formatter {
         s
     }
 
+    /// One right-aligned per-chain log-likelihood cell. `-inf` (a chain stuck
+    /// off the support, gh#608) is rendered loudly and distinctly from `—`
+    /// (nothing readable) — softening either one hides the only signal there
+    /// is.
+    fn chain_loglik_cell(&self, v: f64, width: usize) -> String {
+        if v.is_finite() {
+            format!("{:>width$.2}", v, width = width)
+        } else if v == f64::NEG_INFINITY {
+            format!("{:>width$}", self.err("-inf"), width = width)
+        } else {
+            format!("{:>width$}", "—", width = width)
+        }
+    }
+
     /// Per-chain log-likelihood breakdown for a Bayesian stage (gh#406).
     /// Reads each `chain_N/trace.tsv`, computes the per-chain mean post-burn-in
     /// loglik and its robust modified z-score (median/MAD) against the
     /// between-chain spread, and flags the outliers by name — so a user with a
     /// minority of chains stuck in a side mode sees *which* chains without
-    /// opening every trace by hand. Uniform across mh / pmmh / pgas / nuts (all
-    /// write the same per-chain trace layout). When no per-chain traces exist,
-    /// says so rather than skipping.
-    fn bayesian_chain_loglik_table(&self, stage_dir: &Path, n_chains_expected: usize) -> String {
+    /// opening every trace by hand.
+    ///
+    /// `kind` decides WHICH trace column is compared, by name: `obs_ll`
+    /// (`log p(y | X, θ)`) for PGAS, `log_likelihood` (`log p(y | θ)`) for
+    /// pmmh / mh / nuts (gh#667). For PGAS the complete-data target and its
+    /// transition term are shown alongside — the sampler's own objective, and
+    /// the term whose spread makes a flat-ridge diagnosis obvious — but they
+    /// are never ranked on. When no per-chain traces exist, says so rather
+    /// than skipping.
+    fn bayesian_chain_loglik_table(
+        &self,
+        stage_dir: &Path,
+        n_chains_expected: usize,
+        kind: super::loglik::LoglikType,
+    ) -> String {
         use super::chain_diagnostics as cd;
         let mut s = String::new();
         s.push_str(&format!("  {}\n", self.bold("per-chain log-likelihood")));
 
-        let Some(means) = cd::read_chain_mean_logliks(stage_dir) else {
+        let Some(means) = cd::read_chain_mean_logliks(stage_dir, kind) else {
             s.push_str(&format!("    {}\n\n", self.dim(
                 "(per-chain traces unavailable — cannot break down by chain)")));
             return s;
         };
-        if means.len() < 2 {
-            s.push_str(&format!("    {}\n\n", self.dim(
-                "(need ≥2 chains with traces for a cross-chain outlier score)")));
-            return s;
-        }
-        if n_chains_expected != 0 && means.len() != n_chains_expected {
+        // Whether a cross-chain comparison is possible at all. When it is not,
+        // the reason is stated and the ranked table is skipped — but the
+        // degeneracy screens below still run: they read `log_posterior` and
+        // `draws.tsv`, so a -inf or point-mass chain must not go unreported
+        // just because the comparison column is missing (gh#608, gh#635).
+        let mut scores = Vec::new();
+        if means.scored_column_absent {
+            // No silent gap: a stage whose traces predate the column would
+            // otherwise render as rows of dashes that read like broken chains.
             s.push_str(&format!("    {}\n", self.dim(&format!(
-                "(found traces for {} of {} chains)", means.len(), n_chains_expected))));
-        }
-
-        let scores = cd::chain_loglik_mod_zscores(&means);
-        s.push_str(&format!("    {:6} {:>14}  {:>7}   {}\n",
-            "chain", "mean loglik", "mod-z", "flag"));
-        for sc in &scores {
-            let flag = if sc.is_outlier {
-                self.err("← outlier")
-            } else {
-                String::new()
-            };
-            // gh#608: distinguish "stuck at -inf" (a degenerate chain whose
-            // draws contaminate the pooled numbers) from "no readable trace"
-            // (—). The old rendering softened the one signal that existed.
-            let ll = if sc.mean_loglik.is_finite() {
-                format!("{:>14.2}", sc.mean_loglik)
-            } else if sc.mean_loglik == f64::NEG_INFINITY {
-                format!("{:>14}", self.err("-inf"))
-            } else {
-                format!("{:>14}", "—")
-            };
-            // A non-finite mod-z (unreadable trace) renders `—`, never a fake 0.
-            let z = if sc.mod_z.is_finite() {
-                format!("{:>7.2}", sc.mod_z)
-            } else {
-                format!("{:>7}", "—")
-            };
-            s.push_str(&format!("    {:6} {}  {}   {}\n", sc.chain, ll, z, flag));
+                "(traces carry no `{}` column — cannot compare chains on it)",
+                means.scored_column))));
+        } else if means.scored.len() < 2 {
+            s.push_str(&format!("    {}\n", self.dim(
+                "(need ≥2 chains with traces for a cross-chain outlier score)")));
+        } else {
+            if n_chains_expected != 0 && means.scored.len() != n_chains_expected {
+                s.push_str(&format!("    {}\n", self.dim(&format!(
+                    "(found traces for {} of {} chains)",
+                    means.scored.len(), n_chains_expected))));
+            }
+            scores = cd::chain_loglik_mod_zscores(&means.scored);
+            // gh#667: say what is being ranked, and why the other two columns
+            // are present but not ranked. Without this the reader has no way to
+            // know the table stopped scoring the sampler's own target.
+            if means.complete_data.is_some() {
+                s.push_str(&format!("    {}\n", self.dim(
+                    "ranked on obs ll = log p(y | X): does this chain reproduce the DATA.")));
+                s.push_str(&format!("    {}\n", self.dim(
+                    "transition ll = log p(X | θ) and complete ll = log p(y, X | θ) are path")));
+                s.push_str(&format!("    {}\n", self.dim(
+                    "densities at each chain's OWN path — shown, not ranked (gh#667).")));
+            }
+            match &means.complete_data {
+                Some(_) => s.push_str(&format!("    {:6} {:>14}  {:>7}  {:>14} {:>14}   {}\n",
+                    "chain", "obs ll", "mod-z", "transition ll", "complete ll", "flag")),
+                None => s.push_str(&format!("    {:6} {:>14}  {:>7}   {}\n",
+                    "chain", "mean loglik", "mod-z", "flag")),
+            }
+            for (i, sc) in scores.iter().enumerate() {
+                let flag = if sc.is_outlier {
+                    self.err("← outlier")
+                } else {
+                    String::new()
+                };
+                // gh#608: distinguish "stuck at -inf" (a degenerate chain whose
+                // draws contaminate the pooled numbers) from "no readable trace"
+                // (—). The old rendering softened the one signal that existed.
+                let ll = self.chain_loglik_cell(sc.mean_loglik, 14);
+                // A non-finite mod-z (unreadable trace) renders `—`, never a fake 0.
+                let z = if sc.mod_z.is_finite() {
+                    format!("{:>7.2}", sc.mod_z)
+                } else {
+                    format!("{:>7}", "—")
+                };
+                match &means.complete_data {
+                    Some(cd_means) => {
+                        let trans = self.chain_loglik_cell(
+                            cd_means.transition.get(i).copied().unwrap_or(f64::NAN), 14);
+                        let complete = self.chain_loglik_cell(
+                            cd_means.complete.get(i).copied().unwrap_or(f64::NAN), 14);
+                        s.push_str(&format!("    {:6} {}  {}  {} {}   {}\n",
+                            sc.chain, ll, z, trans, complete, flag));
+                    }
+                    None => s.push_str(&format!("    {:6} {}  {}   {}\n", sc.chain, ll, z, flag)),
+                }
+            }
         }
 
         // gh#608 (ebola F8): the stuck-state screen. A chain recording a
@@ -1251,9 +1322,9 @@ impl Formatter {
             // likelihood surface is the near-unidentified-parameter (flat-ridge)
             // signature.
             s.push_str(&format!("    {}\n", self.warn(&format!(
-                "⚠ chains disagree ({} in a different mode) — is a parameter \
+                "⚠ chains disagree ({} — {} far from the rest) — is a parameter \
                  weakly identified? Inspect its per-chain posterior.",
-                flagged.join(", ")))));
+                flagged.join(", "), means.scored_column))));
         }
         s.push('\n');
         s
@@ -1589,10 +1660,13 @@ fn build_summary_doc(
                 Some(MethodResult::Pgas(_)) | Some(MethodResult::Pmmh(_)) | Some(MethodResult::Nuts(_))
             ) {
                 if let Some(t) = typed.as_mut() {
+                    // Same authority as the text path: the class comes from the
+                    // typed result, never from a column position (gh#667).
+                    let ll_kind = crate::fit::loglik::LoglikType::from(&*t);
                     match apply_selection_to_typed(t, &resolved.stage_dir, sel) {
                         Ok(info) => {
                             if !advised {
-                                chain_selection_advisory(&resolved.stage_dir, &info);
+                                chain_selection_advisory(&resolved.stage_dir, &info, ll_kind);
                                 advised = true;
                             }
                             chain_selection_json = Some(info.to_json());
@@ -2388,6 +2462,7 @@ fn dump_params_only(
 mod tests {
     use super::*;
     use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
+    use crate::fit::loglik::LoglikType;
     use crate::fit::method_result::PosteriorDiagnostics;
 
     fn synthetic_fit_state() -> FitState {
@@ -2601,7 +2676,7 @@ mod tests {
         // table degrades to "unavailable"; the ESS lines under test are unaffected.
         let no_traces = std::path::Path::new("/nonexistent/stage_dir");
         // min-param ESS (145) / wall (11.8 s) = 12.29 ESS/sec — thinning-invariant.
-        let with = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(11.8), 500, 1)), None);
+        let with = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(11.8), 500, 1)), None, LoglikType::CompleteData);
         assert!(
             with.contains("ESS/sec  = 12.29"),
             "must report ESS/sec off the slowest param (145/11.8): {with}"
@@ -2613,14 +2688,14 @@ mod tests {
         );
         // Thinning-invariance: (n_samples 50 × thin 10) is the SAME 500 raw steps,
         // so ESS/iter is identical — the whole point.
-        let thinned = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(5.0), 50, 10)), None);
+        let thinned = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(5.0), 50, 10)), None, LoglikType::CompleteData);
         assert!(
             thinned.contains("ESS/iter = 0.290"),
             "ESS/iter must be invariant to thinning (50×10 == 500 raw): {thinned}"
         );
         // No wall-time (older run) → no ESS/sec line, but ESS/iter still shows
         // (it needs only n_samples×thin, not wall-time).
-        let without = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(None, 500, 1)), None);
+        let without = fmt.bayesian_block("posterior", "pgas", no_traces, BayesianView::Pgas(&mk(None, 500, 1)), None, LoglikType::CompleteData);
         assert!(
             !without.contains("ESS/sec"),
             "no wall-time must omit the ESS/sec line: {without}"
@@ -2664,13 +2739,128 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
 
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
-        let table = fmt.bayesian_chain_loglik_table(&dir, 6);
+        let table = fmt.bayesian_chain_loglik_table(&dir, 6, LoglikType::Marginal);
         assert!(table.contains("per-chain log-likelihood"), "header present:\n{table}");
         assert!(table.contains("← outlier"), "stuck chain must be flagged:\n{table}");
         assert!(table.contains("chains disagree (chain 6"), "nudge must name chain 6:\n{table}");
         // The stuck chain's mean must reflect the post-burn-in draws (≈ -300),
         // not the stripped warm-up (≈ -900).
         assert!(table.contains("-300.00"), "chain 6 mean ≈ -300 (warm-up stripped):\n{table}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#667: a PGAS stage's per-chain table ranks on `obs_ll`
+    /// (`log p(y | X, θ)`), not on the `log_complete_data_ll` target. The
+    /// fixture is built so the two rankings disagree: chain 3 has a hugely
+    /// concentrated latent path (a high complete-data value) with an ordinary
+    /// data fit, chain 6 fits the data ≈450 nats worse with an ordinary
+    /// complete-data value. The table must flag chain 6 and leave chain 3 clean,
+    /// while still SHOWING the complete-data target and its transition term.
+    #[test]
+    fn pgas_chain_table_ranks_on_obs_ll_and_shows_the_split() {
+        let dir = crate::test_support::unique_temp_dir("summary_chain_gh667");
+        std::fs::create_dir_all(&dir).unwrap();
+        // (transition_ll, obs_ll); complete = transition + obs.
+        let chains = [
+            (-2832.6, -952.0),
+            (-2933.0, -952.8),
+            (-800.0, -951.7),
+            (-3100.9, -952.9),
+            (-3172.6, -952.3),
+            (-3000.0, -1400.0),
+        ];
+        for (i, (trans, obs)) in chains.iter().enumerate() {
+            let cd = dir.join(format!("chain_{}", i + 1));
+            std::fs::create_dir_all(&cd).unwrap();
+            let complete = trans + obs;
+            let mut body = String::from(
+                "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n");
+            for s in 0..2 {
+                body.push_str(&format!("{s}\t-9000\t-9100\t-8000\t-1000\n"));
+            }
+            for s in 2..5 {
+                body.push_str(&format!("{s}\t{complete}\t{}\t{trans}\t{obs}\n", complete - 1.0));
+            }
+            std::fs::write(cd.join("trace.tsv"), body).unwrap();
+        }
+        let mut draws = String::from("chain\tdraw\tbeta\n");
+        for c in 0..6 {
+            for d in 0..3 {
+                draws.push_str(&format!("{c}\t{d}\t0.{c}{d}\n"));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 6, LoglikType::CompleteData);
+
+        // The flag lands on the chain that reproduces the data worst…
+        let flagged: Vec<&str> = table
+            .lines()
+            .filter(|l| l.contains("← outlier"))
+            .map(|l| l.trim_start().split_whitespace().next().unwrap_or(""))
+            .collect();
+        assert_eq!(flagged, vec!["6"],
+            "only chain 6 (the bad DATA fit) may be flagged:\n{table}");
+        assert!(table.contains("chains disagree (chain 6"),
+            "the nudge must name chain 6:\n{table}");
+
+        // …and the ranked column is obs_ll, not the complete-data target.
+        assert!(table.contains("-1400.00"),
+            "chain 6's scored value is its obs_ll (-1400.00):\n{table}");
+        assert!(table.contains("-952.00"),
+            "chain 1's scored value is its obs_ll (-952.00):\n{table}");
+
+        // The complete-data target and its latent-path term stay VISIBLE — they
+        // are the sampler's own objective, just not the ranking key.
+        assert!(table.contains("-4400.00"),
+            "chain 6's complete-data target must still be shown:\n{table}");
+        assert!(table.contains("-1751.70"),
+            "chain 3's complete-data target must still be shown:\n{table}");
+        assert!(table.contains("-800.00"),
+            "chain 3's transition_ll must still be shown:\n{table}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#667 must not cost gh#608/gh#635 their reach. A PGAS stage whose
+    /// traces predate the `obs_ll` column cannot be compared chain-to-chain —
+    /// the table says so by name rather than falling back to the position-1
+    /// column — but the degeneracy screens read `log_posterior` and
+    /// `draws.tsv`, so a −inf chain must still be named.
+    #[test]
+    fn missing_obs_ll_still_runs_the_degeneracy_screen() {
+        let dir = crate::test_support::unique_temp_dir("summary_chain_no_obs");
+        std::fs::create_dir_all(&dir).unwrap();
+        for c in 1..=3 {
+            let cd = dir.join(format!("chain_{c}"));
+            std::fs::create_dir_all(&cd).unwrap();
+            // No obs_ll / transition_ll columns at all. Chain 3 is degenerate.
+            let rows = if c == 3 {
+                "0\t-77.0\t-inf\n1\t-77.0\t-inf\n"
+            } else {
+                "0\t-77.0\t-79.0\n1\t-77.0\t-79.0\n"
+            };
+            std::fs::write(cd.join("trace.tsv"),
+                format!("sweep\tlog_complete_data_ll\tlog_posterior\n{rows}")).unwrap();
+        }
+        let mut draws = String::from("chain\tdraw\tbeta\n");
+        for c in 0..3 {
+            for d in 0..2 {
+                draws.push_str(&format!("{c}\t{d}\t0.{c}{d}\n"));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.bayesian_chain_loglik_table(&dir, 3, LoglikType::CompleteData);
+        assert!(table.contains("no `obs_ll` column"),
+            "the missing comparison column is named, not silently substituted:\n{table}");
+        assert!(!table.contains("← outlier"),
+            "nothing may be ranked without the comparison column:\n{table}");
+        assert!(table.contains("DEGENERATE") && table.contains("chain 3"),
+            "the -inf screen still names chain 3:\n{table}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2704,7 +2894,7 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
 
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
-        let table = fmt.bayesian_chain_loglik_table(&dir, 3);
+        let table = fmt.bayesian_chain_loglik_table(&dir, 3, LoglikType::Marginal);
         assert!(table.contains("-inf"),
             "the stuck chain's mean renders -inf, not the missing-data dash:\n{table}");
         assert!(table.contains("DEGENERATE"),
@@ -2733,7 +2923,7 @@ mod tests {
                 .unwrap();
         }
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
-        let table = fmt.bayesian_chain_loglik_table(&dir, 3);
+        let table = fmt.bayesian_chain_loglik_table(&dir, 3, LoglikType::Marginal);
         assert!(!table.contains("DEGENERATE"),
             "healthy chains must not be flagged:\n{table}");
 
@@ -2764,7 +2954,7 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
 
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
-        let table = fmt.bayesian_chain_loglik_table(&dir, 3);
+        let table = fmt.bayesian_chain_loglik_table(&dir, 3, LoglikType::Marginal);
         assert!(table.contains("point-mass"),
             "the frozen chain gets the loud flag:\n{table}");
         assert!(table.contains("chain 3") && table.contains("across 3 retained"),
@@ -2806,7 +2996,7 @@ mod tests {
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
 
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
-        let table = fmt.bayesian_chain_loglik_table(&dir, 6);
+        let table = fmt.bayesian_chain_loglik_table(&dir, 6, LoglikType::Marginal);
         assert!(table.contains("per-chain log-likelihood"), "header present:\n{table}");
         assert!(!table.contains("← outlier"), "well-mixed must flag nothing:\n{table}");
         assert!(!table.contains("chains disagree"), "no nudge when well-mixed:\n{table}");
@@ -2828,7 +3018,7 @@ mod tests {
         let dir = crate::test_support::unique_temp_dir("summary_chain_diag_none");
         std::fs::create_dir_all(&dir).unwrap();
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
-        let table = fmt.bayesian_chain_loglik_table(&dir, 4);
+        let table = fmt.bayesian_chain_loglik_table(&dir, 4, LoglikType::Marginal);
         assert!(table.contains("per-chain traces unavailable"),
             "must say traces are unavailable, not skip:\n{table}");
         std::fs::remove_dir_all(&dir).ok();

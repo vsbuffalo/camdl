@@ -26,6 +26,22 @@ use serde::{Deserialize, Serialize};
 use crate::fit::method_result::MethodResult;
 use crate::run_meta::FitAlgorithm;
 
+/// The marginal samplers' (`pmmh` / `mh` / `nuts`) per-iteration
+/// `log p(y | θ)` column in `chain_N/trace.tsv`.
+pub const TRACE_COL_LOG_LIKELIHOOD: &str = "log_likelihood";
+
+/// PGAS's per-sweep `log p(y, X | θ)` column — its Gibbs target, evaluated
+/// at the sweep's conditioned path `X`.
+pub const TRACE_COL_COMPLETE_DATA_LL: &str = "log_complete_data_ll";
+
+/// PGAS's latent-path term `log p(X | θ)`: the process density of the
+/// conditioned path. A *density at one path*, not an integral over paths.
+pub const TRACE_COL_TRANSITION_LL: &str = "transition_ll";
+
+/// PGAS's observation term `log p(y | X, θ)`: how well the sweep's
+/// conditioned path reproduces the observed data.
+pub const TRACE_COL_OBS_LL: &str = "obs_ll";
+
 /// The comparison class of a log-likelihood value. Serializes to the same
 /// `snake_case` tags the codebase used as free strings before gh#280
 /// (`"if2"`, `"marginal"`, `"ode_marginal"`, `"complete_data"`), so legacy
@@ -71,6 +87,40 @@ impl LoglikType {
             self,
             LoglikType::If2 | LoglikType::Marginal | LoglikType::OdeMarginal
         )
+    }
+
+    /// The `chain_N/trace.tsv` column whose per-chain mean may be compared
+    /// ACROSS chains for a sampler of this class — the input the per-chain
+    /// outlier score is entitled to (gh#667).
+    ///
+    /// - The three marginal kinds stream `log p(y | θ)` in
+    ///   [`TRACE_COL_LOG_LIKELIHOOD`]. It is a function of θ alone, so two
+    ///   chains' values differ only through θ: directly comparable.
+    /// - `CompleteData` (PGAS) streams `log p(y, X | θ)` in
+    ///   [`TRACE_COL_COMPLETE_DATA_LL`], which is **not** comparable: every
+    ///   chain conditions on its own sampled path `X`, and the latent-path
+    ///   term `log p(X | θ)` is a density at one path, not the marginal
+    ///   `∫ p(y|X) p(X|θ) dX`. A θ whose path distribution is more
+    ///   concentrated raises it for every typical path with no better fit to
+    ///   the data, so ranking on it ranks chains by the entropy of their path
+    ///   distribution. On the 60,000-sweep fit that motivated gh#667 the
+    ///   between-chain spread was 522 nats in the path term and 9 nats in the
+    ///   observation term. PGAS is therefore scored on [`TRACE_COL_OBS_LL`],
+    ///   `log p(y | X, θ)` — the term that answers "does this chain reproduce
+    ///   the data".
+    ///
+    /// `obs_ll` is **not** a marginal, so this is deliberately not derived
+    /// from [`is_marginal`](Self::is_marginal): it is the part of the
+    /// complete-data target the data enters, which is what makes it
+    /// comparable chain-to-chain. The match is exhaustive on purpose — a new
+    /// variant must state its column rather than inherit one.
+    pub fn chain_agreement_column(self) -> &'static str {
+        match self {
+            LoglikType::If2 | LoglikType::Marginal | LoglikType::OdeMarginal => {
+                TRACE_COL_LOG_LIKELIHOOD
+            }
+            LoglikType::CompleteData => TRACE_COL_OBS_LL,
+        }
     }
 
     /// Progress-feed metric prefix: `ll(complete)=` for PGAS's complete-data
@@ -169,6 +219,27 @@ mod tests {
         assert!(LoglikType::Marginal.is_marginal());
         assert!(LoglikType::OdeMarginal.is_marginal());
         assert!(!LoglikType::CompleteData.is_marginal());
+    }
+
+    /// gh#667: the per-chain comparison column is a property of the CLASS, and
+    /// the complete-data class does not get to nominate its own target. PGAS
+    /// scores on `obs_ll`; the marginal kinds score on `log_likelihood`.
+    #[test]
+    fn chain_agreement_column_never_ranks_on_the_complete_data_target() {
+        assert_eq!(LoglikType::CompleteData.chain_agreement_column(), "obs_ll");
+        assert_ne!(
+            LoglikType::CompleteData.chain_agreement_column(),
+            TRACE_COL_COMPLETE_DATA_LL,
+            "log p(y, X | θ) is not comparable across chains — every chain \
+             conditions on its own X (gh#667)"
+        );
+        for kind in [LoglikType::If2, LoglikType::Marginal, LoglikType::OdeMarginal] {
+            assert_eq!(
+                kind.chain_agreement_column(),
+                "log_likelihood",
+                "{kind}'s trace column 1 already IS log p(y | θ)"
+            );
+        }
     }
 
     #[test]

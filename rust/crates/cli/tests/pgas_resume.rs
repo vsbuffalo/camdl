@@ -224,6 +224,13 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
 /// along the conditioned path), not a marginal/PF likelihood. The header must
 /// name it as such (`log_complete_data_ll`), never a bare `log_likelihood` a
 /// reader would mistake for a `camdl pfilter` marginal loglik.
+///
+/// gh#667: the same header must carry the `transition_ll` / `obs_ll`
+/// decomposition. `fit summary` compares chains on `obs_ll` — because
+/// `log_complete_data_ll` is evaluated at each chain's OWN latent path and is
+/// not comparable across chains — so these two are not optional diagnostics
+/// any more; a header without `obs_ll` costs the per-chain outlier table its
+/// input.
 #[test]
 fn pgas_trace_loglik_column_names_complete_data() {
     let bin = camdl_bin();
@@ -247,6 +254,23 @@ fn pgas_trace_loglik_column_names_complete_data() {
         "PGAS trace must name its complete-data loglik column; header was: {header}");
     assert!(!cols.contains(&"log_likelihood"),
         "PGAS trace must NOT use a bare `log_likelihood` (mistaken for the marginal); header was: {header}");
+    assert!(cols.contains(&"obs_ll"),
+        "gh#667: `fit summary` compares PGAS chains on `obs_ll` = log p(y | X, θ); \
+         header was: {header}");
+    assert!(cols.contains(&"transition_ll"),
+        "gh#667: the latent-path term is what makes the complete-data spread \
+         readable as an entropy effect; header was: {header}");
+
+    // …and a data row carries finite values for both, so the columns are not
+    // merely declared. The first sweep suffices — a PGAS sweep always scores
+    // its conditioned path against the data.
+    let hdr_idx = |name: &str| cols.iter().position(|c| *c == name).unwrap();
+    let row: Vec<&str> = text.lines().nth(1).expect("at least one trace row").split('\t').collect();
+    for name in ["obs_ll", "transition_ll"] {
+        let v: f64 = row[hdr_idx(name)].parse()
+            .unwrap_or_else(|e| panic!("{name} must parse as f64: {e}; row was {row:?}"));
+        assert!(v.is_finite() && v < 0.0, "{name} must be a finite log-density, got {v}");
+    }
 }
 
 /// gh#294: the PGAS per-sweep trace surfaces the standard cold-chain NUTS

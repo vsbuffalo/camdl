@@ -10,10 +10,42 @@
 //! committed trace files; nothing flows into a `run_id` / CAS key. Adding a
 //! diagnostic does not re-key any fit.
 //!
-//! One shared seam. The gate message (`gating::format_decibans_spread_verdict`)
-//! and the summary table (`fit_summary`) both name outliers via the same
+//! One shared seam, and one obligation on everyone who feeds it. The scout
+//! gate message (`gating::format_decibans_spread_verdict`) and the summary
+//! table (`fit_summary`) both name outliers via the same
 //! [`chain_loglik_mod_zscores`] / [`outlier_labels`], so "what counts as an
-//! outlier" is defined in exactly one place.
+//! outlier" is defined in exactly one place. That function scores whatever
+//! numbers it is handed: **the caller owns the claim that they are comparable
+//! across chains.** The scout gate hands it IF2 clean-eval marginals
+//! `log p(y | θ)`; this module's reader hands it whatever
+//! [`LoglikType::chain_agreement_column`] nominates. Anything else — most of
+//! all a per-chain quantity evaluated at that chain's own latent path — is not
+//! an input to this statistic.
+//!
+//! ## Which column, and why not by position (gh#667)
+//!
+//! Every Bayesian sampler streams its trace through
+//! [`super::trace_writer::TraceWriter`], whose fixed layout is
+//! `<index> <loglik> log_posterior …`. That made trace column index 1 look
+//! like a safe structural invariant to key on, and this module keyed on it.
+//! It is not safe: the *name* in that slot is `log_likelihood` for pmmh / mh /
+//! nuts — a marginal `log p(y | θ)`, comparable — but `log_complete_data_ll`
+//! for PGAS, the joint `log p(y, X | θ)` over the data **and the sampled
+//! latent path**, which is not. Two different quantities in one slot, and the
+//! substitution was invisible precisely because nothing named the column.
+//!
+//! Scoring chains on the PGAS value ranks them mostly by the latent-path term
+//! `log p(X | θ)`, a density at one sampled path: a θ whose path distribution
+//! is more concentrated scores higher on every typical path without fitting
+//! the data any better. On the 60,000-sweep fit behind gh#667 the between-
+//! chain spread was 522 nats in the path term and 9 nats in the observation
+//! term — the flag would have named chains that were sampling correctly.
+//!
+//! So the reader keys on the column NAME, chosen per sampler by
+//! [`LoglikType::chain_agreement_column`]: `obs_ll` (`log p(y | X, θ)`) for
+//! PGAS, `log_likelihood` for the marginal samplers. PGAS's own target and its
+//! transition term are still read and displayed — see
+//! [`CompleteDataMeans`] — they are just never ranked on.
 //!
 //! ## The statistic: robust modified z-score (Iglewicz & Hoaglin 1993)
 //!
@@ -48,6 +80,13 @@
 //! chain is visible rather than silently reading as "clean."
 
 use std::path::Path;
+
+use super::loglik::{LoglikType, TRACE_COL_COMPLETE_DATA_LL, TRACE_COL_TRANSITION_LL};
+
+/// The `TraceWriter` layout's third column, present in every sampler's trace.
+/// Its presence is the structural check that a file is a trace at all, and it
+/// is itself read by the degeneracy screen (gh#608).
+const TRACE_COL_LOG_POSTERIOR: &str = "log_posterior";
 
 /// Flag a chain when its **modified z-score** exceeds this in magnitude. 3.5 is
 /// the Iglewicz–Hoaglin (1993) recommended cutoff: with the 0.6745 rescaling,
@@ -168,22 +207,56 @@ pub fn outlier_labels(scores: &[ChainZScore]) -> Vec<String> {
     flagged.iter().map(|s| format!("chain {}", s.chain)).collect()
 }
 
+/// What the per-chain table shows, and what it is allowed to rank on.
+///
+/// [`scored`](Self::scored) is the ONLY field the outlier statistic sees; the
+/// rest is display. Splitting them in the type is the point — it is what stops
+/// the sampler's own objective from being mistaken for a cross-chain
+/// comparison again (gh#667).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainLoglikMeans {
+    /// The trace column [`scored`](Self::scored) was read from, for labelling
+    /// the table and for saying which column is missing when it is.
+    pub scored_column: &'static str,
+    /// Per-chain mean of `scored_column` over the retained draws, in chain
+    /// order (index 0 = chain 1). `NaN` when a chain has no readable rows.
+    pub scored: Vec<f64>,
+    /// `true` when no discovered trace carries `scored_column` at all — a
+    /// stage whose chains cannot be compared, which the caller must SAY rather
+    /// than render as a table of dashes.
+    pub scored_column_absent: bool,
+    /// PGAS only: the sampler's own target and its latent-path term, shown
+    /// beside the scored column and never ranked on. `None` for the marginal
+    /// samplers, where the scored column already IS the target.
+    pub complete_data: Option<CompleteDataMeans>,
+}
+
+/// PGAS's complete-data target and its latent-path term, per chain — the two
+/// quantities gh#667 removed from the ranking but deliberately kept visible.
+/// `log_complete_data_ll` is the sampler's own Gibbs target, so a chain that
+/// has fallen off the joint support shows up here; `transition_ll` is what
+/// makes the diagnosis obvious, because a wide spread there next to a tight
+/// spread in `obs_ll` is the entropy effect rather than a fit difference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompleteDataMeans {
+    /// Per-chain mean `log p(y, X | θ)` (`log_complete_data_ll`).
+    pub complete: Vec<f64>,
+    /// Per-chain mean `log p(X | θ)` (`transition_ll`).
+    pub transition: Vec<f64>,
+}
+
 /// Read every `chain_*/trace.tsv` under `stage_dir` and return the per-chain
-/// mean post-burn-in log-likelihood, ordered by ascending chain number.
+/// post-burn-in means the summary table needs, ordered by ascending chain
+/// number.
+///
+/// `kind` is the stage's log-likelihood class, which decides *by name* which
+/// column the chains may be compared on — see
+/// [`LoglikType::chain_agreement_column`] and this module's header for why a
+/// column *position* is the wrong key (gh#667).
 ///
 /// Returns `None` when no `chain_*/trace.tsv` files exist (the sampler wrote no
 /// per-chain trace — e.g. an optimizer-only stage) so the caller can say so
 /// rather than silently show an empty table.
-///
-/// ## Column
-///
-/// Every Bayesian sampler streams its trace through
-/// [`super::trace_writer::TraceWriter`], whose fixed layout is
-/// `<index>\t<loglik>\t log_posterior \t …`. So the log-likelihood is always
-/// column index 1, whatever the sampler names it (`log_likelihood` for
-/// PMMH/mh/nuts, `log_complete_data_ll` for PGAS). We key on that structural
-/// invariant (guarded by checking column 2 is `log_posterior`) rather than a
-/// per-sampler column name.
 ///
 /// ## Post-burn-in selection
 ///
@@ -206,7 +279,7 @@ pub fn outlier_labels(scores: &[ChainZScore]) -> Vec<String> {
 /// fall back to the whole trace: without the posterior manifest we cannot strip
 /// warm-up, so the mean is noisier but still honest. This never contaminates a
 /// well-formed fit.
-pub fn read_chain_mean_logliks(stage_dir: &Path) -> Option<Vec<f64>> {
+pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
     let mut chain_dirs = discover_chain_dirs(stage_dir);
     if chain_dirs.is_empty() {
         return None;
@@ -218,23 +291,75 @@ pub fn read_chain_mean_logliks(stage_dir: &Path) -> Option<Vec<f64>> {
     // pairs with the i-th chain dir once both are sorted ascending.
     let draw_counts = read_draw_counts(&stage_dir.join("draws.tsv"));
 
-    let mut out = Vec::with_capacity(chain_dirs.len());
+    let scored_column = kind.chain_agreement_column();
+    // The complete-data split is PGAS's alone: the marginal samplers have no
+    // latent path to separate out, and their scored column IS their target.
+    // Exhaustive, not `!is_marginal()` — a future non-marginal class (an
+    // observation-conditional, say) would not thereby acquire PGAS's columns.
+    let wants_split = match kind {
+        LoglikType::CompleteData => true,
+        LoglikType::If2 | LoglikType::Marginal | LoglikType::OdeMarginal => false,
+    };
+    let names: Vec<&str> = if wants_split {
+        vec![scored_column, TRACE_COL_COMPLETE_DATA_LL, TRACE_COL_TRANSITION_LL]
+    } else {
+        vec![scored_column]
+    };
+
+    let mut scored = Vec::with_capacity(chain_dirs.len());
+    let mut complete = Vec::with_capacity(chain_dirs.len());
+    let mut transition = Vec::with_capacity(chain_dirs.len());
+    // "Absent" means a readable trace exists and none of them names the scored
+    // column — distinct from "no readable trace at all", which surfaces as NaN
+    // means. Starts `false` so an unreadable stage never claims the column is
+    // missing.
+    let mut any_header_read = false;
+    let mut any_scored_column = false;
+
     for (i, (_, dir)) in chain_dirs.iter().enumerate() {
-        let all = read_trace_logliks(&dir.join("trace.tsv"));
-        let selected: &[f64] = match draw_counts.get(i).copied() {
-            Some(k) if k > 0 && k <= all.len() => &all[all.len() - k..],
-            // No manifest for this chain (or a count that doesn't fit) — use the
-            // whole trace rather than drop the chain.
-            _ => &all,
+        let cols = read_trace_cols(&dir.join("trace.tsv"), &names);
+        if let Some(cols) = cols.as_ref() {
+            any_header_read = true;
+            if cols[0].is_some() {
+                any_scored_column = true;
+            }
+        }
+        let k = draw_counts.get(i).copied();
+        let mean_of = |slot: usize| -> f64 {
+            let Some(Some(all)) = cols.as_ref().map(|c| &c[slot]) else {
+                return f64::NAN;
+            };
+            retained_mean(all, k)
         };
-        let mean = if selected.is_empty() {
-            f64::NAN
-        } else {
-            selected.iter().sum::<f64>() / selected.len() as f64
-        };
-        out.push(mean);
+        scored.push(mean_of(0));
+        if wants_split {
+            complete.push(mean_of(1));
+            transition.push(mean_of(2));
+        }
     }
-    Some(out)
+
+    Some(ChainLoglikMeans {
+        scored_column,
+        scored,
+        scored_column_absent: any_header_read && !any_scored_column,
+        complete_data: wants_split.then_some(CompleteDataMeans { complete, transition }),
+    })
+}
+
+/// Mean of the retained tail of one chain's column: the last `k` rows when
+/// `draws.tsv` gave a count that fits, else the whole trace (no manifest means
+/// we cannot strip warm-up, so the mean is noisier but still honest). `NaN`
+/// for an empty selection — never silently 0.
+fn retained_mean(all: &[f64], k: Option<usize>) -> f64 {
+    let selected: &[f64] = match k {
+        Some(k) if k > 0 && k <= all.len() => &all[all.len() - k..],
+        _ => all,
+    };
+    if selected.is_empty() {
+        f64::NAN
+    } else {
+        selected.iter().sum::<f64>() / selected.len() as f64
+    }
 }
 
 /// Collect `(chain_number, dir)` for every `chain_<N>` subdirectory of
@@ -264,42 +389,57 @@ fn discover_chain_dirs(stage_dir: &Path) -> Vec<(usize, std::path::PathBuf)> {
     dirs
 }
 
-/// Read the log-likelihood column (structural column index 1) from a
-/// `trace.tsv`. Empty when the file is missing/unreadable or the header doesn't
-/// look like a `TraceWriter` trace (column 2 must be `log_posterior`).
-fn read_trace_logliks(trace_path: &Path) -> Vec<f64> {
-    // Column 1 is the loglik regardless of the sampler's name for it.
-    read_trace_col(trace_path, 1)
-}
-
-/// Column `col` of a per-chain trace, parsed as f64 rows. Shares the
-/// structural guard (`<index> <loglik> log_posterior …`) with
-/// [`read_trace_logliks`]; column 2 is the CURRENT STATE's log-posterior —
-/// the column the degeneracy screen reads (gh#608).
-fn read_trace_col(trace_path: &Path, col: usize) -> Vec<f64> {
-    let Ok(contents) = std::fs::read_to_string(trace_path) else {
-        return Vec::new();
-    };
+/// Read the NAMED columns of one per-chain trace, row-aligned, as f64 rows.
+///
+/// `None` when the file is missing/unreadable or does not look like a
+/// [`super::trace_writer::TraceWriter`] trace (its header must carry
+/// `log_posterior`); that guard is what separates "not a trace" from "a trace
+/// without this column". Otherwise one slot per requested name, in order, with
+/// `None` for a name the header does not have — so a caller can tell a missing
+/// column from an empty one.
+///
+/// A row is skipped for EVERY column when any *present* requested field is
+/// short or unparseable, which keeps the returned vectors aligned with one
+/// another (a caller reading `obs_ll` beside `transition_ll` compares the same
+/// sweeps).
+fn read_trace_cols(trace_path: &Path, names: &[&str]) -> Option<Vec<Option<Vec<f64>>>> {
+    let contents = std::fs::read_to_string(trace_path).ok()?;
     let mut lines = contents.lines();
-    let Some(header) = lines.next() else {
-        return Vec::new();
-    };
+    let header = lines.next()?;
     let cols: Vec<&str> = header.split('\t').collect();
-    // Guard the structural invariant: <index> <loglik> log_posterior …
-    if cols.len() < 3 || cols[2] != "log_posterior" {
-        return Vec::new();
+    if !cols.iter().any(|c| *c == TRACE_COL_LOG_POSTERIOR) {
+        return None;
     }
-    let mut out = Vec::new();
+    let idx: Vec<Option<usize>> = names
+        .iter()
+        .map(|n| cols.iter().position(|c| c == n))
+        .collect();
+    let mut out: Vec<Option<Vec<f64>>> =
+        idx.iter().map(|i| i.map(|_| Vec::new())).collect();
+    let mut row: Vec<f64> = Vec::with_capacity(names.len());
     for line in lines {
         if line.trim().is_empty() {
             continue;
         }
-        let mut fields = line.split('\t');
-        if let Some(v) = fields.nth(col).and_then(|s| s.parse::<f64>().ok()) {
-            out.push(v);
+        let fields: Vec<&str> = line.split('\t').collect();
+        row.clear();
+        let complete = idx.iter().flatten().all(|&c| {
+            match fields.get(c).and_then(|s| s.parse::<f64>().ok()) {
+                Some(v) => {
+                    row.push(v);
+                    true
+                }
+                None => false,
+            }
+        });
+        if !complete {
+            continue;
+        }
+        for (slot, v) in out.iter_mut().filter_map(|s| s.as_mut()).zip(row.iter()) {
+            slot.push(*v);
         }
     }
-    out
+    Some(out)
 }
 
 /// One chain's stuck-state screen (gh#608, ebola F8): over the RETAINED
@@ -383,10 +523,14 @@ pub fn read_chain_neginf(stage_dir: &Path) -> Option<Vec<ChainNegInf>> {
     let draw_counts = read_draw_counts(&stage_dir.join("draws.tsv"));
     let mut out = Vec::with_capacity(chain_dirs.len());
     for (i, (_, dir)) in chain_dirs.iter().enumerate() {
-        let all = read_trace_col(&dir.join("trace.tsv"), 2);
+        let cols = read_trace_cols(&dir.join("trace.tsv"), &[TRACE_COL_LOG_POSTERIOR]);
+        let all: &[f64] = match cols.as_ref().and_then(|c| c[0].as_ref()) {
+            Some(v) => v,
+            None => &[],
+        };
         let selected: &[f64] = match draw_counts.get(i).copied() {
             Some(k) if k > 0 && k <= all.len() => &all[all.len() - k..],
-            _ => &all,
+            _ => all,
         };
         out.push(ChainNegInf {
             chain: i + 1,
@@ -556,7 +700,13 @@ mod tests {
         }
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
 
-        let means = read_chain_mean_logliks(&dir).expect("chain traces present");
+        // A marginal sampler: trace column 1 is `log_likelihood` = log p(y | θ),
+        // already comparable across chains, so gh#667 leaves this path alone.
+        let means = read_chain_mean_logliks(&dir, LoglikType::Marginal)
+            .expect("chain traces present");
+        assert_eq!(means.scored_column, "log_likelihood");
+        assert!(means.complete_data.is_none(), "no latent-path split for a marginal sampler");
+        let means = means.scored;
         assert_eq!(means.len(), 6);
         // Warm-up (-900/-880) excluded → good chains ≈ -50, not dragged to -890.
         for (i, m) in means.iter().take(5).enumerate() {
@@ -576,15 +726,222 @@ mod tests {
     fn reader_returns_none_without_chain_dirs() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_empty");
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(read_chain_mean_logliks(&dir).is_none(), "no chain_* dirs → None");
+        assert!(read_chain_mean_logliks(&dir, LoglikType::Marginal).is_none(),
+            "no chain_* dirs → None");
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A six-chain PGAS stage whose complete-data ranking and observation-only
+    /// ranking DISAGREE, so the fixture discriminates between them.
+    ///
+    /// - chain 3 has a hugely concentrated latent path (`transition_ll` −800 vs
+    ///   ≈ −3000 elsewhere) and a perfectly ordinary data fit.
+    /// - chain 6 has an ordinary latent path and reproduces the data ≈450 nats
+    ///   worse than every other chain.
+    ///
+    /// Ranking on `log_complete_data_ll` flags chain 3 — a chain that fits the
+    /// data as well as any other. Ranking on `obs_ll` flags chain 6.
+    fn write_disagreeing_pgas_stage(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        // (transition_ll, obs_ll) per chain; complete = transition + obs.
+        let chains = [
+            (-2832.6, -952.0),
+            (-2933.0, -952.8),
+            (-800.0, -951.7),    // concentrated path, ordinary data fit
+            (-3100.9, -952.9),
+            (-3172.6, -952.3),
+            (-3000.0, -1400.0),  // ordinary path, BAD data fit
+        ];
+        for (i, (trans, obs)) in chains.iter().enumerate() {
+            let cd = dir.join(format!("chain_{}", i + 1));
+            std::fs::create_dir_all(&cd).unwrap();
+            let complete = trans + obs;
+            let mut body = String::from(
+                "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n",
+            );
+            // Two warm-up rows the last-K_c rule must strip (draws.tsv keeps 3).
+            for s in 0..2 {
+                body.push_str(&format!("{s}\t-9000\t-9100\t-8000\t-1000\n"));
+            }
+            for s in 2..5 {
+                body.push_str(&format!(
+                    "{s}\t{complete}\t{}\t{trans}\t{obs}\n",
+                    complete - 1.0
+                ));
+            }
+            std::fs::write(cd.join("trace.tsv"), body).unwrap();
+        }
+        let mut draws = String::from("chain\tdraw\tbeta\n");
+        for c in 0..6 {
+            for d in 0..3 {
+                draws.push_str(&format!("{c}\t{d}\t0.{}{}\n", c, d));
+            }
+        }
+        std::fs::write(dir.join("draws.tsv"), draws).unwrap();
+    }
+
+    /// gh#667: a PGAS chain is scored on `obs_ll` = `log p(y | X, θ)` — "does
+    /// this chain reproduce the data" — NOT on `log_complete_data_ll`, whose
+    /// latent-path term is a density at one sampled path and rewards a
+    /// concentrated path distribution rather than a better fit.
     #[test]
-    fn reader_reads_pgas_column_name() {
-        // PGAS names its loglik column `log_complete_data_ll`; the reader keys on
-        // column position (1), not the name, so it must still read it.
+    fn pgas_chains_are_scored_on_obs_ll_not_the_complete_data_target() {
+        let dir = crate::test_support::unique_temp_dir("chain_diag_gh667");
+        write_disagreeing_pgas_stage(&dir);
+
+        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData)
+            .expect("six chain traces");
+        assert_eq!(means.scored_column, "obs_ll",
+            "PGAS chains are compared on log p(y | X, θ)");
+        assert!(!means.scored_column_absent);
+        assert_eq!(means.scored.len(), 6);
+
+        // The scored quantity IS obs_ll (warm-up stripped: −1000 never enters).
+        assert!((means.scored[5] - (-1400.0)).abs() < 1e-6,
+            "chain 6 must be scored on its obs_ll (−1400), got {}", means.scored[5]);
+        assert!((means.scored[2] - (-951.7)).abs() < 1e-6,
+            "chain 3 must be scored on its obs_ll (−951.7), got {}", means.scored[2]);
+
+        // …and the flag follows it: the chain that fits the DATA worst.
+        let scores = chain_loglik_mod_zscores(&means.scored);
+        assert_eq!(outlier_labels(&scores), vec!["chain 6"],
+            "the badly-fitting chain is the outlier: {:?}",
+            scores.iter().map(|s| s.mod_z).collect::<Vec<_>>());
+        assert!(!scores[2].is_outlier,
+            "chain 3 fits the data like every other chain and must NOT flag \
+             (mod_z = {})", scores[2].mod_z);
+
+        // The fixture genuinely discriminates: the complete-data column the old
+        // reader ranked on flags the OTHER chain, and only it. It is still READ
+        // (kept visible in the table) — it is just no longer the ranking key.
+        let split = means.complete_data.as_ref().expect("PGAS carries the split");
+        assert!((split.complete[2] - (-1751.7)).abs() < 1e-6,
+            "chain 3's complete-data target is still read: {}", split.complete[2]);
+        assert!((split.transition[2] - (-800.0)).abs() < 1e-6,
+            "chain 3's transition term is still read: {}", split.transition[2]);
+        let cd_scores = chain_loglik_mod_zscores(&split.complete);
+        assert_eq!(outlier_labels(&cd_scores), vec!["chain 3"],
+            "precondition: ranking on log_complete_data_ll flags the \
+             concentrated-path chain, not the badly-fitting one: {:?}",
+            cd_scores.iter().map(|s| s.mod_z).collect::<Vec<_>>());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#667: the split shown beside the scored column is the real
+    /// decomposition — 522 nats of between-chain spread in `transition_ll`
+    /// against 9 in `obs_ll` is what makes "this is an entropy effect, not a
+    /// fit difference" legible. Uses the six chains of the real 60,000-sweep
+    /// fit in the issue, whose complete-data spread is genuinely dominated by
+    /// the latent-path term.
+    #[test]
+    fn transition_and_obs_spreads_are_read_separately() {
+        let dir = crate::test_support::unique_temp_dir("chain_diag_gh667_split");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The issue's table: (transition_ll, obs_ll) for the 6 finite chains.
+        let chains = [
+            (-2832.6, -952.0), (-2933.0, -952.8), (-2972.0, -951.7),
+            (-3100.9, -958.0), (-3172.6, -952.9), (-3354.4, -960.4),
+        ];
+        for (i, (trans, obs)) in chains.iter().enumerate() {
+            let cd = dir.join(format!("chain_{}", i + 1));
+            std::fs::create_dir_all(&cd).unwrap();
+            let complete = trans + obs;
+            std::fs::write(cd.join("trace.tsv"), format!(
+                "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n\
+                 0\t{complete}\t{}\t{trans}\t{obs}\n", complete - 1.0)).unwrap();
+        }
+        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("traces");
+        let split = means.complete_data.as_ref().expect("PGAS split");
+        let range = |v: &[f64]| {
+            v.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - v.iter().cloned().fold(f64::INFINITY, f64::min)
+        };
+        assert!((range(&split.transition) - 521.8).abs() < 0.1,
+            "latent-path spread ≈ 522 nats, got {}", range(&split.transition));
+        assert!((range(&means.scored) - 8.7).abs() < 0.1,
+            "observation spread ≈ 9 nats, got {}", range(&means.scored));
+
+        // The two columns rank the chains differently on the REAL fit too, not
+        // only on a constructed cohort: chain 6 is 8.7 nats below best on data
+        // fit and 522 below best on the latent path, and only the observation
+        // column names it.
+        let obs_flagged = outlier_labels(&chain_loglik_mod_zscores(&means.scored));
+        let cd_flagged = outlier_labels(&chain_loglik_mod_zscores(&split.complete));
+        assert_eq!(obs_flagged, vec!["chain 6"], "obs_ll names the worst DATA fit");
+        assert!(cd_flagged.is_empty(),
+            "the complete-data column, whose spread is 60× larger, names NOBODY \
+             — its own scale swamps the differences it would flag: {cd_flagged:?}");
+        // NOTE (gh#664): that obs_ll flag fires at |mod-z| = 5.09 on a spread of
+        // 8.7 nats, because the modified z-score is scale-free — it has no
+        // notion of how many nats matter. gh#667 fixes WHICH quantity is
+        // scored; making the threshold mean something is gh#664, and this
+        // assertion pins the pre-gh#664 behaviour so that change shows up here.
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Negative control for gh#667: when the two rankings AGREE — one chain is
+    /// off on the latent path AND reproduces the data far worse — the flag
+    /// still lands on it. Narrowing the scored quantity must not cost the
+    /// diagnostic the cases it already caught.
+    #[test]
+    fn a_chain_bad_on_both_terms_is_still_flagged() {
+        let dir = crate::test_support::unique_temp_dir("chain_diag_gh667_agree");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Five chains agree; chain 6 is worse on BOTH terms.
+        let chains = [
+            (-2900.0, -952.0), (-2910.0, -952.8), (-2890.0, -951.7),
+            (-2905.0, -952.9), (-2895.0, -952.3), (-3900.0, -1400.0),
+        ];
+        for (i, (trans, obs)) in chains.iter().enumerate() {
+            let cd = dir.join(format!("chain_{}", i + 1));
+            std::fs::create_dir_all(&cd).unwrap();
+            let complete = trans + obs;
+            std::fs::write(cd.join("trace.tsv"), format!(
+                "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n\
+                 0\t{complete}\t{}\t{trans}\t{obs}\n", complete - 1.0)).unwrap();
+        }
+        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("traces");
+        let split = means.complete_data.as_ref().expect("PGAS split");
+        // Precondition: this cohort is one both columns agree on…
+        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&split.complete)), vec!["chain 6"]);
+        // …and the scored column still names it.
+        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&means.scored)), vec!["chain 6"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#667: the reader keys on the column NAME. A PGAS trace whose position-1
+    /// column is `log_complete_data_ll` must be read on `obs_ll` — the position
+    /// is not consulted, so the two quantities cannot be substituted for each
+    /// other. The fixture makes them numerically distinguishable on purpose.
+    #[test]
+    fn reader_keys_on_the_name_so_position_1_cannot_stand_in() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_pgas");
+        let cd = dir.join("chain_1");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(
+            cd.join("trace.tsv"),
+            "sweep\tlog_complete_data_ll\tlog_posterior\ttransition_ll\tobs_ll\n\
+             0\t-77.0\t-79.0\t-55.0\t-22.0\n1\t-77.0\t-79.0\t-55.0\t-22.0\n",
+        )
+        .unwrap();
+        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("one chain");
+        assert!((means.scored[0] - (-22.0)).abs() < 1e-9,
+            "must score obs_ll (-22), not the position-1 column (-77): {}", means.scored[0]);
+        let split = means.complete_data.as_ref().expect("PGAS split");
+        assert!((split.complete[0] - (-77.0)).abs() < 1e-9);
+        assert!((split.transition[0] - (-55.0)).abs() < 1e-9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A PGAS trace with no `obs_ll` column cannot be scored at all — the
+    /// reader says the column is absent rather than falling back to whatever
+    /// sits in position 1, which is exactly the substitution gh#667 removed.
+    #[test]
+    fn missing_scored_column_is_reported_not_silently_substituted() {
+        let dir = crate::test_support::unique_temp_dir("chain_diag_no_obs");
         let cd = dir.join("chain_1");
         std::fs::create_dir_all(&cd).unwrap();
         std::fs::write(
@@ -592,8 +949,25 @@ mod tests {
             "sweep\tlog_complete_data_ll\tlog_posterior\n0\t-77.0\t-79.0\n1\t-77.0\t-79.0\n",
         )
         .unwrap();
-        let means = read_chain_mean_logliks(&dir).expect("one chain");
-        assert!((means[0] - (-77.0)).abs() < 1e-9, "must read the pos-1 column: {}", means[0]);
+        let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("one chain");
+        assert!(means.scored_column_absent, "the absence must be REPORTED");
+        assert!(means.scored[0].is_nan(),
+            "no obs_ll → no score; never the complete-data value: {}", means.scored[0]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file that is not a `TraceWriter` trace at all (no `log_posterior`)
+    /// yields NaN means, and is NOT mistaken for "a trace missing a column".
+    #[test]
+    fn a_non_trace_file_is_not_a_missing_column() {
+        let dir = crate::test_support::unique_temp_dir("chain_diag_not_trace");
+        let cd = dir.join("chain_1");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(cd.join("trace.tsv"), "a\tb\tc\n1\t2\t3\n").unwrap();
+        let means = read_chain_mean_logliks(&dir, LoglikType::Marginal).expect("one chain dir");
+        assert!(!means.scored_column_absent,
+            "an unreadable trace is not evidence about which columns a trace has");
+        assert!(means.scored[0].is_nan());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
