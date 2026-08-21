@@ -1736,10 +1736,16 @@ impl FirstWindowAnomaly {
 }
 
 /// Most-common value in `xs` under a relative tolerance (~1%). Used for the
-/// modal observation gap. Ties break toward the smaller value (the more
-/// frequent fine cadence) so a series that is half weekly / half fortnightly
-/// reports the weekly cadence, which is the stricter comparison.
-fn modal_value(xs: &[f64]) -> f64 {
+/// modal observation gap — by [`check_first_interval_window`] (W329) and by
+/// `fit predict`'s forecast grid (gh#696), which continues a stream's own
+/// reporting cadence past the data. ONE notion of "this series' typical
+/// spacing": two would let the warning and the forecast disagree about what
+/// cadence a series settles into.
+///
+/// Ties break toward the smaller value (the more frequent fine cadence) so a
+/// series that is half weekly / half fortnightly reports the weekly cadence,
+/// which is the stricter comparison.
+pub(crate) fn modal_value(xs: &[f64]) -> f64 {
     // For each candidate value, count how many entries fall within rel-tol of
     // it; pick the candidate with the highest count (smallest value on a tie).
     // O(n^2) but n is the number of observations in a fit — tiny.

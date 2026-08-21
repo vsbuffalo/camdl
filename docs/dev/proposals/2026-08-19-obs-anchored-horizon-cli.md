@@ -193,8 +193,11 @@ key; ensembles compose member run_ids and inherit it.
 
 ## Non-goals (explicit)
 
-- `fit predict --to` — free-forward bands exist only at observed times
-  (predict.rs:1694); forecast rows in predict are the separate P5 arc.
+- `fit predict --to` — a _per-invocation_ horizon for predict is still out of
+  scope here. The stated reason ("bands exist only at observed times") no longer
+  holds: gh#696 emits the free-forward band on the MODEL's horizon, continuing
+  each stream's own reporting cadence over the trajectory's snapshot grid. The
+  one-step band is data-conditioned and does still stop at the data.
 - DSL anchors (`to = last_obs + 4 'weeks`, anchored forcing `breakpoints`) —
   symbolic IR anchor, `ir/VERSION` bump, OCaml expander; F15's other half.
 - `--to` on data-windowed commands (pfilter/profile/survey/fit run) — their

@@ -649,7 +649,7 @@ fn subset_convergence(
     Ok(ConvergenceStatus::Reported { rhat_max, ess_min })
 }
 
-// ── The engine sink: sample y_rep per draw at the observed cadence ─────────
+// ── The engine sink: sample y_rep per draw on the emission grid ────────────
 
 /// One scenario's accumulated free-forward output: the per-`(leaf, time)`
 /// `y_rep` samples across that scenario's draws, plus the per-draw quantity
@@ -667,14 +667,19 @@ struct ScenarioAccum {
     quant_times: Vec<f64>,
 }
 
-/// A [`RunSink`] that samples `y_rep` for every fit leaf at the observed times,
+/// A [`RunSink`] that samples `y_rep` for every fit leaf on its emission grid,
 /// for each draw (= cell), accumulating per `(scenario, leaf, time)` across
 /// draws. The quantile reduction runs per scenario after all cells merge.
 struct PredictiveSink {
     compiled: std::sync::Arc<sim::CompiledModel>,
-    /// Per leaf (in `model.observations` order): the observation times to score.
+    /// Per leaf (in `model.observations` order): the times to emit at — the
+    /// leaf's observation times, then (gh#696) the forecast times continuing
+    /// its cadence to the model horizon. NOT the observed-data axis: `last_obs`
+    /// anchors are resolved off the observation times alone.
     leaf_times: Vec<Vec<f64>>,
-    /// Per leaf, per time (aligned with `leaf_times`): the observed auxiliary
+    /// Per leaf, per time (aligned with the OBSERVED prefix of `leaf_times`,
+    /// which is why the forecast tail is only ever built for a leaf whose
+    /// likelihood reads no data column): the observed auxiliary
     /// columns carried forward into the predictive draw (a data-supplied
     /// binomial denominator `n = n_examined`). Empty inner vec = no aux at that
     /// obs time (the likelihood's denominator then resolves data-free).
@@ -1006,19 +1011,23 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     for sref in &scenario_refs {
         crate::sim_job::resolve_scenario_ref(sref, &preset_names)?;
     }
-    // gh#561: `fit predict` emits at the OBSERVED times (`leaf_times`, from the
-    // bound data), so a scenario's own `simulate { to }` cannot move this
-    // command's output window — honouring it here would be a no-op, and
+    // gh#561: every cell this command runs is handed `t_end_override: None`, so
+    // it replays at the MODEL's horizon; a scenario's own `simulate { to }`
+    // cannot move this command's window. Honouring it here would be a no-op, and
     // silently ignoring a declared horizon is the exact bug gh#561 is about.
     // Refuse, and name the two things that do work.
+    //
+    // gh#696 extended the free-forward band OUT TO that model horizon; it did
+    // not make a per-scenario horizon reachable, so this refusal stands
+    // unchanged and must keep firing.
     //
     // Only a genuine difference from the model horizon is refused: a preset
     // restating the run horizon is a no-op and keeps working.
     for sref in &scenario_refs {
         crate::util::refuse_scenario_horizon(
             &model, Some(sref.name()), "fit predict",
-            "the predictive is emitted at the observed times, so its window \
-             comes from the data, not the model horizon",
+            "the predictive replays every scenario at the model's own horizon, \
+             which is one window for the whole run",
         )?;
     }
     // Layer 1 supports param-overlay scenarios cleanly; an intervention-toggling
@@ -1263,6 +1272,89 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             })
             .collect();
 
+        // ── The free-forward emission grid (gh#696) ────────────────────────
+        //
+        // The trajectory is integrated to the model horizon — `quantities/`
+        // carries rows out there and always has. Only the emission time list
+        // was restricted to the observed times, so a scenario's projected curve
+        // in OBSERVABLE units existed inside this same run and was discarded.
+        // Past the last observation each stream continues on its own reporting
+        // cadence, over the trajectory's own snapshot grid, to the horizon.
+        //
+        // This is the FREE-FORWARD grid only. The one-step band is
+        // `p(y_t | y_{1:t-1})` — data-conditioned by definition, so it has
+        // nothing to say past the data and keeps its own observed-time axis
+        // (`one_step_bands`, untouched below).
+        //
+        // `leaf_times` itself is NOT extended: it is also the observed-data
+        // axis that `value_at(..., last_obs)` anchors to (`quantity_obs_anchors`,
+        // read above) and that the contrast reducer folds through. `last_obs`
+        // means the last OBSERVATION, not the last emitted row.
+        let horizon_output_times: Vec<f64> =
+            sim::output::output_times(&model.output.times, model.simulation.t_end);
+        let mut ff_emit_times: Vec<Vec<f64>> = leaf_times.clone();
+        // One note per logical stream, not per stratum leaf.
+        let mut noted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (si, obs_ir) in model.observations.iter().enumerate() {
+            let times = &ff_emit_times[si];
+            if times.is_empty() {
+                continue; // stream not bound to data (or filtered out)
+            }
+            let last_obs = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            // Negated `>`, not `<=`: an unresolved horizon arrives as NaN and
+            // must fall through to "no forecast window", never to "extend".
+            if !(model.simulation.t_end > last_obs) {
+                continue; // no forecast window — byte-identical to before
+            }
+            // A likelihood whose arguments read an observation data column
+            // (`binomial(n = tested)`, a person-time offset) has NO value for
+            // that column past the data: `compile_obs_sample_pf` resolves an
+            // unavailable aux to 0, so a binomial denominator becomes 0 and
+            // every forecast draw is 0. An identically-zero ribbon presented as
+            // a projection is the worst outcome available here, so the stream is
+            // omitted from the extended grid and the omission is announced —
+            // silence would read as "this model has no horizon".
+            let aux_cols = crate::pfilter::stream_aux_columns(obs_ir);
+            if !aux_cols.is_empty() {
+                if noted.insert(obs_ir.source.clone()) {
+                    eprintln!(
+                        "fit predict: stream '{}' stops at its last observation \
+                         (t = {last_obs}) even though the model horizon is {}: its \
+                         likelihood reads the observed data column(s) [{}], which \
+                         have no value past the data. Projecting it would draw \
+                         against a zero denominator and report an identically-zero \
+                         band as a forecast.\n  \
+                         Fix: to project this stream past the data, express the \
+                         denominator in the model (a parameter or a compartment \
+                         sum) rather than reading it from the data file.",
+                        obs_ir.source,
+                        model.simulation.t_end,
+                        aux_cols.join(", "),
+                    );
+                }
+                continue;
+            }
+            let extension = forecast_times(times, &horizon_output_times);
+            if extension.is_empty() {
+                if noted.insert(obs_ir.source.clone()) {
+                    eprintln!(
+                        "fit predict: stream '{}' stops at its last observation \
+                         (t = {last_obs}) even though the model horizon is {}: no \
+                         trajectory output time past the data continues this \
+                         stream's observed cadence, so there is no grid to project \
+                         onto.\n  \
+                         Fix: widen `output {{ trajectories {{ ... }} }}` so the \
+                         forecast window carries output times on the stream's \
+                         reporting cadence.",
+                        obs_ir.source,
+                        model.simulation.t_end,
+                    );
+                }
+                continue;
+            }
+            ff_emit_times[si].extend(extension);
+        }
+
         // The free-forward cells (one per sweep-point × scenario, engine canonical
         // order), plus the stacked quantity files — accumulated across the whole
         // sweep grid, since one design cell is a (sweep point, scenario) pair and
@@ -1304,7 +1396,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             // evaluator is shared via the `Arc` clone.
             let mut sink = PredictiveSink {
                 compiled: compiled.clone(),
-                leaf_times: leaf_times.clone(),
+                leaf_times: ff_emit_times.clone(),
                 leaf_aux: leaf_aux.clone(),
                 quant_eval: quant_eval.clone(),
                 obs_anchors: quantity_obs_anchors,
@@ -1399,7 +1491,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     sweep: sweep_pt.clone(),
                     scenario: scenario_name.clone(),
                     bands: assemble_predictive(
-                        &model, accum, &leaf_times, &leaves, schema.as_ref(),
+                        &model, accum, &ff_emit_times, &leaves, schema.as_ref(),
                     )?,
                 });
             }
@@ -1796,6 +1888,91 @@ fn stream_selected(o: &ir::observation::ObservationModel, filter: Option<&str>) 
     }
 }
 
+// ── The free-forward forecast grid (gh#696) ────────────────────────────────
+
+/// How closely a trajectory output time must sit on the continued reporting
+/// cadence to be that cadence's next forecast time. Relative, so float
+/// accumulation over a long horizon does not drop a row; far below any real
+/// cadence, so two adjacent output times are never confusable.
+const CADENCE_MATCH_REL_TOL: f64 = 1e-6;
+
+/// The forecast times for one observation leaf: an UNBROKEN continuation of the
+/// stream's own reporting cadence past its last observation, over the
+/// trajectory's snapshot grid, out to the model horizon. Empty when there is no
+/// forecast window, no cadence to continue, or nothing on the grid to continue
+/// onto.
+///
+/// The continuation stops at the first cadence step the snapshot grid does not
+/// carry, rather than skipping it: on an incidence stream the emitted value is
+/// the flow accumulated since the PREVIOUS emitted time, so a skipped step
+/// would widen one row's interval — a lone spike in a column of otherwise
+/// uniform counts.
+///
+/// **Why the observed cadence and not every output time.** An incidence stream
+/// reports the flow accumulated since the previous emitted time
+/// ([`crate::project_all_obs_times`] differences the cumulative flow), so
+/// emitting weekly data and then daily forecast rows would put 1-day counts and
+/// 7-day counts in one column — a sevenfold cliff at the seam that reads as a
+/// collapse rather than a change of units. Continuing the cadence keeps every
+/// row in the column the same quantity.
+///
+/// **Why not `emit_schedule`.** It is optional — a fit-only model omits it
+/// entirely (spec §16.4: the data file's `time` column drives the fit) — and
+/// where it is present it is the SIMULATE-side cadence, which is free to
+/// disagree with the data the fit actually holds. The observed times are always
+/// present here and are what the rest of `fit predict` is keyed to, so they are
+/// the single authority; `output_times` (the trajectory's own snapshot grid, the
+/// grid `quantities/` is written on) supplies the candidates, which is what
+/// makes the forecast band and the quantity sidecars agree by construction.
+///
+/// `output_times` must be the model's snapshot grid: every emitted time has to
+/// be one, or the projection would read a stale snapshot
+/// (`check_obs_times_on_snapshot_grid`, gh#589). Filtering candidates OUT of
+/// that grid is what makes that guard unreachable from here.
+fn forecast_times(obs_times: &[f64], output_times: &[f64]) -> Vec<f64> {
+    // Two observations are the fewest that define a spacing to continue.
+    if obs_times.len() < 2 {
+        return Vec::new();
+    }
+    let last_obs = obs_times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !last_obs.is_finite() {
+        return Vec::new();
+    }
+    let gaps: Vec<f64> =
+        obs_times.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0).collect();
+    if gaps.is_empty() {
+        return Vec::new();
+    }
+    // Negated `>`, not `<=`: `modal_value` returns NaN when it finds no positive
+    // gap, and NaN must fall through to "no cadence", not to "cadence is fine".
+    let cadence = crate::util::modal_value(&gaps);
+    if !(cadence > 0.0) {
+        return Vec::new();
+    }
+    let Some(&grid_end) = output_times.last() else {
+        return Vec::new();
+    };
+    // Walk the cadence forward, taking the snapshot time that sits on each step.
+    // The EXACT grid value is what is emitted (not the accumulated `last_obs +
+    // k·cadence`), so the projection's snapshot lookup gets a bit-identical
+    // time and never falls back to the previous snapshot.
+    let mut out: Vec<f64> = Vec::new();
+    let mut k = 1.0_f64;
+    loop {
+        let want = last_obs + k * cadence;
+        let tol = CADENCE_MATCH_REL_TOL * want.abs().max(cadence);
+        if want > grid_end + tol {
+            break;
+        }
+        match output_times.iter().copied().find(|o| (o - want).abs() <= tol) {
+            Some(on_grid) => out.push(on_grid),
+            None => break, // the cadence has left the snapshot grid
+        }
+        k += 1.0;
+    }
+    out
+}
+
 /// Quantile-reduce ONE scenario's accumulated free-forward samples into per-stream
 /// bands, grouping leaves by logical stream. The scenario/horizon/treatment/
 /// convergence/n_draws labels are applied at render time (each
@@ -1803,7 +1980,7 @@ fn stream_selected(o: &ir::observation::ObservationModel, filter: Option<&str>) 
 fn assemble_predictive(
     model: &ir::Model,
     accum: &ScenarioAccum,
-    leaf_times: &[Vec<f64>],
+    emit_times: &[Vec<f64>],
     leaves: &[LeafObs],
     schema: Option<&ObsSchema>,
 ) -> Result<Vec<StreamBands>, String> {
@@ -1833,10 +2010,10 @@ fn assemble_predictive(
                 .stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
             for (ti, draws_at_t) in accum.samples[si].iter().enumerate() {
                 let quantiles = band(draws_at_t).map_err(|e| {
-                    format!("stream '{source}' at t={}: {e}", leaf_times[si][ti])
+                    format!("stream '{source}' at t={}: {e}", emit_times[si][ti])
                 })?;
                 rows.push(BandRow {
-                    time: leaf_times[si][ti],
+                    time: emit_times[si][ti],
                     stratum: stratum.clone(),
                     quantiles,
                 });
@@ -2378,6 +2555,98 @@ mod tests {
         // Both horizons default to this cap; pin it so a silent drift is a test
         // failure, not a surprise 9-hour predict.
         assert_eq!(DEFAULT_PREDICT_DRAWS, 200);
+    }
+
+    // ── The free-forward forecast grid (gh#696) ─────────────────────────────
+
+    /// A regular output/snapshot grid `start, start+step, …, end`.
+    fn grid(start: f64, step: f64, end: f64) -> Vec<f64> {
+        let mut out = Vec::new();
+        let mut t = start;
+        while t <= end + step * 1e-9 {
+            out.push(t);
+            t += step;
+        }
+        out
+    }
+
+    #[test]
+    fn forecast_continues_the_observed_cadence_to_the_horizon() {
+        // Weekly data to t=56 on a DAILY snapshot grid running to t=80. The
+        // forecast rows must be weekly (63, 70, 77) — not daily. A daily
+        // continuation would put 1-day incidence counts in the same column as
+        // 7-day ones and show a sevenfold cliff at the seam.
+        let obs = vec![7.0, 14.0, 21.0, 28.0, 35.0, 42.0, 49.0, 56.0];
+        assert_eq!(forecast_times(&obs, &grid(0.0, 1.0, 80.0)), vec![63.0, 70.0, 77.0]);
+    }
+
+    #[test]
+    fn forecast_is_empty_when_the_horizon_does_not_run_past_the_data() {
+        // The snapshot grid ends AT the last observation — nothing to project
+        // onto, so the emitted grid is exactly the observed one (the change is
+        // a no-op for every model whose horizon is its data).
+        let obs = vec![7.0, 14.0, 21.0, 28.0];
+        assert!(forecast_times(&obs, &grid(0.0, 1.0, 28.0)).is_empty());
+    }
+
+    #[test]
+    fn forecast_survives_holes_in_the_observed_series() {
+        // A daily series missing three days: the gaps are 1, 1, 2, 1, 3, 1 — the
+        // MODE is 1, which is the cadence the series actually reports on. A
+        // mean or median gap would drift off the reporting grid and admit
+        // nothing.
+        let obs = vec![1.0, 2.0, 3.0, 5.0, 6.0, 9.0, 10.0];
+        assert_eq!(forecast_times(&obs, &grid(0.0, 1.0, 14.0)),
+                   vec![11.0, 12.0, 13.0, 14.0]);
+    }
+
+    #[test]
+    fn forecast_admits_nothing_off_the_reporting_cadence() {
+        // Weekly data (last observation t=52) against a coarse `at = [...]`
+        // output grid. The next weekly step, 59, is not a snapshot time — so
+        // nothing is emitted. In particular t=80 must NOT be picked up merely
+        // because 80 − 52 = 28 happens to be four cadences out: emitting it
+        // alone would put a 28-day accumulation in a column of 7-day counts.
+        let obs = vec![10.0, 17.0, 24.0, 31.0, 38.0, 45.0, 52.0];
+        let sparse_output = vec![0.0, 20.0, 40.0, 60.0, 80.0];
+        assert!(
+            forecast_times(&obs, &sparse_output).is_empty(),
+            "an isolated cadence multiple is not a continuation"
+        );
+    }
+
+    #[test]
+    fn forecast_stops_at_the_first_missing_cadence_step() {
+        // Weekly data to t=14 on a daily grid with t=28 punched out (an
+        // `at = [...]` list). 21 is available; 28 is not. The continuation ends
+        // at 21 rather than resuming at 35 with a doubled interval.
+        let obs = vec![7.0, 14.0];
+        let mut output = grid(0.0, 7.0, 49.0);
+        output.retain(|t| *t != 28.0);
+        assert_eq!(forecast_times(&obs, &output), vec![21.0]);
+    }
+
+    #[test]
+    fn forecast_needs_two_observations_to_have_a_cadence() {
+        // One observation defines no spacing to continue; do not guess one.
+        assert!(forecast_times(&[30.0], &grid(0.0, 1.0, 80.0)).is_empty());
+        assert!(forecast_times(&[], &grid(0.0, 1.0, 80.0)).is_empty());
+    }
+
+    #[test]
+    fn forecast_times_land_on_the_snapshot_grid() {
+        // Every emitted time must be an output time — the projection reads the
+        // snapshot at (or before) it, so an off-grid time would silently report
+        // a stale state (gh#589). Filtering candidates out of the grid is what
+        // makes that guard unreachable from here; pin the property.
+        let obs = vec![4.0, 8.0, 12.0, 16.0];
+        let output = grid(0.0, 2.0, 40.0);
+        let fc = forecast_times(&obs, &output);
+        assert_eq!(fc, vec![20.0, 24.0, 28.0, 32.0, 36.0, 40.0]);
+        for t in &fc {
+            assert!(output.iter().any(|o| (o - t).abs() < 1e-12),
+                    "forecast time {t} must be an output time");
+        }
     }
 
     // ── pool_one_step_draws skip policy (gh#620, ebola F11) ─────────────────

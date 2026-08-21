@@ -1079,7 +1079,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
          succeeded.\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("emitted at the observed times"),
+        stderr.contains("replays every scenario at the model's own horizon"),
         "the refusal must say WHY the horizon cannot be honoured; stderr:\n{stderr}"
     );
     assert!(
