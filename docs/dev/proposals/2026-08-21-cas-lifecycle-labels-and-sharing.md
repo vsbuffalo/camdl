@@ -1,9 +1,115 @@
 # CAS lifecycle: a `store` namespace, labels that move, and a bundle you can send
 
-Date: 2026-08-21 Status: proposed Related: gh#594 (store-root model archive is
-last-writer-wins), gh#698 (gzip benchmark for `trajectories.tsv`), gh#699
-(`list` walks 550k sim leaves), gh#701 (the unlabelled-fits hint names a command
-that does not exist)
+Date: 2026-08-21 Status: **UNDER REVISION — do not implement as written.** Two
+adversarial reviews returned two KILLs and six severe gaps against the code. The
+measured motivation below stands; the label mechanism does not. Related: gh#594,
+gh#698, gh#699, gh#701, gh#704. Prior art this document failed to cite and must
+be rewritten against:
+`docs/dev/proposals/2026-06-27-sealed-fit-packets-handles-and-override-algebra.md`
+(`Status: proposed`, not archived) — origin of the `@label` sigil, implemented
+at `cli/src/fit/handle.rs:44` and normative in `docs/camdl-run-spec.md`.
+
+> ### What review killed
+>
+> **The single `<root>/labels.json` widens the blast radius of a lost update
+> from one run to every name in the store.** tmp+rename is crash-atomicity, not
+> mutual exclusion; two concurrent `label` calls silently drop one binding.
+> Today's per-leaf write loses one run and says so (`fit/mod.rs:2483-2486`). The
+> `index.json` analogy is wrong because that file is _derived_ — `rebuild()`
+> reconstructs it from a walk — and `labels.json` would have no rebuild source
+> once the in-leaf field is deleted. Git itself does not do this:
+> `refs/heads/<name>` is one file per ref under a per-ref `.lock`. Per-name
+> files under `<root>/labels/` fix this and the "one `rm` destroys every name in
+> a gitignored tree" hazard together.
+>
+> **"One run per label" cannot represent what `--label` already does.**
+> `batch.rs:1394` calls `ensure_provenance_label` per cell, and `main.rs:2001`
+> labels the ensemble too, so `simulate --label X --draws 1200` over 5 scenarios
+> stamps one label onto **6,001 objects**. The claim that "argv is already in
+> provenance" is also false on a CAS **cache hit**, where the leaf's argv
+> belongs to the original producing invocation — which is precisely why
+> `ensure_provenance_label` exists, with red-green tests at
+> `tests/cas_integration.rs:1528` and `tests/pfilter_cas.rs:237`.
+>
+> ### Claims in the body below that are wrong
+>
+> - **`camdl 'scope` is NOT unaffected.** `camdl_watch/ingest.py:440` shells out
+>   to `camdl list --root … --kind fit --format json` and reads each row's
+>   `label`, returning `{}` on any non-zero exit — so the `camdl store` rename
+>   degrades the viewer to derived labels with **no error**.
+> - **`@label` already exists and already refuses ambiguity**, listing
+>   candidates via `ResolveError::Ambiguous` (`handle.rs:264-292`). So
+>   non-uniqueness today produces a refusal, not the "wrong-fit-packaged bug"
+>   claimed below, and the proposed `label:` / `hash:` escapes reinvent a
+>   shipped sigil — with `:` colliding with `--exclude-chains @a:4`.
+> - **"No precedence" resolution is O(store).** Proving a token has no _second_
+>   match requires enumerating, and `cas_index::resolve_prefix` returns `None`
+>   for any prefix under 64 hex by design (`cas_index.rs:145`), so every label
+>   lookup would take the >120 s walk. `@name` is one file read.
+> - **The label is not stored inside a content-addressed leaf for fits.**
+>   `fit.meta.json` sits at the _segment_, is not a CAS leaf, and is
+>   deliberately mutable with sticky-label semantics normative at
+>   `docs/camdl-run-spec.md:360-361`. The real defect there is that
+>   `write_fit_sidecar` ends in a bare `std::fs::write` (`run_meta.rs:645`), so
+>   `camdl label` on a fit can leave a torn file today.
+> - **`/` is gated by `validate_label` (`fit/mod.rs:2451`), not `path_label`.**
+>   The current charset is `^[a-zA-Z0-9 ,._-]{1,64}$` — spaces and commas legal,
+>   `/` rejected — and `--help` actively teaches sentence-shaped labels.
+> - **Stem resolution is ambiguous by construction**, since the body itself
+>   notes three `fit_national_base_rho_high-*` directories in one store.
+> - **A fit directory is not relocatable across machines.**
+>   `load_config_for_segment` (`handle.rs:175-198`) anchors the archived
+>   `fit.toml.original`'s relative paths at `FitSidecar.fit_toml_path`, recorded
+>   verbatim as typed (`fit/mod.rs:2200`). `pack` must re-point that anchor or
+>   `fit summary` / `fit predict` / `compare` fail on the recipient's machine.
+>
+> ### Gaps that must be decided before any rewrite ships
+>
+> - **`prune` is the first destructive verb outside the store's lock protocol**
+>   (`store.rs:378-392`, `:842-890`). An archived leaf can be re-claimed by a
+>   resumed fit at any time, so prune can delete a directory being streamed
+>   into.
+> - **Archiving must prune the walk, not filter it.** Keyed on `run_id`,
+>   `archived.json` requires reading all 550k `run.json` files to apply — so
+>   archiving 6,000 leaves would leave `list` exactly as slow. It has to key on
+>   the store-relative directory prefix.
+> - **An archived run that is re-run stays hidden**, because
+>   `FsCasStore::lookup` (`store.rs:202-228`) consults only the leaf's own
+>   `run.json` and cannot see a store-level set.
+> - **Whole-leaf-only prune leaves ~4 empty ancestors per leaf** (2,735,850 dirs
+>   for 550,647 leaves), which `cas_read::walk_records` still descends — so it
+>   does not deliver the browsing relief it exists for. Ancestor removal races
+>   `fs::create_dir_all` at `store.rs:376`.
+> - **`batch run` writes no ensemble leaf at all** (`resolve_sim_ensemble` is
+>   reached only from `simulate`, `main.rs:2001`), and even `simulate`'s
+>   ensemble write is best-effort (`main.rs:2556-2561`). So "one selector
+>   archives the whole fan-out" has no guaranteed object behind it.
+> - **Reference edges prune would dangle**: ensembles hash member `sim_run_id`s
+>   into their own identity (`sim_ensemble_cas.rs:16-26`), leaves declare child
+>   artifacts (`batch.rs:1296`), and `lineage realize` takes a raw path into a
+>   leaf.
+> - **The migration harvest cannot run after the field is deleted** —
+>   `RunRecord` has no `deny_unknown_fields` (`record.rs:212`), so the label is
+>   silently dropped on read from that moment.
+> - **`list --format json` publishes `provenance.label`** for four run kinds
+>   (`browse.rs:1497`, `:1504`, `:1588`, `:333`) — a published contract, not an
+>   internal field.
+>
+> ### What the rename actually costs
+>
+> 191 references across 34 `docs/**.md` files (51 in `docs/camdl-run-spec.md`
+> alone, whose §4.5 is a **named normative section**), 24 integration-test
+> shell-outs across 21 files, four docs baked into the binary via `include_str!`
+> (so `camdl docs agents` ships stale text until rebuilt), 35 references in
+> `../camdl-book`, and one cross-repo consumer that cannot be fixed atomically.
+>
+> ### Sound as written, and to be carried forward
+>
+> The two-step archive-then-prune shape; refusing to fold foreign leaves into
+> the local store; a visible `./camdl-inbox/` rather than a temp directory;
+> recomputing digests on unpack while explicitly not claiming to verify the run
+> was correctly produced; printing the hash beside the label in every artifact
+> camdl writes; and the measured motivation in the next section.
 
 ## What a real store looks like
 
