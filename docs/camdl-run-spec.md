@@ -2161,6 +2161,13 @@ Each value is a bare model-time number (`"14"`), an absolute date
 stream's first observation. Resolution per stream is shadow → `default` → none.
 `default` is a reserved key. `condition_from` and `ic_free` cannot be combined.
 
+`camdl pfilter`, `camdl profile`, and `camdl fit predict` all carry the same
+per-stream window, so a fixed-θ loglik and a predictive row cover the window the
+fit scored. `fit predict` emits no row at the boundary itself (it is a reset,
+not an observation), and its free-forward projection reads the recorded
+cumulative flow there — so `condition_from` must also be a recorded **output**
+time, or `fit predict` refuses and names the fix.
+
 ### 6.3 `[estimate]` — free parameters
 
 Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
