@@ -2630,6 +2630,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// gh#691 / gh#687. A predictive band's `ess_min` must not be a minimum
+    /// over the parameters that happened to report one. A parameter whose
+    /// chains disagree has its pooled ESS suppressed — it serializes as JSON
+    /// `null` and drops out of the map — so a `min` that skips it is a minimum
+    /// over the CONVERGED SUBSET, and it RISES as the fit gets worse: the
+    /// badly-mixing parameters leave the map and the well-mixing survivors set
+    /// the value. Measured on the summary headline as a 13x inversion between
+    /// two runs of one model differing only in particle count (gh#687); this is
+    /// the same reduce, on the band label.
+    #[test]
+    fn read_convergence_withholds_ess_min_when_a_param_reports_none() {
+        let dir = std::env::temp_dir().join("camdl_read_convergence_partial_ess_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `tau` is assessed across chains (finite R̂) and carries no ESS.
+        // `a2` mixed and carries 145.
+        std::fs::write(
+            dir.join("pgas_summary.json"),
+            r#"{"rhat": {"a2": 1.01, "tau": 2.639},
+                "ess":  {"a2": 145.0, "tau": null}}"#,
+        )
+        .unwrap();
+        match read_convergence(&dir, Some(FitAlgorithm::Pgas)) {
+            ConvergenceStatus::Reported { rhat_max, ess_min } => {
+                assert!((rhat_max - 2.639).abs() < 1e-9,
+                    "the worst R̂ is still reported: {rhat_max}");
+                assert!(!ess_min.is_finite(),
+                    "ess_min must be withheld while `tau` reports none — 145 is \
+                     the minimum over the converged subset, not over the fit: \
+                     got {ess_min}");
+            }
+            other => panic!("R̂ is assessable here, so the band is Reported: {other:?}"),
+        }
+        // Control: with every assessed parameter reporting, the minimum is real.
+        std::fs::write(
+            dir.join("pgas_summary.json"),
+            r#"{"rhat": {"a2": 1.01, "tau": 2.639},
+                "ess":  {"a2": 145.0, "tau": 9.0}}"#,
+        )
+        .unwrap();
+        match read_convergence(&dir, Some(FitAlgorithm::Pgas)) {
+            ConvergenceStatus::Reported { ess_min, .. } => assert!((ess_min - 9.0).abs() < 1e-9,
+                "a complete map reports the slowest parameter: {ess_min}"),
+            other => panic!("expected Reported, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn read_convergence_clean_break_no_pmmh_fallback() {
         // Clean break: a pre-rename mh fit (only `pmmh_summary.json` on disk) is
