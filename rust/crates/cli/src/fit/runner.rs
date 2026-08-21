@@ -2654,6 +2654,11 @@ pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
 /// is deliberately NOT taken here.
 pub const RHAT_REPORT_THRESHOLD: f64 = 1.1;
 
+/// The R̂ above which the end-of-stage report marks a parameter ✗ rather than ~
+/// — "not converged" against "badly enough that the chains are somewhere else".
+/// Display only: nothing keys on it, and it draws no diagnostic of its own.
+pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
+
 /// Per-parameter convergence diagnostics for one Bayesian stage — the single
 /// shape every sampler fills and every renderer and serializer reads.
 ///
@@ -2744,8 +2749,11 @@ impl StageConvergence {
                 out.push_str(&format!("  {:12} not reported — {}\n", name, why));
                 continue;
             }
-            let status = if d.rhat < 1.1 { "\x1b[32m✓\x1b[0m" }
-                else if d.rhat < 1.5 { "\x1b[33m~\x1b[0m" }
+            // The glyph and the finding must agree about where the band is:
+            // a literal here would silently diverge from `rhat_threshold` the
+            // moment the caller passes anything but 1.1.
+            let status = if d.rhat < rhat_threshold { "\x1b[32m✓\x1b[0m" }
+                else if d.rhat < RHAT_SEVERE_THRESHOLD { "\x1b[33m~\x1b[0m" }
                 else { "\x1b[31m✗\x1b[0m" };
             let tail = if d.ess_tail.is_finite() {
                 format!("{:.0}", d.ess_tail)
@@ -5096,6 +5104,37 @@ dt = 1.0
             "single chain → all NaN/empty; got ({}, {}, {:?})",
             d.rhat, d.ess_bulk, d.ess_per_chain);
         assert_eq!(d.not_reported, Some(ConvergenceError::TooFewChains { n_chains: 1 }));
+    }
+
+    /// The ✓/~/✗ glyph in the end-of-stage block and the `RhatHigh` finding in
+    /// `diagnostics.json` must agree about where the band is. They came from
+    /// two places — the finding from the caller's `rhat_threshold`, the glyph
+    /// from a literal `1.1` — which agreed only because the two numbers
+    /// happened to be equal. Adopting Vehtari et al.'s 1.01 (the open decision
+    /// on gh#84) would have made a parameter at 1.05 print green while drawing
+    /// an error.
+    #[test]
+    fn the_report_glyph_and_the_finding_use_the_same_threshold() {
+        use sim::inference::diagnostic::{DiagnosticCollector, DiagnosticKind};
+        let chains = load_convergence_chains();
+        // R̂ ≈ 1.027 — under the 1.1 bar, over a 1.01 one.
+        let conv = StageConvergence::compute([("ar1_mixed".to_string(),
+            chains["ar1_mixed"].clone())]);
+
+        let collector = DiagnosticCollector::new("test");
+        let lenient = conv.report(&collector, 1.1);
+        assert!(lenient.contains("✓"), "1.027 is inside a 1.1 band: {lenient}");
+        assert!(!collector.drain().iter().any(|d|
+            matches!(d.kind, DiagnosticKind::RhatHigh { .. })),
+            "and draws no finding there");
+
+        let collector = DiagnosticCollector::new("test");
+        let strict = conv.report(&collector, 1.01);
+        assert!(!strict.contains("✓"),
+            "the same R̂ must NOT print green under a 1.01 band: {strict}");
+        assert!(collector.drain().iter().any(|d|
+            matches!(d.kind, DiagnosticKind::RhatHigh { .. })),
+            "and must draw the finding that goes with the glyph");
     }
 
     /// The classic Gelman & Rubin statistic is still computed and still
