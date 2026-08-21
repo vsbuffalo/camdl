@@ -934,19 +934,20 @@ pub fn run_stage(
     let diagnostics = compute_diagnostics(&all_results, &config.estimated_params);
 
     // Report. The healthy band is KERNEL-specific (gh#631): NUTS targets
-    // ~0.8, so the random-walk [10%, 50%] coloring/diagnostic reported every
-    // well-tuned NUTS fit as unhealthy — one severity:error per parameter —
-    // burying real failures (the ebola F8 stuck chain hid in that noise).
-    // The same predicate the sampler used decides the band; a BLOCK update
-    // (identical rate on every parameter) is reported once per chain, not
-    // once per parameter.
+    // ~0.8, so applying the random-walk band to it reported every well-tuned
+    // NUTS fit as unhealthy — one severity:error per parameter — burying real
+    // failures (the ebola F8 stuck chain hid in that noise). The band, the
+    // predicate and the message all come from `AcceptanceKernel` (gh#299), and
+    // the same `nuts_active` predicate the sampler used picks the kernel. A
+    // BLOCK update (identical rate on every parameter) is reported once per
+    // chain, not once per parameter.
     let nuts = sim::inference::pgas::nuts_active(use_nuts, config.compiled.as_ref());
-    let (lo, hi) = if nuts { (0.60, 0.95) } else { (0.10, 0.50) };
     let kernel = if nuts {
         sim::inference::diagnostic::AcceptanceKernel::Nuts
     } else {
         sim::inference::diagnostic::AcceptanceKernel::RandomWalk
     };
+    let (lo, hi) = kernel.healthy_band();
     eprintln!("\nacceptance rates{}:", if nuts { " (NUTS block; ~80% is the target)" } else { "" });
     for &(chain_id, _, ref rates) in &all_results {
         let block_update = rates.len() > 1
@@ -956,21 +957,21 @@ pub fn run_stage(
                 let status = if r < lo { "\x1b[31m" }
                     else if r > hi { "\x1b[33m" }
                     else { "\x1b[32m" };
-                if !(lo..=hi).contains(&r) && !block_update {
-                    collector.push(DiagnosticKind::AcceptanceRateUnhealthy {
-                        rate: r, param: Some(p.name.clone()), kernel,
-                    });
+                if !block_update {
+                    if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
+                        r, Some(p.name.clone()), kernel)
+                    {
+                        collector.push(d);
+                    }
                 }
                 format!("  {}={}{:.0}%\x1b[0m", p.name, status, r * 100.0)
             })
             .collect();
         if block_update {
-            if let Some(&r) = rates.first() {
-                if !(lo..=hi).contains(&r) {
-                    collector.push(DiagnosticKind::AcceptanceRateUnhealthy {
-                        rate: r, param: None, kernel,
-                    });
-                }
+            if let Some(d) = rates.first()
+                .and_then(|&r| sim::inference::diagnostic::acceptance_diagnostic(r, None, kernel))
+            {
+                collector.push(d);
             }
         }
         eprintln!("  chain {}: {}", chain_id + 1, summary.join(" "));

@@ -879,24 +879,26 @@ pub fn run_stage(
     // Compute diagnostics
     let diagnostics = compute_diagnostics(&results, &config.estimated_params);
 
-    // Report
+    // Report. PMMH's θ-move is random-walk MH, so its band is the random-walk
+    // one — taken from `AcceptanceKernel` rather than spelled here, so the
+    // coloring, the finding and the message a user reads cannot disagree about
+    // where the band starts (gh#299 item 3).
+    let kernel = sim::inference::diagnostic::AcceptanceKernel::RandomWalk;
+    let (lo, hi) = kernel.healthy_band();
     eprintln!("\nacceptance rates:");
     for (chain_id, result) in &results {
-        let status = if result.acceptance_rate < 0.10 {
+        let status = if result.acceptance_rate < lo {
             "\x1b[31m✗ too low\x1b[0m"
-        } else if result.acceptance_rate > 0.50 {
+        } else if result.acceptance_rate > hi {
             "\x1b[33m~ high\x1b[0m"
         } else {
             "\x1b[32m✓\x1b[0m"
         };
         eprintln!("  chain {}: {:.1}% {}", chain_id + 1, result.acceptance_rate * 100.0, status);
-        if result.acceptance_rate < 0.10 || result.acceptance_rate > 0.50 {
-            collector.push(DiagnosticKind::AcceptanceRateUnhealthy {
-                rate: result.acceptance_rate, param: None,
-                // PMMH's θ-move is random-walk MH — the [15%, 50%] band is
-                // the right one here (gh#631).
-                kernel: sim::inference::diagnostic::AcceptanceKernel::RandomWalk,
-            });
+        if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
+            result.acceptance_rate, None, kernel)
+        {
+            collector.push(d);
         }
     }
 
