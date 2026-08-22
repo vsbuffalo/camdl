@@ -488,6 +488,67 @@ fn parse_iso8601_to_unix(s: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
+    /// Review blocker 1. `max_rhat()` folds from `0.0`, and a parameter whose
+    /// R̂ could not be computed is filtered out before it gets there — so a fit
+    /// where EVERY parameter was refused has an empty map, `max_rhat()` returns
+    /// `0.0`, and `converged: max_rhat() < 1.05` is **true**. `fit summary`
+    /// prints `max R̂ = 0.000 ✓`.
+    ///
+    /// This is the worst shape a diagnostic can take: a fit that could not be
+    /// assessed certifies itself. It is reachable — all chains frozen at
+    /// distinct values (the 0%-acceptance deadlock, the gh#607 signature) makes
+    /// every R̂ non-finite, and a `-inf` draw takes the same route.
+    ///
+    /// "Could not be computed" and "computed, and it was fine" must not share a
+    /// representation.
+    #[test]
+    fn a_fit_with_no_computable_rhat_is_not_reported_as_converged() {
+        use crate::fit::method_result::PosteriorDiagnostics;
+        use std::collections::BTreeMap;
+
+        let refused = PgasStageResult {
+            diagnostics: PosteriorDiagnostics {
+                // Every parameter refused → nothing reached the map.
+                rhat_per_param: BTreeMap::new(),
+                ess_per_param: BTreeMap::new(),
+                ess_tail_per_param: BTreeMap::new(),
+                n_samples: 4000,
+                thin: 1,
+                wall_time_secs: Some(120.0),
+                n_chains: 8,
+            },
+            posterior_mean: BTreeMap::from([("tau".to_string(), 12.0)]),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            acceptance_per_param: BTreeMap::new(),
+        };
+        let row = MethodView::from_pgas(&refused);
+        assert!(!row.converged,
+            "a fit with no computable R̂ must not be reported as converged");
+        assert!(row.max_rhat.is_none_or(|v| !v.is_finite() || v > 0.0),
+            "and must not publish 0.000 as its max R̂: {:?}", row.max_rhat);
+
+        // Control: a genuinely-assessed converged fit still reports true, so the
+        // fix is a classification and not a blanket refusal.
+        let ok = PgasStageResult {
+            diagnostics: PosteriorDiagnostics {
+                rhat_per_param: BTreeMap::from([("tau".to_string(), 1.01)]),
+                ess_per_param: BTreeMap::from([("tau".to_string(), 800.0)]),
+                ess_tail_per_param: BTreeMap::from([("tau".to_string(), 900.0)]),
+                n_samples: 4000,
+                thin: 1,
+                wall_time_secs: Some(120.0),
+                n_chains: 8,
+            },
+            posterior_mean: BTreeMap::from([("tau".to_string(), 12.0)]),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            acceptance_per_param: BTreeMap::new(),
+        };
+        assert!(MethodView::from_pgas(&ok).converged,
+            "an assessed, converged fit must still report converged");
+    }
+
     #[test]
     fn stem_strips_fit_toml_then_toml() {
         assert_eq!(stem_from_fit_toml_path("fit_he2010.fit.toml"), "fit_he2010");
