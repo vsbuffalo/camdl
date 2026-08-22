@@ -1702,7 +1702,14 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // stream was emitted.
     if !predictive_manifest_entries.is_empty() {
         let mut manifest = serde_json::json!({
-            "schema": "camdl.predictive/v1",
+            // v2 (gh#84): `rhat_max` and `ess_min` in each stream's TSV are the
+            // rank-normalized split R̂ and the bulk-ESS of Vehtari et al.
+            // (2021), and `ess_min` is now withheld whenever any assessed
+            // parameter has no pooled ESS rather than silently minimizing over
+            // the ones that do. v1 carried classic Gelman-Rubin R̂ and a
+            // Geyer per-chain sum. The fields kept their names, so a consumer
+            // joining across a store has only this tag to tell the two apart.
+            "schema": "camdl.predictive/v2",
             "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
         });

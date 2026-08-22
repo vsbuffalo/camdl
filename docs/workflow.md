@@ -250,7 +250,14 @@ the run directory:
   The `q05…q95` columns are the ribbon; the `horizon` and `treatment` columns
   make the two predictive axes explicit (so an honestly-wide posterior band is
   never confused with a narrow plug-in one), and `rhat_max`/`ess_min` carry the
-  fit's own convergence numbers alongside every band.
+  fit's own convergence numbers alongside every band. **`rhat_max` is the
+  rank-normalized split R̂ and `ess_min` the bulk-ESS** (see
+  [Which R̂, and which ESS](#which-r-and-which-ess)); `ess_min` is left empty
+  when any assessed parameter has no pooled ESS, rather than minimizing over the
+  ones that do. The sibling `predictive.json` tags this contract
+  `camdl.predictive/v2`; a `/v1` manifest carries classic Gelman–Rubin R̂ and a
+  per-chain Geyer sum under the same two column names, so **do not join the two
+  versions without keying on the tag**.
 - `observed/<stream>.tsv` — `time | <dims…> | value`, the recorded series in the
   same tidy keys.
 
