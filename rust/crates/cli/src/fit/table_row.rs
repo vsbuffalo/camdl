@@ -341,7 +341,7 @@ impl MethodView {
             max_rhat: d.max_rhat(),
             acceptance_rate: None,
             ess_at_mle: None,
-            ess_posterior: Some(d.ess_per_param.clone()),
+            ess_posterior: Some(d.ess_per_param()),
             ess_per_iter: d.ess_per_iter(),
             ess_per_sec: d.ess_per_sec(),
             params: r.posterior_mean.clone(),
@@ -359,7 +359,7 @@ impl MethodView {
             max_rhat: d.max_rhat(),
             acceptance_rate: Some(r.acceptance_rate),
             ess_at_mle: None,
-            ess_posterior: Some(d.ess_per_param.clone()),
+            ess_posterior: Some(d.ess_per_param()),
             ess_per_iter: d.ess_per_iter(),
             ess_per_sec: d.ess_per_sec(),
             params: r.posterior_mean.clone(),
@@ -379,7 +379,7 @@ impl MethodView {
             // an M-H accept rate — omit it here rather than mislabel it as one.
             acceptance_rate: None,
             ess_at_mle: None,
-            ess_posterior: Some(d.ess_per_param.clone()),
+            ess_posterior: Some(d.ess_per_param()),
             ess_per_iter: d.ess_per_iter(),
             ess_per_sec: d.ess_per_sec(),
             params: r.posterior_mean.clone(),
@@ -512,10 +512,11 @@ mod tests {
         let refused = PgasStageResult {
             diagnostics: PosteriorDiagnostics {
                 // Every parameter refused → nothing reached the map.
-                rhat_per_param: BTreeMap::new(),
-                rhat_not_reported: BTreeMap::new(),
-                ess_per_param: BTreeMap::new(),
-                ess_tail_per_param: BTreeMap::new(),
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                ),
                 n_samples: 4000,
                 thin: 1,
                 wall_time_secs: Some(120.0),
@@ -536,10 +537,11 @@ mod tests {
         // fix is a classification and not a blanket refusal.
         let ok = PgasStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: BTreeMap::from([("tau".to_string(), 1.01)]),
-                rhat_not_reported: BTreeMap::new(),
-                ess_per_param: BTreeMap::from([("tau".to_string(), 800.0)]),
-                ess_tail_per_param: BTreeMap::from([("tau".to_string(), 900.0)]),
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([("tau".to_string(), 1.01)]),
+                    BTreeMap::from([("tau".to_string(), 800.0)]),
+                    BTreeMap::from([("tau".to_string(), 900.0)]),
+                ),
                 n_samples: 4000,
                 thin: 1,
                 wall_time_secs: Some(120.0),

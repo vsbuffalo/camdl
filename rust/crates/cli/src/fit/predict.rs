@@ -23,7 +23,7 @@ use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::posterior_draws;
-use crate::fit::method_result::{min_ess_over, MinEss};
+use crate::fit::method_result::{MaxRhat, PosteriorDiagnostics};
 use crate::run_meta::{FitAlgorithm, ObsSchema};
 
 // ── The two axes, as types ─────────────────────────────────────────────────
@@ -605,15 +605,25 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
                     .collect())
                 .unwrap_or_default()
         };
-        let rhat = map("rhat");
-        let rhat_max = rhat.values().copied().fold(f64::NEG_INFINITY, f64::max);
-        if !rhat_max.is_finite() {
-            return None;
+        // Reduce through the SAME classification `fit summary` uses, over the
+        // same per-parameter type, so a band and the summary cannot disagree
+        // about one fit (gh#409). A stored summary is just another producer of
+        // that map.
+        let diag = PosteriorDiagnostics {
+            per_param: crate::fit::method_result::per_param_from_summary_maps(
+                &map("rhat"), &map("rhat_classic"), &map("ess"), &map("ess_tail")),
+            n_samples: 0,
+            thin: 1,
+            wall_time_secs: None,
+            n_chains: 0,
+        };
+        match diag.max_rhat_status() {
+            MaxRhat::Reported(rhat_max) => Some(ConvergenceStatus::Reported {
+                rhat_max,
+                ess_min: diag.min_ess().unwrap_or(f64::NAN),
+            }),
+            _ => None,
         }
-        Some(ConvergenceStatus::Reported {
-            rhat_max,
-            ess_min: min_ess_cell(&rhat, &map("ess")),
-        })
     };
     // Each method reads its OWN `<algorithm>_summary.json` via the naming seam —
     // no cross-name fallback. A missing summary (an unnamed stage dir, or a
@@ -625,26 +635,6 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
         .as_deref()
         .and_then(try_read)
         .unwrap_or(ConvergenceStatus::NotAssessed)
-}
-
-/// The `ess_min` a band carries, as a number — non-finite when the shared
-/// classification declines to report one, which [`ConvergenceStatus::ess_min_cell`]
-/// renders as an empty cell.
-///
-/// Not a bare `min` over the ESS map: `f64::min` returns the non-NaN operand,
-/// so a parameter whose ESS was suppressed because its chains disagree is
-/// walked past, and the result is a minimum over the CONVERGED SUBSET that
-/// rises as the fit gets worse (gh#687, gh#691). R̂ still reports — that half is
-/// assessable — so the band says "the chains disagree this much, and no honest
-/// efficiency number goes with it" rather than blanking both.
-fn min_ess_cell(
-    rhat: &BTreeMap<String, f64>,
-    ess: &BTreeMap<String, f64>,
-) -> f64 {
-    match min_ess_over(rhat, ess) {
-        MinEss::Reported(v) => v,
-        MinEss::Unreportable { .. } | MinEss::NoParams => f64::NAN,
-    }
 }
 
 /// Recompute a band's convergence over the RETAINED chains of a
@@ -679,21 +669,26 @@ fn subset_convergence(
     let sub =
         crate::chain_selection::recompute_subset_diagnostics(draws_path, selection, &estimated)?;
 
-    // An estimated parameter whose R̂ could not be computed is a sampler
-    // failure, not a missing number — the band must not be labelled with the
-    // max over the parameters that happened to work, which is the same
-    // subset-minimum inversion gh#687 fixed for ESS.
-    if sub.rhat_not_reported.values().any(|r| r.is_pathology()) {
-        return Ok(ConvergenceStatus::NotAssessed);
+    // Reduce through the SAME classification `fit summary` uses, so the two
+    // cannot disagree about one fit + selection (gh#409). A band whose R̂ is
+    // unassessable — a sampler failure, not a missing number — carries no
+    // number rather than the max over the parameters that happened to work.
+    let diag = crate::fit::method_result::PosteriorDiagnostics {
+        per_param: sub.per_param.clone(),
+        n_samples: sub.n_samples,
+        thin: 1,
+        wall_time_secs: None,
+        n_chains: sub.n_chains,
+    };
+    match diag.max_rhat_status() {
+        crate::fit::method_result::MaxRhat::Reported(rhat_max) => {
+            Ok(ConvergenceStatus::Reported {
+                rhat_max,
+                ess_min: diag.min_ess().unwrap_or(f64::NAN),
+            })
+        }
+        _ => Ok(ConvergenceStatus::NotAssessed),
     }
-    let rhat_max = sub.rhat_per_param.values().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !rhat_max.is_finite() {
-        return Ok(ConvergenceStatus::NotAssessed);
-    }
-    Ok(ConvergenceStatus::Reported {
-        rhat_max,
-        ess_min: min_ess_cell(&sub.rhat_per_param, &sub.ess_per_param),
-    })
 }
 
 // ── The engine sink: sample y_rep per draw on the emission grid ────────────

@@ -80,10 +80,7 @@ fn recompute_over_subset(
         new_mean.insert(p.clone(), mean);
     }
 
-    diag.rhat_per_param = sub.rhat_per_param;
-    diag.rhat_not_reported = sub.rhat_not_reported;
-    diag.ess_per_param = sub.ess_per_param;
-    diag.ess_tail_per_param = sub.ess_tail_per_param;
+    diag.per_param = sub.per_param;
     diag.n_samples = sub.n_samples;
     diag.n_chains = sub.n_chains;
     // `thin` and `wall_time_secs` are properties of the whole run, unchanged by
@@ -1050,7 +1047,6 @@ impl Formatter {
             // accept rate — omit it rather than mislabel; MAP loglik does apply.
             BayesianView::Nuts(r) => (&r.diagnostics, &r.posterior_mean, None::<f64>, Some(r.map_loglik)),
         };
-        let ess = &diag.ess_per_param;
 
         // Header: with an active chain selection, `diag.n_chains` is already the
         // RETAINED count (recomputed), so name the subset and what was dropped.
@@ -1093,10 +1089,10 @@ impl Formatter {
                 s.push_str("      which is a sampler failure, not a missing number:\n");
                 for name in params.iter().take(8) {
                     let why = diag
-                        .rhat_not_reported
+                        .per_param
                         .get(name)
-                        .map(|r| r.describe())
-                        .unwrap_or("no reason recorded");
+                        .and_then(|p| p.why_no_rhat())
+                        .unwrap_or_else(|| "no reason recorded".to_string());
                     s.push_str(&format!("        {name} — {why}\n"));
                 }
                 if params.len() > 8 {
@@ -1211,14 +1207,7 @@ impl Formatter {
                 // Both encodings of "no pooled ESS" — an absent key on the
                 // loaded path, a present NaN on the --exclude-chains recompute
                 // — render as the same dash (gh#691). One fact, one rendering.
-                let ess_str = format!(
-                    "{:>10}",
-                    ess.get(name)
-                        .copied()
-                        .filter(|v| v.is_finite())
-                        .map(|v| format!("{:.0}", v))
-                        .unwrap_or_else(|| "—".to_string())
-                );
+                let ess_str = format!("{:>10}", diag.ess_cell(name, "—"));
                 let date_marker = match self.cal.date_for(name, *mean) {
                     Some(date) => format!("  ({})", date),
                     None => String::new(),
@@ -2164,7 +2153,7 @@ fn render_md_stage(stage: &StageReport) -> String {
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
-            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "—".into());
+            let ess = p.diagnostics.ess_cell(name, "—");
             let mean_cell = match stage.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
@@ -2180,7 +2169,7 @@ fn render_md_stage(stage: &StageReport) -> String {
         ));
         s.push_str("| param | mean | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
-            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "—".into());
+            let ess = p.diagnostics.ess_cell(name, "—");
             let mean_cell = match stage.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
@@ -2198,7 +2187,7 @@ fn render_md_stage(stage: &StageReport) -> String {
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
-            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "—".into());
+            let ess = p.diagnostics.ess_cell(name, "—");
             let mean_cell = match stage.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
@@ -2389,7 +2378,7 @@ fn render_latex_stage(stage: &StageReport) -> String {
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
-            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "---".into());
+            let ess = p.diagnostics.ess_cell(name, "---");
             let mean_cell = match stage.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
@@ -2410,7 +2399,7 @@ fn render_latex_stage(stage: &StageReport) -> String {
         s.push_str("\\begin{tabular}{lrrrr}\n\\toprule\n");
         s.push_str("Parameter & Mean & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
         for (name, mean) in &p.posterior_mean {
-            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "---".into());
+            let ess = p.diagnostics.ess_cell(name, "---");
             let mean_cell = match stage.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
@@ -2433,7 +2422,7 @@ fn render_latex_stage(stage: &StageReport) -> String {
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
             let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
-            let ess = p.diagnostics.ess_per_param.get(name).copied().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "---".into());
+            let ess = p.diagnostics.ess_cell(name, "---");
             let mean_cell = match stage.param_dates.get(name) {
                 Some(date) => format!("{:.6} ({})", mean, date),
                 None => format!("{:.6}", mean),
@@ -2681,10 +2670,11 @@ mod tests {
             diagnostics: PosteriorDiagnostics {
                 // Both assessed across chains; `tau`'s R̂ is far above the
                 // pooling threshold, so it carries no pooled ESS.
-                rhat_per_param: BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
-                rhat_not_reported: BTreeMap::new(),
-                ess_per_param: ess,
-                ess_tail_per_param: BTreeMap::new(),
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
+                    ess,
+                    BTreeMap::new(),
+                ),
                 n_samples: 500,
                 thin: 1,
                 wall_time_secs: Some(11.8),
@@ -2749,23 +2739,21 @@ mod tests {
         let no_traces = std::path::Path::new("/nonexistent/stage_dir");
         let r = PgasStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: BTreeMap::from([
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([
                     ("a2".to_string(), 1.013),
                     ("tau".to_string(), 6.571),
                 ]),
-                rhat_not_reported: BTreeMap::new(),
-                ess_per_param: BTreeMap::from([
+                    BTreeMap::from([
                     ("a2".to_string(), 145.0),
                     ("tau".to_string(), 42.0),
                     ("phi".to_string(), f64::NAN),
                 ]),
-                // `tau` is piled on a bound: its 95% indicator is constant, so
-                // tail-ESS is genuinely undefined and must render as a dash
-                // rather than as `NaN`.
-                ess_tail_per_param: BTreeMap::from([
+                    BTreeMap::from([
                     ("a2".to_string(), 268.0),
                     ("tau".to_string(), f64::NAN),
                 ]),
+                ),
                 n_samples: 500,
                 thin: 1,
                 wall_time_secs: Some(11.8),
@@ -2818,11 +2806,11 @@ mod tests {
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
         let mk = |wall: Option<f64>, n_samples: usize, thin: usize| PgasStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: BTreeMap::from([("a2".to_string(), 1.01), ("g".to_string(), 1.00)]),
-                rhat_not_reported: BTreeMap::new(),
-                // a2 mixes worst → it, not the mean, bounds usable ESS.
-                ess_per_param: BTreeMap::from([("a2".to_string(), 145.0), ("g".to_string(), 300.0)]),
-                ess_tail_per_param: BTreeMap::new(),
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([("a2".to_string(), 1.01), ("g".to_string(), 1.00)]),
+                    BTreeMap::from([("a2".to_string(), 145.0), ("g".to_string(), 300.0)]),
+                    BTreeMap::new(),
+                ),
                 n_samples,
                 thin,
                 wall_time_secs: wall,
@@ -3673,10 +3661,11 @@ mod tests {
 
         // Recompute over the subset (drop chain 4).
         let mut diag = PosteriorDiagnostics {
-            rhat_per_param: BTreeMap::from([("beta".to_string(), rhat_all)]),
-            rhat_not_reported: BTreeMap::new(),
-            ess_per_param: BTreeMap::from([("beta".to_string(), f64::NAN)]),
-            ess_tail_per_param: BTreeMap::new(),
+            per_param: crate::fit::method_result::per_param_from_maps(
+                BTreeMap::from([("beta".to_string(), rhat_all)]),
+                BTreeMap::from([("beta".to_string(), f64::NAN)]),
+                BTreeMap::new(),
+            ),
             n_samples: 160,
             thin: 1,
             wall_time_secs: Some(10.0),
@@ -3709,10 +3698,11 @@ mod tests {
     fn synthetic_pgas_result() -> MethodResult {
         MethodResult::Pgas(PgasStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: BTreeMap::from([("R0".to_string(), 1.02)]),
-                rhat_not_reported: BTreeMap::new(),
-                ess_per_param: BTreeMap::new(),
-                ess_tail_per_param: BTreeMap::new(),
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([("R0".to_string(), 1.02)]),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                ),
                 n_samples: 100,
                 thin: 1,
                 wall_time_secs: None,
@@ -3728,10 +3718,11 @@ mod tests {
     fn synthetic_pmmh_result() -> MethodResult {
         MethodResult::Pmmh(PmmhStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: BTreeMap::from([("R0".to_string(), 1.03)]),
-                rhat_not_reported: BTreeMap::new(),
-                ess_per_param: BTreeMap::new(),
-                ess_tail_per_param: BTreeMap::new(),
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([("R0".to_string(), 1.03)]),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                ),
                 n_samples: 100,
                 thin: 1,
                 wall_time_secs: None,

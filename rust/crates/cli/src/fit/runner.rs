@@ -2557,6 +2557,10 @@ pub struct RhatEss {
     pub ess_per_chain: Vec<f64>,
     /// `n_chains × n_draws` — the denominator for [`Self::ess_bulk_ratio`].
     pub n_draws_total: usize,
+    /// Every chain sat at its own single value: the sampler never accepted a
+    /// move. R̂ is then `∞` or undefined, and this is what lets a report say
+    /// WHY rather than printing an infinity and leaving the reader to infer it.
+    pub all_chains_frozen: bool,
     /// Why the rank-normalized statistics are absent, when they are. `None`
     /// when they were computed. Rendered by name rather than left as a bare
     /// `NaN`, which reads as a numerical failure and hides which precondition
@@ -2580,6 +2584,7 @@ impl RhatEss {
     /// `rank_convergence`, so this constructor carries its refusal outward.
     fn absent(why: sim::inference::convergence::ConvergenceError) -> Self {
         RhatEss {
+            all_chains_frozen: false,
             rhat: f64::NAN,
             rhat_classic: f64::NAN,
             ess_bulk: f64::NAN,
@@ -2632,6 +2637,7 @@ pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
     } else { f64::NAN };
 
     RhatEss {
+        all_chains_frozen: rank.all_chains_frozen,
         rhat: rank.rhat,
         rhat_classic,
         ess_bulk: rank.ess_bulk,

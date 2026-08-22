@@ -261,28 +261,8 @@ pub struct SubsetDiagnostics {
     /// A constant / fixed param yields a non-finite R̂ and is omitted, so a `max`
     /// over this map is the max R̂ across the *estimated* params (mirrors
     /// `PosteriorDiagnostics::max_rhat`).
-    pub rhat_per_param: BTreeMap<String, f64>,
-    /// Why each estimated param ABSENT from [`Self::rhat_per_param`] is absent.
-    /// A `ConstantDraws` entry here is unambiguous — pinned parameters are not
-    /// scored at all — so it means an estimated parameter that never moved.
-    pub rhat_not_reported: BTreeMap<String, sim::inference::convergence::RhatRefusal>,
-    /// Per-param bulk-ESS over the retained chains — one entry per scored
-    /// param, **including the non-finite ones**. A param whose R̂ is non-finite
-    /// was never assessable across chains (a constant column: a fixed param
-    /// swept in by the all-columns form) and carries a non-finite ESS too.
-    ///
-    /// Bulk-ESS itself is never suppressed — it uses the between-chain variance
-    /// and stays meaningful however badly the chains disagree — so a `min` over
-    /// this map no longer skips the badly-mixing params and rises as a fit gets
-    /// worse (gh#687). Reduce it through
-    /// [`PosteriorDiagnostics::min_ess_status`](crate::fit::method_result::PosteriorDiagnostics::min_ess_status),
-    /// which still separates "not assessable" from "assessed but absent" for
-    /// diagnostics loaded from older runs.
-    pub ess_per_param: BTreeMap<String, f64>,
-    /// Per-param tail-ESS over the retained chains, same key set as
-    /// [`Self::ess_per_param`]. Non-finite where a tail indicator is constant
-    /// (a parameter piled on a bound).
-    pub ess_tail_per_param: BTreeMap<String, f64>,
+    pub per_param: BTreeMap<String, crate::fit::method_result::ParamConvergence>,
+
     /// Retained draw count (rows kept).
     pub n_samples: usize,
     /// Retained chain count.
@@ -333,31 +313,16 @@ pub fn recompute_subset_diagnostics(
     // an estimated one that failed to move.
     let param_names: &[String] = estimated;
 
-    let mut rhat_not_reported = BTreeMap::new();
-    let mut rhat_per_param = BTreeMap::new();
-    let mut ess_per_param = BTreeMap::new();
-    let mut ess_tail_per_param = BTreeMap::new();
+    let mut per_param = BTreeMap::new();
     for p in param_names {
         let chains: Vec<Vec<f64>> = grouped
             .values()
             .map(|rows| rows.iter().filter_map(|r| r.params.get(p).copied()).collect())
             .collect();
-        let d = crate::fit::runner::compute_rhat_ess(&chains);
-        if d.rhat.is_finite() {
-            rhat_per_param.insert(p.clone(), d.rhat);
-        } else {
-            // Why it is absent, so a caller can tell "the sampler failed here"
-            // from "there was nothing to assess".
-            rhat_not_reported.insert(
-                p.clone(),
-                match &d.not_reported {
-                    Some(e) => e.refusal(),
-                    None => sim::inference::convergence::RhatRefusal::NonFiniteRhat,
-                },
-            );
-        }
-        ess_per_param.insert(p.clone(), d.ess_bulk);
-        ess_tail_per_param.insert(p.clone(), d.ess_tail);
+        // EVERY estimated param gets an entry, whatever the estimator
+        // managed — a parameter must never leave the fit by failing to be
+        // diagnosed.
+        per_param.insert(p.clone(), d_to_param(&crate::fit::runner::compute_rhat_ess(&chains)));
     }
 
     Ok(SubsetDiagnostics {
@@ -365,11 +330,27 @@ pub fn recompute_subset_diagnostics(
         n_samples: kept.len(),
         n_chains: grouped.len(),
         kept,
-        rhat_per_param,
-        rhat_not_reported,
-        ess_per_param,
-        ess_tail_per_param,
+        per_param,
     })
+}
+
+/// Project one parameter's [`RhatEss`](crate::fit::runner::RhatEss) into the
+/// sum type the diagnostics carry, so "could not be scored" travels with the
+/// parameter instead of removing it.
+fn d_to_param(
+    d: &crate::fit::runner::RhatEss,
+) -> crate::fit::method_result::ParamConvergence {
+    use crate::fit::method_result::{ParamConvergence, Stat};
+    match &d.not_reported {
+        Some(e) => ParamConvergence::NotScored { reason: e.refusal() },
+        None => ParamConvergence::Scored {
+            rhat: Stat::from_f64(d.rhat),
+            rhat_classic: Stat::from_f64(d.rhat_classic),
+            ess_bulk: Stat::from_f64(d.ess_bulk),
+            ess_tail: Stat::from_f64(d.ess_tail),
+            all_chains_frozen: d.all_chains_frozen,
+        },
+    }
 }
 
 /// The two load-bearing caveat lines, single-sourced so the per-fit
@@ -525,8 +506,6 @@ mod tests {
     /// estimated set separates them.
     #[test]
     fn a_frozen_estimated_param_is_a_pathology_a_pinned_one_is_not_scored() {
-        use sim::inference::convergence::RhatRefusal;
-
         let dir = std::env::temp_dir().join("camdl_frozen_vs_pinned_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -553,20 +532,20 @@ mod tests {
         let sub = recompute_subset_diagnostics(
             &draws, &keep_all, &["beta".to_string(), "frozen".to_string()])
             .expect("recompute");
-        assert!(sub.rhat_per_param.contains_key("beta"), "beta is assessable");
-        assert!(!sub.rhat_per_param.contains_key("sigma"),
-            "a pinned parameter is never scored: {:?}", sub.rhat_per_param);
-        assert!(!sub.rhat_not_reported.contains_key("sigma"),
-            "and never appears as a refusal either: {:?}", sub.rhat_not_reported);
+        assert!(sub.per_param.contains_key("beta"), "beta is assessable");
+        assert!(!sub.per_param.contains_key("sigma"),
+            "a pinned parameter is never scored: {:?}", sub.per_param.keys());
 
-        // The frozen ESTIMATED parameter is recorded, and as a pathology — not
-        // silently dropped the way the pinned one is.
-        let why = sub.rhat_not_reported.get("frozen")
-            .unwrap_or_else(|| panic!("frozen must be recorded: {:?}", sub.rhat_not_reported));
-        assert!(why.is_pathology(),
-            "a sampler that never accepted a move is a failure, not a shrug: {why:?}");
-        assert!(matches!(why, RhatRefusal::NonFiniteRhat | RhatRefusal::ConstantDraws),
-            "classified as a frozen parameter, got {why:?}");
+        // The frozen ESTIMATED parameter is PRESENT — never dropped for having
+        // failed to be diagnosed — and is classified as a pathology.
+        let frozen = sub.per_param.get("frozen")
+            .unwrap_or_else(|| panic!("frozen must stay in the map: {:?}", sub.per_param.keys()));
+        assert!(frozen.is_pathology(),
+            "a sampler that never accepted a move is a failure, not a shrug: {frozen:?}");
+        assert!(frozen.why_no_rhat().is_some(),
+            "and it carries the reason: {frozen:?}");
+        assert!(!frozen.rhat().cell(3, "—").contains('e'),
+            "never a shape-determined 1e15: {:?}", frozen.rhat());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

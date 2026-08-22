@@ -15,7 +15,7 @@
 //! would be reasonable insurance — for now, the type definitions are
 //! the authoritative constraint.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -110,31 +110,159 @@ pub struct EssSummary {
 /// method (the divergence that let a per-method allowlist drop `mh`, and that
 /// leaves `nuts` unable to report ESS at all until it fills this too).
 ///
+/// One convergence statistic, in the three states it can actually be in.
+///
+/// Not `Option<f64>`, and not a bare `f64`. `serde_json` writes any non-finite
+/// `f64` as `null`, so `Some(f64::INFINITY)` and `None` are indistinguishable
+/// once a summary round-trips through disk — which would silently collapse
+/// "∞, the sampler never moved" into "not computed". The three states have to
+/// be named to survive serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stat {
+    /// A finite measurement.
+    Value(f64),
+    /// Mathematically `+∞`: R̂ with zero within-chain variance, i.e. every
+    /// chain sat at its own single value. A real answer, not a failure.
+    Infinite,
+    /// Not defined for this input — R's `NA`. The folded half of R̂ is
+    /// undefined whenever `|x − median(x)|` is constant, and tail-ESS is
+    /// undefined when a tail indicator is constant.
+    Undefined,
+}
+
+impl Stat {
+    /// From a raw `f64`, mapping the two non-finite cases onto their names.
+    pub fn from_f64(v: f64) -> Self {
+        if v.is_finite() {
+            Stat::Value(v)
+        } else if v.is_infinite() {
+            Stat::Infinite
+        } else {
+            Stat::Undefined
+        }
+    }
+
+    /// The finite value, if there is one. `Infinite` yields `None` — callers
+    /// that must distinguish "no number" from "unboundedly bad" match instead.
+    pub fn finite(self) -> Option<f64> {
+        match self {
+            Stat::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Rendered for a table cell: the number, `∞`, or `missing`.
+    pub fn cell(self, precision: usize, missing: &str) -> String {
+        match self {
+            Stat::Value(v) => format!("{:.*}", precision, v),
+            Stat::Infinite => "∞".to_string(),
+            Stat::Undefined => missing.to_string(),
+        }
+    }
+}
+
+/// What the estimator produced for one parameter.
+///
+/// A sum type because the two cases have disjoint payloads: there is no R̂ to
+/// hold when the reason it is missing is the thing being reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ParamConvergence {
+    /// The estimator ran. Individual statistics may still be `Infinite` or
+    /// `Undefined`; each says so for itself.
+    Scored {
+        /// `max(rank-normalized split-R̂, folded split-R̂)` — the headline.
+        rhat: Stat,
+        /// Gelman & Rubin (1992), unsplit and on the raw scale. Kept because
+        /// the rank-normalized statistic is BOUNDED (ceiling ~1.85 for two
+        /// chains, ~4.5 for eight) and so cannot express severity, while this
+        /// one can. See the 2026-08-22 proposal.
+        rhat_classic: Stat,
+        /// Rank-normalized bulk ESS.
+        ess_bulk: Stat,
+        /// Tail ESS: the smaller of the 5% and 95% indicator ESS.
+        ess_tail: Stat,
+        /// Every chain sat at its own single value — the sampler never
+        /// accepted a move. R̂ is then `∞` or `Undefined`; this is what lets a
+        /// report say *why* rather than printing an infinity and leaving the
+        /// reader to infer the cause.
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        all_chains_frozen: bool,
+    },
+    /// The estimator could not run at all — a structural precondition, or a
+    /// non-finite draw.
+    NotScored { reason: RhatRefusal },
+}
+
+impl ParamConvergence {
+    /// The headline R̂, or `Undefined` when the parameter was never scored.
+    pub fn rhat(&self) -> Stat {
+        match self {
+            Self::Scored { rhat, .. } => *rhat,
+            Self::NotScored { .. } => Stat::Undefined,
+        }
+    }
+
+    /// Bulk ESS, or `Undefined` when the parameter was never scored.
+    pub fn ess_bulk(&self) -> Stat {
+        match self {
+            Self::Scored { ess_bulk, .. } => *ess_bulk,
+            Self::NotScored { .. } => Stat::Undefined,
+        }
+    }
+
+    /// Tail ESS, or `Undefined` when the parameter was never scored.
+    pub fn ess_tail(&self) -> Stat {
+        match self {
+            Self::Scored { ess_tail, .. } => *ess_tail,
+            Self::NotScored { .. } => Stat::Undefined,
+        }
+    }
+
+    /// One clause saying why this parameter carries no usable R̂, or `None`
+    /// when it carries one.
+    pub fn why_no_rhat(&self) -> Option<String> {
+        match self {
+            Self::NotScored { reason } => Some(reason.describe().to_string()),
+            Self::Scored { all_chains_frozen: true, .. } => Some(
+                "every chain sat at its own single value — the sampler never \
+                 accepted a move".to_string(),
+            ),
+            Self::Scored { rhat: Stat::Undefined, .. } => Some(
+                "the folded half of the statistic is undefined for this \
+                 marginal".to_string(),
+            ),
+            Self::Scored { .. } => None,
+        }
+    }
+
+    /// Whether this parameter is evidence the sampler MISBEHAVED, as opposed to
+    /// simply not having been given the shape a between-chain statistic needs.
+    pub fn is_pathology(&self) -> bool {
+        match self {
+            Self::NotScored { reason } => reason.is_pathology(),
+            Self::Scored { all_chains_frozen, rhat, .. } => {
+                *all_chains_frozen || matches!(rhat, Stat::Infinite)
+            }
+        }
+    }
+}
+
 /// Map fields use [`BTreeMap`] so any serialization is lexicographically
 /// ordered (consistent with the rest of `method_result`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PosteriorDiagnostics {
-    /// Gelman-Rubin R̂ per estimated param. **R̂, not the IF2 Â** — see the
-    /// comment on `If2StageResult.max_chain_agreement`. Kept as the full map
-    /// (not just the max) so a renderer can surface per-param convergence.
-    pub rhat_per_param: BTreeMap<String, f64>,
-    /// Why each parameter that has NO entry in [`Self::rhat_per_param`] has
-    /// none. Empty on fits written before the record existed — which is itself
-    /// a state [`MaxRhat`] must handle, because an empty map cannot then be
-    /// told from "every parameter was refused and we did not record it".
-    #[serde(default)]
-    pub rhat_not_reported: BTreeMap<String, RhatRefusal>,
-    /// Rank-normalized bulk effective sample size per estimated param. The
-    /// *minimum* over params bounds the usable ESS (the slowest-mixing param is
-    /// the limit).
-    pub ess_per_param: BTreeMap<String, f64>,
-    /// Tail effective sample size per estimated param — the smaller of the 5%
-    /// and 95% quantile-indicator ESS. A posterior can mix well in the bulk and
-    /// badly in the tail the interval endpoints are read from, so an interval
-    /// quoted off a small tail-ESS is not trustworthy even when bulk-ESS is
-    /// large. Empty on fits written before the statistic existed.
-    #[serde(default)]
-    pub ess_tail_per_param: BTreeMap<String, f64>,
+    /// One entry per **estimated** parameter — and the key set is exactly the
+    /// estimated set, not "the parameters we managed to diagnose".
+    ///
+    /// That distinction is load-bearing. Parameter identity used to be derived
+    /// from whichever diagnostic map happened to be non-empty, so a fit whose
+    /// R̂ could not be computed reported *no parameters at all*: "we could not
+    /// measure this" silently became "this does not exist". A parameter that
+    /// could not be scored is present here as
+    /// [`ParamConvergence::NotScored`] carrying its reason.
+    pub per_param: BTreeMap<String, ParamConvergence>,
     /// Number of post-burn-in thinned posterior samples across all chains (as
     /// written to `draws.tsv`).
     pub n_samples: usize,
@@ -156,56 +284,48 @@ impl PosteriorDiagnostics {
     /// The worst R̂ over the assessed params — **or the reason there isn't
     /// one**. The convergence headline; **R̂, not IF2's Â**. See [`MaxRhat`].
     pub fn max_rhat_status(&self) -> MaxRhat {
-        let reported = self
-            .rhat_per_param
-            .values()
-            .copied()
-            .filter(|v| v.is_finite())
-            .fold(f64::NEG_INFINITY, f64::max);
-        if reported.is_finite() {
-            // At least one parameter was assessed. A refusal on another
-            // parameter is still a pathology that must sink the verdict — a fit
-            // is not converged because SOME of it was.
-            let bad: Vec<String> = self
-                .rhat_not_reported
-                .iter()
-                .filter(|(_, r)| r.is_pathology())
-                .map(|(n, _)| n.clone())
-                .collect();
-            if bad.is_empty() {
-                return MaxRhat::Reported(reported);
-            }
-            return MaxRhat::Unassessable { params: bad };
-        }
-        if self.rhat_not_reported.is_empty() {
-            // No R̂, and no record of why. An older fit, or a stage that
-            // estimated nothing. Either way there is nothing to certify.
+        if self.per_param.is_empty() {
             return MaxRhat::NoParams;
         }
+        // A parameter whose failure is a SAMPLER pathology sinks the verdict,
+        // whether or not other parameters reported. A fit is not converged
+        // because some of it was.
         let bad: Vec<String> = self
-            .rhat_not_reported
+            .per_param
             .iter()
-            .filter(|(_, r)| r.is_pathology())
+            .filter(|(_, p)| p.is_pathology())
             .map(|(n, _)| n.clone())
             .collect();
-        if bad.is_empty() {
-            MaxRhat::NotApplicable {
-                reason: self
-                    .rhat_not_reported
-                    .values()
-                    .next()
-                    .copied()
-                    .unwrap_or(RhatRefusal::EstimatedSetUnknown),
-            }
-        } else {
-            MaxRhat::Unassessable { params: bad }
+        if !bad.is_empty() {
+            return MaxRhat::Unassessable { params: bad };
         }
+        let mut worst = f64::NEG_INFINITY;
+        let mut any = false;
+        for p in self.per_param.values() {
+            if let Stat::Value(v) = p.rhat() {
+                worst = worst.max(v);
+                any = true;
+            }
+        }
+        if any {
+            return MaxRhat::Reported(worst);
+        }
+        // Nothing reported and nothing pathological: the run was never given
+        // the shape a between-chain statistic needs.
+        let reason = self
+            .per_param
+            .values()
+            .find_map(|p| match p {
+                ParamConvergence::NotScored { reason } => Some(*reason),
+                _ => None,
+            })
+            .unwrap_or(RhatRefusal::EstimatedSetUnknown);
+        MaxRhat::NotApplicable { reason }
     }
 
     /// The worst R̂ as a number, `None` when there isn't one. Thin projection of
     /// [`max_rhat_status`](Self::max_rhat_status) for the display sites that
-    /// only need the value; a renderer wanting the *reason* matches on the
-    /// status.
+    /// only need the value.
     pub fn max_rhat(&self) -> Option<f64> {
         match self.max_rhat_status() {
             MaxRhat::Reported(v) => Some(v),
@@ -216,61 +336,78 @@ impl PosteriorDiagnostics {
     /// Whether this fit may be reported as converged. **Only** `Reported`
     /// below the threshold qualifies: `Unassessable` is a sampler pathology,
     /// and `NotApplicable` / `NoParams` mean the question was never answered.
-    /// None of the three is `true`.
     pub fn converged_at(&self, threshold: f64) -> bool {
         matches!(self.max_rhat_status(), MaxRhat::Reported(v) if v < threshold)
     }
 
-    /// One parameter's R̂ as a table cell, or `missing` when it has none.
+    /// One parameter's R̂ as a table cell.
     ///
     /// A fit that fails says so once, in the headline. WHICH parameter failed
     /// is only readable here, and a column of dashes over values the run
     /// already computed sends the reader to `diagnostics.json` to answer the
     /// first question they have (gh#611).
     pub fn rhat_cell(&self, name: &str, missing: &str) -> String {
-        Self::finite_cell(self.rhat_per_param.get(name).copied(), 3, missing)
+        self.per_param
+            .get(name)
+            .map(|p| p.rhat().cell(3, missing))
+            .unwrap_or_else(|| missing.to_string())
     }
 
-    /// One parameter's tail-ESS as a table cell, or `missing` when it has none
-    /// — including the parameter piled on a bound, whose tail indicator is
-    /// constant and whose tail-ESS is genuinely undefined.
+    /// One parameter's bulk ESS as a table cell.
+    pub fn ess_cell(&self, name: &str, missing: &str) -> String {
+        self.per_param
+            .get(name)
+            .map(|p| p.ess_bulk().cell(0, missing))
+            .unwrap_or_else(|| missing.to_string())
+    }
+
+    /// One parameter's tail ESS as a table cell. `Undefined` for a parameter
+    /// piled on a bound, whose tail indicator is constant.
     pub fn ess_tail_cell(&self, name: &str, missing: &str) -> String {
-        Self::finite_cell(self.ess_tail_per_param.get(name).copied(), 0, missing)
+        self.per_param
+            .get(name)
+            .map(|p| p.ess_tail().cell(0, missing))
+            .unwrap_or_else(|| missing.to_string())
     }
 
-    /// A numeric cell that renders `missing` for both encodings of "no value":
-    /// an absent key (a NaN serialized to JSON `null` and dropped on load) and
-    /// a present NaN (the `--exclude-chains` recompute keeps the key). One
-    /// fact, one rendering.
-    fn finite_cell(v: Option<f64>, precision: usize, missing: &str) -> String {
-        match v {
-            Some(v) if v.is_finite() => format!("{:.*}", precision, v),
-            _ => missing.to_string(),
+    /// Minimum bulk ESS over the assessed params — the slowest param bounds
+    /// the usable ESS — **or the reason there isn't one**. See [`MinEss`].
+    pub fn min_ess_status(&self) -> MinEss {
+        if self.per_param.is_empty() {
+            return MinEss::NoParams;
+        }
+        let n_expected = self.per_param.len();
+        let mut missing: Vec<String> = Vec::new();
+        let mut min = f64::INFINITY;
+        for (name, p) in &self.per_param {
+            match p.ess_bulk() {
+                Stat::Value(v) => min = min.min(v),
+                _ => missing.push(name.clone()),
+            }
+        }
+        if missing.is_empty() {
+            MinEss::Reported(min)
+        } else {
+            MinEss::Unreportable { missing, n_expected }
         }
     }
 
-    /// Minimum pooled ESS over the assessed params — the slowest param bounds
-    /// the usable ESS — **or the reason there isn't one**. See [`MinEss`].
-    ///
-    /// A param is *assessed* when it has a finite R̂, or already has a finite
-    /// ESS. A param with no finite R̂ was never comparable across chains at all
-    /// (fewer than two usable chains, or a column that does not vary — a fixed
-    /// parameter swept in by `fit predict`'s all-columns subset recompute), so
-    /// it has no pooled ESS to suppress and does not withhold the headline. A
-    /// param *with* a finite R̂ has a pooled ESS iff R̂ ≤ 1.1, so its absence
-    /// (or NaN) means exactly one thing: the chains disagree.
-    pub fn min_ess_status(&self) -> MinEss {
-        min_ess_over(&self.rhat_per_param, &self.ess_per_param)
-    }
-
-    /// The min-param ESS as a number, `None` when it is not reportable. Thin
-    /// projection of [`min_ess_status`](Self::min_ess_status) for the two
-    /// efficiency ratios; a renderer wanting the *reason* matches on the status.
+    /// The min-param ESS as a number, `None` when it is not reportable.
     pub fn min_ess(&self) -> Option<f64> {
         match self.min_ess_status() {
             MinEss::Reported(v) => Some(v),
             MinEss::Unreportable { .. } | MinEss::NoParams => None,
         }
+    }
+
+    /// Bulk ESS per param, for the consumers that want the raw map (the
+    /// `fit table` row's `ess_posterior`). Non-finite entries are omitted —
+    /// a JSON consumer reading this cannot represent them anyway.
+    pub fn ess_per_param(&self) -> BTreeMap<String, f64> {
+        self.per_param
+            .iter()
+            .filter_map(|(n, p)| p.ess_bulk().finite().map(|v| (n.clone(), v)))
+            .collect()
     }
 
     /// Raw sampling iterations = `n_samples × thin`. Recovers the raw sampling
@@ -297,52 +434,6 @@ impl PosteriorDiagnostics {
     pub fn ess_per_sec(&self) -> Option<f64> {
         let secs = self.wall_time_secs.filter(|s| *s > 0.0)?;
         Some(self.min_ess()? / secs)
-    }
-}
-
-/// Classify a `(R̂, ESS)` pair of per-parameter maps into a [`MinEss`].
-///
-/// A free function rather than a method because three surfaces need it and
-/// only one of them holds a [`PosteriorDiagnostics`]: `fit summary`'s headline,
-/// `fit predict`'s stored-summary band label, and `fit predict`'s
-/// `--exclude-chains` recompute. Each reducing the maps its own way is how the
-/// two sibling sites of gh#691 kept the reduce gh#687 replaced — and how a band
-/// and the summary for one fit + selection come to disagree, which is the
-/// property gh#409 established.
-///
-/// A param is *assessed* when it has a finite R̂, or already has a finite ESS.
-/// A param with no finite R̂ was never comparable across chains at all (fewer
-/// than two usable chains, or a column that does not vary — a fixed parameter
-/// swept in by `fit predict`'s all-columns subset recompute), so it has no
-/// pooled ESS to withhold. A param *with* a finite R̂ that has no ESS means
-/// exactly one thing: whatever suppressed it did so because the chains
-/// disagree.
-pub fn min_ess_over(
-    rhat_per_param: &BTreeMap<String, f64>,
-    ess_per_param: &BTreeMap<String, f64>,
-) -> MinEss {
-    let assessed: BTreeSet<&str> = rhat_per_param
-        .iter()
-        .chain(ess_per_param.iter())
-        .filter(|(_, v)| v.is_finite())
-        .map(|(name, _)| name.as_str())
-        .collect();
-    if assessed.is_empty() {
-        return MinEss::NoParams;
-    }
-    let n_expected = assessed.len();
-    let mut missing: Vec<String> = Vec::new();
-    let mut min = f64::INFINITY;
-    for name in assessed {
-        match ess_per_param.get(name).copied() {
-            Some(v) if v.is_finite() => min = min.min(v),
-            _ => missing.push(name.to_string()),
-        }
-    }
-    if missing.is_empty() {
-        MinEss::Reported(min)
-    } else {
-        MinEss::Unreportable { missing, n_expected }
     }
 }
 
@@ -818,6 +909,7 @@ impl PgasStageResult {
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map = read_f64_map(&summary, "rhat");
+        let rhat_classic_map = read_f64_map(&summary, "rhat_classic");
         let rhat_not_reported = read_refusal_map(&summary);
         let ess_map = read_f64_map(&summary, "ess");
         let ess_tail_map = read_f64_map(&summary, "ess_tail");
@@ -825,10 +917,18 @@ impl PgasStageResult {
         // Posterior moments: average each estimated-param column in
         // draws.tsv. The estimated-param key set is rhat_map's keys
         // when present (rhat is per estimated param), else ess_map's.
-        let est_names: Vec<String> = if !rhat_map.is_empty() {
-            rhat_map.keys().cloned().collect()
-        } else {
-            ess_map.keys().cloned().collect()
+        // Parameter identity is the UNION of every diagnostic key plus every
+        // recorded refusal — never "whichever map happened to be non-empty".
+        // A fit whose R̂ could not be computed still has parameters (gh#611 /
+        // review blocker 1); deriving the list from a diagnostic map made such
+        // a fit report none at all.
+        let est_names: Vec<String> = {
+            let mut set: std::collections::BTreeSet<String> = Default::default();
+            set.extend(rhat_map.keys().cloned());
+            set.extend(ess_map.keys().cloned());
+            set.extend(ess_tail_map.keys().cloned());
+            set.extend(rhat_not_reported.keys().cloned());
+            set.into_iter().collect()
         };
         let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
             posterior_summaries(stage_dir, &est_names);
@@ -873,10 +973,9 @@ impl PgasStageResult {
 
         Ok(PgasStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: rhat_map,
-                rhat_not_reported,
-                ess_per_param: ess_map,
-                ess_tail_per_param: ess_tail_map,
+                per_param: build_per_param(
+                    &rhat_map, &rhat_classic_map, &rhat_not_reported,
+                    &ess_map, &ess_tail_map),
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -904,13 +1003,22 @@ impl PmmhStageResult {
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map = read_f64_map(&summary, "rhat");
+        let rhat_classic_map = read_f64_map(&summary, "rhat_classic");
         let rhat_not_reported = read_refusal_map(&summary);
         let ess_map = read_f64_map(&summary, "ess");
         let ess_tail_map = read_f64_map(&summary, "ess_tail");
-        let est_names: Vec<String> = if !rhat_map.is_empty() {
-            rhat_map.keys().cloned().collect()
-        } else {
-            ess_map.keys().cloned().collect()
+        // Parameter identity is the UNION of every diagnostic key plus every
+        // recorded refusal — never "whichever map happened to be non-empty".
+        // A fit whose R̂ could not be computed still has parameters (gh#611 /
+        // review blocker 1); deriving the list from a diagnostic map made such
+        // a fit report none at all.
+        let est_names: Vec<String> = {
+            let mut set: std::collections::BTreeSet<String> = Default::default();
+            set.extend(rhat_map.keys().cloned());
+            set.extend(ess_map.keys().cloned());
+            set.extend(ess_tail_map.keys().cloned());
+            set.extend(rhat_not_reported.keys().cloned());
+            set.into_iter().collect()
         };
         let (n_samples, posterior_mean, _q025, _q975) =
             posterior_summaries(stage_dir, &est_names);
@@ -936,10 +1044,9 @@ impl PmmhStageResult {
 
         Ok(PmmhStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: rhat_map,
-                rhat_not_reported,
-                ess_per_param: ess_map,
-                ess_tail_per_param: ess_tail_map,
+                per_param: build_per_param(
+                    &rhat_map, &rhat_classic_map, &rhat_not_reported,
+                    &ess_map, &ess_tail_map),
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -965,13 +1072,22 @@ impl NutsStageResult {
         let n_divergent = summary.get("n_divergent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let rhat_map = read_f64_map(&summary, "rhat");
+        let rhat_classic_map = read_f64_map(&summary, "rhat_classic");
         let rhat_not_reported = read_refusal_map(&summary);
         let ess_map = read_f64_map(&summary, "ess");
         let ess_tail_map = read_f64_map(&summary, "ess_tail");
-        let est_names: Vec<String> = if !rhat_map.is_empty() {
-            rhat_map.keys().cloned().collect()
-        } else {
-            ess_map.keys().cloned().collect()
+        // Parameter identity is the UNION of every diagnostic key plus every
+        // recorded refusal — never "whichever map happened to be non-empty".
+        // A fit whose R̂ could not be computed still has parameters (gh#611 /
+        // review blocker 1); deriving the list from a diagnostic map made such
+        // a fit report none at all.
+        let est_names: Vec<String> = {
+            let mut set: std::collections::BTreeSet<String> = Default::default();
+            set.extend(rhat_map.keys().cloned());
+            set.extend(ess_map.keys().cloned());
+            set.extend(ess_tail_map.keys().cloned());
+            set.extend(rhat_not_reported.keys().cloned());
+            set.into_iter().collect()
         };
         let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
             posterior_summaries(stage_dir, &est_names);
@@ -984,10 +1100,9 @@ impl NutsStageResult {
 
         Ok(NutsStageResult {
             diagnostics: PosteriorDiagnostics {
-                rhat_per_param: rhat_map,
-                rhat_not_reported,
-                ess_per_param: ess_map,
-                ess_tail_per_param: ess_tail_map,
+                per_param: build_per_param(
+                    &rhat_map, &rhat_classic_map, &rhat_not_reported,
+                    &ess_map, &ess_tail_map),
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -1003,6 +1118,74 @@ impl NutsStageResult {
 }
 
 // ── shared helpers ──────────────────────────────────────────────────
+
+/// Build the per-parameter map from a stored summary's separate JSON maps.
+///
+/// The loaded path is just another producer of the same type — a band label and
+/// `fit summary` must reduce one fit the same way, whether the numbers came
+/// from a recompute or off disk.
+pub fn per_param_from_summary_maps(
+    rhat: &BTreeMap<String, f64>,
+    rhat_classic: &BTreeMap<String, f64>,
+    ess: &BTreeMap<String, f64>,
+    ess_tail: &BTreeMap<String, f64>,
+) -> BTreeMap<String, ParamConvergence> {
+    build_per_param(rhat, rhat_classic, &BTreeMap::new(), ess, ess_tail)
+}
+
+/// Test-only: build the per-parameter map from plain `(R̂, bulk-ESS, tail-ESS)`
+/// maps, so fixtures stay readable. Deliberately NOT public API — the parallel
+/// maps are the shape this type exists to remove.
+#[cfg(test)]
+pub fn per_param_from_maps(
+    rhat: BTreeMap<String, f64>,
+    ess: BTreeMap<String, f64>,
+    ess_tail: BTreeMap<String, f64>,
+) -> BTreeMap<String, ParamConvergence> {
+    build_per_param(&rhat, &BTreeMap::new(), &BTreeMap::new(), &ess, &ess_tail)
+}
+
+/// Assemble the per-parameter map from a stage summary's separate JSON maps.
+///
+/// The key set is the UNION of everything mentioned, so a parameter that
+/// appears only as a refusal is still a parameter of this fit.
+fn build_per_param(
+    rhat: &BTreeMap<String, f64>,
+    rhat_classic: &BTreeMap<String, f64>,
+    refused: &BTreeMap<String, RhatRefusal>,
+    ess: &BTreeMap<String, f64>,
+    ess_tail: &BTreeMap<String, f64>,
+) -> BTreeMap<String, ParamConvergence> {
+    let mut names: std::collections::BTreeSet<&String> = Default::default();
+    names.extend(rhat.keys());
+    names.extend(rhat_classic.keys());
+    names.extend(refused.keys());
+    names.extend(ess.keys());
+    names.extend(ess_tail.keys());
+
+    names
+        .into_iter()
+        .map(|name| {
+            // A refusal with no numbers at all is `NotScored`; a refusal
+            // alongside an ESS means the estimator ran and only R̂ is missing.
+            let entry = match (refused.get(name), ess.get(name)) {
+                (Some(reason), None) => ParamConvergence::NotScored { reason: *reason },
+                (reason, _) => ParamConvergence::Scored {
+                    rhat: rhat.get(name).copied().map(Stat::from_f64)
+                        .unwrap_or(Stat::Undefined),
+                    rhat_classic: rhat_classic.get(name).copied().map(Stat::from_f64)
+                        .unwrap_or(Stat::Undefined),
+                    ess_bulk: ess.get(name).copied().map(Stat::from_f64)
+                        .unwrap_or(Stat::Undefined),
+                    ess_tail: ess_tail.get(name).copied().map(Stat::from_f64)
+                        .unwrap_or(Stat::Undefined),
+                    all_chains_frozen: matches!(reason, Some(RhatRefusal::NonFiniteRhat)),
+                },
+            };
+            (name.clone(), entry)
+        })
+        .collect()
+}
 
 /// Extract `rhat_not_reported` — `{ "<param>": "<refusal>" }` — from a stage
 /// summary. Absent (an older fit) yields an empty map, which
@@ -1368,7 +1551,7 @@ mod tests {
         // Acceptance per param: chain-mean. R0 col 0: (0.32 + 0.28)/2 = 0.30.
         assert!((r.acceptance_per_param["R0"] - 0.30).abs() < 1e-9);
         // ESS comes through.
-        assert!((r.diagnostics.ess_per_param["sigma"] - 412.0).abs() < 1e-9);
+        assert!((r.diagnostics.ess_per_param()["sigma"] - 412.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1518,13 +1701,14 @@ mod tests {
 
     fn diag(ess: &[(&str, f64)], n_samples: usize, thin: usize, wall: Option<f64>) -> PosteriorDiagnostics {
         PosteriorDiagnostics {
-            rhat_per_param: [("R0", 1.02), ("sigma", 1.04)]
+            per_param: crate::fit::method_result::per_param_from_maps(
+                [("R0", 1.02), ("sigma", 1.04)]
                 .iter()
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect(),
-            rhat_not_reported: BTreeMap::new(),
-            ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-            ess_tail_per_param: BTreeMap::new(),
+                ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+                BTreeMap::new(),
+            ),
             n_samples,
             thin,
             wall_time_secs: wall,
@@ -1577,10 +1761,11 @@ mod tests {
         wall: Option<f64>,
     ) -> PosteriorDiagnostics {
         PosteriorDiagnostics {
-            rhat_per_param: rhat.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-            rhat_not_reported: BTreeMap::new(),
-            ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-            ess_tail_per_param: BTreeMap::new(),
+            per_param: crate::fit::method_result::per_param_from_maps(
+                rhat.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+                ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+                BTreeMap::new(),
+            ),
             n_samples,
             thin: 1,
             wall_time_secs: wall,
@@ -1641,27 +1826,193 @@ mod tests {
         }
     }
 
-    /// A parameter with no finite R̂ was never assessable across chains at all
-    /// (a column that does not vary — a fixed parameter caught by the
-    /// all-columns subset recompute, or fewer than two usable chains). It has
-    /// no pooled ESS to suppress, so it must NOT make the headline undefined:
-    /// otherwise every `--exclude-chains` summary loses its efficiency line.
+    /// `Infinite` and `Undefined` are different answers and must stay
+    /// different **through serialization**.
+    ///
+    /// This is why `Stat` is a three-arm enum rather than `Option<f64>`:
+    /// `serde_json` writes any non-finite `f64` as `null`, so `Some(INFINITY)`
+    /// and `None` are the same bytes on disk. Collapsing them would turn "∞ —
+    /// the sampler never moved" into "not computed" the moment a summary
+    /// round-trips, which is the loudest signal camdl has silently becoming
+    /// the quietest.
     #[test]
-    fn structurally_unassessed_params_do_not_withhold_the_headline() {
-        // `rho` / `k` are constant columns: R̂ non-finite (dropped by both
-        // producers), ESS NaN. `beta` / `gamma` were assessed and report.
+    fn infinite_and_undefined_are_distinct_through_a_json_round_trip() {
+        assert_eq!(Stat::from_f64(f64::INFINITY), Stat::Infinite);
+        assert_eq!(Stat::from_f64(f64::NEG_INFINITY), Stat::Infinite);
+        assert_eq!(Stat::from_f64(f64::NAN), Stat::Undefined);
+        assert_eq!(Stat::from_f64(1.03), Stat::Value(1.03));
+        assert_ne!(Stat::Infinite, Stat::Undefined);
+
+        for original in [Stat::Value(1.03), Stat::Infinite, Stat::Undefined] {
+            let json = serde_json::to_string(&original).expect("serialize");
+            let back: Stat = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, original, "round-trip must preserve the arm: {json}");
+        }
+        // The specific collapse the enum exists to prevent.
+        assert_ne!(
+            serde_json::to_string(&Stat::Infinite).unwrap(),
+            serde_json::to_string(&Stat::Undefined).unwrap(),
+            "the two must not serialize to the same bytes"
+        );
+
+        // And they render differently.
+        assert_eq!(Stat::Infinite.cell(3, "—"), "∞");
+        assert_eq!(Stat::Undefined.cell(3, "—"), "—");
+        assert_eq!(Stat::Value(1.0295).cell(3, "—"), "1.030");
+    }
+
+    /// A parameter whose R̂ is `∞` — every chain frozen at its own value — is a
+    /// SAMPLER PATHOLOGY. It must sink the verdict even when other parameters
+    /// reported perfectly well: a fit is not converged because some of it was.
+    #[test]
+    fn an_infinite_rhat_sinks_the_verdict_even_beside_healthy_params() {
+        let d = PosteriorDiagnostics {
+            per_param: BTreeMap::from([
+                ("beta".to_string(), ParamConvergence::Scored {
+                    rhat: Stat::Value(1.01),
+                    rhat_classic: Stat::Value(1.00),
+                    ess_bulk: Stat::Value(900.0),
+                    ess_tail: Stat::Value(850.0),
+                    all_chains_frozen: false,
+                }),
+                ("frozen".to_string(), ParamConvergence::Scored {
+                    rhat: Stat::Infinite,
+                    rhat_classic: Stat::Infinite,
+                    ess_bulk: Stat::Value(3.0),
+                    ess_tail: Stat::Undefined,
+                    all_chains_frozen: true,
+                }),
+            ]),
+            n_samples: 4000,
+            thin: 1,
+            wall_time_secs: Some(60.0),
+            n_chains: 4,
+        };
+
+        match d.max_rhat_status() {
+            MaxRhat::Unassessable { params } => assert_eq!(params, vec!["frozen".to_string()]),
+            other => panic!("a frozen parameter must make the headline Unassessable, got {other:?}"),
+        }
+        assert!(!d.converged_at(RHAT_CONVERGED_THRESHOLD),
+            "a fit containing a frozen parameter is NOT converged");
+        assert_eq!(d.max_rhat(), None, "and publishes no headline number");
+        // The healthy parameter is untouched and still readable.
+        assert_eq!(d.rhat_cell("beta", "—"), "1.010");
+        assert_eq!(d.rhat_cell("frozen", "—"), "∞", "∞ is shown, not hidden");
+    }
+
+    /// Every non-reporting state carries a reason a reader can act on. A blank
+    /// cell with no explanation is what sent people to `diagnostics.json`.
+    #[test]
+    fn every_non_reporting_state_explains_itself() {
+        let frozen = ParamConvergence::Scored {
+            rhat: Stat::Infinite, rhat_classic: Stat::Infinite,
+            ess_bulk: Stat::Value(3.0), ess_tail: Stat::Undefined,
+            all_chains_frozen: true,
+        };
+        assert!(frozen.why_no_rhat().expect("frozen explains itself").contains("never accepted"));
+        assert!(frozen.is_pathology());
+
+        let undefined_fold = ParamConvergence::Scored {
+            rhat: Stat::Undefined, rhat_classic: Stat::Value(1.02),
+            ess_bulk: Stat::Value(500.0), ess_tail: Stat::Value(400.0),
+            all_chains_frozen: false,
+        };
+        assert!(undefined_fold.why_no_rhat().expect("an undefined R̂ explains itself")
+            .contains("folded"));
+
+        let not_scored = ParamConvergence::NotScored { reason: RhatRefusal::NonFiniteDraw };
+        let why = not_scored.why_no_rhat().expect("a refusal explains itself");
+        assert!(why.contains("NaN") || why.contains("infinite"), "got {why}");
+        assert!(not_scored.is_pathology(), "a non-finite draw is a pathology");
+
+        // Structural: not a pathology, but still not "converged".
+        let too_few = ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains };
+        assert!(!too_few.is_pathology(), "being given one chain is not a sampler failure");
+        assert!(too_few.why_no_rhat().is_some(), "but it still says so");
+
+        // An infinite R̂ is a pathology on its own, whether or not the
+        // frozen-chains flag was set: R̂ = ∞ means the within-chain variance is
+        // zero, and there is no benign way for that to happen.
+        let inf_only = ParamConvergence::Scored {
+            rhat: Stat::Infinite, rhat_classic: Stat::Infinite,
+            ess_bulk: Stat::Value(4.0), ess_tail: Stat::Undefined,
+            all_chains_frozen: false,
+        };
+        assert!(inf_only.is_pathology(),
+            "R̂ = ∞ is a pathology by itself, not only when the flag agrees");
+
+        // A healthy parameter has nothing to explain.
+        let ok = ParamConvergence::Scored {
+            rhat: Stat::Value(1.01), rhat_classic: Stat::Value(1.00),
+            ess_bulk: Stat::Value(900.0), ess_tail: Stat::Value(850.0),
+            all_chains_frozen: false,
+        };
+        assert_eq!(ok.why_no_rhat(), None);
+        assert!(!ok.is_pathology());
+    }
+
+    /// A structural refusal is "not assessed", which is NOT "converged" — the
+    /// distinction option C exists for.
+    #[test]
+    fn a_structural_refusal_is_not_assessed_and_not_converged() {
+        let d = PosteriorDiagnostics {
+            per_param: BTreeMap::from([
+                ("beta".to_string(),
+                 ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains }),
+            ]),
+            n_samples: 100, thin: 1, wall_time_secs: None, n_chains: 1,
+        };
+        match d.max_rhat_status() {
+            MaxRhat::NotApplicable { reason } => assert_eq!(reason, RhatRefusal::TooFewChains),
+            other => panic!("expected NotApplicable, got {other:?}"),
+        }
+        assert!(!d.converged_at(RHAT_CONVERGED_THRESHOLD),
+            "a single-chain fit was never assessed, so it is not converged");
+    }
+
+    /// A parameter the model PINS never enters the map at all, so it cannot
+    /// withhold the headline — and that is now true by construction rather
+    /// than by a filter.
+    ///
+    /// This test used to assert the opposite shape: that constant columns
+    /// swept in by `fit predict`'s all-columns subset recompute carried a
+    /// non-finite R̂ and had to be skipped. That recompute is gone. The subset
+    /// path iterates the ESTIMATED set read from the fit's own sidecar, so the
+    /// only way a NaN reaches this map is an estimated parameter that failed —
+    /// which MUST withhold. One filter was doing two jobs; separating them is
+    /// what made a frozen parameter distinguishable from a pinned one.
+    #[test]
+    fn a_pinned_param_is_absent_from_the_map_not_filtered_out_of_it() {
+        // Exactly the estimated set. `k` and `rho` are pinned by the model and
+        // are simply not here.
         let d = diag_rhat(
             &[("beta", 1.01), ("gamma", 1.02)],
-            &[("beta", 300.0), ("gamma", 145.0), ("k", f64::NAN), ("rho", f64::NAN)],
+            &[("beta", 300.0), ("gamma", 145.0)],
             500,
             Some(11.8),
         );
         assert_eq!(
             d.min_ess_status(),
             MinEss::Reported(145.0),
-            "the two assessed parameters both report; the constant columns are not a gap"
+            "every estimated parameter reported, so the headline is the slowest"
         );
         assert!((d.ess_per_iter().unwrap() - 145.0 / 500.0).abs() < 1e-12);
+        assert!(!d.per_param.contains_key("k") && !d.per_param.contains_key("rho"),
+            "a pinned parameter is not in the estimated set: {:?}", d.per_param.keys());
+
+        // Control: the same map with one ESTIMATED parameter failing DOES
+        // withhold. A NaN here can only mean a sampler failure now.
+        let broken = diag_rhat(
+            &[("beta", 1.01), ("gamma", 1.02)],
+            &[("beta", 300.0), ("gamma", f64::NAN)],
+            500,
+            Some(11.8),
+        );
+        match broken.min_ess_status() {
+            MinEss::Unreportable { missing, .. } => assert_eq!(missing, vec!["gamma".to_string()]),
+            other => panic!("an estimated parameter with no ESS must withhold, got {other:?}"),
+        }
     }
 
     /// THE property this issue exists for. A strictly better fit — every
@@ -1731,10 +2082,11 @@ mod tests {
     #[test]
     fn empty_diagnostics_yield_none_not_nan() {
         let d = PosteriorDiagnostics {
-            rhat_per_param: BTreeMap::new(),
-            rhat_not_reported: BTreeMap::new(),
-            ess_per_param: BTreeMap::new(),
-            ess_tail_per_param: BTreeMap::new(),
+            per_param: crate::fit::method_result::per_param_from_maps(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            ),
             n_samples: 0,
             thin: 1,
             wall_time_secs: Some(5.0),
