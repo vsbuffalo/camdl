@@ -72,17 +72,6 @@ pub enum ConvergenceError {
     /// [`DEGENERATE_REL_TOL`] of the parameter's own scale. The total variance
     /// is zero, so R̂'s denominator is zero and the rank transform is constant.
     ConstantDraws { value: f64 },
-    /// Every chain is internally constant at a value the others do not share:
-    /// the sampler never accepted a move, and each chain is stuck wherever it
-    /// started. The pooled draws DO vary, so this is not `ConstantDraws`.
-    ///
-    /// R̂'s within-chain variance is zero here, so the ratio diverges. It does
-    /// **not** reliably reach `inf`: the chain means are computed by summation,
-    /// so a one-ulp rounding leaves a denominator around `1e-32` and R̂ comes
-    /// back as a finite `~1e15` — a number that passes every `is_finite` check
-    /// and is pure floating-point noise. Refusing by name is the only way to
-    /// stop that reaching a report as a statistic.
-    AllChainsConstant { n_chains: usize },
 }
 
 /// Why a parameter has no R̂, and — the part that decides what a fit may
@@ -157,7 +146,6 @@ impl ConvergenceError {
             Self::UnequalChainLengths { .. } => RhatRefusal::UnequalChainLengths,
             Self::NonFiniteDraw { .. } => RhatRefusal::NonFiniteDraw,
             Self::ConstantDraws { .. } => RhatRefusal::ConstantDraws,
-            Self::AllChainsConstant { .. } => RhatRefusal::NonFiniteRhat,
         }
     }
 }
@@ -178,10 +166,7 @@ impl fmt::Display for ConvergenceError {
             Self::ConstantDraws { value } => write!(
                 f, "every draw is {value}: the parameter did not move, so R̂ \
                     has no within-chain variance to divide by"),
-            Self::AllChainsConstant { n_chains } => write!(
-                f, "each of the {n_chains} chains sat at its own single value: \
-                    the sampler never accepted a move, so R̂ has no within-chain \
-                    variance to divide by"),
+
         }
     }
 }
@@ -219,6 +204,11 @@ pub struct RankConvergence {
     pub ess_tail: f64,
     /// `n_chains × n_draws` — the denominator for [`Self::ess_bulk_ratio`].
     pub n_draws_total: usize,
+    /// Every chain sat at its own single value: the sampler never accepted a
+    /// move. R̂ is `+∞` and ESS is near its floor when this is set; the flag is
+    /// what lets a report say *why* instead of printing an infinity and
+    /// leaving the reader to infer the cause.
+    pub all_chains_frozen: bool,
 }
 
 impl RankConvergence {
@@ -274,21 +264,21 @@ pub fn rank_convergence(chains: &[Vec<f64>]) -> Result<RankConvergence, Converge
         return Err(ConvergenceError::ConstantDraws { value: mean });
     }
 
-    // Every chain internally constant — the 0%-acceptance deadlock. The pooled
-    // draws vary (checked above), so the rank transform is well defined, but
-    // every within-chain variance is zero and R̂'s denominator is only not-zero
-    // by rounding. `posterior` reports the resulting ~1e15 as a number; camdl
-    // refuses it, on the same reasoning as [`DEGENERATE_REL_TOL`] — a statistic
-    // whose value is set by the last bit of a summation is not a statistic.
-    if chains.iter().all(|c| {
+    // Every chain internally constant — the 0%-acceptance deadlock — is
+    // DETECTED but not refused. With the exact-zero variance above, R̂ comes
+    // out as +∞, which is the mathematically correct answer and is what
+    // `posterior` reports; ESS stays computable and is still worth having
+    // (`posterior` reverted per-chain constancy checking for ESS in #198,
+    // as overly conservative). What camdl adds over `posterior` is the
+    // REASON, carried alongside the ∞ so the reader is told what to fix
+    // rather than left to infer it from an infinity.
+    let all_chains_frozen = chains.iter().all(|c| {
         let (lo, hi) = c.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &v| {
             (l.min(v), h.max(v))
         });
         let scale = (c.iter().sum::<f64>() / c.len() as f64).abs().max(f64::MIN_POSITIVE);
         hi - lo <= DEGENERATE_REL_TOL * scale
-    }) {
-        return Err(ConvergenceError::AllChainsConstant { n_chains });
-    }
+    });
 
     let split = split_chains(chains);
     let rhat_bulk = rhat_basic(&rank_normalize(&split));
@@ -316,8 +306,22 @@ pub fn rank_convergence(chains: &[Vec<f64>]) -> Result<RankConvergence, Converge
     // undefined 95% indicator must not be papered over by a defined 5% one.
     let ess_tail = if e05.is_nan() || e95.is_nan() { f64::NAN } else { e05.min(e95) };
 
+    // `max(bulk, folded)` with R's semantics: an undefined half makes the
+    // headline undefined. `f64::max` returns the non-NaN operand, which would
+    // silently publish the bulk value as though the folded check had passed.
+    // The folded half is genuinely undefined whenever `|x − median(x)|` is
+    // constant — a two-point symmetric marginal, which is exactly what a pair
+    // of frozen chains produces. ArviZ has this same latent inconsistency;
+    // `posterior` propagates, and `posterior` is what the oracle pins.
+    let rhat_headline = if rhat_bulk.is_nan() || rhat_folded.is_nan() {
+        f64::NAN
+    } else {
+        rhat_bulk.max(rhat_folded)
+    };
+
     Ok(RankConvergence {
-        rhat: rhat_bulk.max(rhat_folded),
+        all_chains_frozen,
+        rhat: rhat_headline,
         rhat_bulk,
         rhat_folded,
         ess_bulk,
@@ -419,7 +423,23 @@ fn rhat_basic(chains: &[Vec<f64>]) -> f64 {
         .map(|c| c.iter().sum::<f64>() / c.len() as f64)
         .collect();
     let vars: Vec<f64> = chains.iter().zip(&means)
-        .map(|(c, &mu)| c.iter().map(|&x| (x - mu).powi(2)).sum::<f64>() / (n - 1) as f64)
+        .map(|(c, &mu)| {
+            // A chain that never moved has variance EXACTLY zero, and R̂'s
+            // denominator must be exactly zero so the ratio is +∞.
+            //
+            // Computing it as Σ(x−μ)²/(n−1) does not give that: μ = Σx/n does
+            // not round-trip through the summation, so a constant chain leaves
+            // a one-ulp residue around 1e-32. That residue then becomes the
+            // denominator, and R̂ comes back as a FINITE ~1e15 whose magnitude
+            // is set by the array shape rather than by the chains — the same
+            // input at a different draw count gives a different number, and
+            // different inputs at the same shape give the identical one.
+            // R's `matrixStats::colVars` returns exact zero here; so must this.
+            if c.iter().all(|&x| x == c[0]) {
+                return 0.0;
+            }
+            c.iter().map(|&x| (x - mu).powi(2)).sum::<f64>() / (n - 1) as f64
+        })
         .collect();
     let grand = means.iter().sum::<f64>() / m as f64;
     let var_of_means = means.iter().map(|&mu| (mu - grand).powi(2)).sum::<f64>() / (m - 1) as f64;
@@ -685,35 +705,67 @@ mod tests {
         assert!(z[0][0] < z[0][4], "5.0 must rank below 9.0");
     }
 
-    /// EVERY chain frozen at its own value — the 0%-acceptance deadlock — is
-    /// refused by name.
+    /// EVERY chain frozen at its own value — the 0%-acceptance deadlock.
     ///
-    /// It cannot be caught by an `is_finite` check downstream, which is the
-    /// trap: the within-chain variance is zero only up to the rounding of a
-    /// summation, so R̂ comes back as a FINITE `~1e15` rather than `inf`.
-    /// Without this guard that number reaches a report as a statistic.
+    /// R̂ is mathematically `+∞` here (within-chain variance exactly zero,
+    /// between-chain variance positive), and that is what `posterior` reports.
+    /// The trap is that a naive `Σ(x−μ)²/(n−1)` does NOT give `+∞`: `μ` does
+    /// not round-trip through the summation, so a constant chain leaves a
+    /// ~1e-32 residue and R̂ comes back as a FINITE ~1e15. That number passes
+    /// every `is_finite` check, and its magnitude is set by the array shape,
+    /// not the chains — measured in ArviZ, five different frozen-value pairs
+    /// give the identical `3372237941944279.0` while changing the draw count
+    /// changes it.
+    ///
+    /// So: report the infinity, not the artifact — and carry the REASON, which
+    /// is what camdl adds over `posterior`'s bare `Inf`.
     #[test]
-    fn all_chains_frozen_is_refused_by_name_not_reported_as_1e15() {
-        let frozen: Vec<Vec<f64>> = vec![vec![0.5; 40], vec![0.9; 40]];
-        match rank_convergence(&frozen) {
-            Err(ConvergenceError::AllChainsConstant { n_chains }) => assert_eq!(n_chains, 2),
-            other => panic!("expected AllChainsConstant, got {other:?}"),
-        }
-        // The pooled draws are NOT constant, so this is a distinct case from
-        // `ConstantDraws` and must not be folded into it.
-        assert!(!matches!(
-            rank_convergence(&frozen),
-            Err(ConvergenceError::ConstantDraws { .. })
-        ));
+    fn all_chains_frozen_reports_infinity_with_a_reason_not_a_shape_artifact() {
+        let frozen: Vec<Vec<f64>> = vec![vec![0.239349270; 30], vec![0.438170322; 30]];
+        let d = rank_convergence(&frozen).expect("frozen chains are still scored");
 
-        // Negative control: one frozen chain among moving ones still scores —
-        // the guard fires only when NOTHING moved.
+        assert!(d.all_chains_frozen, "the cause must be recorded, not just the symptom");
+        assert!(!d.rhat.is_finite(),
+            "R̂ must not be a finite shape-determined number; got {}", d.rhat);
+
+        // ESS stays computable and is still reported: `posterior` reverted
+        // per-chain constancy checking for ESS in #198 as overly conservative.
+        assert!(d.ess_bulk.is_finite() && d.ess_bulk > 0.0,
+            "ESS is still reported for a frozen parameter; got {}", d.ess_bulk);
+        assert!(d.ess_bulk < 10.0,
+            "and it is small, which is the honest answer; got {}", d.ess_bulk);
+
+        // The magnitude must not depend on the VALUES the chains are stuck at.
+        let other: Vec<Vec<f64>> = vec![vec![1.0; 30], vec![2.0; 30]];
+        let e = rank_convergence(&other).expect("scored");
+        assert_eq!(d.rhat.is_finite(), e.rhat.is_finite(),
+            "two different frozen pairs must not differ in whether R̂ is finite");
+
+        // Negative control: one frozen chain among moving ones is a FINDING,
+        // not a frozen fit — `posterior` reports 1.5268 for that shape and so
+        // must camdl (pinned against the oracle by `one_stuck_chain`).
         let mut mixed: Vec<Vec<f64>> = (0..3)
             .map(|c| (0..40).map(|i| ((i * 13 + c * 29) % 47) as f64 / 47.0).collect())
             .collect();
         mixed.push(vec![0.37; 40]);
-        assert!(rank_convergence(&mixed).is_ok(),
-            "one frozen chain among moving ones is a finding, not a refusal");
+        let m = rank_convergence(&mixed).expect("scored");
+        assert!(!m.all_chains_frozen, "one frozen chain is not all of them");
+        assert!(m.rhat.is_finite(), "and the statistic is still defined: {}", m.rhat);
+    }
+
+    /// R's `max` propagates `NA`; `f64::max` returns the non-NaN operand. When
+    /// the folded half is undefined — `|x − median(x)|` constant, which a
+    /// two-point symmetric marginal produces — the headline must be undefined
+    /// too, not the bulk value smuggled through.
+    #[test]
+    fn an_undefined_folded_half_makes_the_headline_undefined() {
+        let two_point: Vec<Vec<f64>> = vec![vec![0.239349270; 30], vec![0.438170322; 30]];
+        let d = rank_convergence(&two_point).expect("scored");
+        assert!(d.rhat.is_nan(),
+            "posterior returns NA for this shape (folded half constant); got {}", d.rhat);
+        assert!(d.rhat_folded.is_nan(), "the folded half is the undefined one");
+        assert!(d.rhat_bulk.is_infinite(),
+            "while the bulk half is a well-defined +inf; got {}", d.rhat_bulk);
     }
 
     /// A chain frozen at one value is not a reason to refuse the parameter —
