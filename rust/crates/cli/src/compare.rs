@@ -154,6 +154,21 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         std::process::exit(2);
     }
 
+    // Fairness, part two: equal T_score is not an equal observation AXIS.
+    // `paired_delta` zips steps by index, so two traces scoring the same NUMBER
+    // of observations at different TIMES — a hole in one series, a different
+    // `t0` — produce a Δelpd, an se(Δ) and a deciban verdict computed across
+    // two different axes, rendered as a confident answer. This is not
+    // overridable by `--allow-mismatched-horizon`: that flag says "render the Δ
+    // columns as '—' because the horizons differ", whereas this is a pairing
+    // that is meaningless however it is displayed.
+    if !t_mismatch {
+        if let Err(e) = check_shared_observation_axis(&rows) {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    }
+
     // #295 Ask 1: surface the optimism so an in-sample / plug-in score is never
     // silently read as an honest out-of-sample forecast score. Today every trace
     // is plug-in + in-sample, so this always fires; when posterior / LFO traces
@@ -230,14 +245,45 @@ impl PointwiseRow {
     }
 }
 
+/// Every pair of traces that will be differenced must sit on the same
+/// observation axis — same count AND same times, step for step.
+///
+/// `paired_delta` zips by index. That is safe only if index `k` means the same
+/// observation on both sides, which `n_scored()` alone does not establish: a
+/// hole in one series or a different `t0` gives two traces of equal length at
+/// different times. Differencing those is not a comparison at any level of
+/// display, so this runs in the preflight rather than in one renderer.
+///
+/// The message names the traces AND the times that differ: this refuses pairs
+/// that previously rendered, and "not comparable" with no detail is not
+/// actionable for someone reading it against a live outbreak.
+fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
+    let Some(first) = rows.first() else { return Ok(()) };
+    for r in rows.iter().skip(1) {
+        for (k, (a, b)) in first.trace.steps.iter().zip(&r.trace.steps).enumerate() {
+            if a.t != b.t {
+                return Err(format!(
+                    "'{}' and '{}' are not on the same observation axis: scored \
+                     step {} is t={} in '{}' and t={} in '{}'.\n       \
+                     Δelpd pairs observations by position, so differencing these \
+                     would compare unlike times.\n       \
+                     Re-score both models on the same observation set \
+                     (check for a hole in one series, or a different t0).",
+                    first.name, r.name, k + 1, a.t, first.name, b.t, r.name,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Project every candidate against the baseline, step by step and stream by
 /// stream.
 ///
-/// Steps are paired **by index**, which is what `paired_delta` does for the
-/// scalar — so this checks what that cannot afford to leave unchecked at a
-/// glance: that the paired steps carry the same `t`. A difference taken across
-/// two different observation axes is not a comparison, and the pointwise file
-/// is where such a mismatch would otherwise become a plot that looks fine.
+/// The preflight ([`check_shared_observation_axis`]) has already established
+/// that paired steps carry the same `t`; the check is repeated here because
+/// this function is also the one that would turn a mismatch into a plot that
+/// looks fine, and it must not depend on a caller having run the preflight.
 fn pointwise_rows(rows: &[Row], base_idx: usize) -> Result<Vec<PointwiseRow>, String> {
     let base = &rows[base_idx];
     let mut out = Vec::new();
