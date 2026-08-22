@@ -2669,6 +2669,7 @@ pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
 pub struct StageConvergence(Vec<(String, RhatEss)>);
 
 use std::collections::BTreeMap;
+use sim::inference::convergence::RhatRefusal;
 
 impl StageConvergence {
     /// Score each `(param name, chains[chain][draw])` pair. Order is preserved
@@ -2693,6 +2694,24 @@ impl StageConvergence {
     /// the map is the max over the params that were assessable at all.
     pub fn rhat(&self) -> BTreeMap<String, f64> {
         self.finite(|d| d.rhat)
+    }
+
+    /// Why each param ABSENT from [`Self::rhat`] is absent.
+    ///
+    /// Without this the two halves of `rhat` — "assessed and fine" and "could
+    /// not be assessed" — are indistinguishable downstream, which is how a fit
+    /// with no computable R̂ came to report `converged: true`. Two sources:
+    /// a refusal `rank_convergence` named, and an R̂ that evaluated non-finite
+    /// (every chain internally constant at its own value — the 0%-acceptance
+    /// deadlock — which is not an `Err` but is just as fatal).
+    pub fn rhat_not_reported(&self) -> BTreeMap<String, RhatRefusal> {
+        self.0.iter()
+            .filter_map(|(n, d)| match &d.not_reported {
+                Some(e) => Some((n.clone(), e.refusal())),
+                None if !d.rhat.is_finite() => Some((n.clone(), RhatRefusal::NonFiniteRhat)),
+                None => None,
+            })
+            .collect()
     }
 
     /// Classic Gelman & Rubin (1992) R̂ per param, finite entries only.

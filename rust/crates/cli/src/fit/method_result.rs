@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sim::inference::convergence::RhatRefusal;
 
 use crate::fit::state::FitState;
 
@@ -117,6 +118,12 @@ pub struct PosteriorDiagnostics {
     /// comment on `If2StageResult.max_chain_agreement`. Kept as the full map
     /// (not just the max) so a renderer can surface per-param convergence.
     pub rhat_per_param: BTreeMap<String, f64>,
+    /// Why each parameter that has NO entry in [`Self::rhat_per_param`] has
+    /// none. Empty on fits written before the record existed — which is itself
+    /// a state [`MaxRhat`] must handle, because an empty map cannot then be
+    /// told from "every parameter was refused and we did not record it".
+    #[serde(default)]
+    pub rhat_not_reported: BTreeMap<String, RhatRefusal>,
     /// Rank-normalized bulk effective sample size per estimated param. The
     /// *minimum* over params bounds the usable ESS (the slowest-mixing param is
     /// the limit).
@@ -146,10 +153,72 @@ pub struct PosteriorDiagnostics {
 }
 
 impl PosteriorDiagnostics {
-    /// Maximum R̂ over estimated params (0.0 when there are none). The
-    /// convergence headline; **R̂, not IF2's Â**.
-    pub fn max_rhat(&self) -> f64 {
-        self.rhat_per_param.values().copied().fold(0.0_f64, f64::max)
+    /// The worst R̂ over the assessed params — **or the reason there isn't
+    /// one**. The convergence headline; **R̂, not IF2's Â**. See [`MaxRhat`].
+    pub fn max_rhat_status(&self) -> MaxRhat {
+        let reported = self
+            .rhat_per_param
+            .values()
+            .copied()
+            .filter(|v| v.is_finite())
+            .fold(f64::NEG_INFINITY, f64::max);
+        if reported.is_finite() {
+            // At least one parameter was assessed. A refusal on another
+            // parameter is still a pathology that must sink the verdict — a fit
+            // is not converged because SOME of it was.
+            let bad: Vec<String> = self
+                .rhat_not_reported
+                .iter()
+                .filter(|(_, r)| r.is_pathology())
+                .map(|(n, _)| n.clone())
+                .collect();
+            if bad.is_empty() {
+                return MaxRhat::Reported(reported);
+            }
+            return MaxRhat::Unassessable { params: bad };
+        }
+        if self.rhat_not_reported.is_empty() {
+            // No R̂, and no record of why. An older fit, or a stage that
+            // estimated nothing. Either way there is nothing to certify.
+            return MaxRhat::NoParams;
+        }
+        let bad: Vec<String> = self
+            .rhat_not_reported
+            .iter()
+            .filter(|(_, r)| r.is_pathology())
+            .map(|(n, _)| n.clone())
+            .collect();
+        if bad.is_empty() {
+            MaxRhat::NotApplicable {
+                reason: self
+                    .rhat_not_reported
+                    .values()
+                    .next()
+                    .copied()
+                    .unwrap_or(RhatRefusal::EstimatedSetUnknown),
+            }
+        } else {
+            MaxRhat::Unassessable { params: bad }
+        }
+    }
+
+    /// The worst R̂ as a number, `None` when there isn't one. Thin projection of
+    /// [`max_rhat_status`](Self::max_rhat_status) for the display sites that
+    /// only need the value; a renderer wanting the *reason* matches on the
+    /// status.
+    pub fn max_rhat(&self) -> Option<f64> {
+        match self.max_rhat_status() {
+            MaxRhat::Reported(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Whether this fit may be reported as converged. **Only** `Reported`
+    /// below the threshold qualifies: `Unassessable` is a sampler pathology,
+    /// and `NotApplicable` / `NoParams` mean the question was never answered.
+    /// None of the three is `true`.
+    pub fn converged_at(&self, threshold: f64) -> bool {
+        matches!(self.max_rhat_status(), MaxRhat::Reported(v) if v < threshold)
     }
 
     /// One parameter's R̂ as a table cell, or `missing` when it has none.
@@ -275,6 +344,44 @@ pub fn min_ess_over(
     } else {
         MinEss::Unreportable { missing, n_expected }
     }
+}
+
+/// The R̂ below which a Bayesian fit is reported as converged — the
+/// machine-readable `converged` column and `fit summary`'s ✓/✗.
+///
+/// Named once so the gh#84 threshold decision (Vehtari et al. recommend 1.01
+/// for the rank-normalized statistic, plus ESS > 400 before R̂ is read at all)
+/// is a one-line change rather than a hunt through four call sites. Its VALUE
+/// is unchanged and deliberately not part of that review's scope.
+pub const RHAT_CONVERGED_THRESHOLD: f64 = 1.05;
+
+/// The max-over-parameters R̂, or the reason there isn't one.
+///
+/// `max_rhat` previously folded from `0.0` over a map that a refused parameter
+/// never entered, so a fit where every parameter was refused reported
+/// `max R̂ = 0.000 ✓` and `converged: true` — a fit that could not be assessed
+/// certifying itself. Reachable whenever the sampler never accepted a move
+/// (every chain internally constant ⇒ R̂ non-finite) or a draw was `−inf`
+/// (gh#607).
+///
+/// The three non-reporting arms are deliberately distinct because they call for
+/// different actions, and because collapsing them is what produced the defect:
+/// `Unassessable` means the sampler misbehaved and the fit is NOT converged;
+/// `NotApplicable` means the run was never given the shape a between-chain
+/// statistic needs, so the honest word is "not assessed"; `NoParams` means
+/// there was nothing to assess. None of them is "converged".
+#[derive(Debug, Clone, PartialEq)]
+pub enum MaxRhat {
+    /// Every assessed parameter reported, and this is the worst.
+    Reported(f64),
+    /// At least one parameter's R̂ could not be computed for a reason that
+    /// indicates a PROBLEM. `params` names them (ascending).
+    Unassessable { params: Vec<String> },
+    /// R̂ was never computable for a structural reason — too few chains, too
+    /// few draws, unequal chain lengths. Report "not assessed".
+    NotApplicable { reason: RhatRefusal },
+    /// No parameter was assessed and no reason was recorded.
+    NoParams,
 }
 
 /// The min-over-parameters ESS, or the reason there isn't one.
@@ -711,6 +818,7 @@ impl PgasStageResult {
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map = read_f64_map(&summary, "rhat");
+        let rhat_not_reported = read_refusal_map(&summary);
         let ess_map = read_f64_map(&summary, "ess");
         let ess_tail_map = read_f64_map(&summary, "ess_tail");
 
@@ -766,6 +874,7 @@ impl PgasStageResult {
         Ok(PgasStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: rhat_map,
+                rhat_not_reported,
                 ess_per_param: ess_map,
                 ess_tail_per_param: ess_tail_map,
                 n_samples,
@@ -795,6 +904,7 @@ impl PmmhStageResult {
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
         let rhat_map = read_f64_map(&summary, "rhat");
+        let rhat_not_reported = read_refusal_map(&summary);
         let ess_map = read_f64_map(&summary, "ess");
         let ess_tail_map = read_f64_map(&summary, "ess_tail");
         let est_names: Vec<String> = if !rhat_map.is_empty() {
@@ -827,6 +937,7 @@ impl PmmhStageResult {
         Ok(PmmhStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: rhat_map,
+                rhat_not_reported,
                 ess_per_param: ess_map,
                 ess_tail_per_param: ess_tail_map,
                 n_samples,
@@ -854,6 +965,7 @@ impl NutsStageResult {
         let n_divergent = summary.get("n_divergent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let rhat_map = read_f64_map(&summary, "rhat");
+        let rhat_not_reported = read_refusal_map(&summary);
         let ess_map = read_f64_map(&summary, "ess");
         let ess_tail_map = read_f64_map(&summary, "ess_tail");
         let est_names: Vec<String> = if !rhat_map.is_empty() {
@@ -873,6 +985,7 @@ impl NutsStageResult {
         Ok(NutsStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: rhat_map,
+                rhat_not_reported,
                 ess_per_param: ess_map,
                 ess_tail_per_param: ess_tail_map,
                 n_samples,
@@ -890,6 +1003,25 @@ impl NutsStageResult {
 }
 
 // ── shared helpers ──────────────────────────────────────────────────
+
+/// Extract `rhat_not_reported` — `{ "<param>": "<refusal>" }` — from a stage
+/// summary. Absent (an older fit) yields an empty map, which
+/// [`MaxRhat`] reads as `NoParams` rather than as "assessed and fine".
+fn read_refusal_map(summary: &serde_json::Value) -> BTreeMap<String, RhatRefusal> {
+    summary
+        .get("rhat_not_reported")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| {
+                    serde_json::from_value::<RhatRefusal>(v.clone())
+                        .ok()
+                        .map(|r| (k.clone(), r))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Extract a `{ "<param>": f64 }` object from a summary value into a
 /// `BTreeMap`. Non-finite entries (a NaN ESS serialized as JSON `null`) are
@@ -1232,7 +1364,7 @@ mod tests {
         let r0 = r.posterior_mean["R0"];
         assert!((r0 - (56.8 + 57.1 + 56.5 + 57.3) / 4.0).abs() < 1e-9);
         // R̂ map present, max captured.
-        assert!((r.diagnostics.max_rhat() - 1.04).abs() < 1e-9);
+        assert!((r.diagnostics.max_rhat().unwrap() - 1.04).abs() < 1e-9);
         // Acceptance per param: chain-mean. R0 col 0: (0.32 + 0.28)/2 = 0.30.
         assert!((r.acceptance_per_param["R0"] - 0.30).abs() < 1e-9);
         // ESS comes through.
@@ -1278,7 +1410,7 @@ mod tests {
         assert!((r.posterior_mean["R0"] - 57.25).abs() < 1e-9);
         assert!((r.acceptance_rate - 0.25).abs() < 1e-9);
         assert!((r.map_loglik - (-3801.4)).abs() < 1e-9);
-        assert!((r.diagnostics.max_rhat() - 1.03).abs() < 1e-9);
+        assert!((r.diagnostics.max_rhat().unwrap() - 1.03).abs() < 1e-9);
     }
 
     #[test]
@@ -1346,7 +1478,7 @@ mod tests {
         assert_eq!(r.diagnostics.n_chains, 2);
         assert_eq!(r.diagnostics.n_samples, 4);
         assert_eq!(r.n_divergent, 2);
-        assert!((r.diagnostics.max_rhat() - 1.03).abs() < 1e-9);
+        assert!((r.diagnostics.max_rhat().unwrap() - 1.03).abs() < 1e-9);
         // min-param ESS is gamma (150) → ESS/iter = 150 / (4 draws × thin 1).
         assert!((r.diagnostics.ess_per_iter().unwrap() - 150.0 / 4.0).abs() < 1e-9);
         // wall-time from run.json inputs → ESS/sec = 150 / 8.0 s.
@@ -1390,6 +1522,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect(),
+            rhat_not_reported: BTreeMap::new(),
             ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             ess_tail_per_param: BTreeMap::new(),
             n_samples,
@@ -1402,7 +1535,8 @@ mod tests {
     #[test]
     fn diagnostics_max_rhat_and_min_ess_off_the_slowest_param() {
         let d = diag(&[("R0", 850.0), ("sigma", 412.0)], 500, 1, Some(11.8));
-        assert!((d.max_rhat() - 1.04).abs() < 1e-12, "max R̂ is the larger of the two");
+        assert!((d.max_rhat().unwrap() - 1.04).abs() < 1e-12,
+            "max R̂ is the larger of the two");
         assert!((d.min_ess().unwrap() - 412.0).abs() < 1e-12, "min ESS is the slower param");
     }
 
@@ -1444,6 +1578,7 @@ mod tests {
     ) -> PosteriorDiagnostics {
         PosteriorDiagnostics {
             rhat_per_param: rhat.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            rhat_not_reported: BTreeMap::new(),
             ess_per_param: ess.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             ess_tail_per_param: BTreeMap::new(),
             n_samples,
@@ -1597,6 +1732,7 @@ mod tests {
     fn empty_diagnostics_yield_none_not_nan() {
         let d = PosteriorDiagnostics {
             rhat_per_param: BTreeMap::new(),
+            rhat_not_reported: BTreeMap::new(),
             ess_per_param: BTreeMap::new(),
             ess_tail_per_param: BTreeMap::new(),
             n_samples: 0,
@@ -1604,7 +1740,14 @@ mod tests {
             wall_time_secs: Some(5.0),
             n_chains: 1,
         };
-        assert_eq!(d.max_rhat(), 0.0, "no params → 0.0, not NaN");
+        // Review blocker 1: an empty map is NOT `0.0`. Folding from zero made a
+        // fit whose R̂ could not be computed report `max R̂ = 0.000 ✓` and
+        // `converged: true` — the assertion below used to pin that.
+        assert_eq!(d.max_rhat_status(), MaxRhat::NoParams,
+            "no params → say so, never a number that reads as converged");
+        assert_eq!(d.max_rhat(), None);
+        assert!(!d.converged_at(RHAT_CONVERGED_THRESHOLD),
+            "a fit with no R̂ at all must not be reported as converged");
         assert!(d.min_ess().is_none());
         assert!(d.ess_per_iter().is_none(), "no samples → None, no divide-by-zero");
         assert!(d.ess_per_sec().is_none());

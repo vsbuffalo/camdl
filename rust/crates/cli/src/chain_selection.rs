@@ -262,6 +262,10 @@ pub struct SubsetDiagnostics {
     /// over this map is the max R̂ across the *estimated* params (mirrors
     /// `PosteriorDiagnostics::max_rhat`).
     pub rhat_per_param: BTreeMap<String, f64>,
+    /// Why each estimated param ABSENT from [`Self::rhat_per_param`] is absent.
+    /// A `ConstantDraws` entry here is unambiguous — pinned parameters are not
+    /// scored at all — so it means an estimated parameter that never moved.
+    pub rhat_not_reported: BTreeMap<String, sim::inference::convergence::RhatRefusal>,
     /// Per-param bulk-ESS over the retained chains — one entry per scored
     /// param, **including the non-finite ones**. A param whose R̂ is non-finite
     /// was never assessable across chains (a constant column: a fixed param
@@ -295,16 +299,23 @@ pub struct SubsetDiagnostics {
 /// carries are the diagnostics the summary reports for the same subset, never
 /// the stored full-cloud value that includes the dropped chains.
 ///
-/// `params` selects the columns to score: `Some(names)` scores exactly that set
-/// (`fit summary` passes the estimated params its table iterates, keeping the
-/// table shape unchanged); `None` scores every param column present in the
-/// retained cloud (`fit predict`) — the extra fixed columns yield a non-finite
-/// R̂ / ESS that `max` / `min` skip, so the reduced max-R̂ / min-ESS agree with
-/// an estimated-only score.
+/// `estimated` is the **estimated (non-pinned)** parameter names — and it is
+/// required, because "score every column and drop the non-finite results" is
+/// not a safe default.
+///
+/// `draws.tsv` carries estimated params first and then the model's PINNED ones,
+/// constant across every row by construction. Scoring all of them and filtering
+/// non-finite results at insertion made one filter do two jobs: it correctly
+/// hid a pinned parameter, which has no meaningful R̂, and it incorrectly hid an
+/// ESTIMATED parameter frozen by a sampler that never accepted a move. The
+/// benign half worked by accident and the pathological half disappeared with
+/// it. Iterating only the estimated set separates them: a `ConstantDraws`
+/// refusal in this map now means exactly one thing — an estimated parameter
+/// that never moved.
 pub fn recompute_subset_diagnostics(
     draws_path: &Path,
     selection: &ChainSelection,
-    params: Option<&[String]>,
+    estimated: &[String],
 ) -> Result<SubsetDiagnostics, String> {
     let keyed = crate::load_draws_tsv_keyed(&draws_path.to_string_lossy())?;
     let (kept, info) = selection.apply_keyed(keyed)?;
@@ -317,23 +328,12 @@ pub fn recompute_subset_diagnostics(
         }
     }
 
-    // The param set to score. `None` → the union of every param column present
-    // in the retained cloud, sorted for determinism.
-    let all_cols: Vec<String>;
-    let param_names: &[String] = match params {
-        Some(p) => p,
-        None => {
-            let mut set: BTreeSet<&str> = BTreeSet::new();
-            for d in &kept {
-                for name in d.params.keys() {
-                    set.insert(name.as_str());
-                }
-            }
-            all_cols = set.into_iter().map(String::from).collect();
-            &all_cols
-        }
-    };
+    // Score the estimated params only. A pinned parameter is never offered to
+    // the estimator, so it never enters these maps and cannot be confused with
+    // an estimated one that failed to move.
+    let param_names: &[String] = estimated;
 
+    let mut rhat_not_reported = BTreeMap::new();
     let mut rhat_per_param = BTreeMap::new();
     let mut ess_per_param = BTreeMap::new();
     let mut ess_tail_per_param = BTreeMap::new();
@@ -345,6 +345,16 @@ pub fn recompute_subset_diagnostics(
         let d = crate::fit::runner::compute_rhat_ess(&chains);
         if d.rhat.is_finite() {
             rhat_per_param.insert(p.clone(), d.rhat);
+        } else {
+            // Why it is absent, so a caller can tell "the sampler failed here"
+            // from "there was nothing to assess".
+            rhat_not_reported.insert(
+                p.clone(),
+                match &d.not_reported {
+                    Some(e) => e.refusal(),
+                    None => sim::inference::convergence::RhatRefusal::NonFiniteRhat,
+                },
+            );
         }
         ess_per_param.insert(p.clone(), d.ess_bulk);
         ess_tail_per_param.insert(p.clone(), d.ess_tail);
@@ -356,6 +366,7 @@ pub fn recompute_subset_diagnostics(
         n_chains: grouped.len(),
         kept,
         rhat_per_param,
+        rhat_not_reported,
         ess_per_param,
         ess_tail_per_param,
     })
@@ -502,5 +513,61 @@ mod tests {
         assert_eq!(j["excluded"], serde_json::json!([3, 5]));
         assert_eq!(j["kept"], serde_json::json!([1, 2, 4, 6]));
         assert_eq!(j["n_total"], serde_json::json!(6));
+    }
+
+    /// Review blocker 1, the half that makes `ConstantDraws` decidable.
+    ///
+    /// `draws.tsv` carries estimated parameters and then the model's PINNED
+    /// ones, constant across every row. Scoring every column and dropping the
+    /// non-finite results made one filter do two jobs — correctly hiding a
+    /// pinned parameter, which has no meaningful R̂, and incorrectly hiding an
+    /// ESTIMATED parameter that a stuck sampler froze. Iterating only the
+    /// estimated set separates them.
+    #[test]
+    fn a_frozen_estimated_param_is_a_pathology_a_pinned_one_is_not_scored() {
+        use sim::inference::convergence::RhatRefusal;
+
+        let dir = std::env::temp_dir().join("camdl_frozen_vs_pinned_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let draws = dir.join("draws.tsv");
+
+        // `beta` mixes. `frozen` never moved — every chain sits at its own
+        // single value, the 0%-acceptance deadlock. `sigma` is pinned: constant
+        // at one value across every chain, because the model fixes it.
+        let mut text = String::from("chain\tdraw\tbeta\tfrozen\tsigma\n");
+        // Three chains written; chain 3 (1-based) is excluded, so the scored
+        // subset is chains 0 and 1 — `ChainSelection` has no empty form.
+        for chain in 0..3 {
+            for draw in 0..40 {
+                let beta = 0.3 + 0.01 * ((draw * 7 + chain * 3) % 11) as f64;
+                let frozen = if chain == 0 { 0.5 } else { 0.9 };
+                text.push_str(&format!("{chain}\t{draw}\t{beta}\t{frozen}\t6.3\n"));
+            }
+        }
+        std::fs::write(&draws, text).unwrap();
+        let keep_all = ChainSelection::parse_exclude("3").expect("drop the spare chain");
+
+        // Estimated = beta + frozen. `sigma` is pinned and must not appear at
+        // all — not in the R̂ map, and not as a refusal either.
+        let sub = recompute_subset_diagnostics(
+            &draws, &keep_all, &["beta".to_string(), "frozen".to_string()])
+            .expect("recompute");
+        assert!(sub.rhat_per_param.contains_key("beta"), "beta is assessable");
+        assert!(!sub.rhat_per_param.contains_key("sigma"),
+            "a pinned parameter is never scored: {:?}", sub.rhat_per_param);
+        assert!(!sub.rhat_not_reported.contains_key("sigma"),
+            "and never appears as a refusal either: {:?}", sub.rhat_not_reported);
+
+        // The frozen ESTIMATED parameter is recorded, and as a pathology — not
+        // silently dropped the way the pinned one is.
+        let why = sub.rhat_not_reported.get("frozen")
+            .unwrap_or_else(|| panic!("frozen must be recorded: {:?}", sub.rhat_not_reported));
+        assert!(why.is_pathology(),
+            "a sampler that never accepted a move is a failure, not a shrug: {why:?}");
+        assert!(matches!(why, RhatRefusal::NonFiniteRhat | RhatRefusal::ConstantDraws),
+            "classified as a frozen parameter, got {why:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

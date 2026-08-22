@@ -473,6 +473,7 @@ fn write_nuts_summary(
         "stage": "nuts",
         "n_chains": n_chains,
         "rhat": diag.rhat(),
+        "rhat_not_reported": diag.rhat_not_reported(),
         "rhat_classic": diag.rhat_classic(),
         "ess": diag.ess_bulk(),
         "ess_tail": diag.ess_tail(),

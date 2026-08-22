@@ -26,7 +26,8 @@ use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    If2StageResult, MethodResult, MinEss, NutsStageResult, PgasStageResult, PmmhStageResult,
+    If2StageResult, MaxRhat, MethodResult, MinEss, NutsStageResult, PgasStageResult,
+    PmmhStageResult, PosteriorDiagnostics, RHAT_CONVERGED_THRESHOLD,
 };
 use crate::fit::state::FitState;
 use crate::fit::table_row::{self, TableRow};
@@ -63,7 +64,7 @@ fn recompute_over_subset(
     let sub = crate::chain_selection::recompute_subset_diagnostics(
         &stage_dir.join("draws.tsv"),
         selection,
-        Some(&param_names),
+        &param_names,
     )?;
 
     // Posterior means over the retained rows — summary-specific, so computed
@@ -80,6 +81,7 @@ fn recompute_over_subset(
     }
 
     diag.rhat_per_param = sub.rhat_per_param;
+    diag.rhat_not_reported = sub.rhat_not_reported;
     diag.ess_per_param = sub.ess_per_param;
     diag.ess_tail_per_param = sub.ess_tail_per_param;
     diag.n_samples = sub.n_samples;
@@ -707,6 +709,19 @@ struct StageBlock {
     provenance_failed: bool,
 }
 
+/// The max-R̂ cell for the export formats: the number, or a word saying why
+/// there isn't one. Never `0.000` — that is a real R̂ value and must not double
+/// as "could not be computed" (review blocker 1).
+fn max_rhat_cell(diag: &PosteriorDiagnostics) -> String {
+    match diag.max_rhat_status() {
+        MaxRhat::Reported(v) => format!("{v:.3}"),
+        MaxRhat::Unassessable { params } =>
+            format!("not computable for {} parameter(s) — NOT converged", params.len()),
+        MaxRhat::NotApplicable { reason } => format!("not assessed ({})", reason.describe()),
+        MaxRhat::NoParams => "not assessed".to_string(),
+    }
+}
+
 impl Formatter {
     fn fit_header(&self, dir: &str) -> String {
         let mut s = String::new();
@@ -1036,7 +1051,6 @@ impl Formatter {
             BayesianView::Nuts(r) => (&r.diagnostics, &r.posterior_mean, None::<f64>, Some(r.map_loglik)),
         };
         let ess = &diag.ess_per_param;
-        let max_rhat = diag.max_rhat();
 
         // Header: with an active chain selection, `diag.n_chains` is already the
         // RETAINED count (recomputed), so name the subset and what was dropped.
@@ -1058,15 +1072,49 @@ impl Formatter {
         // Convergence: Gelman-Rubin R̂ (NOT IF2's Â — see
         // method_result.rs §`max_chain_agreement` vs §`max_rhat`).
         s.push_str(&format!("  {}\n", self.bold("posterior convergence")));
-        let r_glyph = if max_rhat < 1.05 {
-            self.ok("✓")
-        } else {
-            self.err("✗")
-        };
-        s.push_str(&format!(
-            "    max R̂ = {:.3}  {}  (threshold 1.05)\n",
-            max_rhat, r_glyph
-        ));
+        // "R̂ could not be computed" and "R̂ was computed and it was fine" must
+        // not share a rendering. Folding an empty map to 0.0 printed
+        // `max R̂ = 0.000 ✓` for a fit where every parameter was refused — a
+        // fit that could not be assessed certifying itself.
+        match diag.max_rhat_status() {
+            MaxRhat::Reported(v) => {
+                let glyph = if v < RHAT_CONVERGED_THRESHOLD { self.ok("✓") } else { self.err("✗") };
+                s.push_str(&format!(
+                    "    max R̂ = {:.3}  {}  (threshold {})\n",
+                    v, glyph, RHAT_CONVERGED_THRESHOLD
+                ));
+            }
+            MaxRhat::Unassessable { params } => {
+                s.push_str(&format!("    max R̂ = —   {}\n", self.err("✗")));
+                s.push_str(&format!(
+                    "      R̂ could not be computed for {} of the estimated parameters,\n",
+                    params.len()
+                ));
+                s.push_str("      which is a sampler failure, not a missing number:\n");
+                for name in params.iter().take(8) {
+                    let why = diag
+                        .rhat_not_reported
+                        .get(name)
+                        .map(|r| r.describe())
+                        .unwrap_or("no reason recorded");
+                    s.push_str(&format!("        {name} — {why}\n"));
+                }
+                if params.len() > 8 {
+                    s.push_str(&format!("        … and {} more\n", params.len() - 8));
+                }
+                s.push_str("      This fit is NOT converged.\n");
+            }
+            MaxRhat::NotApplicable { reason } => {
+                s.push_str("    max R̂ = —   (not assessed)\n");
+                s.push_str(&format!(
+                    "      a between-chain statistic was never possible here: {}\n",
+                    reason.describe()
+                ));
+            }
+            MaxRhat::NoParams => {
+                s.push_str("    max R̂ = —   (no parameter was assessed across chains)\n");
+            }
+        }
         if let Some(acc) = acceptance_summary {
             s.push_str(&format!("    acceptance = {:.3} (mean across chains)\n", acc));
         }
@@ -2110,7 +2158,8 @@ fn render_md_stage(stage: &StageReport) -> String {
 
     // Method-specific posterior block.
     if let Some(MethodResult::Pgas(p)) = &stage.method_result {
-        s.push_str(&format!("### Posterior summary (PGAS, max R̂ = {:.3})\n\n", p.diagnostics.max_rhat()));
+        s.push_str(&format!("### Posterior summary (PGAS, max R̂ = {})\n\n",
+            max_rhat_cell(&p.diagnostics)));
         s.push_str("| param | mean | q025 | q975 | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
             let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
@@ -2126,8 +2175,8 @@ fn render_md_stage(stage: &StageReport) -> String {
         s.push('\n');
     } else if let Some(MethodResult::Pmmh(p)) = &stage.method_result {
         s.push_str(&format!(
-            "### Posterior summary (PMMH, max R̂ = {:.3}, acceptance = {:.3})\n\n",
-            p.diagnostics.max_rhat(), p.acceptance_rate
+            "### Posterior summary (PMMH, max R̂ = {}, acceptance = {:.3})\n\n",
+            max_rhat_cell(&p.diagnostics), p.acceptance_rate
         ));
         s.push_str("| param | mean | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
@@ -2142,8 +2191,8 @@ fn render_md_stage(stage: &StageReport) -> String {
         s.push('\n');
     } else if let Some(MethodResult::Nuts(p)) = &stage.method_result {
         s.push_str(&format!(
-            "### Posterior summary (NUTS, max R̂ = {:.3}, divergences = {})\n\n",
-            p.diagnostics.max_rhat(), p.n_divergent
+            "### Posterior summary (NUTS, max R̂ = {}, divergences = {})\n\n",
+            max_rhat_cell(&p.diagnostics), p.n_divergent
         ));
         s.push_str("| param | mean | q025 | q975 | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|---|---|\n");
         for (name, mean) in &p.posterior_mean {
@@ -2332,8 +2381,8 @@ fn render_latex_stage(stage: &StageReport) -> String {
     // PGAS / PMMH posterior block.
     if let Some(MethodResult::Pgas(p)) = &stage.method_result {
         s.push_str(&format!(
-            "Posterior summary (max $\\hat R$ = {:.3}):\n\n",
-            p.diagnostics.max_rhat()
+            "Posterior summary (max $\\hat R$ = {}):\n\n",
+            max_rhat_cell(&p.diagnostics)
         ));
         s.push_str("\\begin{tabular}{lrrrrrr}\n\\toprule\n");
         s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
@@ -2355,8 +2404,8 @@ fn render_latex_stage(stage: &StageReport) -> String {
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
     } else if let Some(MethodResult::Pmmh(p)) = &stage.method_result {
         s.push_str(&format!(
-            "Posterior summary (max $\\hat R$ = {:.3}; acceptance = {:.3}):\n\n",
-            p.diagnostics.max_rhat(), p.acceptance_rate
+            "Posterior summary (max $\\hat R$ = {}; acceptance = {:.3}):\n\n",
+            max_rhat_cell(&p.diagnostics), p.acceptance_rate
         ));
         s.push_str("\\begin{tabular}{lrrrr}\n\\toprule\n");
         s.push_str("Parameter & Mean & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
@@ -2376,8 +2425,8 @@ fn render_latex_stage(stage: &StageReport) -> String {
         s.push_str("\\bottomrule\n\\end{tabular}\n\n");
     } else if let Some(MethodResult::Nuts(p)) = &stage.method_result {
         s.push_str(&format!(
-            "Posterior summary (max $\\hat R$ = {:.3}; divergences = {}):\n\n",
-            p.diagnostics.max_rhat(), p.n_divergent
+            "Posterior summary (max $\\hat R$ = {}; divergences = {}):\n\n",
+            max_rhat_cell(&p.diagnostics), p.n_divergent
         ));
         s.push_str("\\begin{tabular}{lrrrrrr}\n\\toprule\n");
         s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
@@ -2633,6 +2682,7 @@ mod tests {
                 // Both assessed across chains; `tau`'s R̂ is far above the
                 // pooling threshold, so it carries no pooled ESS.
                 rhat_per_param: BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
+                rhat_not_reported: BTreeMap::new(),
                 ess_per_param: ess,
                 ess_tail_per_param: BTreeMap::new(),
                 n_samples: 500,
@@ -2703,6 +2753,7 @@ mod tests {
                     ("a2".to_string(), 1.013),
                     ("tau".to_string(), 6.571),
                 ]),
+                rhat_not_reported: BTreeMap::new(),
                 ess_per_param: BTreeMap::from([
                     ("a2".to_string(), 145.0),
                     ("tau".to_string(), 42.0),
@@ -2768,6 +2819,7 @@ mod tests {
         let mk = |wall: Option<f64>, n_samples: usize, thin: usize| PgasStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: BTreeMap::from([("a2".to_string(), 1.01), ("g".to_string(), 1.00)]),
+                rhat_not_reported: BTreeMap::new(),
                 // a2 mixes worst → it, not the mean, bounds usable ESS.
                 ess_per_param: BTreeMap::from([("a2".to_string(), 145.0), ("g".to_string(), 300.0)]),
                 ess_tail_per_param: BTreeMap::new(),
@@ -3622,6 +3674,7 @@ mod tests {
         // Recompute over the subset (drop chain 4).
         let mut diag = PosteriorDiagnostics {
             rhat_per_param: BTreeMap::from([("beta".to_string(), rhat_all)]),
+            rhat_not_reported: BTreeMap::new(),
             ess_per_param: BTreeMap::from([("beta".to_string(), f64::NAN)]),
             ess_tail_per_param: BTreeMap::new(),
             n_samples: 160,
@@ -3638,10 +3691,10 @@ mod tests {
         assert_eq!(info.n_total, 4);
         assert_eq!(diag.n_chains, 3, "n_chains is now the retained count");
         assert_eq!(diag.n_samples, 120, "3 retained chains × 40 draws");
+        let max_r = diag.max_rhat().expect("the retained subset is assessable");
         assert!(
-            diag.max_rhat() < 1.1,
-            "excluding the outlier collapses R̂ below the gate: {}",
-            diag.max_rhat()
+            max_r < 1.1,
+            "excluding the outlier collapses R̂ below the gate: {max_r}"
         );
         let ess = diag.min_ess().expect("ess present");
         assert!(ess.is_finite() && ess > 0.0, "subset ESS is finite + positive: {ess}");
@@ -3657,6 +3710,7 @@ mod tests {
         MethodResult::Pgas(PgasStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: BTreeMap::from([("R0".to_string(), 1.02)]),
+                rhat_not_reported: BTreeMap::new(),
                 ess_per_param: BTreeMap::new(),
                 ess_tail_per_param: BTreeMap::new(),
                 n_samples: 100,
@@ -3675,6 +3729,7 @@ mod tests {
         MethodResult::Pmmh(PmmhStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: BTreeMap::from([("R0".to_string(), 1.03)]),
+                rhat_not_reported: BTreeMap::new(),
                 ess_per_param: BTreeMap::new(),
                 ess_tail_per_param: BTreeMap::new(),
                 n_samples: 100,

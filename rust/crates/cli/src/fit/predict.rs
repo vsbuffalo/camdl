@@ -546,7 +546,7 @@ impl FitResult {
                 // over the RETAINED chains through the same seam `fit summary`
                 // uses, so the two agree on the same fit + selection (gh#409).
                 let convergence = match &pref.chain_selection {
-                    Some(sel) => subset_convergence(&pref.draws_path, sel)?,
+                    Some(sel) => subset_convergence(segment, &pref.draws_path, sel)?,
                     None => read_convergence(&stage_dir, pref.method),
                 };
                 // Replay on the SAME backend the stage ran on; default only when
@@ -663,10 +663,29 @@ fn min_ess_cell(
 /// [`ConvergenceStatus::NotAssessed`] when no param has a finite R̂ (e.g. a
 /// single retained chain), rather than a falsely-converged band.
 fn subset_convergence(
+    segment: &Path,
     draws_path: &Path,
     selection: &ChainSelection,
 ) -> Result<ConvergenceStatus, String> {
-    let sub = crate::chain_selection::recompute_subset_diagnostics(draws_path, selection, None)?;
+    // The ESTIMATED parameter names, from the fit's own sidecar. `draws.tsv`
+    // also carries the model's pinned parameters, constant by construction, and
+    // scoring those and dropping the non-finite results is what hid a FROZEN
+    // estimated parameter behind the same filter that legitimately hides a
+    // pinned one. Without the sidecar the two cannot be told apart, so the band
+    // says "not assessed" rather than inventing a verdict.
+    let Some(estimated) = crate::run_meta::read_fit_sidecar(segment).map(|s| s.estimated) else {
+        return Ok(ConvergenceStatus::NotAssessed);
+    };
+    let sub =
+        crate::chain_selection::recompute_subset_diagnostics(draws_path, selection, &estimated)?;
+
+    // An estimated parameter whose R̂ could not be computed is a sampler
+    // failure, not a missing number — the band must not be labelled with the
+    // max over the parameters that happened to work, which is the same
+    // subset-minimum inversion gh#687 fixed for ESS.
+    if sub.rhat_not_reported.values().any(|r| r.is_pathology()) {
+        return Ok(ConvergenceStatus::NotAssessed);
+    }
     let rhat_max = sub.rhat_per_param.values().copied().fold(f64::NEG_INFINITY, f64::max);
     if !rhat_max.is_finite() {
         return Ok(ConvergenceStatus::NotAssessed);

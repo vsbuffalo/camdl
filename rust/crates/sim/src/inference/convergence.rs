@@ -72,6 +72,94 @@ pub enum ConvergenceError {
     /// [`DEGENERATE_REL_TOL`] of the parameter's own scale. The total variance
     /// is zero, so R̂'s denominator is zero and the rank transform is constant.
     ConstantDraws { value: f64 },
+    /// Every chain is internally constant at a value the others do not share:
+    /// the sampler never accepted a move, and each chain is stuck wherever it
+    /// started. The pooled draws DO vary, so this is not `ConstantDraws`.
+    ///
+    /// R̂'s within-chain variance is zero here, so the ratio diverges. It does
+    /// **not** reliably reach `inf`: the chain means are computed by summation,
+    /// so a one-ulp rounding leaves a denominator around `1e-32` and R̂ comes
+    /// back as a finite `~1e15` — a number that passes every `is_finite` check
+    /// and is pure floating-point noise. Refusing by name is the only way to
+    /// stop that reaching a report as a statistic.
+    AllChainsConstant { n_chains: usize },
+}
+
+/// Why a parameter has no R̂, and — the part that decides what a fit may
+/// claim — **whether that indicates a problem**.
+///
+/// The two are not the same question and collapsing them is how a fit that
+/// could not be assessed came to report `converged: true`. A run given two
+/// chains of three draws was never *offered* the shape a between-chain
+/// statistic needs; a run whose sampler never accepted a move was, and failed.
+/// The first is "not assessed", the second is "did not converge", and neither
+/// is "converged".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RhatRefusal {
+    /// A draw was `NaN` or `±inf` — gh#607's chain recording
+    /// `log_posterior = −inf` for thousands of sweeps.
+    NonFiniteDraw,
+    /// R̂ itself evaluated non-finite. Every chain is internally constant at a
+    /// value the others do not share, so the within-chain variance is zero and
+    /// the between-chain variance is not: the 0%-acceptance deadlock.
+    NonFiniteRhat,
+    /// An **estimated** parameter that never moved. Distinct from a parameter
+    /// the model pins, which is not offered to the estimator at all.
+    ConstantDraws,
+    /// Fewer than two chains.
+    TooFewChains,
+    /// Fewer than four draws per chain.
+    TooFewDraws,
+    /// Chains of differing length.
+    UnequalChainLengths,
+    /// The estimated parameter set could not be determined, so a constant
+    /// column cannot be told from a pinned one and no honest classification is
+    /// available.
+    EstimatedSetUnknown,
+}
+
+impl RhatRefusal {
+    /// `true` when the refusal is evidence the sampler MISBEHAVED, so a fit
+    /// carrying it must not be called converged. `false` when the run was
+    /// simply never given the shape the statistic needs — then the honest
+    /// report is "not assessed", which is also not "converged".
+    pub fn is_pathology(self) -> bool {
+        match self {
+            Self::NonFiniteDraw | Self::NonFiniteRhat | Self::ConstantDraws => true,
+            Self::TooFewChains
+            | Self::TooFewDraws
+            | Self::UnequalChainLengths
+            | Self::EstimatedSetUnknown => false,
+        }
+    }
+
+    /// One clause naming what happened, for a report.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::NonFiniteDraw => "a draw was NaN or infinite",
+            Self::NonFiniteRhat => "every chain sat at its own single value",
+            Self::ConstantDraws => "the parameter never moved",
+            Self::TooFewChains => "fewer than 2 chains",
+            Self::TooFewDraws => "fewer than 4 draws per chain",
+            Self::UnequalChainLengths => "chains of differing length",
+            Self::EstimatedSetUnknown => "the estimated parameter set is unknown",
+        }
+    }
+}
+
+impl ConvergenceError {
+    /// How this refusal should be classified for reporting.
+    pub fn refusal(&self) -> RhatRefusal {
+        match self {
+            Self::TooFewChains { .. } => RhatRefusal::TooFewChains,
+            Self::TooFewDraws { .. } => RhatRefusal::TooFewDraws,
+            Self::UnequalChainLengths { .. } => RhatRefusal::UnequalChainLengths,
+            Self::NonFiniteDraw { .. } => RhatRefusal::NonFiniteDraw,
+            Self::ConstantDraws { .. } => RhatRefusal::ConstantDraws,
+            Self::AllChainsConstant { .. } => RhatRefusal::NonFiniteRhat,
+        }
+    }
 }
 
 impl fmt::Display for ConvergenceError {
@@ -90,6 +178,10 @@ impl fmt::Display for ConvergenceError {
             Self::ConstantDraws { value } => write!(
                 f, "every draw is {value}: the parameter did not move, so R̂ \
                     has no within-chain variance to divide by"),
+            Self::AllChainsConstant { n_chains } => write!(
+                f, "each of the {n_chains} chains sat at its own single value: \
+                    the sampler never accepted a move, so R̂ has no within-chain \
+                    variance to divide by"),
         }
     }
 }
@@ -180,6 +272,22 @@ pub fn rank_convergence(chains: &[Vec<f64>]) -> Result<RankConvergence, Converge
     let mean = pooled.iter().sum::<f64>() / pooled.len() as f64;
     if hi - lo <= DEGENERATE_REL_TOL * mean.abs().max(f64::MIN_POSITIVE) {
         return Err(ConvergenceError::ConstantDraws { value: mean });
+    }
+
+    // Every chain internally constant — the 0%-acceptance deadlock. The pooled
+    // draws vary (checked above), so the rank transform is well defined, but
+    // every within-chain variance is zero and R̂'s denominator is only not-zero
+    // by rounding. `posterior` reports the resulting ~1e15 as a number; camdl
+    // refuses it, on the same reasoning as [`DEGENERATE_REL_TOL`] — a statistic
+    // whose value is set by the last bit of a summation is not a statistic.
+    if chains.iter().all(|c| {
+        let (lo, hi) = c.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &v| {
+            (l.min(v), h.max(v))
+        });
+        let scale = (c.iter().sum::<f64>() / c.len() as f64).abs().max(f64::MIN_POSITIVE);
+        hi - lo <= DEGENERATE_REL_TOL * scale
+    }) {
+        return Err(ConvergenceError::AllChainsConstant { n_chains });
     }
 
     let split = split_chains(chains);
@@ -575,6 +683,37 @@ mod tests {
         assert!((z[0][2] - want_tie).abs() < 1e-12);
         assert!((z[0][3] - want_tie).abs() < 1e-12);
         assert!(z[0][0] < z[0][4], "5.0 must rank below 9.0");
+    }
+
+    /// EVERY chain frozen at its own value — the 0%-acceptance deadlock — is
+    /// refused by name.
+    ///
+    /// It cannot be caught by an `is_finite` check downstream, which is the
+    /// trap: the within-chain variance is zero only up to the rounding of a
+    /// summation, so R̂ comes back as a FINITE `~1e15` rather than `inf`.
+    /// Without this guard that number reaches a report as a statistic.
+    #[test]
+    fn all_chains_frozen_is_refused_by_name_not_reported_as_1e15() {
+        let frozen: Vec<Vec<f64>> = vec![vec![0.5; 40], vec![0.9; 40]];
+        match rank_convergence(&frozen) {
+            Err(ConvergenceError::AllChainsConstant { n_chains }) => assert_eq!(n_chains, 2),
+            other => panic!("expected AllChainsConstant, got {other:?}"),
+        }
+        // The pooled draws are NOT constant, so this is a distinct case from
+        // `ConstantDraws` and must not be folded into it.
+        assert!(!matches!(
+            rank_convergence(&frozen),
+            Err(ConvergenceError::ConstantDraws { .. })
+        ));
+
+        // Negative control: one frozen chain among moving ones still scores —
+        // the guard fires only when NOTHING moved.
+        let mut mixed: Vec<Vec<f64>> = (0..3)
+            .map(|c| (0..40).map(|i| ((i * 13 + c * 29) % 47) as f64 / 47.0).collect())
+            .collect();
+        mixed.push(vec![0.37; 40]);
+        assert!(rank_convergence(&mixed).is_ok(),
+            "one frozen chain among moving ones is a finding, not a refusal");
     }
 
     /// A chain frozen at one value is not a reason to refuse the parameter —

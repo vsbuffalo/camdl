@@ -1269,6 +1269,7 @@ fn write_summary(
         "steps_per_chain": results.first().map(|(_, r)| r.n_steps).unwrap_or(0),
         "acceptance_rate": acceptance_rates,
         "rhat": diagnostics.rhat(),
+        "rhat_not_reported": diagnostics.rhat_not_reported(),
         "rhat_classic": diagnostics.rhat_classic(),
         "ess": diagnostics.ess_bulk(),
         "ess_tail": diagnostics.ess_tail(),

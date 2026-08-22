@@ -333,11 +333,12 @@ impl MethodView {
     fn from_pgas(r: &PgasStageResult) -> Self {
         let d = &r.diagnostics;
         Self {
-            converged: d.max_rhat() < 1.05,
+            converged: d.converged_at(
+                crate::fit::method_result::RHAT_CONVERGED_THRESHOLD),
             gate_verdict: "n/a".into(),
             best_loglik: None,
             max_chain_agreement: None,
-            max_rhat: Some(d.max_rhat()),
+            max_rhat: d.max_rhat(),
             acceptance_rate: None,
             ess_at_mle: None,
             ess_posterior: Some(d.ess_per_param.clone()),
@@ -350,11 +351,12 @@ impl MethodView {
     fn from_pmmh(r: &PmmhStageResult) -> Self {
         let d = &r.diagnostics;
         Self {
-            converged: d.max_rhat() < 1.05,
+            converged: d.converged_at(
+                crate::fit::method_result::RHAT_CONVERGED_THRESHOLD),
             gate_verdict: "n/a".into(),
             best_loglik: Some(r.map_loglik),
             max_chain_agreement: None,
-            max_rhat: Some(d.max_rhat()),
+            max_rhat: d.max_rhat(),
             acceptance_rate: Some(r.acceptance_rate),
             ess_at_mle: None,
             ess_posterior: Some(d.ess_per_param.clone()),
@@ -367,11 +369,12 @@ impl MethodView {
     fn from_nuts(r: &NutsStageResult) -> Self {
         let d = &r.diagnostics;
         Self {
-            converged: d.max_rhat() < 1.05,
+            converged: d.converged_at(
+                crate::fit::method_result::RHAT_CONVERGED_THRESHOLD),
             gate_verdict: "n/a".into(),
             best_loglik: Some(r.map_loglik),
             max_chain_agreement: None,
-            max_rhat: Some(d.max_rhat()),
+            max_rhat: d.max_rhat(),
             // NUTS realized-acceptance is a dual-averaging target statistic, not
             // an M-H accept rate — omit it here rather than mislabel it as one.
             acceptance_rate: None,
@@ -510,6 +513,7 @@ mod tests {
             diagnostics: PosteriorDiagnostics {
                 // Every parameter refused → nothing reached the map.
                 rhat_per_param: BTreeMap::new(),
+                rhat_not_reported: BTreeMap::new(),
                 ess_per_param: BTreeMap::new(),
                 ess_tail_per_param: BTreeMap::new(),
                 n_samples: 4000,
@@ -533,6 +537,7 @@ mod tests {
         let ok = PgasStageResult {
             diagnostics: PosteriorDiagnostics {
                 rhat_per_param: BTreeMap::from([("tau".to_string(), 1.01)]),
+                rhat_not_reported: BTreeMap::new(),
                 ess_per_param: BTreeMap::from([("tau".to_string(), 800.0)]),
                 ess_tail_per_param: BTreeMap::from([("tau".to_string(), 900.0)]),
                 n_samples: 4000,

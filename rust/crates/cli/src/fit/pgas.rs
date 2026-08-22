@@ -1294,6 +1294,7 @@ fn write_summary(
         "n_chains": results.len(),
         "acceptance_rates": acceptance_rates,
         "rhat": diagnostics.rhat(),
+        "rhat_not_reported": diagnostics.rhat_not_reported(),
         "rhat_classic": diagnostics.rhat_classic(),
         "ess": diagnostics.ess_bulk(),
         "ess_tail": diagnostics.ess_tail(),
