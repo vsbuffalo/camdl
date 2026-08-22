@@ -138,6 +138,86 @@ fn pointwise_tsv_localizes_the_elpd_difference_to_one_step_and_one_stream() {
     assert!(south.abs() < 1e-9, "south is a tie: {south}");
 }
 
+/// Review blocker 3. `paired_delta` pairs steps BY INDEX and the preflight
+/// guards only `n_scored()`, so two traces scoring the same NUMBER of
+/// observations at different TIMES were differenced anyway — Δelpd, se(Δ), the
+/// e-value and the deciban verdict all computed across two different
+/// observation axes, and rendered as a confident answer.
+///
+/// The `--pointwise` path already refuses this. Guarding the opt-in path and
+/// leaving the DEFAULT path to render is the wrong half: the scalar table is
+/// what people read.
+///
+/// The refusal must name which times differ. This turns a comparison that
+/// previously rendered into an error, and "these traces are not comparable"
+/// with no further detail is not actionable on a real outbreak.
+#[test]
+fn compare_refuses_traces_on_different_observation_axes() {
+    let bin = binary();
+    assert!(bin.exists(), "release camdl binary missing: {}", bin.display());
+
+    let dir = std::env::temp_dir().join("camdl_compare_axis_mismatch_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Same T_score (3 scored steps), different observation times: the third
+    // step is t=21 on one side and t=28 on the other.
+    let base = dir.join("base.json");
+    let cand = dir.join("cand.json");
+    std::fs::write(&base,
+        trace_json([-6.0, -6.0, -6.0], [-3.0, -3.0, -3.0], [-3.0, -3.0, -3.0])).unwrap();
+    std::fs::write(&cand,
+        trace_json([-5.0, -6.0, -6.0], [-3.0, -3.0, -3.0], [-3.0, -3.0, -3.0])
+            .replace("\"t\": 21", "\"t\": 28")).unwrap();
+
+    let run = Command::new(&bin)
+        .arg("compare").arg(&base).arg(&cand)
+        .args(["--baseline", "base.json"])
+        .output().expect("running camdl compare");
+
+    assert!(!run.status.success(),
+        "a comparison across two different observation axes must be refused, \
+         not rendered.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(err.contains("21") && err.contains("28"),
+        "the refusal must name the times that differ so it is actionable: {err}");
+    assert!(err.contains("base.json") && err.contains("cand.json"),
+        "and which two traces disagree: {err}");
+
+    // The scalar verdict must not appear on stdout — no e-value, no decibans.
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(!out.contains("dB"),
+        "no evidence verdict may be rendered for an uncomparable pair: {out}");
+}
+
+/// Negative control: aligned traces of equal length still compare. The new
+/// refusal must not fire on the ordinary case.
+#[test]
+fn compare_still_renders_when_the_observation_axes_agree() {
+    let bin = binary();
+    assert!(bin.exists(), "release camdl binary missing: {}", bin.display());
+
+    let dir = std::env::temp_dir().join("camdl_compare_axis_ok_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = dir.join("base.json");
+    let cand = dir.join("cand.json");
+    std::fs::write(&base,
+        trace_json([-6.0, -6.0, -6.0], [-3.0, -3.0, -3.0], [-3.0, -3.0, -3.0])).unwrap();
+    std::fs::write(&cand,
+        trace_json([-5.0, -6.0, -6.0], [-3.0, -3.0, -3.0], [-3.0, -3.0, -3.0])).unwrap();
+
+    let run = Command::new(&bin)
+        .arg("compare").arg(&base).arg(&cand)
+        .args(["--baseline", "base.json"])
+        .output().expect("running camdl compare");
+    assert!(run.status.success(),
+        "aligned traces must still compare.\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stderr));
+}
+
 /// gh#570: two models scoring different stream sets produce an elpd difference
 /// that is not a like-for-like comparison, and the scalar hides it. In the
 /// pointwise view the stream that only one side scored has an empty cell on the
