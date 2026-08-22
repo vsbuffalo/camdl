@@ -361,7 +361,13 @@ thin = 1
         .expect("predictive.json manifest must be written");
     let pjson: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
-    assert_eq!(pjson["schema"], "camdl.predictive/v1", "predictive manifest schema tag");
+    // Review blocker 2. `rhat_max` / `ess_min` in `predictive/<stream>.tsv` are
+    // now sourced from rank-normalized R̂ and bulk-ESS with a new suppression
+    // rule (gh#84), against a contract `docs/workflow.md` publishes under this
+    // tag. A consumer joining `camdl.predictive/v1` across a store written
+    // before and after that change silently mixes two statistics, so the tag
+    // has to move with the fields it describes.
+    assert_eq!(pjson["schema"], "camdl.predictive/v2", "predictive manifest schema tag");
     let streams = pjson["streams"].as_array().expect("streams array");
     let wc = streams
         .iter()
