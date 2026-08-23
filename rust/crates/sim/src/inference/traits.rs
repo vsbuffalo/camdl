@@ -54,8 +54,25 @@ pub trait ProcessModel: Send + Sync {
     /// Number of transitions (for sizing flow accumulators).
     fn n_transitions(&self) -> usize;
 
-    /// Create the initial state from parameters.
-    fn initial_state(&self, params: &[f64]) -> Result<Self::State, SimError>;
+    /// Draw one initial state, `x₀ ~ p(· | params)`.
+    ///
+    /// The `ProcessModel`-level face of
+    /// [`CompiledModel::initial_state_draw`](crate::compiled_model::CompiledModel::initial_state_draw)
+    /// — the sampler question of the initial-state seam (proposal
+    /// `2026-08-23-initial-state-parameters.md`). Every caller of this trait is
+    /// a stochastic filter, so every caller wants a draw; the mean, the
+    /// density and its gradient are asked of the `CompiledModel` directly.
+    ///
+    /// `rng` is the stream the returned state is drawn from. No `init {}`
+    /// entry can declare a law yet, so no implementation consumes it and the
+    /// returned state is the deterministic `init {}` evaluation — but the
+    /// stream a caller passes is the stream the draw will come from once laws
+    /// land, so pass the one whose spread you want (per-particle, not shared).
+    fn initial_state_draw(
+        &self,
+        params: &[f64],
+        rng: &mut StatefulRng,
+    ) -> Result<Self::State, SimError>;
 
     /// Advance state by one timestep.
     ///

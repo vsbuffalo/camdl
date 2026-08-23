@@ -121,21 +121,32 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // incidence stream, sized from the OBS model (the process does not know it).
     let n_acc = obs_model.n_interval_streams();
 
+    // Per-particle RNG streams (deterministic, derived from seed).
+    // stream_offset = 0: particles use stream indices [0, n_particles).
+    // Built before the initial state because drawing x₀ is a draw from a
+    // particle's own stream; `init_particle_rngs` consumes nothing, so the
+    // streams the propagation loop sees below are unchanged.
+    let mut rngs = init_particle_rngs(seed, n_particles, 0);
+
     // Initialize particles from model init. The process sizes `acc` to 0 (it
     // does not know `n_interval_streams`); resize the init state's `acc` to
     // `n_acc` so the `has_predictions` probe (`obs_model.mean(&init, …)`, which
     // projects `acc[k]`) does not index out of bounds. Swarm states are sized
     // by `ParticleSwarm::new`.
-    let mut init = process.initial_state(params)?;
+    //
+    // ONE draw, copied to every particle — the pre-split behaviour, kept
+    // because no `init {}` entry can declare a law yet, so `initial_state_draw`
+    // is deterministic and consumes nothing from `rngs[0]`. gh#732 (proposal
+    // 2026-08-23-initial-state-parameters.md, staging step 5) is exactly the
+    // move of this call into the loop below so particle j draws from `rngs[j]`;
+    // particle 0 already reads its own stream here, so that move leaves this
+    // draw where it is.
+    let mut init = process.initial_state_draw(params, &mut rngs[0])?;
     init.acc.resize(n_acc, 0);
     let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
     for p in &mut swarm.states {
         p.counts.copy_from_slice(&init.counts);
     }
-
-    // Per-particle RNG streams (deterministic, derived from seed).
-    // stream_offset = 0: particles use stream indices [0, n_particles).
-    let mut rngs = init_particle_rngs(seed, n_particles, 0);
 
     // Separate RNG streams for diagnostic draws (rmeasure).
     // Process RNG streams must be identical whether or not predictions are computed.

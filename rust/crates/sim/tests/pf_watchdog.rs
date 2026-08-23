@@ -518,7 +518,9 @@ impl ProcessModel for CountingProcess {
     fn n_compartments(&self) -> usize { self.n_int }
     fn n_transitions(&self) -> usize { self.n_tr }
 
-    fn initial_state(&self, _params: &[f64]) -> Result<ParticleState, SimError> {
+    fn initial_state_draw(
+        &self, _params: &[f64], _rng: &mut StatefulRng,
+    ) -> Result<ParticleState, SimError> {
         // Mock process: `acc` sized 0 (the filter resizes from the obs model).
         Ok(ParticleState::new(self.n_int, self.n_tr, 0))
     }

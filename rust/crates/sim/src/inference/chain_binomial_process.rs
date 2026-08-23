@@ -46,8 +46,12 @@ impl ProcessModel for ChainBinomialProcess {
         self.compiled.model.transitions.len()
     }
 
-    fn initial_state(&self, params: &[f64]) -> Result<ParticleState, SimError> {
-        let (init_int, _) = self.compiled.initial_state_mean(params)?;
+    fn initial_state_draw(
+        &self,
+        params: &[f64],
+        rng: &mut StatefulRng,
+    ) -> Result<ParticleState, SimError> {
+        let (init_int, _) = self.compiled.initial_state_draw(params, rng)?;
         // `acc` sized 0 here: the process does not know `n_interval_streams`
         // (the obs model owns it). The filter copies only `init.counts` into the
         // swarm and allocates each swarm state's `acc` sized from

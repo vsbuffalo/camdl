@@ -21,7 +21,7 @@
 //! is the `npars × Np` matrix that `randwalk_perturbation` (`src/mif2.c`) has
 //! just jittered column-by-column, one column per particle.
 //!
-//! Before the fix camdl evaluated `process.initial_state(&current_params)`
+//! Before the fix camdl evaluated the initial state once at `current_params`
 //! ONCE from the iteration-mean θ and copied the result to every particle.
 //!
 //! Two tests:
@@ -88,7 +88,9 @@ impl ProcessModel for ICStampProcess {
     fn n_transitions(&self) -> usize {
         1
     }
-    fn initial_state(&self, params: &[f64]) -> Result<ParticleState, SimError> {
+    fn initial_state_draw(
+        &self, params: &[f64], _rng: &mut StatefulRng,
+    ) -> Result<ParticleState, SimError> {
         let mut s = ParticleState::new(1, 1, 0);
         s.counts[0] = stamp(params[IVP_IDX]);
         Ok(s)
@@ -189,7 +191,7 @@ fn if2_initial_state_uses_each_particles_own_theta() {
         mismatches,
         0,
         "gh#364: {}/{} particles carry an initial state generated from a θ that is \
-         not their own — IF2 evaluated initial_state() once from the swarm mean. \
+         not their own — IF2 evaluated the initial state once from the swarm mean. \
          Algorithm 1 requires X^F_{{0,j}} ~ f_{{X_0}}(·; Θ^F_{{0,j}}). \
          First offender: x₀ from θ={:.12}, particle θ={:.12}",
         mismatches,

@@ -451,13 +451,13 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // rate and from the observation model, so unless it moves x₀ the
         // weights are independent of it, the resampling is a blind subsample,
         // and its filter mean drifts without ever being selected. Evaluating
-        // `initial_state` once from the swarm mean and copying it to every
+        // the initial state once from the swarm mean and copying it to every
         // particle did exactly that (gh#364) — and silently, since
         // `ic_free = true` validates that an `ivp` param exists precisely to
         // guarantee the t=0 spread this now delivers.
         //
-        // Seam: `ProcessModel::initial_state` is the existing producer of x₀
-        // and was already the one being called; the fix is to route each
+        // Seam: `ProcessModel::initial_state_draw` is the existing producer of
+        // x₀ and was already the one being called; the fix is to route each
         // particle through it rather than the swarm mean. PGAS's per-particle
         // `Binomial(N₀, θ)` draw (`pgas.rs::csmc_as`) is deliberately NOT
         // reused: it exists because PGAS needs a tractable initial-state
@@ -465,11 +465,20 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // `IVPMapping`s that finite-difference a `&CompiledModel` (which
         // `ProcessModel` only optionally exposes), and it would add Monte-Carlo
         // variance that Algorithm 1 does not ask for. IF2 needs a draw, not a
-        // density, and camdl's f_{X_0} is the deterministic `initial_state`.
-        // pomp agrees: `mif2_pfilter` calls `rinit(object, params=tparams)` on
-        // the per-particle perturbed parameter matrix.
-        for (s, pp) in states.iter_mut().zip(particle_params.iter()) {
-            let init_state = process.initial_state(pp)?;
+        // density. pomp agrees: `mif2_pfilter` calls
+        // `rinit(object, params=tparams)` on the per-particle perturbed
+        // parameter matrix.
+        //
+        // Each particle draws from its OWN stream `rngs[j]`, which is the
+        // spread `ic_free` requires. `initial_state_draw` consumes nothing
+        // today (no `init {}` entry can declare a law), so the streams the
+        // propagation loop reads are unchanged; when a law lands, IF2 gets
+        // per-particle initial-state spread here with no further change.
+        for ((s, pp), rng) in states.iter_mut()
+            .zip(particle_params.iter())
+            .zip(rngs.iter_mut())
+        {
+            let init_state = process.initial_state_draw(pp, rng)?;
             s.counts.copy_from_slice(&init_state.counts);
             s.reset_flows();
             // Per-ITERATION re-seed (NOT a per-observation reset): zero BOTH the

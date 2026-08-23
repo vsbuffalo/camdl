@@ -358,10 +358,10 @@ fn gate_licm_inference_producer_byte_identical() {
 
     let proc_off = ChainBinomialProcess::new(compiled_off.clone());
     let proc_on = ChainBinomialProcess::new(compiled_on.clone());
-    let mut s_off = proc_off.initial_state(&params_off).expect("off init state");
-    let mut s_on = proc_on.initial_state(&params_on).expect("on init state");
     let mut rng_off = StatefulRng::new(SEED);
     let mut rng_on = StatefulRng::new(SEED);
+    let mut s_off = proc_off.initial_state_draw(&params_off, &mut rng_off).expect("off init state");
+    let mut s_on = proc_on.initial_state_draw(&params_on, &mut rng_on).expect("on init state");
     let mut scr_off = proc_off.new_scratch();
     let mut scr_on = proc_on.new_scratch();
 

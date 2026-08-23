@@ -45,7 +45,9 @@ impl ProcessModel for ThetaProcess {
 
     fn n_compartments(&self) -> usize { 1 }
     fn n_transitions(&self) -> usize { 1 }
-    fn initial_state(&self, _params: &[f64]) -> Result<ParticleState, SimError> {
+    fn initial_state_draw(
+        &self, _params: &[f64], _rng: &mut StatefulRng,
+    ) -> Result<ParticleState, SimError> {
         Ok(ParticleState::new(1, 1, 0))
     }
     fn step(
