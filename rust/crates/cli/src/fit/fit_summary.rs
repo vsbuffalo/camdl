@@ -2619,6 +2619,58 @@ mod tests {
             block);
     }
 
+    /// One fit, one number, two glyphs.
+    ///
+    /// `gate_verdict_block` compares Â to the CONFIGURED `a_thresh` (default
+    /// 1.01, and the value `check_scout_convergence` actually refuses on);
+    /// `parameter_table` compared it to a bare literal 1.05. On this fixture
+    /// R0's Â is 1.040 — above the gate, below the literal — so the gate block
+    /// printed `max Â = 1.210 ✗ (threshold 1.01)` and the parameter table
+    /// twenty lines below printed `Â=1.040 ✓` for a parameter of the same fit
+    /// that the same gate refuses.
+    #[test]
+    fn the_parameter_table_glyph_agrees_with_the_gate_printed_above_it() {
+        let state = synthetic_fit_state();
+        let gate = state.resolved_gate.clone().expect("fixture resolves its gate");
+        assert!(
+            gate.a_thresh < 1.04,
+            "fixture premise: Â = 1.040 must FAIL this gate ({})",
+            gate.a_thresh
+        );
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.parameter_table(&state);
+        let r0 = table.lines().find(|l| l.contains("R0")).expect("an R0 row");
+        assert!(
+            !r0.contains('✓'),
+            "R0 (Â=1.040) is refused by the a_thresh={} gate, so its row must \
+             not print ✓:\n{r0}\nfull table:\n{table}",
+            gate.a_thresh
+        );
+    }
+
+    /// A parameter whose within-chain variance collapsed has NO Â — the G-R
+    /// formula divides by it, so `compute_chain_agreement` returns NaN and the
+    /// end-of-stage block prints "n/a (W ≈ 0; rely on Δ_dB)". The summary
+    /// table compared that NaN to a literal, and every comparison against NaN
+    /// is false, so it fell through to ✗ — reporting "this parameter failed"
+    /// for a parameter that was never assessed.
+    #[test]
+    fn a_parameter_with_no_agreement_is_not_reported_as_failing() {
+        let mut state = synthetic_fit_state();
+        state.tail_chain_agreement.insert("sigma".into(), f64::NAN);
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let table = fmt.parameter_table(&state);
+        let sigma = table.lines().find(|l| l.contains("sigma")).expect("a sigma row");
+        assert!(
+            !sigma.contains('✗'),
+            "an unassessable Â is not a failure:\n{sigma}"
+        );
+        assert!(
+            sigma.contains("n/a"),
+            "and it must say so, naming why:\n{sigma}"
+        );
+    }
+
     #[test]
     fn parameter_table_filters_to_estimated_params() {
         let state = synthetic_fit_state();
