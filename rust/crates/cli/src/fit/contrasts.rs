@@ -594,9 +594,16 @@ impl Arm {
         // the ordinary `quantities/` path. An anchor outside `[fork, run_end]`
         // right-censors through `value_at_locf` — the same censor-not-clamp
         // contract an out-of-window literal time gets.
+        //
+        // gh#722 routes an in-window `value_at` onto the smoothing path on the
+        // ordinary `quantities/` path, and deliberately NOT here: an arm is a
+        // counterfactual replay, so the object being differenced IS this
+        // trajectory. Reading one arm's operand off the fitted smoothing path
+        // would put the same number in both arms and difference it to zero.
         let quant = self.quant_eval.eval_draw(
             &pvec,
             &traj,
+            sim::quantity::ConditionedRead::Off,
             self.compiled.as_ref(),
             None,
             self.obs_anchors,

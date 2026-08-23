@@ -118,6 +118,69 @@ pub struct QuantityEvaluator {
     names: Vec<String>,
 }
 
+/// Which trajectory a quantity's value must be read off (gh#722).
+///
+/// A `value_at` whose time falls **inside the observed record** is a
+/// retrospective estimand: there are observations covering it, so the object
+/// that answers it is the conditioned smoothing path `p(x | y, θ)`. Pushing θ
+/// through a fresh unconditioned replay and reading the state there discards
+/// every one of those observations — with a weakly identified initial
+/// condition the replays span orders of magnitude and their median has no
+/// relationship to the realised epidemic (`outbreak_size` came back BELOW the
+/// confirmed-case count it is arithmetically bounded by).
+///
+/// Everything else keeps the replay: a reduction with no anchor (`final`,
+/// `max`, `time_of_max`, …) is a property of a whole simulated path, and an
+/// anchor PAST the last observation is a projection, which is what the replay
+/// is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantityPath {
+    /// Read on the conditioned smoothing path.
+    Smoothed,
+    /// Read on the free-forward replay — no anchor, or an anchor past the end
+    /// of the observed record.
+    Replay,
+    /// Anchored inside the observed record, but its series is a SAMPLED
+    /// observation (`observations.<stream>`), which no saved path carries: the
+    /// smoothing file holds the conditioned projection (`inc_<stream>`, a mean),
+    /// not a draw from it. Read on the replay — the caller must SAY SO, because
+    /// this is the same defect, unfixed for this one source kind.
+    ReplayUnconditioned,
+}
+
+impl QuantityPath {
+    /// The manifest / diagnostic spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuantityPath::Smoothed => "smoothed",
+            QuantityPath::Replay => "replay",
+            QuantityPath::ReplayUnconditioned => "replay_unconditioned",
+        }
+    }
+}
+
+/// What a caller has to offer a draw's [`QuantityPath::Smoothed`] quantities.
+///
+/// Three states, not `Option<&Trajectory>`, because "the caller is not doing a
+/// conditioned read at all" and "the caller is, but THIS draw has no saved
+/// path" must not collapse into one value: the first keeps today's replay
+/// answer, the second must censor rather than quietly substitute the replay —
+/// which is the whole of gh#722.
+#[derive(Debug, Clone, Copy)]
+pub enum ConditionedRead<'a> {
+    /// No conditioned read is in play: every quantity reads the replay
+    /// trajectory. `simulate` (which has no fit behind it) and the contrast
+    /// arms (whose forked replay IS the object being differenced) pass this,
+    /// and their output is unchanged.
+    Off,
+    /// This draw's saved smoothing path.
+    Saved(&'a Trajectory),
+    /// A conditioned read is in play, but this draw is outside the forkable
+    /// subset — no path was saved for it. Its in-window `value_at` values are
+    /// CENSORED, never taken off the replay.
+    NotSaved,
+}
+
 /// Canonical, order-independent key for a stratum cell.
 fn stratum_key(stratum: &[ir::observation::StratumKey]) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> =
@@ -222,6 +285,37 @@ impl QuantityEvaluator {
             .collect()
     }
 
+    /// Per quantity, in `quantities` order: which trajectory its value must be
+    /// read off, given the run's observed window (gh#722).
+    ///
+    /// Pure, and draw-independent by construction — the routing is a property
+    /// of the QUANTITY, not of a draw, so a band cannot be a mixture of two
+    /// objects. `eval_draw` folds through this same classifier, so what a
+    /// caller reports and what it computes cannot disagree.
+    ///
+    /// `None` observation window ⇒ nothing is anchorable, so everything reads
+    /// the replay (the data-free caller already refused any `Obs` anchor
+    /// upstream via [`references_obs_anchor`](Self::references_obs_anchor)).
+    pub fn eval_paths(&self, obs_anchors: Option<ObsAnchorTimes>) -> Vec<QuantityPath> {
+        self.programs.iter().map(|p| program_path(p, obs_anchors)).collect()
+    }
+
+    /// Names of the quantities that route to `path` — for the caller's
+    /// stderr note and manifest. Same classifier as
+    /// [`eval_paths`](Self::eval_paths).
+    pub fn quantity_names_on(
+        &self,
+        path: QuantityPath,
+        obs_anchors: Option<ObsAnchorTimes>,
+    ) -> Vec<&str> {
+        self.programs
+            .iter()
+            .zip(&self.names)
+            .filter(|(p, _)| program_path(p, obs_anchors) == path)
+            .map(|(_, n)| n.as_str())
+            .collect()
+    }
+
     /// The distinct stream names reduced by `observations.<stream>` quantities
     /// (sorted, deduped). A caller materializes exactly these — a stream not in
     /// this list needs no `y_sim` for the run's quantities.
@@ -240,9 +334,23 @@ impl QuantityEvaluator {
     }
 
     /// Fold every quantity over ONE draw: `params` is the draw's resolved param
-    /// vector, `traj` the finished trajectory, `obs` the already-drawn `y_sim`
-    /// series (v1.1; `None` for a state-only model). Pure; results are in the same
-    /// order as the `quantities` list (so a `Derived` can read prior scalars).
+    /// vector, `traj` the finished FREE-FORWARD trajectory, `obs` the
+    /// already-drawn `y_sim` series (v1.1; `None` for a state-only model).
+    /// Pure; results are in the same order as the `quantities` list (so a
+    /// `Derived` can read prior scalars).
+    ///
+    /// `conditioned` is what the caller can offer this draw's in-window
+    /// `value_at` quantities ([`QuantityPath::Smoothed`], per
+    /// [`eval_paths`](Self::eval_paths)): [`ConditionedRead::Off`] leaves every
+    /// quantity on `traj` (unchanged behaviour), [`ConditionedRead::Saved`]
+    /// reads them off the smoothing path instead, and
+    /// [`ConditionedRead::NotSaved`] censors them rather than falling back to
+    /// `traj` — a fallback is exactly the gh#722 defect.
+    ///
+    /// A `Derived` leaf reads the SPLICED results, so reduction arithmetic over
+    /// a smoothed leaf carries the smoothed value (and its censoring)
+    /// automatically.
+    ///
     /// `obs_anchors`: the caller-resolved observed-data window (min and max
     /// observation time over the run's bound streams), REQUIRED iff
     /// [`references_obs_anchor`](Self::references_obs_anchor) — gate before
@@ -252,13 +360,51 @@ impl QuantityEvaluator {
         &self,
         params: &[f64],
         traj: &Trajectory,
+        conditioned: ConditionedRead<'_>,
         compiled: &CompiledModel,
         obs: Option<&ObsSeriesSet>,
         obs_anchors: Option<ObsAnchorTimes>,
     ) -> Vec<QuantityResult> {
         let snap_times: Vec<f64> = traj.snapshots.iter().map(|s| s.t).collect();
+        // The smoothing path carries its own snapshot grid (PGAS writes at
+        // substep resolution, finer than the output cadence), so a smoothed
+        // read has to fold over THAT axis — reusing `snap_times` would pair a
+        // conditioned series with the replay's times.
+        let smoothed: Option<(&Trajectory, Vec<f64>)> = match conditioned {
+            ConditionedRead::Saved(s) => {
+                Some((s, s.snapshots.iter().map(|snap| snap.t).collect()))
+            }
+            ConditionedRead::Off | ConditionedRead::NotSaved => None,
+        };
+        let route = !matches!(conditioned, ConditionedRead::Off);
         let mut results: Vec<QuantityResult> = Vec::with_capacity(self.programs.len());
         for prog in &self.programs {
+            // Which object THIS quantity is read off. `Off` short-circuits the
+            // classifier so a caller with no conditioned path in play is
+            // byte-identical to the pre-gh#722 evaluator.
+            let on_smoothed =
+                route && program_path(prog, obs_anchors) == QuantityPath::Smoothed;
+            if on_smoothed {
+                let QProgram::Reduced { source: QSource::State(e), reduce: Some(red) } = prog
+                else {
+                    // `program_path` returns `Smoothed` for exactly this shape.
+                    unreachable!("only a state-source value_at routes to the smoothing path")
+                };
+                let r = match &smoothed {
+                    Some((s, stimes)) => {
+                        let series = eval_series(e, s, compiled, params);
+                        let thresh = |te: &ResolvedExpr| eval_series(te, s, compiled, params);
+                        QuantityResult::Scalar(fold_reduce(
+                            red, &series, stimes, &thresh, obs_anchors,
+                        ))
+                    }
+                    // No saved path for this draw: the band loses the draw, it
+                    // does not gain a free-forward substitute.
+                    None => QuantityResult::Scalar(QuantityDrawValue::Censored),
+                };
+                results.push(r);
+                continue;
+            }
             let r = match prog {
                 QProgram::Reduced { source, reduce } => match source {
                     QSource::State(e) => {
@@ -303,6 +449,50 @@ impl QuantityEvaluator {
             results.push(r);
         }
         results
+    }
+}
+
+/// Which trajectory one program's value must be read off (gh#722). The single
+/// classifier — [`QuantityEvaluator::eval_paths`] reports it and
+/// [`QuantityEvaluator::eval_draw`] acts on it, so the manifest cannot describe
+/// one object while the number came from another.
+///
+/// `Smoothed` requires all three of:
+///
+///  - a `value_at` reduction — every other reduction (`final`, `max`, `mean`,
+///    `time_of_max`, `integral`, a threshold crossing) is a property of a whole
+///    path, not a reading at an instant, so the replay is its object;
+///  - a time that resolves at or before the LAST observation, using the run's
+///    own window. An anchor past it (`last_obs + 8 'weeks`) is a projection;
+///  - a **state** series. `observations.<stream>` reduces a sampled `y_sim`,
+///    and no saved path carries one — hence `ReplayUnconditioned`, which the
+///    caller reports rather than passing off as a conditioned answer.
+///
+/// A `value_at` at a LITERAL time is classified too, from its folded constant:
+/// `value_at(N0 - S, date("2026-08-10"))` inside the record has the same defect
+/// as the `last_obs` spelling. A time expression that is not a constant (a
+/// parameter carrying dim T) cannot be classified without a draw, and routing
+/// per draw would make the band a mixture of two objects — so it stays on the
+/// replay. The compiler documents this argument as "a constant time
+/// expression" (`ocaml/lib/ir/ir.ml`, `time_anchor`).
+fn program_path(prog: &QProgram, obs_anchors: Option<ObsAnchorTimes>) -> QuantityPath {
+    let QProgram::Reduced { source, reduce: Some(RReduce::ValueAt(anchor)) } = prog else {
+        return QuantityPath::Replay;
+    };
+    let Some(w) = obs_anchors else {
+        return QuantityPath::Replay;
+    };
+    let t = match anchor {
+        RAnchor::Obs(a) => w.at(*a),
+        RAnchor::Expr(ResolvedExpr::Const(t)) => *t,
+        RAnchor::Expr(_) => return QuantityPath::Replay,
+    };
+    if !(t <= w.last) {
+        return QuantityPath::Replay;
+    }
+    match source {
+        QSource::State(_) => QuantityPath::Smoothed,
+        QSource::Observation(_) => QuantityPath::ReplayUnconditioned,
     }
 }
 
@@ -807,6 +997,328 @@ mod tests {
         // max/min skip NaN; all-NaN → NaN.
         assert_eq!(reduce_finite(&[1.0, f64::NAN, 4.0], f64::NEG_INFINITY, f64::max), 4.0);
         assert!(reduce_finite(&[f64::NAN], f64::NEG_INFINITY, f64::max).is_nan());
+    }
+
+    // ── gh#722: routing an in-window `value_at` onto the smoothing path ──────
+
+    /// A minimal compiled model: two integer compartments, one parameter.
+    /// Enough for `eval_series` to read `IntPop(0)` off a snapshot.
+    fn one_compartment_model() -> CompiledModel {
+        use ir::{
+            expr::Expr,
+            model::{
+                Compartment, CompartmentKind, InitialConditions, OutputConfig, OutputSchedule,
+                SimulationConfig,
+            },
+            parameter::Parameter,
+            transition::{DrawMethod, StoichiometryEntry, Transition},
+            Model,
+        };
+        let m = Model {
+            ic_grad: Default::default(),
+            name: "q722".into(),
+            version: "0.1".into(),
+            time_unit: "days".into(),
+            description: None,
+            origin: None,
+            origin_rata_die: None,
+            compartments: vec![
+                Compartment { name: "S".into(), kind: CompartmentKind::Integer },
+                Compartment { name: "I".into(), kind: CompartmentKind::Integer },
+            ],
+            transitions: vec![Transition {
+                rate_state_grad: Default::default(),
+                name: "infection".into(),
+                stoichiometry: vec![
+                    StoichiometryEntry("S".into(), -1),
+                    StoichiometryEntry("I".into(), 1),
+                ],
+                rate: Expr::const_(0.0),
+                metadata: None,
+                draw_method: DrawMethod::Poisson,
+                rate_grad: Default::default(),
+                lineage: None,
+            }],
+            ode_equations: vec![],
+            time_functions: vec![],
+            tables: vec![],
+            interventions: vec![],
+            observations: vec![],
+            bindings: vec![],
+            per_eval_bindings: vec![],
+            parameters: vec![Parameter {
+                name: "p".into(),
+                value: ir::parameter::ParamValue::Fixed { value: 1.0 },
+                param_kind: None,
+                param_dim: None,
+            }],
+            initial_conditions: InitialConditions::Explicit({
+                let mut h = HashMap::new();
+                h.insert("S".into(), 1000.0);
+                h.insert("I".into(), 0.0);
+                h
+            }),
+            output: OutputConfig {
+                times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
+                format: "tsv".into(),
+                trajectory: true,
+                observations: false,
+            },
+            simulation: SimulationConfig {
+                t_start: 0.0,
+                t_end: 30.0,
+                time_semantics: "discrete".into(),
+                dt: Some(1.0),
+                rng_seed: Some(1),
+                integrator: Default::default(),
+                t_end_anchor: None,
+            },
+            presets: vec![],
+            model_structure: None,
+            balance: None,
+            identity_tracked_compartments: vec![],
+            quantities: vec![],
+            contrasts: vec![],
+        };
+        CompiledModel::new(m).unwrap()
+    }
+
+    /// A path whose `S` takes the given value at each of `times`.
+    fn path_of(times: &[f64], s: &[i64]) -> Trajectory {
+        let mut t = Trajectory::new();
+        for (&time, &sv) in times.iter().zip(s) {
+            t.push(crate::state::Snapshot {
+                t: time,
+                int_state: crate::state::IntState::from_vec(vec![sv, 0]),
+                real_state: crate::state::RealState::from_vec(vec![]),
+                flows: crate::state::Flows::Int(vec![0]),
+            });
+        }
+        t
+    }
+
+    /// `value_at(S, last_obs)` plus the three negative controls. Built directly
+    /// (as the gh#616 tests do) so the classification is exercised without a
+    /// compiler round-trip.
+    fn evaluator_722() -> QuantityEvaluator {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        QuantityEvaluator {
+            programs: vec![
+                // 0: value_at(S, last_obs) — in-window, state ⇒ Smoothed.
+                QProgram::Reduced {
+                    source: QSource::State(ResolvedExpr::IntPop(0)),
+                    reduce: Some(RReduce::ValueAt(RAnchor::Obs(AnchoredTime::bare(
+                        ObsAnchor::Last,
+                    )))),
+                },
+                // 1: value_at(S, last_obs + 7) — past the record ⇒ Replay.
+                QProgram::Reduced {
+                    source: QSource::State(ResolvedExpr::IntPop(0)),
+                    reduce: Some(RReduce::ValueAt(RAnchor::Obs(AnchoredTime {
+                        anchor: ObsAnchor::Last,
+                        offset: 7.0,
+                    }))),
+                },
+                // 2: final(S) — not a value_at at all ⇒ Replay.
+                QProgram::Reduced {
+                    source: QSource::State(ResolvedExpr::IntPop(0)),
+                    reduce: Some(RReduce::Final),
+                },
+                // 3: time_of_max(S) ⇒ Replay.
+                QProgram::Reduced {
+                    source: QSource::State(ResolvedExpr::IntPop(0)),
+                    reduce: Some(RReduce::TimeOfMax),
+                },
+            ],
+            names: vec![
+                "at_last_obs".into(),
+                "past_last_obs".into(),
+                "final_s".into(),
+                "peak_time".into(),
+            ],
+        }
+    }
+
+    /// The classification table, quantity by quantity. This is what makes the
+    /// routing a property of the QUANTITY rather than of a draw.
+    #[test]
+    fn only_an_in_window_state_value_at_routes_to_the_smoothing_path() {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        let w = ObsAnchorTimes { first: 0.0, last: 14.0 };
+        assert_eq!(
+            evaluator_722().eval_paths(Some(w)),
+            vec![
+                QuantityPath::Smoothed,
+                QuantityPath::Replay,
+                QuantityPath::Replay,
+                QuantityPath::Replay,
+            ],
+        );
+        assert_eq!(
+            evaluator_722().quantity_names_on(QuantityPath::Smoothed, Some(w)),
+            vec!["at_last_obs"],
+        );
+        // `first_obs` is inside the record too.
+        let first = QuantityEvaluator {
+            programs: vec![QProgram::Reduced {
+                source: QSource::State(ResolvedExpr::IntPop(0)),
+                reduce: Some(RReduce::ValueAt(RAnchor::Obs(AnchoredTime::bare(
+                    ObsAnchor::First,
+                )))),
+            }],
+            names: vec!["q".into()],
+        };
+        assert_eq!(first.eval_paths(Some(w)), vec![QuantityPath::Smoothed]);
+        // A LITERAL time inside the record has the same defect as the
+        // `last_obs` spelling; one past it is a projection.
+        let literal = |t: f64| QuantityEvaluator {
+            programs: vec![QProgram::Reduced {
+                source: QSource::State(ResolvedExpr::IntPop(0)),
+                reduce: Some(RReduce::ValueAt(RAnchor::Expr(ResolvedExpr::Const(t)))),
+            }],
+            names: vec!["q".into()],
+        };
+        assert_eq!(literal(10.0).eval_paths(Some(w)), vec![QuantityPath::Smoothed]);
+        assert_eq!(literal(14.0).eval_paths(Some(w)), vec![QuantityPath::Smoothed]);
+        assert_eq!(literal(14.001).eval_paths(Some(w)), vec![QuantityPath::Replay]);
+        // A non-constant time cannot be classified without a draw — it stays on
+        // the replay rather than making one band a mixture of two objects.
+        let param_time = QuantityEvaluator {
+            programs: vec![QProgram::Reduced {
+                source: QSource::State(ResolvedExpr::IntPop(0)),
+                reduce: Some(RReduce::ValueAt(RAnchor::Expr(ResolvedExpr::Param(0)))),
+            }],
+            names: vec!["q".into()],
+        };
+        assert_eq!(param_time.eval_paths(Some(w)), vec![QuantityPath::Replay]);
+        // An `observations.<stream>` value_at inside the record is NAMED, not
+        // silently passed off as conditioned: no saved path carries a y_sim.
+        let obs_src = QuantityEvaluator {
+            programs: vec![QProgram::Reduced {
+                source: QSource::Observation("cases".into()),
+                reduce: Some(RReduce::ValueAt(RAnchor::Obs(AnchoredTime::bare(
+                    ObsAnchor::Last,
+                )))),
+            }],
+            names: vec!["cases_at_last_obs".into()],
+        };
+        assert_eq!(obs_src.eval_paths(Some(w)), vec![QuantityPath::ReplayUnconditioned]);
+        assert_eq!(
+            obs_src.quantity_names_on(QuantityPath::ReplayUnconditioned, Some(w)),
+            vec!["cases_at_last_obs"],
+        );
+        // No observation window ⇒ nothing is anchorable.
+        assert_eq!(evaluator_722().eval_paths(None), vec![QuantityPath::Replay; 4]);
+    }
+
+    /// The gh#722 fix, with the two answers MEASURABLY apart: the replay says
+    /// `S = 900` at `last_obs` while the smoothing path says `S = 100`. The
+    /// in-window `value_at` must read 100; the three controls must read the
+    /// replay's values, or the routing has leaked past `value_at`.
+    #[test]
+    fn an_in_window_value_at_reads_the_smoothing_path_not_the_replay() {
+        let compiled = one_compartment_model();
+        let w = ObsAnchorTimes { first: 0.0, last: 14.0 };
+        // Replay: barely moves (the unconditioned epidemic never took off).
+        let replay = path_of(&[0.0, 7.0, 14.0, 21.0], &[1000, 950, 900, 880]);
+        // Smoothing path: the epidemic the data actually forced, ending with
+        // the observed record.
+        let smoothed = path_of(&[0.0, 7.0, 14.0], &[1000, 500, 100]);
+        let eval = evaluator_722();
+
+        let got = eval.eval_draw(
+            &[1.0],
+            &replay,
+            ConditionedRead::Saved(&smoothed),
+            &compiled,
+            None,
+            Some(w),
+        );
+        assert_eq!(got[0], QuantityResult::Scalar(Value(100.0)), "at_last_obs must be smoothed");
+        assert_eq!(
+            got[1],
+            QuantityResult::Scalar(Value(880.0)),
+            "past_last_obs stays on the replay"
+        );
+        assert_eq!(got[2], QuantityResult::Scalar(Value(880.0)), "final(S) stays on the replay");
+        assert_eq!(got[3], QuantityResult::Scalar(Value(0.0)), "time_of_max stays on the replay");
+
+        // The control that makes the first assertion non-vacuous: with no
+        // conditioned read the SAME call returns the replay's 900.
+        let off = eval.eval_draw(&[1.0], &replay, ConditionedRead::Off, &compiled, None, Some(w));
+        assert_eq!(off[0], QuantityResult::Scalar(Value(900.0)), "Off is the pre-fix answer");
+        assert_eq!(off[1..], got[1..], "Off changes nothing outside the routed quantity");
+    }
+
+    /// A draw outside the forkable subset loses the in-window value; it does
+    /// NOT gain a free-forward substitute. Censoring is what keeps the band
+    /// over the draws that have a conditioned answer.
+    #[test]
+    fn a_draw_with_no_saved_path_censors_rather_than_falling_back() {
+        let compiled = one_compartment_model();
+        let w = ObsAnchorTimes { first: 0.0, last: 14.0 };
+        let replay = path_of(&[0.0, 7.0, 14.0, 21.0], &[1000, 950, 900, 880]);
+        let got = evaluator_722().eval_draw(
+            &[1.0],
+            &replay,
+            ConditionedRead::NotSaved,
+            &compiled,
+            None,
+            Some(w),
+        );
+        assert_eq!(got[0], QuantityResult::Scalar(Censored));
+        // Everything else is untouched — a missing path costs one quantity, not
+        // the whole draw.
+        assert_eq!(got[1], QuantityResult::Scalar(Value(880.0)));
+        assert_eq!(got[2], QuantityResult::Scalar(Value(880.0)));
+    }
+
+    /// Reduction arithmetic over a smoothed leaf carries the smoothed value —
+    /// and its censoring — because a `Derived` reads the SPLICED results, not a
+    /// second replay-only pass.
+    #[test]
+    fn a_derived_leaf_reads_the_spliced_smoothed_value() {
+        use ir::anchor::{AnchoredTime, ObsAnchor};
+        let compiled = one_compartment_model();
+        let w = ObsAnchorTimes { first: 0.0, last: 14.0 };
+        let replay = path_of(&[0.0, 7.0, 14.0, 21.0], &[1000, 950, 900, 880]);
+        let smoothed = path_of(&[0.0, 7.0, 14.0], &[1000, 500, 100]);
+        // q0 = value_at(S, last_obs); q1 = 1000 - q0 (cumulative infections).
+        let eval = QuantityEvaluator {
+            programs: vec![
+                QProgram::Reduced {
+                    source: QSource::State(ResolvedExpr::IntPop(0)),
+                    reduce: Some(RReduce::ValueAt(RAnchor::Obs(AnchoredTime::bare(
+                        ObsAnchor::Last,
+                    )))),
+                },
+                QProgram::Derived(RScalar::BinOp {
+                    op: BinOp::Sub,
+                    left: Box::new(RScalar::Const(1000.0)),
+                    right: Box::new(RScalar::QRef(0)),
+                }),
+            ],
+            names: vec!["s_at_last_obs".into(), "outbreak_size".into()],
+        };
+        let got = eval.eval_draw(
+            &[1.0],
+            &replay,
+            ConditionedRead::Saved(&smoothed),
+            &compiled,
+            None,
+            Some(w),
+        );
+        assert_eq!(got[1], QuantityResult::Scalar(Value(900.0)), "1000 - 100, not 1000 - 900");
+        // Censoring propagates through the arithmetic the same way.
+        let missing = eval.eval_draw(
+            &[1.0],
+            &replay,
+            ConditionedRead::NotSaved,
+            &compiled,
+            None,
+            Some(w),
+        );
+        assert_eq!(missing[1], QuantityResult::Scalar(Censored));
     }
 
     #[test]

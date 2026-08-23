@@ -827,7 +827,14 @@ impl crate::engine::RunSink for PredictiveSink {
         // the OBSERVED data axis — the min and max over the leaves' observation
         // times, which predict carries for the predicted-vs-observed join.
         let quant_results = self.quant_eval.as_ref().map(|eval| {
-            eval.eval_draw(&params, &cell.traj, &self.compiled, Some(&obs_set), self.obs_anchors)
+            eval.eval_draw(
+                &params,
+                &cell.traj,
+                sim::quantity::ConditionedRead::Off,
+                &self.compiled,
+                Some(&obs_set),
+                self.obs_anchors,
+            )
         });
         let snapshot_times: Vec<f64> = if quant_results.is_some() {
             cell.traj.snapshots.iter().map(|s| s.t).collect()

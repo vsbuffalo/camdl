@@ -2335,7 +2335,16 @@ impl SimQuantities {
                 self.emit_every.as_ref(),
             )?)
         };
-        let results = eval.eval_draw(&params, &cell.traj, compiled, obs_set.as_ref(), None);
+        // `simulate` has no fit behind it, so there is no conditioned path to
+        // read: every quantity folds the replay (gh#722 `ConditionedRead::Off`).
+        let results = eval.eval_draw(
+            &params,
+            &cell.traj,
+            sim::quantity::ConditionedRead::Off,
+            compiled,
+            obs_set.as_ref(),
+            None,
+        );
         let times: Vec<f64> = cell.traj.snapshots.iter().map(|s| s.t).collect();
         // The key is DERIVED from the cell, never supplied by a caller — that is
         // what makes pooling unrepresentable here. An accumulator taking a key
