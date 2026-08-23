@@ -87,6 +87,66 @@ fn commit_then_lookup_hit() {
     cleanup(&root);
 }
 
+// ── S2: the overwrite door ──────────────────────────────────────────────────
+
+/// `--force` had no store-level meaning: there was no path that replaced a
+/// Completed leaf, so batch recomputed and had its bytes discarded at commit,
+/// while fit and survey died with AlreadyCompleted. `displace_completed`
+/// quarantines the incumbent so the recompute lands on a clean leaf — and
+/// quarantine, not delete, so a forced rerun never destroys what it replaces.
+#[test]
+fn displace_completed_quarantines_the_incumbent_and_frees_the_path() {
+    let root = tmp_root("displace");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    store.commit_atomic(&leaf, record(a), arts(b"FIRST")).unwrap();
+
+    store.displace_completed(&leaf, &LeafIdentity::new(a)).unwrap();
+    assert!(matches!(store.lookup(&leaf, &LeafIdentity::new(a)), Lookup::Miss),
+        "the displaced leaf must no longer be a cache hit");
+    // Preserved as evidence, not deleted.
+    let q = root.join(".quarantine");
+    assert!(fs::read_dir(&q).map(|d| d.count()).unwrap_or(0) >= 1,
+        "the incumbent must be quarantined, not destroyed");
+
+    // The recompute now lands cleanly — and with different bytes, which is the
+    // whole point of forcing (pre-S1 this was a silent discard, post-S1 it
+    // would be DivergentRecompute without the displace).
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"SECOND")).unwrap();
+    assert_eq!(fs::read(dest.join("traj.tsv")).unwrap(), b"SECOND");
+    cleanup(&root);
+}
+
+/// Forcing must never displace somebody else's artifact: a leaf holding a
+/// DIFFERENT identity at this path is left untouched.
+#[test]
+fn displace_completed_leaves_a_different_identity_alone() {
+    let root = tmp_root("displaceother");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    store.commit_atomic(&leaf, record(id(0xaa)), arts(b"THEIRS")).unwrap();
+    // Force under a different identity — a no-op.
+    store.displace_completed(&leaf, &LeafIdentity::new(id(0xbb))).unwrap();
+    assert_eq!(fs::read(leaf.join("traj.tsv")).unwrap(), b"THEIRS",
+        "a different identity's leaf must survive a force");
+    cleanup(&root);
+}
+
+/// And never displace a leaf a live process is holding.
+#[test]
+fn displace_completed_refuses_a_live_holder() {
+    let root = tmp_root("displacelive");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    store.commit_atomic(&leaf, record(a), arts(b"FIRST")).unwrap();
+    fs::write(leaf.join(".lock"), std::process::id().to_string()).unwrap();
+    let err = store.displace_completed(&leaf, &LeafIdentity::new(a)).unwrap_err();
+    assert!(matches!(err, CasError::FitInProgress { .. }), "got {err:?}");
+    cleanup(&root);
+}
+
 // ── S3: the claim guard ─────────────────────────────────────────────────────
 
 /// A claim dropped without `finalize` marks its leaf `Failed` and releases the

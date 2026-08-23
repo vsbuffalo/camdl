@@ -307,6 +307,69 @@ pub enum WriteMode {
     Streaming,
 }
 
+/// What the caller wants done about an artifact that already exists.
+///
+/// Every command has a `--force`-shaped flag, and before this type each one
+/// decided for itself what that meant: batch recomputed and had its bytes
+/// discarded at commit, fit and survey hard-errored with `AlreadyCompleted`,
+/// pfilter and profile had no force at all, and simulate threaded a flag
+/// nothing ever read. One meaning now, in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritePolicy {
+    /// A valid stored artifact is reused (the default).
+    Reuse,
+    /// Recompute even if a valid artifact exists; the incumbent is
+    /// quarantined, never deleted.
+    Force,
+}
+
+/// The answer to "does this artifact need computing?", asked BEFORE the work.
+///
+/// **Deviation from the proposal** (§S2 sketched one `WriteVerdict` returned by
+/// `begin_resolved_write`): reuse and write happen at two different moments —
+/// the reuse question must be answered before a cell is computed, while
+/// `begin_resolved_write` is called after, with results in hand. Folding both
+/// into one call would force every command to compute first and ask later,
+/// which is precisely the wasted work the cache exists to avoid. So the policy
+/// seam is two functions sharing one `WritePolicy`: [`check_reuse`] before,
+/// `begin_resolved_write` after.
+pub enum ReuseVerdict {
+    /// A valid stored artifact exists; skip the work. Carries the leaf dir —
+    /// a caller that also needs the stored record reads it from there (the
+    /// verdict deliberately does not carry one: the only caller that wants it
+    /// asks at a different point in the run than this decision is made).
+    CacheHit { dir: PathBuf },
+    /// Nothing usable is stored (or `Force` displaced it): do the work, then
+    /// write through `begin_resolved_write`, which derives the same leaf path
+    /// from the same identity — so the verdict carries none.
+    MustRun,
+}
+
+/// The one cache-hit decision. Ask this instead of hand-rolling a `lookup`,
+/// an `exists()` check, or a bespoke cache scan — each of those grew its own
+/// bugs (survey's `landscape.tsv.exists()` had no identity gate at all).
+///
+/// Under [`WritePolicy::Force`] a matching `Completed` leaf is quarantined
+/// first, so the caller always gets `MustRun` and the recompute lands on a
+/// clean leaf rather than colliding with the incumbent at commit time.
+pub fn check_reuse(
+    store: &FsCasStore,
+    root: &Path,
+    resolved: &ResolvedArtifact,
+    policy: WritePolicy,
+) -> Result<ReuseVerdict, CasError> {
+    let dir = store_path(root, resolved.kind, &resolved.levels);
+    let id = runid::LeafIdentity::new(resolved.run_id);
+    if policy == WritePolicy::Force {
+        store.displace_completed(&dir, &id)?;
+        return Ok(ReuseVerdict::MustRun);
+    }
+    match store.lookup(&dir, &id) {
+        runid::Lookup::Hit(_) => Ok(ReuseVerdict::CacheHit { dir }),
+        _ => Ok(ReuseVerdict::MustRun),
+    }
+}
+
 /// The outcome of [`begin_resolved_write`].
 pub enum ResolvedWrite {
     /// Atomic: already committed; the destination path.

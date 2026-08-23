@@ -1204,16 +1204,33 @@ mod gh169_params_label {
 
 impl crate::engine::RunSink for CasSink {
     fn should_run(&mut self, spec: &crate::engine::CellSpec) -> bool {
-        if self.force {
-            return true;
-        }
         match self.cell_resolve(spec) {
-            Ok((rt, dir, _)) => {
+            Ok((rt, _dir, _)) => {
                 let store = runid::FsCasStore::new(self.root());
-                !matches!(
-                    store.lookup(&dir, &runid::LeafIdentity::new(rt.run_id)),
-                    runid::Lookup::Hit(_)
-                )
+                let artifact = crate::resolve::ResolvedArtifact {
+                    kind: runid::ArtifactKind::Sim,
+                    levels: rt.levels.clone(),
+                    run_id: rt.run_id,
+                    display_inputs: serde_json::Value::Null,
+                };
+                let policy = if self.force {
+                    crate::resolve::WritePolicy::Force
+                } else {
+                    crate::resolve::WritePolicy::Reuse
+                };
+                // Through the one policy seam. Under Force the incumbent is
+                // displaced (quarantined) HERE, so the recompute lands on a
+                // clean leaf — previously force only skipped this check and
+                // the recomputed bytes were discarded at commit as an
+                // already-completed no-op, which is why `--force` could not
+                // change a stored artifact.
+                let root = self.root();
+                match crate::resolve::check_reuse(&store, &root, &artifact, policy) {
+                    Ok(crate::resolve::ReuseVerdict::CacheHit { .. }) => false,
+                    Ok(crate::resolve::ReuseVerdict::MustRun) => true,
+                    // Cache check failed → run; the error surfaces in merge_cell.
+                    Err(_) => true,
+                }
             }
             // No cache key without a resolve → run; the error surfaces in merge_cell.
             Err(_) => true,
@@ -1349,6 +1366,23 @@ impl crate::engine::RunSink for CasSink {
         meta.output_schema = crate::output_schema::sim_output_schema(&artifacts.files);
         let root = self.root();
         let store = runid::FsCasStore::new(&root);
+        // The commit half of the force policy. `should_run` covers callers
+        // that skip cached cells, but `simulate` deliberately runs every cell
+        // (its `-o` mirror needs them all) and reaches commit with a cache hit
+        // in place — where the staged bytes were silently discarded, so
+        // `--force` could never change a stored artifact. Displacing here
+        // (quarantine, not delete) gives every commit path the same one
+        // meaning of force, and is a no-op when nothing is stored.
+        if self.force {
+            if let Err(e) = crate::resolve::check_reuse(
+                &store, &root, &resolved_artifact, crate::resolve::WritePolicy::Force,
+            ) {
+                self.counter += 1;
+                self.errors.push(format!("scenario={} seed={}: force displace failed: {}",
+                    name, spec.process_seed, e));
+                return Ok(());
+            }
+        }
         let dest = match crate::resolve::begin_resolved_write(
             &store, &root, &resolved_artifact, &meta,
             crate::resolve::WriteMode::Atomic(artifacts),

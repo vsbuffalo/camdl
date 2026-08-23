@@ -244,6 +244,34 @@ impl FsCasStore {
     /// Mode A: write the leaf into staging with the fsync ordering, then
     /// rename into place — collision-aware, never clobbering a different
     /// identity. Returns the destination (possibly disambiguated).
+    /// The overwrite door: displace a `Completed` leaf so the next claim or
+    /// commit at this identity starts clean.
+    ///
+    /// The store had no such operation, which is why `--force` meant four
+    /// different things at five call sites and "overwrite" at none of them:
+    /// batch recomputed and then had its bytes discarded by the
+    /// already-completed path, fit and survey died with
+    /// `AlreadyCompleted`, and simulate's flag was inert. Forcing routes
+    /// through the same collision-aware machinery as everything else — it
+    /// only ever displaces a leaf whose identity MATCHES (a different
+    /// identity at this path is somebody else's artifact), and it
+    /// **quarantines** rather than deletes, so a forced recompute never
+    /// destroys the result it replaces.
+    ///
+    /// A no-op when the leaf is absent, incomplete, or holds a different
+    /// identity: those already recompute without help.
+    pub fn displace_completed(&self, path: &Path, expected: &LeafIdentity) -> Result<(), CasError> {
+        if matches!(self.lookup(path, expected), Lookup::Hit(_)) {
+            // Never displace a leaf a live process is holding.
+            if held_by_live_lock(path) {
+                let pid = read_lock_pid(&path.join(".lock")).unwrap_or(0);
+                return Err(CasError::FitInProgress { path: path.display().to_string(), pid });
+            }
+            self.quarantine(path)?;
+        }
+        Ok(())
+    }
+
     pub fn commit_atomic(
         &self,
         path: &Path,
