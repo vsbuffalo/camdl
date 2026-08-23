@@ -479,12 +479,22 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 eprintln!("warning: not storing this pfilter leaf — {}", e);
                 return;
             }
-            // Anything else means the result was NOT recorded. Previously every
-            // failure here was a warning, so a store error left the user with a
-            // printed number they reasonably believed had been saved.
+            // Anything else means the result was NOT recorded. Say so
+            // unmistakably — the old bare "warning: claim …" left the user
+            // with a printed number they reasonably believed had been saved —
+            // but do NOT abort: the filter has already finished and delivered
+            // its outputs (the loglik above, `--save-final-state`, the trace
+            // files). The leaf is a cache/provenance artifact, so a store
+            // failure costs a cache entry, not an answer, and killing the
+            // process here would discard completed work over it. A missing
+            // leaf is an honest miss downstream (`camdl cat` reports not
+            // found); it can never be read as a wrong number.
             Err(e) => {
-                eprintln!("error: claim pfilter leaf {}: {}", cas_path.display(), e);
-                std::process::exit(1);
+                eprintln!("warning: this pfilter result was NOT stored in the \
+                           run cache — {}\n  (the log-likelihood above is \
+                           valid; only the cached leaf at {} is missing)",
+                    e, cas_path.display());
+                return;
             }
         };
         let mut body = format!("loglik = {}\nn_replicates = {}\nn_particles = {}\n",
