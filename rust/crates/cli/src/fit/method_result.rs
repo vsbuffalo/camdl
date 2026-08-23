@@ -194,6 +194,16 @@ pub enum ParamConvergence {
         ess_bulk: Stat,
         /// Tail ESS: the smaller of the 5% and 95% indicator ESS.
         ess_tail: Stat,
+        /// Per-chain Geyer ESS, one entry per chain, in chain order.
+        ///
+        /// Answers the follow-up question to a high R̂, which no cross-chain
+        /// statistic can: are the chains each mixing well *within their own
+        /// mode* (large and similar per-chain values — a multimodality
+        /// problem) or is one of them stuck (one small value — a starting
+        /// point or step-size problem)? Empty on a fit written before this was
+        /// stored.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ess_per_chain: Vec<f64>,
         /// Every chain sat at its own single value — the sampler never
         /// accepted a move. R̂ is then `∞` or `Undefined`; this is what lets a
         /// report say *why* rather than printing an infinity and leaving the
@@ -274,16 +284,51 @@ impl ParamConvergence {
     /// and what that means — the answer to "why is R̂ high". `None` when the
     /// parameter was not scored, or when the fit predates the two halves being
     /// stored, or when either half is undefined.
+    ///
+    /// The classic Gelman & Rubin statistic rides along because the
+    /// rank-normalized one is BOUNDED — ceiling ≈1.85 for two chains, ≈4.5 for
+    /// eight — and so cannot express severity. Across thirteen orders of
+    /// magnitude of within-chain movement, from chains frozen to
+    /// floating-point resolution to chains that genuinely explore, it reads
+    /// between 1.81 and 1.90; the classic one separates those by fourteen
+    /// orders of magnitude
+    /// (`docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`).
     pub fn rhat_decomposition(&self) -> Option<String> {
-        let Self::Scored { rhat_bulk, rhat_folded, .. } = self else {
+        let Self::Scored { rhat_bulk, rhat_folded, rhat_classic, .. } = self else {
             return None;
         };
         let (b, f) = (rhat_bulk.finite()?, rhat_folded.finite()?);
         let driver = RhatDriver::of(b, f)?;
+        let classic = match rhat_classic {
+            Stat::Value(v) => format!(", classic {v:.3}"),
+            Stat::Infinite => ", classic ∞".to_string(),
+            Stat::Undefined => String::new(),
+        };
         Some(format!(
-            "R̂ = max(bulk {:.3}, folded {:.3}); the {} half is larger — {}",
-            b, f, driver.half(), driver.describe(),
+            "R̂ = max(bulk {:.3}, folded {:.3}){}; the {} half is larger — {}",
+            b, f, classic, driver.half(), driver.describe(),
         ))
+    }
+
+    /// The per-chain ESS as one clause, for a parameter whose chains disagree.
+    ///
+    /// `None` when there is nothing to say: fewer than two chains' worth of
+    /// values, or a fit written before they were stored. The spread is the
+    /// point — similar large values mean each chain is mixing well inside its
+    /// own mode, one small value means that chain is stuck, and those call for
+    /// different fixes.
+    pub fn per_chain_ess(&self) -> Option<String> {
+        let Self::Scored { ess_per_chain, .. } = self else {
+            return None;
+        };
+        if ess_per_chain.len() < 2 {
+            return None;
+        }
+        let cells: Vec<String> = ess_per_chain
+            .iter()
+            .map(|e| if e.is_finite() { format!("{e:.0}") } else { "—".to_string() })
+            .collect();
+        Some(format!("per-chain ESS [{}]", cells.join(", ")))
     }
 
     /// Whether this parameter is evidence the sampler MISBEHAVED, as opposed to
@@ -1247,6 +1292,7 @@ pub struct ConvergenceMaps {
     refusal_detail: BTreeMap<String, ConvergenceError>,
     ess: BTreeMap<String, f64>,
     ess_tail: BTreeMap<String, f64>,
+    ess_per_chain: BTreeMap<String, Vec<f64>>,
 }
 
 impl ConvergenceMaps {
@@ -1261,6 +1307,7 @@ impl ConvergenceMaps {
             refusal_detail: read_typed_map(summary, "rhat_refusal_detail"),
             ess: read_f64_map(summary, "ess"),
             ess_tail: read_f64_map(summary, "ess_tail"),
+            ess_per_chain: read_typed_map(summary, "ess_per_chain"),
         }
     }
 
@@ -1277,6 +1324,7 @@ impl ConvergenceMaps {
         set.extend(self.refusal_detail.keys());
         set.extend(self.ess.keys());
         set.extend(self.ess_tail.keys());
+        set.extend(self.ess_per_chain.keys());
         set.into_iter().cloned().collect()
     }
 
@@ -1307,6 +1355,11 @@ impl ConvergenceMaps {
                         rhat_classic: stat(&self.rhat_classic, &name),
                         ess_bulk: stat(&self.ess, &name),
                         ess_tail: stat(&self.ess_tail, &name),
+                        ess_per_chain: self
+                            .ess_per_chain
+                            .get(&name)
+                            .cloned()
+                            .unwrap_or_default(),
                         all_chains_frozen: matches!(reason, Some(RhatRefusal::NonFiniteRhat)),
                     },
                 };
@@ -2004,6 +2057,33 @@ mod tests {
         assert_eq!(Stat::Value(1.0295).cell(3, "—"), "1.030");
     }
 
+    /// The per-chain ESS must survive the round trip through
+    /// `*_summary.json` to the surface. It was written by every sampler and
+    /// read by nothing, so the follow-up question to a high R̂ — is each chain
+    /// mixing inside its own mode, or is one stuck — had no answer anywhere a
+    /// user looks.
+    #[test]
+    fn the_per_chain_ess_reaches_the_surface_from_a_stored_summary() {
+        let summary = serde_json::json!({
+            "rhat": { "beta": 2.4 },
+            "ess": { "beta": 12.0 },
+            "ess_per_chain": { "beta": [410.0, 388.0, 9.0] },
+        });
+        let per_param = ConvergenceMaps::read(&summary).per_param();
+        let note = per_param["beta"]
+            .per_chain_ess()
+            .expect("three chains' worth of values is something to say");
+        assert!(note.contains("410") && note.contains("388") && note.contains("9"),
+            "every chain's value is shown — the SPREAD is the diagnosis: {note}");
+
+        // A single chain has no spread to report, so there is nothing to say.
+        let one = serde_json::json!({
+            "rhat": { "beta": 2.4 },
+            "ess_per_chain": { "beta": [410.0] },
+        });
+        assert_eq!(ConvergenceMaps::read(&one).per_param()["beta"].per_chain_ess(), None);
+    }
+
     /// A parameter whose R̂ is `∞` — every chain frozen at its own value — is a
     /// SAMPLER PATHOLOGY. It must sink the verdict even when other parameters
     /// reported perfectly well: a fit is not converged because some of it was.
@@ -2018,6 +2098,7 @@ mod tests {
                     rhat_classic: Stat::Value(1.00),
                     ess_bulk: Stat::Value(900.0),
                     ess_tail: Stat::Value(850.0),
+                    ess_per_chain: Vec::new(),
                     all_chains_frozen: false,
                 }),
                 ("frozen".to_string(), ParamConvergence::Scored {
@@ -2027,6 +2108,7 @@ mod tests {
                     rhat_classic: Stat::Infinite,
                     ess_bulk: Stat::Value(3.0),
                     ess_tail: Stat::Undefined,
+                    ess_per_chain: Vec::new(),
                     all_chains_frozen: true,
                 }),
             ]),
@@ -2057,7 +2139,7 @@ mod tests {
             rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
             rhat_classic: Stat::Infinite,
             ess_bulk: Stat::Value(3.0), ess_tail: Stat::Undefined,
-            all_chains_frozen: true,
+            ess_per_chain: Vec::new(), all_chains_frozen: true,
         };
         assert!(frozen.why_no_rhat().expect("frozen explains itself").contains("never accepted"));
         assert!(frozen.is_pathology());
@@ -2067,7 +2149,7 @@ mod tests {
             rhat_bulk: Stat::Value(1.02), rhat_folded: Stat::Undefined,
             rhat_classic: Stat::Value(1.02),
             ess_bulk: Stat::Value(500.0), ess_tail: Stat::Value(400.0),
-            all_chains_frozen: false,
+            ess_per_chain: Vec::new(), all_chains_frozen: false,
         };
         assert!(undefined_fold.why_no_rhat().expect("an undefined R̂ explains itself")
             .contains("folded"));
@@ -2092,7 +2174,7 @@ mod tests {
             rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
             rhat_classic: Stat::Infinite,
             ess_bulk: Stat::Value(4.0), ess_tail: Stat::Undefined,
-            all_chains_frozen: false,
+            ess_per_chain: Vec::new(), all_chains_frozen: false,
         };
         assert!(inf_only.is_pathology(),
             "R̂ = ∞ is a pathology by itself, not only when the flag agrees");
@@ -2103,7 +2185,7 @@ mod tests {
             rhat_bulk: Stat::Value(1.01), rhat_folded: Stat::Value(1.00),
             rhat_classic: Stat::Value(1.00),
             ess_bulk: Stat::Value(900.0), ess_tail: Stat::Value(850.0),
-            all_chains_frozen: false,
+            ess_per_chain: Vec::new(), all_chains_frozen: false,
         };
         assert_eq!(ok.why_no_rhat(), None);
         assert!(!ok.is_pathology());

@@ -2876,11 +2876,32 @@ impl StageConvergence {
             // "so what do I do" line for anything not certified converged.
             if band != RhatBand::Converged || drew_finding {
                 if let Some(driver) = r.rhat_driver() {
+                    // The whole ladder on one line. `rhat_classic` is here
+                    // because the rank statistic is BOUNDED (ceiling ≈1.85 at
+                    // two chains) and cannot express severity, while the
+                    // classic one can — it is the only number that separates
+                    // "the sampler is dead" from "the sampler mixes badly".
                     out.push_str(&format!(
-                        "  {:12}   R̂ = max(bulk {:.3}, folded {:.3}); the {} half is \
-                         larger — {}\n",
-                        "", r.rhat_bulk, r.rhat_folded, driver.half(), driver.describe(),
+                        "  {:12}   R̂ = max(bulk {:.3}, folded {:.3}), classic {}; \
+                         the {} half is larger — {}\n",
+                        "", r.rhat_bulk, r.rhat_folded,
+                        crate::fit::method_result::Stat::from_f64(d.rhat_classic())
+                            .cell(3, "—"),
+                        driver.half(), driver.describe(),
                     ));
+                }
+                // And whether each chain is mixing well inside its OWN mode,
+                // which no cross-chain statistic can say. Similar large values
+                // point at multimodality; one small value points at a stuck
+                // chain. Different fixes.
+                let per_chain = d.ess_per_chain();
+                if per_chain.len() >= 2 {
+                    let cells: Vec<String> = per_chain
+                        .iter()
+                        .map(|e| if e.is_finite() { format!("{e:.0}") } else { "—".into() })
+                        .collect();
+                    out.push_str(&format!(
+                        "  {:12}   per-chain ESS [{}]\n", "", cells.join(", ")));
                 }
             }
             if drew_finding {
@@ -5380,6 +5401,54 @@ dt = 1.0
         assert!(
             out.contains("rank-normalized"),
             "and which statistic that is:\n{out}"
+        );
+    }
+
+    /// Two numbers camdl computes on every fit, writes to `*_summary.json`,
+    /// and never showed anyone.
+    ///
+    /// The classic Gelman & Rubin R̂ is the only one of the two estimators that
+    /// carries SCALE: the rank-normalized one is bounded — ceiling ≈1.85 at two
+    /// chains — and reads between 1.81 and 1.90 across thirteen orders of
+    /// magnitude of within-chain movement, from chains frozen at
+    /// floating-point resolution to chains that genuinely explore. It cannot
+    /// distinguish "the sampler is dead" from "the sampler mixes badly"; the
+    /// classic one separates those by fourteen orders of magnitude.
+    ///
+    /// The per-chain Geyer ESS answers the follow-up question no cross-chain
+    /// statistic can: are the chains each mixing well *inside their own mode*,
+    /// or is one stuck? Those have different fixes.
+    ///
+    /// `within_chain_drift` makes the first point on its own — `posterior`
+    /// 1.7.0 gives classic 1.0008 where the headline is 1.4280, so the classic
+    /// number reads inside every published healthy band on a fit that has not
+    /// converged. Printing both is the whole reason to keep both.
+    #[test]
+    fn a_non_converged_parameter_shows_the_classic_rhat_and_the_per_chain_ess() {
+        use sim::inference::diagnostic::DiagnosticCollector;
+        let chains = load_convergence_chains();
+        let conv = StageConvergence::compute([(
+            "within_chain_drift".to_string(),
+            chains["within_chain_drift"].clone(),
+        )]);
+        let collector = DiagnosticCollector::new("test");
+        let out = conv.report(&collector, 1.05);
+
+        assert!(
+            out.contains("classic 1.001"),
+            "the estimator that carries scale must be shown beside the bounded \
+             one, not only written to disk:\n{out}"
+        );
+        assert!(
+            out.contains("per-chain ESS ["),
+            "and whether each chain mixes inside its own mode:\n{out}"
+        );
+        // Four chains in this fixture, so four cells.
+        let line = out.lines().find(|l| l.contains("per-chain ESS")).expect("the line");
+        assert_eq!(
+            line.matches(',').count(),
+            3,
+            "one cell per chain, four chains: {line}"
         );
     }
 

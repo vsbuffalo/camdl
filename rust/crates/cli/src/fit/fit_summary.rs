@@ -1135,6 +1135,9 @@ impl Formatter {
                             // has the headline and nothing to decompose.
                             None => {}
                         }
+                        if let Some(e) = p.per_chain_ess() {
+                            s.push_str(&format!("        {e}\n"));
+                        }
                     }
                 }
             }

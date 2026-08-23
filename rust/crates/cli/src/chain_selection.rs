@@ -356,6 +356,7 @@ fn d_to_param(
             rhat_classic: Stat::from_f64(d.rhat_classic()),
             ess_bulk: Stat::from_f64(r.ess_bulk),
             ess_tail: Stat::from_f64(r.ess_tail),
+            ess_per_chain: d.ess_per_chain().to_vec(),
             all_chains_frozen: r.all_chains_frozen,
         },
     }
