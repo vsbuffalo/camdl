@@ -47,6 +47,24 @@ pub(crate) struct DesignCoords<'a> {
     pub sweep: &'a [(String, f64)],
 }
 
+/// Which object a design cell's quantities were folded over, per leaf, plus how
+/// many of its draws had a conditioned path to fold (gh#722).
+///
+/// `fit predict` always supplies one so EVERY manifest entry says which object
+/// its numbers came from — the fitted arm's `value_at(N0 - S, last_obs)` is a
+/// conditioned read and a scenario arm's is a free-forward replay, and the two
+/// sit in one file under a `scenario` column. `simulate` supplies `None` (it
+/// has no fit behind it), keeping its manifest byte-identical.
+#[derive(Clone, Copy)]
+pub(crate) struct EvaluatedOn<'a> {
+    /// Per leaf, in `quantities` order.
+    pub paths: &'a [sim::quantity::QuantityPath],
+    /// Draws in this design cell whose saved smoothing path was opened. The
+    /// honest denominator for a `smoothed` leaf: the rest are censored, and the
+    /// forkable subset is REPORTED, never silently substituted.
+    pub n_conditioned: usize,
+}
+
 /// A scalar quantity leaf's banding result: either a real band over the finite
 /// per-draw values (carrying the censored count), or every draw censored (no
 /// band — `q*` rendered empty). Series quantities never reach here.
@@ -246,12 +264,14 @@ fn collect_qrefs(se: &ir::quantity::ScalarExpr, out: &mut Vec<String>) {
 /// manifest entry (the same way the predictive TSV tags its rows). The
 /// `simulate --quantities-out` caller passes [`DesignCoords::none`] (pools all
 /// cells into one band) and omits both — today's behaviour, unchanged.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_quantities(
     quantities: &[ir::quantity::Quantity],
     quant_draws: &[Vec<sim::quantity::QuantityResult>],
     snapshot_times: &[f64],
     mode: Mode,
     coords: DesignCoords,
+    evaluated_on: Option<EvaluatedOn>,
     calendar: &io::CalendarMeta,
 ) -> Result<(Vec<(String, String)>, String), String> {
     use ir::quantity::{QuantityBody, TemporalReduce};
@@ -382,6 +402,19 @@ pub(crate) fn render_quantities(
             }
             entry["sweep"] = serde_json::Value::Object(sweep_obj);
         }
+        // gh#722: which object this cell's numbers came from. Every leaf in a
+        // group shares a body shape, so the first leaf's routing is the group's
+        // — the same rule `shape` above is read by. `n_conditioned` rides only
+        // on a `smoothed` entry, where it is the band's real denominator.
+        if let Some(ev) = evaluated_on {
+            let path = ev.paths.get(leaf_idxs[0]).copied().unwrap_or(
+                sim::quantity::QuantityPath::Replay,
+            );
+            entry["evaluated_on"] = serde_json::Value::String(path.as_str().to_string());
+            if path == sim::quantity::QuantityPath::Smoothed {
+                entry["n_conditioned_draws"] = serde_json::Value::from(ev.n_conditioned);
+            }
+        }
         manifest_entries.push(entry);
 
         outputs.push((name.clone(), out));
@@ -437,10 +470,12 @@ impl StackedQuantities {
         coords: DesignCoords<'_>,
         draws: &[Vec<sim::quantity::QuantityResult>],
         times: &[f64],
+        evaluated_on: Option<EvaluatedOn<'_>>,
         calendar: &io::CalendarMeta,
     ) -> Result<(), String> {
-        let (outs, manifest) =
-            render_quantities(quantities, draws, times, self.mode, coords, calendar)?;
+        let (outs, manifest) = render_quantities(
+            quantities, draws, times, self.mode, coords, evaluated_on, calendar,
+        )?;
         for (name, content) in outs {
             match self.bodies.entry(name) {
                 indexmap::map::Entry::Vacant(e) => {
@@ -758,7 +793,7 @@ mod tests {
         ]];
         let times = vec![0.0, 7.0];
         let (outs, _manifest) =
-            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords { scenario: None, sweep: &[] }, &test_cal()).unwrap();
+            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords { scenario: None, sweep: &[] }, None, &test_cal()).unwrap();
 
         let prev = &outs.iter().find(|(n, _)| n == "prevalence").unwrap().1;
         let plines: Vec<&str> = prev.trim_end().lines().collect();
@@ -799,7 +834,7 @@ mod tests {
     #[test]
     fn point_mode_rejects_multiple_realizations() {
         let draws: Vec<Vec<sim::quantity::QuantityResult>> = vec![vec![], vec![]];
-        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords { scenario: None, sweep: &[] }, &test_cal()).unwrap_err();
+        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords { scenario: None, sweep: &[] }, None, &test_cal()).unwrap_err();
         assert!(err.contains("exactly one realization"), "got: {err}");
     }
 
@@ -829,7 +864,7 @@ mod tests {
 
         let (outs, manifest) =
             render_quantities(&quantities, &draws, &[], Mode::Banded,
-                DesignCoords { scenario: Some("with_sia"), sweep: &[] }, &test_cal()).unwrap();
+                DesignCoords { scenario: Some("with_sia"), sweep: &[] }, None, &test_cal()).unwrap();
         let peak = &outs.iter().find(|(n, _)| n == "peak").unwrap().1;
         let lines: Vec<&str> = peak.trim_end().lines().collect();
         assert_eq!(
@@ -855,6 +890,7 @@ mod tests {
         let (outs_sw, manifest_sw) = render_quantities(
             &quantities, &draws, &[], Mode::Banded,
             DesignCoords { scenario: Some("with_sia"), sweep: &sweep },
+            None,
             &test_cal(),
         )
         .unwrap();
@@ -876,7 +912,7 @@ mod tests {
 
         // None → no scenario column or field (simulate's byte-identical path).
         let (outs2, manifest2) =
-            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords { scenario: None, sweep: &[] }, &test_cal()).unwrap();
+            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords { scenario: None, sweep: &[] }, None, &test_cal()).unwrap();
         let peak2 = &outs2.iter().find(|(n, _)| n == "peak").unwrap().1;
         assert_eq!(
             peak2.lines().next().unwrap(),

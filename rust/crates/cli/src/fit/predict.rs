@@ -170,6 +170,56 @@ pub struct PosteriorDraws {
     /// `chain_selection`) — a chain-subset band is never mistakable for a
     /// full-cloud one.
     pub selection: Option<SubsetInfo>,
+    /// Each draw's posterior key + the stage it came from — `None` when the
+    /// cloud was built without them (the test constructors). See [`DrawKeys`].
+    keys: Option<DrawKeys>,
+}
+
+/// Each posterior draw's `(chain, draw)` key and the stage directory its saved
+/// smoothing path would live in (gh#722).
+///
+/// The key travels WITH the cloud rather than being re-read beside it, because
+/// a `value_at(..., last_obs)` has to read the path belonging to the draw it is
+/// reported for: a shuffled or offset pairing still bands plausibly, and the
+/// band is the thing a situation report quotes.
+#[derive(Debug, Clone)]
+pub struct DrawKeys {
+    /// The stage directory holding `chain_<N+1>/trajectories.tsv`.
+    pub stage_dir: PathBuf,
+    /// Per draw, in cloud order: its `(chain, draw)` key, or `None` for a
+    /// param-only `draws.tsv` with no key columns.
+    pub per_draw: Vec<Option<(usize, usize)>>,
+}
+
+/// Which draws actually have a smoothing path ON DISK — [`DrawKeys`] narrowed
+/// to the forkable subset, with its size, so the count reported and the paths
+/// openable are the same fact.
+#[derive(Debug, Clone)]
+pub struct SavedPaths {
+    pub stage_dir: PathBuf,
+    /// Per draw, in cloud order: the key of its saved path, `None` when that
+    /// draw has none. The trajectory save stride and `thin` need not agree, so
+    /// this is a genuine subset (gh#727).
+    pub per_draw: Vec<Option<(usize, usize)>>,
+    /// Draws with a saved path, over `per_draw.len()`.
+    pub n_saved: usize,
+}
+
+impl DrawKeys {
+    /// Intersect the cloud's keys with the keys that actually have a saved
+    /// path. One `read_to_string` pass per `chain_*/trajectories.tsv`, so this
+    /// runs only when a quantity needs a conditioned read — a `fit predict`
+    /// with no in-window `value_at` pays nothing.
+    pub fn resolve_saved(&self) -> SavedPaths {
+        let on_disk = crate::fit::joint::trajectory_keys(&self.stage_dir);
+        let per_draw: Vec<Option<(usize, usize)>> = self
+            .per_draw
+            .iter()
+            .map(|k| k.filter(|key| on_disk.contains(key)))
+            .collect();
+        let n_saved = per_draw.iter().filter(|k| k.is_some()).count();
+        SavedPaths { stage_dir: self.stage_dir.clone(), per_draw, n_saved }
+    }
 }
 
 impl PosteriorDraws {
@@ -189,13 +239,43 @@ impl PosteriorDraws {
                  that burn-in did not discard every sweep)"
             ));
         }
-        Ok(PosteriorDraws { draws, stage, method, backend, convergence, selection: None })
+        Ok(PosteriorDraws {
+            draws,
+            stage,
+            method,
+            backend,
+            convergence,
+            selection: None,
+            keys: None,
+        })
     }
 
     /// Attach the chain-selection provenance (`--exclude-chains`) to the cloud.
     pub fn with_selection_info(mut self, info: Option<SubsetInfo>) -> Self {
         self.selection = info;
         self
+    }
+
+    /// Attach the per-draw posterior keys. Rejects a list that is not 1:1 with
+    /// the cloud — an off-by-one here pairs draw *i*'s parameters with draw
+    /// *i+1*'s inferred state and still produces a plausible band.
+    pub fn with_keys(mut self, keys: DrawKeys) -> Result<Self, String> {
+        if keys.per_draw.len() != self.draws.len() {
+            return Err(format!(
+                "internal: {} posterior keys for {} draws — the key list must be 1:1 \
+                 with the cloud",
+                keys.per_draw.len(),
+                self.draws.len()
+            ));
+        }
+        self.keys = Some(keys);
+        Ok(self)
+    }
+
+    /// Each draw's `(chain, draw)` key + its stage dir, when the cloud carries
+    /// them.
+    pub fn keys(&self) -> Option<&DrawKeys> {
+        self.keys.as_ref()
     }
 
     /// The chain-selection provenance, when a selection was active.
@@ -526,11 +606,19 @@ impl FitResult {
         match posterior_draws::resolve_posterior_draws(seg_str, stage) {
             Ok(pref) => {
                 let pref = pref.with_selection(selection);
-                let (rows, sel_info) = pref.load_params_with_info()?;
-                let draws: Vec<IndexMap<String, f64>> = rows
-                    .into_iter()
-                    .map(|m| m.into_iter().collect())
-                    .collect();
+                // Keyed, not param-only: the `(chain, draw)` key locates the
+                // draw's saved smoothing path, and building both out of ONE
+                // pass over the same rows is what keeps them paired (gh#722).
+                let (rows, sel_info) = pref.load_keyed_with_info()?;
+                let mut draws: Vec<IndexMap<String, f64>> = Vec::with_capacity(rows.len());
+                let mut keys: Vec<Option<(usize, usize)>> = Vec::with_capacity(rows.len());
+                for r in rows {
+                    keys.push(match (r.chain, r.draw) {
+                        (Some(c), Some(d)) => Some((c, d)),
+                        _ => None,
+                    });
+                    draws.push(r.params.into_iter().collect());
+                }
                 let stage_dir = pref
                     .draws_path
                     .parent()
@@ -562,7 +650,8 @@ impl FitResult {
                         backend,
                         convergence,
                     )?
-                    .with_selection_info(sel_info),
+                    .with_selection_info(sel_info)
+                    .with_keys(DrawKeys { stage_dir, per_draw: keys })?,
                 ))
             }
             // No cloud: classify as a point-estimate fit. Report the stage the
@@ -697,6 +786,54 @@ struct ScenarioAccum {
     /// The trajectory snapshot times, captured once per scenario (every draw
     /// shares the output cadence) — the time axis a series quantity bands against.
     quant_times: Vec<f64>,
+    /// Draws in this scenario whose saved smoothing path was opened — the
+    /// denominator an in-window `value_at` band is actually over (gh#722). The
+    /// forkable subset is REPORTED, never silently substituted.
+    n_conditioned: usize,
+}
+
+/// Does this design cell read its in-window `value_at` quantities off the
+/// smoothing path (gh#722)? The ONE rule — the sink construction and the
+/// manifest tag both fold through it, so the artifact cannot claim one object
+/// while the number came from another.
+///
+/// Three conditions: the fit carries per-draw path locators at all; the cell is
+/// the arm the smoothing path belongs to (the no-overlay `fitted` arm — see
+/// [`ConditionedSource::scenario`]); and no sweep value overrides a parameter,
+/// which would make the cell replay a different model too.
+///
+/// Deliberately NOT conditioned on `n_saved > 0`: a fit that saved no path
+/// still routes, and every draw then censors. That is the loud, empty band the
+/// caller has already announced — not a quiet fall back to the replay.
+fn conditioned_here(
+    saved: &Option<SavedPaths>,
+    conditioned_scenario: &Option<String>,
+    sweep_pt: &[(String, f64)],
+    scenario: &str,
+) -> bool {
+    saved.is_some()
+        && conditioned_scenario.as_deref() == Some(scenario)
+        && sweep_pt.is_empty()
+}
+
+/// What the free-forward sink reads a [`sim::quantity::QuantityPath::Smoothed`]
+/// quantity off (gh#722). `None` on the sink ⇒ no conditioned read is in play
+/// for this design cell and every quantity folds the replay, unchanged.
+struct ConditionedSource {
+    /// The scenario whose cells read conditioned. Only the no-overlay `fitted`
+    /// arm qualifies: a scenario or a sweep point replays a DIFFERENT model,
+    /// and the smoothing path was inferred under the fitted one — there is no
+    /// conditioned path for a counterfactual, and reusing the fitted one would
+    /// print the same number under every arm.
+    scenario: String,
+    /// Per free-forward draw index (`CellSpec::point_idx`, which indexes the
+    /// subsample the engine was handed): the `(chain, draw)` key of its saved
+    /// path, `None` when that draw is outside the forkable subset.
+    per_draw: Vec<Option<(usize, usize)>>,
+    /// The stage directory holding `chain_<N+1>/trajectories.tsv`.
+    stage_dir: PathBuf,
+    /// Column layout for [`io::trajectories::read_trajectory`].
+    columns: io::trajectories::TrajColumnSpec,
 }
 
 /// A [`RunSink`] that samples `y_rep` for every fit leaf on its emission grid,
@@ -730,6 +867,10 @@ struct PredictiveSink {
     /// folded once by the caller so every consumer in this command (here and the
     /// contrast reducer) anchors `value_at` to the same pair.
     obs_anchors: Option<sim::quantity::ObsAnchorTimes>,
+    /// Where an in-window `value_at` is read from (gh#722). `Some` only when
+    /// the model declares one AND this sink's design cell is the no-overlay
+    /// fitted arm.
+    conditioned: Option<ConditionedSource>,
     /// Scenario name → its accumulator. Insertion order (= the engine's canonical
     /// `scenario → point → rep` order, scenario outermost) is preserved so the
     /// rendered files list scenarios in CLI order.
@@ -745,6 +886,7 @@ impl PredictiveSink {
             samples: leaf_times.iter().map(|ts| vec![Vec::new(); ts.len()]).collect(),
             quant_draws: Vec::new(),
             quant_times: Vec::new(),
+            n_conditioned: 0,
         })
     }
 }
@@ -821,6 +963,48 @@ impl crate::engine::RunSink for PredictiveSink {
             leaf_y[si] = stream_vals;
         }
 
+        // gh#722: a quantity anchored at or before `last_obs` is read off this
+        // draw's CONDITIONED smoothing path, not off the replay above. Only the
+        // no-overlay fitted arm has one (see [`ConditionedSource::scenario`]),
+        // and only the forkable subset of draws — a draw outside it censors
+        // rather than silently borrowing the replay's answer.
+        let conditioned_path: Option<sim::Trajectory> = match &self.conditioned {
+            Some(src) if src.scenario == scenario_name => {
+                match src.per_draw.get(cell.spec.point_idx).copied().flatten() {
+                    Some((chain, draw)) => {
+                        // The on-disk chain dir is 1-based (`chain_{N+1}`); the
+                        // in-file `chain` column is the 0-based key.
+                        let traj_path = src
+                            .stage_dir
+                            .join(format!("chain_{}", chain + 1))
+                            .join("trajectories.tsv");
+                        let (path, _incidence) = io::trajectories::read_trajectory(
+                            &traj_path, &src.columns, chain, draw,
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "reading the smoothing path for (chain {chain}, draw \
+                                 {draw}) to evaluate a quantity anchored inside the \
+                                 observed record: {e}"
+                            )
+                        })?;
+                        Some(path)
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        let conditioned = match (&self.conditioned, &conditioned_path) {
+            (Some(src), _) if src.scenario != scenario_name => {
+                sim::quantity::ConditionedRead::Off
+            }
+            (Some(_), Some(p)) => sim::quantity::ConditionedRead::Saved(p),
+            (Some(_), None) => sim::quantity::ConditionedRead::NotSaved,
+            (None, _) => sim::quantity::ConditionedRead::Off,
+        };
+        let read_conditioned = matches!(conditioned, sim::quantity::ConditionedRead::Saved(_));
+
         // Generated quantities: fold this draw's trajectory + the just-drawn y_sim
         // into its per-quantity values, using the SAME resolved params + draws as
         // the predictive output above. The `value_at` anchors are the two ends of
@@ -830,7 +1014,7 @@ impl crate::engine::RunSink for PredictiveSink {
             eval.eval_draw(
                 &params,
                 &cell.traj,
-                sim::quantity::ConditionedRead::Off,
+                conditioned,
                 &self.compiled,
                 Some(&obs_set),
                 self.obs_anchors,
@@ -854,6 +1038,9 @@ impl crate::engine::RunSink for PredictiveSink {
                 acc.quant_times = snapshot_times;
             }
             acc.quant_draws.push(results);
+            if read_conditioned {
+                acc.n_conditioned += 1;
+            }
         }
         Ok(())
     }
@@ -1425,13 +1612,136 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         // so both horizons subsample identically. Computed ONCE — the subsample
         // is scenario/sweep-independent.
         let ff_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
-        let ff_draws = subsample_draws(posterior.draws(), ff_cap);
+        let ff_idx = subsample_indices(posterior.n_draws(), ff_cap);
+        let ff_draws: Vec<&IndexMap<String, f64>> =
+            ff_idx.iter().map(|&i| &posterior.draws()[i]).collect();
         ff_n_draws = ff_draws.len();
         if ff_n_draws < posterior.n_draws() {
             eprintln!(
                 "fit predict: free_forward horizon — subsampling {ff_n_draws} of {} \
                  posterior draws (raise with --n-draws)",
                 posterior.n_draws()
+            );
+        }
+
+        // ── The conditioned read for in-window quantities (gh#722) ─────────
+        //
+        // A `value_at` anchored at or before `last_obs` is a retrospective
+        // estimand: the observations covering it are what answers it, so it is
+        // folded over the draw's saved smoothing path `p(x | y, θ)` rather than
+        // over a fresh unconditioned replay from `init {}`. Classified per
+        // QUANTITY, once, so a band is never a mixture of two objects.
+        let quant_paths: Vec<sim::quantity::QuantityPath> = quant_eval
+            .as_deref()
+            .map(|e| e.eval_paths(quantity_obs_anchors))
+            .unwrap_or_default();
+        let any_smoothed =
+            quant_paths.iter().any(|p| *p == sim::quantity::QuantityPath::Smoothed);
+        // Named, not silent: an `observations.<stream>` reduction anchored
+        // inside the record has the same defect, and no saved path carries a
+        // y_sim draw to fix it with.
+        if let Some(eval) = quant_eval.as_deref() {
+            let unconditioned = eval.quantity_names_on(
+                sim::quantity::QuantityPath::ReplayUnconditioned,
+                quantity_obs_anchors,
+            );
+            if !unconditioned.is_empty() {
+                eprintln!(
+                    "fit predict: quantity `{}` reduces `observations.<stream>` at an \
+                     anchor inside the observed record, and is reported on the \
+                     free-forward replay. The saved smoothing path carries the \
+                     conditioned projection (`inc_<stream>`, a mean), not a draw from \
+                     it, so there is nothing conditioned to sample the observation \
+                     from (gh#722).\n  \
+                     Fix: express the quantity over latent state \
+                     (`value_at(<state expr>, last_obs)`), which IS read on the \
+                     smoothing path.",
+                    unconditioned.join("`, `"),
+                );
+            }
+        }
+        // The saved subset is resolved only when a quantity needs it — the scan
+        // reads every `chain_*/trajectories.tsv`, and a predict with no
+        // in-window `value_at` must not pay for it.
+        let ff_saved: Option<SavedPaths> = if any_smoothed {
+            posterior.keys().map(|k| {
+                let saved = k.resolve_saved();
+                SavedPaths {
+                    stage_dir: saved.stage_dir,
+                    per_draw: ff_idx.iter().map(|&i| saved.per_draw[i]).collect(),
+                    n_saved: ff_idx.iter().filter(|&&i| saved.per_draw[i].is_some()).count(),
+                }
+            })
+        } else {
+            None
+        };
+        // The scenario whose cells read conditioned: the no-overlay `fitted`
+        // arm only, and only when no `--enable`/`--disable` rides on it (that
+        // makes it a counterfactual too).
+        let conditioned_scenario: Option<String> =
+            if args.enable.is_empty() && args.disable.is_empty() {
+                Some(crate::args::FITTED.to_string())
+            } else {
+                None
+            };
+        if any_smoothed {
+            let names = quant_eval
+                .as_deref()
+                .map(|e| {
+                    e.quantity_names_on(
+                        sim::quantity::QuantityPath::Smoothed,
+                        quantity_obs_anchors,
+                    )
+                    .join("`, `")
+                })
+                .unwrap_or_default();
+            match (&ff_saved, &conditioned_scenario) {
+                (Some(s), Some(_)) if s.n_saved > 0 => {
+                    eprintln!(
+                        "fit predict: quantity `{names}` is anchored at or before \
+                         last_obs — reported on the conditioned smoothing path \
+                         p(x|y), not on the free-forward replay (gh#722). \
+                         {}/{} replayed draws have a saved path; the other {} are \
+                         censored for these quantities, never substituted from the \
+                         replay.",
+                        s.n_saved,
+                        ff_n_draws,
+                        ff_n_draws - s.n_saved,
+                    );
+                }
+                (_, None) => {
+                    eprintln!(
+                        "fit predict: quantity `{names}` is anchored at or before \
+                         last_obs, but `--enable`/`--disable` makes every arm of this \
+                         run a counterfactual, for which no conditioned path exists. \
+                         They are reported on the free-forward replay, which ignores \
+                         the observations they are anchored inside (gh#722)."
+                    );
+                }
+                _ => {
+                    eprintln!(
+                        "fit predict: quantity `{names}` is anchored at or before \
+                         last_obs, but this fit saved no latent path for any replayed \
+                         draw — there is nothing conditioned to read them on. They are \
+                         reported as fully censored rather than taken from the \
+                         free-forward replay, which ignores every observation they are \
+                         anchored inside (gh#722).\n  \
+                         Fix: re-fit with `n_trajectories` set on the posterior stage \
+                         (PGAS/PMMH save the smoothing paths), then re-run \
+                         `fit predict`."
+                    );
+                }
+            }
+        }
+        // A counterfactual arm keeps the replay, and says so once — its rows sit
+        // in the same file as the fitted arm's, under a `scenario` column, so a
+        // reader comparing them must know they are two different objects.
+        if any_smoothed && scenario_refs.iter().any(|s| s.name() != crate::args::FITTED) {
+            eprintln!(
+                "fit predict: the scenario arms report their anchored quantities on \
+                 their OWN free-forward replay — the smoothing path was inferred under \
+                 the fitted model, and the data a counterfactual would have generated \
+                 do not exist. `quantities.json` tags each entry with `evaluated_on`."
             );
         }
         // Fan the (draws × scenarios) replay grid across Rayon. The engine seeds
@@ -1447,6 +1757,26 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             // A FRESH sink per sweep-point keeps the sink scenario-keyed (no sink
             // rewrite); the sweep axis lives in this loop, not the sink. The
             // evaluator is shared via the `Arc` clone.
+            //
+            // A sweep point OVERRIDES a parameter, so its cells replay a
+            // different model than the one the smoothing path was inferred
+            // under: only the un-swept design cell reads conditioned (gh#722).
+            let conditioned = match (&ff_saved, &conditioned_scenario) {
+                (Some(saved), Some(scenario))
+                    if conditioned_here(&ff_saved, &conditioned_scenario, sweep_pt, scenario) =>
+                {
+                    Some(ConditionedSource {
+                        scenario: scenario.clone(),
+                        per_draw: saved.per_draw.clone(),
+                        stage_dir: saved.stage_dir.clone(),
+                        // No incidence columns: only STATE quantities route to
+                        // the smoothing path, and requiring `inc_<stream>` here
+                        // would refuse a file that has none.
+                        columns: io::trajectories::TrajColumnSpec::from_model(&model, &[]),
+                    })
+                }
+                _ => None,
+            };
             let mut sink = PredictiveSink {
                 compiled: compiled.clone(),
                 leaf_times: ff_emit_times.clone(),
@@ -1454,6 +1784,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 leaf_window_start: leaf_window_start.clone(),
                 quant_eval: quant_eval.clone(),
                 obs_anchors: quantity_obs_anchors,
+                conditioned,
                 by_scenario: IndexMap::new(),
             };
 
@@ -1533,11 +1864,33 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 if !model.quantities.is_empty() {
                     // One design cell = this (sweep point, scenario). The shared
                     // stacker owns the header-drop and the manifest merge.
+                    // gh#722: a scenario cell folded the replay for EVERY
+                    // quantity, so its manifest entries must say `replay` —
+                    // the routing tag is per design cell, not per model.
+                    let cell_paths: Vec<sim::quantity::QuantityPath> =
+                        if conditioned_here(&ff_saved, &conditioned_scenario, sweep_pt, scenario_name)
+                        {
+                            quant_paths.clone()
+                        } else {
+                            quant_paths
+                                .iter()
+                                .map(|p| match p {
+                                    sim::quantity::QuantityPath::Smoothed => {
+                                        sim::quantity::QuantityPath::Replay
+                                    }
+                                    other => *other,
+                                })
+                                .collect()
+                        };
                     stacked.push_group(
                         &model.quantities,
                         coords,
                         &accum.quant_draws,
                         &accum.quant_times,
+                        Some(crate::quantity_output::EvaluatedOn {
+                            paths: &cell_paths,
+                            n_conditioned: accum.n_conditioned,
+                        }),
                         &calendar,
                     )?;
                 }
@@ -2163,12 +2516,23 @@ pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
 /// would bias the band toward early sweeps / a single chain. Chosen draws are
 /// returned in cloud order.
 pub(crate) fn subsample_draws<T>(draws: &[T], cap: usize) -> Vec<&T> {
-    let total = draws.len();
+    subsample_indices(draws.len(), cap).into_iter().map(|i| &draws[i]).collect()
+}
+
+/// The subsample as INDICES into the cloud. Everything a draw carries that is
+/// not in its parameter row — its `(chain, draw)` key, and so the saved
+/// smoothing path a `value_at(..., last_obs)` reads (gh#722) — has to be picked
+/// by the SAME indices, and re-deriving the stride at the second call site is
+/// how the two silently drift apart.
+pub(crate) fn subsample_indices(total: usize, cap: usize) -> Vec<usize> {
+    if total == 0 {
+        return Vec::new();
+    }
     let n_used = cap.min(total).max(1);
     if n_used >= total {
-        draws.iter().collect()
+        (0..total).collect()
     } else {
-        (0..n_used).map(|i| &draws[(i * total) / n_used]).collect()
+        (0..n_used).map(|i| (i * total) / n_used).collect()
     }
 }
 

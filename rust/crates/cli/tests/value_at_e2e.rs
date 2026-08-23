@@ -9,6 +9,12 @@
 //!   3. `simulate --quantities-out` on a `last_obs` model hard-errors naming
 //!      the quantity (a forward run has no observed data to anchor to).
 //!
+//! The posterior stage is **PGAS**, which stores the smoothed latent paths: an
+//! in-window `value_at` is read off those (gh#722), so a sampler that stores
+//! none has no such quantity to band and this test would be asserting the
+//! empty case rather than the anchor arithmetic. The no-paths behaviour is
+//! pinned separately, in `gh722_quantity_smoothing_path.rs`.
+//!
 //! The `.camdl` source is compiled in-process by the `camdlc` the gate puts on
 //! PATH (`make test-rust` prepends the freshly-built compiler).
 
@@ -110,11 +116,11 @@ rho = 0.6
 k = 10.0
 
 [stages.posterior]
-algorithm = "pmmh"
+algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
 particles = 100
-iterations = 80
+sweeps = 80
 burn_in = 20
 thin = 5
 "#,

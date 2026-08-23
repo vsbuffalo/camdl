@@ -487,7 +487,10 @@ fn program_path(prog: &QProgram, obs_anchors: Option<ObsAnchorTimes>) -> Quantit
         RAnchor::Expr(ResolvedExpr::Const(t)) => *t,
         RAnchor::Expr(_) => return QuantityPath::Replay,
     };
-    if !(t <= w.last) {
+    // A NaN anchor time compares false here and falls to the replay, which is
+    // the safe side: an unresolvable time must not claim to be conditioned.
+    let inside_the_record = t <= w.last;
+    if !inside_the_record {
         return QuantityPath::Replay;
     }
     match source {

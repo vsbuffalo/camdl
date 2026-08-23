@@ -302,7 +302,12 @@ pub fn resolve_forecast_ensemble(
 /// Collect every `(chain, draw)` key from the stage's `chain_*/trajectories.tsv`
 /// files. Skips the leading `# camdl-trajectories …` comment line and dedups
 /// the per-snapshot rows to one key per saved draw.
-fn trajectory_keys(stage_dir: &Path) -> BTreeSet<(usize, usize)> {
+///
+/// This is the "has a saved smoothing path" predicate for the whole crate —
+/// [`classify_joint`] and the `quantities/` conditioned read (gh#722) both fold
+/// through it, so the forkable count a command reports and the paths it can
+/// actually open cannot disagree.
+pub(crate) fn trajectory_keys(stage_dir: &Path) -> BTreeSet<(usize, usize)> {
     let mut keys = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(stage_dir) else {
         return keys;

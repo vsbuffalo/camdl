@@ -496,6 +496,48 @@ not exported: it is keyed to camdl's own epoch and would mislead a consumer that
 read it as a Julian or Rata day number. Numeric `time` stays the canonical,
 diff-stable axis; `calendar` is additive metadata, not a re-encoding of it.
 
+#### 2.2.3 Which object a quantity is read on
+
+`fit predict` also writes the model's `quantities {}` block to
+`quantities/<name>.tsv` plus a `quantities.json` manifest. Those numbers are not
+all folded over the same object, and the manifest says which.
+
+A quantity anchored **inside the observed record** — `value_at(EXPR, last_obs)`,
+`value_at(EXPR, first_obs + 2 'weeks)`, or a literal time at or before the last
+observation — is a retrospective estimand: there are observations covering the
+instant it reads, so it is folded over that draw's **conditioned smoothing
+path** `p(x | y, θ)`, saved by the fit at `chain_N/trajectories.tsv`. Everything
+else is folded over the **free-forward replay** the predictive band is built
+from: a reduction with no anchor (`final`, `max`, `mean`, `time_of_max`,
+`integral`, a threshold crossing) is a property of a whole simulated path, and
+an anchor past the last observation (`last_obs + 8 'weeks`) is a projection.
+
+Each manifest entry carries the tag:
+
+```jsonc
+{ "name": "outbreak_size", "evaluated_on": "smoothed", "n_conditioned_draws": 300 }
+{ "name": "peak_infectious", "evaluated_on": "replay" }
+```
+
+`evaluated_on` is `smoothed`, `replay`, or `replay_unconditioned` — the last for
+a quantity that reduces `observations.<stream>` at an in-window anchor, which
+stays on the replay because a saved path carries the conditioned projection
+(`inc_<stream>`, a mean), not a draw from it. That case is announced on stderr.
+
+Three consequences a reader has to know:
+
+- **Only the saved subset of draws has a conditioned path.** The trajectory save
+  stride (`n_trajectories`) and `thin` need not agree, so a smoothed quantity
+  bands over the draws that have one; the rest are **censored**, counted in
+  `n_censored`, never given the replay's answer. `n_conditioned_draws` is the
+  band's real denominator, and the count is also printed on stderr.
+- **A counterfactual arm keeps the replay.** A `--scenario` / `--sweep` cell, or
+  a run carrying `--enable`/`--disable`, replays a different model than the one
+  the smoothing path was inferred under, and the data a counterfactual would
+  have generated do not exist. Those cells are tagged `replay`.
+- **A fit that saved no paths reports the quantity as fully censored**, with a
+  named note on stderr, rather than falling back to the replay.
+
 ### 2.3 Sweeping a fit over a fixed parameter
 
 `camdl fit run <config> --sweep NAME=SPEC` applies each sweep point to the
