@@ -87,6 +87,72 @@ fn commit_then_lookup_hit() {
     cleanup(&root);
 }
 
+// ── S1: divergence check at commit ──────────────────────────────────────────
+// Proposal: docs/dev/proposals/2026-08-23-run-identity-and-store-contract.md
+
+/// Same identity, same bytes → benign dedup, exactly as before S1.
+#[test]
+fn identical_recompute_still_dedups() {
+    let root = tmp_root("dedup");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let d1 = store.commit_atomic(&leaf, record(a), arts(b"same bytes")).unwrap();
+    let d2 = store.commit_atomic(&leaf, record(a), arts(b"same bytes")).unwrap();
+    assert_eq!(d1, d2, "identical recompute returns the incumbent leaf");
+    cleanup(&root);
+}
+
+/// Same identity, DIFFERENT bytes → the staged recompute disagrees with the
+/// incumbent. Runs are seeded-deterministic, so this is an identity bug (a
+/// knob missing from the run_id) or nondeterminism — either must be loud,
+/// never a silent discard. This is the check that would have caught the
+/// `--integrator` class at first occurrence.
+#[test]
+fn divergent_recompute_is_a_loud_error_not_a_silent_discard() {
+    let root = tmp_root("diverge");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    store.commit_atomic(&leaf, record(a), arts(b"first result")).unwrap();
+    let err = store
+        .commit_atomic(&leaf, record(a), arts(b"second, different result"))
+        .unwrap_err();
+    match &err {
+        CasError::DivergentRecompute { file, .. } => assert_eq!(file, "traj.tsv"),
+        other => panic!("expected DivergentRecompute, got {other:?}"),
+    }
+    // The incumbent is untouched — divergence never clobbers.
+    assert_eq!(fs::read(leaf.join("traj.tsv")).unwrap(), b"first result");
+    // The staged bytes are quarantined as evidence, not deleted.
+    let q = root.join(".quarantine");
+    let quarantined = fs::read_dir(&q)
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert!(quarantined >= 1, "staged dir must be preserved under .quarantine");
+    cleanup(&root);
+}
+
+/// Same identity, staged strict superset with equal shared bytes — the
+/// "leaf gains an artifact" case (e.g. --event-log against a pre-existing
+/// leaf). Until the S4 augment door lands this dedups (the extra file is
+/// dropped), but it must NOT be a divergence error.
+#[test]
+fn superset_recompute_with_equal_shared_bytes_dedups() {
+    let root = tmp_root("superset");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    store.commit_atomic(&leaf, record(a), arts(b"traj bytes")).unwrap();
+    let mut plus = arts(b"traj bytes");
+    plus.insert("event_log.tsv", b"t\tevent\n".to_vec());
+    let dest = store.commit_atomic(&leaf, record(a), plus).unwrap();
+    assert_eq!(dest, leaf);
+    assert!(!leaf.join("event_log.tsv").exists(),
+        "pre-S4: the extra artifact is not adopted (and not an error)");
+    cleanup(&root);
+}
+
 #[test]
 fn lookup_collision_on_different_identity() {
     let root = tmp_root("coll");
@@ -207,9 +273,12 @@ fn lost_race_returns_incumbent_without_overwriting() {
     let store = FsCasStore::new(&root);
     let leaf = root.join("sims").join("sir-aaaaaaaa");
     let p1 = store.commit_atomic(&leaf, record(id(0xaa)), arts(b"ORIGINAL")).unwrap();
-    // A second identical-identity commit finds the completed leaf → benign
-    // race, same destination, incumbent bytes preserved.
-    let p2 = store.commit_atomic(&leaf, record(id(0xaa)), arts(b"SHOULD_NOT_WIN")).unwrap();
+    // A second identical-identity, identical-bytes commit finds the completed
+    // leaf → benign race, same destination, incumbent untouched. (Pre-S1 this
+    // test used DIFFERENT bytes to observe the non-overwrite; different bytes
+    // under one run_id are now the DivergentRecompute error — see
+    // divergent_recompute_is_a_loud_error_not_a_silent_discard.)
+    let p2 = store.commit_atomic(&leaf, record(id(0xaa)), arts(b"ORIGINAL")).unwrap();
     assert_eq!(p1, p2);
     assert_eq!(fs::read(p1.join("traj.tsv")).unwrap(), b"ORIGINAL");
     cleanup(&root);
