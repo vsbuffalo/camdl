@@ -300,6 +300,71 @@ pub struct IVPMapping {
     pub compartment_idx: usize,
 }
 
+/// Which estimated parameters move an initial compartment count, and which
+/// compartment each one moves.
+///
+/// The test is a one-sided finite difference: nudge the parameter and see
+/// whether any non-balance compartment's *rounded* initial count changes. The
+/// balance compartment is skipped because it moves as a consequence of every
+/// other compartment, not as a consequence of this parameter.
+///
+/// The result is a property of `current_params`, not of the model alone, and
+/// under PGAS that means it is a property of the *chain's starting draw* —
+/// `run_pgas` calls this once per chain from that chain's own start. Two
+/// chains of one fit can therefore disagree about whether a parameter is an
+/// IVP, which makes the Binomial term in [`complete_data_loglik`] present on
+/// some chains and absent on others. See `PROBE_STEP` for when that happens.
+pub fn detect_ivp_mappings(
+    model: &CompiledModel,
+    if2_params: &[EstimatedParam],
+    current_params: &[f64],
+) -> Result<Vec<IVPMapping>, SimError> {
+    let (init_base, _) = model.initial_state(current_params)?;
+    let mut mappings = Vec::new();
+    for (i, spec) in if2_params.iter().enumerate() {
+        let mut perturbed = current_params.to_vec();
+        let delta = (spec.upper - spec.lower).min(1.0) * PROBE_STEP;
+        perturbed[spec.index] = (perturbed[spec.index] + delta).min(spec.upper);
+        let (init_pert, _) = model.initial_state(&perturbed)?;
+        // Find which compartment changed
+        for (c, (&base_c, &pert_c)) in init_base.counts.iter()
+            .zip(init_pert.counts.iter()).enumerate()
+        {
+            // Skip balance compartment (it changes as a consequence)
+            if model.balance.as_ref().is_some_and(|b| b.local_int_idx == c) {
+                continue;
+            }
+            if base_c != pert_c {
+                eprintln!("  {} detected as IVP → compartment {} \
+                          (stochastic init, Binom density in LL)", spec.name, c);
+                mappings.push(IVPMapping {
+                    param_idx: i,
+                    model_param_idx: spec.index,
+                    compartment_idx: c,
+                });
+                break;
+            }
+        }
+    }
+    Ok(mappings)
+}
+
+/// Fraction of a parameter's range (capped at 1.0) used as the probe step in
+/// [`detect_ivp_mappings`].
+///
+/// The cap is what makes the probe value-dependent. For a parameter whose
+/// range is wider than 1.0 the step is a flat `0.01` in the parameter's own
+/// units, so the probe only registers a mapping when the initial-condition
+/// expression happens to cross a rounding boundary within that `0.01` —
+/// `CompiledModel::initial_state` rounds integer compartments to `i64`.
+///
+/// For a *fraction* parameter driving a large population the slope is the
+/// population size, so a `0.01` step moves the count by thousands and the
+/// probe always fires. For a *count* parameter the slope is 1, so the probe
+/// fires only for starts within `0.01` of a half-integer — about 1% of them.
+/// That is the difference between a deterministic detection and a coin flip.
+pub const PROBE_STEP: f64 = 0.01;
+
 /// Number of equal-width time bins `CSMCDiagnostics::renewal_by_bin` resolves
 /// renewal into.
 ///
@@ -3105,36 +3170,8 @@ pub fn run_pgas(
     // propensities. These get stochastic initial states in CSMC and a
     // Binomial density term in the complete-data LL, enabling posterior
     // sampling through the Gibbs structure.
-    let ivp_mappings: Vec<IVPMapping> = {
-        let (init_base, _) = model.initial_state(&current_params)?;
-        let mut mappings = Vec::new();
-        for (i, spec) in if2_params.iter().enumerate() {
-            let mut perturbed = current_params.clone();
-            let delta = (spec.upper - spec.lower).min(1.0) * 0.01;
-            perturbed[spec.index] = (perturbed[spec.index] + delta).min(spec.upper);
-            let (init_pert, _) = model.initial_state(&perturbed)?;
-            // Find which compartment changed
-            for (c, (&base_c, &pert_c)) in init_base.counts.iter()
-                .zip(init_pert.counts.iter()).enumerate()
-            {
-                // Skip balance compartment (it changes as a consequence)
-                if model.balance.as_ref().is_some_and(|b| b.local_int_idx == c) {
-                    continue;
-                }
-                if base_c != pert_c {
-                    eprintln!("  {} detected as IVP → compartment {} \
-                              (stochastic init, Binom density in LL)", spec.name, c);
-                    mappings.push(IVPMapping {
-                        param_idx: i,
-                        model_param_idx: spec.index,
-                        compartment_idx: c,
-                    });
-                    break;
-                }
-            }
-        }
-        mappings
-    };
+    let ivp_mappings: Vec<IVPMapping> =
+        detect_ivp_mappings(model, if2_params, &current_params)?;
 
     // Initial complete-data log-likelihood (now includes initial state density)
     //
