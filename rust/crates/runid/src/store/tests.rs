@@ -463,6 +463,61 @@ fn mode_b_reclaims_stale_lock_held_by_dead_pid() {
     cleanup(&root);
 }
 
+/// A process that dies holding the `.reclaim` serializer used to wedge the
+/// leaf permanently: every later reclaim saw `AlreadyExists` and refused, so
+/// the leaf could never be recomputed without a manual `rm`. A stranded
+/// serializer (dead owner pid) is now cleared at the point of contention.
+#[test]
+fn stranded_reclaim_serializer_does_not_wedge_the_leaf() {
+    let _serial = super::RECLAIM_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("strandedreclaim");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("fit-aaaaaaaa").join("01-scout-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("orphan_chain.tsv", b"partial").unwrap();
+
+    // Two dead pids: one holding `.lock` (the crashed run), one holding
+    // `.reclaim` (a second process that died mid-takeover).
+    let mut c1 = std::process::Command::new("true").spawn().expect("spawn");
+    let dead_lock_pid = c1.id();
+    c1.wait().expect("reap");
+    let mut c2 = std::process::Command::new("true").spawn().expect("spawn");
+    let dead_reclaim_pid = c2.id();
+    c2.wait().expect("reap");
+    fs::write(leaf.join(".lock"), dead_lock_pid.to_string()).unwrap();
+    fs::write(leaf.join(".reclaim"), dead_reclaim_pid.to_string()).unwrap();
+
+    let claim2 = store.claim_streaming(&leaf, record(id(0xaa)))
+        .expect("a .reclaim stranded by a dead process must not wedge the leaf");
+    let dest = claim2.finalize(record(id(0xaa))).unwrap();
+    assert!(matches!(store.lookup(&dest, &LeafIdentity::new(id(0xaa))), Lookup::Hit(_)));
+    cleanup(&root);
+}
+
+/// The converse: a `.reclaim` held by a LIVE process is a genuine concurrent
+/// reclaim and must still refuse — the stranded-clearing must not become a
+/// way to barge into the critical section.
+#[test]
+fn live_reclaim_serializer_still_refuses() {
+    let _serial = super::RECLAIM_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("livereclaim");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("fits").join("fit-aaaaaaaa").join("01-scout-bbbbbbbb");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("orphan_chain.tsv", b"partial").unwrap();
+    let mut c1 = std::process::Command::new("true").spawn().expect("spawn");
+    let dead_lock_pid = c1.id();
+    c1.wait().expect("reap");
+    fs::write(leaf.join(".lock"), dead_lock_pid.to_string()).unwrap();
+    // OUR pid is alive by construction.
+    fs::write(leaf.join(".reclaim"), std::process::id().to_string()).unwrap();
+
+    let err = store.claim_streaming(&leaf, record(id(0xaa)))
+        .expect_err("a live .reclaim holder must still block the takeover");
+    assert!(matches!(err, CasError::FitInProgress { .. }), "got {err:?}");
+    cleanup(&root);
+}
+
 #[test]
 fn mode_b_reclaims_stale_running_when_unlocked() {
     let root = tmp_root("reclaim");
