@@ -5,8 +5,9 @@
 - Defect 1: fixed by `55178dd1`
 - Defect 2: confirmed, **not yet fixed** — see "The open decision"
 - Class: **code-vs-code** — the code disagreed with the mathematics it is an
-  implementation of. Both defects are fixed in code, with tests pinning the
-  agreement.
+  implementation of. Defect 1 is fixed in code with a test pinning the
+  agreement; defect 2 has a confirmed reproduction and two candidate fixes, and
+  is awaiting a decision between them.
 
 ## Summary in one paragraph
 
