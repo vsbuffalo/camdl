@@ -1,9 +1,11 @@
 # The reference particle was denied its descendants for four months
 
-Date: 2026-08-23 Class: **code-vs-code** — the conditional resampling in
-`csmc_as` disagreed with the invariance requirement conditional SMC rests on.
-Fixed in code, with a test pinning the agreement. Fixed by: `55178dd1` Issue:
-gh#718
+- Date: 2026-08-23
+- Issue: gh#718
+- Fixed by: `55178dd1`
+- Class: **code-vs-code** — the conditional resampling in `csmc_as` disagreed
+  with the invariance requirement conditional SMC rests on. Fixed in code, with
+  a test pinning the agreement.
 
 ## What happened
 
