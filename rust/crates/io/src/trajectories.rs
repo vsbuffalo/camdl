@@ -9,7 +9,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use sim::{Flows, IntState, RealState, Trajectory};
+use sim::{Flows, IntState, RealState, Snapshot, Trajectory};
 
 use crate::calendar::CalendarMeta;
 
@@ -607,6 +607,72 @@ mod tests {
         }
     }
 
+    /// gh#722: the whole saved path must come back exactly as written, because
+    /// a quantity anchored inside the data window is evaluated against it.
+    /// A per-instant reader (`read_state_at`) cannot answer that question.
+    #[test]
+    fn read_trajectory_round_trips_the_written_path() {
+        let tmp = std::env::temp_dir()
+            .join(format!("camdl_io_traj_rt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("trajectories.tsv");
+
+        let mut t0 = Trajectory::new();
+        t0.push(snap(0.0, vec![99, 1, 0], vec![0, 0]));
+        t0.push(snap(1.0, vec![97, 2, 1], vec![2, 1]));
+        t0.push(snap(2.0, vec![94, 4, 2], vec![3, 1]));
+        // A second (chain, draw) that must NOT bleed into the first's path.
+        let mut t1 = Trajectory::new();
+        t1.push(snap(0.0, vec![50, 50, 0], vec![0, 0]));
+        t1.push(snap(1.0, vec![40, 55, 5], vec![10, 5]));
+
+        let draws = vec![
+            PosteriorDraw {
+                chain: 0, draw: 5, path: t0.clone(),
+                incidence: vec![vec![0.0], vec![2.0], vec![3.0]],
+            },
+            PosteriorDraw {
+                chain: 1, draw: 5, path: t1,
+                incidence: vec![vec![0.0], vec![10.0]],
+            },
+        ];
+        write_trajectories_tsv(&path, &draws, &cols(), None, "h", "pgas", Granularity::Substep)
+            .unwrap();
+
+        let (got, inc) = read_trajectory(&path, &cols(), 0, 5).expect("round trip");
+
+        assert_eq!(got.snapshots.len(), 3, "must read only (chain 0, draw 5)'s rows");
+        assert_eq!(inc, vec![vec![0.0], vec![2.0], vec![3.0]]);
+        for (g, w) in got.snapshots.iter().zip(t0.snapshots.iter()) {
+            assert_eq!(g.t, w.t);
+            assert_eq!(g.int_state.counts, w.int_state.counts);
+            assert_eq!(g.flows, w.flows, "flows must survive, not be dropped to zero");
+        }
+    }
+
+    /// The forkable-subset boundary is an error with a name, not an empty path
+    /// that would silently band over nothing (gh#727).
+    #[test]
+    fn read_trajectory_names_a_draw_with_no_saved_path() {
+        let tmp = std::env::temp_dir()
+            .join(format!("camdl_io_traj_miss_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("trajectories.tsv");
+        let mut t0 = Trajectory::new();
+        t0.push(snap(0.0, vec![99, 1, 0], vec![0, 0]));
+        let draws = vec![PosteriorDraw {
+            chain: 0, draw: 5, path: t0, incidence: vec![vec![0.0]],
+        }];
+        write_trajectories_tsv(&path, &draws, &cols(), None, "h", "pgas", Granularity::Substep)
+            .unwrap();
+
+        let err = read_trajectory(&path, &cols(), 0, 6).unwrap_err();
+        assert!(
+            err.contains("no saved path") && err.contains("forkable"),
+            "the error must say the draw is outside the forkable subset, got: {err}"
+        );
+    }
+
     #[test]
     fn writes_tidy_long_header_and_stacked_rows() {
         let tmp = std::env::temp_dir().join(format!("camdl_io_traj_{}", std::process::id()));
@@ -891,4 +957,141 @@ mod tests {
         assert_eq!(json["origin"], serde_json::Value::Null);
         assert_eq!(json["days_per_unit"], serde_json::json!(1.0));
     }
+}
+
+/// Reconstruct the whole saved path for `(chain, draw)` as a [`Trajectory`].
+///
+/// [`read_state_at`] answers "the state at one instant", which is what a
+/// counterfactual fork needs. A quantity anchored inside the data window needs
+/// the *series*: `value_at(N0 - S, last_obs)` has to be evaluated against the
+/// conditioned smoothing path, not against a fresh unconditioned replay that
+/// ignores every observation it is anchored inside (gh#722).
+///
+/// The `inc_<stream>` columns are returned alongside, one row per snapshot, in
+/// `columns.incidence` order. Per this file's own manifest they are the
+/// **conditioned** smoother `p(x | y)` — which is precisely why they are the
+/// right operand for an in-window quantity and the wrong one for a projection.
+///
+/// # Chain-binomial only, loudly
+///
+/// [`Flows`] keeps integer and real flows as distinct variants on purpose: a
+/// real (ODE) flow quantized through `u64` silently zeroes sub-unit flows. This
+/// reader therefore refuses a real-flow file rather than rounding it. PGAS and
+/// PMMH write integer flows, which is the whole of the smoothing-path use case
+/// today; an ODE smoother would need this to grow a variant, not a cast.
+pub fn read_trajectory(
+    path: &Path,
+    columns: &TrajColumnSpec,
+    chain: usize,
+    draw: usize,
+) -> Result<(Trajectory, Vec<Vec<f64>>), String> {
+    let txt = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines
+        .next()
+        .ok_or_else(|| format!("empty trajectories file: {}", path.display()))?
+        .split('\t')
+        .collect();
+    let col = |name: &str| -> Result<usize, String> {
+        header
+            .iter()
+            .position(|c| *c == name)
+            .ok_or_else(|| format!("trajectories file {} has no `{name}` column", path.display()))
+    };
+    let (ci, di, ti) = (col("chain")?, col("draw")?, col("time")?);
+    let int_idx: Vec<usize> =
+        columns.int_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+    let real_idx: Vec<usize> =
+        columns.real_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+    let flow_idx: Vec<usize> =
+        columns.flows.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+    let inc_idx: Vec<usize> =
+        columns.incidence.iter().map(|n| col(n)).collect::<Result<_, _>>()?;
+
+    let mut snapshots: Vec<Snapshot> = Vec::new();
+    let mut incidence: Vec<Vec<f64>> = Vec::new();
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        let bad = |what: &str| format!("trajectories file {}: bad {what} field", path.display());
+        let row_chain: usize =
+            f.get(ci).and_then(|s| s.parse().ok()).ok_or_else(|| bad("chain"))?;
+        let row_draw: usize =
+            f.get(di).and_then(|s| s.parse().ok()).ok_or_else(|| bad("draw"))?;
+        if row_chain != chain || row_draw != draw {
+            continue;
+        }
+        let t: f64 = f.get(ti).and_then(|s| s.parse().ok()).ok_or_else(|| bad("time"))?;
+
+        let counts = int_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<i64>().ok()).ok_or_else(|| {
+                    format!("trajectories file {}: bad integer compartment at column {i}",
+                        path.display())
+                })
+            })
+            .collect::<Result<Vec<i64>, _>>()?;
+        let values = real_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<f64>().ok()).ok_or_else(|| {
+                    format!("trajectories file {}: bad real compartment at column {i}",
+                        path.display())
+                })
+            })
+            .collect::<Result<Vec<f64>, _>>()?;
+        let flows = flow_idx
+            .iter()
+            .map(|&i| {
+                let raw = f.get(i).ok_or_else(|| bad("flow"))?;
+                if raw.contains('.') {
+                    return Err(format!(
+                        "trajectories file {}: flow column {i} holds `{raw}`, a real-valued \
+                         flow. This reader is chain-binomial only — rounding a real flow to \
+                         an integer silently zeroes sub-unit flows, so it refuses rather \
+                         than quantizing.",
+                        path.display()
+                    ));
+                }
+                raw.parse::<u64>().map_err(|_| {
+                    format!("trajectories file {}: bad integer flow at column {i}",
+                        path.display())
+                })
+            })
+            .collect::<Result<Vec<u64>, String>>()?;
+        let inc_row = inc_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<f64>().ok()).ok_or_else(|| {
+                    format!("trajectories file {}: bad incidence at column {i}", path.display())
+                })
+            })
+            .collect::<Result<Vec<f64>, _>>()?;
+
+        snapshots.push(Snapshot {
+            t,
+            int_state: IntState::from_vec(counts),
+            real_state: RealState::from_vec(values),
+            flows: Flows::Int(flows),
+        });
+        incidence.push(inc_row);
+    }
+
+    if snapshots.is_empty() {
+        return Err(format!(
+            "no saved path for (chain={chain}, draw={draw}) in {} — that draw is not in the \
+             forkable subset (the trajectory save stride and `thin` need not agree; gh#727)",
+            path.display()
+        ));
+    }
+
+    Ok((
+        Trajectory { snapshots, transition_diagnostics: Vec::new(), reactive_log: None },
+        incidence,
+    ))
 }
