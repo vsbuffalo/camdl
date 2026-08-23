@@ -1782,17 +1782,32 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
                 unreachable!("Streaming write mode never returns a committed path")
             }
-            Err(e) => {
-                eprintln!("warning: claim profile point {}: {}", cas_path.display(), e);
+            // The identical point is already stored — a cache report, not a
+            // failure (this start recomputed it for nothing).
+            Err(runid::CasError::AlreadyCompleted { .. }) => return,
+            // Another process holds this point right now; its result stands.
+            Err(e @ runid::CasError::FitInProgress { .. }) => {
+                eprintln!("warning: not storing profile point {} — {}",
+                    cas_path.display(), e);
                 return;
             }
+            // Anything else means this point was NOT recorded: fail loudly
+            // rather than leaving a gap in the landscape the user never sees.
+            Err(e) => {
+                eprintln!("error: claim profile point {}: {}", cas_path.display(), e);
+                std::process::exit(1);
+            }
         };
-        let start_dir = write.dir().to_path_buf();
 
         let mle_toml = render_mle_toml(&if2_params, &focal_values,
             &focal_grids.iter().map(|fg| fg.name.as_str()).collect::<Vec<_>>(),
             &mle_params, final_loglik, final_log_posterior, &diag);
-        let _ = std::fs::write(start_dir.join("mle.toml"), mle_toml);
+        // Through the claim (fsync'd), error fatal: a discarded write error
+        // could finalize a Completed point with no mle.toml in it.
+        if let Err(e) = write.write("mle.toml", mle_toml.as_bytes()) {
+            eprintln!("error: writing mle.toml into {}: {}", cas_path.display(), e);
+            std::process::exit(1);
+        }
 
         if let Err(e) = write.finalize(inputs_json) {
             eprintln!("warning: finalize profile point {}: {}", cas_path.display(), e);

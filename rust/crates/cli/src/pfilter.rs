@@ -466,12 +466,36 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
                 unreachable!("Streaming write mode never returns a committed path")
             }
-            Err(e) => { eprintln!("warning: claim pfilter leaf {}: {}", cas_path.display(), e); return; }
+            // The identical evaluation is already stored: this rerun recomputed
+            // it for nothing, which is a cache report, not a failure.
+            Err(runid::CasError::AlreadyCompleted { .. }) => {
+                crate::status::step("cached", cas_path.display());
+                return;
+            }
+            // Another process is computing this same evaluation right now. The
+            // loglik above is still correct and already printed; only the store
+            // write is skipped.
+            Err(e @ runid::CasError::FitInProgress { .. }) => {
+                eprintln!("warning: not storing this pfilter leaf — {}", e);
+                return;
+            }
+            // Anything else means the result was NOT recorded. Previously every
+            // failure here was a warning, so a store error left the user with a
+            // printed number they reasonably believed had been saved.
+            Err(e) => {
+                eprintln!("error: claim pfilter leaf {}: {}", cas_path.display(), e);
+                std::process::exit(1);
+            }
         };
         let mut body = format!("loglik = {}\nn_replicates = {}\nn_particles = {}\n",
             mean_ll, n_reps, n_particles);
         if n_reps > 1 { body.push_str(&format!("loglik_sd = {}\n", sd_ll)); }
-        let _ = std::fs::write(write.dir().join("loglik.toml"), body);
+        // Through the claim (fsync'd), and the error is fatal: a discarded
+        // write error could finalize a Completed leaf with no loglik.toml in it.
+        if let Err(e) = write.write("loglik.toml", body.as_bytes()) {
+            eprintln!("error: writing pfilter loglik.toml into {}: {}", cas_path.display(), e);
+            std::process::exit(1);
+        }
         if let Err(e) = write.finalize(inputs_json) {
             eprintln!("warning: finalize pfilter leaf {}: {}", cas_path.display(), e);
         } else {
