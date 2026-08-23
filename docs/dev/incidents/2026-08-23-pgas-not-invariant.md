@@ -439,9 +439,7 @@ picks must be independent across slots" — and had no representation in the
 program. A precondition with no representation cannot be checked, cannot be
 tested, and cannot fail loudly. It can only be violated silently.
 
-## Part 6: retrospective — how this could have been caught, and how to prevent
-
-the next one
+## Part 6: retrospective — how this could have been caught; prevention
 
 ### Why four months passed
 
@@ -545,16 +543,22 @@ conditional draw is just `n−1` independent picks, and defect 1 cannot occur by
 construction. The defect-1 fix (`55178dd1`) would be _revised_, not extended,
 and the Algorithm 4 implementation deleted.
 
-**One claim from the review we could not confirm.** Their §8 argues that
-conditional systematic resampling combined with ancestor sampling is still
-invalid even on substeps that do resample. The TRAP fixture cannot test this —
-both its substeps have equal incoming weights, so "suppress AS where resampling
-was skipped" suppresses _all_ ancestor sampling there and is simply the control
-arm in disguise. The evidence we have is the DENSE and SPARSE runs, where
-ancestor sampling ran on genuinely unequal weights with conditional systematic
-resampling and measured clean (z = 1.16 and −0.36). That is moderate evidence
-against §8, not proof. **Option 2 sidesteps the question entirely, which given
-the stakes is an additional reason to prefer it.**
+**One claim from the review is left explicitly unresolved.** Their §8 argues
+that conditional systematic resampling combined with ancestor sampling is
+invalid even on substeps that do resample. We could not settle it. The TRAP
+fixture cannot test it — both its substeps have equal incoming weights, so
+"suppress ancestor sampling where resampling was skipped" suppresses _all_
+ancestor sampling there and is simply the control arm in disguise. The only
+evidence either way is the DENSE and SPARSE runs, where ancestor sampling ran on
+genuinely unequal weights with conditional systematic resampling and measured
+clean (z = 1.16 and −0.36). That is moderate evidence against §8 and nothing
+more.
+
+**The chosen fix deliberately does not depend on the answer.** Option 2 uses
+multinomial resampling wherever ancestor sampling runs, so the question of
+whether systematic resampling can coexist with ancestor sampling never arises.
+It is recorded here as open, not as settled in our favour, and should not be
+cited in either direction.
 
 ---
 

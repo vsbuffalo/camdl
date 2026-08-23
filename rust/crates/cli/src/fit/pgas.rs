@@ -603,10 +603,18 @@ pub fn run_stage(
             // the ancestor-sampling counters because the three are read
             // together: the profile says WHERE the path is stuck, `as_accept`
             // and `as_proposed` say why.
-            let mut trace_columns: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 11);
+            let mut trace_columns: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 12);
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
-            trace_columns.extend(["as_accept", "as_proposed", "transition_ll", "obs_ll",
+            // gh#718: `as_opportunity` is how many substeps in the sweep drew
+            // an ancestry, which is the only place an ancestor move is legal.
+            // It is NOT the observation count: the weights an observation
+            // produces are consumed by the FOLLOWING substep, so a terminal
+            // observation contributes none. Read it as the denominator behind
+            // `as_proposed` — a low renewal with `as_opportunity` near zero is
+            // a schedule with nowhere to renew, not a sampler that will not.
+            trace_columns.extend(["as_opportunity", "as_accept", "as_proposed",
+                  "transition_ll", "obs_ll",
                   "tree_depth", "n_leapfrog", "step_size", "accept_stat",
                   "n_divergent", "energy"]);
             let trace_writer = super::trace_writer::TraceWriter::new(
@@ -676,6 +684,7 @@ pub fn run_stage(
                     "NA".to_string()
                 };
                 let as_proposed_str = result.csmc_diag.n_as_proposed.to_string();
+                let as_opportunity_str = result.csmc_diag.n_resampled.to_string();
                 let transition_ll_str = format!("{:.4}", result.transition_ll);
                 let obs_ll_str = format!("{:.4}", result.obs_ll);
                 // Per-sweep cold-chain NUTS diagnostics (gh#294).
@@ -686,10 +695,11 @@ pub fn run_stage(
                 let accept_stat_str = format!("{:.4}", nd.accept_stat);
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
-                let mut extra: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 11);
+                let mut extra: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 12);
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
                 extra.extend([
+                    as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
                     transition_ll_str.as_str(), obs_ll_str.as_str(),
                     tree_depth_str.as_str(), n_leapfrog_str.as_str(), step_size_str.as_str(),

@@ -48,105 +48,73 @@ pub(crate) fn systematic_resample_core(weights: &[f64], u0: f64) -> Vec<usize> {
 }
 
 /// Ancestor indices for one step of a **conditional** SMC sweep — the
-/// resampling inside particle Gibbs, where slot `reference` is held by the
-/// reference trajectory and descends from itself.
+/// resampling inside particle Gibbs, where slot `reference` holds the reference
+/// trajectory and descends from itself.
 ///
-/// Returns one ancestor per slot, with `out[reference] == reference`.
+/// Returns one ancestor per slot, with `out[reference] == reference`. Each of
+/// the other `n - 1` slots draws **independently** from `categorical(W)` over
+/// all `n` particles — the reference included, so the reference's history can
+/// be inherited by the free particles exactly as often as its weight warrants.
 ///
-/// # Why this is not [`systematic_resample`] with one slot overwritten
+/// # Why multinomial here, when the particle filter uses systematic
 ///
-/// [`systematic_resample`] lays `n` evenly spaced thresholds across the
-/// cumulative weight and returns one ancestor per slot. A conditional sweep has
-/// only `n − 1` slots to fill, because the reference keeps itself. Taking the
-/// unconditional output and dropping the entry at `reference` drops the LAST
-/// threshold, so the free slots span only the first `(n−1+u)/n` of the
-/// cumulative range: every particle in the top `1/n` of it loses about one
-/// expected offspring, and the reference — last in the weight vector — loses
-/// its own. On a 5-particle ensemble with `w_ref = 0.1` the reference receives
-/// **zero** descendants where it is owed `4 × 0.1`, and the deficit does not
-/// shrink with `n` (~0.6 of one slot at `n = 500`), because a typical particle
-/// only expects about one slot to begin with.
+/// Systematic resampling wastes fewer particles and is the right default for
+/// the unconditional filters (`particle_filter`, `if2`), which fill every slot
+/// from every pick. It is the wrong tool inside particle Gibbs, for two
+/// separate reasons that cost four months of wrong posteriors (gh#718):
 ///
-/// # What correctness requires
+/// - **Its picks are not separable.** A conditional sweep fills only `n - 1`
+///   slots. Taking an `n`-pick systematic draw and dropping the entry at
+///   `reference` does not yield the conditional law: the picks are locked to an
+///   ordered grid, so dropping one drops a *specific* stratum — the last, which
+///   is exactly where the reference lies. Measured at `n = 5` with
+///   `w_ref = 0.1`, the reference drew **zero** descendants against the 0.1 it
+///   was owed, and the deficit does not shrink with `n`.
+/// - **Ancestor sampling needs slot independence.** The accept/reject ratio for
+///   an ancestor move is derived assuming the ancestry factorises across slots
+///   (Lindsten, Jordan & Schön 2014). Under a scheme whose picks are dependent,
+///   the resampling law does not cancel out of that ratio and the move is not a
+///   valid Metropolis step. Multinomial makes the cancellation exact.
 ///
-/// Chopin & Singh (2015) require the *unconditional* resampling distribution to
-/// be **marginally unbiased** — the law of a single ancestor `A^n` must assign
-/// probability `W^m` to outcome `m` (§5) — which for systematic resampling is
-/// obtained by randomly cycling the output. What a conditional sweep must then
-/// draw from is that scheme's law **conditioned on the reference keeping
-/// itself**; their Algorithm 4 (§5.2) does exactly that, and is implemented
-/// here:
+/// Adapting systematic resampling to the conditional case is possible — Chopin
+/// & Singh (2015), *On particle Gibbs sampling*, Bernoulli 21(3):1855–1883,
+/// give the construction as their Algorithm 4 — but it does not by itself
+/// license the ancestor-sampling move above, so it buys nothing here.
 ///
-/// (a) draw `U` conditioned so the reference receives an offspring, with the
-///     correct conditional law for how many it receives;
-/// (b) run plain systematic resampling at that `U`;
-/// (c) cycle the output uniformly over the reference's own copies, placing one
-///     of them in the reference slot.
-///
-/// Note what is NOT claimed: the *conditional* draw's per-slot marginals are
-/// not `W` — conditioning changes them. The tests therefore check marginal
-/// unbiasedness of the unconditional scheme, and check this function against
-/// rejection sampling from it.
-///
-/// The paper fixes the reference at index 1 and notes the frozen trajectory may
-/// be relabelled freely, so this rotates the weight vector to put `reference`
-/// first and rotates the result back.
-///
-/// Reference: Chopin, N. and Singh, S.S. (2015). "On particle Gibbs sampling."
-/// *Bernoulli* **21**(3):1855–1883, DOI 10.3150/14-BEJ629; §5 and Algorithm 4
-/// in §5.2 (arXiv:1304.1887 reprint repaginates).
-pub fn conditional_systematic_resample(
+/// The caller must not perform an ancestor-sampling move on a substep where
+/// this function was not called: see the `did_resample` gate in `csmc_as`.
+pub fn conditional_multinomial_resample(
     log_weights: &[f64],
     reference: usize,
     rng: &mut StatefulRng,
 ) -> Vec<usize> {
     let n = log_weights.len();
     assert!(reference < n, "reference slot {reference} out of range for {n} particles");
-    if n == 1 {
-        return vec![0];
-    }
+
+    // One normalisation and one cumulative pass for the whole draw; each free
+    // slot is then a single uniform plus a binary search. `normalize_log_weights`
+    // already falls back to uniform on a degenerate weight vector, so the CDF
+    // below is always a valid distribution.
     let w = normalize_log_weights(log_weights);
-    let nf = n as f64;
-    // Rotate so the reference is entry 0; `rot` maps rotated → original.
-    let rot = |i: usize| (i + reference) % n;
-    let wr: Vec<f64> = (0..n).map(|i| w[rot(i)]).collect();
-
-    // (a) The conditioned base uniform.
-    let nw1 = nf * wr[0];
-    let u0 = if nw1 <= 1.0 {
-        rng.uniform() * nw1
-    } else {
-        let floor = nw1.floor();
-        let frac = nw1 - floor;
-        if rng.uniform() < frac * (floor + 1.0) / nw1 {
-            rng.uniform() * frac
-        } else {
-            frac + rng.uniform() * (1.0 - frac)
-        }
-    };
-
-    // (b) Plain systematic selection at that `U` — the same loop the
-    // unconditional path uses, so the two can never drift apart.
-    let abar = systematic_resample_core(&wr, u0);
-
-    // (c) Cycle uniformly over the reference's own copies, placing one of them
-    // in the reference slot. Uniform over copies is what makes this the
-    // conditional law of the cycle-randomised scheme rather than of some
-    // arbitrary tie-break.
-    let copies: Vec<usize> = (0..n).filter(|&i| abar[i] == 0).collect();
-    // Step (a) guarantees at least one copy; fall back rather than panic if a
-    // degenerate weight vector defeats it.
-    let c0 = if copies.is_empty() {
-        0
-    } else {
-        copies[((rng.uniform() * copies.len() as f64) as usize).min(copies.len() - 1)]
-    };
-
-    let mut out = vec![0usize; n];
-    for slot in 0..n {
-        out[rot(slot)] = rot(abar[(c0 + slot) % n]);
+    let mut cdf = Vec::with_capacity(n);
+    let mut acc = 0.0;
+    for &x in &w {
+        acc += x;
+        cdf.push(acc);
     }
-    debug_assert_eq!(out[reference], reference, "the reference must descend from itself");
+    // Pin the tail so floating-point drift cannot leave `u` past the last edge.
+    if let Some(last) = cdf.last_mut() {
+        *last = 1.0;
+    }
+
+    let mut out = vec![reference; n];
+    for slot in 0..n {
+        if slot == reference {
+            continue;
+        }
+        let u = rng.uniform();
+        out[slot] = cdf.partition_point(|&c| c < u).min(n - 1);
+    }
     out
 }
 
@@ -195,31 +163,41 @@ mod tests {
             "particle 0 (weight 3/6) got {} copies out of 4", count_0);
     }
 
-    /// The unconditional scheme must be **marginally unbiased**: the law of a
-    /// single ancestor is the weight vector itself. Chopin & Singh (2015) §5
-    /// require this of the resampling distribution, and obtain it for
-    /// systematic resampling by randomly cycling the output (§5.2).
+    /// The property gh#718 defect 1 destroyed, stated as directly as it can be:
+    /// a free slot picks particle `m` with probability `W_m`, and that includes
+    /// the reference particle.
     ///
-    /// Note this is a property of the UNCONDITIONAL scheme. The conditional
-    /// draw's per-slot marginals are NOT `W` — conditioning on the reference
-    /// keeping itself changes them — which is why the conditional scheme is
-    /// checked against rejection sampling below instead.
+    /// The previous scheme filled the `n-1` free slots from an `n`-stratum
+    /// `systematic_resample` and discarded the entry at the reference slot,
+    /// which threw away the last stratum. The reference — laid down last, so
+    /// occupying the far right of the resampling line — drew ZERO descendants
+    /// here instead of `w_ref`, and every other particle was inflated by
+    /// `n/(n-1)`. This test fails catastrophically against that code.
     #[test]
-    fn randomized_systematic_is_marginally_unbiased() {
+    fn free_slot_ancestors_are_the_weight_vector() {
         const N: usize = 5;
+        const REF: usize = N - 1;
         const DRAWS: usize = 400_000;
+        // Reference deliberately LIGHT (`w_ref < 1/n`), the case the old scheme
+        // excluded outright.
         let w = [0.30_f64, 0.25, 0.20, 0.15, 0.10];
+        let log_weights: Vec<f64> = w.iter().map(|x| x.ln()).collect();
+
         let mut rng = StatefulRng::new(20260823);
         let mut counts = [[0u64; N]; N]; // [slot][ancestor]
         for _ in 0..DRAWS {
-            let abar = systematic_resample_core(&w, rng.uniform());
-            let c0 = ((rng.uniform() * N as f64) as usize).min(N - 1);
-            for slot in 0..N {
-                counts[slot][abar[(c0 + slot) % N]] += 1;
+            let a = conditional_multinomial_resample(&log_weights, REF, &mut rng);
+            assert_eq!(a[REF], REF, "the reference slot must descend from itself");
+            for (slot, &anc) in a.iter().enumerate() {
+                counts[slot][anc] += 1;
             }
         }
+
         let mut worst = (0.0_f64, 0usize, 0usize);
         for slot in 0..N {
+            if slot == REF {
+                continue;
+            }
             for m in 0..N {
                 let z = (counts[slot][m] as f64 / DRAWS as f64 - w[m])
                     / (w[m] * (1.0 - w[m]) / DRAWS as f64).sqrt();
@@ -230,38 +208,32 @@ mod tests {
         }
         assert!(
             worst.0 < 5.0,
-            "randomly-cycled systematic resampling is not marginally unbiased: \
-             worst |z|={:.2} at slot {} ancestor {} (want {:.4}, got {:.4})",
+            "free-slot ancestor law is not the weight vector: worst |z|={:.2} at slot {} \
+             ancestor {} (want {:.4}, got {:.4}). Particle Gibbs is not invariant under a \
+             resampling scheme that is not marginally unbiased (gh#718).",
             worst.0, worst.1, worst.2, w[worst.2],
             counts[worst.1][worst.2] as f64 / DRAWS as f64
         );
+        // Non-vacuity: the reference must actually be reachable from a free slot,
+        // or this test would pass on a scheme that merely never selects it.
+        let ref_picks: u64 = (0..N).filter(|&s| s != REF).map(|s| counts[s][REF]).sum();
+        assert!(
+            ref_picks > 0,
+            "no free slot ever selected the reference — the discriminating case is absent"
+        );
     }
 
-    /// The conditional scheme must sample the unconditional scheme's law
-    /// **conditioned on the reference keeping itself** — that is what makes the
-    /// particle Gibbs kernel invariant. Oracle: rejection sampling from the
-    /// unconditional randomly-cycled scheme, which is non-circular (it shares
-    /// no code path with [`conditional_systematic_resample`]'s conditioning of
-    /// `U` or its choice of cycle).
-    ///
-    /// This is the test gh#718 needed. The previous scheme filled the `n-1`
-    /// free slots from an `n`-stratum [`systematic_resample`] and discarded the
-    /// entry at the reference slot, which is not the conditional law of
-    /// anything: it threw away the top stratum, so the reference — last in the
-    /// weight vector — drew ZERO descendants where it is owed its share, and
-    /// every other particle was inflated by `n/(n-1)`.
-    ///
-    /// Three weight vectors, because Algorithm 4 step (a) BRANCHES on
-    /// `N·W_ref` and a single fixture leaves branches unexercised. With
-    /// `N·W_ref` a whole number the conditioning degenerates to a plain
-    /// `U ~ [0,1)`, so a fixture like that cannot tell step (a) from its
-    /// absence — mutation-checked.
-    fn check_conditional_matches_rejection(w: &[f64], label: &str) {
-        const REF: usize = 4;
-        let n = w.len();
-        assert_eq!(n, 5, "cases are written for n = 5");
+    /// The conditional draw must be the unconditional scheme's law conditioned
+    /// on the reference keeping itself. Oracle: rejection sampling from the
+    /// unconditional multinomial draw, which shares no code with the
+    /// conditional path's slot skipping.
+    #[test]
+    fn conditional_multinomial_matches_rejection_sampling() {
+        const N: usize = 4;
+        const REF: usize = N - 1;
+        let w = [0.15_f64, 0.20, 0.25, 0.40];
         let log_weights: Vec<f64> = w.iter().map(|x| x.ln()).collect();
-        let target = 300_000usize;
+        let target = 200_000usize;
 
         let tally = |draws: &[Vec<usize>]| {
             let mut m = std::collections::HashMap::<Vec<usize>, u64>::new();
@@ -270,33 +242,39 @@ mod tests {
             }
             m
         };
+        let draw_one = |rng: &mut StatefulRng| -> usize {
+            let u = rng.uniform();
+            let mut acc = 0.0;
+            for (i, &p) in w.iter().enumerate() {
+                acc += p;
+                if u < acc {
+                    return i;
+                }
+            }
+            N - 1
+        };
 
-        // Oracle: unconditional randomly-cycled systematic, keeping the draws in
-        // which the reference happened to keep itself.
         let mut rng = StatefulRng::new(11);
         let mut accepted: Vec<Vec<usize>> = Vec::new();
         let mut proposed = 0u64;
         while accepted.len() < target {
             proposed += 1;
-            let abar = systematic_resample_core(w, rng.uniform());
-            let c0 = ((rng.uniform() * n as f64) as usize).min(n - 1);
-            let a: Vec<usize> = (0..n).map(|slot| abar[(c0 + slot) % n]).collect();
+            let a: Vec<usize> = (0..N).map(|_| draw_one(&mut rng)).collect();
             if a[REF] == REF {
                 accepted.push(a);
             }
         }
-        // Marginal unbiasedness says the acceptance rate is `w[REF]`; if it is
-        // not, the oracle is not the distribution it claims to be.
         let acc_rate = accepted.len() as f64 / proposed as f64;
         assert!(
             (acc_rate - w[REF]).abs() < 0.01,
-            "{label}: rejection oracle accepted {acc_rate:.4}, expected w_ref={:.4}",
+            "rejection oracle accepted {acc_rate:.4}, expected w_ref={:.4} — the oracle is \
+             not the distribution it claims to be",
             w[REF]
         );
 
         let mut rng2 = StatefulRng::new(29);
         let direct: Vec<Vec<usize>> = (0..accepted.len())
-            .map(|_| conditional_systematic_resample(&log_weights, REF, &mut rng2))
+            .map(|_| conditional_multinomial_resample(&log_weights, REF, &mut rng2))
             .collect();
 
         let (oracle, got) = (tally(&accepted), tally(&direct));
@@ -314,50 +292,19 @@ mod tests {
                 continue;
             }
             compared += 1;
-            // Two independent samples of the same size.
             let se = ((po * (1.0 - po) + pg * (1.0 - pg)) / m).sqrt();
             let z = (pg - po) / se;
             if z.abs() > worst.0 {
                 worst = (z.abs(), k.clone(), po, pg);
             }
         }
-        // A light reference pins `Ā` almost completely, so this case has only a
-        // couple of reachable outcomes; require a real distribution rather than
-        // a particular count.
-        let max_p = oracle.values().map(|&c| c as f64 / m).fold(0.0_f64, f64::max);
-        assert!(compared >= 2, "{label}: only {compared} outcomes compared — too vacuous");
-        assert!(
-            max_p < 0.95,
-            "{label}: the oracle is a near point mass (max outcome {max_p:.3}) — nothing to compare"
-        );
+        assert!(compared >= 10, "only {compared} outcomes compared — too vacuous");
         assert!(
             worst.0 < 5.0,
-            "{label}: the conditional draw is not the unconditional law conditioned on \
-             the reference keeping itself: outcome {:?} has rejection-oracle probability \
-             {:.5} but conditional-scheme probability {:.5} (|z|={:.2}). Particle Gibbs is \
-             not invariant under such a scheme (gh#718).",
+            "the conditional draw is not the unconditional law conditioned on the reference \
+             keeping itself: outcome {:?} has oracle probability {:.5} but conditional-scheme \
+             probability {:.5} (|z|={:.2})",
             worst.1, worst.2, worst.3, worst.0
         );
-    }
-
-    /// `N·W_ref = 0.5 ≤ 1`: the reference is owed less than one copy, so step
-    /// (a) must force `U` into the reference's own slice or it gets none.
-    #[test]
-    fn conditional_systematic_matches_rejection_light_reference() {
-        check_conditional_matches_rejection(&[0.25, 0.25, 0.25, 0.15, 0.10], "light reference");
-    }
-
-    /// `N·W_ref = 1.75`: a fractional part, so step (a)'s two-branch draw is
-    /// live — this is the case that distinguishes it from a plain `U ~ [0,1)`.
-    #[test]
-    fn conditional_systematic_matches_rejection_fractional_reference() {
-        check_conditional_matches_rejection(&[0.15, 0.20, 0.15, 0.15, 0.35], "fractional reference");
-    }
-
-    /// `N·W_ref = 2.0`: the reference takes several copies, some of which land
-    /// in FREE slots — the case where a free slot can select the reference.
-    #[test]
-    fn conditional_systematic_matches_rejection_heavy_reference() {
-        check_conditional_matches_rejection(&[0.15, 0.15, 0.15, 0.15, 0.40], "heavy reference");
     }
 }

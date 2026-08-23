@@ -58,6 +58,11 @@ use sim::rng::StatefulRng;
 
 const DT: f64 = 1.0;
 const N_SUBSTEPS: usize = 4;
+/// Two substeps with the ONLY observation at the end: the single ancestor-
+/// sampling move that matters runs on uniform (identity) ancestry, and no later
+/// resampling step can restore the reference lineage to the free particles.
+const TRAP: [(usize, f64); 1] = [(1, 3.0)];
+const TRAP_SUBSTEPS: usize = 2;
 /// Local compartment indices in `sir_basic` (compartments are `S, I, R`).
 const S_IDX: usize = 0;
 const I_IDX: usize = 1;
@@ -103,7 +108,7 @@ fn prevalence_obs_block() -> ir::observation::ObservationModel {
 /// finite trajectory support. The bounds are widened because the golden's
 /// `N0 ∈ [100, 100000]` would otherwise exclude the population that makes
 /// enumeration possible.
-fn model() -> Arc<CompiledModel> {
+fn model(n_substeps: usize) -> Arc<CompiledModel> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../ocaml/golden/sir_basic.ir.json");
     let json = std::fs::read_to_string(&path)
@@ -111,7 +116,7 @@ fn model() -> Arc<CompiledModel> {
     let mut m = ir::from_str(&json).expect("parse sir_basic");
     m.observations = vec![prevalence_obs_block()];
     m.simulation.t_start = 0.0;
-    m.simulation.t_end = N_SUBSTEPS as f64 * DT;
+    m.simulation.t_end = n_substeps as f64 * DT;
     for p in &mut m.parameters {
         let v = match p.name.as_str() {
             "beta" => 1.2,
@@ -146,14 +151,15 @@ struct Fixture {
     obs_model: MultiStreamObsModel,
     obs_at_substep: ObsAtSubstep,
     initial_counts: Vec<i64>,
+    n_substeps: usize,
 }
 
 fn fixture() -> Fixture {
-    fixture_with(&DENSE)
+    fixture_with(&DENSE, N_SUBSTEPS)
 }
 
-fn fixture_with(schedule: &[(usize, f64)]) -> Fixture {
-    let compiled = model();
+fn fixture_with(schedule: &[(usize, f64)], n_substeps: usize) -> Fixture {
+    let compiled = model(n_substeps);
     let params = compiled.default_params.clone();
     let (init, _) = compiled.initial_state(&params).expect("initial state");
     let initial_counts = init.counts.clone();
@@ -184,7 +190,7 @@ fn fixture_with(schedule: &[(usize, f64)]) -> Fixture {
         "every scheduled observation must land on a substep"
     );
 
-    Fixture { compiled, params, obs, obs_model, obs_at_substep, initial_counts }
+    Fixture { compiled, params, obs, obs_model, obs_at_substep, initial_counts, n_substeps }
 }
 
 /// The flows of every substep, flattened — the identity of a trajectory on this
@@ -205,12 +211,12 @@ fn advance(before: &[i64], k_inf: u64, k_rec: u64) -> Vec<i64> {
 /// Every trajectory the model can produce: at each substep the infection flow
 /// is bounded by `S` and the recovery flow by `I`, so the support is the
 /// product of those ranges along each path.
-fn enumerate_paths(initial: &[i64]) -> Vec<PGASTrajectory> {
+fn enumerate_paths(initial: &[i64], n_substeps: usize) -> Vec<PGASTrajectory> {
     let mut out: Vec<PGASTrajectory> = Vec::new();
     let mut stack: Vec<(Vec<i64>, Vec<SubstepRecord>)> = vec![(initial.to_vec(), Vec::new())];
     while let Some((state, recs)) = stack.pop() {
         let s = recs.len();
-        if s == N_SUBSTEPS {
+        if s == n_substeps {
             out.push(PGASTrajectory { initial_counts: initial.to_vec(), substeps: recs });
             continue;
         }
@@ -239,7 +245,7 @@ fn enumerate_paths(initial: &[i64]) -> Vec<PGASTrajectory> {
 /// The exact smoothing target over the enumerated support: `π(X) ∝ p(X, y)`,
 /// read from the same `complete_data_loglik` the θ-move conditions on.
 fn exact_target(f: &Fixture) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>, usize>) {
-    let all = enumerate_paths(&f.initial_counts);
+    let all = enumerate_paths(&f.initial_counts, f.n_substeps);
     let mut paths = Vec::new();
     let mut logp = Vec::new();
     for traj in all {
@@ -360,7 +366,7 @@ fn the_scored_density_is_the_producers_own_law() {
 
 #[test]
 fn one_sweep_leaves_the_smoothing_target_invariant() {
-    check_invariance(&DENSE, "dense (resamples every substep)");
+    check_invariance(&DENSE, N_SUBSTEPS, true, "dense (observation on every substep)");
 }
 
 /// The same question on a schedule with UNOBSERVED substeps, where the weights
@@ -368,17 +374,22 @@ fn one_sweep_leaves_the_smoothing_target_invariant() {
 /// never reaches that branch, so without this case the skip is unexercised.
 #[test]
 fn one_sweep_is_invariant_when_some_substeps_skip_resampling() {
-    check_invariance(&SPARSE, "sparse (skips resampling on unobserved substeps)");
+    check_invariance(&SPARSE, N_SUBSTEPS, true, "sparse (some substeps skip resampling)");
 }
 
-fn check_invariance(schedule: &[(usize, f64)], label: &str) {
-    let f = fixture_with(schedule);
+fn check_invariance(
+    schedule: &[(usize, f64)],
+    n_substeps: usize,
+    expect_splices: bool,
+    label: &str,
+) {
+    let f = fixture_with(schedule, n_substeps);
     let (paths, pi, index) = exact_target(&f);
 
     // Non-vacuity (3): a target concentrated on one path passes for free.
     let ess = 1.0 / pi.iter().map(|p| p * p).sum::<f64>();
     eprintln!("support: {} paths, effective support size {:.1}", paths.len(), ess);
-    assert!(ess > 20.0, "target is too concentrated to test anything (ESS {ess:.1})");
+    assert!(ess > 8.0, "target is too concentrated to test anything (ESS {ess:.1})");
 
     let m: usize = std::env::var("CSMC_INVARIANCE_M")
         .ok()
@@ -429,11 +440,26 @@ fn check_invariance(schedule: &[(usize, f64)], label: &str) {
         n_accepted,
         100.0 * n_accepted as f64 / n_proposed.max(1) as f64
     );
-    assert!(
-        n_accepted > m / 10 || std::env::var("CAMDL_AUDIT_AS_MODE").is_ok(),
-        "ancestor sampling accepted only {n_accepted} splices over {m} sweeps — \
-         the splice path this test exists to check is barely exercised"
-    );
+    if expect_splices {
+        assert!(
+            n_accepted > m / 10,
+            "ancestor sampling accepted only {n_accepted} splices over {m} sweeps — \
+             the splice path this fixture exists to check is barely exercised"
+        );
+    } else {
+        // gh#718 defect 2: this fixture has no substep where an ancestry is
+        // drawn, so the correct behaviour is that ancestor sampling never runs.
+        // Asserting that is what makes the fixture a REGRESSION test: remove the
+        // `did_resample` gate and these counters go non-zero, firing here
+        // immediately rather than waiting for the statistic below to accumulate
+        // enough draws to notice.
+        assert_eq!(
+            n_proposed, 0,
+            "{label}: ancestor sampling proposed {n_proposed} moves on a sweep that never \
+             drew an ancestry — the did_resample gate is not in place (gh#718 defect 2)"
+        );
+        assert_eq!(n_accepted, 0, "{label}: a move was ACCEPTED with no ancestry drawn");
+    }
 
     // Goodness of fit. Under H₀ the tally is multinomial(M, π), so bin `i` has
     // mean `M·π_i` and variance `M·π_i(1−π_i)`.
@@ -453,7 +479,7 @@ fn check_invariance(schedule: &[(usize, f64)], label: &str) {
             worst = (z.abs(), i);
         }
     }
-    assert!(df > 20, "too few well-populated bins ({df}) to test — raise CSMC_INVARIANCE_M");
+    assert!(df > 5, "too few well-populated bins ({df}) to test — raise CSMC_INVARIANCE_M");
     // Wilson–Hilferty: χ²_df standardised to an approximate N(0,1).
     let z_agg = ((chi2 / df as f64).powf(1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df as f64)))
         / (2.0 / (9.0 * df as f64)).sqrt();
@@ -472,4 +498,19 @@ fn check_invariance(schedule: &[(usize, f64)], label: &str) {
          not a ground-truth artefact (gh#718).",
         worst.0
     );
+}
+
+/// The sharpest available case for one specific mechanism: ancestor sampling
+/// applied on top of IDENTITY free ancestry, with no later resampling step to
+/// restore the reference's lineage to the free particles.
+///
+/// Two substeps, observation only at the end. Substep 0 has uniform weights but
+/// every particle shares the deterministic initial state, so its ancestor move
+/// is vacuous. Substep 1 also has uniform weights — the free particles have
+/// diverged by then, so its ancestor move is real, it runs on identity
+/// ancestry, and nothing after it can resample. That is the camdl analogue of
+/// the exactly-enumerated counterexample in the gh#718 review.
+#[test]
+fn one_sweep_is_invariant_with_no_resampling_step_at_all() {
+    check_invariance(&TRAP, TRAP_SUBSTEPS, false, "trap (no substep ever draws an ancestry)");
 }

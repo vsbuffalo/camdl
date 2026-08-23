@@ -21,7 +21,7 @@ use crate::error::SimError;
 use crate::inference::obs_loglik::{poisson_logpmf, binom_logpmf};
 use crate::inference::numerics::BINOM_PROB_EPS;
 use crate::inference::particle_filter::Observation;
-use crate::inference::resampling::conditional_systematic_resample;
+use crate::inference::resampling::conditional_multinomial_resample;
 use crate::inference::pmmh::Prior;
 use crate::inference::prior::Density;
 use crate::inference::types::{EstimatedParam, PROB_FRACTION_EPS, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
@@ -388,6 +388,18 @@ pub struct CSMCDiagnostics {
     pub renewal_by_bin: [f64; RENEWAL_BINS],
     /// Number of substeps where all ancestor weights were -inf.
     pub n_degenerate: usize,
+    /// Substeps where a resampling actually drew a new ancestry — i.e. where
+    /// the incoming weights were not all equal. Between observations they are,
+    /// so this counts the observation boundaries the sweep consumed, which is
+    /// NOT the number of observations: the weights an observation produces are
+    /// consumed by the FOLLOWING substep, so a terminal observation sets
+    /// weights that only ever feed the final trajectory draw (gh#718).
+    pub n_resampled: usize,
+    /// Substeps where ancestor sampling was skipped because no resampling drew
+    /// an ancestry there. The mixing cost of the gh#718 defect-2 fix: this plus
+    /// `n_resampled` is the total substep count, and only the latter offers the
+    /// reference a chance to renew.
+    pub n_as_skipped_no_resample: usize,
     /// Total substeps.
     pub n_substeps: usize,
     /// Substeps where the Eq.-(17) proposal named an ancestor OTHER than the
@@ -2077,6 +2089,10 @@ pub fn csmc_as(
     // Diagnostic: count substeps where ancestor sampling is degenerate
     // (no particle can reach the reference state → reference stays self-connected)
     let mut n_degenerate: usize = 0;
+    // gh#718: how often an ancestry was actually drawn, and how often ancestor
+    // sampling was consequently skipped. Counters only — no RNG.
+    let mut n_resampled: usize = 0;
+    let mut n_as_skipped_no_resample: usize = 0;
     // gh#607 follow-up: ancestor-sampling acceptance accounting. Counters only
     // — they consume no RNG, so trajectories stay bit-identical.
     let mut n_as_proposed: usize = 0;
@@ -2116,24 +2132,25 @@ pub fn csmc_as(
         let prev_acc_for_ancestor: Vec<Vec<u64>> = acc.clone();
 
         // ── 1. Resample free particles (ancestor selection from prev weights) ──
-        // On non-observation substeps, weights are uniform → systematic
-        // resampling is identity. Skip resampling in that case.
-        let substep_ancestors: Vec<usize>;
+        // Between observations there is no new information, so every weight is
+        // equal and resampling would only duplicate particles for nothing. Skip
+        // it — and record that we skipped, because ancestor sampling below is
+        // only a legal move where an ancestry was actually drawn (gh#718).
         let weights_are_uniform = log_weights.iter().all(|&w| (w - log_weights[0]).abs() < 1e-10);
+        let did_resample = !weights_are_uniform;
 
-        if weights_are_uniform {
-            // Identity: each particle is its own ancestor
-            substep_ancestors = (0..n_particles).collect();
+        let substep_ancestors: Vec<usize> = if !did_resample {
+            // Identity: each particle is its own ancestor.
+            (0..n_particles).collect()
         } else {
-            // gh#718: CONDITIONAL resampling. The reference slot keeps
-            // itself, so only `n-1` slots are drawn — and taking the
-            // unconditional `systematic_resample` and dropping the entry at
-            // `j_ref` is not that draw: it discards the top stratum and denies
-            // the reference its descendants. See
-            // `conditional_systematic_resample`.
+            // gh#718: the CONDITIONAL resample. The reference keeps itself and
+            // the other `n-1` slots draw independently from `categorical(W)`
+            // over the whole ensemble — including the reference, so its history
+            // is inherited as often as its weight warrants. See
+            // `conditional_multinomial_resample` for why this is not the
+            // systematic scheme the unconditional filters use.
             let indices =
-                conditional_systematic_resample(&log_weights, j_ref, &mut resample_rng);
-            // Apply resampling to free particles (not reference)
+                conditional_multinomial_resample(&log_weights, j_ref, &mut resample_rng);
             let mut new_counts = Vec::with_capacity(n_particles);
             let mut new_cum_flows = Vec::with_capacity(n_particles);
             // Phase 2a: the per-stream `acc` bins travel with the particle,
@@ -2152,8 +2169,9 @@ pub fn csmc_as(
             counts = new_counts;
             cum_flows = new_cum_flows;
             acc = new_acc;
-            substep_ancestors = indices;
-        }
+            n_resampled += 1;
+            indices
+        };
 
         // Save pre-propagation states for ancestor sampling
         for j in 0..n_particles {
@@ -2218,7 +2236,28 @@ pub fn csmc_as(
         // own gamma noise enters the density (given this noise, how likely is
         // reaching x'_s from ancestor j?). `fill_ancestor_log_weights` owns the
         // weight formula; the categorical draw + lineage bookkeeping stay here.
-        {
+        //
+        // gh#718 defect 2: this move is legal ONLY where step 1 actually drew an
+        // ancestry. Where it did not, every particle kept its own history, so
+        // the ancestry is the identity and moving the reference onto another
+        // particle's prefix produces a configuration the resampling step gave
+        // probability ZERO — outside the support of the distribution this kernel
+        // is supposed to leave invariant. The gate is `did_resample`, a fact
+        // about what step 1 DID, deliberately not "does this substep carry an
+        // observation": weights can come out equal even at an observation (every
+        // particle scoring it identically), and then the resample is skipped and
+        // an ancestor move here would be exactly the invalid one. LJS §6 permit
+        // performing ancestor sampling only on some substeps; the cost is mixing.
+        if !did_resample {
+            n_as_skipped_no_resample += 1;
+            let mut step_ancestors = substep_ancestors;
+            step_ancestors[j_ref] = j_ref;
+            ancestors.push(step_ancestors);
+            for i in 0..counts[j_ref].len() {
+                counts[j_ref][i] =
+                    prev_counts[j_ref][i] + (ref_rec.counts_after[i] - ref_rec.counts_before[i]);
+            }
+        } else {
             fill_ancestor_log_weights(
                 &mut ancestor_log_w,
                 model,
@@ -2450,6 +2489,8 @@ pub fn csmc_as(
         trajectory_renewal,
         renewal_by_bin: renewal_bins.finish(),
         n_degenerate,
+        n_resampled,
+        n_as_skipped_no_resample,
         n_substeps,
         n_as_proposed,
         n_as_accepted,
@@ -3659,7 +3700,7 @@ pub fn run_pgas(
             // on long time series where ancestor sampling is the bottleneck.
             let mut csmc_diag = CSMCDiagnostics {
                 trajectory_renewal: 0.0, renewal_by_bin: [f64::NAN; RENEWAL_BINS],
-                n_degenerate: 0, n_substeps: 0,
+                n_degenerate: 0, n_resampled: 0, n_as_skipped_no_resample: 0, n_substeps: 0,
                 n_as_proposed: 0, n_as_accepted: 0, n_as_refused_inadmissible: 0,
             };
             for csmc_rep in 0..config.csmc_sweeps_per_nuts {
