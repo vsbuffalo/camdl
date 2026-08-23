@@ -2792,6 +2792,35 @@ pub struct CellInitState {
 /// Apply a CLI integrator-method override (gh#166) to the model in place.
 /// Method-only: forcing rk45 PRESERVES the model's tolerances if it declared
 /// them (else runtime defaults); forcing rk4 drops them. No-op when `method` is
+/// Expand `--param-vec PREFIX=FILE` entries into concrete `(PREFIX_key, val)`
+/// pairs, validating each name against the model's parameter set.
+///
+/// Shared by the run path (`resolve_run_model`) and the identity path
+/// (`build_simulate_cas_sink`) so the hashed params cannot diverge from the
+/// executed ones — the 2026-08-23 audit found the identity path never read
+/// `set_vec_entries` at all, so two runs with different vec files shared one
+/// `run_id` and the second was served the first's trajectory.
+pub fn resolve_param_vec_entries(
+    model: &ir::Model,
+    set_vec_entries: &[(String, String)],
+) -> Result<Vec<(String, f64)>, String> {
+    let model_param_set: std::collections::HashSet<&str> = model.parameters.iter()
+        .map(|p| p.name.as_str()).collect();
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for (prefix, file) in set_vec_entries {
+        let entries = load_keyed_tsv(file)?;
+        for (key, val) in entries {
+            let full_name = format!("{}_{}", prefix, key);
+            if !model_param_set.contains(full_name.as_str()) {
+                return Err(format!(
+                    "--param-vec {}: unknown parameter '{}'", prefix, full_name));
+            }
+            out.push((full_name, val));
+        }
+    }
+    Ok(out)
+}
+
 /// `None`. There is no CLI tolerance flag — the orphan-tolerance state stays
 /// unrepresentable (tolerances are a model property).
 pub fn apply_integrator_override(
@@ -3127,20 +3156,8 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // (verified via `rg 'param.vec' rust/crates/cli/tests` — no hits),
     // and the principled mapping is that `--param-vec` is the
     // bulk-set sibling of `--param` and should share its precedence.
-    let model_param_set: std::collections::HashSet<String> = model.parameters.iter()
-        .map(|p| p.name.clone()).collect();
-    let mut fixed_cli: Vec<(String, f64)> = Vec::new();
-    for (prefix, file) in &run.set_vec_entries {
-        let entries = load_keyed_tsv(file)?;
-        for (key, val) in entries {
-            let full_name = format!("{}_{}", prefix, key);
-            if !model_param_set.contains(&full_name) {
-                return Err(format!(
-                    "--param-vec {}: unknown parameter '{}'", prefix, full_name));
-            }
-            fixed_cli.push((full_name, val));
-        }
-    }
+    let mut fixed_cli: Vec<(String, f64)> =
+        resolve_param_vec_entries(&model, &run.set_vec_entries)?;
     // `run.overrides` is a HashMap; collect into a deterministic
     // (alphabetical-by-name) Vec so the resolver's provenance is
     // reproducible run-to-run.
