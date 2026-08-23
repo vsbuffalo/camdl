@@ -206,4 +206,38 @@ init = "single"
         "nuts fit summary must report ESS/iter off the posterior:\n{summary_txt}");
     assert!(summary_txt.contains("[nuts]"),
         "nuts fit summary must render the nuts posterior block:\n{summary_txt}");
+
+    // The `RhatHigh` findings are pushed as a side effect of RENDERING the
+    // convergence block, and nuts never rendered one — so `diagnostics.json`
+    // was never written for a `nuts` stage and the diagnostics surface was
+    // blind to non-convergence on every ODE+NUTS fit, however badly the chains
+    // disagreed. The file existing is the check; its CONTENTS are a property of
+    // this (converged) fixture and are not asserted.
+    let stage_dir = find_stage_dir(&fit_dir, "nuts_summary.json")
+        .expect("the nuts stage dir carries its summary");
+    assert!(
+        stage_dir.join("diagnostics.json").exists(),
+        "a nuts stage must persist diagnostics.json like pgas and pmmh do; \
+         stage dir holds: {:?}",
+        std::fs::read_dir(&stage_dir).unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The directory under `fit_dir` holding `marker`.
+fn find_stage_dir(fit_dir: &Path, marker: &str) -> Option<PathBuf> {
+    let mut stack = vec![fit_dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if d.join(marker).exists() {
+            return Some(d);
+        }
+        for e in std::fs::read_dir(&d).ok()?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    None
 }

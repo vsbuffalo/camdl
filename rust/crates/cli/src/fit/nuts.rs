@@ -393,6 +393,22 @@ pub fn run_stage(
     ordered.sort_by_key(|c| c.chain_id);
     let chain_samples: Vec<&Vec<Vec<f64>>> = ordered.iter().map(|c| &c.samples).collect();
     let diag = nuts_diagnostics(&config.estimated_params, &chain_samples);
+
+    // The end-of-stage convergence block, and — the part that is not
+    // cosmetic — the `RhatHigh` findings, which `report` pushes as a side
+    // effect of rendering. Without this call nuts printed no block and
+    // collected no findings, so `diagnostics.json` was never written and the
+    // diagnostics surface was blind to non-convergence on every ODE+NUTS fit,
+    // however badly the chains disagreed. Same threshold and same seam as
+    // pgas and pmmh.
+    let collector = sim::inference::diagnostic::DiagnosticCollector::new("nuts");
+    if opts.n_chains > 1 {
+        eprint!("{}", diag.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
+    }
+    collector.render_to_stderr();
+    let diag_path = stage_dir.join("diagnostics.json");
+    let _ = collector.write_json(&diag_path.to_string_lossy());
+
     write_nuts_summary(stage_dir, opts.n_chains, &diag, total_divergent)?;
     write_nuts_draws(
         stage_dir,
