@@ -115,7 +115,8 @@ fn count_ivp_model() -> CompiledModel {
                     prior: ir::parameter::PriorSpec::Flat,
                     transform: ir::parameter::Transform::Identity,
                 },
-                param_kind: None,
+                // As the downstream model declares it: `I0 : count`.
+                param_kind: Some(ir::parameter::ParamKind::Count),
                 param_dim: None,
             },
         ],
@@ -175,59 +176,64 @@ fn params_with_i0(compiled: &CompiledModel, i0: f64) -> Vec<f64> {
     p
 }
 
-/// The finding: whether `I0` is treated as an IVP parameter — and therefore
-/// whether the chain's target carries a Binomial term at all — is decided by
-/// the chain's starting draw, not by the model.
+/// The fix: a `count`-kinded parameter never enters the IVP path, from ANY
+/// start — including the one that used to fire.
+///
+/// Before the kind guard, this was decided per chain by a rounding-gated probe.
+/// `run_pgas` calls `detect_ivp_mappings` once per chain from
+/// `chain_starts[chain_id]`, nudging each parameter by
+/// `(upper - lower).min(1.0) * PROBE_STEP` and asking whether any compartment's
+/// ROUNDED initial count moved. For `I0` with a range wider than 1.0 that step
+/// is a flat 0.01 individuals, so with `I = I0` it fired only for starts within
+/// 0.01 of a half-integer — about 1% of them. Two chains of one fit therefore
+/// carried different targets: one with a ~4.2e8 offset, one with no IVP term.
+///
+/// The guard removes the whole class rather than the nondeterminism alone: the
+/// Binomial term reads the parameter as a probability, and a count is not one.
 #[test]
-fn ivp_detection_depends_on_the_chains_starting_draw() {
+fn a_count_parameter_never_enters_the_ivp_path() {
     let compiled = count_ivp_model();
     let specs = i0_spec(&compiled);
 
-    // The probe step, in I0's own units. `.min(1.0)` caps the 4097.5-wide
-    // range at 1.0, so this is 0.01 individuals.
     let step = (I0_UPPER - I0_LOWER).min(1.0) * PROBE_STEP;
     assert!(
         (step - 0.01).abs() < 1e-12,
         "probe step should be 0.01 individuals for a count parameter, got {step}"
     );
 
-    // A start comfortably inside a rounding bin: round(614.998) == 615 and
-    // round(615.008) == 615, so no compartment moves and nothing registers.
-    let quiet = detect_ivp_mappings(&compiled, &specs, &params_with_i0(&compiled, 614.998))
-        .expect("detection must not error");
-
-    // A start within one probe step of the .5 boundary: round(614.4998) == 614
-    // but round(614.5098) == 615, so `I` moves and `I0` registers.
-    let firing = detect_ivp_mappings(&compiled, &specs, &params_with_i0(&compiled, 614.4998))
-        .expect("detection must not error");
-
-    assert!(
-        quiet.is_empty(),
-        "I0 = 614.998 should register no IVP mapping, got {quiet:?}"
-    );
-    assert_eq!(
-        firing.len(),
-        1,
-        "I0 = 614.4998 sits within one probe step of a rounding boundary and \
-         must register, got {firing:?}"
-    );
-    assert_eq!(
-        firing[0].compartment_idx, 0,
-        "the mapping should point at `I` (compartment 0)"
+    // `614.4998` is the start that DOES cross a rounding boundary:
+    // round(614.4998) = 614, round(614.5098) = 615. It is the case that used to
+    // register, so it is the one that proves the guard rather than the probe.
+    let crossing = params_with_i0(&compiled, 614.4998);
+    let (base, _) = compiled.initial_state(&crossing).unwrap();
+    let mut nudged = crossing.clone();
+    nudged[compiled.param_index["I0"]] += step;
+    let (pert, _) = compiled.initial_state(&nudged).unwrap();
+    assert_ne!(
+        base.counts, pert.counts,
+        "this start must still move a rounded initial count, else the guard is          not what is being tested — the probe simply missed"
     );
 
-    // Negative control: a genuine fraction parameter is detected from EVERY
-    // start, because its slope is N_POP rather than 1. Same model, same
-    // detector — only the parameterisation differs.
+    for start in [614.998_f64, 614.4998, 3.0, 2999.5] {
+        let m = detect_ivp_mappings(&compiled, &specs, &params_with_i0(&compiled, start))
+            .expect("detection must not error");
+        assert!(
+            m.is_empty(),
+            "a `count` parameter must never register an IVP mapping; it did at              start {start}: {m:?}"
+        );
+    }
+
+    // Negative control, and the other half of the contract: a `probability`
+    // parameter still registers, and now does so from EVERY start, because its
+    // slope in the initial count is the population rather than 1.
     let frac = fraction_ivp_model();
     let frac_specs = fraction_spec(&frac);
     for start in [0.001_f64, 0.00131, 0.0491, 0.02] {
         let m = detect_ivp_mappings(&frac, &frac_specs, &params_with_frac(&frac, start))
             .expect("detection must not error");
         assert_eq!(
-            m.len(),
-            1,
-            "a fraction IVP must register from every start; missed at {start}"
+            m.len(), 1,
+            "a probability IVP must register from every start; missed at {start}"
         );
     }
 }
@@ -291,7 +297,7 @@ fn fraction_ivp_model() -> CompiledModel {
             prior: ir::parameter::PriorSpec::Flat,
             transform: ir::parameter::Transform::Identity,
         },
-        param_kind: None,
+        param_kind: Some(ir::parameter::ParamKind::Probability),
         param_dim: None,
     };
     model.initial_conditions = InitialConditions::Parameterized(HashMap::from([

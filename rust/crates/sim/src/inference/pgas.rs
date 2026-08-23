@@ -335,6 +335,43 @@ pub fn detect_ivp_mappings(
                 continue;
             }
             if base_c != pert_c {
+                // The term this would add is `log Binom(x0[c]; N_patch, θ)`,
+                // which reads θ as a PROBABILITY. A parameter of any other
+                // kind is not one, and passing it in anyway is gh#719: a
+                // count like `I0 = 615` clamps to `1 - PROB_FRACTION_EPS` and
+                // charges `log(1e-10)` for every individual outside the
+                // compartment — a finite ~-4e8 offset that the non-finite
+                // guard walks straight past.
+                //
+                // Skipping rather than erroring, because the skip IS the
+                // behaviour such a model already gets whenever the probe
+                // above fails to fire, which is the overwhelmingly common
+                // case: the initial condition stays deterministic in θ and θ
+                // is estimated through the trajectory density. Refusing would
+                // reject models that fit correctly today. What it does buy is
+                // DETERMINISM — with counts and rates filtered out, every
+                // parameter that survives has slope `N_patch` in the initial
+                // count, so the probe fires from every start rather than
+                // from ~1% of them, and two chains of one fit can no longer
+                // carry different targets.
+                let kind = model.model.parameters.iter()
+                    .find(|p| p.name == spec.name)
+                    .and_then(|p| p.param_kind);
+                if kind != Some(ir::parameter::ParamKind::Probability) {
+                    eprintln!("  {} moves initial compartment {} but is \
+                               {} — NOT adding the initial-state Binomial \
+                               density (it reads the parameter as a \
+                               probability). The initial condition stays \
+                               deterministic in this parameter; it is still \
+                               estimated through the trajectory density. \
+                               gh#719.",
+                        spec.name, c,
+                        match kind {
+                            Some(k) => format!("declared `{}`", k.as_str()),
+                            None => "of undetermined kind".to_string(),
+                        });
+                    break;
+                }
                 eprintln!("  {} detected as IVP → compartment {} \
                           (stochastic init, Binom density in LL)", spec.name, c);
                 mappings.push(IVPMapping {
