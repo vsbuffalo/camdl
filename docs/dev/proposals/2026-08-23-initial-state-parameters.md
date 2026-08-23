@@ -1,221 +1,254 @@
-# Initial-state parameters: one name per concept, one declared distribution
+# Initial state: one spec per compartment, evaluated in dependency order
 
 Status: proposed\
-Supersedes: nothing\
-Closes: gh#719 (design half), gh#723
+Closes: gh#719, gh#723, gh#732, gh#733\
+Requires: `ir/VERSION` 0.33 → 0.34 (52 goldens, atomic OCaml + Rust)
 
-## Background the reader is assumed to bring
+## Assumed background
 
-The `Capabilities` bitflags and the three compatibility axes
-([`docs/dev/capabilities-system.md`](../capabilities-system.md)); PGAS's
-complete-data likelihood decomposition (`sim/src/inference/pgas.rs`,
-`complete_data_loglik`). Everything else is stated here.
+The three compatibility axes
+([`capabilities-system.md`](../capabilities-system.md)); PGAS's complete-data
+likelihood decomposition (`sim/src/inference/pgas.rs`, `complete_data_loglik`);
+the golden / `ir/VERSION` human-loop rule (CLAUDE.md, `VERSIONING.md`).
+Everything else is stated here.
 
-## The problem, in one sentence
+## What is wrong today
 
-Two unrelated mechanisms are both called "IVP", one of them decides whether to
-apply itself by finite-differencing a rounded integer, and neither is declared
-by the modeller.
+**An initial condition cannot say it is stochastic.** `init {}` accepts only
+`compartment = expr`. PGAS nonetheless adds a Binomial density on some initial
+compartments, choosing which by finite-differencing a rounded integer — a probe
+whose outcome depends on the chain's starting draw, so two chains of one fit can
+carry different targets (gh#719).
 
-## The two things called IVP
+**A compartment reference in `init {}` silently reads zero.**
+`CompiledModel::initial_state` evaluates every parameterized IC against a
+throwaway zero state (`compiled_model.rs:1912`), so
 
-**1. A perturbation schedule (IF2).** `EstimatedParam.ivp: bool`
-(`sim/src/inference/types.rs:67`) means "perturb this parameter only at `t = 0`,
-not at every observation". It is read in exactly one place, `if2.rs:522`:
-
-```rust
-if spec.ivp || simplex_member_indices.contains(&spec.index) { continue; }
+```camdl
+init { A = A0
+       B = A0 - A }        # A0 = 500, A = 500
 ```
 
-It skips the random-walk jitter. There is no density term anywhere near it.
-camdl's own doc comment says this matches pomp's `ivp()` in `rw.sd`; that
-correspondence is **relayed from the comment, not verified against pomp** (pomp
-is not installed in this checkout).
+yields `B = 500`, not `0`. It compiles with no diagnostic and the reference
+survives into the IR. There is no ordering to appeal to: `Parameterized` is a
+`HashMap<String, Expr>`, which has no iteration order (gh#733).
 
-**2. An initial-state density (PGAS).** `IVPMapping` (`pgas.rs:294`) causes
-`complete_data_loglik` to add
+**A mixed block is unrepresentable.** `InitialConditions` is an enum over the
+_whole_ block, and the variant is a constant-folding decision in the expander
+(`expander.ml:6157`: all-const → `Explicit`, else `Parameterized`). One
+deterministic entry beside one stochastic entry has nowhere to live.
 
-```
-log Binom( x₀[c] ;  N_patch,  θ )
-```
+**`ivp` means three things.** It is an IF2 perturbation schedule (`if2.rs:522`),
+a precondition for `ic_free` (`runner.rs:482`), and an exemption from the scout
+Â gate (`gating.rs:163`). Under PGAS it is parsed, folded into the fit hash, and
+read nowhere.
 
-reading the parameter `θ` as the **probability** that each of `N_patch`
-individuals starts in compartment `c`. This makes `x₀` stochastic so the Gibbs
-structure can sample `θ` through it.
-
-These share a name and nothing else. One is a schedule, the other is a
-likelihood term. **PGAS never reads the flag**, and IF2 never adds the density.
-
-### What that costs today
-
-A modeller who writes `ivp = true` in a fit config and runs `algorithm = pgas`
-gets silence: the key is parsed, folded into the fit hash, reported in the
-pre-flight summary (`fit/mod.rs:706`), and then ignored. That is the exact
-pathology axis 3 exists to prevent — "a model accepted on a backend by one
-algorithm is rejected on the same backend by another", except here it is not
-rejected, it is silently inert.
-
-Conversely, a modeller who declares nothing can still get mechanism 2, because
-PGAS infers it (`detect_ivp_mappings`) by nudging each estimated parameter and
-asking whether a **rounded** initial count moved. Nobody asked for it and
-nothing reports it as a modelling choice.
+**`ic_free` + plain `pmmh` is a live silent-wrong answer.** `validate_ic_free`
+admits it (`methods.rs:588`) and `runner.rs:482` accepts an `ivp = true`
+declaration as proof of per-particle spread — but the bootstrap PF copies one
+deterministic initial state to every particle (`particle_filter.rs:129-133`), so
+the spread the guard checks for never exists and `ic_free` degenerates to
+dropping y₁, exactly as that guard's own comment warns (gh#732).
 
 ## Design
 
-### Types
-
-Replace the inferred boolean with a declared distribution, per parameter.
+### The spec is per compartment
 
 ```rust
-/// The law the initial compartment count follows, given θ.
-///
-/// Declared per estimated parameter; never inferred. `Deterministic` is the
-/// default and adds no term to the complete-data likelihood.
-pub enum InitialStateLaw {
-    /// `x₀[c] = round(f(θ))`. No density term; θ is estimated through the
-    /// trajectory density alone.
-    Deterministic,
-    /// `x₀[c] ~ Binomial(N_patch, θ)`. Requires `ParamKind::Probability`.
-    /// The estimand is an initial *prevalence*.
-    Binomial,
-    /// `x₀[c] ~ Poisson(θ)`. Requires `ParamKind::Count` or `Positive`.
-    /// The estimand is an initial *count* — an introduction size.
-    Poisson,
+/// What one compartment's initial value is.
+pub enum InitSpec {
+    /// `S = N0 - I`. May reference parameters AND other compartments.
+    Deterministic(Expr),
+    /// `I ~ poisson(rate = I0)`. Integer compartments only.
+    Count(InitCountLaw),
+    /// A real compartment drawn from a continuous law.
+    Real(InitRealLaw),
 }
 
-/// Which compartment an initial-state law attaches to, and under which law.
-/// Replaces `IVPMapping`.
-pub struct InitialStateDensity {
-    pub param_idx: usize,
-    pub model_param_idx: usize,
-    pub compartment_idx: usize,
-    pub law: InitialStateLaw,
-}
+/// Ordered: init entries are evaluated in dependency order, and the order is
+/// part of the model's identity.
+pub struct InitialConditions(pub IndexMap<String, InitSpec>);
 ```
 
-`EstimatedParam` carries the declaration and loses the overloaded name:
+`Explicit` and `Parameterized` both collapse into `Deterministic`; constant
+folding becomes a `CompiledModel` build detail rather than an IR-visible
+variant. `FromDistribution` is **deleted**, not retyped — it has been present
+since the first IR commit (`076e8397`), has no producer in either language
+(`expander.ml` emits only the other two), and is typed
+`HashMap<String, PriorDist>` against a vocabulary with no discrete laws, so it
+could never have expressed a count seed.
+
+### The law vocabulary reuses the argument structs, not the enum
 
 ```rust
-pub struct EstimatedParam {
-    // …
-    /// IF2 only: perturb at t = 0 and not thereafter. Was `ivp`.
-    pub perturb_only_at_t0: bool,
-    /// The initial-state law this parameter carries. `Deterministic` unless
-    /// declared. Read by PGAS/PMMH; ignored by IF2, which has no
-    /// complete-data likelihood to add it to.
-    pub initial_state: InitialStateLaw,
+pub enum InitCountLaw {              // CompartmentKind::Integer
+    Poisson(PoissonLikelihood),         // { rate: Diffable }
+    Binomial(BinomialLikelihood),       // { n: Expr (θ-independent), p: Diffable }
+    NegBinomial(NegBinomialLikelihood), // { mean: Diffable, dispersion: Diffable }
+}
+pub enum InitRealLaw {               // CompartmentKind::Real
+    Normal(NormalLikelihood),
 }
 ```
 
-`LogLikComponents.ivp` becomes `initial_state`, and gains a trace column
-(`initial_state_ll`) next to `transition_ll` and `obs_ll`. A constant component
-of the target that can only be recovered as
-`log_complete_data_ll − transition_ll − obs_ll` is how gh#719 took a
-trace-forensics pass to find.
+Reusing the `Likelihood` _enum_ would admit `Bernoulli`, `Beta` and
+`ZeroInflatedNegBinomial` on an integer compartment — illegal states, made
+representable. Reusing its _structs_ keeps what matters: `Diffable` carries the
+expression together with its per-parameter classified gradient from the OCaml
+obs-gradient autodiff pass (`observation.rs:60-73`), which is the mechanism that
+makes a new law's gradient correct by construction rather than by hand.
+`BinomialLikelihood.n` is already sealed `#[differentiate(skip)]` with "must be
+θ-independent"; importing that seal turns a silently-dropped `∂N/∂θ` into a
+compile-time refusal.
 
-### Surface
+`CompartmentKind` selects the admissible set at construction, so a continuous
+law on an integer compartment does not compile.
 
-```toml
-[estimate]
-# an introduction size we believe as a count
-I0 = { start = 550.0, bounds = [2.5, 4100.0], initial_state = "poisson" }
-# an initial prevalence
-p0 = { start = 3e-5, bounds = [1e-6, 1e-3], initial_state = "binomial" }
-# ordinary: absent means Deterministic
-r_eff = { start = 1.2, bounds = [0.5, 3.0] }
+`NegBinomial` ships in v1 rather than later. Introduction counts are clustered
+rather than Poisson (Lloyd-Smith, Schreiber, Kopp & Getz 2005, _Nature_
+438:355–359, doi:10.1038/nature04153 — offspring dispersion `k ≈ 0.16` for
+SARS), and `NegBinomial` contains Poisson as `k → ∞`. Shipping Poisson alone
+would be the special case presented as the general one.
+
+### Syntax
+
+```camdl
+init {
+  I ~ poisson(rate = I0)
+  S = N0 - I               # reads the DRAWN value
+}
 ```
 
-`ivp` stays spelled `ivp` at the user surface. It is pomp's word, modellers
-arriving from pomp look for it, and renaming a user-facing key to fix an
-_internal_ collision would be paying the wrong party. The collision is resolved
-by giving mechanism 2 its own name — `initial_state` — and by renaming the
-internal types, which no user reads.
+`~` already means "is distributed as" in two grammar positions — parameter
+priors (`parser.mly:429/437/445/453`) and observation likelihoods
+(`parser.mly:877`, `scored ~ obs_likelihood`), both parsed as `funcall(kwargs)`.
+Extending `init_entry` (`parser.mly:1333`) is the third consistent use, and
+`obs_likelihood` is reusable verbatim.
 
-### Why Poisson for the count case
+**Measured, not assumed:** adding `comp [idx] ~ obs_likelihood` and
+`comp idxs ~ obs_likelihood` to `init_entry` and running
+`menhir --explain --strict` gives 1 shift/reduce and 2 reduce/reduce — identical
+to the unmodified grammar, one state renumbered. The decision point is a single
+terminal (`EQ` vs `TILDE`) after a shared prefix.
 
-This is the case the current code cannot express, and it is the common one: an
-outbreak seeded by a known or estimated number of introductions. Binomial is the
-wrong shape for it — it needs a denominator `N_patch` that carries no meaning
-for a seed count, and it caps the seed at the patch population. Poisson needs no
-denominator, has no upper bound, and is the `N → ∞, Np → λ` limit of exactly the
-Binomial the current code writes. A modeller who knows "about three people were
-infectious at t₀" is describing a Poisson mean, not a binomial proportion.
+`=` keeps its present meaning exactly. The two forms then carry the distinction
+that matters — deterministic versus stochastic — visible in the model file, with
+no default to forget.
 
-### Resolution of the fraction-versus-count question
+### Dependency-ordered evaluation
 
-**Both, declared, never inferred.** The two parameterisations are not
-alternatives to choose between globally — they answer different questions, and
-which one applies is a property of the parameter, not of the model or the
-backend. A model may reasonably carry one of each.
+Init entries form a DAG over compartment references. Build it from each RHS's
+`Expr::Pop` set, topologically sort, and evaluate against the **partially
+built** state rather than a zero state. A cycle is a compile error naming the
+cycle.
 
-### Capability gate
+This is what makes the population budget hold without a `balance {}` block:
+`I ~ poisson(rate = I0)` is drawn, then `S = N0 - I` reads the drawn value, so
+the total is `N0` by construction rather than by a balance rewrite. It is also
+the fix for gh#733 — the same change, and the reason to do them together.
 
-`ivp = true` under `algorithm = pgas` or `pmmh` becomes a **hard error at config
-load**, naming the flag, the algorithm, and the fix: it is an IF2 perturbation
-schedule and those algorithms have none. Routed through axis 3 alongside the
-existing `requires_priors` and hierarchical-prior checks (`config_v2.rs`,
-`pgas.rs`), which is where a config-key × algorithm rejection belongs.
+No golden references a compartment in an init RHS (a walk over all 52
+`ocaml/golden/*.ir.json` matching `{"pop": "<name>"}` inside
+`initial_conditions` returns zero files), so nothing depends on the zero-state
+behaviour.
 
-`initial_state = "binomial" | "poisson"` under `algorithm = if2` is likewise a
-hard error: IF2 has no complete-data likelihood to add a density term to.
+### A law on a `balance {}` target is a compile error
 
-Kind mismatches (`binomial` on a `count`, `poisson` on a `probability`) are
-config-load errors naming the parameter, its declared kind, and the law it was
-given.
+The balance stage overwrites its target after every substep
+(`lifecycle.rs:71-82`), so a draw there is discarded. Three sites already know
+this by hand — the IVP detector skips it (`pgas.rs`), `csmc_as` recomputes it
+(`pgas.rs:2166`), `lifecycle.rs:91` exempts it from the negativity check. It
+becomes one validate-time rule with an E-code.
 
-### Removal
+While there: `csmc_as` hardcodes `total_pop − Σothers` where `lifecycle.rs:75`
+evaluates the declared `bal.expr`. Any model whose balance expression is not
+exactly that gets two different initial states from the two paths. `csmc_as`
+adopts the declared expression.
 
-`detect_ivp_mappings` and `PROBE_STEP` are deleted. Nothing infers an
-initial-state law.
+### The seam: one initial-state producer, four questions
 
-## Modeller UX risks, and what each is worth
+`CompiledModel::initial_state` is a deterministic producer with ~18 call sites
+(three forward backends, the bootstrap PF, the correlated PF, IF2's per-particle
+loop, the ODE sensitivity seed). It splits:
 
-1. **An opt-in declaration is easy to forget.** A modeller who wants a
-   stochastic seed and omits `initial_state` silently gets a deterministic one.
-   This is the main risk of the design and it is not fully removable —
-   mitigation is that the fit pre-flight always prints one line per estimated
-   parameter carrying a non-deterministic law, and prints "all initial
-   conditions deterministic" when none does. Silence must never be ambiguous
-   between "not declared" and "not supported".
+```rust
+fn initial_state_mean(&self, params) -> (IntState, RealState)        // ODE, render, preflight
+fn initial_state_draw(&self, params, rng) -> (IntState, RealState)   // every stochastic forward path
+fn initial_state_logpdf(&self, x0, params) -> f64                    // PGAS complete-data term
+fn initial_state_logpdf_grad(&self, x0, params) -> Vec<f64>          // PGAS + NUTS
+```
 
-2. **The word `ivp` will keep misleading people** as long as it means only the
-   IF2 schedule while looking like it means initial-value estimation generally.
-   The hard error under PGAS/PMMH converts that from a silent no-op into a
-   message that teaches the distinction at the moment it matters.
+A law is a sampler _and_ a density _and_ a gradient. Today three sites hardcode
+Binomial independently (`pgas.rs:2154` sampler, `pgas.rs:1237` density,
+`pgas_grad.rs:454` gradient); adding a law to one and not the others gives NUTS
+a gradient identically zero on that coordinate — the silent-bias class camdl
+already hard-rejects for parametric `DerivedExpr` projections. The split makes
+that structural. `poisson_logpmf` (`obs_loglik.rs:445`), its gradient
+(`obs_loglik.rs:171`) and `StatefulRng::poisson` (`rng.rs:119`) already exist.
 
-3. **Migration is a no-op for correct models.** A model whose initial-state
-   parameter is `probability`-kinded and currently auto-detected must add
-   `initial_state = "binomial"` to keep the term. Nothing else changes. Across
-   the ebola corpus — 542 stored chains, 75 fits — **zero** fits carried a
-   correct initial-state fraction, so nothing there regresses; the parameters
-   that did enter the path were `I0` (`count`) and `tau`/`gamma`/`omega_base`
-   (`rate`), all of which the interim kind guard already excludes.
+With `initial_state_draw` in place, the bootstrap PF draws per-particle initial
+states, and gh#732 closes as a consequence rather than as a patch.
 
-4. **Deterministic is a real choice, not a degradation.** It is what 530 of
-   those 542 chains ran, and those are the fits that produced usable posteriors.
-   The docs must say so, or modellers will read the default as "off" and add a
-   law they do not need.
+### `ivp` is renamed and gated
+
+`EstimatedParam.ivp` → `perturb_only_at_t0`, at the user surface too. Keeping
+pomp's word costs more than it saves: a pomp user reads `ivp()` as "this is an
+initial-value parameter", which in pomp is simultaneously a schedule statement
+and a modelling statement because pomp's `rinit` is where `i_0` lives. camdl
+splits those and would be keeping the word for only the schedule half.
+(`capabilities-system.md` already records `ivp` as "a fit-layer concept, not an
+IR property".) Under the alpha posture this is one renamed TOML key.
+
+It becomes a hard error under every algorithm with no perturbation schedule
+(`pgas`, `pmmh`, `mh`, `nl-*`), routed through axis 3 beside the existing
+`requires_priors` and hierarchical-prior checks — **after** `runner.rs:482`'s
+`ic_free` precondition is re-expressed as what it actually needs (per-particle
+spread at t=0), which today only IF2 delivers. Gating the flag before fixing the
+precondition would make the `ic_free` + `pmmh` cell unsatisfiable rather than
+correct.
+
+## Out of scope, with reasons
+
+**Zero-truncation.** Poisson and Binomial both put mass on `x₀ = 0`, which makes
+the outbreak impossible and the observation likelihood `−∞`; under CSMC those
+particles are dead weight. Conditioning on "an outbreak was observed" is a
+zero-truncated law. Deferred to a follow-up issue rather than guessed at,
+because whether to condition is a modelling choice and the right default is not
+obvious.
+
+**Joint seeds.** Because init expands per cell before emission
+(`expander.ml:6118-6153`), `I[p in patch] ~ poisson(rate = λ)` means
+_independent_ draws per patch. "One introduction, location unknown" is
+Multinomial over cells and is not expressible. `simplex_groups` (`if2.rs:59`) is
+the existing surface for an initial composition and is where that belongs; a
+follow-up issue.
 
 ## Staging
 
-1. Rename internals (`ivp` → `perturb_only_at_t0`, `IVPMapping` →
-   `InitialStateDensity`, `LogLikComponents.ivp` → `initial_state`); add the
-   `initial_state_ll` trace column. Behaviour-neutral.
-2. Add `InitialStateLaw` + the `initial_state` config key, honoured for
-   `Binomial`. Keep detection as a deprecated fallback that warns when it fires
-   and names the declaration that would replace it.
-3. Add `Poisson`.
-4. Delete detection and `PROBE_STEP`; add the axis-3 gates.
+1. **gh#733 alone**: `IndexMap`, dependency order, cycle error, partial-state
+   evaluation. `Explicit`/`Parameterized` collapse to `Deterministic`. IR bump.
+2. **The law types + `~` grammar**, `Deterministic` still the only reachable
+   spec for existing models. Goldens regenerate once more with the new
+   `InitSpec` shape.
+3. **The `initial_state` split** (mean/draw/logpdf/logpdf_grad), all call sites.
+   Behaviour-neutral for deterministic models.
+4. **Wire the laws** through sampler/density/gradient; delete
+   `detect_ivp_mappings` and `PROBE_STEP`; balance-target E-code.
+5. **gh#732 + the rename + the axis-3 gates.**
 
-Steps 1 and 4 are the ones that move stored output: 1 renames a trace column and
-4 removes an auto-applied likelihood term. Both re-key. Land 1 and 2 together,
-then 3 and 4 together, rather than four separate invalidations.
+Steps 1 and 2 each bump `ir/VERSION`. Land them adjacently so the goldens
+regenerate twice rather than five times.
 
-## What is already done
+Stored runs are _already_ invalidated by any commit — `FitDigest.engine` folds
+`VERSION_SHORT`, which includes the git hash (`cli/src/version.rs:12`), so
+grouping saves nothing in the run store. What steps 4 and 5 invalidate is
+**scientific**: a fit computed with an auto-applied initial-state term is not
+comparable with one computed without it. That is the sentence to put in the
+release notes.
 
-The interim safety fix is on `main` at `c988b91b`: only a
-`ParamKind::Probability` parameter may enter the Binomial term. That removes the
-`-4.2e8` class and makes detection deterministic in the chain's start, without
-deciding anything this proposal decides. It is not a substitute for the design —
-detection is still an inference where a declaration belongs — but it means the
-design is not urgent.
+## Already landed
+
+`c988b91b` — only a `ParamKind::Probability` parameter may enter the existing
+Binomial term. This removes the `−4.2 × 10⁸` class and makes the probe's outcome
+deterministic in the chain's start, so nothing here is urgent. It is not a
+substitute: detection remains an inference where a declaration belongs.
