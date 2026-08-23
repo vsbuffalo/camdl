@@ -67,9 +67,9 @@ fn ancestor_weight_includes_importance_weight() {
     free_state[big] += 50;
 
     let n = 2usize;
-    let j_ref = n - 1;
-    // Index 0 = free particle's pre-resample state; index 1 (= j_ref) is unused
-    // by the helper (the reference slot reads `ref_counts_before` instead).
+    // Index 0 = the free particle's pre-resample state; index 1 = the reference
+    // slot's, which on a sweep with no accepted splice is its recorded
+    // `counts_before`. Every slot is scored at its own entry.
     let prev_counts_for_ancestor = vec![free_state.clone(), ref_counts_before.clone()];
 
     // Sharply NON-UNIFORM incoming weights, as after an observation. If these
@@ -106,7 +106,6 @@ fn ancestor_weight_includes_importance_weight() {
         &mut anc,
         &compiled,
         &prev_counts_for_ancestor,
-        &ref_counts_before,
         &rec.flows,
         &rec.gammas,
         &log_weights,
@@ -114,7 +113,6 @@ fn ancestor_weight_includes_importance_weight() {
         t,
         dt,
         None,
-        j_ref,
     )
     .expect("fill_ancestor_log_weights");
 

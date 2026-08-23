@@ -1877,8 +1877,15 @@ pub fn splice_log_ratio(
 /// of the *same* original slot `j` (the resample never reshuffles `log_weights`).
 /// Dropping it biases the draw whenever the incoming weights are non-uniform
 /// (every substep following an observation) and forfeits the Theorem-1 invariance
-/// of the PGAS kernel. The reference slot `j_ref` uses its own corrected
-/// `ref_counts_before` with its own `log_weights[j_ref]`.
+/// of the PGAS kernel.
+///
+/// Every slot is scored at its OWN entry in that snapshot, the reference's
+/// included. The reference slot used to be passed separately as
+/// `ref_counts_before`; the call site passed `prev_counts[j_ref]`, which IS
+/// `prev_counts_for_ancestor[j_ref]`, so the branch selected a different buffer
+/// holding the same values. The name outlived the fact — it read as "the
+/// reference's RECORDED pre-state" long after a splice could re-anchor the slot
+/// away from it.
 ///
 /// Extracted from [`csmc_as`] and made `pub` so this weight — the quantity the
 /// invariance proof hinges on — is unit-testable in isolation.
@@ -1887,7 +1894,6 @@ pub fn fill_ancestor_log_weights(
     ancestor_log_w: &mut [f64],
     model: &CompiledModel,
     prev_counts_for_ancestor: &[Vec<i64>],
-    ref_counts_before: &[i64],
     ref_flows: &[u64],
     ref_gammas: &[f64],
     log_weights: &[f64],
@@ -1895,7 +1901,6 @@ pub fn fill_ancestor_log_weights(
     t: f64,
     step_dt: f64,
     per_eval: Option<&[f64]>,
-    j_ref: usize,
 ) -> Result<(), SimError> {
     // Parallel (gh#209): each slot is an independent transition-density eval over
     // a read-only state; the categorical draw in `csmc_as` reads the buffer only
@@ -1904,15 +1909,10 @@ pub fn fill_ancestor_log_weights(
         .par_iter_mut()
         .enumerate()
         .map(|(j, slot)| {
-            // gh#audit-H8: ancestor states are the pre-resample ensemble; the
-            // reference slot uses its own corrected counts_before.
-            let counts_before = if j == j_ref {
-                ref_counts_before
-            } else {
-                &prev_counts_for_ancestor[j]
-            };
+            // gh#audit-H8: ancestor states are the pre-resample ensemble.
             let td = log_transition_density_substep(
-                model, counts_before, ref_flows, ref_gammas, params, t, step_dt, per_eval,
+                model, &prev_counts_for_ancestor[j], ref_flows, ref_gammas, params, t, step_dt,
+                per_eval,
             )?;
             // Eq (17): log w̃_j = log w_{s-1}^j + log f_θ(x'_s | x_{s-1}^j).
             *slot = log_weights[j] + td;
@@ -2213,7 +2213,6 @@ pub fn csmc_as(
                 &mut ancestor_log_w,
                 model,
                 &prev_counts_for_ancestor,
-                &prev_counts[j_ref],
                 &ref_rec.flows,
                 &ref_rec.gammas,
                 &log_weights,
@@ -2221,7 +2220,6 @@ pub fn csmc_as(
                 t,
                 step_dt,
                 per_eval,
-                j_ref,
             )?;
 
             // gh#607: refuse a candidate whose splice would shift the reference's
