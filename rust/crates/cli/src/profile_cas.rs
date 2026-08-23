@@ -22,7 +22,7 @@ use runid::inputs::{
 };
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
-use crate::fit::cas::{digest_value, ensure_finite};
+use crate::fit::cas::digest_value;
 
 /// A fully-resolved profile-point leaf: the five factored levels (in path
 /// order) and the leaf `run_id` composed from their hashes.
@@ -70,10 +70,14 @@ use crate::fit::cas::{data_digests, level};
 /// Resolve a profile-point leaf's identity: the five factored levels and the
 /// `run_id` derived from their hashes.
 pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoint, String> {
-    // Reject non-finite floats before hashing — the JSON serializer would
-    // silently null them (a collision), same gate as the fit-stage path.
-    ensure_finite(ctx.base_config)?;
-    ensure_finite(ctx.method_config)?;
+    // NOTE: `base_config` / `method_config` arrive as already-built
+    // `serde_json::Value`s, and `json!` has by then collapsed any NaN/Inf to
+    // `Null` — so a finiteness gate HERE cannot see a non-finite (the
+    // 2026-08-23 audit found the previous gate at this point vacuous). The
+    // caller gates the raw floats before building the blobs
+    // (`profile.rs`, `ensure_finite(&(cooling, dt, pmmh_rho_opt))`). When
+    // these blobs migrate onto `canonical_config_hash` (proposal §I2) the
+    // gate moves inside that helper and this note goes away.
 
     // Canonicalize the sweep grid: axes sorted by name, values ascending, so
     // the identity depends only on the *set* of cells, not `--sweep` order.

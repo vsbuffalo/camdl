@@ -68,6 +68,10 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
     let mut fixed_sorted: Vec<(&str, f64)> =
         ctx.fixed.iter().map(|(n, v)| (n.as_str(), *v)).collect();
     fixed_sorted.sort_by(|a, b| a.0.cmp(b.0));
+    // Gate the RAW floats: `json!` collapses NaN/Inf to `Null`, so a check on
+    // the built blob can never fire and NaN vs Inf would hash alike
+    // (2026-08-23 audit).
+    ensure_finite(&fixed_sorted)?;
     let config_blob = serde_json::json!({
         "eval_method": ctx.eval_method,
         "eval_particles": ctx.eval_particles,
@@ -76,17 +80,17 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
         "fixed": fixed_sorted,
         "scenario": ctx.scenario,
     });
-    ensure_finite(&config_blob)?;
 
     // box level — the LHS sampling spec.
     let mut bounds_sorted: Vec<(&str, f64, f64)> =
         ctx.bounds.iter().map(|(n, lo, hi)| (n.as_str(), *lo, *hi)).collect();
     bounds_sorted.sort_by(|a, b| a.0.cmp(b.0));
+    // Same: the LHS bounds are floats, gated before the blob is built.
+    ensure_finite(&bounds_sorted)?;
     let box_blob = serde_json::json!({
         "bounds": bounds_sorted,
         "n_points": ctx.n_points,
     });
-    ensure_finite(&box_blob)?;
 
     let model_digest = ModelDigest::from_model(
         ctx.model,

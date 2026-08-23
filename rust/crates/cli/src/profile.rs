@@ -1088,6 +1088,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         "fit_toml":    fit_toml_hash,
         "priors":      priors_blob,
     });
+    // Gate the RAW floats before `json!` sees them: the macro collapses
+    // NaN/Inf to `Null`, so `resolve_profile_point`'s gate on the built blob
+    // could never fire and NaN vs Inf would hash alike (2026-08-23 audit).
+    // These three are the only floats in either blob.
+    if let Err(e) = crate::fit::cas::ensure_finite(&(cooling, dt, pmmh_rho_opt)) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
     let method_config_blob = serde_json::json!({
         "algorithm": algorithm,
         "if2": { "particles": n_particles, "iterations": n_iterations,
