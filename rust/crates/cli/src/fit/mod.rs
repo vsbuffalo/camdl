@@ -1015,7 +1015,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
 
         // ── CAS identity + claim ──
-        let ordinal = config.stages.get_index_of(*stage_name).map(|i| i + 1).unwrap_or(0);
+        // sweep_config is the authoritative document inside the sweep loop;
+        // reading `config` here was correct only because a sweep never adds
+        // or removes stages.
+        let ordinal = sweep_config.stages.get_index_of(*stage_name).map(|i| i + 1).unwrap_or(0);
         let ctx = cas::FitStageCtx {
             model: &model,
             fit_stem: &fit_stem,
