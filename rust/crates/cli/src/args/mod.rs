@@ -992,7 +992,11 @@ pub struct FitRunArgs {
     /// every ODE inference stage — nl-sbplx, nl-bobyqa, and mh
     /// (deterministic likelihood). Use this for CI smoke fits or
     /// known-converged-dt rerenders where the audit cost is unwelcome.
-    #[arg(long)]
+    /// Requires --stage: the dt-check result is stored in the leaf, so
+    /// the override is keyed into that stage's identity (gh#540 seam).
+    /// Refused on mh/nl-* stages until they grow a dt_check TOML field
+    /// (gh#726).
+    #[arg(long, requires = "stage")]
     pub no_dt_check: bool,
 
     /// Drop the dt-check warning threshold to the strict default
@@ -1006,8 +1010,11 @@ pub struct FitRunArgs {
     /// Override `n_halvings` on the dt-check (gh#52). Default 2
     /// (evaluates at dt_fit, dt_fit/2, dt_fit/4 — 7× the
     /// loglik-eval cost). Use 3 for ambiguous cases at 15×.
-    /// Requires --stage when running in fit run.
-    #[arg(long, value_name = "N")]
+    /// Requires --stage: the ladder result is stored in the leaf, so
+    /// the override is keyed into that stage's identity (gh#540 seam).
+    /// Refused on mh/nl-* stages until they grow a dt_check TOML field
+    /// (gh#726).
+    #[arg(long, value_name = "N", requires = "stage")]
     pub dt_check_halvings: Option<usize>,
 
     // ── IF2-specific algorithm overrides (require --stage) ───────────
