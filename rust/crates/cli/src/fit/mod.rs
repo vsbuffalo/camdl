@@ -1669,7 +1669,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &stage_dir,
                     pmmh_opts,
                     seed, force,
-                    /* check_variance */ false,
                     a.resume.is_some(),
                     effective_starts.as_deref(),
                     // PMMH's dt-check is the PF-based one wired on the IF2 path.
@@ -1712,7 +1711,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &stage_dir,
                     pmmh_opts,
                     seed, force,
-                    /* check_variance */ false,
                     a.resume.is_some(),
                     effective_starts.as_deref(),
                     Some((mh_dt_check, a.dt_check_strict)),
