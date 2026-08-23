@@ -540,24 +540,54 @@ conditional draw is just `n−1` independent picks, and defect 1 cannot occur by
 construction. The defect-1 fix (`55178dd1`) would be _revised_, not extended,
 and the Algorithm 4 implementation deleted.
 
-**One claim from the review is left explicitly unresolved.** Their §8 argues
-that conditional systematic resampling combined with ancestor sampling is
-invalid even on substeps that do resample. We could not settle it. The TRAP
-fixture cannot test it — both its substeps have equal incoming weights, so
-"suppress ancestor sampling where resampling was skipped" suppresses _all_
-ancestor sampling there and is simply the control arm in disguise. The only
-evidence either way is the DENSE and SPARSE runs, where ancestor sampling ran on
-genuinely unequal weights with conditional systematic resampling and measured
-clean (z = 1.16 and −0.36). That is moderate evidence against §8 and nothing
-more.
+**The one claim we left open is now settled, and the review was right.** Their
+§8 argued that conditional _systematic_ resampling is invalid in combination
+with ancestor sampling even on substeps that do resample. We recorded it as
+unresolved and said our DENSE and SPARSE runs were "moderate evidence against
+it". **Both of those statements were wrong.**
 
-**The chosen fix deliberately does not depend on the answer.** Option 2 uses
-multinomial resampling wherever ancestor sampling runs, so the question of
-whether systematic resampling can coexist with ancestor sampling never arises.
-It is recorded here as open, not as settled in our favour, and should not be
-cited in either direction.
+_The evidence was not moderate; it was absent._ The goodness-of-fit statistic
+scales as `z ≈ M·D / sqrt(2·df)` for a divergence `D`, so at fixed `D` it falls
+as `1/sqrt(df)` — and DENSE has 1,956 scored bins against TRAP's 126, a 15×
+difference nobody costed. Comparing raw `z` across fixtures was the error. A
+defect of exactly TRAP's measured size would have registered on DENSE at **z =
+0.60**. DENSE had 0.6σ of power against the question it was being cited to
+answer, and SPARSE had less. This is the same shape of mistake as reading
+SPARSE's clean result as refuting the review: a property of the fixture's
+geometry that was not accounted for.
 
----
+_And the defect is real, measured exactly._ Enumerating the resampling law
+directly — no model, no Monte Carlo — the ancestry `csmc_as` realises under
+conditional systematic resampling differs from the target's by a total variation
+of 0.30 to 0.80, and **33–75% of its mass sits on ancestries the target gives
+density exactly zero.** Systematic resampling pins each particle's offspring
+count to `floor(N·W)` or `floor(N·W)+1` and emits them in cyclic order, so given
+the other slots only one or two values of the reference's ancestor are
+admissible at all; ancestor sampling proposes over all `N`. That is a support
+violation, and no reweighting of an accept/reject ratio repairs one. On a
+near-uniform weight vector the reference's history is erased from the ensemble
+on 81% of steps where the target says 5% — defect 1's pathology reappearing on
+substeps that _do_ resample.
+
+The identical comparison under multinomial returns machine zero (≤ 6e−15), which
+is what makes this a statement about systematic resampling rather than about our
+algebra.
+
+**So multinomial was not a way of sidestepping the question. It was the
+answer.** Chopin & Singh say as much, in §5.3: the label dependence induced by
+"particularly systematic resampling … makes it more difficult to update one
+single component of this vector", and updating one single component is exactly
+what ancestor sampling does. They add that adapting ancestor sampling to those
+schemes is "straightforward" but give no algorithm and call the mixing gains
+"deserv[ing] further investigation".
+
+_If anyone later wants systematic's lower variance back_, the adaptation is to
+draw the reference's ancestor **before** the free block rather than overwriting
+it after: AS-draw `A^r = j` from the unchanged Eq.-(17) weight, then draw the
+free ancestry from `ρ_W(· | A^r = j)`. This costs nothing structurally in camdl
+— the ancestor-sampling block reads only pre-resample snapshots and the incoming
+weights, never anything propagation produces, so it can be hoisted above the
+resample unchanged.
 
 ### The chosen fix, and the condition it must be gated on
 
