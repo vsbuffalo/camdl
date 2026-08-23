@@ -176,11 +176,11 @@ fn a_prevalence_only_model_has_no_interval_accumulator() {
 /// either a regression or an intended change to the draw order — never
 /// something to re-baseline without deciding which.
 ///
-/// These values were RE-CAPTURED for gh#718. They previously pinned the
-/// trajectory measured just before the interval-accumulator re-sync landed, and
-/// that comparison is no longer available: gh#718 replaced the conditional
-/// resampling (`conditional_systematic_resample`), which moves every CSMC draw
-/// on every model. The claim this test still carries — that the re-sync is
+/// These values were RE-CAPTURED for gh#718, twice: once when the conditional
+/// resampling was replaced, and again when ancestor sampling was gated on
+/// `did_resample`. Each moves every CSMC draw on every model, so the original
+/// comparison — against the trajectory measured just before the
+/// interval-accumulator re-sync landed — is no longer reachable. The claim this test still carries — that the re-sync is
 /// inert on a prevalence-only model — rests on check (1) above, which proves it
 /// at the seam rather than by comparison to a historical constant.
 ///
@@ -188,13 +188,20 @@ fn a_prevalence_only_model_has_no_interval_accumulator() {
 /// accepted-splice count is asserted below from the diagnostics rather than
 /// quoted from a one-off instrumentation run, so it cannot silently fall to
 /// zero.
+///
+/// That count dropped from 83 to 13 across these four sweeps when the gh#718
+/// defect-2 gate landed, and the drop is entirely in the OPPORTUNITIES, not the
+/// acceptance rate: this fixture observes weekly over 80 substeps, so ancestor
+/// sampling now runs at the 11 substeps that draw an ancestry rather than all
+/// 80. Acceptance held at roughly 26-30% on both sides. That is the mixing cost
+/// of the fix, visible here as a number.
 #[test]
 fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() {
     const EXPECTED: [u64; 4] = [
-        0x97e10084d77ac732,
-        0x172214c07211dd7d,
-        0x8ee0eff521842a76,
-        0x310aeb5580259e32,
+        0xd4d5422fbf955f37,
+        0xe97d0fdbf1045872,
+        0xd5b34daeea94f9ac,
+        0x6f6c490434371607,
     ];
     let f = fixture();
     let mut accepted = 0usize;
@@ -219,10 +226,12 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
         })
         .collect();
     assert!(
-        accepted > 20,
+        accepted > 5,
         "only {accepted} splices accepted over 4 sweeps — the re-sync branch this \
          test exercises is behind `ref_ancestor != j_ref`, so the digest would be \
-         pinning a path that never runs"
+         pinning a path that never runs. Expect ~13 for this fixture; a fall to 0 \
+         means ancestor sampling is gated off everywhere, not just where no \
+         ancestry was drawn."
     );
     assert_eq!(
         got,
