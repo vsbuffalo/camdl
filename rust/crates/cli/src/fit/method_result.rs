@@ -104,7 +104,8 @@ pub struct EssSummary {
 
 /// Posterior convergence + efficiency diagnostics, shared by every Bayesian
 /// sampler (PGAS, PMMH, mh, NUTS). Every sampler computes these the same way
-/// — per-param R̂ and Geyer ESS via [`crate::fit::runner::compute_rhat_ess`]
+/// — per-param rank-normalized R̂ and bulk/tail ESS via
+/// [`crate::fit::runner::compute_rhat_ess`]
 /// — and every renderer reads the same accessors below. Adding a new Bayesian
 /// method means *filling this struct*, not re-deriving efficiency metrics per
 /// method (the divergence that let a per-method allowlist drop `mh`, and that
@@ -608,11 +609,17 @@ pub enum MaxRhat {
 
 /// The min-over-parameters ESS, or the reason there isn't one.
 ///
-/// Pooled (across-chain) ESS is deliberately suppressed for a parameter whose
-/// chains disagree: [`compute_rhat_ess`](crate::fit::runner::compute_rhat_ess)
-/// sets `ess_total` to NaN when R̂ > 1.1, because under multi-modality the sum
-/// of per-chain ESS overstates the effective N for the *joint* posterior
-/// (IM12). Those parameters then reach [`PosteriorDiagnostics`] in one of two
+/// Bulk ESS is the rank-normalized cross-chain statistic of Vehtari et al.
+/// (2021). It is never suppressed by R̂: it uses the between-chain variance
+/// rather than summing per-chain estimates, so it does not overstate the
+/// effective N when chains sit in different modes, and there is nothing to
+/// gate. (The previous `ess_total` — a sum of per-chain Geyer estimates set to
+/// NaN above R̂ 1.1 — was removed in gh#299 precisely because it reported
+/// nothing exactly when a fit most needed a number.)
+///
+/// A parameter can still carry no bulk ESS: `rank_convergence` refused its
+/// draws, or the rank-transformed draws are constant so the autocorrelation is
+/// undefined. Those parameters reach [`PosteriorDiagnostics`] in one of two
 /// encodings: **absent** on the loaded path (a NaN serializes to JSON `null`,
 /// which `read_f64_map` drops) or **NaN-valued** on the `--exclude-chains`
 /// recompute path (`chain_selection::recompute_subset_diagnostics`).
@@ -1898,11 +1905,11 @@ mod tests {
         }
     }
 
-    /// gh#687: a parameter whose chains disagree has its pooled ESS suppressed
-    /// (`compute_rhat_ess` → NaN → serialized as JSON `null` → dropped by
-    /// `read_f64_map`), so it reaches the map as an ABSENT key. The minimum
-    /// must not be taken over the parameters that survived — that is a minimum
-    /// over a subset, reported as if it bounded the whole posterior.
+    /// gh#687: a parameter can reach the map with no bulk ESS at all — a NaN
+    /// serializes to JSON `null` and `read_f64_map` drops it, so the key is
+    /// ABSENT. The minimum must not be taken over the parameters that survived
+    /// — that is a minimum over a subset, reported as if it bounded the whole
+    /// posterior, and it RISES as the fit gets worse.
     #[test]
     fn min_ess_is_undefined_when_an_assessed_param_reports_no_ess() {
         // rho was assessed (R̂ = 2.639) and reports no ESS; the other two did.

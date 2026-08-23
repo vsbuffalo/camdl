@@ -456,7 +456,8 @@ pub fn run_stage(
     Ok(())
 }
 
-/// Per-estimated-param R̂ + Geyer ESS from the chains' posterior draws, computed
+/// Per-estimated-param rank-normalized R̂ + bulk/tail ESS from the chains'
+/// posterior draws (plus the classic R̂ and the per-chain Geyer ESS), computed
 /// through the shared [`crate::fit::runner::compute_rhat_ess`] every Bayesian
 /// method routes through. `chain_samples[chain][draw][param]`, columns in
 /// `estimated_params` order. Mirrors PGAS's `compute_diagnostics`; the only

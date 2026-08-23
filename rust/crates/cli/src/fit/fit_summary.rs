@@ -1209,12 +1209,13 @@ impl Formatter {
             MinEss::Unreportable { missing, n_expected } => {
                 s.push_str("    ESS/iter = —   ESS/sec = —   (efficiency not reportable)\n");
                 s.push_str(&format!(
-                    "      {} of {} parameters have no pooled ESS — their chains disagree\n",
+                    "      {} of {} parameters report no bulk ESS — either the estimator\n",
                     missing.len(),
                     n_expected
                 ));
-                s.push_str("      (R̂ above the pooling threshold), so per-chain ESS cannot be\n");
-                s.push_str("      summed into an effective N for the joint posterior:\n");
+                s.push_str("      refused their draws outright, or the rank-transformed draws\n");
+                s.push_str("      are constant so the autocorrelation is undefined. Each says\n");
+                s.push_str("      which in the per-parameter table below:\n");
                 // Wrap the names to a readable width. The per-parameter table
                 // below marks them too, but a column of dashes reads as "not
                 // applicable"; the reader should not have to derive the list.
@@ -2765,9 +2766,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// gh#687: when a parameter's chains disagree its pooled ESS is suppressed,
-    /// and the minimum over the parameters that DID report rises as the fit gets
-    /// worse. The block must print no efficiency number at all in that state,
+    /// The withholding message described a mechanism gh#299 removed. It told
+    /// the reader their parameters had "no pooled ESS — their chains disagree
+    /// (R̂ above the pooling threshold), so per-chain ESS cannot be summed into
+    /// an effective N". None of that is how camdl computes ESS any more: bulk
+    /// ESS is the rank-normalized cross-chain statistic of Vehtari et al.
+    /// (2021), it uses the between-chain variance instead of summing per-chain
+    /// estimates, and no R̂ gate suppresses it. A reader who acted on that
+    /// sentence would go looking for a threshold that does not exist.
+    #[test]
+    fn the_withholding_message_does_not_describe_a_retired_mechanism() {
+        use std::collections::BTreeMap;
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let r = PgasStageResult {
+            diagnostics: PosteriorDiagnostics {
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
+                    BTreeMap::from([("a2".to_string(), 145.0)]),
+                    BTreeMap::new(),
+                ),
+                n_samples: 500,
+                thin: 1,
+                wall_time_secs: Some(11.8),
+                n_chains: 4,
+            },
+            posterior_mean: BTreeMap::from([("a2".to_string(), 0.5), ("tau".to_string(), 1.0)]),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            acceptance_per_param: BTreeMap::new(),
+        };
+        let out = fmt.bayesian_block(
+            "pgas", "pgas", no_traces, BayesianView::Pgas(&r), None,
+            crate::fit::loglik::LoglikType::CompleteData,
+        );
+        assert!(
+            !out.contains("pooling threshold"),
+            "no R̂ gate suppresses bulk ESS — gh#299 removed it:\n{out}"
+        );
+        assert!(
+            !out.contains("summed"),
+            "bulk ESS is not a sum of per-chain estimates; it uses the \
+             between-chain variance:\n{out}"
+        );
+        // It must still name the parameters that withhold the headline.
+        assert!(out.contains("tau"), "and must still name who withholds it:\n{out}");
+    }
+
+    /// gh#687: when a parameter reports no bulk ESS, the minimum over the
+    /// parameters that DID report rises as the fit gets worse. The block must
+    /// print no efficiency number at all in that state,
     /// and must name the parameters that withhold it — the blank is the
     /// diagnosis. The control leg (a complete map) proves the withholding is
     /// conditional, not a renderer that lost its numbers.
@@ -2778,8 +2826,8 @@ mod tests {
         let no_traces = std::path::Path::new("/nonexistent/stage_dir");
         let mk = |ess: BTreeMap<String, f64>| PgasStageResult {
             diagnostics: PosteriorDiagnostics {
-                // Both assessed across chains; `tau`'s R̂ is far above the
-                // pooling threshold, so it carries no pooled ESS.
+                // Both assessed across chains; `tau` carries no bulk ESS,
+                // the state this block has to withhold the headline for.
                 per_param: crate::fit::method_result::per_param_from_maps(
                     BTreeMap::from([("a2".to_string(), 1.01), ("tau".to_string(), 2.639)]),
                     ess,
@@ -2809,7 +2857,7 @@ mod tests {
         );
         assert!(out.contains("ESS/iter = —"), "the withheld metric is shown as a dash: {out}");
         assert!(
-            out.contains("1 of 2 parameters have no pooled ESS"),
+            out.contains("1 of 2 parameters report no bulk ESS"),
             "the count of parameters withholding the metric is stated: {out}"
         );
         assert!(
@@ -2899,7 +2947,7 @@ mod tests {
         // present-but-NaN form.
         let phi = row("phi");
         assert!(!phi.contains("NaN"),
-            "a suppressed ESS is a dash, never the literal NaN: {phi}");
+            "an absent ESS is a dash, never the literal NaN: {phi}");
         let a2 = row("a2");
         assert!(a2.contains("1.013"), "every assessed parameter carries its R̂: {a2}");
         assert!(a2.contains("145"), "every assessed parameter carries its ESS: {a2}");

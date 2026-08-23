@@ -101,7 +101,10 @@ pub struct TableRow {
     pub acceptance_rate: Option<f64>,
     /// Particle-filter ESS at θ̂. IF2 only.
     pub ess_at_mle: Option<EssSummary>,
-    /// Posterior chain ESS per parameter. PGAS / PMMH only.
+    /// Rank-normalized **bulk** ESS per parameter — the cross-chain statistic
+    /// of Vehtari et al. (2021), not a per-chain or summed one. Every Bayesian
+    /// stage fills it (PGAS, PMMH, mh, NUTS); `None` on a non-Bayesian stage.
+    /// Parameters with no bulk ESS are omitted rather than carrying a NaN.
     pub ess_posterior: Option<BTreeMap<String, f64>>,
     /// ESS/iteration — the algorithm-comparison metric: min-parameter ESS per raw
     /// sampling step (thinning-invariant, hardware-independent). PGAS / PMMH only.

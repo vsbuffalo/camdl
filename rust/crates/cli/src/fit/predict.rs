@@ -2670,10 +2670,10 @@ mod tests {
     }
 
     /// gh#691 / gh#687. A predictive band's `ess_min` must not be a minimum
-    /// over the parameters that happened to report one. A parameter whose
-    /// chains disagree has its pooled ESS suppressed — it serializes as JSON
-    /// `null` and drops out of the map — so a `min` that skips it is a minimum
-    /// over the CONVERGED SUBSET, and it RISES as the fit gets worse: the
+    /// over the parameters that happened to report one. A parameter with no
+    /// bulk ESS serializes as JSON `null` and drops out of the map, so a `min`
+    /// that skips it is a minimum over the REPORTING SUBSET, and it RISES as
+    /// the fit gets worse: the
     /// badly-mixing parameters leave the map and the well-mixing survivors set
     /// the value. Measured on the summary headline as a 13x inversion between
     /// two runs of one model differing only in particle count (gh#687); this is
