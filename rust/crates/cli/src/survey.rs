@@ -339,33 +339,43 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     };
 
     let store = runid::FsCasStore::new(&output_root);
+    let resolved_artifact = crate::resolve::ResolvedArtifact {
+        kind: runid::ArtifactKind::Survey,
+        levels: resolved_id.levels.clone(),
+        run_id: resolved_id.run_id,
+        display_inputs: serde_json::Value::Null,
+    };
 
-    // Cache hit: ask the STORE, with this survey's identity. The previous
-    // check was `landscape.tsv.exists()` — no identity gate, no `Completed`
-    // gate, no exact-set — so a different survey sharing this path's
-    // short-hash segment was served as "cached" (the collision class the
-    // store's disambiguation exists to prevent), and a crash between the
-    // landscape write and `finalize` left a file the check called cached
-    // while the store itself called the leaf Stale(Incomplete). Re-render
-    // HTML if asked.
-    {
-        let landscape_path = run_dir.join("landscape.tsv");
-        let html_path = run_dir.join("landscape.html");
-        let hit = matches!(
-            store.lookup(&run_dir, &runid::LeafIdentity::new(resolved_id.run_id)),
-            runid::Lookup::Hit(_)
-        );
-        if !a.force && hit {
-            crate::status::step("cached", run_dir.display());
+    // Reuse decision through the one policy seam. The previous check was
+    // `landscape.tsv.exists()` — no identity gate, no `Completed` gate, no
+    // exact-set — so a different survey sharing this path's short-hash
+    // segment was served as "cached", and a crash between the landscape
+    // write and `finalize` left a file the check called cached while the
+    // store called the leaf Stale(Incomplete). `--force` now displaces the
+    // incumbent (quarantined) instead of colliding with it at claim time.
+    let policy = if a.force {
+        crate::resolve::WritePolicy::Force
+    } else {
+        crate::resolve::WritePolicy::Reuse
+    };
+    match crate::resolve::check_reuse(&store, &output_root, &resolved_artifact, policy) {
+        Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
+            crate::status::step("cached", dir.display());
+            let html_path = dir.join("landscape.html");
             if a.render && !html_path.exists() {
                 eprintln!("  rendering --render HTML from cached landscape.tsv …");
                 if let Err(e) = render_landscape_html(
-                    &landscape_path, &html_path, &landscape_meta)
+                    &dir.join("landscape.tsv"), &html_path, &landscape_meta)
                 {
                     eprintln!("warning: HTML render failed: {}", e);
                 }
             }
             return;
+        }
+        Ok(crate::resolve::ReuseVerdict::MustRun) => {}
+        Err(e) => {
+            eprintln!("error: survey cache check {}: {}", run_dir.display(), e);
+            std::process::exit(1);
         }
     }
 
@@ -374,12 +384,6 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // end (a crash leaves no finalized landscape.tsv). The running record
     // carries Null inputs (the landscape summary is a post-run result); the
     // final inputs are supplied to `finalize`.
-    let resolved_artifact = crate::resolve::ResolvedArtifact {
-        kind: runid::ArtifactKind::Survey,
-        levels: resolved_id.levels.clone(),
-        run_id: resolved_id.run_id,
-        display_inputs: serde_json::Value::Null,
-    };
     let meta = crate::resolve::RecordMeta::new(
         &ir_version_str, &model_path_str, label_arg.clone());
     let write = match crate::resolve::begin_resolved_write(

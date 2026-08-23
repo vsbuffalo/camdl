@@ -1118,16 +1118,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
         let store = runid::FsCasStore::new(&cas_root);
-        if !force && a.resume.is_none() {
-            if let runid::Lookup::Hit(_) =
-                store.lookup(&cas_path, &runid::LeafIdentity::new(resolved.run_id))
-            {
-                eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
-                    cas_path.strip_prefix(&cas_root).unwrap_or(&cas_path).display());
-                stage_identities.insert(stage_name.to_string(), (resolved.run_id, cas_path));
-                continue;
-            }
-        }
         // Streaming write through the one resolved-writer seam (gh#241 PR D).
         // The running record carries Null inputs (the stage's loglik summary is
         // a post-run result); the final inputs are supplied to `finalize`. The
@@ -1141,6 +1131,33 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let meta = crate::resolve::RecordMeta::new(
             &ir_version_str, &sweep_config.model.camdl, None)
             .with_deps(deps.clone());
+        // Reuse decision through the one policy seam. `--resume` deliberately
+        // does NOT reuse: it extends a base run into a NEW leaf keyed on the
+        // longer chain, so this stage must run even when its own identity is
+        // already stored. `--force` displaces the incumbent (quarantined) —
+        // previously it skipped the lookup only to die at the claim with
+        // "artifact already completed", which is why the flag never worked
+        // on a completed stage.
+        let policy = if force {
+            crate::resolve::WritePolicy::Force
+        } else {
+            crate::resolve::WritePolicy::Reuse
+        };
+        if a.resume.is_none() {
+            match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
+                Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
+                    eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
+                        dir.strip_prefix(&cas_root).unwrap_or(&dir).display());
+                    stage_identities.insert(stage_name.to_string(), (resolved.run_id, dir));
+                    continue;
+                }
+                Ok(crate::resolve::ReuseVerdict::MustRun) => {}
+                Err(e) => {
+                    eprintln!("error: fit stage cache check {}: {}", cas_path.display(), e);
+                    std::process::exit(1);
+                }
+            }
+        }
         let mut write = match crate::resolve::begin_resolved_write(
             &store, &cas_root, &resolved_artifact, &meta,
             crate::resolve::WriteMode::Streaming,

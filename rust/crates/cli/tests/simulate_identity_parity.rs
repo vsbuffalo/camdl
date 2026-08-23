@@ -120,6 +120,68 @@ fn integrator_override_splits_the_cas_leaves() {
         "rk4 and rk45 runs must land in two distinct CAS leaves");
 }
 
+/// `--force` must actually replace the stored artifact. It never did: batch
+/// recomputed the cell and the fresh bytes were discarded at commit as an
+/// already-completed no-op, so the leaf kept its original content. The store
+/// now has an overwrite door (displace-then-recompute, incumbent quarantined).
+#[test]
+fn force_replaces_the_stored_leaf() {
+    let bin = camdl_bin();
+    let Some(cc) = camdlc() else {
+        eprintln!("skip: camdlc.exe missing (run `make build`)");
+        return;
+    };
+    if !bin.exists() {
+        eprintln!("skip: release camdl missing (run `make build`)");
+        return;
+    }
+    let tmp = tempdir("force");
+    let ir = compile(tmp.path(), &cc, SIR_ODE, "sir");
+    let params = tmp.path().join("p.toml");
+    std::fs::write(&params, "beta = 0.5\ngamma = 0.25\nN0 = 10000\n").unwrap();
+    let out = tmp.path().join("out");
+
+    let run = |extra: &[&str]| {
+        let mut cmd = Command::new(&bin);
+        cmd.args(["simulate"]).arg(&ir)
+            .args(["--params"]).arg(&params)
+            .args(["--backend", "ode", "--dt", "1", "--seed", "1",
+                   "--cas", "--output-dir"]).arg(&out)
+            .arg("-o").arg(tmp.path().join("traj.tsv"))
+            .env("CAMDL_SKIP_VERSION_CHECK", "1");
+        for a in extra { cmd.arg(a); }
+        let o = cmd.output().unwrap();
+        assert!(o.status.success(), "simulate failed: {}", String::from_utf8_lossy(&o.stderr));
+    };
+
+    // The observable is the quarantine: forcing DISPLACES the incumbent (and
+    // preserves it) before recomputing. Content is not an observable here —
+    // the rebuild is deterministic, so the bytes are identical either way;
+    // and tampering with the leaf would prove nothing, since the exact-set
+    // check (size + mtime) already reclaims a modified leaf without --force.
+    let quarantine = out.join(".quarantine");
+    let q_count = || -> usize {
+        std::fs::read_dir(&quarantine).map(|d| d.count()).unwrap_or(0)
+    };
+
+    run(&[]);
+    assert_eq!(sim_leaves(&out).len(), 1, "one leaf after the first run");
+    let original = std::fs::read(sim_leaves(&out)[0].join("traj.tsv")).unwrap();
+
+    // Negative control: a plain rerun is a cache hit and displaces nothing.
+    run(&[]);
+    assert_eq!(q_count(), 0, "a cache-hit rerun must not quarantine anything");
+
+    run(&["--force"]);
+    assert!(q_count() >= 1,
+        "--force must displace the incumbent into .quarantine; without the \
+         overwrite door it was a cache hit (or a discarded recompute) and \
+         nothing was ever replaced");
+    assert_eq!(sim_leaves(&out).len(), 1, "the forced rerun leaves one live leaf");
+    assert_eq!(std::fs::read(sim_leaves(&out)[0].join("traj.tsv")).unwrap(), original,
+        "the forced recompute reproduces the same deterministic trajectory");
+}
+
 const SIR_VEC: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
