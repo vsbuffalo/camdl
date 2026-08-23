@@ -523,14 +523,11 @@ distinct trajectories each time. Over the 7–15 substeps camdl typically runs
 between observations, the ensemble collapses. **Rejected.**
 
 **Option 2 — where resampling is skipped, also skip ancestor sampling; use
-multinomial resampling and ancestor sampling only at observation substeps.**
-Measured clean (z = 0.98). Lindsten, Jordan & Schön explicitly permit performing
-ancestor sampling only occasionally, as a cost/mixing tradeoff. Keeps the
-sensible "don't resample when there is no new information" behaviour. **Cost:
-ancestor sampling currently fires at every substep; under this option it fires
-only where data exists — on the ebola fixture, 3 opportunities per sweep instead
-of 15. Trajectory renewal will drop, and mixing with it.** **This is the option
-chosen.**
+multinomial resampling and ancestor sampling only where an ancestry is actually
+drawn.** Measured clean (z = 0.98). Lindsten, Jordan & Schön explicitly permit
+performing ancestor sampling only occasionally. **This is the option chosen**,
+and see "What it actually cost" below — the prediction that it would hurt mixing
+did not survive measurement.
 
 **Option 3 — keep systematic resampling and carry the full resampling
 probability through the accept/reject test.** On equal-weight substeps that
@@ -586,3 +583,59 @@ through a narrower door.
 Gibbs control used throughout this investigation only existed by patching
 `pgas.rs`. An `ancestor_sampling = false` setting is to be added once the
 defect-2 fix lands, so that control is reachable without editing the source.
+
+### What it actually cost
+
+The expectation, stated before measuring, was that ancestor sampling firing at
+far fewer substeps would reduce trajectory renewal and with it the mixing rate.
+**That is wrong.** Measured before and after at matched observation cadence
+(2500 sweeps, 256 particles, 80 substeps, `sir_overdispersion`):
+
+| cadence           | arm       | renewal | ms/sweep | ESS/sweep | ESS/second |
+| ----------------- | --------- | ------: | -------: | --------: | ---------: |
+| every 7 substeps  | before    |  0.9957 |     23.3 |     1.000 |      42.94 |
+|                   | **after** |  0.9760 | **13.7** |     0.936 |  **68.07** |
+| every 14 substeps | before    |  0.9965 |     21.3 |     0.872 |      40.87 |
+|                   | **after** |  0.9831 | **11.2** |     0.923 |  **82.42** |
+
+Three things to read off it.
+
+**Per-sweep efficiency is unchanged within noise** — ESS/sweep moves −6% at one
+cadence and +6% at the other. Despite 7× and 16× fewer ancestor-sampling
+opportunities, renewal falls only from ~0.996 to ~0.976, and `renewal_by_bin`
+shows no early-time degeneracy. The reason is that renewal is not proportional
+to opportunity count: one splice accepted at an observation boundary re-anchors
+the whole trajectory downstream of it.
+
+**Sweeps are 1.7–1.9× cheaper**, because `fill_ancestor_log_weights` and
+`splice_log_ratio` are skipped wherever the gate closes, and they are not cheap.
+
+**ESS per second improves 1.6–2.0×.** On this fixture the correct kernel is also
+the faster one.
+
+Scope, stated rather than implied: one model, 256 particles. The production
+province fit runs 9,600 particles over 141 substeps, where the saving should be
+larger — `fill_ancestor_log_weights` is O(particles) per substep — but the
+magnitude does not transfer. The "before" column is a biased kernel, so this
+measures throughput honestly and statistical quality only loosely. ESS is for a
+single functional, prevalence at the terminal substep, chosen as the hardest
+coordinate to renew.
+
+**Consequence for tuning:** do not raise `csmc_sweeps_per_nuts` to compensate
+for the gate. On this evidence there is nothing to compensate for.
+
+### How many opportunities the gate leaves, on real schedules
+
+The count is a property of the observation cadence, not the model, and it is off
+by one from the obvious reading: the weights an observation produces are
+consumed by the FOLLOWING substep, so a terminal observation drives no
+resampling at all. Computed from the ebola project's own data files, at
+`dt = 1`:
+
+| fit config                                        | union observation days | substeps | ancestor-sampling opportunities |
+| ------------------------------------------------- | ---------------------: | -------: | ------------------------------: |
+| `fit_province_direct_sum_8k` (all streams weekly) |                     15 |      141 |                   **14** (9.9%) |
+| `fit_national_delay_od_lab_direct_sum_8k` (daily) |                     85 |      146 |                  **84** (57.5%) |
+
+The per-sweep trace now carries `as_opportunity` next to `as_proposed`, so this
+is readable from any run rather than recomputed from the schedule.
