@@ -494,6 +494,89 @@ impl PosteriorDiagnostics {
 /// is unchanged and deliberately not part of that review's scope.
 pub const RHAT_CONVERGED_THRESHOLD: f64 = 1.05;
 
+/// The R̂ above which a surface marks a parameter ✗ rather than ~ — "not
+/// converged" against "badly enough that the chains are somewhere else".
+/// Display only: nothing keys on it, and it draws no diagnostic of its own.
+pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
+
+/// Where a reported R̂ sits against the bar camdl **certifies** against.
+///
+/// One band for every surface that glyphs an R̂. Two surfaces used to spell it
+/// differently — the end-of-stage block against `RHAT_REPORT_THRESHOLD` (1.1,
+/// which is the bar that draws a *finding*), `fit summary` against
+/// `RHAT_CONVERGED_THRESHOLD` (1.05, the bar `converged_at` and the
+/// machine-readable `converged` column key on). A parameter in `[1.05, 1.1)`
+/// therefore printed ✓ when the fit finished and ✗ when the user ran
+/// `fit summary` on the same directory.
+///
+/// Certification and severity are separate questions and stay separate: this
+/// band answers "may this be reported as converged", and
+/// `DiagnosticKind::severity` answers "is the finding a warning or an error".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RhatBand {
+    /// Below [`RHAT_CONVERGED_THRESHOLD`]: may be reported as converged.
+    Converged,
+    /// Between the two thresholds: not converged.
+    NotConverged,
+    /// At or above [`RHAT_SEVERE_THRESHOLD`]: the chains are somewhere else.
+    Severe,
+    /// R̂ is not a finite number, so there is no band. NOT a pass — the caller
+    /// renders the reason ([`ParamConvergence::why_no_rhat`]) instead of a
+    /// glyph.
+    NotAssessed,
+}
+
+impl RhatBand {
+    /// The band a finite R̂ falls in.
+    pub fn of(rhat: f64) -> Self {
+        if !rhat.is_finite() {
+            Self::NotAssessed
+        } else if rhat < RHAT_CONVERGED_THRESHOLD {
+            Self::Converged
+        } else if rhat < RHAT_SEVERE_THRESHOLD {
+            Self::NotConverged
+        } else {
+            Self::Severe
+        }
+    }
+
+    /// The plain glyph; colour is the renderer's business.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Converged => "✓",
+            Self::NotConverged => "~",
+            Self::Severe => "✗",
+            Self::NotAssessed => "—",
+        }
+    }
+
+    /// The verdict in words, so a glyph never has to carry the whole meaning
+    /// on a surface a public-health decision is read off.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Converged => "converged",
+            Self::NotConverged => "NOT converged",
+            Self::Severe => "NOT converged — the chains are in different places",
+            Self::NotAssessed => "not assessed",
+        }
+    }
+
+    /// The glyph, never greener than a drawn finding allows.
+    ///
+    /// `drew_finding` is `R̂ > RHAT_REPORT_THRESHOLD` at the call site. The two
+    /// thresholds are independent knobs, and if the finding bar is ever set
+    /// BELOW the certification bar — gh#84's open 1.01 candidate would do
+    /// exactly that — a parameter could print green beside an error-level
+    /// finding drawn on the same number. Demoting here makes that
+    /// unrepresentable rather than a coincidence of the current constants.
+    pub fn glyph_with_finding(self, drew_finding: bool) -> &'static str {
+        match (self, drew_finding) {
+            (Self::Converged, true) => Self::NotConverged.glyph(),
+            _ => self.glyph(),
+        }
+    }
+}
+
 /// The max-over-parameters R̂, or the reason there isn't one.
 ///
 /// `max_rhat` previously folded from `0.0` over a map that a refused parameter

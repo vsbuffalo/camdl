@@ -247,14 +247,26 @@ pub enum DiagnosticKind {
     },
 }
 
+/// The chain-agreement value above which a `RhatHigh` / `ConvergenceIncomplete`
+/// finding is an **error** rather than a warning.
+///
+/// This is the SEVERITY ladder, and it is deliberately not the band a renderer
+/// glyphs against (`method_result::RhatBand`, keyed on the threshold camdl
+/// certifies at) nor the band the refine gate refuses at
+/// (`GateConfig::a_thresh`). "May this fit be reported as converged", "does
+/// this finding stop a run", and "which glyph goes in this cell" are three
+/// questions; one constant answering all three would move all three together.
+pub const CONVERGENCE_ERROR_SEVERITY: f64 = 1.5;
+
 impl DiagnosticKind {
     pub fn severity(&self) -> Severity {
         match self {
             Self::InitialLoglikInfinite => Severity::Error,
             Self::BadInit { .. } => Severity::Error,
-            Self::RhatHigh { rhat, .. } if *rhat > 1.5 => Severity::Error,
+            Self::RhatHigh { rhat, .. } if *rhat > CONVERGENCE_ERROR_SEVERITY => Severity::Error,
             Self::RhatHigh { .. } => Severity::Warning,
-            Self::ConvergenceIncomplete { max_chain_agreement, .. } if *max_chain_agreement > 1.5 => Severity::Error,
+            Self::ConvergenceIncomplete { max_chain_agreement, .. }
+                if *max_chain_agreement > CONVERGENCE_ERROR_SEVERITY => Severity::Error,
             Self::ConvergenceIncomplete { .. } => Severity::Warning,
             Self::DivergentTransitions { .. } => Severity::Warning,
             Self::LowESS { ess_fraction, .. } if *ess_fraction < 0.05 => Severity::Error,
@@ -283,9 +295,17 @@ impl DiagnosticKind {
 
     pub fn render(&self) -> String {
         match self {
+            // `{:.3}` on the threshold, not `{:.1}`: every value in the band
+            // camdl cares about — 1.01, 1.05, 1.1 — rounds to "1.0" at one
+            // decimal, so the reader could not tell which bar was applied.
+            // Name the statistic too: R̂ has been the rank-normalized split
+            // statistic of Vehtari et al. (2021) since gh#84, not the classic
+            // Gelman & Rubin one, and the two disagree by a third on a
+            // drifting-chain fit.
             Self::RhatHigh { param, rhat, threshold } =>
-                format!("Rhat for '{}' is {:.3} (threshold {:.1}). \
-                         Chain estimates have not converged.", param, rhat, threshold),
+                format!("rank-normalized split R̂ for '{}' is {:.3} \
+                         (threshold {:.3}). Chain estimates have not \
+                         converged.", param, rhat, threshold),
             Self::ChainDiverged { chain_id, n_chains } =>
                 format!("Chain {} of {} diverged from the others (MLE outside 3×MAD).",
                     chain_id, n_chains),
@@ -514,6 +534,33 @@ fn chrono_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The threshold in a `RhatHigh` message was formatted `{:.1}`, so every
+    /// value in the band camdl actually cares about rendered the same: 1.01,
+    /// 1.05 and 1.1 all printed as "1.0". A reader could not tell which bar
+    /// the finding was drawn against, and "1.0" is not a threshold anything
+    /// applies. The message must also name WHICH statistic — R̂ has been the
+    /// rank-normalized split statistic of Vehtari et al. (2021) since gh#84,
+    /// not the classic Gelman & Rubin one, and the two disagree by a third on
+    /// a drifting-chain fit.
+    #[test]
+    fn the_rhat_finding_names_its_statistic_and_its_threshold_exactly() {
+        let m = DiagnosticKind::RhatHigh {
+            param: "beta".into(), rhat: 1.0295, threshold: 1.01,
+        }.render();
+        assert!(
+            m.contains("1.01"),
+            "the threshold applied must be legible, not rounded to 1.0: {m}"
+        );
+        assert!(
+            !m.contains("threshold 1.0)") && !m.contains("threshold 1.0."),
+            "and must not round a 1.01 bar to 1.0: {m}"
+        );
+        assert!(
+            m.contains("rank-normalized"),
+            "and must name which R̂ statistic it is: {m}"
+        );
+    }
 
     /// gh#631: the healthy band is kernel-specific. 0.83 acceptance is a
     /// well-tuned NUTS block (no error, in-band → this kind is not even

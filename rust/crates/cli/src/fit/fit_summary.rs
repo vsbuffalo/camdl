@@ -28,7 +28,7 @@ use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
     If2StageResult, MaxRhat, MethodResult, MinEss, NutsStageResult, PgasStageResult,
-    PmmhStageResult, PosteriorDiagnostics, RHAT_CONVERGED_THRESHOLD, Stat,
+    PmmhStageResult, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD, Stat,
 };
 use crate::fit::state::FitState;
 use crate::fit::table_row::{self, TableRow};
@@ -1103,10 +1103,21 @@ impl Formatter {
         // fit that could not be assessed certifying itself.
         match diag.max_rhat_status() {
             MaxRhat::Reported(v) => {
-                let glyph = if v < RHAT_CONVERGED_THRESHOLD { self.ok("✓") } else { self.err("✗") };
+                // The same band the stage's own end-of-run block glyphs
+                // against, so one R̂ cannot read ✓ when the fit finishes and ✗
+                // here. The verdict is also spelled out: on a surface a
+                // public-health decision is read off, a glyph should not have
+                // to carry the whole meaning.
+                let band = RhatBand::of(v);
+                let glyph = match band {
+                    RhatBand::Converged => self.ok(band.glyph()),
+                    RhatBand::NotConverged => self.warn(band.glyph()),
+                    RhatBand::Severe => self.err(band.glyph()),
+                    RhatBand::NotAssessed => self.dim(band.glyph()).to_string(),
+                };
                 s.push_str(&format!(
-                    "    max R̂ = {:.3}  {}  (rank-normalized split R̂, threshold {})\n",
-                    v, glyph, RHAT_CONVERGED_THRESHOLD
+                    "    max R̂ = {:.3}  {}  {}  (rank-normalized split R̂, threshold {})\n",
+                    v, glyph, band.describe(), RHAT_CONVERGED_THRESHOLD
                 ));
                 // Above the band, say WHY. R̂ is `max(rhat_bulk, rhat_folded)`
                 // and the two halves have different remedies: a location

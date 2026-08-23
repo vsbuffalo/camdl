@@ -2664,11 +2664,6 @@ pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
 /// is deliberately NOT taken here.
 pub const RHAT_REPORT_THRESHOLD: f64 = 1.1;
 
-/// The R̂ above which the end-of-stage report marks a parameter ✗ rather than ~
-/// — "not converged" against "badly enough that the chains are somewhere else".
-/// Display only: nothing keys on it, and it draws no diagnostic of its own.
-pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
-
 /// Per-parameter convergence diagnostics for one Bayesian stage — the single
 /// shape every sampler fills and every renderer and serializer reads.
 ///
@@ -2842,7 +2837,11 @@ impl StageConvergence {
         collector: &sim::inference::diagnostic::DiagnosticCollector,
         rhat_threshold: f64,
     ) -> String {
-        let mut out = String::from("\nRhat / ESS:\n");
+        use crate::fit::method_result::{RhatBand, RHAT_CONVERGED_THRESHOLD};
+        let mut out = format!(
+            "\nR̂ (rank-normalized split, Vehtari et al. 2021) / ESS — \
+             R̂ threshold {RHAT_CONVERGED_THRESHOLD}:\n"
+        );
         for (name, d) in self.iter() {
             let Some(r) = d.rank() else {
                 // `rank()` is `None` exactly when `refusal()` is `Some`.
@@ -2850,12 +2849,19 @@ impl StageConvergence {
                 out.push_str(&format!("  {:12} not reported — {}\n", name, why));
                 continue;
             };
-            // The glyph and the finding must agree about where the band is:
-            // a literal here would silently diverge from `rhat_threshold` the
-            // moment the caller passes anything but 1.1.
-            let status = if r.rhat < rhat_threshold { "\x1b[32m✓\x1b[0m" }
-                else if r.rhat < RHAT_SEVERE_THRESHOLD { "\x1b[33m~\x1b[0m" }
-                else { "\x1b[31m✗\x1b[0m" };
+            // The glyph is the CERTIFICATION band — the same one `fit summary`
+            // uses — so one R̂ cannot print ✓ when the fit finishes and ✗ when
+            // the user runs `fit summary` on the same directory. `rhat_threshold`
+            // is a different bar: it draws the FINDING. `glyph_with_finding`
+            // keeps the glyph from ever being greener than the finding allows.
+            let drew_finding = r.rhat > rhat_threshold;
+            let band = RhatBand::of(r.rhat);
+            let status = match band.glyph_with_finding(drew_finding) {
+                "✓" => "\x1b[32m✓\x1b[0m",
+                "~" => "\x1b[33m~\x1b[0m",
+                "✗" => "\x1b[31m✗\x1b[0m",
+                other => other,
+            };
             let tail = if r.ess_tail.is_finite() {
                 format!("{:.0}", r.ess_tail)
             } else {
@@ -2866,7 +2872,9 @@ impl StageConvergence {
                 name, r.rhat, status, r.ess_bulk, tail,
                 100.0 * r.ess_bulk_ratio(), r.n_draws_total,
             ));
-            if r.rhat > rhat_threshold {
+            // The decomposition follows the GLYPH, not the finding: it is the
+            // "so what do I do" line for anything not certified converged.
+            if band != RhatBand::Converged || drew_finding {
                 if let Some(driver) = r.rhat_driver() {
                     out.push_str(&format!(
                         "  {:12}   R̂ = max(bulk {:.3}, folded {:.3}); the {} half is \
@@ -2874,6 +2882,8 @@ impl StageConvergence {
                         "", r.rhat_bulk, r.rhat_folded, driver.half(), driver.describe(),
                     ));
                 }
+            }
+            if drew_finding {
                 collector.push(sim::inference::diagnostic::DiagnosticKind::RhatHigh {
                     param: name.to_string(), rhat: r.rhat, threshold: rhat_threshold,
                 });
@@ -5249,6 +5259,89 @@ dt = 1.0
             "and must draw the finding that goes with the glyph");
     }
 
+    /// Four pseudo-iid chains, two of them offset by `offset`. R̂ rises
+    /// smoothly with the offset; 0.09 lands at 1.0675, inside the disputed
+    /// `[RHAT_CONVERGED_THRESHOLD, RHAT_REPORT_THRESHOLD)` gap.
+    fn offset_chains(offset: f64) -> Vec<Vec<f64>> {
+        let lcg = |seed: u64, n: usize, off: f64| -> Vec<f64> {
+            let mut st = seed;
+            (0..n)
+                .map(|_| {
+                    st = st
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    off + ((st >> 33) as f64) / (u32::MAX as f64)
+                })
+                .collect()
+        };
+        vec![
+            lcg(1, 200, 0.0),
+            lcg(2, 200, offset),
+            lcg(3, 200, 0.0),
+            lcg(4, 200, offset),
+        ]
+    }
+
+    /// One R̂, two commands, two glyphs.
+    ///
+    /// The end-of-stage block glyphed against the caller's `rhat_threshold`
+    /// (`RHAT_REPORT_THRESHOLD` = 1.1, the bar that draws a `RhatHigh`
+    /// FINDING); `fit summary` glyphs against `RHAT_CONVERGED_THRESHOLD`
+    /// (1.05, the bar `converged_at` and the machine-readable `converged`
+    /// column key on). A parameter in `[1.05, 1.1)` therefore printed ✓ when
+    /// the fit finished and ✗ when the user ran `fit summary` on the same
+    /// directory. Certification is one question; both surfaces must give it
+    /// one answer.
+    #[test]
+    fn the_stage_report_glyphs_rhat_against_the_bar_camdl_certifies_against() {
+        use sim::inference::diagnostic::DiagnosticCollector;
+        use crate::fit::method_result::{RhatBand, RHAT_CONVERGED_THRESHOLD};
+
+        let chains = offset_chains(0.09);
+        let d = compute_rhat_ess(&chains);
+        let rhat = d.rank().expect("scored").rhat;
+        assert!(
+            rhat > RHAT_CONVERGED_THRESHOLD && rhat < RHAT_REPORT_THRESHOLD,
+            "fixture premise: R̂ must land in the disputed gap; got {rhat}"
+        );
+
+        let conv = StageConvergence::compute([("beta".to_string(), chains)]);
+        let collector = DiagnosticCollector::new("test");
+        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD);
+
+        assert!(
+            !out.contains('✓'),
+            "R̂ = {rhat:.4} is above the bar `fit summary` certifies against, \
+             so the stage block must not print it green:\n{out}"
+        );
+        assert_eq!(
+            RhatBand::of(rhat),
+            RhatBand::NotConverged,
+            "and the shared band agrees"
+        );
+
+        // The finding is a SEPARATE band and must not have moved: nothing is
+        // drawn below `RHAT_REPORT_THRESHOLD`.
+        assert!(
+            !collector.drain().iter().any(|f| matches!(
+                f.kind,
+                sim::inference::diagnostic::DiagnosticKind::RhatHigh { .. }
+            )),
+            "the finding bar is 1.1 and this R̂ is below it — no finding"
+        );
+
+        // And the line must NAME the statistic and the threshold it applied,
+        // so a reader is never left to infer which bar a glyph used.
+        assert!(
+            out.contains("1.05"),
+            "the block must name the threshold it glyphed against:\n{out}"
+        );
+        assert!(
+            out.contains("rank-normalized"),
+            "and which statistic that is:\n{out}"
+        );
+    }
+
     /// A high R̂ has two structurally different causes and the end-of-stage
     /// report must say WHICH: chains disagreeing about **location**
     /// (`rhat_bulk`) or about **spread** (`rhat_folded`). Both halves are
@@ -5259,6 +5352,7 @@ dt = 1.0
     /// value with different widths. `posterior` 1.7.0 on this fixture:
     /// `rhat` 1.3130, `rhat_split` 0.9984 (the raw-scale unfolded rung), so
     /// the folded half is what the headline is made of.
+
     #[test]
     fn the_report_names_which_half_drove_a_high_rhat() {
         use sim::inference::diagnostic::DiagnosticCollector;
