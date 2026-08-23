@@ -489,11 +489,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("sweep: {} points", sweep_points.len());
     }
 
-    // Validate --starts-from requires --stage
-    if starts_from_override.is_some() && stage_filter.is_none() {
-        eprintln!("error: --starts-from requires --stage to disambiguate which stage it applies to.");
-        std::process::exit(1);
-    }
 
     // Validate --resume requires a PGAS or PMMH stage. Other methods
     // have no extension dimension (IF2's cooling depends on total
@@ -947,9 +942,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // init_mle. `effective_starts` is the dir the runner loads the prior
         // θ̂ from (now an upstream CAS leaf); `deps` folds the upstream's
         // identity + consumed `fit_state.toml` digest into this stage's hash.
-        let cli_starts = starts_from_override.as_ref()
-            .filter(|_| stages_to_run.len() == 1)
-            .cloned();
+        // `starts_from_override` derives from `--mle`, which clap marks
+        // `requires = "stage"` — so when it is Some, stages_to_run is
+        // exactly the one selected stage. (A `.filter(len == 1)` here was
+        // vestigial belt-and-braces re-checking what clap enforces.)
+        let cli_starts = starts_from_override.clone();
         let (effective_starts, mut deps): (Option<String>, Vec<runid::inputs::ArtifactRef>) =
             if let Some(dir) = cli_starts {
                 let dep = cas::cas_dep_from_dir(std::path::Path::new(&dir));
