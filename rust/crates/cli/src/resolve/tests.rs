@@ -522,6 +522,9 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         particles: 100,
         replicates: 1,
         dt: 1.0,
+        // Unconditioned: omitted from the config blob, so this pinned digest
+        // is unchanged by the field's introduction (hash-neutrality).
+        condition_from: None,
         obs_block: "",
         flow_indices: &[],
         seed: 7,
