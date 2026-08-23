@@ -1218,6 +1218,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             }
                             ScoutGateVerdict::Hard { failing, all_structural, ivp, loglik_spread } => {
                                 let msg = gating::format_hard_verdict(
+                                    &effective_gate,
                                     &failing, &all_structural, &ivp,
                                     loglik_spread, ps.best_loglik, None);
                                 if allow_nonconverged_scout {

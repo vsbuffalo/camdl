@@ -5,8 +5,8 @@
 //! `docs/dev/proposals/2026-04-19-refine-gates-scout-convergence.md`:
 //!
 //! - Gate 1 (pre-refine): scout's tail chain-agreement (Â) on every
-//!   non-IVP estimated parameter must be ≤ `A_HARD`. If it isn't, refine refuses to
-//!   start. Overridable via `--allow-nonconverged-scout`.
+//!   non-IVP estimated parameter must be below `gate.a_thresh`. If it isn't,
+//!   refine refuses to start. Overridable via `--allow-nonconverged-scout`.
 //!
 //! - Gate 2 (post-refine): refine's best loglik must not regress
 //!   below scout's by more than a tolerance ε. If it does, refine's
@@ -20,14 +20,6 @@ use super::config_v2::GateConfig;
 use super::state::FitState;
 use crate::evidence::NATS_TO_DB;
 
-/// Legacy hard threshold for the chain-agreement Â check. Retained as
-/// a documented constant because it informs the SoftWarn band's upper
-/// bound when `gate.a_thresh` is configured loosely. Step 8 (proposal
-/// §Proposal 3) shifts the *effective* hard threshold to
-/// `gate.a_thresh` (default 1.01) — a deliberate tightening; see the
-/// proposal.
-pub const A_HARD: f64 = 1.10;
-
 /// Soft threshold: params between this and `gate.a_thresh` get a
 /// prominent warning but refine still runs. When `gate.a_thresh ≤
 /// A_SOFT` the SoftWarn band is empty (every above-soft Â also
@@ -35,6 +27,74 @@ pub const A_HARD: f64 = 1.10;
 /// colour-coding (red ≥ a_thresh, yellow A_SOFT..a_thresh,
 /// green < A_SOFT).
 pub const A_SOFT: f64 = 1.05;
+
+/// Where one parameter's chain-agreement Â sits relative to **the gate that
+/// will actually be applied to it**.
+///
+/// Derived from `GateConfig::a_thresh`, not from a literal, because every
+/// renderer that spelled the band as a constant drifted from the gate the
+/// moment `a_thresh` moved off that constant — and the default did move, to
+/// 1.01. One `fit summary` printed `max Â = 1.030 ✗ (threshold 1.01)` in the
+/// gate block and `Â=1.030 ✓` in the parameter table twenty lines below.
+///
+/// This is the **glyph** band and nothing else. The diagnostic severity ladder
+/// — whether a finding is a warning or an error — is a different question with
+/// a different answer (`DiagnosticKind::severity`), and merging the two would
+/// make "the gate refuses this" and "this is an error-level finding" one knob
+/// when they are two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgreementBand {
+    /// Below [`A_SOFT`]: nothing to say.
+    Pass,
+    /// In `[A_SOFT, a_thresh)`: prominent warning, but refine still runs.
+    /// Empty whenever `a_thresh <= A_SOFT`, which the 1.01 default is.
+    SoftWarn,
+    /// At or above `a_thresh` — the comparison
+    /// [`check_scout_convergence`] refuses on.
+    Fail,
+    /// Â is not defined for this parameter: the within-chain variance `W`
+    /// collapsed relative to the parameter's scale, so Â would diverge with no
+    /// diagnostic meaning and `compute_chain_agreement` returns `NaN` (gh#45).
+    ///
+    /// **Not** a failure. Every comparison against `NaN` is false, so a band
+    /// written as an if/else-if chain of `<` falls through to the failure arm
+    /// and reports a parameter that was never assessed as one that failed. The
+    /// compound gate's Δ_dB leg carries the verdict for these.
+    NotAssessed,
+}
+
+impl AgreementBand {
+    /// The plain glyph. Colour is the renderer's business — `fit summary`
+    /// paints through its own `ok`/`warn`/`err`, the stage report through raw
+    /// ANSI — so this returns the character alone.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Pass => "✓",
+            Self::SoftWarn => "~",
+            Self::Fail => "✗",
+            Self::NotAssessed => "n/a",
+        }
+    }
+}
+
+impl GateConfig {
+    /// Which band one parameter's Â falls in, under **this** gate.
+    ///
+    /// The single authority for the ✓/~/✗ on an Â, so a glyph cannot disagree
+    /// with the verdict printed beside it. [`check_scout_convergence`] reduces
+    /// through the same ladder.
+    pub fn a_band(&self, a: f64) -> AgreementBand {
+        if !a.is_finite() {
+            AgreementBand::NotAssessed
+        } else if a >= self.a_thresh {
+            AgreementBand::Fail
+        } else if a >= A_SOFT {
+            AgreementBand::SoftWarn
+        } else {
+            AgreementBand::Pass
+        }
+    }
+}
 
 /// Minimum ε for Gate 2. Scout's noise floor on a typical PF-based
 /// loglik estimator at reasonable particle counts. `epsilon` takes the
@@ -117,33 +177,38 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
     let worst = structural.iter().map(|(_, r)| *r)
         .fold(0.0_f64, f64::max);
 
-    // Step 1 — Â check.
-    if worst >= gate.a_thresh {
-        let failing: Vec<(String, f64)> = structural.iter()
-            .filter(|(_, r)| *r >= gate.a_thresh)
-            .cloned().collect();
-        let loglik_spread = if scout.chain_logliks.len() >= 2 {
-            let hi = scout.chain_logliks.iter().cloned()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let lo = scout.chain_logliks.iter().cloned()
-                .fold(f64::INFINITY, f64::min);
-            hi - lo
-        } else { 0.0 };
-        return ScoutGateVerdict::Hard {
-            failing,
-            all_structural: structural,
-            ivp,
-            loglik_spread,
-        };
-    }
-    if worst >= A_SOFT {
-        // SoftWarn band only exists when gate.a_thresh > A_SOFT;
-        // otherwise the previous branch consumed everything above
-        // A_SOFT and we don't reach here.
-        let warnable: Vec<(String, f64)> = structural.into_iter()
-            .filter(|(_, r)| *r >= A_SOFT)
-            .collect();
-        return ScoutGateVerdict::SoftWarn { param_agreement: warnable };
+    // Step 1 — Â check. Reduced through `GateConfig::a_band`, the same
+    // authority every renderer uses, so a printed glyph and this verdict
+    // cannot disagree about one number.
+    match gate.a_band(worst) {
+        AgreementBand::Fail => {
+            let failing: Vec<(String, f64)> = structural.iter()
+                .filter(|(_, r)| gate.a_band(*r) == AgreementBand::Fail)
+                .cloned().collect();
+            let loglik_spread = if scout.chain_logliks.len() >= 2 {
+                let hi = scout.chain_logliks.iter().cloned()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let lo = scout.chain_logliks.iter().cloned()
+                    .fold(f64::INFINITY, f64::min);
+                hi - lo
+            } else { 0.0 };
+            return ScoutGateVerdict::Hard {
+                failing,
+                all_structural: structural,
+                ivp,
+                loglik_spread,
+            };
+        }
+        AgreementBand::SoftWarn => {
+            let warnable: Vec<(String, f64)> = structural.into_iter()
+                .filter(|(_, r)| gate.a_band(*r) == AgreementBand::SoftWarn)
+                .collect();
+            return ScoutGateVerdict::SoftWarn { param_agreement: warnable };
+        }
+        // `worst` is a max over finite entries seeded at 0.0, so `NotAssessed`
+        // is unreachable for it; either way there is nothing for the Â leg to
+        // refuse and the decibans leg below carries the verdict.
+        AgreementBand::Pass | AgreementBand::NotAssessed => {}
     }
 
     // Step 2 — decibans-spread check on clean-eval logliks. Skipped
@@ -290,7 +355,12 @@ pub fn format_decibans_spread_verdict(
 }
 
 /// Render the Gate 1 Hard verdict as a human error message.
+///
+/// `gate` is the one this verdict came from, so every glyph in the table is
+/// the same comparison the verdict is — not a literal that agrees only while
+/// `a_thresh` happens to equal it.
 pub fn format_hard_verdict(
+    gate: &GateConfig,
     failing: &[(String, f64)],
     all_structural: &[(String, f64)],
     ivp: &[(String, f64)],
@@ -298,16 +368,21 @@ pub fn format_hard_verdict(
     scout_best_loglik: f64,
     scout_best_chain_values: Option<&[(String, f64)]>,
 ) -> String {
-    let mut msg = String::from(
+    let mut msg = format!(
         "refine stage requires scout convergence.\n\n  \
-         Scout tail Â (last half of iterations):\n");
+         Scout tail Â (IF2 chain agreement over the last half of iterations), \
+         threshold {:.2}:\n",
+        gate.a_thresh);
     for (name, agreement) in all_structural {
-        let marker = if *agreement > A_HARD { "✗" }
-                     else if *agreement > A_SOFT { "~" }
-                     else { " " };
+        let band = gate.a_band(*agreement);
+        let marker = if band == AgreementBand::Pass { " " } else { band.glyph() };
         msg.push_str(&format!("    {} {:<10} Â = {:>6.3}{}\n",
             marker, name, agreement,
-            if *agreement > A_HARD { "   (> 1.10)" } else { "" }));
+            if band == AgreementBand::Fail {
+                format!("   (>= {:.2})", gate.a_thresh)
+            } else {
+                String::new()
+            }));
     }
     for (name, agreement) in ivp {
         msg.push_str(&format!("      {:<10} Â = {:>6.3}   (ivp — not gated)\n",
@@ -384,7 +459,7 @@ mod tests {
     /// exemption logic, both of which were defined before the new
     /// stricter default `a_thresh = 1.01`.
     fn legacy_gate() -> GateConfig {
-        GateConfig { a_thresh: A_HARD, decibans_thresh: f64::INFINITY }
+        GateConfig { a_thresh: 1.10, decibans_thresh: f64::INFINITY }
     }
 
     #[test]

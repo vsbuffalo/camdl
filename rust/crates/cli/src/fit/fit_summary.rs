@@ -23,6 +23,7 @@ use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::evidence::NATS_TO_DB;
 use crate::fit::config_diff::ConfigDiff;
 use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
+use crate::fit::gating::AgreementBand;
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
@@ -860,17 +861,35 @@ impl Formatter {
         s
     }
 
+    /// The gate config to render an Â against. Priority:
+    ///   1. `state.resolved_gate` (Phase 3 — the value actually used)
+    ///   2. `GateConfig::default()`, with a "(thresholds unknown)" caveat
+    ///
+    /// Shared by the gate block and the parameter table so the two cannot
+    /// glyph one number against two different thresholds.
+    fn resolve_gate(state: &FitState) -> (GateConfig, GateThresholdSource) {
+        match &state.resolved_gate {
+            Some(g) => (g.clone(), GateThresholdSource::Resolved),
+            None => (GateConfig::default(), GateThresholdSource::DefaultFallback),
+        }
+    }
+
+    /// One Â glyph, painted. The band comes from the gate; only the colour is
+    /// this renderer's own.
+    fn a_glyph(&self, gate: &GateConfig, a: f64) -> String {
+        match gate.a_band(a) {
+            AgreementBand::Pass => self.ok("✓"),
+            AgreementBand::SoftWarn => self.warn("~"),
+            AgreementBand::Fail => self.err("✗"),
+            AgreementBand::NotAssessed => self.dim("n/a").to_string(),
+        }
+    }
+
     fn gate_verdict_block(&self, state: &FitState) -> String {
         let mut s = String::new();
         s.push_str(&format!("  {}\n", self.bold("compound scout-convergence gate")));
 
-        // Resolve the gate config to render against. Priority:
-        //   1. state.resolved_gate (Phase 3 — the value actually used)
-        //   2. GateConfig::default() with a "(thresholds unknown)" caveat
-        let (gate, threshold_source) = match &state.resolved_gate {
-            Some(g) => (g.clone(), GateThresholdSource::Resolved),
-            None => (GateConfig::default(), GateThresholdSource::DefaultFallback),
-        };
+        let (gate, threshold_source) = Self::resolve_gate(state);
 
         // Â leg
         let max_a = state.tail_chain_agreement.values().cloned()
@@ -930,7 +949,13 @@ impl Formatter {
 
     fn parameter_table(&self, state: &FitState) -> String {
         let mut s = String::new();
-        s.push_str(&format!("  {}\n", self.bold("parameter estimates (loglik-eval, selected chain θ̂)")));
+        // The Â column is glyphed against the SAME gate the block above
+        // reports, so one number cannot print ✗ there and ✓ here.
+        let (gate, _) = Self::resolve_gate(state);
+        s.push_str(&format!(
+            "  {}  {}\n",
+            self.bold("parameter estimates (loglik-eval, selected chain θ̂)"),
+            self.dim(&format!("Â threshold {:.2}", gate.a_thresh))));
         if state.start_values.is_empty() {
             s.push_str(&format!("    {}\n", self.dim("(no start_values in fit_state.toml)")));
             s.push('\n');
@@ -953,12 +978,16 @@ impl Formatter {
             let v = state.start_values[k];
             let agreement = state.tail_chain_agreement.get(k).copied();
             let agreement_str = match agreement {
-                Some(r) => {
-                    let glyph = if r < 1.05 { self.ok("✓") }
-                        else if r < 1.10 { self.warn("~") }
-                        else { self.err("✗") };
-                    format!("Â={:.3} {}", r, glyph)
+                // A collapsed within-chain variance leaves no Â at all; say so
+                // rather than printing `Â=NaN ✗`, which reads as a failure the
+                // estimator never assessed (gh#45).
+                // A collapsed within-chain variance leaves no Â at all; say so
+                // rather than printing `Â=NaN ✗`, which reads as a failure the
+                // estimator never assessed (gh#45).
+                Some(r) if !r.is_finite() => {
+                    self.dim("Â=n/a (W ≈ 0; rely on Δ_dB)").to_string()
                 }
+                Some(r) => format!("Â={:.3} {}", r, self.a_glyph(&gate, r)),
                 None => self.dim("Â=—").to_string(),
             };
             let ivp_marker = if ivp_set.contains(k.as_str()) {

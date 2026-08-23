@@ -2282,13 +2282,23 @@ pub fn run_chains_with_per_chain_params(
                        under cold cooling). Rely on Δ_dB leg of the compound \
                        gate above for the convergence verdict.");
         } else {
-            eprintln!("\nÂ:");
+            // Name the statistic and the threshold. Â is IF2 chain agreement,
+            // NOT a posterior R̂, and the band comes from the gate that will
+            // judge this stage — a literal here diverged from `a_thresh` the
+            // moment the default moved to 1.01, so the same number printed ✓
+            // at the end of the stage and ✗ in `fit summary`'s gate block.
+            eprintln!("\nÂ (IF2 chain agreement), threshold {:.2}:",
+                config.gate.a_thresh);
             for spec in &config.estimated_params {
                 match chain_agreement.get(&spec.name) {
                     Some(&r) if r.is_finite() => {
-                        let status = if r < 1.1 { "\x1b[32m✓\x1b[0m" }
-                            else if r < 1.5 { "\x1b[33m~\x1b[0m" }
-                            else { "\x1b[31m✗\x1b[0m" };
+                        let status = match config.gate.a_band(r) {
+                            super::gating::AgreementBand::Pass => "\x1b[32m✓\x1b[0m",
+                            super::gating::AgreementBand::SoftWarn => "\x1b[33m~\x1b[0m",
+                            super::gating::AgreementBand::Fail => "\x1b[31m✗\x1b[0m",
+                            // Unreachable: `r.is_finite()` is the match guard.
+                            super::gating::AgreementBand::NotAssessed => "n/a",
+                        };
                         eprintln!("  {:12} Â={:.3} {}", spec.name, r, status);
                     }
                     Some(_) => {
