@@ -108,6 +108,9 @@ fn hash_opt_f64(h: &mut CanonicalHasher, x: &Option<f64>) {
 
 impl ContentAddressed for Diffable {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Diffable { expr, grad: _, proj_grad: _ } = self;
         header(h, "ir::deriv::Diffable");
         // Only the semantic argument `expr` is identity. The classified gradient
         // maps `grad` (∂arg/∂θ) and `proj_grad` (∂arg/∂projected) are
@@ -115,7 +118,7 @@ impl ContentAddressed for Diffable {
         // params/forcings — so they are NOT hashed (SV = 2; proposal
         // 2026-07-16-gradient-maps-out-of-run-identity.md). This is the obs half
         // of gradient-independent model identity, mirroring the rate side below.
-        self.expr.hash_into(h);
+        expr.hash_into(h);
     }
 }
 
@@ -263,18 +266,24 @@ impl ContentAddressed for Expr {
 
 impl ContentAddressed for StoichiometryEntry {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let StoichiometryEntry(compartment, delta) = self;
         header(h, "ir::transition::StoichiometryEntry");
-        h.write_str(&self.0);
-        h.write_i64(self.1);
+        h.write_str(compartment);
+        h.write_i64(*delta);
     }
 }
 
 impl ContentAddressed for TransitionMetadata {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let TransitionMetadata { origin_kind, source_compartment, dest_compartment } = self;
         header(h, "ir::transition::TransitionMetadata");
-        self.origin_kind.hash_into(h);
-        self.source_compartment.hash_into(h);
-        self.dest_compartment.hash_into(h);
+        origin_kind.hash_into(h);
+        source_compartment.hash_into(h);
+        dest_compartment.hash_into(h);
     }
 }
 
@@ -297,26 +306,35 @@ impl ContentAddressed for DrawMethod {
 
 impl ContentAddressed for TransitionLineage {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let TransitionLineage { is_lineage_event, parent_pool_weights } = self;
         header(h, "ir::transition::TransitionLineage");
-        self.is_lineage_event.hash_into(h);
-        self.parent_pool_weights.hash_into(h);
+        is_lineage_event.hash_into(h);
+        parent_pool_weights.hash_into(h);
     }
 }
 
 impl ContentAddressed for Transition {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Transition {
+            name, stoichiometry, rate, metadata, draw_method,
+            rate_grad: _, rate_state_grad: _, lineage,
+        } = self;
         header(h, "ir::transition::Transition");
-        h.write_str(&self.name);
-        self.stoichiometry.hash_into(h);
-        self.rate.hash_into(h);
-        self.metadata.hash_into(h);
-        self.draw_method.hash_into(h);
+        h.write_str(name);
+        stoichiometry.hash_into(h);
+        rate.hash_into(h);
+        metadata.hash_into(h);
+        draw_method.hash_into(h);
         // rate_grad (∂rate/∂θ) and rate_state_grad (∂rate/∂compartment, `J_x`,
         // gh#275) are compiler-derived autodiff of `rate` over the already-hashed
         // params/compartments/forcings, so they are NOT hashed — model identity is
         // gradient-independent (SV = 2; proposal
         // 2026-07-16-gradient-maps-out-of-run-identity.md).
-        self.lineage.hash_into(h);
+        lineage.hash_into(h);
     }
 }
 
@@ -400,12 +418,15 @@ impl ContentAddressed for HierarchicalKind {
 
 impl ContentAddressed for HierarchicalPrior {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let HierarchicalPrior { kind, args, pool_over } = self;
         header(h, "ir::parameter::HierarchicalPrior");
-        self.kind.hash_into(h);
+        kind.hash_into(h);
         // args: BTreeMap<String, Expr> — sorted by key (already, but the
         // helper sorts regardless).
-        h.write_str_map(self.args.iter());
-        h.write_str(&self.pool_over);
+        h.write_str_map(args.iter());
+        h.write_str(pool_over);
     }
 }
 
@@ -487,11 +508,14 @@ impl ContentAddressed for ParamValue {
 
 impl ContentAddressed for Parameter {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Parameter { name, value, param_kind, param_dim } = self;
         header(h, "ir::parameter::Parameter");
-        h.write_str(&self.name);
-        self.value.hash_into(h);
-        self.param_kind.hash_into(h);
-        self.param_dim.hash_into(h);
+        h.write_str(name);
+        value.hash_into(h);
+        param_kind.hash_into(h);
+        param_dim.hash_into(h);
     }
 }
 
@@ -576,10 +600,13 @@ impl ContentAddressed for Likelihood {
 
 impl ContentAddressed for RegularSchedule {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let RegularSchedule { start, step, end } = self;
         header(h, "ir::observation::RegularSchedule");
-        h.write_f64_bits(self.start);
-        h.write_f64_bits(self.step);
-        h.write_f64_bits(self.end);
+        h.write_f64_bits(*start);
+        h.write_f64_bits(*step);
+        h.write_f64_bits(*end);
     }
 }
 
@@ -619,28 +646,40 @@ impl ContentAddressed for ColumnRole {
 
 impl ContentAddressed for ObsColumn {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let ObsColumn { name, role } = self;
         header(h, "ir::observation::ObsColumn");
-        h.write_str(&self.name);
-        self.role.hash_into(h);
+        h.write_str(name);
+        role.hash_into(h);
     }
 }
 
 impl ContentAddressed for StratumKey {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let StratumKey { dim, level } = self;
         header(h, "ir::observation::StratumKey");
-        h.write_str(&self.dim);
-        h.write_str(&self.level);
+        h.write_str(dim);
+        h.write_str(level);
     }
 }
 
 impl ContentAddressed for ObservationModel {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let ObservationModel {
+            name, source, columns, scored, emit_schedule, stratum, projection,
+            projection_state_grad: _, likelihood,
+        } = self;
         header(h, "ir::observation::ObservationModel");
-        h.write_str(&self.name);
-        h.write_str(&self.source);
-        self.columns.hash_into(h);
-        h.write_str(&self.scored);
-        self.emit_schedule.hash_into(h);
+        h.write_str(name);
+        h.write_str(source);
+        columns.hash_into(h);
+        h.write_str(scored);
+        emit_schedule.hash_into(h);
         // `stratum` is hashed ONLY when non-empty: an empty stratum (every
         // model without a stratified observation header) writes nothing, so
         // existing run_ids are byte-identical. A non-empty stratum exists only
@@ -648,15 +687,15 @@ impl ContentAddressed for ObservationModel {
         // load-bearing — it routes file rows to this leaf — so it must enter
         // the hash. (`Vec::hash_into` would write a `len=0` prefix even when
         // empty, churning every existing id; guard against that.)
-        if !self.stratum.is_empty() {
-            self.stratum.hash_into(h);
+        if !stratum.is_empty() {
+            stratum.hash_into(h);
         }
-        self.projection.hash_into(h);
+        projection.hash_into(h);
         // projection_state_grad (∂projection/∂compartment, gh#275 §1h) is the
         // compiler-derived WrtPop gradient of a DerivedExpr projection — pure
         // autodiff of `projection` — so it is NOT hashed (SV = 2; proposal
         // 2026-07-16-gradient-maps-out-of-run-identity.md).
-        self.likelihood.hash_into(h);
+        likelihood.hash_into(h);
     }
 }
 
@@ -664,9 +703,12 @@ impl ContentAddressed for ObservationModel {
 
 impl ContentAddressed for OdeEquation {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let OdeEquation { compartment, derivative } = self;
         header(h, "ir::ode_equation::OdeEquation");
-        h.write_str(&self.compartment);
-        self.derivative.hash_into(h);
+        h.write_str(compartment);
+        derivative.hash_into(h);
     }
 }
 
@@ -702,11 +744,14 @@ impl ContentAddressed for TableSource {
 
 impl ContentAddressed for Table {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Table { name, source, out_of_bounds, cell_kind } = self;
         header(h, "ir::table::Table");
-        h.write_str(&self.name);
-        self.source.hash_into(h);
-        self.out_of_bounds.hash_into(h);
-        self.cell_kind.hash_into(h);
+        h.write_str(name);
+        source.hash_into(h);
+        out_of_bounds.hash_into(h);
+        cell_kind.hash_into(h);
     }
 }
 
@@ -764,15 +809,18 @@ impl ContentAddressed for TimeFuncKind {
 
 impl ContentAddressed for TimeFunction {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let TimeFunction { name, kind, dim, lag, data_source: _ } = self;
         header(h, "ir::time_func::TimeFunction");
-        h.write_str(&self.name);
-        self.kind.hash_into(h);
-        self.dim.hash_into(h);
+        h.write_str(name);
+        kind.hash_into(h);
+        dim.hash_into(h);
         // gh#314: lag is identity — two models that differ only by a forcing's
         // evaluation-time shift produce different trajectories and must re-key.
         // The Option impl tags presence, so `None` (no lag) stays distinct from
         // any `Some(lag)`.
-        self.lag.hash_into(h);
+        lag.hash_into(h);
         // `data_source` (ir/VERSION 0.33) is DELIBERATELY NOT FOLDED. It is the
         // compile-time provenance of a `data = "path"` forcing — the path as
         // written plus the SHA-256 of the file's bytes — and neither can change
@@ -800,11 +848,14 @@ impl ContentAddressed for TimeFunction {
 
 impl ContentAddressed for RecurringSchedule {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let RecurringSchedule { start, period, end, at_day } = self;
         header(h, "ir::intervention::RecurringSchedule");
-        h.write_f64_bits(self.start);
-        h.write_f64_bits(self.period);
-        h.write_f64_bits(self.end);
-        hash_opt_f64(h, &self.at_day);
+        h.write_f64_bits(*start);
+        h.write_f64_bits(*period);
+        h.write_f64_bits(*end);
+        hash_opt_f64(h, at_day);
     }
 }
 
@@ -919,11 +970,14 @@ impl ContentAddressed for TriggerExpr {
 
 impl ContentAddressed for ReactiveTrigger {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let ReactiveTrigger { when_, after, once, cooldown } = self;
         header(h, "ir::intervention::ReactiveTrigger");
-        self.when_.hash_into(h);
-        h.write_f64_bits(self.after);
-        self.once.hash_into(h);
-        hash_opt_f64(h, &self.cooldown);
+        when_.hash_into(h);
+        h.write_f64_bits(*after);
+        once.hash_into(h);
+        hash_opt_f64(h, cooldown);
     }
 }
 
@@ -975,12 +1029,15 @@ impl ContentAddressed for Action {
 
 impl ContentAddressed for Intervention {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Intervention { name, base_name, fire, actions, kind } = self;
         header(h, "ir::intervention::Intervention");
-        h.write_str(&self.name);
-        self.base_name.hash_into(h);
-        self.fire.hash_into(h);
-        self.actions.hash_into(h);
-        self.kind.hash_into(h);
+        h.write_str(name);
+        base_name.hash_into(h);
+        fire.hash_into(h);
+        actions.hash_into(h);
+        kind.hash_into(h);
     }
 }
 
@@ -1011,9 +1068,12 @@ impl ContentAddressed for CompartmentKind {
 
 impl ContentAddressed for Compartment {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Compartment { name, kind } = self;
         header(h, "ir::model::Compartment");
-        h.write_str(&self.name);
-        self.kind.hash_into(h);
+        h.write_str(name);
+        kind.hash_into(h);
     }
 }
 
@@ -1039,9 +1099,12 @@ impl ContentAddressed for InitialConditions {
 
 impl ContentAddressed for RegularOutputSchedule {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let RegularOutputSchedule { start, step } = self;
         header(h, "ir::model::RegularOutputSchedule");
-        h.write_f64_bits(self.start);
-        h.write_f64_bits(self.step);
+        h.write_f64_bits(*start);
+        h.write_f64_bits(*step);
     }
 }
 
@@ -1063,28 +1126,36 @@ impl ContentAddressed for OutputSchedule {
 
 impl ContentAddressed for OutputConfig {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let OutputConfig { times, format, trajectory, observations } = self;
         header(h, "ir::model::OutputConfig");
-        self.times.hash_into(h);
-        h.write_str(&self.format);
-        self.trajectory.hash_into(h);
-        self.observations.hash_into(h);
+        times.hash_into(h);
+        h.write_str(format);
+        trajectory.hash_into(h);
+        observations.hash_into(h);
     }
 }
 
 impl ContentAddressed for SimulationConfig {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let SimulationConfig {
+            t_start, t_end, time_semantics, dt, rng_seed, integrator, t_end_anchor,
+        } = self;
         header(h, "ir::model::SimulationConfig");
-        h.write_f64_bits(self.t_start);
-        h.write_f64_bits(self.t_end);
-        h.write_str(&self.time_semantics);
-        hash_opt_f64(h, &self.dt);
-        self.rng_seed.hash_into(h);
+        h.write_f64_bits(*t_start);
+        h.write_f64_bits(*t_end);
+        h.write_str(time_semantics);
+        hash_opt_f64(h, dt);
+        rng_seed.hash_into(h);
         // gh#166: hash the integrator ONLY when non-default (Rk45 + its
         // tolerances, tagged so atol/rtol can't collide), so a default-Rk4 model
         // keeps its pre-gh#166 run-id (no cache churn) while rk45 / explicit
         // tolerances — which produce different trajectories — get a distinct
         // content address.
-        if let ir::model::Integrator::Rk45 { atol, rtol } = &self.integrator {
+        if let ir::model::Integrator::Rk45 { atol, rtol } = integrator {
             h.write_str("rk45");
             if let Some(a) = atol { h.write_str("atol"); h.write_f64_bits(*a); }
             if let Some(r) = rtol { h.write_str("rtol"); h.write_f64_bits(*r); }
@@ -1095,7 +1166,7 @@ impl ContentAddressed for SimulationConfig {
         // path resolves and CLEARS this before the model is hashed, so what it
         // guards is the paths that hash an as-compiled model (fit sidecar,
         // model-level provenance).
-        hash_anchor_opt(h, &self.t_end_anchor);
+        hash_anchor_opt(h, t_end_anchor);
     }
 }
 
@@ -1111,90 +1182,123 @@ fn hash_anchor_opt(h: &mut CanonicalHasher, a: &Option<ir::anchor::AnchoredTime>
 
 impl ContentAddressed for Preset {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Preset {
+            name, label, params, enable, disable, scale, compose, t_end, t_end_anchor,
+        } = self;
         header(h, "ir::model::Preset");
-        h.write_str(&self.name);
-        h.write_str(&self.label);
-        h.write_str_f64_map(self.params.iter());
-        self.enable.hash_into(h);
-        self.disable.hash_into(h);
-        h.write_str_f64_map(self.scale.iter());
-        self.compose.hash_into(h);
-        hash_opt_f64(h, &self.t_end);
-        hash_anchor_opt(h, &self.t_end_anchor);
+        h.write_str(name);
+        h.write_str(label);
+        h.write_str_f64_map(params.iter());
+        enable.hash_into(h);
+        disable.hash_into(h);
+        h.write_str_f64_map(scale.iter());
+        compose.hash_into(h);
+        hash_opt_f64(h, t_end);
+        hash_anchor_opt(h, t_end_anchor);
     }
 }
 
 impl ContentAddressed for Dimension {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Dimension { name, values } = self;
         header(h, "ir::model::Dimension");
-        h.write_str(&self.name);
-        self.values.hash_into(h);
+        h.write_str(name);
+        values.hash_into(h);
     }
 }
 
 impl ContentAddressed for ModelStructure {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let ModelStructure {
+            dimensions, compartment_dims, base_compartments,
+            transmission_transitions, infectious_compartments,
+        } = self;
         header(h, "ir::model::ModelStructure");
-        self.dimensions.hash_into(h);
+        dimensions.hash_into(h);
         // compartment_dims: HashMap<String, Vec<String>>.
-        h.write_str_map(self.compartment_dims.iter());
-        self.base_compartments.hash_into(h);
-        self.transmission_transitions.hash_into(h);
-        self.infectious_compartments.hash_into(h);
+        h.write_str_map(compartment_dims.iter());
+        base_compartments.hash_into(h);
+        transmission_transitions.hash_into(h);
+        infectious_compartments.hash_into(h);
     }
 }
 
 impl ContentAddressed for BalanceSpec {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let BalanceSpec { target, expr } = self;
         header(h, "ir::model::BalanceSpec");
-        h.write_str(&self.target);
-        self.expr.hash_into(h);
+        h.write_str(target);
+        expr.hash_into(h);
     }
 }
 
 impl ContentAddressed for Binding {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Binding { name, expr } = self;
         header(h, "ir::model::Binding");
-        h.write_str(&self.name);
-        self.expr.hash_into(h);
+        h.write_str(name);
+        expr.hash_into(h);
     }
 }
 
 impl ContentAddressed for Model {
     fn hash_into(&self, h: &mut CanonicalHasher) {
+        // Exhaustive destructure: a new IR field must not silently escape the
+        // model hash — add it below, or bind it `_` with the reason.
+        let Model {
+            name, version, time_unit, description, origin, origin_rata_die,
+            compartments, transitions, ode_equations, time_functions, tables,
+            interventions, observations, parameters, bindings, per_eval_bindings,
+            initial_conditions, ic_grad: _, output, simulation, presets,
+            model_structure, balance, identity_tracked_compartments,
+            // Reporting-only reductions/contrasts, documented in `ir::model` as
+            // deliberately excluded from `Model::hash_into` — non-identity, must
+            // never re-key a sim/fit.
+            quantities: _, contrasts: _,
+        } = self;
         header(h, "ir::model::Model");
-        h.write_str(&self.name);
-        h.write_str(&self.version);
-        h.write_str(&self.time_unit);
-        self.description.hash_into(h);
-        self.origin.hash_into(h);
-        self.origin_rata_die.hash_into(h);
-        self.compartments.hash_into(h);
-        self.transitions.hash_into(h);
-        self.ode_equations.hash_into(h);
-        self.time_functions.hash_into(h);
-        self.tables.hash_into(h);
-        self.interventions.hash_into(h);
-        self.observations.hash_into(h);
-        self.parameters.hash_into(h);
-        self.bindings.hash_into(h);
+        h.write_str(name);
+        h.write_str(version);
+        h.write_str(time_unit);
+        description.hash_into(h);
+        origin.hash_into(h);
+        origin_rata_die.hash_into(h);
+        compartments.hash_into(h);
+        transitions.hash_into(h);
+        ode_equations.hash_into(h);
+        time_functions.hash_into(h);
+        tables.hash_into(h);
+        interventions.hash_into(h);
+        observations.hash_into(h);
+        parameters.hash_into(h);
+        bindings.hash_into(h);
         // gh#272 LICM: identity field (the emitted IR is hashed). Empty by default
         // — but the empty Vec's length prefix still shifts the model hash at the
         // 0.19 schema bump (a deliberate, version-bumped re-key); pinned by the
         // distinctness test in this module.
-        self.per_eval_bindings.hash_into(h);
-        self.initial_conditions.hash_into(h);
+        per_eval_bindings.hash_into(h);
+        initial_conditions.hash_into(h);
         // ic_grad (∂(initial_state)/∂θ, the forward-sensitivity seed, gh#275) is
         // compiler-derived autodiff of the parameterized initial conditions over
         // the already-hashed params, so it is NOT hashed — model identity is
         // gradient-independent (SV = 2; proposal
         // 2026-07-16-gradient-maps-out-of-run-identity.md).
-        self.output.hash_into(h);
-        self.simulation.hash_into(h);
-        self.presets.hash_into(h);
-        self.model_structure.hash_into(h);
-        self.balance.hash_into(h);
-        self.identity_tracked_compartments.hash_into(h);
+        output.hash_into(h);
+        simulation.hash_into(h);
+        presets.hash_into(h);
+        model_structure.hash_into(h);
+        balance.hash_into(h);
+        identity_tracked_compartments.hash_into(h);
     }
 }
 
