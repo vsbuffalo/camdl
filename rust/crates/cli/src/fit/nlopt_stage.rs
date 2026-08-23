@@ -692,6 +692,7 @@ mod tests {
             survey_path: None,
             survey_top_k_n: None,
             gate: GateConfig::default(),
+            dt_check: crate::fit::config_v2::DtCheckConfig::default(),
         }
     }
 
