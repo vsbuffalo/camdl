@@ -5162,6 +5162,67 @@ dt = 1.0
             "and must draw the finding that goes with the glyph");
     }
 
+    /// A high R̂ has two structurally different causes and the end-of-stage
+    /// report must say WHICH: chains disagreeing about **location**
+    /// (`rhat_bulk`) or about **spread** (`rhat_folded`). Both halves are
+    /// computed by `rank_convergence`; carrying only their `max` outward left
+    /// the reader a number with no action attached to it.
+    ///
+    /// `scale_disagree` is the spread case — four chains centred on the same
+    /// value with different widths. `posterior` 1.7.0 on this fixture:
+    /// `rhat` 1.3130, `rhat_split` 0.9984 (the raw-scale unfolded rung), so
+    /// the folded half is what the headline is made of.
+    #[test]
+    fn the_report_names_which_half_drove_a_high_rhat() {
+        use sim::inference::diagnostic::DiagnosticCollector;
+        let chains = load_convergence_chains();
+        let conv = StageConvergence::compute([(
+            "scale_disagree".to_string(),
+            chains["scale_disagree"].clone(),
+        )]);
+        let collector = DiagnosticCollector::new("test");
+        let out = conv.report(&collector, 1.05);
+
+        assert!(
+            out.contains("folded"),
+            "the report must name the folded half — it is the whole reason the \
+             headline is above the band here:\n{out}"
+        );
+        assert!(
+            out.contains("bulk 0.99") || out.contains("bulk 1.00"),
+            "and must print the location half beside it, so the reader can see \
+             the two are far apart:\n{out}"
+        );
+        assert!(
+            out.contains("spread"),
+            "and must say what that split MEANS, not only that it exists:\n{out}"
+        );
+    }
+
+    /// The mirror case: `within_chain_drift` is driven by the LOCATION half
+    /// (each chain drifts across its own run), so the same line must name the
+    /// other cause. Without this a report that hard-coded "spread" would pass
+    /// the test above.
+    #[test]
+    fn the_report_names_the_location_half_when_that_is_the_driver() {
+        use sim::inference::diagnostic::DiagnosticCollector;
+        let chains = load_convergence_chains();
+        let conv = StageConvergence::compute([(
+            "within_chain_drift".to_string(),
+            chains["within_chain_drift"].clone(),
+        )]);
+        let collector = DiagnosticCollector::new("test");
+        let out = conv.report(&collector, 1.05);
+        assert!(
+            out.contains("location"),
+            "drifting chains disagree about WHERE the posterior sits:\n{out}"
+        );
+        assert!(
+            !out.contains("disagree on spread"),
+            "and that is not a spread disagreement:\n{out}"
+        );
+    }
+
     /// The classic Gelman & Rubin statistic is still computed and still
     /// available — it is just no longer the headline. On the drifting-chain
     /// fixture the two differ by more than a third, in the direction that
