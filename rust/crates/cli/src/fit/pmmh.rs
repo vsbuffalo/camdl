@@ -121,7 +121,6 @@ pub fn run_stage(
     pmmh_opts: PmmhStageOpts,
     seed: u64,
     force: bool,
-    check_variance: bool,
     resume: bool,
     starts_from: Option<&str>,
     // Post-fit deterministic ODE dt-check config (gh#52, gh#227). `Some` only on
@@ -368,80 +367,6 @@ pub fn run_stage(
         }
     }
 
-    if check_variance {
-        // Also run correlation check if rho is set
-        if let Some(rho) = rho {
-            eprintln!("\nCPM correlation check (rho={}, 50 correlated pairs)...", rho);
-            let n_source_groups = config.compiled.source_groups.len();
-            let n_obs = config.observations.len();
-            let obs_spacing = if config.observations.len() >= 2 {
-                config.observations[1].time - config.observations[0].time
-            } else { 7.0 };
-            let steps_per_obs = sim::time::interval_steps(0.0, obs_spacing, dt);
-            let mut corr_rng = sim::rng::StatefulRng::new(seed + 999);
-
-            let process = config.build_process();
-            let obs_model_trait = config.build_obs_model();
-            let smc_config = config.smc_config();
-
-            let eval_corr = |params: &[f64], randoms: &sim::inference::correlated_pf::PFRandomState|
-                -> Result<f64, sim::error::SimError> {
-                // gh#224: structural failures surface; a degenerate/recoverable
-                // correlated-PF run is a ruled-out θ (−∞).
-                match sim::inference::correlated_pf::bootstrap_filter_correlated(
-                    &process, &obs_model_trait, params, &smc_config, randoms, seed,
-                ) {
-                    Ok(r) => Ok(r.log_likelihood),
-                    Err(e) if e.is_structural() => Err(e),
-                    Err(_) => Ok(f64::NEG_INFINITY),
-                }
-            };
-
-            let mut ll_a = Vec::new();
-            let mut ll_b = Vec::new();
-            for i in 0..50 {
-                let u = sim::inference::correlated_pf::PFRandomState::draw_fresh(
-                    n_particles, n_obs, steps_per_obs, n_source_groups, &mut corr_rng,
-                );
-                let u_prime = u.correlate(rho, &mut corr_rng);
-                let la = eval_corr(&base, &u)
-                    .map_err(|e| format!("pmmh: structural error during CPM correlation check: {}", e))?;
-                let lb = eval_corr(&base, &u_prime)
-                    .map_err(|e| format!("pmmh: structural error during CPM correlation check: {}", e))?;
-                ll_a.push(la);
-                ll_b.push(lb);
-                eprint!("\r  pair {}/50: Δ={:.2}    ", i + 1, (la - lb).abs());
-            }
-            eprintln!();
-
-            // Compute correlation
-            let n = ll_a.len() as f64;
-            let mean_a = ll_a.iter().sum::<f64>() / n;
-            let mean_b = ll_b.iter().sum::<f64>() / n;
-            let var_a = ll_a.iter().map(|&x| (x - mean_a).powi(2)).sum::<f64>() / (n - 1.0);
-            let var_b = ll_b.iter().map(|&x| (x - mean_b).powi(2)).sum::<f64>() / (n - 1.0);
-            let cov = ll_a.iter().zip(&ll_b).map(|(&a, &b)| (a - mean_a) * (b - mean_b)).sum::<f64>() / (n - 1.0);
-            let rho_eff = if var_a > 0.0 && var_b > 0.0 { cov / (var_a.sqrt() * var_b.sqrt()) } else { 0.0 };
-
-            let diffs: Vec<f64> = ll_a.iter().zip(&ll_b).map(|(&a, &b)| a - b).collect();
-            let diff_mean = diffs.iter().sum::<f64>() / n;
-            let diff_sd = (diffs.iter().map(|&d| (d - diff_mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
-
-            eprintln!("  ρ_eff = {:.3}", rho_eff);
-            eprintln!("  sd(individual) = {:.2}", var_a.sqrt());
-            eprintln!("  sd(difference) = {:.2}", diff_sd);
-            if rho_eff > 0.95 {
-                eprintln!("  \x1b[32m✓ CPM correlation excellent — mixing issue is proposal tuning\x1b[0m");
-            } else if rho_eff > 0.8 {
-                eprintln!("  \x1b[33m~ CPM correlation moderate — binomial correlation partial\x1b[0m");
-            } else {
-                eprintln!("  \x1b[31m✗ CPM correlation low — check binomial z-value injection\x1b[0m");
-            }
-        }
-
-        eprintln!("\n--check-variance: stopping here (no MCMC run).");
-        return Ok(());
-    }
 
     if !force && !resume {
         let state_path = stage_dir.join("fit_state.toml");
