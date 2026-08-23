@@ -360,113 +360,49 @@ fn diff_stages(
     }
 }
 
-/// Project a `Stage` into a flat key→value settings map. Algorithm-aware:
-/// keys differ across IF2/PGAS/PMMH/PFilter/Nl*, and the `algorithm` and
-/// `backend` keys are first-class so a stage that swapped either produces
-/// a clean row in `settings_changed`.
+/// Project a `Stage` into a flat key→value settings map, derived from the
+/// stage's own serialization (dotted paths for nested tables) — the same
+/// move `validate_stage_keys` makes to get its allowed-key set. The
+/// previous hand-maintained per-variant projection listed a SUBSET of each
+/// variant's fields, so `fit diff` reported "no settings changed" for two
+/// configs differing in anything swept into its `..` (tempering, use_nuts,
+/// dt_check, every init selector, …) — a silent wrong answer from a
+/// provenance surface. Deriving from serialization means the key set can
+/// never drift from the enum; keys carry the TOML-side spellings
+/// (`init_mle`, `init`), which is what the user wrote and diffs against.
 fn stage_settings_map(stage: &Stage) -> BTreeMap<String, serde_json::Value> {
     let mut m = BTreeMap::new();
-    m.insert("algorithm".into(), serde_json::Value::String(stage.method_name().into()));
-    m.insert("backend".into(), serde_json::Value::String(stage.backend().as_str().into()));
-    match stage {
-        Stage::IF2 {
-            chains,
-            particles,
-            iterations,
-            cooling,
-            cooling_target_iters,
-            loglik_eval,
-            gate,
-            ..
-        } => {
-            m.insert("chains".into(), serde_json::json!(chains));
-            m.insert("particles".into(), serde_json::json!(particles));
-            m.insert("iterations".into(), serde_json::json!(iterations));
-            m.insert("cooling".into(), serde_json::json!(cooling));
-            m.insert("cooling_target_iters".into(),
-                serde_json::json!(cooling_target_iters));
-            m.insert(
-                "loglik_eval.n_particles".into(),
-                serde_json::json!(loglik_eval.n_particles),
-            );
-            m.insert(
-                "loglik_eval.n_replicates".into(),
-                serde_json::json!(loglik_eval.n_replicates),
-            );
-            m.insert("gate.a_thresh".into(), serde_json::json!(gate.a_thresh));
-            m.insert(
-                "gate.decibans_thresh".into(),
-                serde_json::json!(gate.decibans_thresh),
-            );
+    // The serde tag puts `algorithm` in the map alongside every field;
+    // `backend` is an ordinary field on all variants.
+    let v = serde_json::to_value(stage).unwrap_or(serde_json::Value::Null);
+    flatten_settings("", &v, &mut m);
+    m
+}
+
+/// Recursively flatten a JSON object into dotted-path keys. Non-object
+/// leaves (numbers, strings, bools, nulls, arrays) are inserted as-is —
+/// arrays (e.g. `tempering`) diff as whole values, which is the readable
+/// grain for a settings row.
+fn flatten_settings(
+    prefix: &str,
+    v: &serde_json::Value,
+    m: &mut BTreeMap<String, serde_json::Value>,
+) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_settings(&key, val, m);
+            }
         }
-        Stage::PGAS {
-            chains,
-            particles,
-            sweeps,
-            burn_in,
-            thin,
-            ..
-        } => {
-            m.insert("chains".into(), serde_json::json!(chains));
-            m.insert("particles".into(), serde_json::json!(particles));
-            m.insert("sweeps".into(), serde_json::json!(sweeps));
-            m.insert("burn_in".into(), serde_json::json!(burn_in));
-            m.insert("thin".into(), serde_json::json!(thin));
-        }
-        Stage::PMMH {
-            chains,
-            particles,
-            iterations,
-            burn_in,
-            thin,
-            ..
-        } => {
-            m.insert("chains".into(), serde_json::json!(chains));
-            m.insert("particles".into(), serde_json::json!(particles));
-            m.insert("iterations".into(), serde_json::json!(iterations));
-            m.insert("burn_in".into(), serde_json::json!(burn_in));
-            m.insert("thin".into(), serde_json::json!(thin));
-        }
-        Stage::Mh {
-            chains,
-            iterations,
-            burn_in,
-            thin,
-            ..
-        } => {
-            m.insert("chains".into(), serde_json::json!(chains));
-            m.insert("iterations".into(), serde_json::json!(iterations));
-            m.insert("burn_in".into(), serde_json::json!(burn_in));
-            m.insert("thin".into(), serde_json::json!(thin));
-        }
-        Stage::Nuts {
-            chains,
-            samples,
-            ..
-        } => {
-            m.insert("chains".into(), serde_json::json!(chains));
-            m.insert("samples".into(), serde_json::json!(samples));
-        }
-        Stage::PFilter {
-            particles,
-            replicates,
-            ..
-        } => {
-            m.insert("particles".into(), serde_json::json!(particles));
-            m.insert("replicates".into(), serde_json::json!(replicates));
-        }
-        Stage::NlSbplx(c) | Stage::NlBobyqa(c) => {
-            m.insert("chains".into(), serde_json::json!(c.chains));
-            m.insert("tolerance".into(), serde_json::json!(c.tolerance));
-            m.insert("max_evals".into(), serde_json::json!(c.max_evals));
-            m.insert("gate.a_thresh".into(), serde_json::json!(c.gate.a_thresh));
-            m.insert(
-                "gate.decibans_thresh".into(),
-                serde_json::json!(c.gate.decibans_thresh),
-            );
+        leaf => {
+            m.insert(prefix.to_string(), leaf.clone());
         }
     }
-    m
 }
 
 #[cfg(test)]
@@ -633,6 +569,47 @@ mod tests {
             .expect("refine.chains delta missing");
         assert_eq!(chains_chg.from, serde_json::json!(4));
         assert_eq!(chains_chg.to, serde_json::json!(8));
+    }
+
+    /// The settings map must cover EVERY stage field, not a hand-picked
+    /// subset: the old per-variant projection swallowed `tempering`,
+    /// `use_nuts`, the init selectors and more with `..`, so a diff over
+    /// any of them reported "no settings changed". Derived-from-
+    /// serialization can't drift from the enum; this pins the fields the
+    /// old code demonstrably missed.
+    #[test]
+    fn settings_map_covers_fields_the_old_projection_swallowed() {
+        let cfg: FitConfigV2 = toml::from_str(r#"
+        [model]
+        camdl = "m.camdl"
+
+        [estimate]
+        beta = { bounds = [0.01, 2.0], prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }
+
+        [fixed]
+        N0 = 1000000
+
+        [stages.posterior]
+        algorithm  = "pgas"
+        backend    = "chain_binomial"
+        chains     = 2
+        particles  = 100
+        sweeps     = 10
+        tempering  = [1.0, 0.5]
+        "#).expect("toml parse");
+        let m = stage_settings_map(&cfg.stages["posterior"]);
+        for key in ["algorithm", "backend", "chains", "tempering", "use_nuts", "init", "init_mle"] {
+            assert!(m.contains_key(key),
+                "settings map must carry '{key}' — a fit diff over it \
+                 previously reported no change; keys present: {:?}",
+                m.keys().collect::<Vec<_>>());
+        }
+        // And a diff over one of the previously-swallowed fields yields a row.
+        let mut hot = cfg.stages["posterior"].clone();
+        if let Stage::PGAS { tempering, .. } = &mut hot { *tempering = vec![1.0, 0.7, 0.4]; }
+        let hot_map = stage_settings_map(&hot);
+        assert_ne!(m.get("tempering"), hot_map.get("tempering"),
+            "a tempering change must be visible to fit diff");
     }
 
     #[test]
