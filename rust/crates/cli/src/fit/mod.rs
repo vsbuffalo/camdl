@@ -1175,7 +1175,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
 
         let stage_t0 = std::time::Instant::now();
-        let mut stage_best_loglik: Option<f64> = None;
+        // Uninitialized on purpose: every dispatch arm must assign a stage
+        // loglik (or exit) — the compiler enforces that no arm can fall
+        // through to the finalize below with a silent None.
+        let stage_best_loglik: Option<f64>;
+        // PFilter has replicates, not competing chains, so it legitimately
+        // leaves this None.
         let mut stage_best_chain: Option<usize> = None;
 
         // Surface the registry caveat for Beta/Experimental methods, once per
@@ -1650,10 +1655,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     std::process::exit(1);
                 });
                 // Bubble loglik from fit_state.toml written by PGAS runner
-                if let Ok(fs) = state::FitState::load(&stage_dir.to_string_lossy()) {
-                    stage_best_loglik = Some(fs.best_loglik);
-                    stage_best_chain = Some(fs.best_chain);
-                }
+                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                stage_best_loglik = Some(fs.best_loglik);
+                stage_best_chain = Some(fs.best_chain);
             }
             Stage::PMMH { .. } => {
                 let pmmh_opts = pmmh::PmmhStageOpts::from_stage(stage)
@@ -1677,10 +1681,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     eprintln!("error running pmmh stage '{}': {}", stage_name, e);
                     std::process::exit(1);
                 });
-                if let Ok(fs) = state::FitState::load(&stage_dir.to_string_lossy()) {
-                    stage_best_loglik = Some(fs.best_loglik);
-                    stage_best_chain = Some(fs.best_chain);
-                }
+                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                stage_best_loglik = Some(fs.best_loglik);
+                stage_best_chain = Some(fs.best_chain);
             }
             Stage::Mh { .. } => {
                 // Deterministic-ODE Metropolis-Hastings. Routes through the
@@ -1720,10 +1723,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     eprintln!("error running mh stage '{}': {}", stage_name, e);
                     std::process::exit(1);
                 });
-                if let Ok(fs) = state::FitState::load(&stage_dir.to_string_lossy()) {
-                    stage_best_loglik = Some(fs.best_loglik);
-                    stage_best_chain = Some(fs.best_chain);
-                }
+                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                stage_best_loglik = Some(fs.best_loglik);
+                stage_best_chain = Some(fs.best_chain);
             }
             Stage::Nuts { .. } => {
                 // Gradient-based Bayesian sampling of the deterministic ODE
@@ -1745,10 +1747,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     eprintln!("error running nuts stage '{}': {}", stage_name, e);
                     std::process::exit(1);
                 });
-                if let Ok(fs) = state::FitState::load(&stage_dir.to_string_lossy()) {
-                    stage_best_loglik = Some(fs.best_loglik);
-                    stage_best_chain = Some(fs.best_chain);
-                }
+                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                stage_best_loglik = Some(fs.best_loglik);
+                stage_best_chain = Some(fs.best_chain);
             }
             Stage::NlSbplx(_) | Stage::NlBobyqa(_) => {
                 #[cfg(feature = "ode")]
@@ -1804,10 +1805,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         eprintln!("error running nlopt stage '{}': {}", stage_name, e);
                         std::process::exit(1);
                     });
-                    if let Ok(fs) = state::FitState::load(&stage_dir.to_string_lossy()) {
-                        stage_best_loglik = Some(fs.best_loglik);
-                        stage_best_chain = Some(fs.best_chain);
-                    }
+                    let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                    stage_best_loglik = Some(fs.best_loglik);
+                    stage_best_chain = Some(fs.best_chain);
                 }
                 #[cfg(not(feature = "ode"))]
                 {
@@ -2085,6 +2085,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 /// Resolve a `--resume <base ref>` to a base stage-leaf dir: an existing path,
 /// else a `run_id` hex prefix matched under `<cas_root>/fits/`. `None` when no
 /// unique match (caller errors).
+/// After a stage runner reported success, its `fit_state.toml` is the channel
+/// carrying the stage result back to this orchestrator (`best_loglik` /
+/// `best_chain` end up in the finalized run.json inputs). A missing or
+/// corrupt file at that point is a runner bug or a torn write; the previous
+/// `if let Ok` swallow left a silent `null` in run.json where the result
+/// belonged. Fail loudly instead.
+fn load_stage_result_or_exit(stage_name: &str, stage_dir: &std::path::Path) -> state::FitState {
+    state::FitState::load(&stage_dir.to_string_lossy()).unwrap_or_else(|e| {
+        eprintln!(
+            "error: stage '{}' reported success but its fit_state.toml \
+             cannot be read back from {}: {}",
+            stage_name, stage_dir.display(), e);
+        std::process::exit(1);
+    })
+}
+
 fn resolve_base_ref(reference: &str, cas_root: &std::path::Path) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(reference);
     if p.is_dir() {
