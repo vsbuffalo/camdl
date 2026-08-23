@@ -3,22 +3,21 @@
 - Date: 2026-08-23
 - Issue: gh#718
 - Defect 1: fixed by `55178dd1`
-- Defect 2: confirmed, **not yet fixed** — see "The open decision"
+- Defect 2: confirmed; fix decided (Part 7), implementation in progress
 - Class: **code-vs-code** — the code disagreed with the mathematics it is an
-  implementation of. Defect 1 is fixed in code with a test pinning the
-  agreement; defect 2 has a confirmed reproduction and two candidate fixes, and
-  is awaiting a decision between them.
+  implementation of. Both defects are errors of composition rather than of any
+  single function; see Part 5.
 
 ## Summary in one paragraph
 
-PGAS is camdl's default method for Bayesian fitting. Its correctness rests on a
-single property, and we found two separate places where the code violates it.
-The consequence is not "noisier answers" or "slower convergence" — it is that
-the posterior distributions PGAS reports are not the posterior distributions
-that were asked for. They are shifted, systematically, in a way that **no
-convergence diagnostic we compute can detect**. Every PGAS fit produced since
-2026-04-05 is affected. One defect is fixed; the second is confirmed and needs a
-design decision before it can be fixed.
+PGAS is camdl's default method for stochastic Bayesian fitting. Its correctness
+rests on a single property, and we found two separate places where the code
+violates it. The consequence is not "noisier answers" or "slower convergence" —
+it is that the posterior distributions PGAS reports are not the posterior
+distributions that were asked for. They are shifted, systematically, in a way
+that **no convergence diagnostic we compute can detect**. Every PGAS fit
+produced since 2026-04-05 is affected. One defect is fixed; the second is
+confirmed and needs a design decision before it can be fixed.
 
 ---
 
@@ -87,6 +86,14 @@ the standard choice — but the `n` picks are strongly dependent on each other,
 because they are locked to a rigid grid of ticks. Each tick's interval is called
 a **stratum**.
 
+> **A warning about the word "stratum".** In this document it means one of those
+> `n` evenly spaced intervals of the resampling line — a purely numerical
+> construct inside the resampler, with no epidemiological content. It has
+> **nothing to do with `stratum` in the camdl DSL**, where it names a
+> stratification of the population (age band, patch, health zone) declared in an
+> observation block. The two are unrelated and it is unfortunate that the
+> standard term for each is the same word.
+
 ---
 
 ## Part 1: how we measured "wrong"
@@ -153,7 +160,10 @@ differences between them turn out to be the whole story:
 
 ## Part 2: the investigation, hypothesis by hypothesis
 
-### Hypothesis 1 — the ancestor weight was being scored at a stale state
+Each heading carries its verdict, so the two that mattered are findable without
+reading the one that did not.
+
+### Hypothesis 1 (REFUTED) — the ancestor weight was being scored at a stale state
 
 **What we thought.** `fill_ancestor_log_weights` scores each candidate the
 reference could re-attach to. It took the reference's own state through a
@@ -177,7 +187,7 @@ two readers down the same wrong path, so it was removed in `b7279b5e` — a
 behaviour-neutral change that makes the file stop suggesting a bug that isn't
 there.
 
-### Hypothesis 2 — the resampling discards one of its own picks
+### Hypothesis 2 (CONFIRMED — this is defect 1) — the resampling discards one of its own picks
 
 **What we thought.** Reading the resampling block, `systematic_resample` is
 asked for `n` picks — one per particle — but the result is only used for the
@@ -263,7 +273,7 @@ because the test's weights made `n × w_ref` exactly 2.0, which makes step one o
 the algorithm a no-op; the test now uses three weight vectors chosen so every
 branch is exercised.
 
-### Hypothesis 3 — the ancestor move is invalid wherever resampling is skipped
+### Hypothesis 3 (CONFIRMED — this is defect 2) — the ancestor move is invalid wherever resampling is skipped
 
 **Where this came from.** An upstream review of gh#718, which did not agree with
 our diagnosis and proposed a different and deeper one.
@@ -388,7 +398,123 @@ reference particle to protect. Only `csmc_as` does.
 
 ---
 
-## The open decision — how to fix defect 2
+## Part 5: what kind of errors were these?
+
+Neither defect is a bug in any single function. `systematic_resample` is
+correct. The loop that applies it is correct — its bounds are right and it
+touches every slot it means to. `splice_log_ratio` is correct, and was verified
+against an independent oracle before any of this. **Both defects are errors of
+composition**: correct pieces assembled under an assumption that nothing in the
+program recorded.
+
+**Defect 1's class: calling a primitive that answers a neighbouring question,
+then discarding the mismatch.** The operation actually needed was "draw the
+ancestors for the `n-1` slots that are not the reference". No such function
+existed. Instead the code called the function for a _different_ question — "draw
+ancestors for all `n` slots, with no reference to protect" — and dropped the
+part of the answer that did not fit. Dropping part of a joint draw silently
+changes its distribution, which is invisible at the call site because the
+discarded value is simply never read.
+
+This has the _appearance_ of an off-by-one, since `j_ref = n - 1` and the
+discarded pick is `indices[n - 1]`. It is not one, and that distinction matters
+for prevention: re-indexing would not have fixed it. Had the reference been
+placed at slot 0, the code would have discarded the leftmost stratum instead and
+starved the reference just as thoroughly. The error is that a joint draw was
+treated as if its components were separable.
+
+**Defect 2's class: a borrowed derivation whose stated precondition was never
+carried into the code.** The ancestor-sampling accept/reject formula comes from
+Lindsten, Jordan & Schön (2014), where it is derived for a particle system whose
+resampling picks are _independent across slots_ — multinomial. camdl resamples
+systematically, and skips resampling entirely when weights are equal. The
+formula was transcribed faithfully; the condition under which it is a valid
+formula was not. Nothing in the code, its types, its comments, or its tests
+recorded that the formula had a precondition at all, so there was nothing to
+notice was violated.
+
+**What the two share.** In both cases a correctness precondition lived only in
+the mathematics — "the resampling must be marginally unbiased", "the ancestor
+picks must be independent across slots" — and had no representation in the
+program. A precondition with no representation cannot be checked, cannot be
+tested, and cannot fail loudly. It can only be violated silently.
+
+## Part 6: retrospective — how this could have been caught, and how to prevent
+
+the next one
+
+### Why four months passed
+
+The suite had four tests on this kernel and all four passed throughout. They
+pinned the accept/reject ratio against an independent oracle, the
+ancestor-sampling weight formula, the continuity of the returned path, and a
+byte-level digest. Every one of them checks a _part_. None asked the question
+the algorithm exists to answer: does a sweep applied to a draw from the target
+return a draw from the target?
+
+Nothing else could have surfaced it either. Both defects bias every chain
+identically, so R̂ stays at 1.00 and ESS stays healthy — the diagnostics were
+working correctly and reporting truthfully on a quantity that is blind to this
+entire class of error. And because starving the reference makes the chain
+abandon its current trajectory more readily, the bug plausibly made mixing look
+_better_, so it never presented as a symptom.
+
+### What would have caught it, in order of cost
+
+1. **A unit test asserting the resampling's defining property.** The cheapest by
+   a wide margin. Chopin & Singh state it in one sentence: the chance of any one
+   slot picking particle `m` must equal `m`'s weight. As a test that is twenty
+   lines, needs no model, and runs in 0.13 s. Against the old code it fails at
+   0.0000 versus 0.1000 owed — not a marginal failure, a total one. It now
+   exists (`conditional_systematic_matches_rejection_sampling_*`).
+2. **An invariance test on an exactly-enumerable fixture.** Minutes to run,
+   about a day to conceive, and it would have failed on day one. It now exists
+   (`csmc_exact_invariance`).
+3. **Recording the preconditions of a borrowed derivation as executable
+   assertions.** When a formula is transcribed from a paper, the paper's
+   assumptions are part of what is being transcribed. "Valid only under a
+   resampling scheme that is marginally unbiased and independent across slots"
+   belongs next to the formula as something the program can check, not as prose
+   in a comment — or as nothing at all, which is what happened.
+
+### Rules to carry forward
+
+1. **Test the defining property, not the parts.** A kernel whose whole purpose
+   is to leave a distribution invariant needs a test that measures invariance.
+   Four tests on the parts passed on a kernel that was not invariant.
+2. **Never call a primitive and discard part of its answer.** If the operation
+   you need is not the operation the function performs, write the function you
+   need and name it for the question it answers. The discarded value is the tell
+   — a computed result that is never read is either dead work or a silently
+   changed distribution.
+3. **When you implement from a paper, implement its preconditions too.** Copy
+   the formula and the conditions in the same commit, and make the conditions
+   checkable. A derivation's assumptions are not commentary; they are part of
+   the specification.
+4. **A control is only a control if it has been tested on its own.** "Plain
+   particle Gibbs is provably correct" was true of the algorithm and false of
+   this implementation of it. A control that shares code with the arm under test
+   cancels shared defects out of the comparison and relocates them into the
+   difference — which is precisely how gh#718 came to indict the wrong surface.
+   Where a control carries the weight of a conclusion, give it an absolute
+   check, not just its role in a paired contrast.
+5. **Shrink the model before growing the sample.** The instrument that settled
+   this in minutes is a 6-person SIR over 4 substeps. The one that could not
+   settle it in days was a 15-substep model needing 800,000 draws for a ground
+   truth. When a property is exactly checkable on a small enough state space,
+   make the state space small — the payoff is a comparison with no Monte-Carlo
+   error on either side.
+6. **When a prediction fails to reproduce, compare the geometry before
+   concluding the prediction is wrong.** The SPARSE fixture came back clean and
+   we briefly read that as evidence against the review's diagnosis. SPARSE
+   contained a repair mechanism we had not thought about. Finding TRAP meant
+   asking what structure the counterexample had that our fixture lacked.
+7. **`--method pgas` has no off-switch for ancestor sampling.** Every plain
+   particle Gibbs arm in this investigation existed only because `pgas.rs` was
+   temporarily patched. Given rule 4, the control ought to be reachable without
+   editing the source.
+
+## Part 7: the decision on defect 2
 
 Three options, with what each costs.
 
@@ -396,7 +522,7 @@ Three options, with what each costs.
 with equal weights.** Measured clean (z = 1.28). But resampling on equal weights
 duplicates particles for no benefit: only about 63% of the ensemble survives as
 distinct trajectories each time. Over the 7–15 substeps camdl typically runs
-between observations, the ensemble collapses. **Not recommended.**
+between observations, the ensemble collapses. **Rejected.**
 
 **Option 2 — where resampling is skipped, also skip ancestor sampling; use
 multinomial resampling and ancestor sampling only at observation substeps.**
@@ -405,8 +531,8 @@ ancestor sampling only occasionally, as a cost/mixing tradeoff. Keeps the
 sensible "don't resample when there is no new information" behaviour. **Cost:
 ancestor sampling currently fires at every substep; under this option it fires
 only where data exists — on the ebola fixture, 3 opportunities per sweep instead
-of 15. Trajectory renewal will drop, and mixing with it.** This is the
-recommendation.
+of 15. Trajectory renewal will drop, and mixing with it.** **This is the option
+chosen.**
 
 **Option 3 — keep systematic resampling and carry the full resampling
 probability through the accept/reject test.** On equal-weight substeps that
@@ -432,30 +558,27 @@ the stakes is an additional reason to prefer it.**
 
 ---
 
-## What this changes
+### The chosen fix, and the condition it must be gated on
 
-1. **A control is only a control if it has been tested on its own.** "Plain
-   particle Gibbs is provably correct" was true of the algorithm and false of
-   this implementation. A control arm that shares code with the arm under test
-   cancels shared defects out of the comparison and silently relocates them into
-   the difference. Where a control carries the weight of a conclusion, it needs
-   an absolute check, not just its role in a paired contrast.
-2. **Test the defining property, not the parts.** Four separate tests pinned
-   pieces of `csmc_as` — the ratio, the weight, the continuity, a digest — and
-   all four passed on a kernel that was not invariant. The exact-enumeration
-   test now in the suite would have failed on day one.
-3. **Shrink the model before growing the sample.** The instrument that settled
-   this in minutes is a 6-person SIR over 4 substeps. The one that could not
-   settle it in days was a 15-substep model needing 800,000 draws for a ground
-   truth. When a property is exactly checkable on a small enough state space,
-   make the state space small.
-4. **A fixture that passes may simply lack the geometry to fail.** SPARSE looked
-   like a fair test of defect 2 and was not, because it contained a repair
-   mechanism we had not thought about. Finding TRAP required asking what
-   structure the _counterexample_ had that our fixture lacked. When a prediction
-   fails to reproduce, compare the geometry before concluding the prediction is
-   wrong.
-5. **A parallel seam wants a named function.** The conditional resampling draw
-   was written as "call the unconditional one and ignore part of the answer",
-   inline, with no name and no test of its own. It is a different question from
-   unconditional resampling, and it needed to say so.
+**Option 2 is chosen, with one clarification that changes the implementation.**
+
+Ancestor sampling must run only where **a valid resampling operation actually
+took place** — not merely where the substep happens to carry an observation.
+Those two conditions look equivalent and are not. A substep can carry an
+observation and still produce equal weights, if every particle happens to score
+the observation identically; the resampling is then skipped, and an ancestor
+move there would be exactly the invalid move defect 2 describes. Gating on "is
+there an observation here?" would leave that case broken while appearing to fix
+it.
+
+So the gate is a fact about what the code _did_, not about what the schedule
+says: the resampling step sets a flag when it has actually drawn a new ancestry,
+and ancestor sampling reads that flag. Anything else re-introduces the defect
+through a narrower door.
+
+### Follow-up
+
+`--method pgas` has no way to disable ancestor sampling, so the plain particle
+Gibbs control used throughout this investigation only existed by patching
+`pgas.rs`. An `ancestor_sampling = false` setting is to be added once the
+defect-2 fix lands, so that control is reachable without editing the source.
