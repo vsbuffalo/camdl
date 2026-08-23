@@ -203,10 +203,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             resolve_starts_from_arg(&s)
         });
     let allow_nonconverged_scout = a.allow_nonconverged_scout;
-    // Stage-scoped CLI override for the convergence gate (clap requires --stage
-    // so scout/refine stay independently tunable). loglik_eval has no CLI
-    // override — it is part of the fit identity (gh#189).
-    let cli_decibans_thresh      = a.decibans_thresh;
     // Construct the full InitMethod payload from the CLI tag +
     // companion paths. When `--init from_mle` is used the path-bearing
     // variant is consumed by `starts_from_override` above (the legacy
@@ -266,6 +262,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         no_adapt:             a.no_adapt,
         adapt_start:          a.adapt_start,
         rho:                  a.rho,
+        cooling_target_iters: a.cooling_target_iters,
+        decibans_thresh:      a.decibans_thresh,
+        no_dt_check:          a.no_dt_check,
+        dt_check_halvings:    a.dt_check_halvings,
+        record_ancestry:      a.record_ancestry,
+        record_prequential:   a.record_prequential,
     };
     let sweep_specs: Vec<(String, Vec<f64>)> = a.sweep.iter()
         .map(|s| (s.name.clone(), s.grid.expand()))
@@ -343,7 +345,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     if let Some(stage_name) = a.stage.as_deref() {
         if !cli_overrides.is_empty() {
             match config.stages.get_mut(stage_name) {
-                Some(stage) => stage.apply_cli_overrides(&cli_overrides),
+                Some(stage) => stage.apply_cli_overrides(&cli_overrides)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }),
                 None => {
                     eprintln!("error: --stage '{}' is not a stage in {} \
                                (stages: {})",
@@ -1181,10 +1187,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // the fit's identity (folded into the IF2 stage's whole-serialize
                 // identity_payload), so it has no CLI override (gh#189: a CLI
                 // override bypassed the run_id and silently re-scored under the
-                // same key). The gate still has a stage-scoped CLI override.
+                // same key). The gate's `--decibans-thresh` override is applied
+                // through `apply_cli_overrides` BEFORE the identity is taken,
+                // so `gate` here already carries it (gh#540 seam).
                 let effective_loglik_eval = loglik_eval.clone();
-                let mut effective_gate = gate.clone();
-                if let Some(db) = cli_decibans_thresh     { effective_gate.decibans_thresh = db; }
+                let effective_gate = gate.clone();
                 let prior_state = effective_starts.as_ref().and_then(|dir| {
                     state::FitState::load(dir).ok()
                 });
@@ -1268,13 +1275,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     None => (None, Vec::new()),
                 };
 
-                let effective_cooling_target_iters = a.cooling_target_iters
-                    .unwrap_or(*cooling_target_iters);
                 let mut run_config = runner::FitRunConfig::build(
                     &sweep_config,
                     prior_state.as_ref(),
                     *chains, *particles, *iterations,
-                    *cooling, effective_cooling_target_iters,
+                    *cooling, *cooling_target_iters,
                     // gh#506: NOT `effective_starts.is_none()`. That asked
                     // `build` to overwrite every `EstimatedParam::initial`
                     // with a uniform draw whenever the stage had no upstream
@@ -1495,17 +1500,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // where coarse dt creates a fake basin that synth-
                 // recovery can't detect (it shares the same dt).
                 // See docs/dev/proposals/2026-05-07-richardson-dt-check.md.
-                // Apply CLI overrides on top of the stage TOML.
-                // --no-dt-check forces enabled=false; --dt-check-halvings
-                // overrides n_halvings; --dt-check-strict bumps the
-                // backend default down to the strict threshold.
-                let mut effective_dt_check = dt_check.clone();
-                if a.no_dt_check {
-                    effective_dt_check.enabled = false;
-                }
-                if let Some(n) = a.dt_check_halvings {
-                    effective_dt_check.n_halvings = n;
-                }
+                // --no-dt-check / --dt-check-halvings are applied through
+                // `apply_cli_overrides` BEFORE the identity is taken, so
+                // `dt_check` here already carries them (gh#540 seam — the
+                // result is stored in fit_state.toml, so the knobs are
+                // identity-defining). --dt-check-strict stays a plain
+                // runtime arg: it only escalates the warning to a fatal
+                // exit and never changes the stored leaf.
+                let effective_dt_check = dt_check.clone();
                 let dt_check_seed = seed.wrapping_add(0xd7c4ec_5eed); // "dtchec seed"
                 let dt_check_result = dt_check::run_richardson_ladder(
                     &run_config,
@@ -1696,9 +1698,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
                 // default; honours the same CLI flags as the IF2 path
                 // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
-                let mut mh_dt_check = config_v2::DtCheckConfig::default();
-                if a.no_dt_check { mh_dt_check.enabled = false; }
-                if let Some(n) = a.dt_check_halvings { mh_dt_check.n_halvings = n; }
+                // gh#726: Mh has no dt_check TOML field, so the CLI flags
+                // cannot be keyed into the identity — `apply_cli_overrides`
+                // refuses them on this stage. Defaults only until the field
+                // lands. --dt-check-strict remains allowed (abort policy,
+                // leaf-byte-neutral).
+                let mh_dt_check = config_v2::DtCheckConfig::default();
 
                 pmmh::run_stage(
                     &sweep_config,
@@ -1775,11 +1780,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             .collect())
                         .unwrap_or_default();
                     // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
-                    // default; honours the same CLI flags as the IF2 path
-                    // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
-                    let mut nl_dt_check = config_v2::DtCheckConfig::default();
-                    if a.no_dt_check { nl_dt_check.enabled = false; }
-                    if let Some(n) = a.dt_check_halvings { nl_dt_check.n_halvings = n; }
+                    // default. gh#726: nl-* stages have no dt_check TOML
+                    // field, so --no-dt-check / --dt-check-halvings cannot be
+                    // keyed into the identity — `apply_cli_overrides` refuses
+                    // them here. Defaults only until the field lands;
+                    // --dt-check-strict remains allowed (abort policy,
+                    // leaf-byte-neutral).
+                    let nl_dt_check = config_v2::DtCheckConfig::default();
 
                     nlopt_stage::run_stage(
                         &sweep_config,
@@ -1823,8 +1830,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // `record_prequential = false` in [stages.X] opts out,
                 // and the CLI flag can re-enable it on a per-invocation
                 // basis without editing the TOML.
-                let record_ancestry = *record_ancestry || a.record_ancestry;
-                let want_prequential = *record_prequential || a.record_prequential;
+                let record_ancestry = *record_ancestry;
+                let want_prequential = *record_prequential;
                 let prior_state = effective_starts.as_ref().and_then(|dir| {
                     state::FitState::load(dir).ok()
                 });

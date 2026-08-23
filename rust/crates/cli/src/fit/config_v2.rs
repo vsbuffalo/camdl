@@ -1772,7 +1772,7 @@ impl Stage {
     /// A `None` argument leaves the field as the toml declared it, so a run
     /// with no CLI overrides keys identically to before — no existing cached
     /// fit is invalidated by this.
-    pub fn apply_cli_overrides(&mut self, cli: &CliStageOverrides) {
+    pub fn apply_cli_overrides(&mut self, cli: &CliStageOverrides) -> Result<(), String> {
         // ── Chain-start overrides (gh#514) ──
         if let Some((init_method, survey_path, survey_top_k_n)) = match self {
             Stage::IF2 { init_method, survey_path, survey_top_k_n, .. }
@@ -1822,8 +1822,41 @@ impl Stage {
                 if cli.no_adapt { *adapt = false; }
                 if let Some(s) = cli.adapt_start { *adapt_start = s; }
             }
-            _ => {}
+            Stage::IF2 { cooling_target_iters, gate, dt_check, .. } => {
+                if let Some(n) = cli.cooling_target_iters { *cooling_target_iters = n; }
+                if let Some(db) = cli.decibans_thresh { gate.decibans_thresh = db; }
+                if cli.no_dt_check { dt_check.enabled = false; }
+                if let Some(n) = cli.dt_check_halvings { dt_check.n_halvings = n; }
+            }
+            Stage::PFilter { record_ancestry, record_prequential, .. } => {
+                // One-way overrides to true: the toml can opt out
+                // (`record_prequential = false`), the flag opts back in.
+                if cli.record_ancestry { *record_ancestry = true; }
+                if cli.record_prequential { *record_prequential = true; }
+            }
+            Stage::NlSbplx(cfg) | Stage::NlBobyqa(cfg) => {
+                if let Some(db) = cli.decibans_thresh { cfg.gate.decibans_thresh = db; }
+            }
         }
+
+        // ── dt-check refusal on stages with no dt_check field (gh#726) ──
+        // Mh and nl-* stages RUN the dt-check and STORE its result in the
+        // leaf, but their DtCheckConfig has no TOML field, so these flags
+        // cannot reach the stage identity: applying them at the dispatch
+        // site would be un-keyed stored output (the gh#514/gh#540 defect).
+        // Refuse loudly until the field exists and is folded into identity.
+        if (cli.no_dt_check || cli.dt_check_halvings.is_some())
+            && matches!(self,
+                Stage::Mh { .. } | Stage::NlSbplx(_) | Stage::NlBobyqa(_))
+        {
+            return Err(format!(
+                "--no-dt-check / --dt-check-halvings are not yet supported on \
+                 '{}' stages: their dt-check settings have no fit.toml field, \
+                 so the override cannot be keyed into the run identity \
+                 (gh#726). Drop the flag for now.",
+                self.method_name()));
+        }
+        Ok(())
     }
 }
 
@@ -1857,6 +1890,27 @@ pub struct CliStageOverrides {
     pub no_adapt: bool,
     pub adapt_start: Option<usize>,
     pub rho: Option<f64>,
+    /// `--cooling-target-iters` (IF2): iterations over which the cooling
+    /// fraction is reached. Changes the perturbation schedule and therefore
+    /// the MLE.
+    pub cooling_target_iters: Option<usize>,
+    /// `--decibans-thresh`: overrides `gate.decibans_thresh` on stages that
+    /// carry a `GateConfig` (IF2, nl-sbplx, nl-bobyqa). The applied gate is
+    /// persisted in the leaf (`resolved_gate`), so it is stored output.
+    pub decibans_thresh: Option<f64>,
+    /// `--no-dt-check`: disables the post-fit Richardson dt-check, whose
+    /// result is stored in `fit_state.toml.dt_check`. IF2 only for now;
+    /// refused on mh/nl-* (no TOML field to override — gh#726).
+    pub no_dt_check: bool,
+    /// `--dt-check-halvings`: dt-check ladder depth. IF2 only for now;
+    /// refused on mh/nl-* (gh#726).
+    pub dt_check_halvings: Option<usize>,
+    /// `--record-ancestry` (PFilter): one-way override to true; adds the
+    /// ancestor trace to the stored leaf.
+    pub record_ancestry: bool,
+    /// `--record-prequential` (PFilter): one-way override to true; adds the
+    /// prequential trace to the stored leaf.
+    pub record_prequential: bool,
 }
 
 impl CliStageOverrides {
@@ -3196,6 +3250,52 @@ iterations = 10
         cfg.stages["posterior"].clone()
     }
 
+    /// A `pfilter` stage, for the record-flag overrides. Both record fields
+    /// are declared false so the one-way CLI override to true is observable.
+    fn pfilter_stage() -> Stage {
+        let cfg = parse(r#"
+[model]
+camdl = "m.camdl"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000000
+
+[stages.eval]
+algorithm = "pfilter"
+backend   = "chain_binomial"
+particles = 100
+record_ancestry     = false
+record_prequential  = false
+"#).unwrap();
+        cfg.stages["eval"].clone()
+    }
+
+    /// An `mh` stage, for the gh#726 dt-check refusal: Mh stores the
+    /// dt-check result in the leaf but has no dt_check TOML field, so the
+    /// CLI flags cannot reach its identity and must be refused.
+    fn mh_stage() -> Stage {
+        let cfg = parse(r#"
+[model]
+camdl = "m.camdl"
+
+[estimate]
+beta = { bounds = [0.01, 2.0], prior = { log_normal = { mu = 0.0, sigma = 1.0 } } }
+
+[fixed]
+N0 = 1000000
+
+[stages.posterior]
+algorithm  = "mh"
+backend    = "ode"
+chains     = 2
+iterations = 10
+"#).unwrap();
+        cfg.stages["posterior"].clone()
+    }
+
     fn scout_stage(init: &str) -> Stage {
         let cfg = parse(&format!(r#"
 [model]
@@ -3229,7 +3329,8 @@ init       = "{init}"
         let declared = scout_stage("single");
         let mut overridden = scout_stage("single");
         overridden.apply_cli_overrides(&CliStageOverrides {
-            init: Some(crate::fit::init::InitMethod::Lhs), ..Default::default() });
+            init: Some(crate::fit::init::InitMethod::Lhs), ..Default::default() })
+            .unwrap();
 
         assert_ne!(declared.identity_payload(), overridden.identity_payload(),
             "a stage run under `--init lhs` must not share an identity with \
@@ -3282,10 +3383,24 @@ init       = "{init}"
              CliStageOverrides { adapt_start: Some(42), ..Default::default() }),
             ("--rho", pmmh_stage(),
              CliStageOverrides { rho: Some(0.9), ..Default::default() }),
+            // The 2026-08-23 batch: found applied at the dispatch site,
+            // after the CAS claim, exactly like the thirteen above.
+            ("--cooling-target-iters", scout_stage("single"),
+             CliStageOverrides { cooling_target_iters: Some(20), ..Default::default() }),
+            ("--decibans-thresh", scout_stage("single"),
+             CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
+            ("--no-dt-check", scout_stage("single"),
+             CliStageOverrides { no_dt_check: true, ..Default::default() }),
+            ("--dt-check-halvings", scout_stage("single"),
+             CliStageOverrides { dt_check_halvings: Some(3), ..Default::default() }),
+            ("--record-ancestry", pfilter_stage(),
+             CliStageOverrides { record_ancestry: true, ..Default::default() }),
+            ("--record-prequential", pfilter_stage(),
+             CliStageOverrides { record_prequential: true, ..Default::default() }),
         ];
         for (flag, base, cli) in cases {
             let mut overridden = base.clone();
-            overridden.apply_cli_overrides(&cli);
+            overridden.apply_cli_overrides(&cli).unwrap();
             assert_ne!(
                 base.identity_payload(), overridden.identity_payload(),
                 "{flag} changes what the stage computes or stores, so it must \
@@ -3303,7 +3418,7 @@ init       = "{init}"
         let base = pgas_stage();
         let mut more = pgas_stage();
         more.apply_cli_overrides(&CliStageOverrides {
-            n_trajectories: Some(500), ..Default::default() });
+            n_trajectories: Some(500), ..Default::default() }).unwrap();
         assert_ne!(base.cas_n_trajectories(), more.cas_n_trajectories(),
             "`--n-trajectories` must reach `cas_n_trajectories` — it reads the \
              stage, and the flag used to be applied to the opts struct instead, \
@@ -3318,8 +3433,33 @@ init       = "{init}"
     fn no_cli_override_leaves_the_stage_identity_untouched() {
         let declared = scout_stage("uniform");
         let mut untouched = scout_stage("uniform");
-        untouched.apply_cli_overrides(&CliStageOverrides::default());
+        untouched.apply_cli_overrides(&CliStageOverrides::default()).unwrap();
         assert_eq!(declared.identity_payload(), untouched.identity_payload());
+    }
+
+    /// gh#726: an mh stage stores its dt-check result in the leaf but has no
+    /// dt_check TOML field — the CLI dt-check flags cannot reach its identity,
+    /// so applying them must refuse loudly rather than silently drop or
+    /// silently apply un-keyed. (nl-* stages share the refusal; mh stands in
+    /// for the class.)
+    #[test]
+    fn dt_check_override_refused_on_stage_without_dt_check_field() {
+        let mut mh = mh_stage();
+        let err = mh.apply_cli_overrides(&CliStageOverrides {
+            no_dt_check: true, ..Default::default() }).unwrap_err();
+        assert!(err.contains("gh#726"), "refusal must cite the tracking issue: {err}");
+
+        let mut mh = mh_stage();
+        let err = mh.apply_cli_overrides(&CliStageOverrides {
+            dt_check_halvings: Some(3), ..Default::default() }).unwrap_err();
+        assert!(err.contains("gh#726"), "refusal must cite the tracking issue: {err}");
+
+        // The same overrides on an IF2 stage are accepted — the refusal is
+        // about the missing field, not about the flags.
+        let mut if2 = scout_stage("single");
+        if2.apply_cli_overrides(&CliStageOverrides {
+            no_dt_check: true, dt_check_halvings: Some(3),
+            ..Default::default() }).unwrap();
     }
 
     /// `--survey-path` and `--survey-top-k` ride the same seam and are
@@ -3332,13 +3472,13 @@ init       = "{init}"
         let mut with_path = scout_stage("survey_top_k");
         with_path.apply_cli_overrides(&CliStageOverrides {
             survey_path: Some(std::path::PathBuf::from("results/survey-abc")),
-            ..Default::default() });
+            ..Default::default() }).unwrap();
         assert_ne!(base.identity_payload(), with_path.identity_payload(),
             "--survey-path selects which points seed the chains");
 
         let mut with_k = scout_stage("survey_top_k");
         with_k.apply_cli_overrides(&CliStageOverrides {
-            survey_top_k: Some(3), ..Default::default() });
+            survey_top_k: Some(3), ..Default::default() }).unwrap();
         assert_ne!(base.identity_payload(), with_k.identity_payload(),
             "--survey-top-k selects how many points seed the chains");
         assert_ne!(with_path.identity_payload(), with_k.identity_payload());
