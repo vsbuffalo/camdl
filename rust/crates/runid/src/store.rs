@@ -138,6 +138,21 @@ pub enum CasError {
     /// race residual). Refuse loudly rather than blind-wipe a finished result.
     #[error("refusing to clear a Completed leaf at {path} (concurrent finalize)")]
     ReclaimRaceCompleted { path: String },
+    /// Same identity, different bytes: a commit found a `Completed` incumbent
+    /// whose stored file disagrees with what was just staged. Runs are
+    /// seeded-deterministic, so this is an identity bug — an input that
+    /// changes the output is missing from the `run_id` — or nondeterminism;
+    /// either way the two results must not share a key, and silently
+    /// discarding the staged bytes (the pre-S1 behavior) served the
+    /// incumbent as if it were this run's result. The staged directory is
+    /// preserved under `.quarantine/` as evidence. Proposal:
+    /// docs/dev/proposals/2026-08-23-run-identity-and-store-contract.md §S1.
+    #[error(
+        "divergent recompute at {path}: '{file}' staged {ours} vs stored {theirs} \
+         under one run_id — an input is missing from the identity, or the run \
+         is nondeterministic. Staged bytes preserved in .quarantine/."
+    )]
+    DivergentRecompute { path: String, file: String, ours: String, theirs: String },
 }
 
 /// A bundle of named output files (e.g. `{traj.tsv, event_log.tsv}`).
@@ -280,7 +295,7 @@ impl FsCasStore {
         fsync_dir(&staging)?;
 
         let id = LeafIdentity::new(record.run_id);
-        self.rename_staged_into_place(&staging, path, &id)
+        self.rename_staged_into_place(&staging, path, &id, &record.artifacts)
     }
 
     /// Resolve the destination and rename `staging` into it, tolerating the
@@ -294,6 +309,7 @@ impl FsCasStore {
         staging: &Path,
         path: &Path,
         id: &LeafIdentity,
+        staged_manifest: &BTreeMap<String, FileChecksum>,
     ) -> Result<PathBuf, CasError> {
         // The loop converges fast: a competing same-identity commit resolves
         // to AlreadyCompleted, a different identity disambiguates to its own
@@ -303,7 +319,39 @@ impl FsCasStore {
         for _ in 0..MAX_ATTEMPTS {
             match self.resolve_claim_dir(path, id)? {
                 ClaimOutcome::AlreadyCompleted(dest) => {
-                    // Lost a benign race: the identical leaf already landed.
+                    // S1 divergence check (proposal 2026-08-23-run-identity-
+                    // and-store-contract): a same-identity incumbent is a
+                    // benign dedup ONLY if its bytes match what we staged.
+                    // "Same key ⟺ same bytes" is the store's whole claim;
+                    // this is the one moment both sides are in hand. A shared
+                    // file with a differing digest means an identity bug or
+                    // nondeterminism — quarantine the staged evidence and
+                    // fail loudly instead of silently serving the incumbent.
+                    let incumbent = match read_record(&dest) {
+                        ReadResult::Ok(r) => r,
+                        // The incumbent vanished or tore between resolve and
+                        // read (e.g. a concurrent reclaim): re-resolve.
+                        ReadResult::Absent | ReadResult::Unparseable => continue,
+                    };
+                    for (name, ours) in staged_manifest {
+                        if let Some(theirs) = incumbent.artifacts.get(name) {
+                            if ours.digest != theirs.digest {
+                                self.quarantine(staging)?;
+                                return Err(CasError::DivergentRecompute {
+                                    path: dest.display().to_string(),
+                                    file: name.clone(),
+                                    ours: ours.digest.to_hex(),
+                                    theirs: theirs.digest.to_hex(),
+                                });
+                            }
+                        }
+                    }
+                    // All shared files agree. Staged-only extras (the "leaf
+                    // gains an artifact" case, e.g. --event-log over a
+                    // pre-existing leaf) are dropped here until the S4
+                    // augment door lands; surfacing that to the caller is
+                    // S2's WriteVerdict (this crate has no logging channel,
+                    // so the proposal's "report" deliberately waits for it).
                     fs::remove_dir_all(staging).ok();
                     return Ok(dest);
                 }
