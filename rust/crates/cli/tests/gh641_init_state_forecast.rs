@@ -164,11 +164,22 @@ struct Fixture {
 }
 
 fn run(bin: &Path, args: &[String]) -> std::process::Output {
-    Command::new(bin)
-        .args(args)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .output()
-        .expect("spawn camdl")
+    run_in_store(bin, args, None)
+}
+
+/// `pfilter` has no `--output-dir` flag; its CAS root comes from
+/// `CAMDL_OUTPUT_DIR`, defaulting to a repo-relative `results/`. Every test
+/// here that omits it therefore shares ONE store with every other test doing
+/// the same, and under the parallel gate a concurrent quarantine/rename can
+/// pull a directory out from under a claim. Isolating the store per fixture
+/// removes that shared mutable state.
+fn run_in_store(bin: &Path, args: &[String], store: Option<&Path>) -> std::process::Output {
+    let mut cmd = Command::new(bin);
+    cmd.args(args).env("CAMDL_SKIP_VERSION_CHECK", "1");
+    if let Some(dir) = store {
+        cmd.env("CAMDL_OUTPUT_DIR", dir);
+    }
+    cmd.output().expect("spawn camdl")
 }
 
 fn s(p: &Path) -> String {
@@ -195,13 +206,13 @@ fn fixture(bin: &Path, particles: usize) -> Fixture {
     assert!(out.status.success(), "data gen failed: {}", String::from_utf8_lossy(&out.stderr));
 
     let state = dir.join("final.tsv");
-    let out = run(bin, &[
+    let out = run_in_store(bin, &[
         "pfilter".into(), s(&model), "--params".into(), s(&params),
         format!("--data={}", s(&data)),
         "--particles".into(), particles.to_string(),
         "--seed".into(), "1".into(),
         "--save-final-state".into(), s(&state),
-    ]);
+    ], Some(&dir.join("cas_pf")));
     assert!(out.status.success(), "pfilter failed: {}", String::from_utf8_lossy(&out.stderr));
 
     Fixture { _tmp: tmp, dir, model, model_long, params, data, state }
