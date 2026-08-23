@@ -386,3 +386,92 @@ fn gamma_desync_is_a_zero_density() {
         rec.gammas.len()
     );
 }
+
+// ── gh#720: the zero-offset short-circuit must read the seeds ────────────────
+
+/// gh#720. `splice_log_ratio` short-circuited to `0.0` on an all-zero
+/// compartment offset without reading `cum_seed`/`acc_seed`, which it is
+/// handed. Two particles can agree on every compartment count and disagree on
+/// the partly-filled interval bin they carry into the splice — routine
+/// immediately after a resample duplicates particles — and the observation
+/// closing that bin then scores a different total. The move was accepted with
+/// probability 1, uncorrected.
+///
+/// The offset here is exactly zero, so the transition, gamma and balance terms
+/// are bit-identical to the baseline by construction and contribute nothing.
+/// Every nat in the answer comes from the straddled bin.
+///
+/// On the ORACLE: `expected` below re-walks the straddled bin through the same
+/// obs-model calls `splice_log_ratio` makes, so it is a mirror of the
+/// accumulation lifecycle rather than an independent implementation of it. The
+/// non-circular part of this test is the mutation check — reverting the source
+/// guard makes `got` exactly `0.0` while `expected` stays put — together with
+/// `ratio_matches_complete_data_loglik_on_an_interval_stream` above, which
+/// pins the non-short-circuit path against `complete_data_loglik`.
+#[test]
+fn a_differing_accumulator_seed_is_not_a_free_splice() {
+    let f = fixture(Kind::Interval);
+    let s = substep_inside_a_bin(&f);
+    let n_comp = f.reference.substeps[s].counts_before.len();
+    let offset = vec![0i64; n_comp];
+
+    let baseline = reference_baseline(
+        &f.compiled, &f.reference, &f.params, &f.obs_model, &f.obs_at_substep, None,
+    )
+    .expect("baseline");
+
+    // The reference's own seed, then the same seed with five extra infections
+    // already banked in the open bin. Compartment counts are untouched.
+    let (cum_seed, acc_seed) = accumulation_entering(&f, s);
+    let mut perturbed = cum_seed.clone();
+    perturbed[0] += 5;
+
+    let unchanged = splice_log_ratio(
+        &f.compiled, &f.reference, &f.params, &f.obs_model, &f.obs_at_substep, None,
+        &baseline, s, &offset, &cum_seed, &acc_seed,
+    )
+    .expect("splice_log_ratio");
+    assert_eq!(
+        unchanged, 0.0,
+        "the true identity move — zero offset AND the baseline's own seed — \
+         must still be exactly zero"
+    );
+
+    let got = splice_log_ratio(
+        &f.compiled, &f.reference, &f.params, &f.obs_model, &f.obs_at_substep, None,
+        &baseline, s, &offset, &perturbed, &acc_seed,
+    )
+    .expect("splice_log_ratio");
+
+    // What the straddled bin's observation term becomes under the perturbed
+    // seed, minus what the baseline charged for it.
+    let t_obs = (s..f.reference.substeps.len())
+        .find(|t| f.obs_at_substep.contains_key(t))
+        .expect("a bin must close at or after s");
+    let obs_idx = *f.obs_at_substep.get(&t_obs).unwrap();
+    let mut cum = perturbed.clone();
+    let mut acc = acc_seed.clone();
+    for t in s..=t_obs {
+        for (i, &fl) in f.reference.substeps[t].flows.iter().enumerate() {
+            cum[i] += fl;
+        }
+    }
+    f.obs_model.fold_into_acc(&cum, &mut acc);
+    let ll = f.obs_model.log_likelihood_from_flows_and_counts(
+        &acc, &f.reference.substeps[t_obs].counts_after, obs_idx, &f.params);
+    let expected = ll - baseline.obs_ll_at(t_obs);
+
+    assert!(got.is_finite(), "the ratio must be finite, got {got}");
+    assert!(
+        expected.abs() > 1e-3,
+        "the five banked infections must actually move the bin's density, else \
+         this test passes for free (expected={expected})"
+    );
+    assert!(
+        (got - expected).abs() < TOL,
+        "splice_log_ratio = {got} but the straddled bin moved by {expected} \
+         (gap {:.3e} nats). A candidate carrying a different partial bin is \
+         being accepted as a free identity move — gh#720.",
+        (got - expected).abs()
+    );
+}

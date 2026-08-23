@@ -1705,6 +1705,29 @@ pub struct ReferenceBaseline {
     /// elsewhere. Accumulated over the reference's own flow bins, exactly as
     /// [`complete_data_loglik`] does.
     obs_ll: Vec<f64>,
+    /// Per-transition flow accumulation ENTERING each substep — the prefix of
+    /// the interval bin that is still open at that point.
+    ///
+    /// [`splice_log_ratio`]'s zero-offset short-circuit is valid only if the
+    /// candidate's whole walk would reproduce this baseline term for term. At
+    /// `Δ = 0` the transition and gamma terms do so by construction, but the
+    /// observation closing a straddled bin does not: it scores
+    /// `acc_seed + flows`, so a candidate carrying a different partial bin
+    /// gets a different total. These are what the seeds must match for the
+    /// short-circuit to be sound (gh#720).
+    cum_at: Vec<Vec<u64>>,
+    /// Per-interval-stream accumulator entering each substep. Companion to
+    /// [`Self::cum_at`]; see there.
+    acc_at: Vec<Vec<u64>>,
+}
+
+impl ReferenceBaseline {
+    /// What the reference charged for the observation due at substep `t`
+    /// (`0.0` where none is due). Read-only accessor so a test can name the
+    /// term a splice's observation delta is measured against.
+    pub fn obs_ll_at(&self, t: usize) -> f64 {
+        self.obs_ll[t]
+    }
 }
 
 /// One forward pass over the reference trajectory, mirroring
@@ -1731,7 +1754,14 @@ pub fn reference_baseline(
     let mut cum_flows = vec![0u64; n_tr];
     let mut acc = vec![0u64; obs_model.n_interval_streams()];
 
+    let mut cum_at = Vec::with_capacity(n_substeps);
+    let mut acc_at = Vec::with_capacity(n_substeps);
+
     for (t, rec) in reference.substeps.iter().enumerate() {
+        // Entering `t`: the state a splice at `t` must match to be a no-op.
+        cum_at.push(cum_flows.clone());
+        acc_at.push(acc.clone());
+
         td[t] = log_transition_density_substep(
             model, &rec.counts_before, &rec.flows, &rec.gammas, params,
             rec.t0, rec.dt_substep, per_eval,
@@ -1751,7 +1781,7 @@ pub fn reference_baseline(
             obs_model.reset_due_acc(obs_idx, &mut acc);
         }
     }
-    Ok(ReferenceBaseline { td, gamma, obs_ll })
+    Ok(ReferenceBaseline { td, gamma, obs_ll, cum_at, acc_at })
 }
 
 /// `log S_j − log S_ref` for a candidate ancestor whose splice shifts the
@@ -1846,7 +1876,18 @@ pub fn splice_log_ratio(
 ) -> Result<f64, SimError> {
     // Keeping the current ancestry is the identity move: every term is its own
     // baseline. Short-circuit it exactly, without arithmetic.
-    if offset.iter().all(|&d| d == 0) {
+    //
+    // gh#720: a zero compartment offset is NOT sufficient. Two particles can
+    // agree on compartment counts and disagree on the partly-filled interval
+    // bin they carry into `substep` — routine immediately after a resample
+    // duplicates particles — and the observation closing that bin then scores
+    // a different total. The identity holds only if the accumulator seeds also
+    // match the baseline's own state entering `substep`; otherwise fall
+    // through and let the walk charge the difference.
+    if offset.iter().all(|&d| d == 0)
+        && cum_seed == baseline.cum_at[substep].as_slice()
+        && acc_seed == baseline.acc_at[substep].as_slice()
+    {
         return Ok(0.0);
     }
 
