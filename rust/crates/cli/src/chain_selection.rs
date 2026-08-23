@@ -341,14 +341,22 @@ fn d_to_param(
     d: &crate::fit::runner::RhatEss,
 ) -> crate::fit::method_result::ParamConvergence {
     use crate::fit::method_result::{ParamConvergence, Stat};
-    match &d.not_reported {
-        Some(e) => ParamConvergence::NotScored { reason: e.refusal() },
-        None => ParamConvergence::Scored {
-            rhat: Stat::from_f64(d.rhat),
-            rhat_classic: Stat::from_f64(d.rhat_classic),
-            ess_bulk: Stat::from_f64(d.ess_bulk),
-            ess_tail: Stat::from_f64(d.ess_tail),
-            all_chains_frozen: d.all_chains_frozen,
+    match d.rank() {
+        None => {
+            let e = d.refusal().expect("an unscored param carries its refusal");
+            ParamConvergence::NotScored {
+                reason: e.refusal(),
+                detail: Some(e.clone()),
+            }
+        }
+        Some(r) => ParamConvergence::Scored {
+            rhat: Stat::from_f64(r.rhat),
+            rhat_bulk: Stat::from_f64(r.rhat_bulk),
+            rhat_folded: Stat::from_f64(r.rhat_folded),
+            rhat_classic: Stat::from_f64(d.rhat_classic()),
+            ess_bulk: Stat::from_f64(r.ess_bulk),
+            ess_tail: Stat::from_f64(r.ess_tail),
+            all_chains_frozen: r.all_chains_frozen,
         },
     }
 }

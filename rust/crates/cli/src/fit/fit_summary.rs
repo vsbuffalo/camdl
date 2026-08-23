@@ -27,7 +27,7 @@ use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
     If2StageResult, MaxRhat, MethodResult, MinEss, NutsStageResult, PgasStageResult,
-    PmmhStageResult, PosteriorDiagnostics, RHAT_CONVERGED_THRESHOLD,
+    PmmhStageResult, PosteriorDiagnostics, RHAT_CONVERGED_THRESHOLD, Stat,
 };
 use crate::fit::state::FitState;
 use crate::fit::table_row::{self, TableRow};
@@ -1076,9 +1076,27 @@ impl Formatter {
             MaxRhat::Reported(v) => {
                 let glyph = if v < RHAT_CONVERGED_THRESHOLD { self.ok("✓") } else { self.err("✗") };
                 s.push_str(&format!(
-                    "    max R̂ = {:.3}  {}  (threshold {})\n",
+                    "    max R̂ = {:.3}  {}  (rank-normalized split R̂, threshold {})\n",
                     v, glyph, RHAT_CONVERGED_THRESHOLD
                 ));
+                // Above the band, say WHY. R̂ is `max(rhat_bulk, rhat_folded)`
+                // and the two halves have different remedies: a location
+                // disagreement is a warm-up/drift problem, a spread
+                // disagreement points at per-chain effective diversity
+                // (docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md).
+                if v >= RHAT_CONVERGED_THRESHOLD {
+                    for (name, p) in &diag.per_param {
+                        if !matches!(p.rhat(), Stat::Value(x) if x >= RHAT_CONVERGED_THRESHOLD) {
+                            continue;
+                        }
+                        match p.rhat_decomposition() {
+                            Some(d) => s.push_str(&format!("      {name} — {d}\n")),
+                            // A fit written before the two halves were stored
+                            // has the headline and nothing to decompose.
+                            None => {}
+                        }
+                    }
+                }
             }
             MaxRhat::Unassessable { params } => {
                 s.push_str(&format!("    max R̂ = —   {}\n", self.err("✗")));
@@ -3656,7 +3674,10 @@ mod tests {
             }
             by_chain.into_values().collect()
         };
-        let rhat_all = crate::fit::runner::compute_rhat_ess(&all).rhat;
+        let rhat_all = crate::fit::runner::compute_rhat_ess(&all)
+            .rank()
+            .expect("four chains of equal length are scored")
+            .rhat;
         assert!(rhat_all > 1.5, "over all chains the outlier inflates R̂: {rhat_all}");
 
         // Recompute over the subset (drop chain 4).

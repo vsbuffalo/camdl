@@ -52,10 +52,17 @@ use std::fmt;
 
 /// Why a rank-normalized diagnostic could not be computed for a parameter.
 ///
-/// Every variant names a property of the *input*. Callers render these; they
-/// must never be collapsed to a bare `NaN`, which reads as a numerical failure
-/// and hides which precondition was missed.
-#[derive(Debug, Clone, PartialEq)]
+/// Every variant names a property of the *input*, **with the numbers**. Callers
+/// render these; they must never be collapsed to a bare `NaN`, which reads as a
+/// numerical failure and hides which precondition was missed.
+///
+/// Serialized so the numbers survive the trip to `*_summary.json` and
+/// `camdl fit summary` can print the same sentence the stage printed at the
+/// time. [`RhatRefusal`] is the lossy classification of the same fact — it
+/// answers "is this a sampler pathology"; this type answers "what exactly was
+/// wrong with the input".
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "refusal", rename_all = "snake_case")]
 pub enum ConvergenceError {
     /// R̂ compares chains; one chain has nothing to compare against.
     TooFewChains { n_chains: usize },
@@ -67,11 +74,37 @@ pub enum ConvergenceError {
     /// A draw is `NaN` or `±inf`. Rank normalization has no ordering for these
     /// and would silently propagate `NaN` through every statistic — see gh#607,
     /// a chain that recorded `log_posterior = −inf` for thousands of sweeps.
-    NonFiniteDraw { chain: usize, draw: usize, value: f64 },
+    ///
+    /// `value` is non-finite by construction — that is what the variant is for
+    /// — and `serde_json` writes any non-finite `f64` as `null`, which will not
+    /// read back. It is carried as its `Display` form (`inf` / `-inf` / `NaN`),
+    /// which `f64::from_str` parses, so the round-trip is exact.
+    NonFiniteDraw {
+        chain: usize,
+        draw: usize,
+        #[serde(with = "nonfinite_f64")]
+        value: f64,
+    },
     /// Every draw of every chain is the same value to within
     /// [`DEGENERATE_REL_TOL`] of the parameter's own scale. The total variance
     /// is zero, so R̂'s denominator is zero and the rank transform is constant.
     ConstantDraws { value: f64 },
+}
+
+/// `f64` as its `Display` string, for the one field that is non-finite by
+/// construction. JSON has no encoding for `inf`/`NaN`, and `serde_json`'s
+/// silent `null` would make the field unreadable on the way back.
+mod nonfinite_f64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse::<f64>().map_err(serde::de::Error::custom)
+    }
 }
 
 /// Why a parameter has no R̂, and — the part that decides what a fit may
@@ -211,7 +244,60 @@ pub struct RankConvergence {
     pub all_chains_frozen: bool,
 }
 
+/// Which half of `max(rhat_bulk, rhat_folded)` set the headline R̂ — the
+/// answer to *why* R̂ is high, which the headline alone cannot give.
+///
+/// The two halves differ by exactly one transformation (folding about the
+/// median), so the larger one names which kind of between-chain disagreement
+/// the statistic is reacting to. That is a decomposition, not a threshold: no
+/// cutoff on the gap is proposed or applied here, deliberately — see
+/// `docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`, which
+/// defers the lint until the gaps have been observed on a corpus of real fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RhatDriver {
+    /// `rhat_bulk` is the larger: the chains disagree about **where** the
+    /// posterior sits. A chain drifting across its own run reads this way,
+    /// because splitting compares each chain's halves.
+    Location,
+    /// `rhat_folded` is the larger: the chains agree on location and disagree
+    /// on **spread**, which `rhat_bulk` cannot see.
+    Scale,
+}
+
+impl RhatDriver {
+    /// The larger half, or `None` when either is undefined (so there is no
+    /// comparison to report) — the folded half is undefined whenever
+    /// `|x − median(x)|` is constant.
+    pub fn of(rhat_bulk: f64, rhat_folded: f64) -> Option<Self> {
+        if rhat_bulk.is_nan() || rhat_folded.is_nan() {
+            return None;
+        }
+        Some(if rhat_folded > rhat_bulk { Self::Scale } else { Self::Location })
+    }
+
+    /// One clause naming what the larger half means, for a report.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Location => "the chains disagree about where the posterior sits",
+            Self::Scale => "the chains agree on location and disagree on spread",
+        }
+    }
+
+    /// The name of the half, for a line that also prints both numbers.
+    pub fn half(self) -> &'static str {
+        match self {
+            Self::Location => "bulk",
+            Self::Scale => "folded",
+        }
+    }
+}
+
 impl RankConvergence {
+    /// Which half of `max(rhat_bulk, rhat_folded)` the headline came from.
+    pub fn rhat_driver(&self) -> Option<RhatDriver> {
+        RhatDriver::of(self.rhat_bulk, self.rhat_folded)
+    }
+
     /// Bulk-ESS as a fraction of the draws it was computed from.
     ///
     /// Report it alongside the ESS itself. Geyer's initial-positive-sequence

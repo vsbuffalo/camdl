@@ -1289,20 +1289,18 @@ fn write_summary(
         .map(|(_, _, rates)| rates.clone())
         .collect();
 
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "stage": "pgas",
         "n_chains": results.len(),
         "acceptance_rates": acceptance_rates,
-        "rhat": diagnostics.rhat(),
-        "rhat_not_reported": diagnostics.rhat_not_reported(),
-        "rhat_classic": diagnostics.rhat_classic(),
-        "ess": diagnostics.ess_bulk(),
-        "ess_tail": diagnostics.ess_tail(),
-        "ess_per_chain": diagnostics.ess_per_chain(),
         // Thinning factor: `n_samples` (kept draws) × `thin` = raw sampling
         // iterations, the thinning-invariant denominator for ESS/iteration.
         "thin": thin,
     });
+    // Every convergence key comes from one producer, so a statistic cannot be
+    // live in this summary and silently absent from pmmh's or nuts's.
+    summary.as_object_mut().expect("json! built an object")
+        .extend(diagnostics.summary_fields());
 
     let path = dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)

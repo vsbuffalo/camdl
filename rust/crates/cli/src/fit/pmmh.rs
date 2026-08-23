@@ -1263,23 +1263,21 @@ fn write_summary(
         .map(|spec| (spec.name.clone(), map_result.map_params[spec.index]))
         .collect();
 
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "stage": "pmmh",
         "n_chains": results.len(),
         "steps_per_chain": results.first().map(|(_, r)| r.n_steps).unwrap_or(0),
         "acceptance_rate": acceptance_rates,
-        "rhat": diagnostics.rhat(),
-        "rhat_not_reported": diagnostics.rhat_not_reported(),
-        "rhat_classic": diagnostics.rhat_classic(),
-        "ess": diagnostics.ess_bulk(),
-        "ess_tail": diagnostics.ess_tail(),
-        "ess_per_chain": diagnostics.ess_per_chain(),
         "map_loglik": map_result.map_loglik,
         "map_chain": map_chain + 1,
         "map_params": map_params,
         // n_samples (kept) × thin = raw sampling iterations → ESS/iteration.
         "thin": thin,
     });
+    // Every convergence key comes from one producer, so a statistic cannot be
+    // live in this summary and silently absent from pgas's or nuts's.
+    summary.as_object_mut().expect("json! built an object")
+        .extend(diagnostics.summary_fields());
 
     let path = dir.join(algo.summary_filename());
     let contents = serde_json::to_string_pretty(&summary)

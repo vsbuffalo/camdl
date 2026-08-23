@@ -13,7 +13,6 @@
 //! (IF2 / NLopt), which produce no draws cloud, are refused with an actionable
 //! message rather than silently plugged in.
 
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -597,21 +596,12 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
         let bytes = std::fs::read(stage_dir.join(name)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        let map = |key: &str| -> BTreeMap<String, f64> {
-            v.get(key)
-                .and_then(|o| o.as_object())
-                .map(|o| o.iter()
-                    .filter_map(|(k, x)| x.as_f64().map(|f| (k.clone(), f)))
-                    .collect())
-                .unwrap_or_default()
-        };
         // Reduce through the SAME classification `fit summary` uses, over the
-        // same per-parameter type, so a band and the summary cannot disagree
-        // about one fit (gh#409). A stored summary is just another producer of
-        // that map.
+        // same per-parameter type, read by the same reader, so a band and the
+        // summary cannot disagree about one fit (gh#409). A stored summary is
+        // just another producer of that map.
         let diag = PosteriorDiagnostics {
-            per_param: crate::fit::method_result::per_param_from_summary_maps(
-                &map("rhat"), &map("rhat_classic"), &map("ess"), &map("ess_tail")),
+            per_param: crate::fit::method_result::ConvergenceMaps::read(&v).per_param(),
             n_samples: 0,
             thin: 1,
             wall_time_secs: None,

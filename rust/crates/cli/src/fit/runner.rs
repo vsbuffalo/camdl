@@ -2512,86 +2512,85 @@ pub fn compute_chain_agreement(
     agreement_map
 }
 
-/// R-hat and ESS diagnostics for a single parameter.
+/// R-hat and ESS diagnostics for a single parameter: everything the chains
+/// yielded, or the named precondition that refused them all.
 ///
-/// The headline [`rhat`](Self::rhat) and [`ess_bulk`](Self::ess_bulk) /
-/// [`ess_tail`](Self::ess_tail) are the rank-normalized statistics of
-/// Vehtari, Gelman, Simpson, Carpenter & Bürkner (2021), _Bayesian
-/// Analysis_ 16(2):667-718, computed by
-/// [`sim::inference::convergence::rank_convergence`]. Read that module
-/// for what each one detects; the short version is that R-hat is
-/// `max(rank-normalized split-R̂, folded split-R̂)`, which sees a chain
-/// drifting across its own run and a chain disagreeing on spread —
-/// neither of which the classic between-chain-means statistic can.
+/// The rank-normalized statistics of Vehtari, Gelman, Simpson, Carpenter &
+/// Bürkner (2021), _Bayesian Analysis_ 16(2):667-718, are carried **whole**, as
+/// the [`RankConvergence`] `rank_convergence` returned. Re-listing a subset of
+/// its fields here is what dropped `rhat_bulk` and `rhat_folded` — the two
+/// halves whose split is the answer to "*why* is R̂ high" — before they reached
+/// any surface a user reads.
 ///
-/// [`rhat_classic`](Self::rhat_classic) is that classic Gelman & Rubin
-/// (1992) statistic, kept because the healthy band published in
-/// `docs/workflow.md` was calibrated against it and a reader comparing an
-/// old fit to a new one needs both numbers to be legible.
+/// `rhat_classic` is the classic Gelman & Rubin (1992) statistic, kept because
+/// the healthy band published in `docs/workflow.md` was calibrated against it,
+/// because a reader comparing an old fit to a new one needs both numbers to be
+/// legible, and because the rank-normalized statistic is BOUNDED (ceiling ~1.85
+/// for two chains, ~4.5 for eight) and so cannot express severity while this one
+/// can — see `docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`.
 ///
-/// `ess_bulk` needs no R-hat gate: it uses the *between-chain* variance,
-/// so it does not overstate the effective N when chains sit in different
-/// modes. That is what retired the previous `ess_total` — a sum of
-/// per-chain Geyer estimates suppressed to `NaN` above R-hat 1.1 (IM12,
-/// 2026-04-19 inference review), which reported nothing exactly when a
-/// fit most needed a number (gh#299).
+/// `ess_bulk` needs no R-hat gate: it uses the *between-chain* variance, so it
+/// does not overstate the effective N when chains sit in different modes. That
+/// is what retired the previous R-hat-gated pooled ESS, which reported nothing
+/// exactly when a fit most needed a number (gh#299).
 ///
-/// `ess_per_chain` is always populated when the structural
-/// preconditions hold (≥ 2 chains, equal length, ≥ 4 samples each).
-/// Each entry is the Geyer initial-positive-sequence ESS for that
-/// chain — interpretable as the chain's effective N for whatever
-/// distribution it is sampling, *regardless* of cross-chain
-/// agreement. It answers a different question from `ess_bulk`: whether
-/// chains stuck in different modes are each mixing well within their own
-/// mode (large per-chain ESS) or are both stuck and non-stationary.
-pub struct RhatEss {
-    /// `max(rank-normalized split-R̂, folded split-R̂)` — Vehtari et al. 2021.
-    pub rhat: f64,
-    /// Gelman & Rubin (1992) R-hat: unsplit chains, raw scale.
-    pub rhat_classic: f64,
-    /// Rank-normalized split bulk-ESS.
-    pub ess_bulk: f64,
-    /// Tail-ESS: the smaller of the 5% and 95% indicator ESS.
-    pub ess_tail: f64,
-    /// Per-chain Geyer ESS, one entry per chain.
-    pub ess_per_chain: Vec<f64>,
-    /// `n_chains × n_draws` — the denominator for [`Self::ess_bulk_ratio`].
-    pub n_draws_total: usize,
-    /// Every chain sat at its own single value: the sampler never accepted a
-    /// move. R̂ is then `∞` or undefined, and this is what lets a report say
-    /// WHY rather than printing an infinity and leaving the reader to infer it.
-    pub all_chains_frozen: bool,
-    /// Why the rank-normalized statistics are absent, when they are. `None`
-    /// when they were computed. Rendered by name rather than left as a bare
+/// `ess_per_chain` holds the Geyer initial-positive-sequence ESS for each chain
+/// — interpretable as that chain's effective N for whatever distribution it is
+/// sampling, *regardless* of cross-chain agreement. It answers a different
+/// question from `ess_bulk`: whether chains stuck in different modes are each
+/// mixing well within their own mode (large per-chain ESS) or are both stuck and
+/// non-stationary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RhatEss {
+    /// The estimator ran. Individual statistics may still be `NaN` or `±inf`;
+    /// each says so for itself.
+    Scored {
+        /// Every rank-normalized statistic, as computed.
+        rank: RankConvergence,
+        /// Gelman & Rubin (1992) R-hat: unsplit chains, raw scale.
+        rhat_classic: f64,
+        /// Per-chain Geyer ESS, one entry per chain.
+        ess_per_chain: Vec<f64>,
+    },
+    /// `rank_convergence` refused the input, naming which precondition failed
+    /// and with what numbers. Rendered by name rather than left as a bare
     /// `NaN`, which reads as a numerical failure and hides which precondition
     /// was missed (gh#84).
-    pub not_reported: Option<sim::inference::convergence::ConvergenceError>,
+    NotScored(ConvergenceError),
 }
 
 impl RhatEss {
-    /// Bulk-ESS as a fraction of the draws it was computed from — the number
-    /// that says when to distrust the ESS itself. See
-    /// [`sim::inference::convergence::RankConvergence::ess_bulk_ratio`].
-    pub fn ess_bulk_ratio(&self) -> f64 {
-        if self.n_draws_total == 0 {
-            return f64::NAN;
+    /// The rank-normalized statistics, or `None` when the input was refused.
+    /// The one accessor everything else goes through — there is no second copy
+    /// of any of its fields here to drift from it.
+    pub fn rank(&self) -> Option<&RankConvergence> {
+        match self {
+            Self::Scored { rank, .. } => Some(rank),
+            Self::NotScored(_) => None,
         }
-        self.ess_bulk / self.n_draws_total as f64
     }
 
-    /// Everything absent, with the reason. The structural preconditions
-    /// (≥ 2 chains, equal length, ≥ 4 samples each) are checked by
-    /// `rank_convergence`, so this constructor carries its refusal outward.
-    fn absent(why: sim::inference::convergence::ConvergenceError) -> Self {
-        RhatEss {
-            all_chains_frozen: false,
-            rhat: f64::NAN,
-            rhat_classic: f64::NAN,
-            ess_bulk: f64::NAN,
-            ess_tail: f64::NAN,
-            ess_per_chain: Vec::new(),
-            n_draws_total: 0,
-            not_reported: Some(why),
+    /// Why there are no rank-normalized statistics, when there are none.
+    pub fn refusal(&self) -> Option<&ConvergenceError> {
+        match self {
+            Self::Scored { .. } => None,
+            Self::NotScored(e) => Some(e),
+        }
+    }
+
+    /// Classic Gelman & Rubin (1992) R-hat; `NaN` when the input was refused.
+    pub fn rhat_classic(&self) -> f64 {
+        match self {
+            Self::Scored { rhat_classic, .. } => *rhat_classic,
+            Self::NotScored(_) => f64::NAN,
+        }
+    }
+
+    /// Per-chain Geyer ESS; empty when the input was refused.
+    pub fn ess_per_chain(&self) -> &[f64] {
+        match self {
+            Self::Scored { ess_per_chain, .. } => ess_per_chain,
+            Self::NotScored(_) => &[],
         }
     }
 }
@@ -2602,15 +2601,15 @@ impl RhatEss {
 /// Structural preconditions — ≥ 2 chains with ≥ 4 samples each, all chains
 /// equal length — are enforced by
 /// [`rank_convergence`](sim::inference::convergence::rank_convergence), which
-/// names the one that failed. Below them every field is NaN / empty and
-/// [`not_reported`](RhatEss::not_reported) says why.
+/// names the one that failed. Below them the result is [`RhatEss::NotScored`]
+/// carrying that name and its numbers.
 pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
     use sim::inference::convergence::rank_convergence;
     use sim::inference::pmmh::mcmc_ess;
 
     let rank = match rank_convergence(chains) {
         Ok(r) => r,
-        Err(e) => return RhatEss::absent(e),
+        Err(e) => return RhatEss::NotScored(e),
     };
 
     // Classic Gelman & Rubin (1992): between-chain variance of the chain
@@ -2636,15 +2635,10 @@ pub fn compute_rhat_ess(chains: &[Vec<f64>]) -> RhatEss {
         (((n_samples - 1.0) / n_samples * within + between / n_samples) / within).sqrt()
     } else { f64::NAN };
 
-    RhatEss {
-        all_chains_frozen: rank.all_chains_frozen,
-        rhat: rank.rhat,
+    RhatEss::Scored {
+        rank,
         rhat_classic,
-        ess_bulk: rank.ess_bulk,
-        ess_tail: rank.ess_tail,
         ess_per_chain: chains.iter().map(|c| mcmc_ess(c)).collect(),
-        n_draws_total: rank.n_draws_total,
-        not_reported: None,
     }
 }
 
@@ -2675,7 +2669,7 @@ pub const RHAT_SEVERE_THRESHOLD: f64 = 1.5;
 pub struct StageConvergence(Vec<(String, RhatEss)>);
 
 use std::collections::BTreeMap;
-use sim::inference::convergence::RhatRefusal;
+use sim::inference::convergence::{ConvergenceError, RankConvergence, RhatRefusal};
 
 impl StageConvergence {
     /// Score each `(param name, chains[chain][draw])` pair. Order is preserved
@@ -2699,7 +2693,20 @@ impl StageConvergence {
     /// Rank-normalized R̂ per param — **finite entries only**, so a `max` over
     /// the map is the max over the params that were assessable at all.
     pub fn rhat(&self) -> BTreeMap<String, f64> {
-        self.finite(|d| d.rhat)
+        self.finite_rank(|r| r.rhat)
+    }
+
+    /// The **location** half of the headline: rank-normalized split-R̂ without
+    /// the fold. Finite entries only, same convention as [`Self::rhat`].
+    pub fn rhat_bulk(&self) -> BTreeMap<String, f64> {
+        self.finite_rank(|r| r.rhat_bulk)
+    }
+
+    /// The **spread** half: the same statistic on `|x − median(x)|`. Its gap
+    /// from [`Self::rhat_bulk`] is what says whether chains disagree about
+    /// where the posterior sits or about how wide it is.
+    pub fn rhat_folded(&self) -> BTreeMap<String, f64> {
+        self.finite_rank(|r| r.rhat_folded)
     }
 
     /// Why each param ABSENT from [`Self::rhat`] is absent.
@@ -2712,37 +2719,73 @@ impl StageConvergence {
     /// deadlock — which is not an `Err` but is just as fatal).
     pub fn rhat_not_reported(&self) -> BTreeMap<String, RhatRefusal> {
         self.0.iter()
-            .filter_map(|(n, d)| match &d.not_reported {
-                Some(e) => Some((n.clone(), e.refusal())),
-                None if !d.rhat.is_finite() => Some((n.clone(), RhatRefusal::NonFiniteRhat)),
-                None => None,
+            .filter_map(|(n, d)| match d {
+                RhatEss::NotScored(e) => Some((n.clone(), e.refusal())),
+                RhatEss::Scored { rank, .. } if !rank.rhat.is_finite() => {
+                    Some((n.clone(), RhatRefusal::NonFiniteRhat))
+                }
+                RhatEss::Scored { .. } => None,
             })
+            .collect()
+    }
+
+    /// The refusal behind each entry of [`Self::rhat_not_reported`], **with its
+    /// numbers** — "R̂ needs at least 2 chains; got 1" rather than "fewer than 2
+    /// chains". Only params `rank_convergence` refused appear: a non-finite R̂
+    /// is not a refusal of the input, so it has no detail to carry.
+    pub fn rhat_refusal_detail(&self) -> BTreeMap<String, ConvergenceError> {
+        self.0.iter()
+            .filter_map(|(n, d)| d.refusal().map(|e| (n.clone(), e.clone())))
             .collect()
     }
 
     /// Classic Gelman & Rubin (1992) R̂ per param, finite entries only.
     pub fn rhat_classic(&self) -> BTreeMap<String, f64> {
-        self.finite(|d| d.rhat_classic)
+        self.finite(|d| d.rhat_classic())
     }
 
     /// Bulk-ESS per param. Every param gets an entry, non-finite included: a
     /// NaN serializes to JSON `null` and the loader reads it as absent, which
     /// is the encoding `PosteriorDiagnostics::min_ess_status` expects.
     pub fn ess_bulk(&self) -> BTreeMap<String, f64> {
-        self.0.iter().map(|(n, d)| (n.clone(), d.ess_bulk)).collect()
+        self.per_param_rank(|r| r.ess_bulk)
     }
 
     /// Tail-ESS per param, same key set as [`Self::ess_bulk`].
     pub fn ess_tail(&self) -> BTreeMap<String, f64> {
-        self.0.iter().map(|(n, d)| (n.clone(), d.ess_tail)).collect()
+        self.per_param_rank(|r| r.ess_tail)
     }
 
     /// Per-chain Geyer ESS per param, omitting params with no per-chain values.
     pub fn ess_per_chain(&self) -> BTreeMap<String, Vec<f64>> {
         self.0.iter()
-            .filter(|(_, d)| !d.ess_per_chain.is_empty())
-            .map(|(n, d)| (n.clone(), d.ess_per_chain.clone()))
+            .filter(|(_, d)| !d.ess_per_chain().is_empty())
+            .map(|(n, d)| (n.clone(), d.ess_per_chain().to_vec()))
             .collect()
+    }
+
+    /// The convergence half of a `*_summary.json`, as one object.
+    ///
+    /// Every Bayesian sampler merges this into its own stage-specific fields,
+    /// so a statistic cannot be live in one sampler's summary and silently
+    /// absent from another's — the divergence [`StageConvergence`] exists to
+    /// prevent, and which three hand-written `json!` blocks reintroduced.
+    /// [`crate::fit::method_result::ConvergenceMaps`] is the matching reader.
+    pub fn summary_fields(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        let mut put = |k: &str, v: serde_json::Value| {
+            m.insert(k.to_string(), v);
+        };
+        put("rhat", serde_json::json!(self.rhat()));
+        put("rhat_bulk", serde_json::json!(self.rhat_bulk()));
+        put("rhat_folded", serde_json::json!(self.rhat_folded()));
+        put("rhat_classic", serde_json::json!(self.rhat_classic()));
+        put("rhat_not_reported", serde_json::json!(self.rhat_not_reported()));
+        put("rhat_refusal_detail", serde_json::json!(self.rhat_refusal_detail()));
+        put("ess", serde_json::json!(self.ess_bulk()));
+        put("ess_tail", serde_json::json!(self.ess_tail()));
+        put("ess_per_chain", serde_json::json!(self.ess_per_chain()));
+        m
     }
 
     fn finite(&self, f: impl Fn(&RhatEss) -> f64) -> BTreeMap<String, f64> {
@@ -2751,6 +2794,20 @@ impl StageConvergence {
                 let v = f(d);
                 v.is_finite().then(|| (n.clone(), v))
             })
+            .collect()
+    }
+
+    /// One rank-normalized statistic per param, finite entries only.
+    fn finite_rank(&self, f: impl Fn(&RankConvergence) -> f64) -> BTreeMap<String, f64> {
+        self.finite(|d| d.rank().map_or(f64::NAN, &f))
+    }
+
+    /// One rank-normalized statistic per param, EVERY param present — the
+    /// encoding the ESS maps need (a NaN becomes JSON `null`, read back as
+    /// absent).
+    fn per_param_rank(&self, f: impl Fn(&RankConvergence) -> f64) -> BTreeMap<String, f64> {
+        self.0.iter()
+            .map(|(n, d)| (n.clone(), d.rank().map_or(f64::NAN, &f)))
             .collect()
     }
 
@@ -2763,6 +2820,13 @@ impl StageConvergence {
     /// estimator telling you it summed autocorrelations out to nearly the whole
     /// run (gh#84). A parameter that could not be scored at all names the
     /// reason instead of printing a dash.
+    ///
+    /// A parameter ABOVE the band gets a second line decomposing its R̂ into
+    /// `max(rhat_bulk, rhat_folded)` and naming which half is larger. The
+    /// headline says a fit did not converge; the decomposition says what to do
+    /// about it — a location disagreement is a warm-up/drift problem, a spread
+    /// disagreement points at per-chain effective diversity
+    /// (`docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`).
     pub fn report(
         &self,
         collector: &sim::inference::diagnostic::DiagnosticCollector,
@@ -2770,29 +2834,38 @@ impl StageConvergence {
     ) -> String {
         let mut out = String::from("\nRhat / ESS:\n");
         for (name, d) in self.iter() {
-            if let Some(why) = &d.not_reported {
+            let Some(r) = d.rank() else {
+                // `rank()` is `None` exactly when `refusal()` is `Some`.
+                let why = d.refusal().expect("an unscored param carries its refusal");
                 out.push_str(&format!("  {:12} not reported — {}\n", name, why));
                 continue;
-            }
+            };
             // The glyph and the finding must agree about where the band is:
             // a literal here would silently diverge from `rhat_threshold` the
             // moment the caller passes anything but 1.1.
-            let status = if d.rhat < rhat_threshold { "\x1b[32m✓\x1b[0m" }
-                else if d.rhat < RHAT_SEVERE_THRESHOLD { "\x1b[33m~\x1b[0m" }
+            let status = if r.rhat < rhat_threshold { "\x1b[32m✓\x1b[0m" }
+                else if r.rhat < RHAT_SEVERE_THRESHOLD { "\x1b[33m~\x1b[0m" }
                 else { "\x1b[31m✗\x1b[0m" };
-            let tail = if d.ess_tail.is_finite() {
-                format!("{:.0}", d.ess_tail)
+            let tail = if r.ess_tail.is_finite() {
+                format!("{:.0}", r.ess_tail)
             } else {
                 "—".to_string()
             };
             out.push_str(&format!(
                 "  {:12} Rhat={:.3} {} ESS bulk={:.0} tail={} ({:.1}% of {} draws)\n",
-                name, d.rhat, status, d.ess_bulk, tail,
-                100.0 * d.ess_bulk_ratio(), d.n_draws_total,
+                name, r.rhat, status, r.ess_bulk, tail,
+                100.0 * r.ess_bulk_ratio(), r.n_draws_total,
             ));
-            if d.rhat > rhat_threshold {
+            if r.rhat > rhat_threshold {
+                if let Some(driver) = r.rhat_driver() {
+                    out.push_str(&format!(
+                        "  {:12}   R̂ = max(bulk {:.3}, folded {:.3}); the {} half is \
+                         larger — {}\n",
+                        "", r.rhat_bulk, r.rhat_folded, driver.half(), driver.describe(),
+                    ));
+                }
                 collector.push(sim::inference::diagnostic::DiagnosticKind::RhatHigh {
-                    param: name.to_string(), rhat: d.rhat, threshold: rhat_threshold,
+                    param: name.to_string(), rhat: r.rhat, threshold: rhat_threshold,
                 });
             }
         }
@@ -5054,21 +5127,22 @@ dt = 1.0
             .map(|i| 5.0 + 0.05 * ((i as f64 * 0.7).sin()))
             .collect();
         let d = compute_rhat_ess(&[chain_a, chain_b]);
-        assert!(d.rhat.is_finite() && d.rhat > 1.1,
-            "fixture should produce R-hat > 1.1; got {}", d.rhat);
-        assert!(d.ess_bulk.is_finite() && d.ess_bulk > 0.0,
+        let r = d.rank().expect("scored");
+        assert!(r.rhat.is_finite() && r.rhat > 1.1,
+            "fixture should produce R-hat > 1.1; got {}", r.rhat);
+        assert!(r.ess_bulk.is_finite() && r.ess_bulk > 0.0,
             "a non-converged parameter must still report a finite bulk ESS; got {}",
-            d.ess_bulk);
-        assert!(d.ess_bulk < 20.0,
+            r.ess_bulk);
+        assert!(r.ess_bulk < 20.0,
             "two chains stuck in separate modes are worth very few effective \
-             draws; got {}", d.ess_bulk);
-        assert!(d.ess_bulk_ratio() < 0.05,
+             draws; got {}", r.ess_bulk);
+        assert!(r.ess_bulk_ratio() < 0.05,
             "ESS/N must expose how little of the run is usable; got {}",
-            d.ess_bulk_ratio());
-        assert_eq!(d.ess_per_chain.len(), 2,
+            r.ess_bulk_ratio());
+        assert_eq!(d.ess_per_chain().len(), 2,
             "ess_per_chain must be populated for each chain regardless of R-hat");
-        assert!(d.ess_per_chain.iter().all(|&e| e.is_finite() && e > 0.0),
-            "per-chain ESS values must be finite; got {:?}", d.ess_per_chain);
+        assert!(d.ess_per_chain().iter().all(|&e| e.is_finite() && e > 0.0),
+            "per-chain ESS values must be finite; got {:?}", d.ess_per_chain());
     }
 
     /// Well-mixed regression: chains drawn from the same distribution
@@ -5088,47 +5162,50 @@ dt = 1.0
         let chain_a = lcg(1, 500);
         let chain_b = lcg(2, 500);
         let d = compute_rhat_ess(&[chain_a, chain_b]);
-        assert!(d.rhat.is_finite() && d.rhat < 1.1,
-            "well-mixed pseudo-iid chains should give R-hat < 1.1; got {}", d.rhat);
-        assert!(d.ess_bulk.is_finite() && d.ess_bulk > 0.0,
-            "bulk ESS must be finite for well-mixed chains; got {}", d.ess_bulk);
-        assert!(d.ess_tail.is_finite() && d.ess_tail > 0.0,
-            "tail ESS must be finite for well-mixed chains; got {}", d.ess_tail);
-        assert!(d.ess_bulk_ratio() > 0.5,
+        let r = d.rank().expect("scored");
+        assert!(r.rhat.is_finite() && r.rhat < 1.1,
+            "well-mixed pseudo-iid chains should give R-hat < 1.1; got {}", r.rhat);
+        assert!(r.ess_bulk.is_finite() && r.ess_bulk > 0.0,
+            "bulk ESS must be finite for well-mixed chains; got {}", r.ess_bulk);
+        assert!(r.ess_tail.is_finite() && r.ess_tail > 0.0,
+            "tail ESS must be finite for well-mixed chains; got {}", r.ess_tail);
+        assert!(r.ess_bulk_ratio() > 0.5,
             "near-independent draws should be worth most of their count; got {}",
-            d.ess_bulk_ratio());
-        assert!(d.not_reported.is_none());
-        assert_eq!(d.ess_per_chain.len(), 2);
-        assert!(d.ess_per_chain.iter().all(|&e| e.is_finite() && e > 0.0));
+            r.ess_bulk_ratio());
+        assert!(d.refusal().is_none());
+        assert_eq!(d.ess_per_chain().len(), 2);
+        assert!(d.ess_per_chain().iter().all(|&e| e.is_finite() && e > 0.0));
     }
 
     /// Structural preconditions: >= 2 chains, equal length, >= 4 samples
-    /// each. Below this everything is NaN / empty AND `not_reported` names
-    /// the precondition that failed — the estimators are genuinely
-    /// undefined, and the reader should not have to guess which one it was.
+    /// each. Below this there are NO statistics at all — the result is
+    /// `NotScored` carrying the precondition that failed, so a caller cannot
+    /// read a NaN as a measurement and the reader does not have to guess which
+    /// precondition it was.
     #[test]
-    fn rhat_ess_returns_nan_when_too_few_samples() {
+    fn rhat_ess_refuses_by_name_when_too_few_samples() {
         use sim::inference::convergence::ConvergenceError;
         let chain_a: Vec<f64> = vec![1.0, 1.1, 1.05];
         let chain_b: Vec<f64> = vec![1.0, 1.2, 1.10];
         let d = compute_rhat_ess(&[chain_a, chain_b]);
-        assert!(d.rhat.is_nan(),      "< 4 samples per chain → R-hat NaN; got {}",     d.rhat);
-        assert!(d.ess_bulk.is_nan(),  "< 4 samples per chain → bulk ESS NaN; got {}",  d.ess_bulk);
-        assert!(d.ess_per_chain.is_empty(),
-            "< 4 samples per chain → ess_per_chain empty; got {:?}", d.ess_per_chain);
-        assert_eq!(d.not_reported, Some(ConvergenceError::TooFewDraws { n_draws: 3 }));
+        assert!(d.rank().is_none(), "< 4 samples per chain → no statistics at all");
+        assert!(d.ess_per_chain().is_empty(),
+            "< 4 samples per chain → ess_per_chain empty; got {:?}", d.ess_per_chain());
+        assert_eq!(d.refusal(), Some(&ConvergenceError::TooFewDraws { n_draws: 3 }));
     }
 
     #[test]
-    fn rhat_ess_returns_nan_for_single_chain() {
+    fn rhat_ess_refuses_by_name_for_a_single_chain() {
         use sim::inference::convergence::ConvergenceError;
         // R-hat needs >= 2 chains.
         let chain: Vec<f64> = (0..200).map(|i| 1.0 + 0.01 * i as f64).collect();
         let d = compute_rhat_ess(&[chain]);
-        assert!(d.rhat.is_nan() && d.ess_bulk.is_nan() && d.ess_per_chain.is_empty(),
-            "single chain → all NaN/empty; got ({}, {}, {:?})",
-            d.rhat, d.ess_bulk, d.ess_per_chain);
-        assert_eq!(d.not_reported, Some(ConvergenceError::TooFewChains { n_chains: 1 }));
+        assert!(d.rank().is_none() && d.ess_per_chain().is_empty(),
+            "single chain → nothing scored");
+        assert!(d.rhat_classic().is_nan(),
+            "and the classic statistic is refused by the same input; got {}",
+            d.rhat_classic());
+        assert_eq!(d.refusal(), Some(&ConvergenceError::TooFewChains { n_chains: 1 }));
     }
 
     /// The ✓/~/✗ glyph in the end-of-stage block and the `RhatHigh` finding in
@@ -5214,8 +5291,12 @@ dt = 1.0
         let collector = DiagnosticCollector::new("test");
         let out = conv.report(&collector, 1.05);
         assert!(
-            out.contains("location"),
+            out.contains("where the posterior sits"),
             "drifting chains disagree about WHERE the posterior sits:\n{out}"
+        );
+        assert!(
+            out.contains("bulk half is larger"),
+            "and it is the unfolded half that says so:\n{out}"
         );
         assert!(
             !out.contains("disagree on spread"),
@@ -5234,13 +5315,15 @@ dt = 1.0
         let d = compute_rhat_ess(&chains["within_chain_drift"]);
         let want_classic = reference[&("within_chain_drift".into(), "rhat_classic".into())]
             .expect("fixture carries a classic R-hat");
-        assert!((d.rhat_classic - want_classic).abs() / want_classic < 1e-9,
+        let classic = d.rhat_classic();
+        assert!((classic - want_classic).abs() / want_classic < 1e-9,
             "classic R-hat = {}, posterior 1.7.0 rhat_basic(split = FALSE) = {}",
-            d.rhat_classic, want_classic);
-        assert!(d.rhat_classic < 1.05,
-            "fixture premise: classic R-hat reads healthy here ({})", d.rhat_classic);
-        assert!(d.rhat > 1.4,
-            "the headline must be the rank-normalized statistic ({})", d.rhat);
+            classic, want_classic);
+        assert!(classic < 1.05,
+            "fixture premise: classic R-hat reads healthy here ({})", classic);
+        assert!(d.rank().expect("scored").rhat > 1.4,
+            "the headline must be the rank-normalized statistic ({})",
+            d.rank().expect("scored").rhat);
     }
 
     // ── The external oracle for the rank-normalized statistics (gh#84) ──────
@@ -5330,7 +5413,9 @@ dt = 1.0
             let want = reference
                 .get(&(case.clone(), "rhat".to_string()))
                 .unwrap_or_else(|| panic!("no reference rhat for case {case}"));
-            let got = compute_rhat_ess(cs).rhat;
+            let got = compute_rhat_ess(cs)
+                .rank()
+                .map_or(f64::NAN, |r| r.rhat);
             match want {
                 // posterior declines to report (a constant draw set); camdl
                 // must not invent a number either.

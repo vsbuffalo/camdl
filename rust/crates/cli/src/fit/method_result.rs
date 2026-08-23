@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sim::inference::convergence::RhatRefusal;
+use sim::inference::convergence::{ConvergenceError, RhatDriver, RhatRefusal};
 
 use crate::fit::state::FitState;
 
@@ -174,6 +174,16 @@ pub enum ParamConvergence {
     Scored {
         /// `max(rank-normalized split-R̂, folded split-R̂)` — the headline.
         rhat: Stat,
+        /// The **location** half of that max: rank-normalized split-R̂ without
+        /// the fold. `Undefined` on a fit written before this was stored.
+        #[serde(default = "undefined_stat")]
+        rhat_bulk: Stat,
+        /// The **spread** half: the same statistic on `|x − median(x)|`.
+        /// Which of the two is larger is the answer to *why* R̂ is high, and
+        /// the two remedies are different — see
+        /// `docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`.
+        #[serde(default = "undefined_stat")]
+        rhat_folded: Stat,
         /// Gelman & Rubin (1992), unsplit and on the raw scale. Kept because
         /// the rank-normalized statistic is BOUNDED (ceiling ~1.85 for two
         /// chains, ~4.5 for eight) and so cannot express severity, while this
@@ -192,7 +202,23 @@ pub enum ParamConvergence {
     },
     /// The estimator could not run at all — a structural precondition, or a
     /// non-finite draw.
-    NotScored { reason: RhatRefusal },
+    NotScored {
+        /// The classification: is this a sampler pathology or a shape the run
+        /// was never given? [`MaxRhat`] keys on it.
+        reason: RhatRefusal,
+        /// The same refusal **with its numbers** — "R̂ needs at least 2 chains;
+        /// got 1" rather than "fewer than 2 chains". `None` when the refusal
+        /// was derived from a non-finite R̂ rather than raised by
+        /// `rank_convergence`, and on a fit written before this was stored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ConvergenceError>,
+    },
+}
+
+/// `serde` default for the two R̂ halves: a fit written before they were
+/// stored has no value, which is `Undefined`, not zero.
+fn undefined_stat() -> Stat {
+    Stat::Undefined
 }
 
 impl ParamConvergence {
@@ -222,9 +248,15 @@ impl ParamConvergence {
 
     /// One clause saying why this parameter carries no usable R̂, or `None`
     /// when it carries one.
+    ///
+    /// When the refusal's numbers survived to disk they are what is said —
+    /// "chain 1 draw 7 is -inf; rank normalization is undefined for non-finite
+    /// draws" locates the problem, where "a draw was NaN or infinite" only
+    /// classifies it.
     pub fn why_no_rhat(&self) -> Option<String> {
         match self {
-            Self::NotScored { reason } => Some(reason.describe().to_string()),
+            Self::NotScored { detail: Some(e), .. } => Some(e.to_string()),
+            Self::NotScored { reason, detail: None } => Some(reason.describe().to_string()),
             Self::Scored { all_chains_frozen: true, .. } => Some(
                 "every chain sat at its own single value — the sampler never \
                  accepted a move".to_string(),
@@ -237,11 +269,27 @@ impl ParamConvergence {
         }
     }
 
+    /// Which half of `max(rhat_bulk, rhat_folded)` set this parameter's R̂,
+    /// and what that means — the answer to "why is R̂ high". `None` when the
+    /// parameter was not scored, or when the fit predates the two halves being
+    /// stored, or when either half is undefined.
+    pub fn rhat_decomposition(&self) -> Option<String> {
+        let Self::Scored { rhat_bulk, rhat_folded, .. } = self else {
+            return None;
+        };
+        let (b, f) = (rhat_bulk.finite()?, rhat_folded.finite()?);
+        let driver = RhatDriver::of(b, f)?;
+        Some(format!(
+            "R̂ = max(bulk {:.3}, folded {:.3}); the {} half is larger — {}",
+            b, f, driver.half(), driver.describe(),
+        ))
+    }
+
     /// Whether this parameter is evidence the sampler MISBEHAVED, as opposed to
     /// simply not having been given the shape a between-chain statistic needs.
     pub fn is_pathology(&self) -> bool {
         match self {
-            Self::NotScored { reason } => reason.is_pathology(),
+            Self::NotScored { reason, .. } => reason.is_pathology(),
             Self::Scored { all_chains_frozen, rhat, .. } => {
                 *all_chains_frozen || matches!(rhat, Stat::Infinite)
             }
@@ -316,7 +364,7 @@ impl PosteriorDiagnostics {
             .per_param
             .values()
             .find_map(|p| match p {
-                ParamConvergence::NotScored { reason } => Some(*reason),
+                ParamConvergence::NotScored { reason, .. } => Some(*reason),
                 _ => None,
             })
             .unwrap_or(RhatRefusal::EstimatedSetUnknown);
@@ -908,11 +956,7 @@ impl PgasStageResult {
             read_summary_json(stage_dir, &crate::run_meta::FitAlgorithm::Pgas.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
-        let rhat_map = read_f64_map(&summary, "rhat");
-        let rhat_classic_map = read_f64_map(&summary, "rhat_classic");
-        let rhat_not_reported = read_refusal_map(&summary);
-        let ess_map = read_f64_map(&summary, "ess");
-        let ess_tail_map = read_f64_map(&summary, "ess_tail");
+        let conv = ConvergenceMaps::read(&summary);
 
         // Posterior moments: average each estimated-param column in
         // draws.tsv. The estimated-param key set is rhat_map's keys
@@ -922,14 +966,7 @@ impl PgasStageResult {
         // A fit whose R̂ could not be computed still has parameters (gh#611 /
         // review blocker 1); deriving the list from a diagnostic map made such
         // a fit report none at all.
-        let est_names: Vec<String> = {
-            let mut set: std::collections::BTreeSet<String> = Default::default();
-            set.extend(rhat_map.keys().cloned());
-            set.extend(ess_map.keys().cloned());
-            set.extend(ess_tail_map.keys().cloned());
-            set.extend(rhat_not_reported.keys().cloned());
-            set.into_iter().collect()
-        };
+        let est_names: Vec<String> = conv.param_names();
         let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
             posterior_summaries(stage_dir, &est_names);
 
@@ -973,9 +1010,7 @@ impl PgasStageResult {
 
         Ok(PgasStageResult {
             diagnostics: PosteriorDiagnostics {
-                per_param: build_per_param(
-                    &rhat_map, &rhat_classic_map, &rhat_not_reported,
-                    &ess_map, &ess_tail_map),
+                per_param: conv.per_param(),
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -1002,24 +1037,13 @@ impl PmmhStageResult {
         let summary = read_summary_json(stage_dir, &algo.summary_filename())?;
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
 
-        let rhat_map = read_f64_map(&summary, "rhat");
-        let rhat_classic_map = read_f64_map(&summary, "rhat_classic");
-        let rhat_not_reported = read_refusal_map(&summary);
-        let ess_map = read_f64_map(&summary, "ess");
-        let ess_tail_map = read_f64_map(&summary, "ess_tail");
+        let conv = ConvergenceMaps::read(&summary);
         // Parameter identity is the UNION of every diagnostic key plus every
         // recorded refusal — never "whichever map happened to be non-empty".
         // A fit whose R̂ could not be computed still has parameters (gh#611 /
         // review blocker 1); deriving the list from a diagnostic map made such
         // a fit report none at all.
-        let est_names: Vec<String> = {
-            let mut set: std::collections::BTreeSet<String> = Default::default();
-            set.extend(rhat_map.keys().cloned());
-            set.extend(ess_map.keys().cloned());
-            set.extend(ess_tail_map.keys().cloned());
-            set.extend(rhat_not_reported.keys().cloned());
-            set.into_iter().collect()
-        };
+        let est_names: Vec<String> = conv.param_names();
         let (n_samples, posterior_mean, _q025, _q975) =
             posterior_summaries(stage_dir, &est_names);
 
@@ -1044,9 +1068,7 @@ impl PmmhStageResult {
 
         Ok(PmmhStageResult {
             diagnostics: PosteriorDiagnostics {
-                per_param: build_per_param(
-                    &rhat_map, &rhat_classic_map, &rhat_not_reported,
-                    &ess_map, &ess_tail_map),
+                per_param: conv.per_param(),
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -1071,24 +1093,13 @@ impl NutsStageResult {
         let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
         let n_divergent = summary.get("n_divergent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-        let rhat_map = read_f64_map(&summary, "rhat");
-        let rhat_classic_map = read_f64_map(&summary, "rhat_classic");
-        let rhat_not_reported = read_refusal_map(&summary);
-        let ess_map = read_f64_map(&summary, "ess");
-        let ess_tail_map = read_f64_map(&summary, "ess_tail");
+        let conv = ConvergenceMaps::read(&summary);
         // Parameter identity is the UNION of every diagnostic key plus every
         // recorded refusal — never "whichever map happened to be non-empty".
         // A fit whose R̂ could not be computed still has parameters (gh#611 /
         // review blocker 1); deriving the list from a diagnostic map made such
         // a fit report none at all.
-        let est_names: Vec<String> = {
-            let mut set: std::collections::BTreeSet<String> = Default::default();
-            set.extend(rhat_map.keys().cloned());
-            set.extend(ess_map.keys().cloned());
-            set.extend(ess_tail_map.keys().cloned());
-            set.extend(rhat_not_reported.keys().cloned());
-            set.into_iter().collect()
-        };
+        let est_names: Vec<String> = conv.param_names();
         let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
             posterior_summaries(stage_dir, &est_names);
 
@@ -1100,9 +1111,7 @@ impl NutsStageResult {
 
         Ok(NutsStageResult {
             diagnostics: PosteriorDiagnostics {
-                per_param: build_per_param(
-                    &rhat_map, &rhat_classic_map, &rhat_not_reported,
-                    &ess_map, &ess_tail_map),
+                per_param: conv.per_param(),
                 n_samples,
                 thin,
                 wall_time_secs,
@@ -1119,18 +1128,91 @@ impl NutsStageResult {
 
 // ── shared helpers ──────────────────────────────────────────────────
 
-/// Build the per-parameter map from a stored summary's separate JSON maps.
+/// The convergence half of a stage summary, read once.
 ///
-/// The loaded path is just another producer of the same type — a band label and
-/// `fit summary` must reduce one fit the same way, whether the numbers came
-/// from a recompute or off disk.
-pub fn per_param_from_summary_maps(
-    rhat: &BTreeMap<String, f64>,
-    rhat_classic: &BTreeMap<String, f64>,
-    ess: &BTreeMap<String, f64>,
-    ess_tail: &BTreeMap<String, f64>,
-) -> BTreeMap<String, ParamConvergence> {
-    build_per_param(rhat, rhat_classic, &BTreeMap::new(), ess, ess_tail)
+/// The mirror of
+/// [`StageConvergence::summary_fields`](crate::fit::runner::StageConvergence::summary_fields):
+/// one writer, one reader, so a statistic the samplers store cannot be dropped
+/// by a loader that forgot to add a key. Every field is optional on the wire —
+/// a fit written before a statistic existed simply has no entry for it, and the
+/// corresponding [`Stat`] is `Undefined` rather than absent.
+#[derive(Debug, Default)]
+pub struct ConvergenceMaps {
+    rhat: BTreeMap<String, f64>,
+    rhat_bulk: BTreeMap<String, f64>,
+    rhat_folded: BTreeMap<String, f64>,
+    rhat_classic: BTreeMap<String, f64>,
+    refused: BTreeMap<String, RhatRefusal>,
+    refusal_detail: BTreeMap<String, ConvergenceError>,
+    ess: BTreeMap<String, f64>,
+    ess_tail: BTreeMap<String, f64>,
+}
+
+impl ConvergenceMaps {
+    /// Read every convergence key a stage summary may carry.
+    pub fn read(summary: &serde_json::Value) -> Self {
+        ConvergenceMaps {
+            rhat: read_f64_map(summary, "rhat"),
+            rhat_bulk: read_f64_map(summary, "rhat_bulk"),
+            rhat_folded: read_f64_map(summary, "rhat_folded"),
+            rhat_classic: read_f64_map(summary, "rhat_classic"),
+            refused: read_typed_map(summary, "rhat_not_reported"),
+            refusal_detail: read_typed_map(summary, "rhat_refusal_detail"),
+            ess: read_f64_map(summary, "ess"),
+            ess_tail: read_f64_map(summary, "ess_tail"),
+        }
+    }
+
+    /// Every parameter this summary mentions, in any capacity. The key set is
+    /// the UNION, so a parameter that appears only as a refusal is still a
+    /// parameter of this fit (gh#611).
+    pub fn param_names(&self) -> Vec<String> {
+        let mut set: std::collections::BTreeSet<&String> = Default::default();
+        set.extend(self.rhat.keys());
+        set.extend(self.rhat_bulk.keys());
+        set.extend(self.rhat_folded.keys());
+        set.extend(self.rhat_classic.keys());
+        set.extend(self.refused.keys());
+        set.extend(self.refusal_detail.keys());
+        set.extend(self.ess.keys());
+        set.extend(self.ess_tail.keys());
+        set.into_iter().cloned().collect()
+    }
+
+    /// Assemble the per-parameter sum type.
+    ///
+    /// The loaded path is just another producer of that type — a band label and
+    /// `fit summary` must reduce one fit the same way, whether the numbers came
+    /// from a recompute or off disk.
+    pub fn per_param(&self) -> BTreeMap<String, ParamConvergence> {
+        let stat = |m: &BTreeMap<String, f64>, name: &str| {
+            m.get(name).copied().map(Stat::from_f64).unwrap_or(Stat::Undefined)
+        };
+        self.param_names()
+            .into_iter()
+            .map(|name| {
+                // A refusal with no numbers at all is `NotScored`; a refusal
+                // alongside an ESS means the estimator ran and only R̂ is missing.
+                let reason = self.refused.get(&name);
+                let entry = match (reason, self.ess.get(&name)) {
+                    (Some(reason), None) => ParamConvergence::NotScored {
+                        reason: *reason,
+                        detail: self.refusal_detail.get(&name).cloned(),
+                    },
+                    (reason, _) => ParamConvergence::Scored {
+                        rhat: stat(&self.rhat, &name),
+                        rhat_bulk: stat(&self.rhat_bulk, &name),
+                        rhat_folded: stat(&self.rhat_folded, &name),
+                        rhat_classic: stat(&self.rhat_classic, &name),
+                        ess_bulk: stat(&self.ess, &name),
+                        ess_tail: stat(&self.ess_tail, &name),
+                        all_chains_frozen: matches!(reason, Some(RhatRefusal::NonFiniteRhat)),
+                    },
+                };
+                (name, entry)
+            })
+            .collect()
+    }
 }
 
 /// Test-only: build the per-parameter map from plain `(R̂, bulk-ESS, tail-ESS)`
@@ -1142,64 +1224,24 @@ pub fn per_param_from_maps(
     ess: BTreeMap<String, f64>,
     ess_tail: BTreeMap<String, f64>,
 ) -> BTreeMap<String, ParamConvergence> {
-    build_per_param(&rhat, &BTreeMap::new(), &BTreeMap::new(), &ess, &ess_tail)
+    ConvergenceMaps { rhat, ess, ess_tail, ..Default::default() }.per_param()
 }
 
-/// Assemble the per-parameter map from a stage summary's separate JSON maps.
-///
-/// The key set is the UNION of everything mentioned, so a parameter that
-/// appears only as a refusal is still a parameter of this fit.
-fn build_per_param(
-    rhat: &BTreeMap<String, f64>,
-    rhat_classic: &BTreeMap<String, f64>,
-    refused: &BTreeMap<String, RhatRefusal>,
-    ess: &BTreeMap<String, f64>,
-    ess_tail: &BTreeMap<String, f64>,
-) -> BTreeMap<String, ParamConvergence> {
-    let mut names: std::collections::BTreeSet<&String> = Default::default();
-    names.extend(rhat.keys());
-    names.extend(rhat_classic.keys());
-    names.extend(refused.keys());
-    names.extend(ess.keys());
-    names.extend(ess_tail.keys());
-
-    names
-        .into_iter()
-        .map(|name| {
-            // A refusal with no numbers at all is `NotScored`; a refusal
-            // alongside an ESS means the estimator ran and only R̂ is missing.
-            let entry = match (refused.get(name), ess.get(name)) {
-                (Some(reason), None) => ParamConvergence::NotScored { reason: *reason },
-                (reason, _) => ParamConvergence::Scored {
-                    rhat: rhat.get(name).copied().map(Stat::from_f64)
-                        .unwrap_or(Stat::Undefined),
-                    rhat_classic: rhat_classic.get(name).copied().map(Stat::from_f64)
-                        .unwrap_or(Stat::Undefined),
-                    ess_bulk: ess.get(name).copied().map(Stat::from_f64)
-                        .unwrap_or(Stat::Undefined),
-                    ess_tail: ess_tail.get(name).copied().map(Stat::from_f64)
-                        .unwrap_or(Stat::Undefined),
-                    all_chains_frozen: matches!(reason, Some(RhatRefusal::NonFiniteRhat)),
-                },
-            };
-            (name.clone(), entry)
-        })
-        .collect()
-}
-
-/// Extract `rhat_not_reported` — `{ "<param>": "<refusal>" }` — from a stage
-/// summary. Absent (an older fit) yields an empty map, which
-/// [`MaxRhat`] reads as `NoParams` rather than as "assessed and fine".
-fn read_refusal_map(summary: &serde_json::Value) -> BTreeMap<String, RhatRefusal> {
+/// Extract a `{ "<param>": <T> }` object from a summary value. An entry that
+/// does not deserialize is dropped rather than failing the whole load: a fit
+/// written by a newer camdl may carry a variant this one does not know, and
+/// losing one parameter's classification is better than losing the fit.
+fn read_typed_map<T: serde::de::DeserializeOwned>(
+    summary: &serde_json::Value,
+    key: &str,
+) -> BTreeMap<String, T> {
     summary
-        .get("rhat_not_reported")
+        .get(key)
         .and_then(|v| v.as_object())
         .map(|o| {
             o.iter()
                 .filter_map(|(k, v)| {
-                    serde_json::from_value::<RhatRefusal>(v.clone())
-                        .ok()
-                        .map(|r| (k.clone(), r))
+                    serde_json::from_value::<T>(v.clone()).ok().map(|r| (k.clone(), r))
                 })
                 .collect()
         })
@@ -1870,6 +1912,8 @@ mod tests {
             per_param: BTreeMap::from([
                 ("beta".to_string(), ParamConvergence::Scored {
                     rhat: Stat::Value(1.01),
+                    rhat_bulk: Stat::Value(1.01),
+                    rhat_folded: Stat::Value(1.00),
                     rhat_classic: Stat::Value(1.00),
                     ess_bulk: Stat::Value(900.0),
                     ess_tail: Stat::Value(850.0),
@@ -1877,6 +1921,8 @@ mod tests {
                 }),
                 ("frozen".to_string(), ParamConvergence::Scored {
                     rhat: Stat::Infinite,
+                    rhat_bulk: Stat::Infinite,
+                    rhat_folded: Stat::Undefined,
                     rhat_classic: Stat::Infinite,
                     ess_bulk: Stat::Value(3.0),
                     ess_tail: Stat::Undefined,
@@ -1906,7 +1952,9 @@ mod tests {
     #[test]
     fn every_non_reporting_state_explains_itself() {
         let frozen = ParamConvergence::Scored {
-            rhat: Stat::Infinite, rhat_classic: Stat::Infinite,
+            rhat: Stat::Infinite,
+            rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
+            rhat_classic: Stat::Infinite,
             ess_bulk: Stat::Value(3.0), ess_tail: Stat::Undefined,
             all_chains_frozen: true,
         };
@@ -1914,20 +1962,24 @@ mod tests {
         assert!(frozen.is_pathology());
 
         let undefined_fold = ParamConvergence::Scored {
-            rhat: Stat::Undefined, rhat_classic: Stat::Value(1.02),
+            rhat: Stat::Undefined,
+            rhat_bulk: Stat::Value(1.02), rhat_folded: Stat::Undefined,
+            rhat_classic: Stat::Value(1.02),
             ess_bulk: Stat::Value(500.0), ess_tail: Stat::Value(400.0),
             all_chains_frozen: false,
         };
         assert!(undefined_fold.why_no_rhat().expect("an undefined R̂ explains itself")
             .contains("folded"));
 
-        let not_scored = ParamConvergence::NotScored { reason: RhatRefusal::NonFiniteDraw };
+        let not_scored =
+            ParamConvergence::NotScored { reason: RhatRefusal::NonFiniteDraw, detail: None };
         let why = not_scored.why_no_rhat().expect("a refusal explains itself");
         assert!(why.contains("NaN") || why.contains("infinite"), "got {why}");
         assert!(not_scored.is_pathology(), "a non-finite draw is a pathology");
 
         // Structural: not a pathology, but still not "converged".
-        let too_few = ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains };
+        let too_few =
+            ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains, detail: None };
         assert!(!too_few.is_pathology(), "being given one chain is not a sampler failure");
         assert!(too_few.why_no_rhat().is_some(), "but it still says so");
 
@@ -1935,7 +1987,9 @@ mod tests {
         // frozen-chains flag was set: R̂ = ∞ means the within-chain variance is
         // zero, and there is no benign way for that to happen.
         let inf_only = ParamConvergence::Scored {
-            rhat: Stat::Infinite, rhat_classic: Stat::Infinite,
+            rhat: Stat::Infinite,
+            rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
+            rhat_classic: Stat::Infinite,
             ess_bulk: Stat::Value(4.0), ess_tail: Stat::Undefined,
             all_chains_frozen: false,
         };
@@ -1944,7 +1998,9 @@ mod tests {
 
         // A healthy parameter has nothing to explain.
         let ok = ParamConvergence::Scored {
-            rhat: Stat::Value(1.01), rhat_classic: Stat::Value(1.00),
+            rhat: Stat::Value(1.01),
+            rhat_bulk: Stat::Value(1.01), rhat_folded: Stat::Value(1.00),
+            rhat_classic: Stat::Value(1.00),
             ess_bulk: Stat::Value(900.0), ess_tail: Stat::Value(850.0),
             all_chains_frozen: false,
         };
@@ -1959,7 +2015,8 @@ mod tests {
         let d = PosteriorDiagnostics {
             per_param: BTreeMap::from([
                 ("beta".to_string(),
-                 ParamConvergence::NotScored { reason: RhatRefusal::TooFewChains }),
+                 ParamConvergence::NotScored {
+                     reason: RhatRefusal::TooFewChains, detail: None }),
             ]),
             n_samples: 100, thin: 1, wall_time_secs: None, n_chains: 1,
         };

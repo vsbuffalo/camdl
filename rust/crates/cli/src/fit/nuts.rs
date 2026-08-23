@@ -469,19 +469,17 @@ fn write_nuts_summary(
     diag: &super::runner::StageConvergence,
     n_divergent: usize,
 ) -> Result<(), String> {
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "stage": "nuts",
         "n_chains": n_chains,
-        "rhat": diag.rhat(),
-        "rhat_not_reported": diag.rhat_not_reported(),
-        "rhat_classic": diag.rhat_classic(),
-        "ess": diag.ess_bulk(),
-        "ess_tail": diag.ess_tail(),
-        "ess_per_chain": diag.ess_per_chain(),
         "n_divergent": n_divergent,
         // nuts draws are unthinned: n_samples (kept) × thin = raw sampling iters.
         "thin": 1,
     });
+    // Every convergence key comes from one producer, so a statistic cannot be
+    // live in this summary and silently absent from pgas's or pmmh's.
+    summary.as_object_mut().expect("json! built an object")
+        .extend(diag.summary_fields());
     let path = dir.join(crate::run_meta::FitAlgorithm::Nuts.summary_filename());
     let contents =
         serde_json::to_string_pretty(&summary).map_err(|e| format!("json error: {}", e))?;
@@ -514,4 +512,95 @@ fn write_nuts_draws<'a>(
     // Explicit flush: BufWriter swallows write errors on drop.
     f.flush()
         .map_err(|e| format!("cannot write {}: {}", path.display(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fit::runner::StageConvergence;
+
+    fn read_summary(dir: &Path) -> (String, serde_json::Value) {
+        let text = std::fs::read_to_string(
+            dir.join(crate::run_meta::FitAlgorithm::Nuts.summary_filename()),
+        )
+        .expect("summary readable");
+        let v = serde_json::from_str(&text).expect("valid json");
+        (text, v)
+    }
+
+    /// A convergence statistic is only useful where a user reads it, and
+    /// `nuts_summary.json` is the only place a `nuts` fit's diagnostics survive
+    /// the process. The decomposition of R̂ into its location (`rhat_bulk`) and
+    /// spread (`rhat_folded`) halves — the answer to *why* R̂ is high — must
+    /// therefore be written, not computed and discarded.
+    ///
+    /// Four chains, two centred on 0 and two on 1, all the same width: a pure
+    /// LOCATION disagreement, so `rhat_bulk` must be the larger half.
+    #[test]
+    fn the_nuts_summary_carries_the_rhat_decomposition() {
+        let dir = tempfile::tempdir().unwrap();
+        let chains: Vec<Vec<f64>> = (0..4)
+            .map(|c| {
+                let centre = if c < 2 { 0.0 } else { 1.0 };
+                (0..60)
+                    .map(|i| centre + 0.1 * ((i as f64 * 0.7 + c as f64).sin()))
+                    .collect()
+            })
+            .collect();
+        let diag = StageConvergence::compute([("beta".to_string(), chains)]);
+        write_nuts_summary(dir.path(), 4, &diag, 0).expect("summary written");
+        let (text, v) = read_summary(dir.path());
+
+        let bulk = v["rhat_bulk"]["beta"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("nuts_summary.json must carry rhat_bulk; got:\n{text}"));
+        let folded = v["rhat_folded"]["beta"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("nuts_summary.json must carry rhat_folded; got:\n{text}"));
+        assert!(
+            bulk > folded,
+            "a pure location disagreement must be driven by the bulk half: \
+             bulk={bulk}, folded={folded}"
+        );
+        assert!(
+            (v["rhat"]["beta"].as_f64().expect("headline present") - bulk).abs() < 1e-12,
+            "and the headline must be that half exactly"
+        );
+    }
+
+    /// A refusal must reach the summary WITH its numbers. One chain is a
+    /// structural refusal; the stored form has to say "got 1", not only
+    /// "fewer than 2 chains", or `fit summary` renders five structurally
+    /// different failures identically.
+    #[test]
+    fn the_nuts_summary_carries_the_refusal_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let one_chain: Vec<Vec<f64>> = vec![(0..40).map(|i| i as f64 * 0.1).collect()];
+        let diag = StageConvergence::compute([("beta".to_string(), one_chain)]);
+        write_nuts_summary(dir.path(), 1, &diag, 0).expect("summary written");
+        let (text, v) = read_summary(dir.path());
+
+        let detail = &v["rhat_refusal_detail"]["beta"];
+        assert_eq!(
+            detail["refusal"].as_str(),
+            Some("too_few_chains"),
+            "the refusal must be stored by name; got:\n{text}"
+        );
+        assert_eq!(
+            detail["n_chains"].as_u64(),
+            Some(1),
+            "and with the number that produced it; got:\n{text}"
+        );
+
+        // And it must read back into the same typed error, all the way to the
+        // sentence `fit summary` prints.
+        let maps = crate::fit::method_result::ConvergenceMaps::read(&v);
+        let why = maps.per_param()["beta"]
+            .why_no_rhat()
+            .expect("an unscored param says why");
+        assert!(
+            why.contains("got 1"),
+            "the reason a reader sees must carry the number: {why}"
+        );
+    }
 }
