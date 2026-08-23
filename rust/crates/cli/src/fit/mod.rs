@@ -208,9 +208,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // variant is consumed by `starts_from_override` above (the legacy
     // dispatcher's `--starts-from` semantic). For the other warm-start
     // variants (from_prior / from_posterior / from_params) the typed
-    // InitMethod flows into `cli_init_method` and is dispatched
-    // through `pgas_opts.init_method` / `pmmh_opts.init_method` /
-    // the IF2 stage's `effective_init`.
+    // InitMethod flows into `cli_init_method`, which reaches every
+    // stage through `CliStageOverrides::init` -> `apply_cli_overrides`
+    // (gh#514) — the stage's own `init_method` field carries it from
+    // there.
     let cli_init_method: Option<crate::fit::init::InitMethod> = match a.init {
         Some(tag) if !matches!(tag, crate::args::InitModeTag::FromMle) => {
             Some(tag.to_init_method(
@@ -224,8 +225,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
         _ => None,
     };
-    let cli_survey_path          = a.survey_path.clone();
-    let cli_survey_top_k         = a.survey_top_k;
 
     // gh#540: every CLI flag that changes what a stage computes or stores,
     // collected once so the stage identity can see all of them. Applied to the
@@ -250,8 +249,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     }
     let cli_overrides = crate::fit::config_v2::CliStageOverrides {
         init:                 cli_init_method.clone(),
-        survey_path:          cli_survey_path.clone(),
-        survey_top_k:         cli_survey_top_k,
+        survey_path:          a.survey_path.clone(),
+        survey_top_k:         a.survey_top_k,
         tempering:            a.tempering.clone(),
         max_tree_depth:       a.max_tree_depth,
         trajectory_warmup:    a.trajectory_warmup,
@@ -1315,18 +1314,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // unchanged); Lhs = Latin-hypercube stratified, scale-
                 // aware via Transform.
                 //
-                // CLI `--init` overrides the stage-config init_method
-                // when a single stage is selected (clap requires --stage
-                // with --init).
-                let effective_init: crate::fit::init::InitMethod =
-                    cli_init_method.clone().unwrap_or_else(|| init_method.clone());
-                // CLI overrides for survey_top_k siblings (require
-                // --stage; clap enforces). When the stage TOML sets
-                // them too, CLI wins.
-                let effective_survey_path: Option<std::path::PathBuf> =
-                    cli_survey_path.clone().or_else(|| survey_path.clone());
-                let effective_survey_top_k_n: Option<usize> =
-                    cli_survey_top_k.or(*survey_top_k_n);
+                // CLI `--init` / `--survey-path` / `--survey-top-k` were
+                // already written INTO the stage by `apply_cli_overrides`
+                // (gh#514, applied before the identity was taken; the flags
+                // require --stage, and --stage filters `stages_to_run` to
+                // exactly the overridden stage). Re-merging the CLI values
+                // here was a second merge site that could only agree with
+                // the first or drift from it — read the stage fields.
+                let effective_init: crate::fit::init::InitMethod = init_method.clone();
+                let effective_survey_path: Option<std::path::PathBuf> = survey_path.clone();
+                let effective_survey_top_k_n: Option<usize> = *survey_top_k_n;
                 // gh#506 follow-up: a declared `start` that the chosen init
                 // mode discards is a silent no-op. Not an error — the
                 // spreading modes ignore it on purpose — but the user who
