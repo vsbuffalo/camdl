@@ -2460,13 +2460,32 @@ fn build_simulate_cas_sink(
     if let Some(w) = run.obs_anchors {
         crate::obs_anchor::substitute(&mut base_model, w)?;
     }
+    // Audit 2026-08-23 #1: apply `--integrator` to the model that is HASHED,
+    // exactly as `resolve_run_model` applies it to the model that is RUN. The
+    // identity path never applied it, so an rk45 run and an rk4 run of the
+    // same model shared one `run_id` — and post-S1 the second would die with
+    // DivergentRecompute instead of getting its own leaf. Same argument as
+    // the gh#616 anchor substitution above: the two loads must agree by
+    // construction.
+    util::apply_integrator_override(&mut base_model, run.integrator);
 
-    // Resolved base params: model defaults overlaid by --params then --param,
-    // filtered to the params that resolved to a value (a param that relies on
-    // the scenario half is supplied there, not here — mirrors prepare_cas_ctx).
+    // Resolved base params: model defaults overlaid by --params, then
+    // --param-vec, then --param (matching `resolve_run_model`'s tier-5
+    // last-wins order: vec entries expand before `run.overrides`, so an
+    // explicit `--param NAME=VAL` still wins), filtered to the params that
+    // resolved to a value (a param that relies on the scenario half is
+    // supplied there, not here — mirrors prepare_cas_ctx).
     let mut params_model = base_model.clone();
     for path in &run.params_files {
         util::apply_params_file(&mut params_model, path)?;
+    }
+    // Audit 2026-08-23 #2: `--param-vec` values were absent from the hashed
+    // params — the identity path never read `set_vec_entries`. Shared
+    // expansion with the run path so the two cannot diverge.
+    for (k, v) in util::resolve_param_vec_entries(&params_model, &run.set_vec_entries)? {
+        if let Some(p) = params_model.parameters.iter_mut().find(|p| p.name == k) {
+            p.value = p.value.with_value(v);
+        }
     }
     for (k, v) in &run.overrides {
         if let Some(p) = params_model.parameters.iter_mut().find(|p| &p.name == k) {
