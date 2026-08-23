@@ -371,7 +371,10 @@ fitted posterior (`fit predict`), banded into `quantities/<name>.tsv` with a
 `quantities.json` manifest. A timing question that never resolves (an outbreak
 that never takes off in a given draw) is reported as **right-censored**, not as
 a fabricated time. Because they are derived reports, adding or changing a
-`quantities {}` block never re-keys a model's `run_id`.
+`quantities {}` block never re-keys a model's `run_id`. The same holds for `#'`
+documentation: it lands in the IR envelope's `docs` dictionary, outside the
+`model` object identity is computed from, so correcting a citation costs you no
+fits.
 
 ---
 

@@ -3914,6 +3914,16 @@ quantity's kind. Because they are _derived reports_ computed from a run rather
 than inputs to it, adding or changing a `quantities {}` block never re-keys a
 model's `run_id`.
 
+**`#'` documentation carries the same guarantee.** A doc comment is presentation
+metadata: the compiler emits it into the IR envelope's `docs` dictionary, which
+sits *outside* the `model` object that run identity is computed from. Rewording
+a docstring — correcting a citation, sharpening a caveat — therefore leaves
+`model_identity` unchanged and orphans no completed fit. Both rules exist so
+that the two edits a modeller most often wants to make *after* a long run, the
+reporting vocabulary and the scholarly record of why a prior is what it is, are
+free to make. What *does* re-key is anything the model computes with: a rate, a
+prior, a bound, a compartment, a transition, an observation.
+
 **A vocabulary can live in its own file.** A `quantities {}` block is a
 _reporting vocabulary_, and several models often want the same one. Rather than
 copy it into each model — where the copies drift — put it in an ordinary
