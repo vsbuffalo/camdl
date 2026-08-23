@@ -172,28 +172,35 @@ fn a_prevalence_only_model_has_no_interval_accumulator() {
     assert_eq!(ll_zero, ll_wild, "prevalence likelihood must not read the flow accumulator");
 }
 
-/// (2) The digest: a full CSMC sweep on this model reproduces the trajectory
-/// measured immediately before the interval-accumulator re-sync landed
-/// (`pgas.rs` at the parent of the gh#607 accumulator commit). A change here is
-/// either a regression in that claim or an intended change to the CSMC draw
-/// order — never something to re-baseline without deciding which.
+/// (2) The digest: a tripwire on the CSMC draw for this model. A change here is
+/// either a regression or an intended change to the draw order — never
+/// something to re-baseline without deciding which.
 ///
-/// NOT vacuous: the re-sync sits behind `ref_ancestor != j_ref`, and these four
-/// sweeps accept **83 splices** over 4 × 80 = 320 ancestor-sampling
-/// opportunities (counted by instrumenting that branch on 2026-08-19). The code
-/// under test runs 83 times and moves nothing.
+/// These values were RE-CAPTURED for gh#718. They previously pinned the
+/// trajectory measured just before the interval-accumulator re-sync landed, and
+/// that comparison is no longer available: gh#718 replaced the conditional
+/// resampling (`conditional_systematic_resample`), which moves every CSMC draw
+/// on every model. The claim this test still carries — that the re-sync is
+/// inert on a prevalence-only model — rests on check (1) above, which proves it
+/// at the seam rather than by comparison to a historical constant.
+///
+/// NOT vacuous: the re-sync sits behind `ref_ancestor != j_ref`, and the
+/// accepted-splice count is asserted below from the diagnostics rather than
+/// quoted from a one-off instrumentation run, so it cannot silently fall to
+/// zero.
 #[test]
 fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() {
     const EXPECTED: [u64; 4] = [
-        0xf9ca0a01894e9c7d,
-        0x7463433398e370e5,
-        0xbc73cf25769a82f2,
-        0x92af74721aa5e3c7,
+        0x97e10084d77ac732,
+        0x172214c07211dd7d,
+        0x8ee0eff521842a76,
+        0x310aeb5580259e32,
     ];
     let f = fixture();
+    let mut accepted = 0usize;
     let got: Vec<u64> = (0..4u64)
         .map(|seed| {
-            let (traj, _diag) = csmc_as(
+            let (traj, diag) = csmc_as(
                 &f.compiled,
                 &f.params,
                 &f.obs,
@@ -207,9 +214,16 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
                 EffectFiring::default(),
             )
             .expect("csmc_as");
+            accepted += diag.n_as_accepted;
             digest(&traj)
         })
         .collect();
+    assert!(
+        accepted > 20,
+        "only {accepted} splices accepted over 4 sweeps — the re-sync branch this \
+         test exercises is behind `ref_ancestor != j_ref`, so the digest would be \
+         pinning a path that never runs"
+    );
     assert_eq!(
         got,
         EXPECTED.to_vec(),

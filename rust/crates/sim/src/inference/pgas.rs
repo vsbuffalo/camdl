@@ -21,7 +21,7 @@ use crate::error::SimError;
 use crate::inference::obs_loglik::{poisson_logpmf, binom_logpmf};
 use crate::inference::numerics::BINOM_PROB_EPS;
 use crate::inference::particle_filter::Observation;
-use crate::inference::resampling::systematic_resample;
+use crate::inference::resampling::conditional_systematic_resample;
 use crate::inference::pmmh::Prior;
 use crate::inference::prior::Density;
 use crate::inference::types::{EstimatedParam, PROB_FRACTION_EPS, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
@@ -1879,13 +1879,19 @@ pub fn splice_log_ratio(
 /// (every substep following an observation) and forfeits the Theorem-1 invariance
 /// of the PGAS kernel.
 ///
-/// Every slot is scored at its OWN entry in that snapshot, the reference's
-/// included. The reference slot used to be passed separately as
-/// `ref_counts_before`; the call site passed `prev_counts[j_ref]`, which IS
-/// `prev_counts_for_ancestor[j_ref]`, so the branch selected a different buffer
-/// holding the same values. The name outlived the fact — it read as "the
-/// reference's RECORDED pre-state" long after a splice could re-anchor the slot
-/// away from it.
+/// # Every slot, including the reference's, is scored at its OWN state
+///
+/// `prev_counts_for_ancestor[j_ref]` is the reference SLOT's realized
+/// end-of-`s−1` state, which is **not** `reference.substeps[s].counts_before`
+/// once an earlier splice this sweep has re-anchored the slot: it is that value
+/// plus the accumulated constant offset `Δ`, and `Δ` persists for the rest of
+/// the sweep. Scoring the reference slot at the recorded (unshifted) state
+/// instead breaks the one cancellation the accept/reject ratio is built on —
+/// [`splice_log_ratio`] starts its transition sum at `s+1` *because* the
+/// substep-`s` factor `f_θ(u'_s | x^j_{s-1})` is already in this weight for the
+/// same `j`. Evaluate the two at different states and `α` acquires a spurious
+/// `f_θ(u'_s | x_ref + Δ) / f_θ(u'_s | x_ref)`, which is not π-invariant
+/// (gh#718).
 ///
 /// Extracted from [`csmc_as`] and made `pub` so this weight — the quantity the
 /// invariance proof hinges on — is unit-testable in isolation.
@@ -2119,8 +2125,14 @@ pub fn csmc_as(
             // Identity: each particle is its own ancestor
             substep_ancestors = (0..n_particles).collect();
         } else {
-            // Resample from previous weights
-            let indices = systematic_resample(&log_weights, &mut resample_rng);
+            // gh#718: CONDITIONAL resampling. The reference slot keeps
+            // itself, so only `n-1` slots are drawn — and taking the
+            // unconditional `systematic_resample` and dropping the entry at
+            // `j_ref` is not that draw: it discards the top stratum and denies
+            // the reference its descendants. See
+            // `conditional_systematic_resample`.
+            let indices =
+                conditional_systematic_resample(&log_weights, j_ref, &mut resample_rng);
             // Apply resampling to free particles (not reference)
             let mut new_counts = Vec::with_capacity(n_particles);
             let mut new_cum_flows = Vec::with_capacity(n_particles);
@@ -2128,16 +2140,14 @@ pub fn csmc_as(
             // following EXACTLY the `cum_flows` resampling (reference kept,
             // free particles take their ancestor's bins).
             let mut new_acc = Vec::with_capacity(n_particles);
+            // No `j == j_ref` arm: `indices[j_ref] == j_ref` by construction, so
+            // the reference keeps itself through the ordinary path. The special
+            // case used to be load-bearing precisely because the index it
+            // overwrote was garbage — which is what hid gh#718.
             for j in 0..n_particles {
-                if j == j_ref {
-                    new_counts.push(counts[j_ref].clone());
-                    new_cum_flows.push(cum_flows[j_ref].clone());
-                    new_acc.push(acc[j_ref].clone());
-                } else {
-                    new_counts.push(counts[indices[j]].clone());
-                    new_cum_flows.push(cum_flows[indices[j]].clone());
-                    new_acc.push(acc[indices[j]].clone());
-                }
+                new_counts.push(counts[indices[j]].clone());
+                new_cum_flows.push(cum_flows[indices[j]].clone());
+                new_acc.push(acc[indices[j]].clone());
             }
             counts = new_counts;
             cum_flows = new_cum_flows;
