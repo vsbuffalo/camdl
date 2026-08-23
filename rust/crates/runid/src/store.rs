@@ -470,7 +470,7 @@ impl FsCasStore {
         rec.artifacts = BTreeMap::new();
         write_record_atomic(&dir, &rec)?;
         fsync_dir(&dir)?;
-        Ok(StreamClaim { dir })
+        Ok(StreamClaim { dir, finalized: false })
     }
 
     /// Walk the disambiguation candidates for `path`, classifying each by a
@@ -565,6 +565,10 @@ impl CasStore for FsCasStore {
 #[derive(Debug)]
 pub struct StreamClaim {
     dir: PathBuf,
+    /// Set by [`finalize`](Self::finalize) once the leaf is `Completed`. While
+    /// false, [`Drop`] treats the claim as abandoned and marks the leaf
+    /// `Failed` — see the impl below.
+    finalized: bool,
 }
 
 impl StreamClaim {
@@ -585,7 +589,7 @@ impl StreamClaim {
     /// Commit `Running → Completed`: build the exact-set manifest from the
     /// streamed files, write `run.json.tmp → rename` over `run.json` (the
     /// single-file rename is the commit point), fsync the dir, drop the lock.
-    pub fn finalize(self, mut record: RunRecord) -> Result<PathBuf, CasError> {
+    pub fn finalize(mut self, mut record: RunRecord) -> Result<PathBuf, CasError> {
         // Walk the whole streamed subtree (chains nest under `chain_N/`),
         // stopping at the declared children (`trajectories/`, `dt_check/`,
         // `obs/`) — those are separate artifacts, manifested by their own
@@ -595,7 +599,34 @@ impl StreamClaim {
         write_record_atomic(&self.dir, &record)?;
         fsync_dir(&self.dir)?;
         fs::remove_file(self.dir.join(".lock")).ok();
-        Ok(self.dir)
+        // Only now is the leaf durably Completed; `Drop` must not touch it.
+        // Set AFTER the commit point so a failure above still drops as Failed.
+        self.finalized = true;
+        Ok(self.dir.clone())
+    }
+}
+
+/// An abandoned claim marks its leaf `Failed` and releases the lock.
+///
+/// Before this, a claim dropped without `finalize` — an error return, a `?`,
+/// a panic unwind — left the leaf `Running` with a live `.lock`, and
+/// `RunStatus::Failed` was declared but written nowhere: a cleanly-failed run
+/// and a `kill -9` were indistinguishable on disk, and the next same-identity
+/// claimant had to wait for PID-liveness reclaim to clear it.
+///
+/// Best-effort by necessity (`Drop` cannot report): every step is `.ok()`'d.
+/// PID reclaim remains the backstop for the paths `Drop` cannot see — a
+/// `kill -9`, and `process::exit` (which runs no destructors).
+impl Drop for StreamClaim {
+    fn drop(&mut self) {
+        if self.finalized {
+            return;
+        }
+        if let ReadResult::Ok(mut record) = read_record(&self.dir) {
+            record.status = RunStatus::Failed;
+            write_record_atomic(&self.dir, &record).ok();
+        }
+        fs::remove_file(self.dir.join(".lock")).ok();
     }
 }
 

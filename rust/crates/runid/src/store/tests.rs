@@ -87,6 +87,54 @@ fn commit_then_lookup_hit() {
     cleanup(&root);
 }
 
+// ── S3: the claim guard ─────────────────────────────────────────────────────
+
+/// A claim dropped without `finalize` marks its leaf `Failed` and releases the
+/// lock. Before the guard the leaf stayed `Running` with a live `.lock`, so a
+/// cleanly-failed run looked identical to a `kill -9` and the next claimant
+/// had to wait for PID-liveness reclaim.
+#[test]
+fn abandoned_claim_marks_the_leaf_failed_and_drops_the_lock() {
+    let root = tmp_root("abandoned");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    {
+        let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+        claim.write("partial.tsv", b"half").unwrap();
+        // dropped here without finalize — the error/`?`/unwind path
+    }
+    let rec = match read_record(&leaf) {
+        ReadResult::Ok(r) => r,
+        ReadResult::Absent => panic!("run.json missing after an abandoned claim"),
+        ReadResult::Unparseable => panic!("run.json unparseable after an abandoned claim"),
+    };
+    assert_eq!(rec.status, RunStatus::Failed,
+        "an abandoned claim must record Failed, not leave Running");
+    assert!(!leaf.join(".lock").exists(), "the lock must be released");
+    // And the leaf is reclaimable: a later run of the same identity recomputes.
+    assert!(matches!(
+        store.lookup(&leaf, &LeafIdentity::new(id(0xaa))),
+        Lookup::Stale(StaleReason::Incomplete)
+    ));
+    cleanup(&root);
+}
+
+/// The guard must not touch a finalized leaf.
+#[test]
+fn finalized_claim_is_untouched_by_the_guard() {
+    let root = tmp_root("finalized");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let claim = store.claim_streaming(&leaf, record(id(0xaa))).unwrap();
+    claim.write("traj.tsv", b"S\tI\n9\t1\n").unwrap();
+    let dest = claim.finalize(record(id(0xaa))).unwrap();
+    match store.lookup(&dest, &LeafIdentity::new(id(0xaa))) {
+        Lookup::Hit(r) => assert_eq!(r.status, RunStatus::Completed),
+        other => panic!("expected Hit after finalize, got {other:?}"),
+    }
+    cleanup(&root);
+}
+
 // ── S1: divergence check at commit ──────────────────────────────────────────
 // Proposal: docs/dev/proposals/2026-08-23-run-identity-and-store-contract.md
 
