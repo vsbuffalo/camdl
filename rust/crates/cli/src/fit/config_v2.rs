@@ -1842,7 +1842,7 @@ impl Stage {
 /// Presentation-only flags (progress bars, `--no-run`, output verbosity) are
 /// deliberately absent: they do not change the artifact, so keying on them
 /// would invalidate cached fits for nothing.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CliStageOverrides {
     pub init: Option<super::init::InitMethod>,
     pub survey_path: Option<std::path::PathBuf>,
@@ -1863,20 +1863,12 @@ impl CliStageOverrides {
     /// True when nothing was passed — the caller skips the whole override step,
     /// so a run with no CLI overrides keys byte-identically to before and no
     /// stored fit is invalidated.
+    ///
+    /// Compared structurally against `Self::default()` so a field added to the
+    /// struct can never be forgotten here — the previous hand-enumerated
+    /// conjunction silently ignored any field it didn't list.
     pub fn is_empty(&self) -> bool {
-        self.init.is_none()
-            && self.survey_path.is_none()
-            && self.survey_top_k.is_none()
-            && self.tempering.is_none()
-            && self.max_tree_depth.is_none()
-            && self.trajectory_warmup.is_none()
-            && self.csmc_sweeps_per_nuts.is_none()
-            && self.n_trajectories.is_none()
-            && !self.diagonal_mass
-            && !self.no_nuts
-            && !self.no_adapt
-            && self.adapt_start.is_none()
-            && self.rho.is_none()
+        *self == Self::default()
     }
 }
 
