@@ -993,9 +993,8 @@ pub struct FitRunArgs {
     /// (deterministic likelihood). Use this for CI smoke fits or
     /// known-converged-dt rerenders where the audit cost is unwelcome.
     /// Requires --stage: the dt-check result is stored in the leaf, so
-    /// the override is keyed into that stage's identity (gh#540 seam).
-    /// Refused on mh/nl-* stages until they grow a dt_check TOML field
-    /// (gh#726).
+    /// the override is keyed into that stage's identity (gh#540 seam;
+    /// gh#726 for the mh/nl-* dt_check field).
     #[arg(long, requires = "stage")]
     pub no_dt_check: bool,
 
@@ -1011,9 +1010,8 @@ pub struct FitRunArgs {
     /// (evaluates at dt_fit, dt_fit/2, dt_fit/4 — 7× the
     /// loglik-eval cost). Use 3 for ambiguous cases at 15×.
     /// Requires --stage: the ladder result is stored in the leaf, so
-    /// the override is keyed into that stage's identity (gh#540 seam).
-    /// Refused on mh/nl-* stages until they grow a dt_check TOML field
-    /// (gh#726).
+    /// the override is keyed into that stage's identity (gh#540 seam;
+    /// gh#726 for the mh/nl-* dt_check field).
     #[arg(long, value_name = "N", requires = "stage")]
     pub dt_check_halvings: Option<usize>,
 

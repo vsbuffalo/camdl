@@ -344,11 +344,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     if let Some(stage_name) = a.stage.as_deref() {
         if !cli_overrides.is_empty() {
             match config.stages.get_mut(stage_name) {
-                Some(stage) => stage.apply_cli_overrides(&cli_overrides)
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }),
+                Some(stage) => stage.apply_cli_overrides(&cli_overrides),
                 None => {
                     eprintln!("error: --stage '{}' is not a stage in {} \
                                (stages: {})",
@@ -1506,9 +1502,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // `apply_cli_overrides` BEFORE the identity is taken, so
                 // `dt_check` here already carries them (gh#540 seam — the
                 // result is stored in fit_state.toml, so the knobs are
-                // identity-defining). --dt-check-strict stays a plain
-                // runtime arg: it only escalates the warning to a fatal
-                // exit and never changes the stored leaf.
+                // identity-defining). --dt-check-strict is still a plain
+                // runtime arg — but NOT byte-neutral: when the TOML leaves
+                // threshold_nats unset it selects the stored threshold, an
+                // identity gap tracked in gh#730.
                 let effective_dt_check = dt_check.clone();
                 let dt_check_seed = seed.wrapping_add(0xd7c4ec_5eed); // "dtchec seed"
                 let dt_check_result = dt_check::run_richardson_ladder(
@@ -1681,7 +1678,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Stage::Mh { .. } => {
+            Stage::Mh { dt_check, .. } => {
                 // Deterministic-ODE Metropolis-Hastings. Routes through the
                 // shared PMMH machinery (chains, adaptive proposal, priors,
                 // MAP, R̂/ESS, trace output); `pmmh::run_stage` swaps the PF
@@ -1697,12 +1694,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
                 // default; honours the same CLI flags as the IF2 path
                 // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
-                // gh#726: Mh has no dt_check TOML field, so the CLI flags
-                // cannot be keyed into the identity — `apply_cli_overrides`
-                // refuses them on this stage. Defaults only until the field
-                // lands. --dt-check-strict remains allowed (abort policy,
-                // leaf-byte-neutral).
-                let mh_dt_check = config_v2::DtCheckConfig::default();
+                // gh#726: the stage's dt_check field — CLI overrides were
+                // applied through `apply_cli_overrides` BEFORE the identity
+                // was taken, and the field is in Mh's identity_payload (the
+                // result is stored in fit_state.toml.dt_check).
+                let mh_dt_check = dt_check.clone();
 
                 pmmh::run_stage(
                     &sweep_config,
@@ -1746,7 +1742,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Stage::NlSbplx(_) | Stage::NlBobyqa(_) => {
+            Stage::NlSbplx(nl_cfg) | Stage::NlBobyqa(nl_cfg) => {
                 #[cfg(feature = "ode")]
                 {
                     // Model identity + data digests for the mle_params.toml
@@ -1776,13 +1772,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             .collect())
                         .unwrap_or_default();
                     // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
-                    // default. gh#726: nl-* stages have no dt_check TOML
-                    // field, so --no-dt-check / --dt-check-halvings cannot be
-                    // keyed into the identity — `apply_cli_overrides` refuses
-                    // them here. Defaults only until the field lands;
-                    // --dt-check-strict remains allowed (abort policy,
-                    // leaf-byte-neutral).
-                    let nl_dt_check = config_v2::DtCheckConfig::default();
+                    // default. gh#726: the stage's dt_check field — CLI
+                    // overrides were applied through `apply_cli_overrides`
+                    // BEFORE the identity was taken, and NloptStageConfig
+                    // full-serializes into its identity (the result is
+                    // stored in fit_state.toml.dt_check).
+                    let nl_dt_check = nl_cfg.dt_check.clone();
 
                     nlopt_stage::run_stage(
                         &sweep_config,
@@ -1806,7 +1801,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
                 #[cfg(not(feature = "ode"))]
                 {
-                    let _ = (stage_name, &sweep_config, &stage_dir, seed, effective_starts.as_deref());
+                    let _ = (stage_name, &sweep_config, &stage_dir, seed, effective_starts.as_deref(), nl_cfg);
                     eprintln!(
                         "error: this binary was built without --features ode, \
                          which is required for algorithm = \"{}\". Rebuild \
@@ -2709,6 +2704,7 @@ mod tests {
             adapt: true,
             adapt_start: 300,
             burnin_dt,
+            dt_check: config_v2::DtCheckConfig::default(),
         }
     }
 

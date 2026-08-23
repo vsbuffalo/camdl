@@ -174,7 +174,10 @@ fn ode_dt_check_runs_and_writes_verdict() {
 
 #[test]
 fn ode_dt_check_suppressed_by_no_dt_check_flag() {
-    let Some(text) = run_nlsbplx_fit("off", &["--no-dt-check"]) else { return };
+    // --no-dt-check requires --stage since it is keyed into that stage's
+    // identity via CliStageOverrides (gh#540 seam; gh#726 for the nl-*
+    // dt_check field).
+    let Some(text) = run_nlsbplx_fit("off", &["--no-dt-check", "--stage", "mle"]) else { return };
     // --no-dt-check → enabled=false → Skipped → the block is omitted entirely
     // (mirrors the IF2 path's "skipped omits the block" semantics).
     assert!(!text.contains("[dt_check]"),
