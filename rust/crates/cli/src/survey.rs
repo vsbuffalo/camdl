@@ -338,12 +338,24 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         eval_method,
     };
 
-    // Cache hit: a finalized landscape.tsv at the content-addressed path means
-    // the survey is done (same path ⟺ same inputs). Re-render HTML if asked.
+    let store = runid::FsCasStore::new(&output_root);
+
+    // Cache hit: ask the STORE, with this survey's identity. The previous
+    // check was `landscape.tsv.exists()` — no identity gate, no `Completed`
+    // gate, no exact-set — so a different survey sharing this path's
+    // short-hash segment was served as "cached" (the collision class the
+    // store's disambiguation exists to prevent), and a crash between the
+    // landscape write and `finalize` left a file the check called cached
+    // while the store itself called the leaf Stale(Incomplete). Re-render
+    // HTML if asked.
     {
         let landscape_path = run_dir.join("landscape.tsv");
         let html_path = run_dir.join("landscape.html");
-        if !a.force && landscape_path.exists() {
+        let hit = matches!(
+            store.lookup(&run_dir, &runid::LeafIdentity::new(resolved_id.run_id)),
+            runid::Lookup::Hit(_)
+        );
+        if !a.force && hit {
             crate::status::step("cached", run_dir.display());
             if a.render && !html_path.exists() {
                 eprintln!("  rendering --render HTML from cached landscape.tsv …");
@@ -362,7 +374,6 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // end (a crash leaves no finalized landscape.tsv). The running record
     // carries Null inputs (the landscape summary is a post-run result); the
     // final inputs are supplied to `finalize`.
-    let store = runid::FsCasStore::new(&output_root);
     let resolved_artifact = crate::resolve::ResolvedArtifact {
         kind: runid::ArtifactKind::Survey,
         levels: resolved_id.levels.clone(),

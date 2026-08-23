@@ -328,6 +328,14 @@ impl ResolvedClaim {
         self.claim.dir()
     }
 
+    /// Stream one output file into the claimed leaf, fsync'd. Prefer this to
+    /// writing under [`dir`](Self::dir) with `std::fs::write`: that path skips
+    /// the fsync and (at the sites that discarded its error) could finalize a
+    /// `Completed` leaf whose payload file was never written.
+    pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), CasError> {
+        self.claim.write(name, bytes)
+    }
+
     /// Attach the tabular outputs' column schema, keyed by leaf-relative path,
     /// before `finalize`. Recorded in `run.json`, never hashed — identity was
     /// fixed at claim time, so this cannot re-key the run.
