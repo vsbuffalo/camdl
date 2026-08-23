@@ -3479,10 +3479,17 @@ pfilter: bound streams: weekly_cases(neg_binomial)
 Read that number carefully. The filter starts at the model's `simulate { from }`
 and the first held-out observation is at t = 63, so the first scored bin
 accumulates incidence over the entire 0–63 warm-up rather than over one weekly
-cadence. `condition_from` exists to fix exactly this, but it is a `fit`-path key
-today — `pfilter` does not read it. For a like-for-like held-out score, prefer
-`camdl fit predict` plus `camdl compare`, which replay the fitted trajectory
-forward into the held-out window.
+cadence. `condition_from` fixes exactly this, and `pfilter` applies it the same
+way `fit run` does: `--condition-from` if given, else the `condition_from` of
+the toml passed to `--fit`. A `pfilter` that scored a window the fit never
+scores would report a log-likelihood incomparable with the fit's, so the two
+share one code path (`apply_conditioning_windows`), and W329 — the
+wide-first-window enforcer — runs here too.
+
+`camdl fit predict` plus `camdl compare` answers a different question, replaying
+the fitted trajectory forward into the held-out window rather than re-filtering
+it; reach for that when you want a predictive score rather than a filter
+log-likelihood.
 
 > **Current limitation.** `[data] holdout_after = <t>` and the `[data.holdout]`
 > file block are accepted by the parser and folded into the fit hash, but no
