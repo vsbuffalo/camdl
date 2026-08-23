@@ -69,8 +69,12 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     let mut params_sorted: Vec<(&str, f64)> =
         ctx.params.iter().map(|(n, v)| (n.as_str(), *v)).collect();
     params_sorted.sort_by(|a, b| a.0.cmp(b.0));
+    // Gate the RAW values: `json!` collapses NaN/Inf to `Null` on the way in,
+    // so a check applied to the built blob can never see a non-finite and
+    // NaN vs Inf would hash alike (2026-08-23 audit). The comment above has
+    // always described this order; the code did not.
+    ensure_finite(&params_sorted)?;
     let params_blob = serde_json::json!(params_sorted);
-    ensure_finite(&params_blob)?;
 
     // The scoring setup, with the observed data folded in (guardrail: the
     // model level stays the pure IR; the data the loglik is computed against
@@ -79,6 +83,8 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     let mut data_sorted: Vec<(&str, &str)> =
         ctx.data.iter().map(|(n, h)| (n.as_str(), h.as_str())).collect();
     data_sorted.sort_by(|a, b| a.0.cmp(b.0));
+    // `dt` is the only float here; gate it before `json!` sees it.
+    ensure_finite(&ctx.dt)?;
     let config_blob = serde_json::json!({
         "particles": ctx.particles,
         "replicates": ctx.replicates,
@@ -87,7 +93,6 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         "flow_indices": ctx.flow_indices,
         "data": data_sorted,
     });
-    ensure_finite(&config_blob)?;
 
     let model_digest = ModelDigest::from_model(
         ctx.model,
@@ -145,6 +150,35 @@ mod tests {
             "particles": particles, "replicates": replicates, "dt": dt,
             "obs_block": obs, "flow_indices": Vec::<u32>::new(), "data": d,
         }))
+    }
+
+    /// A non-finite scored value must be REFUSED, not hashed. `json!` maps
+    /// NaN and ±Inf alike to `Null`, so a point containing either would
+    /// otherwise hash identically to the other — and to a literal null —
+    /// silently colliding distinct evaluations (2026-08-23 audit: the gate
+    /// ran on the already-built blob and could never fire).
+    #[test]
+    fn non_finite_scored_values_are_refused_before_hashing() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let pt = vec![("beta", bad)];
+            assert!(ensure_finite(&pt).is_err(),
+                "a non-finite scored value ({bad}) must be refused");
+        }
+        assert!(ensure_finite(&vec![("beta", 0.3)]).is_ok(), "finite points pass");
+        // The hazard the gate exists to prevent: without it these collide.
+        assert_eq!(
+            digest_value(&serde_json::json!(vec![("beta", f64::NAN)])),
+            digest_value(&serde_json::json!(vec![("beta", f64::INFINITY)])),
+            "json! nulls both — which is exactly why the gate must run on the \
+             raw values, before the blob is built"
+        );
+    }
+
+    /// `dt` is the config level's only float and rides the same gate.
+    #[test]
+    fn non_finite_dt_is_refused_before_hashing() {
+        assert!(ensure_finite(&f64::NAN).is_err(), "a NaN dt must be refused");
+        assert!(ensure_finite(&1.0_f64).is_ok(), "a finite dt passes");
     }
 
     /// The scored point distinguishes leaves: two param vectors produce

@@ -91,8 +91,11 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
     let mut params_sorted: Vec<(&str, f64)> =
         ctx.base_params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
     params_sorted.sort_by(|a, b| a.0.cmp(b.0));
+    // Gate the RAW values: `json!` collapses NaN/Inf to `Null`, so a check on
+    // the built blob can never fire — the collision this comment warns about
+    // was live (2026-08-23 audit).
+    ensure_finite(&params_sorted)?;
     let params_blob = serde_json::json!(params_sorted);
-    ensure_finite(&params_blob)?;
 
     // grid level — the sorted cell list + the explicit cell count. Each cell is
     // (scenario, seed, draw, sim_run_id); sorting is order-independent. The
@@ -110,11 +113,12 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
         })
         .collect();
     cells_sorted.sort();
+    // The grid blob carries no floats (labels, seeds, indices, hex digests),
+    // so there is nothing to gate here.
     let grid_blob = serde_json::json!({
         "n_cells": ctx.cells.len(),
         "cells": cells_sorted,
     });
-    ensure_finite(&grid_blob)?;
 
     let model_digest = ModelDigest::from_model(
         ctx.model,
@@ -122,12 +126,13 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
         EngineVersion(ctx.engine_version.to_string()),
     );
 
+    // `dt` is the only float; gate it before `json!` sees it.
+    ensure_finite(&ctx.dt)?;
     let config_label = format!("{}-dt{}", ctx.backend.as_str(), fmt_dt(ctx.dt));
     let config_blob = serde_json::json!({
         "backend": ctx.backend.as_str(),
         "dt": ctx.dt,
     });
-    ensure_finite(&config_blob)?;
 
     let grid_label = format!("cells-n{}", ctx.cells.len());
 
