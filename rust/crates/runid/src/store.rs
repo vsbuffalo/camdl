@@ -918,7 +918,35 @@ fn reclaim_or_refuse(dir: &Path, lock: &Path) -> Result<(), CasError> {
         Ok(mut rf) => {
             let _ = write!(rf, "{}", std::process::id());
         }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(fail(holder.unwrap_or(0))),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            // A live serializer means a genuine concurrent reclaim — refuse.
+            // But a process that died holding `.reclaim` strands it, and an
+            // unconditional refusal here wedges the leaf permanently: every
+            // future reclaim sees AlreadyExists and gives up, so the leaf can
+            // never be recomputed without manual `rm`. The module doc deferred
+            // this to a store-open sweep that was never written; clearing it
+            // at the point of contention needs no store-wide walk.
+            //
+            // `.reclaim` records its creator's pid, so the same liveness test
+            // that governs `.lock` governs it. If two processes both find it
+            // stranded, both remove and retry: one wins `create_new`, the
+            // other sees a LIVE holder and refuses correctly.
+            let stranded = read_lock_pid(&reclaim).is_some_and(|p| !pid_is_alive(p));
+            if !stranded {
+                return Err(fail(holder.unwrap_or(0)));
+            }
+            let _ = fs::remove_file(&reclaim);
+            match OpenOptions::new().write(true).create_new(true).open(&reclaim) {
+                Ok(mut rf) => {
+                    let _ = write!(rf, "{}", std::process::id());
+                }
+                // Lost the retry to another claimant — it holds the gate now.
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    return Err(fail(holder.unwrap_or(0)));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
         Err(e) => return Err(e.into()),
     }
     // Re-confirm the holder is STILL the dead PID we saw, now that we hold
