@@ -49,6 +49,16 @@ pub struct PfilterCtx<'a> {
     /// override was removed (projections now always come from `observations {}`);
     /// always `""`. Retained in the hashed context so a pre-removal `--flow`-free
     /// `run_id` is unchanged (removing the field would re-key every pfilter leaf).
+    /// The resolved conditioning spec in force (`--condition-from`, else the
+    /// `--fit` toml's `condition_from`), or `None` when nothing conditions.
+    /// Identity-bearing: the window decides WHICH observations are scored, so
+    /// it changes the stored loglik (2026-08-23 audit). The raw spec is
+    /// hashed rather than the per-stream resolved times because the inputs
+    /// that resolve it — the data bytes, `dt` and the model — are already in
+    /// this leaf's identity, so spec + those pin the window uniquely.
+    /// `None` is omitted from the config blob entirely, so an unconditioned
+    /// pfilter keys exactly as before this field existed.
+    pub condition_from: Option<&'a crate::fit::config_v2::ConditionFrom>,
     pub obs_block: &'a str,
     /// Flow-override transition indices. Vestigial (see `obs_block`); always
     /// empty. Kept so the content-addressed `run_id` of a `--flow`-free run is
@@ -85,7 +95,7 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     data_sorted.sort_by(|a, b| a.0.cmp(b.0));
     // `dt` is the only float here; gate it before `json!` sees it.
     ensure_finite(&ctx.dt)?;
-    let config_blob = serde_json::json!({
+    let mut config_blob = serde_json::json!({
         "particles": ctx.particles,
         "replicates": ctx.replicates,
         "dt": ctx.dt,
@@ -93,6 +103,15 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         "flow_indices": ctx.flow_indices,
         "data": data_sorted,
     });
+    // Inserted only when conditioning is in force, so an unconditioned run's
+    // blob — and therefore its `run_id` — is byte-identical to one produced
+    // before this field existed. `ConditionFrom` serializes untagged (a
+    // string, or a BTreeMap whose key order is stable), so the digest is
+    // deterministic.
+    if let Some(cond) = ctx.condition_from {
+        config_blob["condition_from"] = serde_json::to_value(cond)
+            .map_err(|e| format!("cannot serialize condition_from for hashing: {e}"))?;
+    }
 
     let model_digest = ModelDigest::from_model(
         ctx.model,
@@ -150,6 +169,54 @@ mod tests {
             "particles": particles, "replicates": replicates, "dt": dt,
             "obs_block": obs, "flow_indices": Vec::<u32>::new(), "data": d,
         }))
+    }
+
+    /// The same blob with a conditioning spec folded in, mirroring
+    /// `resolve_pfilter`'s insert-only-when-Some.
+    fn config_level_conditioned(
+        particles: u32, replicates: u32, dt: f64, obs: &str, data: &[(&str, &str)],
+        cond: &crate::fit::config_v2::ConditionFrom,
+    ) -> ContentHash {
+        let mut d: Vec<(&str, &str)> = data.to_vec();
+        d.sort_by(|a, b| a.0.cmp(b.0));
+        let mut blob = serde_json::json!({
+            "particles": particles, "replicates": replicates, "dt": dt,
+            "obs_block": obs, "flow_indices": Vec::<u32>::new(), "data": d,
+        });
+        blob["condition_from"] = serde_json::to_value(cond).unwrap();
+        digest_value(&blob)
+    }
+
+    /// The conditioning window decides WHICH observations are scored, so two
+    /// windows produce different logliks and must not share a `run_id`
+    /// (2026-08-23 audit: `--condition-from` reached the scoring but not the
+    /// key, so the store kept the first window's loglik.toml for both).
+    /// Crucially, an UNCONDITIONED run must key exactly as it did before the
+    /// field existed — the spec is omitted from the blob entirely.
+    #[test]
+    fn conditioning_window_is_in_the_key_and_absence_is_hash_neutral() {
+        use crate::fit::config_v2::ConditionFrom;
+        let hh = h(1);
+        let data = [("cases", hh.as_str())];
+        let plain = config_level(100, 1, 1.0, "", &data);
+
+        let a = config_level_conditioned(100, 1, 1.0, "", &data,
+            &ConditionFrom::All("first_obs - 3 'days".into()));
+        let b = config_level_conditioned(100, 1, 1.0, "", &data,
+            &ConditionFrom::All("first_obs - 10 'days".into()));
+        assert_ne!(a, b, "two conditioning windows must key differently");
+        assert_ne!(plain, a, "conditioned must not share the unconditioned key");
+        assert_eq!(a, config_level_conditioned(100, 1, 1.0, "", &data,
+            &ConditionFrom::All("first_obs - 3 'days".into())),
+            "the same window must be stable");
+
+        // Hash-neutrality: the unconditioned blob has no condition_from key at
+        // all, so its digest is what it was before the field was added.
+        assert_eq!(plain, digest_value(&serde_json::json!({
+            "particles": 100u32, "replicates": 1u32, "dt": 1.0,
+            "obs_block": "", "flow_indices": Vec::<u32>::new(),
+            "data": vec![("cases", hh.as_str())],
+        })), "an unconditioned pfilter must key exactly as before");
     }
 
     /// A non-finite scored value must be REFUSED, not hashed. `json!` maps

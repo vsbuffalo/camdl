@@ -254,12 +254,16 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // pfilter that scored a window the fit never scores produced a loglik
     // incomparable with the fit's, and W329 (the wide-first-window enforcer,
     // inside the same call) never ran here.
+    // Bound (not scoped to this block) because the CAS identity must hash the
+    // same spec that was applied: the window decides which observations are
+    // scored, so two windows produce different logliks and must not share a
+    // run_id (2026-08-23 audit).
+    let condition_from = crate::fit::runner::condition_spec_from_cli_or_toml(
+        &a.condition_from, a.fit.as_deref(),
+    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     {
-        let cond = crate::fit::runner::condition_spec_from_cli_or_toml(
-            &a.condition_from, a.fit.as_deref(),
-        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
         crate::fit::runner::apply_conditioning_windows(
-            &mut streams, cond.as_ref(), &model,
+            &mut streams, condition_from.as_ref(), &model,
             compiled.model.simulation.t_start, dt,
         ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     }
@@ -421,6 +425,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             particles: n_particles as u32,
             replicates: n_reps as u32,
             dt,
+            condition_from: condition_from.as_ref(),
             obs_block: "",
             flow_indices: &flow_indices,
             seed,
