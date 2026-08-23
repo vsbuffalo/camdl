@@ -179,6 +179,24 @@ Gelman & Rubin (1992) statistic, which compares chain _means_ only — and which
 each `*_summary.json` still carries as `rhat_classic` so an old fit and a new
 one stay comparable.
 
+Both halves of that `max` are reported too, as `rhat_bulk` (location) and
+`rhat_folded` (spread), and which one is larger is the answer to _why_ R̂ is
+high. A large `rhat_bulk` says the chains disagree about where the posterior
+sits — lengthen warm-up, or discard more of it. A large `rhat_folded` says they
+agree on location and disagree on how wide the posterior is, which for a
+particle method points at per-chain effective particle diversity. Above the
+threshold, `camdl fit summary` and the end-of-stage block print the split:
+
+```
+max R̂ = 1.313  ~  NOT converged  (rank-normalized split R̂, threshold 1.05)
+  beta — R̂ = max(bulk 0.998, folded 1.313); the folded half is larger —
+         the chains agree on location and disagree on spread
+```
+
+No threshold is placed on the gap between the halves; it is reported, not
+linted. See `docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`
+for the evidence and for what a cutoff would need before it could be picked.
+
 `ESS` is the rank-normalized **bulk** effective sample size, with the **tail**
 ESS (the smaller of the 5% and 95% quantile-indicator ESS) beside it. Neither is
 suppressed when chains disagree: both use the between-chain variance rather than

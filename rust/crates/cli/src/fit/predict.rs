@@ -2678,6 +2678,34 @@ mod tests {
     /// the value. Measured on the summary headline as a 13x inversion between
     /// two runs of one model differing only in particle count (gh#687); this is
     /// the same reduce, on the band label.
+    /// A stage whose R̂ was REFUSED must not have its predictive band labelled
+    /// with a reported convergence status. The refusals live in the summary's
+    /// `rhat_not_reported`, and reading only the numeric maps dropped them —
+    /// silently promoting "we could not assess this parameter" to "assessed,
+    /// and here is the max over the ones that were".
+    #[test]
+    fn read_convergence_is_not_reported_when_the_summary_carries_a_refusal() {
+        let dir = std::env::temp_dir().join("camdl_read_convergence_refusal_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `tau` never moved — a sampler pathology, not a missing number.
+        std::fs::write(
+            dir.join("pgas_summary.json"),
+            r#"{"rhat": {"a2": 1.01},
+                "ess":  {"a2": 145.0},
+                "rhat_not_reported": {"tau": "constant_draws"}}"#,
+        )
+        .unwrap();
+        match read_convergence(&dir, Some(FitAlgorithm::Pgas)) {
+            ConvergenceStatus::Reported { rhat_max, .. } => panic!(
+                "a fit with a refused parameter must not report a band off the \
+                 parameters that survived; got max R̂ = {rhat_max}"
+            ),
+            _ => {}
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn read_convergence_withholds_ess_min_when_a_param_reports_none() {
         let dir = std::env::temp_dir().join("camdl_read_convergence_partial_ess_test");

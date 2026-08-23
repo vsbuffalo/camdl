@@ -528,10 +528,21 @@ pub enum RhatBand {
 }
 
 impl RhatBand {
-    /// The band a finite R̂ falls in.
+    /// The band an R̂ falls in.
+    ///
+    /// The two non-finite cases are NOT the same and must not share an arm.
+    /// `+∞` is a real answer and the worst one — every chain sat at its own
+    /// single value, the 0%-acceptance deadlock — so it belongs in `Severe`;
+    /// collapsing it into `NotAssessed` would render the most broken fit camdl
+    /// can produce with the same neutral dash it uses for "not applicable".
+    /// `NaN` is R's `NA`: the folded half was undefined for this marginal, so
+    /// there genuinely is no band and the caller renders the reason instead.
+    /// [`Stat::from_f64`] draws the same line.
     pub fn of(rhat: f64) -> Self {
-        if !rhat.is_finite() {
+        if rhat.is_nan() {
             Self::NotAssessed
+        } else if rhat.is_infinite() {
+            Self::Severe
         } else if rhat < RHAT_CONVERGED_THRESHOLD {
             Self::Converged
         } else if rhat < RHAT_SEVERE_THRESHOLD {

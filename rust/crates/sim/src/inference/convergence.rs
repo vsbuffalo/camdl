@@ -672,6 +672,57 @@ mod tests {
         (0..n).map(|i| start + step * i as f64).collect()
     }
 
+    /// Every refusal must survive the trip to `*_summary.json` and back with
+    /// its numbers intact, or `camdl fit summary` cannot say more than an
+    /// em-dash. `NonFiniteDraw` is the one that needs care: its `value` is
+    /// non-finite by construction, and `serde_json` writes any non-finite
+    /// `f64` as `null`, which then fails to deserialize as a number. It is
+    /// carried as its `Display` form instead.
+    #[test]
+    fn every_refusal_round_trips_through_json_with_its_numbers() {
+        let cases = [
+            ConvergenceError::TooFewChains { n_chains: 1 },
+            ConvergenceError::TooFewDraws { n_draws: 3 },
+            ConvergenceError::UnequalChainLengths { expected: 50, chain: 1, found: 40 },
+            ConvergenceError::NonFiniteDraw { chain: 1, draw: 7, value: f64::NEG_INFINITY },
+            ConvergenceError::NonFiniteDraw { chain: 0, draw: 0, value: f64::INFINITY },
+            ConvergenceError::ConstantDraws { value: 2.5 },
+        ];
+        for want in cases {
+            let text = serde_json::to_string(&want).expect("serializes");
+            assert!(!text.contains("null"),
+                "a null loses the number the message is made of: {text}");
+            let got: ConvergenceError =
+                serde_json::from_str(&text).expect("round-trips");
+            assert_eq!(got, want, "via {text}");
+            // And the sentence a reader sees survives with it.
+            assert_eq!(got.to_string(), want.to_string());
+        }
+
+        // NaN is not `PartialEq` with itself, so it is checked on the message.
+        let nan = ConvergenceError::NonFiniteDraw { chain: 2, draw: 3, value: f64::NAN };
+        let text = serde_json::to_string(&nan).expect("serializes");
+        let got: ConvergenceError = serde_json::from_str(&text).expect("round-trips");
+        assert!(matches!(got, ConvergenceError::NonFiniteDraw { chain: 2, draw: 3, value }
+            if value.is_nan()), "got {got:?} via {text}");
+    }
+
+    /// The two halves of the headline, and what their order means. No cutoff
+    /// on the gap is applied — only which is larger is reported.
+    #[test]
+    fn the_driver_names_the_larger_half_and_is_undefined_when_one_is() {
+        assert_eq!(RhatDriver::of(1.42, 1.00), Some(RhatDriver::Location));
+        assert_eq!(RhatDriver::of(1.00, 1.31), Some(RhatDriver::Scale));
+        // Ties go to location: `max` took the bulk value, and there is no
+        // spread disagreement to report.
+        assert_eq!(RhatDriver::of(1.10, 1.10), Some(RhatDriver::Location));
+        // An undefined folded half leaves nothing to compare.
+        assert_eq!(RhatDriver::of(f64::INFINITY, f64::NAN), None);
+        assert_eq!(RhatDriver::of(f64::NAN, 1.0), None);
+        // A frozen pair: bulk is a well-defined +inf, so the comparison holds.
+        assert_eq!(RhatDriver::of(f64::INFINITY, 1.0), Some(RhatDriver::Location));
+    }
+
     #[test]
     fn refuses_a_single_chain_by_name() {
         let e = rank_convergence(&[ramp(50, 0.0, 0.1)]).unwrap_err();

@@ -5282,6 +5282,47 @@ dt = 1.0
         ]
     }
 
+    /// R̂ = `+∞` — every chain frozen at its own value, the 0%-acceptance
+    /// deadlock — is a real answer and the worst one camdl can report. It must
+    /// glyph as loudly as any other failure. A band that treated every
+    /// non-finite R̂ as "no band" would render the most broken fit with the
+    /// same neutral dash it uses for "not applicable", which is the softening
+    /// direction and therefore the dangerous one.
+    ///
+    /// Three chains, each constant at its own value: `posterior` 1.7.0 returns
+    /// `Inf` for this shape (the folded half is only constant at two chains).
+    #[test]
+    fn a_frozen_parameter_glyphs_as_the_worst_band_not_as_a_blank() {
+        use sim::inference::diagnostic::DiagnosticCollector;
+        use crate::fit::method_result::RhatBand;
+
+        let frozen: Vec<Vec<f64>> = vec![
+            vec![0.239349270; 30],
+            vec![0.438170322; 30],
+            vec![0.717000001; 30],
+        ];
+        let d = compute_rhat_ess(&frozen);
+        let r = d.rank().expect("frozen chains are still scored");
+        assert!(
+            r.all_chains_frozen && r.rhat.is_infinite(),
+            "fixture premise: R̂ must be +inf with the cause recorded; got {} (frozen={})",
+            r.rhat, r.all_chains_frozen
+        );
+        assert_eq!(
+            RhatBand::of(r.rhat),
+            RhatBand::Severe,
+            "an infinite R̂ is the worst band, not an absent one"
+        );
+
+        let conv = StageConvergence::compute([("beta".to_string(), frozen)]);
+        let collector = DiagnosticCollector::new("test");
+        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD);
+        assert!(
+            out.contains('✗'),
+            "and the stage block must say so loudly:\n{out}"
+        );
+    }
+
     /// One R̂, two commands, two glyphs.
     ///
     /// The end-of-stage block glyphed against the caller's `rhat_threshold`
