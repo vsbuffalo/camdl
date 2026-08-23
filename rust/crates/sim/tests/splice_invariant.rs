@@ -293,7 +293,7 @@ fn resume_default_is_byte_identical_to_the_plain_wrapper() {
 #[test]
 fn off_grid_resume_time_is_rejected() {
     let (model, params) = sir_model(ints(T_END as u64), T_END);
-    let (int_s, real_s) = model.initial_state(&params).unwrap();
+    let (int_s, real_s) = model.initial_state_mean(&params).unwrap();
     let start = StartState { int_s, real_s, rng: None };
 
     // T* = 10.5 lands BETWEEN the integer output emits.
@@ -334,7 +334,7 @@ fn reactive_model_resume_is_rejected() {
     }
     let compiled = CompiledModel::new(model).expect("compile reactive golden");
     let params = compiled.default_params.clone();
-    let (int_s, real_s) = compiled.initial_state(&params).unwrap();
+    let (int_s, real_s) = compiled.initial_state_mean(&params).unwrap();
     let start = StartState { int_s, real_s, rng: None };
 
     let cfg = ChainBinomialConfig { t_start: 0.0, t_end: 365.0, dt: 1.0 };

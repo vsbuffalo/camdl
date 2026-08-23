@@ -161,7 +161,7 @@ fn fixture() -> Fixture {
 fn fixture_with(schedule: &[(usize, f64)], n_substeps: usize) -> Fixture {
     let compiled = model(n_substeps);
     let params = compiled.default_params.clone();
-    let (init, _) = compiled.initial_state(&params).expect("initial state");
+    let (init, _) = compiled.initial_state_mean(&params).expect("initial state");
     let initial_counts = init.counts.clone();
 
     let obs: Vec<Observation> = schedule

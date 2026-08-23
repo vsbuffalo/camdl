@@ -492,7 +492,7 @@ mod tests {
 
         // Synthesize incidence data at the true params (near the mode).
         let beta_idx = cm.param_index["beta"];
-        let (int_s0, _) = cm.initial_state(&true_params).unwrap();
+        let (int_s0, _) = cm.initial_state_mean(&true_params).unwrap();
         let seed = vec![0.0; int_s0.counts.len()];
         let recs = crate::ode::integrate_obs_sensitivity(
             &cm, &true_params, &[beta_idx], &seed, &crate::config::OdeConfig {
@@ -590,7 +590,7 @@ mod tests {
         let gamma_idx = cm.param_index["gamma"];
 
         // Synthesize incidence data at the true params.
-        let (int_s0, _) = cm.initial_state(&true_params).unwrap();
+        let (int_s0, _) = cm.initial_state_mean(&true_params).unwrap();
         let seed = vec![0.0; int_s0.counts.len()];
         let recs = crate::ode::integrate_obs_sensitivity(
             &cm, &true_params, &[beta_idx], &seed,

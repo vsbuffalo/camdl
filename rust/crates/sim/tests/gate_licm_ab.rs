@@ -201,8 +201,8 @@ fn gate_licm_is_byte_identical() {
     // (the gradient eval-equality gate the proposal calls for). Each context
     // points at its own model so a `PerEvalRef` resolves against the right
     // `per_eval_bindings`.
-    let (int_off, real_off) = compiled_off.initial_state(&params_off).expect("off init state");
-    let (int_on, real_on) = compiled_on.initial_state(&params_on).expect("on init state");
+    let (int_off, real_off) = compiled_off.initial_state_mean(&params_off).expect("off init state");
+    let (int_on, real_on) = compiled_on.initial_state_mean(&params_on).expect("on init state");
     let ctx_off = sim::propensity::EvalCtx {
         model: &compiled_off, int_s: &int_off, real_s: &real_off, params: &params_off,
         t: t_start, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,

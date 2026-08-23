@@ -256,12 +256,24 @@ pub fn run_chain_binomial_with_observer(
         }
     }
 
+    // gh#322 start-from-state seam: restore the injected RNG when one is supplied
+    // (splice-invariant test → byte-identical tail); otherwise seed fresh from
+    // `seed` (a normal run, or a contrast arm re-rolling its forward noise from
+    // the fork). `resume.start = None` falls through to the fresh seed unchanged.
+    // Constructed BEFORE the initial state because building the initial state is
+    // itself a draw from this stream (`initial_state_draw`); construction
+    // consumes no randomness, so the stream the loop below sees is unchanged.
+    let mut rng = match resume.start.and_then(|ss| ss.rng.as_ref()) {
+        Some(r) => r.clone(),
+        None => StatefulRng::new(seed),
+    };
+
     // gh#322 start-from-state seam: seed the compartment state from the injected
-    // fork state when resuming; otherwise build it from the model. `None` (every
+    // fork state when resuming; otherwise draw it from the model. `None` (every
     // existing path) is byte-identical.
     let (mut int_s, mut real_s) = match resume.start {
         Some(ss) => (ss.int_s.clone(), ss.real_s.clone()),
-        None => model.initial_state(params)?,
+        None => model.initial_state_draw(params, &mut rng)?,
     };
     let n_transitions = model.model.transitions.len();
     let n_real = real_s.values.len();
@@ -272,14 +284,6 @@ pub fn run_chain_binomial_with_observer(
     // gh#69: also threads `params` for parametric `at [...]` schedules.
     let fire_steps = model.resolve_fire_steps(cfg.dt, params);
 
-    // gh#322 start-from-state seam: restore the injected RNG when one is supplied
-    // (splice-invariant test → byte-identical tail); otherwise seed fresh from
-    // `seed` (a normal run, or a contrast arm re-rolling its forward noise from
-    // the fork). `resume.start = None` falls through to the fresh seed unchanged.
-    let mut rng = match resume.start.and_then(|ss| ss.rng.as_ref()) {
-        Some(r) => r.clone(),
-        None => StatefulRng::new(seed),
-    };
     let mut scratch = StepScratch::new(model);
     let mut flows = vec![0u64; n_transitions];
 

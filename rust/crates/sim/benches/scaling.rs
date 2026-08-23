@@ -60,7 +60,7 @@ fn bench_eval_propensities(c: &mut Criterion) {
     let mut missing = 0;
     for &(p, a, coup) in GRID {
         let Some((model, params)) = try_load(p, a, coup) else { missing += 1; continue };
-        let (int_s, real_s) = model.initial_state(&params).unwrap();
+        let (int_s, real_s) = model.initial_state_mean(&params).unwrap();
         let mut out = Vec::with_capacity(model.model.transitions.len());
         g.throughput(criterion::Throughput::Elements(model.model.transitions.len() as u64));
         g.bench_function(BenchmarkId::from_parameter(label(p, a, coup)), |b| {
@@ -80,7 +80,7 @@ fn bench_step_one(c: &mut Criterion) {
     for &(p, a, coup) in GRID {
         let Some((model, params)) = try_load(p, a, coup) else { continue };
         let n_tr = model.model.transitions.len();
-        let (init_int, init_real) = model.initial_state(&params).unwrap();
+        let (init_int, init_real) = model.initial_state_mean(&params).unwrap();
         let mut scratch = StepScratch::new(&model);
         g.bench_function(BenchmarkId::from_parameter(label(p, a, coup)), |b| {
             b.iter_batched(

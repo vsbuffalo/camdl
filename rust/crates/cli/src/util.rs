@@ -3502,9 +3502,19 @@ pub fn run_simulation_event_log(
     let t_start = model.simulation.t_start;
     let t_end = model.simulation.t_end;
 
-    // Seed the recorder's initial-pool table from the t=0 state.
+    // Seed the recorder's initial-pool table from the t=0 state. Pre-flight
+    // sizing, before any backend runs — the mean, not a draw: this call must
+    // not consume from (or diverge from) the simulation's own RNG stream, which
+    // the backend below seeds from `run.seed`.
+    //
+    // NOTE for the initial-state laws (proposal
+    // 2026-08-23-initial-state-parameters.md, staging step 4): once `init {}`
+    // can declare a law, the backend's `initial_state_draw` will no longer
+    // equal this mean, and the recorder would be seeded from a state the run
+    // never occupied. The fix then is to hand the recorder the backend's drawn
+    // x₀ rather than to re-derive one here.
     let (initial_int, _initial_real) = compiled
-        .initial_state(&params)
+        .initial_state_mean(&params)
         .map_err(|e| format!("initial state error: {:?}", e))?;
     let mut recorder = EventRecorder::new(&compiled, &initial_int)
         .map_err(|e| format!("event recorder init error: {:?}", e))?;

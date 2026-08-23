@@ -319,13 +319,17 @@ pub fn detect_ivp_mappings(
     if2_params: &[EstimatedParam],
     current_params: &[f64],
 ) -> Result<Vec<IVPMapping>, SimError> {
-    let (init_base, _) = model.initial_state(current_params)?;
+    // Both arms of the finite difference take the MEAN: the probe asks whether
+    // a parameter moves the initial state deterministically, so a draw on
+    // either side would put Monte-Carlo noise into the difference and make the
+    // detection random.
+    let (init_base, _) = model.initial_state_mean(current_params)?;
     let mut mappings = Vec::new();
     for (i, spec) in if2_params.iter().enumerate() {
         let mut perturbed = current_params.to_vec();
         let delta = (spec.upper - spec.lower).min(1.0) * PROBE_STEP;
         perturbed[spec.index] = (perturbed[spec.index] + delta).min(spec.upper);
-        let (init_pert, _) = model.initial_state(&perturbed)?;
+        let (init_pert, _) = model.initial_state_mean(&perturbed)?;
         // Find which compartment changed
         for (c, (&base_c, &pert_c)) in init_base.counts.iter()
             .zip(init_pert.counts.iter()).enumerate()
@@ -1491,7 +1495,11 @@ pub fn simulate_reference_on_grid(
     firing: EffectFiring<'_>,
     rng: &mut StatefulRng,
 ) -> Result<PGASTrajectory, SimError> {
-    let (init_int, _) = model.initial_state(params)?;
+    // A reference trajectory is one realization of the process, so its x₀ is a
+    // DRAW from the same stream the substep loop below consumes — not the mean.
+    // (Nothing is consumed today: no `init {}` entry can declare a law, so the
+    // walk's draw sequence is unchanged.)
+    let (init_int, _) = model.initial_state_draw(params, rng)?;
     let n_tr = model.model.transitions.len();
 
     // gh#272 LICM: stage the per-eval prologue ONCE for this θ (`params` fixed for
@@ -2134,7 +2142,18 @@ pub fn csmc_as(
     // Each free particle draws S₀ ~ Binom(N₀, s0) independently, giving the
     // CSMC diverse initial states to select among. This is what enables
     // posterior sampling of IVP parameters like s0.
-    let (init_int, _) = model.initial_state(params)?;
+    //
+    // The MEAN, deliberately, on all three of its uses here: it is the
+    // deterministic base the hand-rolled Binomial sampler below perturbs, and
+    // it supplies `total_pop` and the per-patch `N₀` — population scales that
+    // must be the same number for every particle, so a draw would make the
+    // Binomial's own `n` random. When the declared laws land (proposal
+    // 2026-08-23-initial-state-parameters.md, staging step 4) the per-particle
+    // block below is replaced by `initial_state_draw` on `rngs[j]` and the
+    // Binomial density/gradient move to `initial_state_logpdf` /
+    // `initial_state_logpdf_grad`; this `_mean` call stays, for the population
+    // scales.
+    let (init_int, _) = model.initial_state_mean(params)?;
     let total_pop = init_int.counts.iter().sum::<i64>();
 
     // Precompute per-IVP patch populations (for stratified models, N₀ is the
@@ -2204,7 +2223,7 @@ pub fn csmc_as(
 
     // Store initial counts per particle BEFORE propagation (for traceback).
     // Needed because free particles have stochastic initial states (Binom draw)
-    // that differ from the deterministic initial_state(params).
+    // that differ from the deterministic initial_state_mean(params).
     let initial_counts_per_particle: Vec<Vec<i64>> = counts.to_vec();
 
     // History for traceback

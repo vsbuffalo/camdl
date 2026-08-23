@@ -89,7 +89,7 @@ pub fn record_event_log(
 ) -> (Trajectory, EventLog) {
     let compiled = CompiledModel::new(m.clone()).unwrap();
     let params = compiled.default_params.clone();
-    let (initial_int, _) = compiled.initial_state(&params).unwrap();
+    let (initial_int, _) = compiled.initial_state_mean(&params).unwrap();
     let mut recorder = EventRecorder::new(&compiled, &initial_int).unwrap();
     let traj = match backend {
         Backend::Gillespie => {

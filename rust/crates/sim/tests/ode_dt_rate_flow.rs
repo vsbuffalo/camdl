@@ -67,7 +67,7 @@ fn ode_flow_uses_realized_substep_dt_not_grid_dt() {
     let t_start = compiled.model.simulation.t_start;
     assert_eq!(t_start, 0.0);
 
-    let (int0, real0) = compiled.initial_state(&params).expect("initial state");
+    let (int0, real0) = compiled.initial_state_mean(&params).expect("initial state");
 
     // Oracle built from `eval_propensities` itself (no hardcoded beta/tau).
     // The ODE backend records the continuous flow `rate · dt` WITHOUT rounding,
@@ -122,7 +122,7 @@ fn ode_subunit_flow_is_not_rounded_to_zero() {
     params[pidx("tau")] = 1.0;
 
     let t_start = compiled.model.simulation.t_start;
-    let (int0, real0) = compiled.initial_state(&params).expect("initial state");
+    let (int0, real0) = compiled.initial_state_mean(&params).expect("initial state");
 
     // Oracle: the continuous flow over the first unit window — a single substep
     // from the exactly-known initial state with dt = 1.

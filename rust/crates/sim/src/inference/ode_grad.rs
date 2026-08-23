@@ -240,7 +240,7 @@ mod tests {
         // mode → well-conditioned FD). Uses the recorder + each stream's resolved
         // projection, exactly as det_grad reads them.
         let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
-        let (int_s0, _) = compiled.initial_state(&params).unwrap();
+        let (int_s0, _) = compiled.initial_state_mean(&params).unwrap();
         let seed = vec![0.0; int_s0.counts.len() * est.len()];
         let recs =
             crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times, cfg.dt)
@@ -362,7 +362,7 @@ mod tests {
         // Synthesize data with the SAME coarse integration at the true params, so the
         // FD is well-conditioned (data near the coarse-likelihood mode).
         let cfg = OdeConfig { t_start: 0.0, t_end: 150.0, dt };
-        let (int_s0, _) = compiled.initial_state(&params).unwrap();
+        let (int_s0, _) = compiled.initial_state_mean(&params).unwrap();
         let seed = vec![0.0; int_s0.counts.len() * est.len()];
         let recs = crate::ode::integrate_obs_sensitivity(
             &compiled, &params, &est, &seed, &cfg, &obs_times, burnin_dt,
@@ -504,7 +504,7 @@ mod tests {
 
         // Synthesize obs data at the true params: weekly = incidence, detection = √I+√R.
         let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end: 60.0, dt };
-        let seed = vec![0.0; compiled.initial_state(&params).unwrap().0.counts.len() * est.len()];
+        let seed = vec![0.0; compiled.initial_state_mean(&params).unwrap().0.counts.len() * est.len()];
         let recs =
             crate::ode::integrate_obs_sensitivity(&compiled, &params, &est, &seed, &cfg, &obs_times, cfg.dt)
                 .unwrap();

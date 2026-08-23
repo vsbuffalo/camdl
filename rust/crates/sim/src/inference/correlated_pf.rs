@@ -273,16 +273,25 @@ pub fn bootstrap_filter_correlated(
     // obs model (the process does not know `n_interval_streams`).
     let n_acc = obs_model.n_interval_streams();
 
-    let (init_int, _init_real) = model.initial_state(params)?;
+    // Per-particle RNGs via ChaCha8 stream counter (IM1 fix 2026-04-19).
+    // Built before the initial state because drawing x₀ is a draw from a
+    // particle's own stream; `new_stream` consumes nothing, so the streams the
+    // propagation loop sees below are unchanged.
+    let mut rngs: Vec<StatefulRng> = (0..n_particles)
+        .map(|i| StatefulRng::new_stream(seed, i as u64))
+        .collect();
+
+    // ONE draw, copied to every particle — the pre-split behaviour, kept
+    // because no `init {}` entry can declare a law yet, so `initial_state_draw`
+    // is deterministic and consumes nothing from `rngs[0]`. Note the pre-drawn
+    // correlated randoms in `randoms` cover the transition kernel only; a
+    // future initial-state law drawn here would be an *uncorrelated* addition
+    // to a CPM proposal, which is a design question step 5 owes an answer.
+    let (init_int, _init_real) = model.initial_state_draw(params, &mut rngs[0])?;
     let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
     for p in &mut swarm.states {
         p.counts.copy_from_slice(&init_int.counts);
     }
-
-    // Per-particle RNGs via ChaCha8 stream counter (IM1 fix 2026-04-19).
-    let mut rngs: Vec<StatefulRng> = (0..n_particles)
-        .map(|i| StatefulRng::new_stream(seed, i as u64))
-        .collect();
 
     let mut states_buf: Vec<ParticleState> = (0..n_particles)
         .map(|_| ParticleState::new(n_int, n_tr, n_acc))

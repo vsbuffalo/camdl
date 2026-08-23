@@ -147,7 +147,7 @@ fn generate_data(compiled: &CompiledModel, params: &[f64]) -> (Vec<f64>, Vec<f64
     // Manual forward driver: reads `flow_accumulators` directly (the
     // per-transition tally, lifecycle unchanged). No per-stream `acc` here → 0.
     let mut state = ParticleState::new(n_int, n_tr, 0);
-    let (init, _) = compiled.initial_state(params).unwrap();
+    let (init, _) = compiled.initial_state_mean(params).unwrap();
     state.counts.copy_from_slice(&init.counts);
 
     let mut scratch = StepScratch::new(compiled);

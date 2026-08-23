@@ -142,7 +142,18 @@ pub fn run_gillespie_with_observer(
     // See chain_binomial.rs and tests/progress_tick_invariance.rs.
     mut tick: Option<&mut dyn FnMut(f64)>,
 ) -> Result<Trajectory, SimError> {
-    let (mut int_s, mut real_s) = model.initial_state(params)?;
+    // Paired-seed coupling: running baseline and intervention with the same
+    // seed produces identical trajectories up to the first state divergence,
+    // because the stateful PRNG's output only depends on its prior consumption
+    // sequence. Any change that reorders or adds draws before that point also
+    // breaks the coupling — this is NOT event-keyed RNG.
+    //
+    // Constructed before the initial state because building the initial state
+    // is itself a draw from this stream (`initial_state_draw`); construction
+    // consumes no randomness, so the event loop's stream is unchanged.
+    let mut stateful_rng = StatefulRng::new(seed);
+
+    let (mut int_s, mut real_s) = model.initial_state_draw(params, &mut stateful_rng)?;
 
     let n_transitions = model.model.transitions.len();
     let n_real = real_s.values.len();
@@ -154,13 +165,6 @@ pub fn run_gillespie_with_observer(
 
     // Propensity buffer — allocated once, reused
     let mut propensities: Vec<f64> = Vec::with_capacity(n_transitions);
-
-    // Paired-seed coupling: running baseline and intervention with the same
-    // seed produces identical trajectories up to the first state divergence,
-    // because the stateful PRNG's output only depends on its prior consumption
-    // sequence. Any change that reorders or adds draws before that point also
-    // breaks the coupling — this is NOT event-keyed RNG.
-    let mut stateful_rng = StatefulRng::new(seed);
 
     // Sorted output times
     // gh#53: resolve fire_steps using the model's compile-time dt.

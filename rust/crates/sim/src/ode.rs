@@ -796,7 +796,10 @@ pub fn run_ode(
     let per_eval: Option<Vec<f64>> =
         crate::resolved_expr::stage_per_eval(model, params, cfg.t_start, cfg.dt);
 
-    let (int_s0, real_s0) = model.initial_state(params)?;
+    // The ODE skeleton is deterministic: it integrates the mean field, so it
+    // starts from the mean initial state. (The forward-sensitivity path takes
+    // the un-rounded `initial_state_continuous` instead — see its doc comment.)
+    let (int_s0, real_s0) = model.initial_state_mean(params)?;
     let n_transitions = model.model.transitions.len();
     let mut state = OdeState {
         int:  int_s0.counts.iter().map(|&c| c as f64).collect(),

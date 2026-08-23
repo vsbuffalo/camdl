@@ -397,7 +397,7 @@ fn generate_data(compiled: &CompiledModel, params: &[f64]) -> (Vec<f64>, Vec<f64
     let n_int = compiled.int_local_to_global.len();
     let n_tr = compiled.model.transitions.len();
     let mut state = ParticleState::new(n_int, n_tr, 0);
-    let (init, _) = compiled.initial_state(params).unwrap();
+    let (init, _) = compiled.initial_state_mean(params).unwrap();
     state.counts.copy_from_slice(&init.counts);
 
     let mut scratch = StepScratch::new(compiled);
@@ -432,7 +432,7 @@ fn generate_data(compiled: &CompiledModel, params: &[f64]) -> (Vec<f64>, Vec<f64
 fn pure_ic_ivp_param_is_identified() {
     let (compiled, true_params) = pure_ic_sir_model();
     assert_eq!(
-        compiled.initial_state(&true_params).unwrap().0.counts[1],
+        compiled.initial_state_mean(&true_params).unwrap().0.counts[1],
         (TRUE_I0 * N_POP) as i64,
         "fixture sanity: i0 must actually drive I₀"
     );

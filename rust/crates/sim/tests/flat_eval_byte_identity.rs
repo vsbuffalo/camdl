@@ -84,7 +84,7 @@ fn flat_matches_eval_resolved_on_all_goldens() {
             }
         };
         let params = cm.default_params.clone();
-        let (int_s0, real_s0) = match cm.initial_state(&params) {
+        let (int_s0, real_s0) = match cm.initial_state_mean(&params) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("SKIP {fname}: initial_state with midpoint params: {e}");

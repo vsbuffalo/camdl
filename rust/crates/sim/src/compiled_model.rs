@@ -1896,8 +1896,27 @@ impl CompiledModel {
         caps
     }
 
-    /// Build the initial state from model.initial_conditions + params.
-    pub fn initial_state(
+    /// The initial state with every `init {}` entry at its **mean** — the
+    /// deterministic answer to "where does this model start?".
+    ///
+    /// One of the four questions the initial-state seam answers (proposal
+    /// `2026-08-23-initial-state-parameters.md`, "one initial-state producer,
+    /// four questions"): [`Self::initial_state_mean`],
+    /// [`Self::initial_state_draw`], [`Self::initial_state_logpdf`],
+    /// [`Self::initial_state_logpdf_grad`]. A law is a sampler AND a density
+    /// AND a gradient; splitting the single producer into the four is what
+    /// makes "added to one, forgotten in the others" a compile-visible gap
+    /// rather than a silently-zero coordinate in the NUTS gradient.
+    ///
+    /// Call this only where the *mean* is what is wanted: the deterministic ODE
+    /// path, `camdl render`-style pre-flight state, and any structural quantity
+    /// derived from the initial state (a patch population, a total). Every
+    /// stochastic forward path calls [`Self::initial_state_draw`] instead.
+    ///
+    /// `init {}` cannot declare a law yet — `InitialConditions` is
+    /// `Explicit`/`Parameterized`, both deterministic — so today this is the
+    /// entire initial state and `initial_state_draw` returns exactly this.
+    pub fn initial_state_mean(
         &self,
         params: &[f64],
     ) -> Result<(IntState, RealState), SimError> {
@@ -1960,11 +1979,85 @@ impl CompiledModel {
         Ok((IntState::from_vec(int_counts), RealState::from_vec(real_values)))
     }
 
+    /// One **draw** of the initial state, `x₀ ~ p(· | θ)`.
+    ///
+    /// The sampler half of the initial-state seam (see
+    /// [`Self::initial_state_mean`] for the other three). Every stochastic
+    /// forward path routes here — the chain-binomial and Gillespie forward
+    /// runs, the bootstrap and correlated particle filters, IF2's per-particle
+    /// initialisation, and PGAS's reference-trajectory walk — so that when a
+    /// law lands they all get it from one place.
+    ///
+    /// No `init {}` entry can declare a law yet, so there is nothing to draw:
+    /// this returns [`Self::initial_state_mean`] and **consumes nothing from
+    /// `rng`**. A caller's RNG stream is therefore byte-identical to what the
+    /// single pre-split `initial_state` produced. `rng` is threaded now so
+    /// that adding the draw is a change to this function only.
+    pub fn initial_state_draw(
+        &self,
+        params: &[f64],
+        rng: &mut crate::rng::StatefulRng,
+    ) -> Result<(IntState, RealState), SimError> {
+        let _ = rng;
+        self.initial_state_mean(params)
+    }
+
+    /// `log p(x₀ | θ)` — the initial-state term of the complete-data
+    /// likelihood, the density half of the initial-state seam (see
+    /// [`Self::initial_state_mean`]).
+    ///
+    /// `x0_int` / `x0_real` are the integer and real halves of the state
+    /// [`Self::initial_state_draw`] produces, taken as slices so a caller
+    /// holding `IntState.counts` (or PGAS's `PGASTrajectory::initial_counts`,
+    /// a bare `Vec<i64>`) passes them without allocating. This is the one
+    /// departure from the proposal's shorthand `(x0, params)`, which does not
+    /// type `x0`.
+    ///
+    /// **Returns `0.0` today**: a deterministic `init {}` contributes no
+    /// density — `x₀` is a function of `θ`, not a random variable, so it adds
+    /// no `θ`-dependent term to the complete-data likelihood. The existing
+    /// PGAS Binomial IVP term (`pgas.rs`, `complete_data_loglik`) is a
+    /// *detected*, not declared, initial-state law and is deliberately left
+    /// where it is until the laws land.
+    pub fn initial_state_logpdf(
+        &self,
+        x0_int: &[i64],
+        x0_real: &[f64],
+        params: &[f64],
+    ) -> f64 {
+        let _ = (x0_int, x0_real, params);
+        0.0
+    }
+
+    /// `∂/∂θ log p(x₀ | θ)` — the gradient half of the initial-state seam (see
+    /// [`Self::initial_state_mean`]).
+    ///
+    /// Indexed by **model** parameter index, so the returned vector has
+    /// `params.len()` entries. A caller working in an estimated-parameter
+    /// basis maps it through its own `estimated_to_model`; keeping the full
+    /// basis here is what lets the signature stay `(x0, params)` as the
+    /// proposal specifies, with no estimated-set argument.
+    ///
+    /// **Returns all zeros today**, for the same reason
+    /// [`Self::initial_state_logpdf`] returns `0.0`: `∂/∂θ` of a constant is
+    /// zero, and it is zero *because there is no law*, not because the
+    /// gradient was forgotten. That distinction is the whole point of the
+    /// split — the density and the gradient move together or not at all.
+    pub fn initial_state_logpdf_grad(
+        &self,
+        x0_int: &[i64],
+        x0_real: &[f64],
+        params: &[f64],
+    ) -> Vec<f64> {
+        let _ = (x0_int, x0_real);
+        vec![0.0; params.len()]
+    }
+
     /// Continuous initial compartment values for the ODE **gradient** path
     /// (gh#275 §1c): the un-rounded initial state, returned as
     /// `(int_as_f64, real)`.
     ///
-    /// [`Self::initial_state`] rounds/truncates integer compartments to `i64`,
+    /// [`Self::initial_state_mean`] rounds/truncates integer compartments to `i64`,
     /// correct for the discrete backends. The deterministic ODE forward
     /// sensitivity must instead start from the *continuous* initial value:
     /// rounding a `Parameterized` initial condition to an integer makes the
@@ -1972,11 +2065,15 @@ impl CompiledModel {
     /// `∂init/∂θ` seed (`ic_grad`) and would make the reported gradient
     /// inconsistent with the value it differentiates (an FD of the rounded value
     /// is ~0 or a boundary spike, never the analytic seed). For `Explicit`
-    /// (constant) ICs this returns exactly `initial_state`'s values; the two
+    /// (constant) ICs this returns exactly `initial_state_mean`'s values; the two
     /// paths diverge only for a `Parameterized` IC that evaluates to a
     /// non-integer, where the continuous value is the correct one for the ODE
-    /// skeleton. The eval context mirrors `initial_state`'s parameterized arm
+    /// skeleton. The eval context mirrors `initial_state_mean`'s parameterized arm
     /// (zero state, `t = 0`, `dt = 0`), so the two stay in lockstep.
+    ///
+    /// This is the un-rounded *sibling* of `initial_state_mean`, not a fifth
+    /// question of the initial-state seam: there is no continuous "draw",
+    /// because the ODE path is deterministic by construction.
     pub fn initial_state_continuous(
         &self,
         params: &[f64],
@@ -1992,7 +2089,7 @@ impl CompiledModel {
         let zero_real = RealState::new(n_real);
 
         // Place a continuous initial value into the int- or real-compartment slot
-        // (unrounded, unlike `initial_state`'s `as i64` / `.round()`).
+        // (unrounded, unlike `initial_state_mean`'s `as i64` / `.round()`).
         macro_rules! place {
             ($name:expr, $v:expr) => {{
                 let global = self.comp_index.get($name.as_str())
@@ -2030,7 +2127,7 @@ impl CompiledModel {
         Ok((int_values, real_values))
     }
 
-    /// The forward-sensitivity seed `S(t_start) = ∂(initial_state)/∂θ` (`ic_grad`,
+    /// The forward-sensitivity seed `S(t_start) = ∂(initial state)/∂θ` (`ic_grad`,
     /// gh#275 §1c C-seed), laid out as the `n_int × d` row-major block the ODE
     /// gradient path expects (`state_sens_0`), where `d = estimated.len()` and the
     /// column order matches `estimated_to_model`.

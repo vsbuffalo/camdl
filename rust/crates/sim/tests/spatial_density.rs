@@ -415,7 +415,7 @@ fn test_step_one_zero_infection_flow() {
     eprintln!("  I_p5 compartment idx = {}", i_p5_idx);
 
     // Set up initial state with I_p5 = 0
-    let (init_int, _) = compiled.initial_state(&params).unwrap();
+    let (init_int, _) = compiled.initial_state_mean(&params).unwrap();
     let mut counts = init_int.counts.clone();
     // Force I_p5 = 0
     counts[i_p5_idx] = 0;
