@@ -81,6 +81,12 @@ observations {
 /// CAS sim leaves: `sims/<sim>/<scen>/seed_N/` dirs containing run.json.
 /// Every dir containing a `run.json`, at any depth — the factored CAS path
 /// is 5 levels deep, and the obs ensemble is a declared `obs/` child below it.
+/// TRAJECTORY leaves — the per-seed run dirs.
+///
+/// The obs subtree is now a real child leaf with its own `run.json` (it used
+/// to be a bare directory), so a naive "every dir holding a run.json" walk
+/// counts it too. `camdl list` is unaffected because it gates on artifact
+/// kind; this helper does the equivalent by not descending into `obs/`.
 fn run_leaves(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -91,7 +97,7 @@ fn run_leaves(root: &Path) -> Vec<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 let p = e.path();
-                if p.is_dir() { stack.push(p); }
+                if p.is_dir() && e.file_name() != "obs" { stack.push(p); }
             }
         }
     }
@@ -187,6 +193,85 @@ enabled = {obs}
         assert!(!obs_stream_files(leaf).is_empty(),
             "the obs subtree must contain per-stream files: {}", leaf.display());
     }
+}
+
+/// The obs subtree is a REAL child leaf: it carries its own `RunRecord` whose
+/// `run_id` is the id the parent declares in `children`.
+///
+/// `record.rs` promises children are "validated recursively on their own
+/// lookup", but this one used to be a bare directory of unsynced files with no
+/// record at all — the parent declared an id computed from a formula, pointing
+/// at something that carried nothing to check it against, and the parent's
+/// exact-set scan stops at the child boundary. A torn obs write was therefore
+/// invisible to every integrity check the store has.
+#[test]
+fn the_obs_child_carries_its_own_record_matching_the_parents_declaration() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir.camdl");
+    let params = tmp.path().join("params.toml");
+    let output = tmp.path().join("output");
+    write_sir_with_obs(&model);
+    std::fs::write(&params,
+        "beta = 0.6\ngamma = 0.2\nrho = 0.5\nN0 = 10000\nI0 = 10\n").unwrap();
+
+    let batch = tmp.path().join("batch.toml");
+    std::fs::write(&batch, format!(r#"
+[config]
+model = "{model}"
+params = "{params}"
+output_dir = "{out}"
+backend = "chain_binomial"
+dt = 1
+seeds = {{ list = [1] }}
+parallel = 1
+
+[[scenario]]
+name = "baseline"
+
+[obs]
+enabled = true
+"#, model = model.display(), params = params.display(), out = output.display())).unwrap();
+
+    let run = Command::new(&bin)
+        .args(["batch", "run", &batch.to_string_lossy()])
+        .output().expect("spawn");
+    assert!(run.status.success(), "batch run failed. stderr:\n{}",
+        String::from_utf8_lossy(&run.stderr));
+
+    let leaves = run_leaves(&output.join("sims"));
+    assert_eq!(leaves.len(), 1, "expected one trajectory leaf, got {:?}", leaves);
+    let parent = &leaves[0];
+
+    // The parent declares exactly one obs child id.
+    let parent_rec: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(parent.join("run.json")).unwrap()).unwrap();
+    let declared = parent_rec["children"]["obs"][0].as_str()
+        .expect("parent must declare an obs child id");
+
+    // The subtree carries its OWN record, and its run_id is that id.
+    let obs_root = parent.join("obs");
+    let child_dir = std::fs::read_dir(&obs_root).unwrap()
+        .flatten().map(|e| e.path()).find(|p| p.is_dir())
+        .expect("an obs subtree must exist");
+    let child_json = child_dir.join("run.json");
+    assert!(child_json.is_file(),
+        "the obs child must carry its own run.json — without one nothing can \
+         ever validate it, which is the contract record.rs claims for children");
+    let child_rec: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&child_json).unwrap()).unwrap();
+    assert_eq!(child_rec["run_id"].as_str().unwrap(), declared,
+        "the child's own run_id must be the id its parent declared, or the \
+         declaration points at nothing");
+    assert_eq!(child_rec["kind"].as_str().unwrap(), "obs");
+    assert_eq!(child_rec["status"].as_str().unwrap(), "completed");
+
+    // And its files are manifested with digests, so a torn write is detectable.
+    let manifest = child_rec["artifacts"].as_object()
+        .expect("the child must carry an exact-set manifest");
+    assert!(manifest.contains_key("obs.json"), "manifest: {:?}", manifest.keys());
+    assert!(manifest.keys().any(|k| k.ends_with(".tsv")),
+        "the per-stream files must be manifested: {:?}", manifest.keys());
 }
 
 /// #4 — obs ensemble in the CAS. `batch run` over 3 seeds with obs enabled
