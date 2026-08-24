@@ -441,6 +441,23 @@ pub struct LogLikComponents {
     pub transition: f64,
     /// Sum of observation densities (joint_obs_weight).
     pub observation: f64,
+    /// [`Self::observation`] resolved by stream: entry `i` is the observation
+    /// log-density of declared stream `i`, summed over that stream's own
+    /// observation times (and over its strata, for an indexed stream). Length
+    /// `MultiStreamObsModel::n_streams()`; empty only when the model declares no
+    /// stream.
+    ///
+    /// The two are the same numbers added in a different order — `observation`
+    /// sums time-major, this sums stream-major — so they agree only to
+    /// floating-point reassociation, not bitwise. `observation` remains the
+    /// authority and is accumulated exactly as it was before this
+    /// decomposition existed (gh#742).
+    ///
+    /// Reported per stream in the sweep trace (`obs_ll_<stream>`) because the
+    /// collapsed scalar cannot answer WHICH stream a fit is straining against —
+    /// a four-stream national fit had to be re-run under a pinned seed to find
+    /// out.
+    pub observation_per_stream: Vec<f64>,
     /// `log p(x₀ | θ)` — the density of the trajectory's own initial state
     /// under the laws the model DECLARES (`init { I ~ poisson(rate = I0) }`).
     /// Zero for a model whose `init {}` is entirely deterministic, and zero
@@ -472,6 +489,16 @@ pub struct PGASSweep {
     pub transition_ll: f64,
     /// Observation component of the complete-data log-likelihood.
     pub obs_ll: f64,
+    /// [`Self::obs_ll`] resolved by declared stream, in the observation model's
+    /// stream order — one entry per stream, each the sum over that stream's own
+    /// observation times and strata (gh#742). Written to the sweep trace as
+    /// `obs_ll_<stream>`.
+    ///
+    /// Populated on every sweep: the sweep evaluates the whole likelihood, so a
+    /// stream on its own cadence still contributes its own sum here. Sums to
+    /// `obs_ll` up to floating-point reassociation — the two orders differ, so
+    /// the agreement is to round-off, not bitwise.
+    pub obs_ll_per_stream: Vec<f64>,
     /// Initial-state component `log p(x₀ | θ)` of the complete-data
     /// log-likelihood — the density of the sweep's own `x₀` under the laws
     /// declared in `init { }`. Zero for a deterministic `init { }`.
@@ -1132,6 +1159,11 @@ pub fn complete_data_loglik(
     let per_eval = per_eval_scratch.as_deref();
     let mut transition_ll = 0.0;
     let mut observation_ll = 0.0;
+    // gh#742: the same observation terms, kept resolved by stream. Accumulated
+    // ALONGSIDE `observation_ll`, never in place of it — `observation_ll` stays
+    // the sum of the per-observation joint scores it always was, so no reported
+    // number moves.
+    let mut observation_per_stream = vec![0.0; obs_model.n_streams()];
 
     // `log p(x₀ | θ)` from the DECLARED initial-state laws, through the same
     // seam the sampler and the gradient use, so the three cannot disagree about
@@ -1148,6 +1180,7 @@ pub fn complete_data_loglik(
             total: f64::NEG_INFINITY,
             transition: 0.0,
             observation: 0.0,
+            observation_per_stream,
             initial_state: initial_state_ll,
         });
     }
@@ -1191,6 +1224,7 @@ pub fn complete_data_loglik(
                 total: f64::NEG_INFINITY,
                 transition: transition_ll + td,
                 observation: observation_ll,
+                observation_per_stream,
                 initial_state: initial_state_ll,
             });
         }
@@ -1226,12 +1260,21 @@ pub fn complete_data_loglik(
             // into each Interval stream's persistent `acc` bin BEFORE scoring;
             // score reads the per-stream `acc`.
             obs_model.fold_into_acc(&cum_flows, &mut acc);
-            let obs_ll = obs_model.log_likelihood_from_flows_and_counts(
+            // gh#742: score once, per stream, and sum. `log_likelihood_from_flows_and_counts`
+            // IS `log_likelihood_per_stream_from_flows_and_counts(..).iter().sum()`
+            // (`multi_stream_obs.rs`) — same `score_streams` walk, same order — so
+            // taking the vector and summing it here is the identical fold over the
+            // identical values, not a second evaluation.
+            let per_stream = obs_model.log_likelihood_per_stream_from_flows_and_counts(
                 &acc, &rec.counts_after, obs_idx, params);
+            let obs_ll: f64 = per_stream.iter().sum();
             if !obs_ll.is_finite() {
                 log::debug!("complete_data_loglik: obs density -inf at substep {} (obs_idx={})", s, obs_idx);
             }
             observation_ll += obs_ll;
+            for (dst, src) in observation_per_stream.iter_mut().zip(per_stream.iter()) {
+                *dst += *src;
+            }
             let total = initial_state_ll + transition_ll + observation_ll;
             if !total.is_finite() {
                 log::debug!("complete_data_loglik: -inf after obs at substep {} (cumulative)", s);
@@ -1239,6 +1282,7 @@ pub fn complete_data_loglik(
                     total: f64::NEG_INFINITY,
                     transition: transition_ll,
                     observation: observation_ll,
+                    observation_per_stream,
                     initial_state: initial_state_ll,
                 });
             }
@@ -1253,6 +1297,7 @@ pub fn complete_data_loglik(
         total: initial_state_ll + transition_ll + observation_ll,
         transition: transition_ll,
         observation: observation_ll,
+        observation_per_stream,
         initial_state: initial_state_ll,
     })
 }
@@ -3412,6 +3457,7 @@ pub fn run_pgas(
         // Cold rung LL components (populated during rung loop)
         let mut cold_transition_ll = 0.0_f64;
         let mut cold_obs_ll = 0.0_f64;
+        let mut cold_obs_ll_per_stream: Vec<f64> = Vec::new();
         let mut cold_initial_state_ll = 0.0_f64;
         let mut cold_nuts = NutsSweepDiag::default();
 
@@ -3692,6 +3738,7 @@ pub fn run_pgas(
             if rung == 0 {
                 cold_transition_ll = ll_components.transition;
                 cold_obs_ll = ll_components.observation;
+                cold_obs_ll_per_stream = ll_components.observation_per_stream;
                 cold_initial_state_ll = ll_components.initial_state;
             }
         } // end rung loop
@@ -3849,6 +3896,7 @@ pub fn run_pgas(
             proposal_sds: cold_proposal_sd,
             transition_ll: cold_transition_ll,
             obs_ll: cold_obs_ll,
+            obs_ll_per_stream: cold_obs_ll_per_stream,
             initial_state_ll: cold_initial_state_ll,
             nuts: cold_nuts,
         };
@@ -4282,7 +4330,10 @@ mod theta_proposal_score_tests {
     use crate::error::{CollapseKind, NegativeCountCause};
 
     fn components(total: f64) -> LogLikComponents {
-        LogLikComponents { total, transition: total, observation: 0.0, initial_state: 0.0 }
+        LogLikComponents {
+            total, transition: total, observation: 0.0,
+            observation_per_stream: Vec::new(), initial_state: 0.0,
+        }
     }
 
     #[test]

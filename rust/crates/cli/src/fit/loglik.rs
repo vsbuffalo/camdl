@@ -42,6 +42,23 @@ pub const TRACE_COL_TRANSITION_LL: &str = "transition_ll";
 /// conditioned path reproduces the observed data.
 pub const TRACE_COL_OBS_LL: &str = "obs_ll";
 
+/// The `obs_ll` column resolved by observation stream: `obs_ll_<stream>` for
+/// each stream the model declares, so a fit can be asked WHICH stream it is
+/// straining against without re-running the filter (gh#742).
+///
+/// One column per stream, not per stream × stratum: an indexed stream's column
+/// sums over its strata. Per-stratum scores answer "which district", a different
+/// question with its own machinery, and would make a 774-unit model's trace
+/// thousands of columns wide.
+///
+/// Every column is populated on every row — a sweep evaluates the whole
+/// likelihood, so a stream on its own cadence still contributes its own sum.
+/// The columns add up to [`TRACE_COL_OBS_LL`] to floating-point round-off (the
+/// two sums associate in different orders).
+pub fn trace_col_obs_ll_stream(stream: &str) -> String {
+    format!("{TRACE_COL_OBS_LL}_{stream}")
+}
+
 /// PGAS's initial-state term `log p(x₀ | θ)`, from the laws the model declares
 /// in `init { }`. Zero for a deterministic `init { }`.
 ///
@@ -247,6 +264,26 @@ mod tests {
                 kind.chain_agreement_column(),
                 "log_likelihood",
                 "{kind}'s trace column 1 already IS log p(y | θ)"
+            );
+        }
+    }
+
+    /// gh#742: a per-stream column is `obs_ll`'s name with the stream appended,
+    /// so the decomposition reads as a refinement of the column it sums to and a
+    /// reader can find every part by the one prefix. The scored column stays
+    /// `obs_ll` exactly — a per-stream column must never be mistaken for it.
+    #[test]
+    fn per_stream_column_extends_the_obs_ll_name_without_colliding_with_it() {
+        assert_eq!(trace_col_obs_ll_stream("cases"), "obs_ll_cases");
+        assert_eq!(trace_col_obs_ll_stream("community_deaths"), "obs_ll_community_deaths");
+        for stream in ["cases", "deaths"] {
+            let col = trace_col_obs_ll_stream(stream);
+            assert!(col.starts_with(TRACE_COL_OBS_LL), "{col} must extend {TRACE_COL_OBS_LL}");
+            assert_ne!(
+                col,
+                LoglikType::CompleteData.chain_agreement_column(),
+                "a per-stream column must not shadow the column PGAS chains are \
+                 ranked on (gh#667)"
             );
         }
     }

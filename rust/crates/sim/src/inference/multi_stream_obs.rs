@@ -1013,6 +1013,22 @@ impl MultiStreamObsModel {
         self.interval_slots.len()
     }
 
+    /// Number of declared observation streams — the length of every per-stream
+    /// vector this type produces (`log_likelihood_per_stream_from_flows_and_counts`,
+    /// `per_stream_observed`, `stream_names`). Counts EVERY stream, incidence and
+    /// prevalence alike, unlike [`Self::n_interval_streams`].
+    pub fn n_streams(&self) -> usize {
+        self.streams.len()
+    }
+
+    /// The declared stream names, in the same order as every per-stream vector
+    /// (`log_likelihood_per_stream_from_flows_and_counts`, `per_stream_observed`).
+    /// The single source of truth for labelling a per-stream column, so a label
+    /// and the value under it cannot come from different orderings.
+    pub fn stream_names(&self) -> Vec<String> {
+        self.streams.iter().map(|s| s.name.clone()).collect()
+    }
+
     /// The `Interval` (incidence / `FlowSum`) streams as `(name, flow_indices)`,
     /// in dense `acc` order. The single source of truth for an `inc_<stream>`
     /// output column: a posterior-trajectory writer sums per-transition flows
@@ -1588,10 +1604,12 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
 
     fn n_observations(&self) -> usize { self.obs_times.len() }
     fn obs_time(&self, obs_idx: usize) -> f64 { self.obs_times[obs_idx] }
-    fn n_streams(&self) -> usize { self.streams.len() }
+    fn n_streams(&self) -> usize {
+        MultiStreamObsModel::n_streams(self)
+    }
 
     fn stream_names(&self) -> Vec<String> {
-        self.streams.iter().map(|s| s.name.clone()).collect()
+        MultiStreamObsModel::stream_names(self)
     }
 
     fn sample(

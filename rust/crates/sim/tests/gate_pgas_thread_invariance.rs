@@ -171,6 +171,18 @@ fn assert_sweeps_bit_identical(a: &[PGASSweep], b: &[PGASSweep]) {
             "sweep {i}: transition log-likelihood differs across thread counts");
         assert_eq!(sa.obs_ll.to_bits(), sb.obs_ll.to_bits(),
             "sweep {i}: observation log-likelihood differs across thread counts");
+        // gh#742: the per-stream decomposition is a reported number too, so it
+        // carries the same invariance obligation as the scalar it refines.
+        assert_eq!(sa.obs_ll_per_stream.len(), sb.obs_ll_per_stream.len(),
+            "sweep {i}: per-stream obs-loglik width differs across thread counts");
+        assert!(!sa.obs_ll_per_stream.is_empty(),
+            "sweep {i}: non-vacuous — the fixture must declare at least one stream");
+        for (k, (&va, &vb)) in sa.obs_ll_per_stream.iter()
+            .zip(&sb.obs_ll_per_stream).enumerate() {
+            assert_eq!(va.to_bits(), vb.to_bits(),
+                "sweep {i} stream {k}: per-stream observation log-likelihood \
+                 differs across thread counts: {va} vs {vb}");
+        }
     }
 }
 

@@ -762,7 +762,14 @@ pub fn run_stage(
             // the ancestor-sampling counters because the three are read
             // together: the profile says WHERE the path is stuck, `as_accept`
             // and `as_proposed` say why.
-            let mut trace_columns: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 13);
+            // gh#742: `obs_ll` resolved by declared stream. Names come from the
+            // obs model itself, in the same order as `PGASSweep::obs_ll_per_stream`,
+            // so a label and the value beneath it cannot come from two orderings.
+            let obs_ll_stream_columns: Vec<String> = obs_model.stream_names().iter()
+                .map(|n| super::loglik::trace_col_obs_ll_stream(n))
+                .collect();
+            let mut trace_columns: Vec<&str> =
+                Vec::with_capacity(RENEWAL_BINS + 13 + obs_ll_stream_columns.len());
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
             // gh#718: `as_opportunity` is how many substeps in the sweep drew
@@ -778,8 +785,12 @@ pub fn run_stage(
             trace_columns.extend(["as_opportunity", "as_accept", "as_proposed",
                   super::loglik::TRACE_COL_TRANSITION_LL,
                   super::loglik::TRACE_COL_OBS_LL,
-                  super::loglik::TRACE_COL_INITIAL_STATE_LL,
-                  "tree_depth", "n_leapfrog", "step_size", "accept_stat",
+                  super::loglik::TRACE_COL_INITIAL_STATE_LL]);
+            // The per-stream decomposition of `obs_ll` sits directly after the
+            // three components it refines, so the block reads as
+            // `obs_ll = Σ obs_ll_<stream>` left to right.
+            trace_columns.extend(obs_ll_stream_columns.iter().map(String::as_str));
+            trace_columns.extend(["tree_depth", "n_leapfrog", "step_size", "accept_stat",
                   "n_divergent", "energy"]);
             let trace_writer = super::trace_writer::TraceWriter::new(
                 &trace_path_str, "sweep", "log_complete_data_ll",
@@ -850,6 +861,11 @@ pub fn run_stage(
                 let transition_ll_str = format!("{:.4}", result.transition_ll);
                 let obs_ll_str = format!("{:.4}", result.obs_ll);
                 let initial_state_ll_str = format!("{:.4}", result.initial_state_ll);
+                // gh#742: one value per declared stream, same order as the
+                // header block built from `obs_model.stream_names()`.
+                let obs_ll_stream_strs: Vec<String> = result.obs_ll_per_stream.iter()
+                    .map(|v| format!("{v:.4}"))
+                    .collect();
                 // Per-sweep cold-chain NUTS diagnostics (gh#294).
                 let nd = &result.nuts;
                 let tree_depth_str = nd.tree_depth.to_string();
@@ -858,7 +874,8 @@ pub fn run_stage(
                 let accept_stat_str = format!("{:.4}", nd.accept_stat);
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
-                let mut extra: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 13);
+                let mut extra: Vec<&str> =
+                    Vec::with_capacity(RENEWAL_BINS + 13 + obs_ll_stream_strs.len());
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
                 extra.extend([
@@ -866,6 +883,9 @@ pub fn run_stage(
                     as_accept_str.as_str(), as_proposed_str.as_str(),
                     transition_ll_str.as_str(), obs_ll_str.as_str(),
                     initial_state_ll_str.as_str(),
+                ]);
+                extra.extend(obs_ll_stream_strs.iter().map(String::as_str));
+                extra.extend([
                     tree_depth_str.as_str(), n_leapfrog_str.as_str(), step_size_str.as_str(),
                     accept_stat_str.as_str(), n_divergent_str.as_str(), energy_str.as_str(),
                 ]);
