@@ -555,12 +555,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `--condition-from` flags, else the `--fit` toml's `condition_from`.
     // Without this, profile scored the first bin over the whole leading span
     // (a window the fit never scores) and skipped W329.
+    // Bound (not scoped to this block) because the identity must hash the
+    // same window that was applied: it decides which observations each point
+    // is scored against, so it changes every stored loglik.
+    let condition_from = crate::fit::runner::condition_spec_from_cli_or_toml(
+        &a.condition_from, a.fit.as_deref(),
+    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     {
-        let cond = crate::fit::runner::condition_spec_from_cli_or_toml(
-            &a.condition_from, a.fit.as_deref(),
-        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
         crate::fit::runner::apply_conditioning_windows(
-            &mut streams, cond.as_ref(), &model,
+            &mut streams, condition_from.as_ref(), &model,
             compiled.model.simulation.t_start, dt,
         ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     }
@@ -1081,32 +1084,78 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     fixed_blob.sort();
     let mut priors_blob = resolved_priors_kv.clone();
     priors_blob.sort_by(|a, b| a.0.cmp(&b.0));
+    // 2026-08-23 audit: the conditioning window decides WHICH observations
+    // every point is scored against, so it changes each cell's loglik and
+    // MLE — but only the `--fit` toml route reached identity (incidentally,
+    // via fit_toml), while the CLI flag that OVERRIDES it did not. It belongs
+    // with fixed/priors: part of the inference problem, not of the method.
+    // `ConditionFrom` serializes untagged (a string, or a BTreeMap with
+    // stable key order), and `null` when absent — so an unconditioned profile
+    // re-keys here too, which is unavoidable: this level is a single blob.
     let base_config_blob = serde_json::json!({
         "base_params": base_params_hash,
         "fixed":       fixed_blob,
         "obs_family":  obs_family_key,
         "fit_toml":    fit_toml_hash,
         "priors":      priors_blob,
+        "condition_from": condition_from,
     });
     // Gate the RAW floats before `json!` sees them: the macro collapses
     // NaN/Inf to `Null`, so `resolve_profile_point`'s gate on the built blob
     // could never fire and NaN vs Inf would hash alike (2026-08-23 audit).
-    // These three are the only floats in either blob.
-    if let Err(e) = crate::fit::cas::ensure_finite(&(cooling, dt, pmmh_rho_opt)) {
+    // These are the floats in either blob (rw_sd values included).
+    let rw_sd_floats: Vec<f64> = specs.iter().filter_map(|s| s.rw_sd).collect();
+    if let Err(e) = crate::fit::cas::ensure_finite(
+        &(cooling, dt, pmmh_rho_opt, &rw_sd_floats))
+    {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+    // 2026-08-23 audit: three per-cell knobs reached the computation but not
+    // the key, so a rerun that changed any of them was served the previous
+    // run's landscape, cell for cell, under a "cached — resuming" line.
+    //
+    //  - rw_sd: the RESOLVED per-parameter IF2 perturbation magnitudes (CLI
+    //    over fit-toml), sorted by name. `--rw-sd` is a REQUIRED flag whose
+    //    values drive the sampler, and only the estimated *set* was keyed
+    //    (incidentally, through the priors blob) — never the magnitudes.
+    //    `auto` rides as its own discriminator since it derives the values
+    //    from the model rather than the flag.
+    //  - init: which starting points seed each start (the gh#514 class, still
+    //    open on this command). Its companion PATHS are part of the resolved
+    //    InitMethod, so they ride along.
+    //  - pf_max_substeps: a degeneracy budget whose trip is swallowed here as
+    //    `-inf` (unlike pfilter, which aborts), so a tripped budget could bake
+    //    an -inf loglik into a cached cell that a later default-budget run was
+    //    then served.
+    let mut rw_sd_blob: Vec<(&str, Option<f64>)> =
+        specs.iter().map(|s| (s.name.as_str(), s.rw_sd)).collect();
+    rw_sd_blob.sort_by(|a, b| a.0.cmp(b.0));
     let method_config_blob = serde_json::json!({
         "algorithm": algorithm,
         "if2": { "particles": n_particles, "iterations": n_iterations,
                  "cooling": cooling, "dt": dt, "starts": n_starts },
         "pmmh": { "steps": pmmh_steps, "particles": pmmh_particles, "rho": pmmh_rho_opt },
+        "rw_sd": rw_sd_blob,
+        "rw_sd_auto": rw_sd_auto,
+        "init": init_method,
+        "pf_max_substeps": a.inference.pf_max_substeps,
     });
     // The base fit's `starts_from` lineage would fold into the base as
     // a dep (guardrail 3-base). `camdl profile` does not currently
     // thread a base-fit lineage, so the dep list is empty; when it
     // does, push the resolved `FitStage` ArtifactRef here.
-    let profile_deps: Vec<runid::inputs::ArtifactRef> = Vec::new();
+    // 2026-08-23 audit: fold the chain-start file's CONTENT into the identity,
+    // the same treatment `fit run` got in gh#541. The resolved `init` in the
+    // method blob names WHICH file; this digests WHAT IS IN IT, so rewriting
+    // a draws.tsv or params.toml in place re-keys instead of serving the
+    // previous file's landscape. (`from_mle` is deliberately absent — it
+    // folds the upstream leaf's fit_state.toml digest already.)
+    let profile_deps: Vec<runid::inputs::ArtifactRef> = init_method
+        .source_file()
+        .and_then(|(path, artifact)| crate::fit::cas::cas_file_dep(&path, artifact))
+        .into_iter()
+        .collect();
     let store = runid::FsCasStore::new(&root);
     let ir_version_str = ir::IR_VERSION.trim().to_string();
     let stem_label = stem.clone().unwrap_or_else(|| "profile".to_string());

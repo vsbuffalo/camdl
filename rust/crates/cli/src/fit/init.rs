@@ -129,6 +129,28 @@ pub enum InitMethod {
     FromParams { path: PathBuf },
 }
 
+impl InitMethod {
+    /// The chain-start SOURCE FILE this init mode reads, if it names one, plus
+    /// the artifact name to record. Callers fold the file's CONTENT into their
+    /// identity deps so rewriting it in place re-keys the run — a path only
+    /// distinguishes a *different* file, never the same path rewritten
+    /// (gh#541).
+    ///
+    /// `FromMle` is absent on purpose: it already folds the upstream leaf's
+    /// `fit_state.toml` digest through `cas_dep_from_dir`, and a second dep
+    /// for it would double-count.
+    pub fn source_file(&self) -> Option<(PathBuf, &'static str)> {
+        match self {
+            InitMethod::FromPosterior { source } => Some(match source {
+                PosteriorSource::DrawsTsv(p) => (p.clone(), "draws.tsv"),
+                PosteriorSource::FitDir(d) => (d.join("draws.tsv"), "draws.tsv"),
+            }),
+            InitMethod::FromParams { path } => Some((path.clone(), "params.toml")),
+            _ => None,
+        }
+    }
+}
+
 /// Where to read posterior draws from. See [`InitMethod::FromPosterior`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
