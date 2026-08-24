@@ -669,3 +669,33 @@ fn if2_iteration_budget_aborts_pre_window() {
     assert_eq!(process.steps(), 0,
         "IF2 iteration-budget guard must abort BEFORE the substep loop runs any step");
 }
+
+/// An EMPTY swarm (`n_particles == 0`) must not panic the filter.
+///
+/// The degeneracy layer deliberately tolerates it —
+/// `check_pf_degeneracy`'s `n_particles > 0` guard, and
+/// `degeneracy::tests::empty_swarm_does_not_trigger_all_dead` pin that — so
+/// `bootstrap_filter` must reach a normal return or a `SimError`, never an
+/// index panic. This became reachable when the initial-state draw started
+/// taking a particle's own RNG stream (proposal
+/// `docs/dev/proposals/2026-08-23-initial-state-parameters.md`, staging step
+/// 3): with no particles there is no stream to index.
+#[test]
+fn an_empty_swarm_does_not_panic_the_bootstrap_filter() {
+    let obs_times: Vec<f64> = (1..=3).map(|k| k as f64).collect();
+    let process = CountingProcess::new(3, 1, 256);
+    let obs_model = TimeGridObs { obs_times };
+    let config = SMCConfig {
+        n_particles: 0,
+        dt: 1.0,
+        t_start: 0.0,
+        skip_first_obs_from_loglik: false,
+        record_ancestry: false,
+        record_prequential: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+    };
+
+    // The assertion is that this call RETURNS — Ok or Err, either is a
+    // defensible answer for a degenerate swarm. A panic is not.
+    let _ = bootstrap_filter(&process, &obs_model, &[], &config, 42);
+}

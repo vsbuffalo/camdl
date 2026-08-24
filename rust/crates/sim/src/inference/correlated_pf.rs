@@ -287,7 +287,14 @@ pub fn bootstrap_filter_correlated(
     // correlated randoms in `randoms` cover the transition kernel only; a
     // future initial-state law drawn here would be an *uncorrelated* addition
     // to a CPM proposal, which is a design question step 5 owes an answer.
-    let (init_int, _init_real) = model.initial_state_draw(params, &mut rngs[0])?;
+    // `rngs` is empty when `n_particles == 0`; see the same guard in
+    // `particle_filter.rs::bootstrap_filter`.
+    let (init_int, _init_real) = match rngs.first_mut() {
+        Some(rng0) => model.initial_state_draw(params, rng0)?,
+        None => model.initial_state_draw(
+            params, &mut StatefulRng::new_stream(seed, 0),
+        )?,
+    };
     let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
     for p in &mut swarm.states {
         p.counts.copy_from_slice(&init_int.counts);

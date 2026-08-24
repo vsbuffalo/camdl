@@ -141,7 +141,18 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // move of this call into the loop below so particle j draws from `rngs[j]`;
     // particle 0 already reads its own stream here, so that move leaves this
     // draw where it is.
-    let mut init = process.initial_state_draw(params, &mut rngs[0])?;
+    //
+    // `rngs` is empty when `n_particles == 0` — a degenerate swarm the
+    // degeneracy layer deliberately tolerates (`check_pf_degeneracy`'s
+    // `n_particles > 0` guard), so it must not panic here. With no particle
+    // there is also no particle to hand the state to, so a scratch stream is
+    // the whole of the answer.
+    let mut init = match rngs.first_mut() {
+        Some(rng0) => process.initial_state_draw(params, rng0)?,
+        None => process.initial_state_draw(
+            params, &mut StatefulRng::new_stream(seed, 0),
+        )?,
+    };
     init.acc.resize(n_acc, 0);
     let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
     for p in &mut swarm.states {
