@@ -1256,6 +1256,15 @@ impl Formatter {
         // on the column this sampler's loglik CLASS makes comparable (gh#667).
         s.push_str(&self.bayesian_chain_loglik_table(stage_dir, diag.n_chains, ll_kind));
 
+        // Per-chain saved-vs-forkable latent paths (gh#727). PGAS only: it is
+        // the one Bayesian stage that writes latent paths, so for PMMH / NUTS
+        // there is no count to omit. A path is usable downstream only when its
+        // sweep is also a retained draw, and the two rules that decide those
+        // are independent — so the counts must be readable side by side.
+        if matches!(view, BayesianView::Pgas(_)) {
+            s.push_str(&self.saved_path_table(stage_dir));
+        }
+
         // Posterior parameter table.
         s.push_str(&format!("  {}\n", self.bold("posterior summary")));
         if posterior_mean.is_empty() {
@@ -1301,6 +1310,61 @@ impl Formatter {
         } else {
             format!("{:>width$}", "—", width = width)
         }
+    }
+
+    /// Per-chain saved-vs-forkable latent paths for a PGAS stage (gh#727).
+    ///
+    /// A PGAS chain writes a latent path every `traj_stride` sweeps and retains
+    /// a posterior draw every `thin` sweeps, on two rules that do not know
+    /// about each other. Only a path whose sweep is ALSO a retained draw can be
+    /// forked (`simulate --init-state fit`) or read by a `last_obs`-anchored
+    /// `quantities {}` entry, so the two counts are reported side by side and
+    /// the shortfall is named rather than left for the reader to subtract.
+    ///
+    /// Reads the block `pgas.rs` writes into `pgas_summary.json`, through that
+    /// module's own reader, so producer and consumer cannot drift.
+    fn saved_path_table(&self, stage_dir: &Path) -> String {
+        let path = stage_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
+        let Some(report) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .as_ref()
+            .and_then(super::pgas::read_saved_path_counts)
+        else {
+            // A stage that recorded no such block: nothing to report and
+            // nothing known to be missing.
+            return String::new();
+        };
+        if report.per_chain.is_empty() {
+            return String::new();
+        }
+        let mut s = String::new();
+        s.push_str(&format!("  {}\n", self.bold("saved latent paths")));
+        let total_saved: u64 = report.per_chain.iter().map(|c| c.n_saved).sum();
+        let total_forkable: u64 = report.per_chain.iter().map(|c| c.n_forkable).sum();
+        s.push_str(&format!("    {:6} {:>10} {:>10} {:>10}\n",
+            "chain", "written", "forkable", "unusable"));
+        for (i, c) in report.per_chain.iter().enumerate() {
+            let lost = c.n_saved.saturating_sub(c.n_forkable);
+            // Pad before coloring — the ANSI bytes would otherwise count
+            // toward the field width and break the column.
+            let cell = format!("{:>10}", lost);
+            let lost_cell = if lost == 0 { self.dim(&cell).to_string() } else { self.warn(&cell) };
+            s.push_str(&format!("    {:6} {:>10} {:>10}{}\n",
+                i + 1, c.n_saved, c.n_forkable, lost_cell));
+        }
+        if total_forkable < total_saved {
+            s.push_str(&format!("    {}\n", self.warn(&format!(
+                "{} of {} written paths cannot be joined to a posterior draw",
+                total_saved - total_forkable, total_saved))));
+            s.push_str(&format!("    {}\n", self.dim(&format!(
+                "a path is usable only when its sweep is also a retained draw; \
+                 stride {} is not a multiple of thin {}",
+                report.traj_stride.map_or("—".to_string(), |v| v.to_string()),
+                report.thin))));
+        }
+        s.push('\n');
+        s
     }
 
     /// Per-chain log-likelihood breakdown for a Bayesian stage (gh#406).
@@ -3331,6 +3395,85 @@ mod tests {
         let table = fmt.bayesian_chain_loglik_table(&dir, 4, LoglikType::Marginal);
         assert!(table.contains("per-chain traces unavailable"),
             "must say traces are unavailable, not skip:\n{table}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── gh#727: saved-vs-forkable latent paths in the summary ────────────
+
+    /// Write a `pgas_summary.json` carrying just the gh#727 `trajectories`
+    /// block — the only key `saved_path_table` reads.
+    fn write_traj_summary(
+        dir: &std::path::Path,
+        traj_stride: u64,
+        thin: u64,
+        per_chain: &[(u64, u64)],
+    ) {
+        let summary = serde_json::json!({
+            "stage": "pgas",
+            "thin": thin,
+            "trajectories": {
+                "traj_stride": traj_stride,
+                "thin": thin,
+                "n_saved": per_chain.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
+                "n_forkable": per_chain.iter().map(|(_, b)| *b).collect::<Vec<_>>(),
+            },
+        });
+        std::fs::write(dir.join("pgas_summary.json"),
+            serde_json::to_string_pretty(&summary).unwrap()).unwrap();
+    }
+
+    /// gh#727: the shortfall between written and forkable latent paths lands in
+    /// the rendered summary, per chain, with the total named — not left for the
+    /// reader to subtract, and not only on a consumer's stderr.
+    #[test]
+    fn saved_path_table_names_the_unusable_paths_per_chain() {
+        let dir = crate::test_support::unique_temp_dir("summary_gh727_lossy");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The issue's long run: stride 144 against thin 5, two chains.
+        write_traj_summary(&dir, 144, 5, &[(250, 50), (250, 50)]);
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let t = fmt.saved_path_table(&dir);
+        assert!(t.contains("saved latent paths"), "header present:\n{t}");
+        // Two per-chain rows carrying written / forkable / unusable.
+        assert!(t.contains("     1        250         50       200\n"),
+            "chain 1 row must show 250 written, 50 forkable, 200 unusable:\n{t}");
+        assert!(t.contains("     2        250         50       200\n"),
+            "chain 2 row must show the same:\n{t}");
+        assert!(t.contains("400 of 500 written paths cannot be joined"),
+            "the total shortfall must be stated:\n{t}");
+        assert!(t.contains("stride 144 is not a multiple of thin 5"),
+            "the reason must be stated:\n{t}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Negative control: a stride that IS a multiple of `thin` renders the
+    /// counts and says nothing about a shortfall, because there is none.
+    #[test]
+    fn saved_path_table_is_quiet_when_every_path_is_forkable() {
+        let dir = crate::test_support::unique_temp_dir("summary_gh727_clean");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_traj_summary(&dir, 180, 5, &[(200, 200), (200, 200)]);
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let t = fmt.saved_path_table(&dir);
+        assert!(t.contains("saved latent paths"), "header still present:\n{t}");
+        assert!(t.contains("     1        200        200         0\n"),
+            "the counts still render, with nothing unusable:\n{t}");
+        assert!(!t.contains("cannot be joined"),
+            "an aligned stride must claim no shortfall:\n{t}");
+        assert!(!t.contains("not a multiple"),
+            "an aligned stride must not explain a shortfall it does not have:\n{t}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stage whose summary carries no `trajectories` block (PMMH / NUTS, or a
+    /// PGAS run predating gh#727) renders nothing rather than a row of dashes.
+    #[test]
+    fn saved_path_table_is_empty_without_the_block() {
+        let dir = crate::test_support::unique_temp_dir("summary_gh727_absent");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pgas_summary.json"), r#"{"stage":"pgas","thin":5}"#).unwrap();
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        assert_eq!(fmt.saved_path_table(&dir), "");
         std::fs::remove_dir_all(&dir).ok();
     }
 

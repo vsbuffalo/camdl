@@ -31,6 +31,234 @@ const RENEWAL_BIN_COLUMNS: [&str; RENEWAL_BINS] = [
     "renewal_b5", "renewal_b6", "renewal_b7", "renewal_b8", "renewal_b9",
 ];
 
+// ── Trajectory stride vs thinning (gh#727) ───────────────────────────────────
+//
+// A PGAS chain selects sweeps twice, on two rules that do not know about each
+// other:
+//
+//   * a **posterior draw** is retained when `(sweep - burn_in)` is a multiple
+//     of `thin` (`sim/inference/pgas.rs`, the `sweeps.push` guard);
+//   * a **latent path** is written when `(sweep - burn_in)` is a multiple of
+//     `traj_stride`, and `traj_stride` is derived from `n_trajectories` alone.
+//
+// Every downstream consumer of a saved path joins it to its draw on
+// `(chain, sweep)` — forking a posterior state (`simulate --init-state fit`)
+// and reading a `last_obs`-anchored `quantities {}` entry both do. So a written
+// path is usable only where the two rules coincide: offsets that are a multiple
+// of `lcm(traj_stride, thin)`. That is every written path exactly when
+// `traj_stride` is a multiple of `thin`, and otherwise a fraction of them.
+
+/// Sweeps between saved latent paths for a given `n_trajectories`.
+///
+/// The one formula. The write site (`sweep >= burn_in && (sweep - burn_in)
+/// .is_multiple_of(traj_stride)`) and the alignment check below must not each
+/// carry their own copy, or the warning stops describing the run it precedes.
+fn traj_stride_for(n_post_burnin: usize, n_trajectories: usize) -> usize {
+    (n_post_burnin / n_trajectories).max(1)
+}
+
+/// Least common multiple of `a` and `b`, clamped to `cap`.
+///
+/// The clamp is not an approximation: the caller only ever asks
+/// `n_post_burnin.div_ceil(lcm)`, and every `lcm >= n_post_burnin` gives the
+/// same answer of 1 (only the offset-0 sweep qualifies). Clamping keeps the
+/// product inside `usize` for pathological `thin`.
+fn lcm_capped(a: usize, b: usize, cap: usize) -> usize {
+    fn gcd(mut a: usize, mut b: usize) -> usize {
+        while b != 0 {
+            let t = a % b;
+            a = b;
+            b = t;
+        }
+        a
+    }
+    if a == 0 || b == 0 {
+        return cap.max(1);
+    }
+    let l = (a as u128 / gcd(a, b) as u128) * b as u128;
+    if l > cap as u128 { cap.max(1) } else { l as usize }
+}
+
+/// How a PGAS stage's two sweep-selection rules line up, in counts.
+///
+/// These are the projection for a **fresh** run over `[burn_in, n_sweeps)`, so
+/// they can be reported before a sweep runs. A `--resume` run starts partway in
+/// and writes fewer; the measured per-chain counts written into
+/// `pgas_summary.json` (`trajectories.n_saved` / `.n_forkable`) are the ones to
+/// read after the fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrajectoryStridePlan {
+    /// Sweeps after burn-in: `n_sweeps - burn_in`.
+    pub n_post_burnin: usize,
+    /// Sweeps between saved paths. `None` when no path is saved at all
+    /// (`n_trajectories == 0`, or no post-burn-in sweep); the write site
+    /// encodes that case as `usize::MAX`, which is not a stride to reason
+    /// about.
+    pub traj_stride: Option<usize>,
+    /// Latent paths written to `chain_*/trajectories.tsv`.
+    pub n_saved: usize,
+    /// Posterior draws retained in `draws.tsv`.
+    pub n_draws: usize,
+    /// Written paths whose sweep is also a retained draw — the usable subset.
+    pub n_forkable: usize,
+}
+
+impl TrajectoryStridePlan {
+    /// Resolve the two rules against each other for one PGAS stage.
+    pub fn resolve(
+        n_sweeps: usize,
+        burn_in: usize,
+        n_trajectories: usize,
+        thin: usize,
+    ) -> Self {
+        let n_post_burnin = n_sweeps.saturating_sub(burn_in);
+        let traj_stride = (n_trajectories > 0 && n_post_burnin > 0)
+            .then(|| traj_stride_for(n_post_burnin, n_trajectories));
+        // `thin == 0` is not rejected by the config layer, and
+        // `usize::is_multiple_of(0)` is true only for 0 — so a zero `thin`
+        // retains the single sweep at `burn_in` and nothing else. Model that
+        // rather than dividing by zero.
+        let n_draws = match (n_post_burnin, thin) {
+            (0, _) => 0,
+            (_, 0) => 1,
+            (n, t) => n.div_ceil(t),
+        };
+        let (n_saved, n_forkable) = match traj_stride {
+            None => (0, 0),
+            Some(stride) => {
+                let saved = n_post_burnin.div_ceil(stride);
+                let forkable = if thin == 0 {
+                    1
+                } else {
+                    n_post_burnin.div_ceil(lcm_capped(stride, thin, n_post_burnin))
+                };
+                (saved, forkable)
+            }
+        };
+        TrajectoryStridePlan { n_post_burnin, traj_stride, n_saved, n_draws, n_forkable }
+    }
+
+    /// Every written path lands on a retained draw. False means the stage
+    /// writes paths no consumer can join to a draw.
+    pub fn all_saved_are_forkable(&self) -> bool {
+        self.n_forkable == self.n_saved
+    }
+}
+
+/// The `n_trajectories` nearest to `requested` whose stride is a multiple of
+/// `thin`, so that every path it writes is forkable.
+///
+/// `None` when no such value exists — which happens exactly when `thin` retains
+/// at most the single offset-0 draw (`thin == 0`, or `thin > n_post_burnin`),
+/// since every stride is at least 1 and at most `n_post_burnin`. Ties break to
+/// the smaller value: it writes fewer paths for the same guarantee.
+fn nearest_aligned_n_trajectories(
+    n_post_burnin: usize,
+    requested: usize,
+    thin: usize,
+) -> Option<usize> {
+    if thin == 0 || n_post_burnin == 0 || requested == 0 {
+        return None;
+    }
+    let aligned = |n: usize| n > 0 && traj_stride_for(n_post_burnin, n).is_multiple_of(thin);
+    // Past `n_post_burnin` every `n_trajectories` gives the same stride of 1,
+    // so scanning further than that (from either end) can find nothing new.
+    let limit = requested.max(n_post_burnin) + 1;
+    (1..=limit).find_map(|d| {
+        let below = requested.checked_sub(d).filter(|&n| aligned(n));
+        below.or_else(|| aligned(requested + d).then_some(requested + d))
+    })
+}
+
+/// The configuration-time warning for a stride that writes unusable paths, or
+/// `None` when every written path lands on a retained draw.
+///
+/// Fires on `n_forkable < n_saved` — "paths are lost" — rather than on the bare
+/// `traj_stride % thin != 0`. The two differ only when the stride writes at
+/// most one path, where nothing is lost and a warning naming zero lost paths
+/// would be noise.
+pub(crate) fn trajectory_stride_warning(
+    n_sweeps: usize,
+    burn_in: usize,
+    n_trajectories: usize,
+    thin: usize,
+) -> Option<String> {
+    let plan = TrajectoryStridePlan::resolve(n_sweeps, burn_in, n_trajectories, thin);
+    if plan.all_saved_are_forkable() {
+        return None;
+    }
+    let stride = plan.traj_stride.expect("a plan that saved a path has a stride");
+    let lost = plan.n_saved - plan.n_forkable;
+    let mut msg = format!(
+        "warning: n_trajectories = {n_trajectories} writes a latent path every \
+         {stride} sweeps, but a posterior draw is retained every thin = {thin} \
+         sweeps.\n  \
+         Only {} of the {} written paths land on a retained draw; the other \
+         {lost} cost disk and write time and cannot be used. Forking a \
+         posterior state (`simulate --init-state fit`) and a \
+         `last_obs`-anchored `quantities {{}}` entry both join a path to its \
+         draw on (chain, sweep).",
+        plan.n_forkable, plan.n_saved,
+    );
+    match nearest_aligned_n_trajectories(plan.n_post_burnin, n_trajectories, thin) {
+        Some(clean) => {
+            let clean_plan =
+                TrajectoryStridePlan::resolve(n_sweeps, burn_in, clean, thin);
+            let clean_stride = clean_plan
+                .traj_stride
+                .expect("an aligned candidate saves at least one path");
+            msg.push_str(&format!(
+                "\n  n_trajectories = {clean} (stride {clean_stride}) writes {} \
+                 paths, every one of them forkable.",
+                clean_plan.n_saved,
+            ));
+        }
+        None => msg.push_str(&format!(
+            "\n  No n_trajectories fixes this: thin = {thin} over {} \
+             post-burn-in sweeps retains only {} draw(s) in total. Lower `thin`.",
+            plan.n_post_burnin, plan.n_draws,
+        )),
+    }
+    Some(msg)
+}
+
+/// Per-chain saved-vs-forkable counts, MEASURED from what each chain actually
+/// wrote — not the projection [`TrajectoryStridePlan`] makes from the config.
+///
+/// The two differ when a chain resumes partway in, or when a draw's substep
+/// record was incoherent and the adapter skipped it. This is the number that
+/// goes into `pgas_summary.json`, so the artifact records what happened rather
+/// than what was planned.
+pub(crate) struct SavedPathCounts {
+    /// Written paths, one entry per chain in `results` order.
+    pub n_saved: Vec<usize>,
+    /// Of those, the ones whose sweep is also a retained draw.
+    pub n_forkable: Vec<usize>,
+}
+
+impl SavedPathCounts {
+    /// `retained` is `(chain_id, the sweep indices that chain kept as posterior
+    /// draws)`, one entry per surviving chain in `results` order;
+    /// `saved_sweeps[chain_id]` are the sweep indices that chain wrote a latent
+    /// path for. Both are recorded, never re-derived from `burn_in`/`thin` —
+    /// re-deriving is the class of bug that gh#727 is about.
+    pub fn measure(
+        retained: &[(usize, Vec<usize>)],
+        saved_sweeps: &[Vec<usize>],
+    ) -> Self {
+        let mut n_saved = Vec::with_capacity(retained.len());
+        let mut n_forkable = Vec::with_capacity(retained.len());
+        for (chain_id, retained_sweeps) in retained {
+            let kept: std::collections::HashSet<usize> =
+                retained_sweeps.iter().copied().collect();
+            let saved = saved_sweeps.get(*chain_id).map(Vec::as_slice).unwrap_or(&[]);
+            n_saved.push(saved.len());
+            n_forkable.push(saved.iter().filter(|s| kept.contains(s)).count());
+        }
+        SavedPathCounts { n_saved, n_forkable }
+    }
+}
+
 /// Per-stage knobs extracted from a `Stage::PGAS { ... }` variant by
 /// the `camdl fit run` dispatcher and passed verbatim into `run_stage`.
 /// Mirrors every PGAS field in `Stage::PGAS` plus burn_in/thin defaults.
@@ -457,6 +685,21 @@ pub fn run_stage(
     eprintln!("  estimated output: {} posterior samples per chain",
         (n_sweeps.saturating_sub(burn_in)) / thin);
 
+    // gh#727. The path-save stride and the draw-retention rule are independent,
+    // and only their intersection is usable downstream. Resolve them against
+    // each other HERE — before a single sweep runs — so a user who raised
+    // `n_trajectories` and got fewer usable paths learns it now rather than
+    // hours later at the consumer. `traj_plan` is also the single source of the
+    // stride the per-chain write site below uses.
+    let traj_plan = TrajectoryStridePlan::resolve(n_sweeps, burn_in, n_trajectories, thin);
+    eprintln!("  saved latent paths: {} per chain, {} of them forkable \
+        (stride {}, thin {})",
+        traj_plan.n_saved, traj_plan.n_forkable,
+        traj_plan.traj_stride.map_or("—".to_string(), |s| s.to_string()), thin);
+    if let Some(w) = trajectory_stride_warning(n_sweeps, burn_in, n_trajectories, thin) {
+        eprintln!("\x1b[33m{}\x1b[0m", w);
+    }
+
     // Pre-create chain directories (must happen before parallel spawn)
     for chain_id in 0..n_chains {
         let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
@@ -504,6 +747,15 @@ pub fn run_stage(
     }
     let chain_nuts: std::sync::Mutex<Vec<ChainNutsDiag>> =
         std::sync::Mutex::new(vec![ChainNutsDiag::default(); n_chains]);
+
+    // gh#727. The sweep index of every latent path each chain actually wrote,
+    // indexed by chain_id and filled inside the parallel closure (the pattern
+    // `chain_nuts` uses). Intersected with each chain's retained draws after
+    // the loop to get the MEASURED saved-vs-forkable counts for the summary —
+    // a resumed chain, or one whose substep record was incoherent on some
+    // sweep, writes fewer than `traj_plan` projects.
+    let chain_saved_sweeps: std::sync::Mutex<Vec<Vec<usize>>> =
+        std::sync::Mutex::new(vec![Vec::new(); n_chains]);
 
     // Per-chain progress bars (mirrors IF2 / PMMH). One `Reporter` hands out a
     // `Task` per chain, rendered as a coordinated stack; the Reporter honors
@@ -625,13 +877,11 @@ pub fn run_stage(
 
             let chain_start = std::time::Instant::now();
 
-            // Trajectory save stride: evenly space n_trajectories across post-burn-in
-            let n_post_burnin = n_sweeps.saturating_sub(burn_in);
-            let traj_stride = if n_trajectories > 0 && n_post_burnin > 0 {
-                (n_post_burnin / n_trajectories).max(1)
-            } else {
-                usize::MAX // disabled
-            };
+            // Trajectory save stride: evenly space n_trajectories across
+            // post-burn-in. Resolved once above (gh#727) so the count reported
+            // at configuration time and the sweeps actually written cannot
+            // disagree; `usize::MAX` is the disabled encoding (no path saved).
+            let traj_stride = traj_plan.traj_stride.unwrap_or(usize::MAX);
 
             // Shared posterior-trajectory output (latent-trajectory-output
             // consolidation, 2026-06-09). The per-substep reference path of each
@@ -818,6 +1068,10 @@ pub fn run_stage(
             // time [date]` id columns) + a `trajectories.json` manifest. Replaces
             // the per-draw `trajectory_NNNNNN.tsv` wide files.
             let draws = saved_draws.into_inner();
+            // gh#727: the sweeps a path was actually written for (the adapter
+            // skips an incoherent record, so this is not the stride re-derived).
+            chain_saved_sweeps.lock().unwrap()[chain_id] =
+                draws.iter().map(|d| d.draw).collect();
             if !draws.is_empty() {
                 let date_origin = traj_date_origin.as_ref()
                     .map(|(o, u)| (o.as_str(), u.as_str()));
@@ -1076,8 +1330,19 @@ pub fn run_stage(
         }
     }
 
-    // Write summary JSON
-    write_summary(stage_dir, &all_results, &config, thin, &diagnostics)?;
+    // Write summary JSON. gh#727: the saved-vs-forkable counts go in with it,
+    // measured from the sweeps each chain wrote rather than re-derived from the
+    // stride, so the artifact records what happened.
+    let saved_sweeps = chain_saved_sweeps.into_inner()
+        .expect("no chain panicked while holding the saved-sweeps lock");
+    let retained_sweeps: Vec<(usize, Vec<usize>)> = all_results.iter()
+        .map(|(chain_id, sweeps, _)| {
+            (*chain_id, sweeps.iter().map(|s| s.sweep).collect())
+        })
+        .collect();
+    let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
+    write_summary(stage_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
+        n_trajectories, &diagnostics)?;
 
     // No-op resume: every chain already reached the target sweep count
     // before this invocation. There are no new sweeps to aggregate
@@ -1288,11 +1553,69 @@ fn compute_diagnostics(
     }))
 }
 
+/// The `trajectories` key of `pgas_summary.json` — the per-chain saved-vs-
+/// forkable block (gh#727), keyed the same way `acceptance_rates` is (one entry
+/// per surviving chain, in `results` order).
+///
+/// Written next to the producer so the reader
+/// ([`read_saved_path_counts`]) cannot drift from it.
+pub(crate) const TRAJECTORIES_KEY: &str = "trajectories";
+
+/// One chain's row of the `trajectories` block.
+pub(crate) struct ChainSavedPaths {
+    /// Latent paths this chain wrote.
+    pub n_saved: u64,
+    /// Of those, the ones whose sweep is also a retained draw.
+    pub n_forkable: u64,
+}
+
+/// The `trajectories` block of a stage summary, read back.
+pub(crate) struct SavedPathReport {
+    /// Sweeps between saved paths, or `None` when the stage saved none.
+    pub traj_stride: Option<u64>,
+    /// Sweeps between retained draws.
+    pub thin: u64,
+    /// One row per chain, in the summary's chain order.
+    pub per_chain: Vec<ChainSavedPaths>,
+}
+
+/// Read the `trajectories` block back out of a stage summary JSON. `None` for
+/// a summary that carries no such block — a PMMH / NUTS stage saves no latent
+/// paths at all, and neither does a PGAS stage written before gh#727 — and for
+/// one whose two per-chain arrays disagree in length, which is not a report.
+pub(crate) fn read_saved_path_counts(
+    summary: &serde_json::Value,
+) -> Option<SavedPathReport> {
+    let t = summary.get(TRAJECTORIES_KEY)?;
+    let arr = |k: &str| -> Vec<u64> {
+        t.get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+            .unwrap_or_default()
+    };
+    let saved = arr("n_saved");
+    let forkable = arr("n_forkable");
+    if saved.len() != forkable.len() {
+        return None;
+    }
+    Some(SavedPathReport {
+        traj_stride: t.get("traj_stride").and_then(|v| v.as_u64()),
+        thin: t.get("thin").and_then(|v| v.as_u64())?,
+        per_chain: saved.into_iter().zip(forkable)
+            .map(|(n_saved, n_forkable)| ChainSavedPaths { n_saved, n_forkable })
+            .collect(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_summary(
     dir: &Path,
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     _config: &FitRunConfig,
     thin: usize,
+    traj_plan: &TrajectoryStridePlan,
+    saved_paths: &SavedPathCounts,
+    n_trajectories: usize,
     diagnostics: &StageConvergence,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<Vec<f64>> = results.iter()
@@ -1306,6 +1629,18 @@ fn write_summary(
         // Thinning factor: `n_samples` (kept draws) × `thin` = raw sampling
         // iterations, the thinning-invariant denominator for ESS/iteration.
         "thin": thin,
+        // gh#727. `n_saved` is the latent paths a chain wrote; `n_forkable` is
+        // how many of those landed on a retained draw and are therefore usable
+        // by `simulate --init-state fit` or a `last_obs`-anchored `quantities`
+        // entry. They differ whenever `traj_stride` is not a multiple of
+        // `thin`, and nothing downstream could see the gap before this block.
+        TRAJECTORIES_KEY: {
+            "n_trajectories": n_trajectories,
+            "traj_stride": traj_plan.traj_stride,
+            "thin": thin,
+            "n_saved": saved_paths.n_saved,
+            "n_forkable": saved_paths.n_forkable,
+        },
     });
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pmmh's or nuts's.
@@ -1393,5 +1728,223 @@ mod tests {
         let opts = PgasStageOpts::from_stage(&stage)
             .expect("single-rung [1.0] must validate");
         assert_eq!(opts.tempering, vec![1.0]);
+    }
+
+    // ── gh#727: trajectory stride vs thinning ────────────────────────────
+
+    /// Count the two sweep-selection rules by REPLAYING them, offset by
+    /// offset, with the same predicate each site uses (`is_multiple_of`) —
+    /// independent of the closed-form `div_ceil` / `lcm` arithmetic under
+    /// test. Returns `(n_saved, n_draws, n_forkable)`.
+    fn replay_counts(
+        n_sweeps: usize, burn_in: usize, traj_stride: usize, thin: usize,
+    ) -> (usize, usize, usize) {
+        let (mut saved, mut draws, mut forkable) = (0, 0, 0);
+        for sweep in burn_in..n_sweeps {
+            let k = sweep - burn_in;
+            // `pgas.rs` write site.
+            let is_saved = k.is_multiple_of(traj_stride);
+            // `sim/inference/pgas.rs` retention guard.
+            let is_draw = k.is_multiple_of(thin);
+            saved += usize::from(is_saved);
+            draws += usize::from(is_draw);
+            forkable += usize::from(is_saved && is_draw);
+        }
+        (saved, draws, forkable)
+    }
+
+    /// The closed form must agree with a replay of the two predicates over
+    /// every sweep, across a grid that spans aligned and misaligned strides.
+    /// Without this the counts could be plausible and wrong.
+    #[test]
+    fn plan_counts_match_a_replay_of_both_predicates() {
+        for &n_post_burnin in &[1usize, 2, 7, 30, 97, 360, 1000] {
+            for &n_trajectories in &[1usize, 2, 3, 7, 11, 50, 200, 1001] {
+                for &thin in &[1usize, 2, 3, 5, 7, 13, 100] {
+                    let burn_in = 11;
+                    let n_sweeps = burn_in + n_post_burnin;
+                    let plan = TrajectoryStridePlan::resolve(
+                        n_sweeps, burn_in, n_trajectories, thin);
+                    let stride = plan.traj_stride
+                        .expect("a positive n_trajectories over ≥1 sweep saves paths");
+                    assert_eq!(stride, (n_post_burnin / n_trajectories).max(1),
+                        "stride must be the write site's own formula");
+                    let (saved, draws, forkable) =
+                        replay_counts(n_sweeps, burn_in, stride, thin);
+                    assert_eq!(
+                        (plan.n_saved, plan.n_draws, plan.n_forkable),
+                        (saved, draws, forkable),
+                        "N={n_post_burnin} n_traj={n_trajectories} thin={thin}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// The issue's first measurement: `traj_stride` 15 against `thin` 2. Every
+    /// second written path lands between two retained draws, so half of them
+    /// can never be joined to a draw.
+    #[test]
+    fn stride_15_against_thin_2_makes_half_the_written_paths_unusable() {
+        // 9000 post-burn-in sweeps, 600 requested paths → stride 15.
+        let plan = TrajectoryStridePlan::resolve(10_000, 1_000, 600, 2);
+        assert_eq!(plan.n_post_burnin, 9_000);
+        assert_eq!(plan.traj_stride, Some(15));
+        assert_eq!(plan.n_saved, 600, "600 latent paths are written");
+        assert_eq!(plan.n_draws, 4_500, "thin = 2 retains every other sweep");
+        assert_eq!(plan.n_forkable, 300, "only sweeps on lcm(15, 2) = 30 are both");
+        assert!(!plan.all_saved_are_forkable());
+
+        let w = trajectory_stride_warning(10_000, 1_000, 600, 2)
+            .expect("a stride that loses half the paths must warn");
+        assert!(w.contains("Only 300 of the 600 written paths"), "got: {w}");
+        assert!(w.contains("the other 300"), "must name the loss: {w}");
+        // The nearest clean request: 601 → stride 14, a multiple of 2.
+        assert!(w.contains("n_trajectories = 601 (stride 14) writes 643 paths"),
+            "must name the nearest clean n_trajectories: {w}");
+    }
+
+    /// The negative control, and the low end of the issue's non-monotone pair:
+    /// 36000 post-burn-in sweeps at `thin` 5 with `n_trajectories` 200 gives
+    /// stride 180, a multiple of 5. Nothing is lost, so nothing is said.
+    #[test]
+    fn stride_180_is_a_multiple_of_thin_5_and_warns_about_nothing() {
+        let plan = TrajectoryStridePlan::resolve(38_000, 2_000, 200, 5);
+        assert_eq!(plan.n_post_burnin, 36_000);
+        assert_eq!(plan.traj_stride, Some(180));
+        assert_eq!(plan.n_saved, 200);
+        assert_eq!(plan.n_forkable, 200, "180 is a multiple of 5 — nothing is lost");
+        assert!(plan.all_saved_are_forkable());
+        assert_eq!(trajectory_stride_warning(38_000, 2_000, 200, 5), None,
+            "an aligned stride must produce NO warning");
+    }
+
+    /// The high end of the same pair, and the reason this bites: raising
+    /// `n_trajectories` from 200 to 250 lowers the stride to 144, which is not
+    /// a multiple of `thin` 5 — so the knob that means "save more paths"
+    /// leaves a quarter as many usable ones.
+    #[test]
+    fn raising_n_trajectories_to_250_drops_forkable_paths_to_20_percent() {
+        let plan = TrajectoryStridePlan::resolve(38_000, 2_000, 250, 5);
+        assert_eq!(plan.traj_stride, Some(144));
+        assert_eq!(plan.n_saved, 250);
+        assert_eq!(plan.n_forkable, 50, "lcm(144, 5) = 720 → 36000/720 = 50");
+        assert_eq!(plan.n_forkable * 5, plan.n_saved, "20% of the written paths");
+
+        // Non-monotone in the knob: MORE requested paths, FEWER usable.
+        let at_200 = TrajectoryStridePlan::resolve(38_000, 2_000, 200, 5);
+        assert!(plan.n_saved > at_200.n_saved);
+        assert!(plan.n_forkable < at_200.n_forkable,
+            "250 must yield fewer forkable paths than 200 — the reported inversion");
+
+        let w = trajectory_stride_warning(38_000, 2_000, 250, 5)
+            .expect("a misaligned stride must warn");
+        assert!(w.contains("Only 50 of the 250 written paths"), "got: {w}");
+        // 248 → stride 145, a multiple of 5; nearer than 256 above.
+        assert!(w.contains("n_trajectories = 248 (stride 145) writes 249 paths"),
+            "must name the nearest clean n_trajectories: {w}");
+    }
+
+    /// The nearest clean request is genuinely nearest and genuinely clean —
+    /// asserted against a scan, not against the implementation's own answer.
+    #[test]
+    fn the_suggested_n_trajectories_is_the_nearest_one_that_loses_nothing() {
+        for &(n_post_burnin, requested, thin) in
+            &[(36_000usize, 250usize, 5usize), (9_000, 600, 2), (1_000, 40, 3)]
+        {
+            assert_ne!(traj_stride_for(n_post_burnin, requested) % thin, 0,
+                "the case must start misaligned, or there is nothing to suggest");
+            let suggested = nearest_aligned_n_trajectories(n_post_burnin, requested, thin)
+                .expect("a clean n_trajectories exists for these");
+            let stride = traj_stride_for(n_post_burnin, suggested);
+            assert_eq!(stride % thin, 0,
+                "the suggestion must actually align (N={n_post_burnin})");
+            let d = suggested.abs_diff(requested);
+            for near in requested.saturating_sub(d - 1)..(requested + d) {
+                if near == 0 { continue; }
+                assert_ne!(traj_stride_for(n_post_burnin, near) % thin, 0,
+                    "n_trajectories = {near} is nearer than {suggested} and also \
+                     aligns (N={n_post_burnin}, requested={requested}, thin={thin})");
+            }
+        }
+    }
+
+    /// `n_trajectories = 0` disables path saving. Nothing is written, so
+    /// nothing is lost and there is nothing to warn about.
+    #[test]
+    fn saving_no_paths_at_all_is_not_a_misalignment() {
+        let plan = TrajectoryStridePlan::resolve(10_000, 1_000, 0, 2);
+        assert_eq!(plan.traj_stride, None);
+        assert_eq!((plan.n_saved, plan.n_forkable), (0, 0));
+        assert_eq!(plan.n_draws, 4_500, "draws are still retained");
+        assert_eq!(trajectory_stride_warning(10_000, 1_000, 0, 2), None);
+    }
+
+    /// A `thin` at least as large as the post-burn-in run retains one draw, so
+    /// no `n_trajectories` can make more than one path usable. Say that
+    /// instead of suggesting a number that cannot help.
+    #[test]
+    fn a_thin_larger_than_the_run_has_no_clean_n_trajectories() {
+        // 100 post-burn-in sweeps, thin 500 → only the sweep at burn_in.
+        let plan = TrajectoryStridePlan::resolve(1_100, 1_000, 10, 500);
+        assert_eq!(plan.traj_stride, Some(10));
+        assert_eq!(plan.n_saved, 10);
+        assert_eq!(plan.n_draws, 1);
+        assert_eq!(plan.n_forkable, 1);
+        assert_eq!(nearest_aligned_n_trajectories(100, 10, 500), None);
+        let w = trajectory_stride_warning(1_100, 1_000, 10, 500)
+            .expect("9 unusable paths must warn");
+        assert!(w.contains("No n_trajectories fixes this"), "got: {w}");
+        assert!(w.contains("retains only 1 draw(s)"), "got: {w}");
+    }
+
+    /// `thin = 0` is not rejected upstream, and `is_multiple_of(0)` retains
+    /// only the sweep at `burn_in`. The arithmetic must model that rather than
+    /// divide by zero.
+    #[test]
+    fn a_zero_thin_retains_one_draw_and_does_not_panic() {
+        let plan = TrajectoryStridePlan::resolve(1_100, 1_000, 10, 0);
+        assert_eq!(plan.n_draws, 1);
+        assert_eq!(plan.n_saved, 10);
+        assert_eq!(plan.n_forkable, 1);
+        let (saved, draws, forkable) = replay_counts(1_100, 1_000, 10, 0);
+        assert_eq!((plan.n_saved, plan.n_draws, plan.n_forkable),
+            (saved, draws, forkable), "must match the predicates at thin = 0");
+        assert!(trajectory_stride_warning(1_100, 1_000, 10, 0)
+            .is_some_and(|w| w.contains("No n_trajectories fixes this")));
+    }
+
+    /// A stride writing at most one path loses nothing even when it is not a
+    /// multiple of `thin`, so it must NOT warn — a warning naming zero lost
+    /// paths is noise.
+    #[test]
+    fn a_single_written_path_never_warns() {
+        // 10 post-burn-in sweeps, 1 requested path → stride 10, thin 3.
+        let plan = TrajectoryStridePlan::resolve(1_010, 1_000, 1, 3);
+        assert_eq!(plan.traj_stride, Some(10));
+        assert_ne!(10 % 3, 0, "the stride is genuinely misaligned");
+        assert_eq!((plan.n_saved, plan.n_forkable), (1, 1));
+        assert_eq!(trajectory_stride_warning(1_010, 1_000, 1, 3), None);
+    }
+
+    /// The summary's counts come from the sweeps each chain ACTUALLY wrote,
+    /// intersected with the draws it actually retained — not from the stride
+    /// re-derived. A chain whose record was incoherent on some sweep writes
+    /// fewer paths, and the artifact must say so.
+    #[test]
+    fn measured_saved_paths_intersect_the_retained_draws_per_chain() {
+        // thin = 2 from burn_in = 100: retained draws at 100, 102, … 110.
+        let retained_sweeps: Vec<usize> = (0..6).map(|i| 100 + 2 * i).collect();
+        let retained = vec![
+            (0usize, retained_sweeps.clone()),
+            (1usize, retained_sweeps.clone()),
+        ];
+        // Chain 0: stride 5 → 100, 105, 110; only 100 and 110 are even offsets.
+        // Chain 1: the same stride, but the path at 105 was skipped as
+        // incoherent, so only two were written and both are forkable.
+        let saved_sweeps = vec![vec![100, 105, 110], vec![100, 110]];
+        let counts = SavedPathCounts::measure(&retained, &saved_sweeps);
+        assert_eq!(counts.n_saved, vec![3, 2]);
+        assert_eq!(counts.n_forkable, vec![2, 2]);
     }
 }
