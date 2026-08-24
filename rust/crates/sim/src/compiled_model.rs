@@ -1908,10 +1908,14 @@ impl CompiledModel {
     /// makes "added to one, forgotten in the others" a compile-visible gap
     /// rather than a silently-zero coordinate in the NUTS gradient.
     ///
-    /// Call this only where the *mean* is what is wanted: the deterministic ODE
-    /// path, `camdl render`-style pre-flight state, and any structural quantity
-    /// derived from the initial state (a patch population, a total). Every
-    /// stochastic forward path calls [`Self::initial_state_draw`] instead.
+    /// Call this only where the *mean* is what is wanted. Today that is the
+    /// deterministic ODE path (`ode.rs::run_ode`), pre-flight state built
+    /// before any backend runs (the `--event-log` lineage recorder's initial
+    /// pool), the deterministic IVP finite-difference probe
+    /// (`pgas.rs::detect_ivp_mappings`), and structural quantities derived
+    /// from the initial state — a patch population, a total — which must be
+    /// the same number for every particle. Every stochastic forward path calls
+    /// [`Self::initial_state_draw`] instead.
     ///
     /// `init {}` cannot declare a law yet — `InitialConditions` is
     /// `Explicit`/`Parameterized`, both deterministic — so today this is the
