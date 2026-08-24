@@ -209,6 +209,28 @@ same backend by another**. Representative confirmed cases:
   is the axis's second silent-wrong-answer guard, and it was wrong until gh#732:
   it tested a _proxy_ (is some parameter flagged?) for a _property_ (does spread
   exist?), and the proxy did not imply the property.
+- **A DECLARED `init { }` law requires a filter that draws x₀ per particle**
+  (`particle_filter.rs::bootstrap_filter` and
+  `correlated_pf.rs::bootstrap_filter_correlated`, keyed on
+  `ProcessModel::declares_init_law` / `CompiledModel::has_init_law`). Since
+  ir/VERSION 0.35 an initial condition may be drawn (`I ~ poisson(rate = I0)`),
+  which makes x₀ a random variable the filter has to integrate over. The
+  bootstrap filter evaluates ONE initial state and copies it to every particle,
+  so it would condition the whole swarm on a single realization — a wrong
+  likelihood, not a noisy one — and correlated PMMH would additionally be adding
+  uncorrelated noise to the one quantity it needs correlated between the current
+  and proposed θ. Both refuse by name, pointing at `pgas` (its conditional SMC
+  draws per particle and scores `log p(x₀ | θ)` as part of the target) and `if2`
+  (each particle draws from its own perturbed θ). Moving the bootstrap draw into
+  the per-particle loop is staging step 5 of the initial-state proposal; the
+  refusal is the honest interim, and re-admitting those two cells is a one-line
+  change to each guard.
+
+  Unusually for this axis, the check lives at the ENFORCEMENT point rather than
+  in `FitConfigV2::validate`: the predicate is a property of the compiled model,
+  which config validation does not hold. `ProcessModel::declares_init_law` is
+  deliberately a REQUIRED trait method with no default, so a new process must
+  answer rather than inherit a `false` that happens to be wrong.
 - **`perturb_only_at_t0` requires the fit to have an `if2` stage**
   (`methods.rs::validate_perturb_only_at_t0`, called once from
   `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"

@@ -173,6 +173,39 @@ choices before simulation starts.
 
 ---
 
+## Uncertain initial conditions
+
+An `init { }` entry may be **drawn** rather than computed. `=` says "this
+compartment starts at this value"; `~` says "this compartment starts at a draw
+from this distribution" — the same reading `~` has for a parameter prior and for
+an observation likelihood.
+
+```camdl
+init {
+  I ~ poisson(rate = I0)   # the number introduced is a draw around I0
+  S = N0 - I               # reads the DRAWN I, so S + I = N0 on every run
+}
+```
+
+Entries are evaluated in dependency order, so `S` reads what `I` was drawn as.
+The population budget holds on every draw with no `balance { }` block.
+
+An integer compartment may be drawn from `poisson(rate = ..)`,
+`binomial(n = .., p = ..)` or `neg_binomial(mean = .., r = ..)`; a `: real`
+compartment from `normal(mean = .., sd = ..)`. Reach for `neg_binomial` when
+introductions are clustered rather than independent — the dispersion `r`
+controls how much more variable the count is than a Poisson of the same mean.
+
+Under `pgas` a drawn initial condition becomes part of the fit target:
+`log p(x0 | theta)` is added to the complete-data likelihood and reported per
+sweep in the `initial_state_ll` trace column, so the law's parameters are
+estimated from the data. Under `if2` each particle draws its own initial state.
+`pfilter` and `pmmh` refuse such a model — their bootstrap filter gives every
+particle the same initial state, which would condition the whole swarm on one
+realization.
+
+---
+
 ## Math functions and time
 
 `t` is the current simulation time, available anywhere in expressions. Standard
