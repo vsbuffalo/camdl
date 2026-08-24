@@ -96,7 +96,7 @@ fn balance_model() -> CompiledModel {
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: BETA }, param_kind: None, param_dim: None },
             Parameter { name: "N0".into(), value: ir::parameter::ParamValue::Fixed { value: N0 as f64 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("S".into(), N0 as f64);
             m.insert("I".into(), 0.0);

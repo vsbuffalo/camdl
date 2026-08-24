@@ -149,12 +149,12 @@ mod tests {
         // carries emitted `ic_grad` for its own parameterized IC, so clear it to
         // stay consistent with this forced Explicit IC (the estimated-IC oracle
         // below sets its own IC + ic_grad).
-        model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
+        model.initial_conditions = ir::model::InitialConditions::constants([
             ("S".to_string(), 9990.0),
             ("E".to_string(), 0.0),
             ("I".to_string(), 10.0),
             ("R".to_string(), 0.0),
-        ]));
+        ]);
         model.ic_grad = HashMap::new();
 
         // Keep the native weekly_cases (rho·incidence). Rewrite detection to a
@@ -566,12 +566,12 @@ mod tests {
         // Parameterized IC: I0 sets the initial infected count and is drawn out of
         // S so the total population is conserved. N0 stays fixed.
         let param = |n: &str| Expr::Param(ParamExpr { param: n.to_string() });
-        model.initial_conditions = ir::model::InitialConditions::Parameterized(HashMap::from([
+        model.initial_conditions = ir::model::InitialConditions::exprs([
             ("S".to_string(), Expr::bin_op(BinOp::Sub, param("N0"), param("I0"))),
             ("E".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
             ("I".to_string(), param("I0")),
             ("R".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
-        ]));
+        ]);
         // Emitted ∂init/∂I0: −1 for S (= ∂(N0−I0)/∂I0), +1 for I. N0 is fixed → no
         // column. (What the OCaml WrtParam-over-init pass will emit.)
         let grad1 = |v: f64| DerivEntry::Grad(Expr::Const(ConstExpr { value: v }));
@@ -689,12 +689,12 @@ mod tests {
             .join("../../../ocaml/golden/seir_observations.ir.json");
         let mut model: ir::Model =
             ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
+        model.initial_conditions = ir::model::InitialConditions::constants([
             ("S".to_string(), 9990.0),
             ("E".to_string(), 0.0),
             ("I".to_string(), 10.0),
             ("R".to_string(), 0.0),
-        ]));
+        ]);
         model.ic_grad = HashMap::new();
         model.simulation.t_end = t_end;
 

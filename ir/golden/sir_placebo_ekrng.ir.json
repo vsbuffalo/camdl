@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.33",
+  "ir_version": "0.34",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "sir_placebo_ekrng",
@@ -125,25 +125,17 @@
       {"name": "epsilon", "value": {"mode": "fixed", "value": 1e-10}, "param_kind": null, "param_dim": null}
     ],
     "initial_conditions": {
-      "parameterized": {
-        "S": {
+      "S": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
-            "left": {
-              "const": 1000.0
-            },
-            "right": {
-              "param": "I0"
-            }
+            "left": { "const": 1000.0 },
+            "right": { "param": "I0" }
           }
-        },
-        "I": {
-          "param": "I0"
-        },
-        "R": {
-          "const": 0.0
         }
-      }
+      },
+      "I": { "deterministic": { "param": "I0" } },
+      "R": { "deterministic": { "const": 0.0 } }
     },
     "output": {
       "times": {

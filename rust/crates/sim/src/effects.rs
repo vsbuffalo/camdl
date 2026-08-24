@@ -700,7 +700,6 @@ mod tests {
         transition::{DrawMethod, StoichiometryEntry, Transition},
         Model,
     };
-    use std::collections::HashMap;
 
     // S, I integer; W real. One trivial transition so the model compiles.
     fn model_with(actions: Vec<Action>) -> CompiledModel {
@@ -741,13 +740,11 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "p".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None }],
-            initial_conditions: InitialConditions::Explicit({
-                let mut h = HashMap::new();
-                h.insert("S".into(), 100.0);
-                h.insert("I".into(), 0.0);
-                h.insert("W".into(), 50.0);
-                h
-            }),
+            initial_conditions: InitialConditions::constants([
+                ("S".into(), 100.0),
+                ("I".into(), 0.0),
+                ("W".into(), 50.0)
+            ]),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
                 format: "tsv".into(),
@@ -1129,14 +1126,12 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "p".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None }],
-            initial_conditions: InitialConditions::Explicit({
-                let mut h = HashMap::new();
-                h.insert("S".into(), 100.0);
-                h.insert("I".into(), 0.0);
-                h.insert("W1".into(), 10.0);
-                h.insert("W2".into(), 0.0);
-                h
-            }),
+            initial_conditions: InitialConditions::constants([
+                ("S".into(), 100.0),
+                ("I".into(), 0.0),
+                ("W1".into(), 10.0),
+                ("W2".into(), 0.0)
+            ]),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
                 format: "tsv".into(),
@@ -1261,13 +1256,11 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "p".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None }],
-            initial_conditions: InitialConditions::Explicit({
-                let mut h = HashMap::new();
-                h.insert("S".into(), 100.0);
-                h.insert("I".into(), 0.0);
-                h.insert("W".into(), 50.0);
-                h
-            }),
+            initial_conditions: InitialConditions::constants([
+                ("S".into(), 100.0),
+                ("I".into(), 0.0),
+                ("W".into(), 50.0)
+            ]),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
                 format: "tsv".into(),

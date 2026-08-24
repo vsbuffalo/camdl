@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.33",
+  "ir_version": "0.34",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "cholera_siwr",
@@ -246,12 +246,10 @@
       {"name": "rho", "value": {"mode": "fixed", "value": 5.0}, "param_kind": null, "param_dim": null}
     ],
     "initial_conditions": {
-      "explicit": {
-        "S": 990,
-        "I": 10,
-        "R": 0,
-        "W": 0.0
-      }
+      "S": { "deterministic": { "const": 990 } },
+      "I": { "deterministic": { "const": 10 } },
+      "R": { "deterministic": { "const": 0 } },
+      "W": { "deterministic": { "const": 0.0 } }
     },
     "output": {
       "times": {

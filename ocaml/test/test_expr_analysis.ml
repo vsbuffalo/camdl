@@ -81,7 +81,7 @@ let model_with_bindings bs =
     compartments = []; transitions = []; ode_equations = [];
     time_functions = []; tables = []; interventions = []; observations = [];
     parameters = []; bindings = bs; per_eval_bindings = [];
-    initial_conditions = Explicit [];
+    initial_conditions = [];
     ic_grad = [];
     output = { times = OutAtTimes []; format = "tsv";
                trajectory = true; observations = true };

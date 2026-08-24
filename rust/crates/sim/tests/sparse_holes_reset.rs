@@ -100,7 +100,7 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
         parameters: vec![
             Parameter { name: "dummy".into(), value: ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut h = HashMap::new();
             h.insert("R".into(), 0.0); h
         }),

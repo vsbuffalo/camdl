@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.33",
+  "ir_version": "0.34",
   "validated_by": "hand-curated-guard-fixture",
   "model": {
     "name": "intervention_nonfinite",
@@ -59,7 +59,9 @@
       {"name": "z", "value": {"mode": "fixed", "value": 0.0}, "param_kind": null, "param_dim": null}
     ],
     "initial_conditions": {
-      "explicit": { "S": 1000, "I": 0, "V": 0 }
+      "S": { "deterministic": { "const": 1000 } },
+      "I": { "deterministic": { "const": 0 } },
+      "V": { "deterministic": { "const": 0 } }
     },
     "output": {
       "times": { "regular": { "start": 0.0, "step": 1.0 } },

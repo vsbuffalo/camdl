@@ -62,7 +62,7 @@ fn setup_pure_erlang_decay(n0: i64) -> ir::Model {
     init.insert("E_e3".to_string(), 0.0);
     init.insert("I".to_string(), 0.0);
     init.insert("R".to_string(), 0.0);
-    model.initial_conditions = InitialConditions::Explicit(init);
+    model.initial_conditions = InitialConditions::constants(init);
 
     // Override params: β = 0 (no infections possible from S=0 anyway,
     // but makes the setup self-evident), σ = 0.2 (5-day mean latent),

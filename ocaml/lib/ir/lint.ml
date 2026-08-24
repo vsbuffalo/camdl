@@ -159,10 +159,11 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
 
   (* Initial conditions: a compartment is live if it has an init target,
      even if it appears nowhere else. *)
-  (match m.initial_conditions with
-   | Explicit pairs -> List.iter (fun (comp, _v) -> add comp) pairs
-   | Parameterized pairs -> List.iter (fun (comp, e) -> add comp; add_expr e) pairs
-   | FromDistribution pairs -> List.iter (fun (comp, _d) -> add comp) pairs);
+  List.iter
+    (fun (comp, spec) ->
+       add comp;
+       match spec with Deterministic e -> add_expr e)
+    m.initial_conditions;
 
   (* Balance constraint: target compartment + balance expr operands. *)
   (match m.balance with

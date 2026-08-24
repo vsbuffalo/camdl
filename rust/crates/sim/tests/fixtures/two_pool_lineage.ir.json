@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.33",
-  "validated_by": "ocaml-compiler-v0.33",
+  "ir_version": "0.34",
+  "validated_by": "ocaml-compiler-v0.34",
   "model": {
     "name": "two_pool",
     "version": "0.3",
@@ -283,7 +283,11 @@
       {"name": "sigma", "value": {"mode": "estimated", "bounds": [0.0, 5.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
       {"name": "gamma", "value": {"mode": "estimated", "bounds": [0.0, 5.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null}
     ],
-    "initial_conditions": { "explicit": { "S": 200.0, "I": 5.0, "A": 5.0 } },
+    "initial_conditions": {
+      "S": { "deterministic": { "const": 200.0 } },
+      "I": { "deterministic": { "const": 5.0 } },
+      "A": { "deterministic": { "const": 5.0 } }
+    },
     "output": {
       "times": { "regular": { "start": 0.0, "step": 1.0 } },
       "format": "tsv",

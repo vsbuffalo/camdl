@@ -109,7 +109,7 @@ fn model() -> Arc<CompiledModel> {
             Parameter { name: "rho".into(), value: ir::parameter::ParamValue::Fixed { value: 0.3 }, param_kind: None, param_dim: None },
             Parameter { name: "k".into(), value: ir::parameter::ParamValue::Fixed { value: 5.0 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut h = HashMap::new();
             h.insert("S".into(), 950.0); h.insert("I".into(), 40.0); h.insert("R".into(), 10.0); h
         }),

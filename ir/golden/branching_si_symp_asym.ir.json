@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.33",
-  "validated_by": "ocaml-compiler-v0.33",
+  "ir_version": "0.34",
+  "validated_by": "ocaml-compiler-v0.34",
   "model": {
     "name": "branching_si_symp_asym",
     "version": "0.3",
@@ -311,16 +311,16 @@
       {"name": "I0", "value": {"mode": "estimated", "bounds": [1.0, 1000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
     ],
     "initial_conditions": {
-      "parameterized": {
-        "S": {
+      "S": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
             "left": { "param": "N0" },
             "right": { "param": "I0" }
           }
-        },
-        "I_symp": { "param": "I0" }
-      }
+        }
+      },
+      "I_symp": { "deterministic": { "param": "I0" } }
     },
     "output": {
       "times": { "regular": { "start": 0.0, "step": 1.0 } },

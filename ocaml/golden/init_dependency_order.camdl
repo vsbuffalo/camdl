@@ -1,0 +1,116 @@
+# SEIR seeded mid-outbreak, where each initial condition is written in terms
+# of the ones it depends on (gh#733).
+#
+# WHAT THIS MODEL IS
+#
+# A standard SEIR with a cumulative-deaths compartment. Susceptible people (S)
+# who meet an infectious person become exposed (E) — infected but not yet
+# infectious — then become infectious (I), then either recover with immunity
+# (R) or die (D). D is a cumulative tally, not a living population, so it is
+# outside the transmission denominator.
+#
+# WHAT THIS FIXTURE IS FOR
+#
+# The `init { }` block is the point. It exercises, in one block, every part of
+# the initial-condition contract that arrived with ir/VERSION 0.34:
+#
+#   * an entry that READS ANOTHER COMPARTMENT's initial value — `E` reads the
+#     `I` that this same block seeds, and `S` reads `R`. Before 0.34 every such
+#     reference silently evaluated to zero;
+#   * DECLARATION ORDER THAT IS NOT DEPENDENCY ORDER — `S` is written first and
+#     depends on three entries below it, so the runtime's topological sort is
+#     exercised rather than incidentally satisfied by the order of the lines;
+#   * a HOISTED BINDING in an init RHS — `S` reads `let infected = E + I`,
+#     which makes S depend on E and I through the binding body, not just on
+#     what its own line names;
+#   * a DEPENDENCY CHAIN THREE DEEP — `I` is seeded from a parameter, `E` from
+#     `I`, and `S` from `E` (via `infected`), so a single-level evaluation pass
+#     would not suffice;
+#   * a LITERAL ENTRY BESIDE EXPRESSION ENTRIES — `D = 0` sits in the same
+#     block as `S`, `E` and `R`. Before 0.34 the whole block had to be one or
+#     the other, so this combination could not be written down.
+#
+# THE PROPERTY TO READ OFF IT
+#
+# The living population is exactly `N0` at t=0, with no `balance { }` block:
+# `S` is what is left after the seeded E, I and R are taken out of `N0`. Under
+# the `baseline` scenario (N0 = 100000, I0 = 50, exposed_per_infectious = 1.5,
+# frac_immune = 0.2) that is
+#
+#     I = 50,  E = 75,  R = 20000,  S = 100000 - 125 - 20000 = 79875,  D = 0
+#
+# and S + E + I + R = 100000. Evaluate the entries against a zero state instead
+# and S comes out at 100000 — a starting population 25% too large, with no
+# diagnostic.
+
+time_unit = 'days
+
+compartments { S, E, I, R, D }
+
+parameters {
+  #' per-capita transmission rate
+  #' @symbol β
+  beta                  : rate     in [0.001, 2.0]
+  #' rate of leaving the exposed class; 1/sigma is the mean latent period
+  #' @symbol σ
+  sigma                 : rate     in [0.01, 1.0]
+  #' recovery rate; 1/gamma is the mean infectious period
+  #' @symbol γ
+  gamma                 : rate     in [0.01, 1.0]
+  #' per-capita fatality rate out of the infectious class
+  #' @symbol μ
+  mu                    : rate     in [0.0001, 0.5]
+  #' living population at t_start
+  N0                    : count    in [100, 1000000]
+  #' infectious people at t_start
+  I0                    : count    in [1, 10000]
+  #' exposed people per infectious person at t_start. A growing epidemic
+  #' carries more latent than infectious infections, so this exceeds 1.
+  exposed_per_infectious : positive in [0.1, 10.0]
+  #' fraction of the living population already immune at t_start
+  frac_immune           : probability in [0.0, 0.9]
+}
+
+let N        = S + E + I + R   # living population — the transmission denominator
+let infected = E + I           # everyone currently carrying an infection
+
+transitions {
+  infection   : S --> E  @ beta * S * I / N
+  progression : E --> I  @ sigma * E
+  recovery    : I --> R  @ gamma * I
+  fatality    : I --> D  @ mu * I
+}
+
+init {
+  # Written in the order a modeller thinks about them — the outcome first,
+  # then what it is made of. The runtime does NOT evaluate them in this
+  # order. The edges are S -> {E, I} (through `infected`), S -> R, and
+  # E -> I; the sort puts I before E before S, and S last. Evaluate these
+  # lines top to bottom instead and S is seeded from an unbuilt E, I and R.
+  D = 0
+  S = N0 - infected - R
+  E = exposed_per_infectious * I
+  I = I0
+  R = frac_immune * N0
+}
+
+simulate {
+  from = 0 'days
+  to   = 120 'days
+}
+
+scenarios {
+  baseline {
+    label = "seeded mid-outbreak"
+    set = {
+      beta                   = 0.6
+      sigma                  = 0.2
+      gamma                  = 0.1
+      mu                     = 0.01
+      N0                     = 100000
+      I0                     = 50
+      exposed_per_infectious = 1.5
+      frac_immune            = 0.2
+    }
+  }
+}

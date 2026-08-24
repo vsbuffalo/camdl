@@ -2356,7 +2356,7 @@ mod tests {
             parameters: vec![],
             bindings: vec![],
             per_eval_bindings: vec![],
-            initial_conditions: InitialConditions::Explicit(Default::default()),
+            initial_conditions: InitialConditions::default(),
             output: OutputConfig {
                 times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
                 format: "tsv".into(),

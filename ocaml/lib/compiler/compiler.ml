@@ -456,6 +456,21 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
             means the IR was hand-written or has drifted",
       (* The IR carries no per-init-entry source span. *)
       Diagnostics.no_loc
+    | InitDependencyCycle cyc ->
+      (* gh#733. An init entry may read another compartment's initial value, so
+         the entries are evaluated in dependency order. A cycle has no such
+         order — every candidate evaluation reads a compartment that has not
+         been built yet. Name the whole cycle: the offending entry is rarely the
+         one the author is looking at. *)
+      "E515",
+      Printf.sprintf
+        "initial conditions reference each other in a cycle: %s"
+        (String.concat " -> " (cyc @ [List.hd cyc])),
+      Some "an initial condition may read another compartment's initial value, \
+            but the references must form a chain, not a loop. Break the cycle \
+            by writing one of these entries in terms of parameters only",
+      (* The IR carries no per-init-entry source span. *)
+      Diagnostics.no_loc
   in
   Diagnostics.mk_error ~code ~loc ~message ?hint ()
 
@@ -744,24 +759,27 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
                 else Autodiff.differentiate_projection om.projection comp_names tfs tbls bindings })
           observations)
     in
-    (* Initial-condition autodiff (gh#275 §1c C-seed): ∂(initial_state)/∂θ for a
-       PARAMETERIZED initial condition, filling the model's [ic_grad] map — the
-       ODE forward-sensitivity seed S(t_start). Explicit (constant) and
-       from-distribution ICs contribute nothing (∂init/∂θ = 0 / not a gradient
-       method's concern). A compartment whose expression has no parameter
-       dependence is dropped (empty grad_map), so a mixed init emits only the
-       parameter-bearing compartments. *)
+    (* Initial-condition autodiff (gh#275 §1c C-seed): ∂(initial_state)/∂θ per
+       initial condition, filling the model's [ic_grad] map — the ODE
+       forward-sensitivity seed S(t_start). A compartment whose expression has
+       no parameter dependence is dropped (empty grad_map), so a block of
+       literals emits nothing and a mixed block emits only the parameter-bearing
+       compartments.
+
+       [Init_order.closed] first substitutes each compartment reference by that
+       compartment's own initial expression (gh#733): the runtime evaluates the
+       entries in dependency order, so `init { A = A0   B = A0 - A }` starts B
+       at 0, and the seed has to differentiate THAT, not the raw `A0 - A` whose
+       [Pop] leaf differentiates to zero (which would report ∂B/∂A0 = 1). *)
     let ic_grad =
-      match d.model.Ir.initial_conditions with
-      | Ir.Parameterized ic_map ->
-        Passtime.time "autodiff-ic" (fun () ->
-          List.filter_map
-            (fun (comp, expr) ->
-              match Autodiff.differentiate_ic expr param_names tfs tbls with
-              | [] -> None
-              | grad -> Some (comp, grad))
-            ic_map)
-      | Ir.Explicit _ | Ir.FromDistribution _ -> []
+      Passtime.time "autodiff-ic" (fun () ->
+        List.filter_map
+          (fun (comp, expr) ->
+            match Autodiff.differentiate_ic expr param_names tfs tbls with
+            | [] -> None
+            | grad -> Some (comp, grad))
+          (Init_order.closed d.model.Ir.initial_conditions
+             ~bindings:d.model.Ir.bindings))
     in
     (* Write the resolved quantity dimensions (#5) back onto the model before the
        value-preserving transforms (constant-fold/LICM never touch quantities). *)

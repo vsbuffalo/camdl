@@ -36,7 +36,7 @@ fn tiny_model() -> Model {
         parameters: vec![],
         bindings: vec![],
         per_eval_bindings: vec![],
-        initial_conditions: InitialConditions::Explicit(Default::default()),
+        initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
             format: "tsv".into(),
@@ -653,40 +653,31 @@ fn presentation_fields_are_inert_on_every_cas_kind() {
 #[test]
 fn cas_identity_pins() {
     // Absolute run_id pins for every model-bearing kind, over `tiny_model()`
-    // with every other input fixed. Two jobs:
+    // with every other input fixed. The job: a move here is a deliberate,
+    // reviewed re-key — say which kinds move and why, then re-pin. Anything
+    // that moves a kind NOT named in the reason is collateral, and it fails
+    // here rather than silently in the field.
     //
-    //   - `sim` / `fit` are pinned to their PRE-gh#442 values. gh#442 sanctions
-    //     a re-key of the four batch kinds and nothing else; if this refactor
-    //     (or a later one) moves sim or fit, that is collateral, and it fails
-    //     here rather than silently in the field.
-    //   - `pfilter` / `survey` / `sim_ensemble` / `profile` are pinned to their
-    //     POST-gh#442 values — the deliberate re-key, recorded so it can never
-    //     recur silently.
-    //
-    // A move here is a deliberate, reviewed re-key: say which kinds move and
-    // why, then re-pin.
+    // gh#733 (ir/VERSION 0.34) moved ALL SIX at once, and it is the first
+    // change that does. `initial_conditions` stopped being a three-variant enum
+    // over the whole block and became one ordered map of per-compartment specs,
+    // so its `ContentAddressed` bytes changed — a new `ir::model::InitSpec`
+    // header, and a length-prefixed walk in DECLARATION order rather than the
+    // sorted `write_str_map`. Every kind's `model` level folds
+    // `initial_conditions`, so every kind re-keys. That the scope is "all six"
+    // rather than "some" is itself the claim this list makes checkable: a
+    // change to a field EVERY kind hashes cannot leave any of them behind.
     let expected: &[(&str, &str)] = &[
-        // gh#641 re-keyed `sim` ALONE: `SimConfig` gained `init_state` (schema
-        // version 3 → 4), which contributes bytes at its `None` default, so
-        // every sim leaf moves. No other kind embeds `SimConfig`, which is why
-        // the five below are byte-for-byte their pre-gh#641 values — that is the
-        // scope claim this list exists to make checkable.
-        ("sim", "99e7f1d94ed2ab526c8bdbf8e9833c6d67b909ce9ff19145a8a5cc69424aff11"),
-        // Re-keyed by the `ivp` → `perturb_only_at_t0` rename: the fit
-        // canonical JSON serializes `EstimateSpecV2` field-by-field, so the
-        // renamed TOML key changes the hashed bytes for every fit leaf even at
-        // its `false` default. `fit` ALONE moves — no other kind embeds
-        // `FitConfigV2`, which is the scope claim this list makes checkable.
-        // (Unchanged by gh#442 before that: the pre-fix build produced
-        // c2707d3d973cbdaf9c0d5afc553264ca59f6002c60055b5957f31aa2431f673f for
-        // the same fixture.)
-        ("fit", "5c04cd634aa930a1805463e3b5112354e67984d9401c2ea83ed78116b952645f"),
-        // Re-keyed by gh#442: these four hashed the RAW model, so their `model`
-        // level folded `output.format = "tsv"` / `time_semantics = "continuous"`.
-        ("pfilter", "08df1f4d17f0b2a4428202b055bc1cc7c9cc5c6573fe2c3387e95bfdbe55ad3e"),
-        ("survey", "7815cf6ee9be362f1de0f444e8d6e60c262e53d70d729459599d9bdfc6c89bc8"),
-        ("sim_ensemble", "cdc28e4c0e8c7335b4903460e705cb3f606e89bd42076621811f43e0951ef123"),
-        ("profile", "a9f236851af534936300f1a048ad3c26b41a27976d154c519ed68ebb1e6a9873"),
+        // `fit` carries TWO re-keys composed: this one, and the
+        // `ivp` -> `perturb_only_at_t0` rename, whose renamed TOML key
+        // changes the fit canonical JSON's hashed bytes even at its `false`
+        // default. The other five carry only this one.
+        ("sim", "79410b7a99a5481578da7c4aeb1104ac98eaac188b4c363b3bc0ea69fa6c0fc5"),
+        ("fit", "4013b1617bb9152e85ab715b2acded4923e3d23f8df68246b4447db943610fa5"),
+        ("pfilter", "487a1ac8fafaa7548b078657be2fc7d1b5ec17ccfb177ff10b992b8a03e161b3"),
+        ("survey", "ef89bb787175271fbec810a494a3a7b7cde2ef909cff60633d638b66ea1b0ab0"),
+        ("sim_ensemble", "b597c66aa6dac403d222637af80ddf09b715e1b38a23848459b562101aee12c9"),
+        ("profile", "8bf027c81176a94448ed2fd463c20abb92d4c8c7e48244a383582005c583a554"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.

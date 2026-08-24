@@ -563,12 +563,10 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![],
-            initial_conditions: InitialConditions::Explicit({
-                let mut h = HashMap::new();
-                h.insert("S".into(), 1.0);
-                h.insert("I".into(), 0.0);
-                h
-            }),
+            initial_conditions: InitialConditions::constants([
+                ("S".into(), 1.0),
+                ("I".into(), 0.0)
+            ]),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
                 format: "tsv".into(),

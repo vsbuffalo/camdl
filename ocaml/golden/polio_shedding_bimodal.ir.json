@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"polio_shedding_bimodal","version":"0.3","time_unit":"weeks","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"polio_shedding_bimodal","version":"0.3","time_unit":"weeks","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"R","kind":"integer"},
 {"name":"I__typical__1","kind":"integer"},
@@ -15,6 +15,6 @@
 {"name":"p","value":{"mode":"required"},"param_kind":"probability","param_dim":null},
 {"name":"tau_typ","value":{"mode":"estimated","bounds":[0.5,12.0],"prior":"flat","transform":"identity"},"param_kind":"positive","param_dim":null},
 {"name":"tau_pro","value":{"mode":"estimated","bounds":[12.0,200.0],"prior":"flat","transform":"identity"},"param_kind":"positive","param_dim":null}
-],"initial_conditions":{"parameterized":{"S":{"const":990.0},"I__typical__1":{"bin_op":{"op":"mul","left":{"const":10.0},"right":{"param":"p"}}},"I__prolonged__1":{"bin_op":{"op":"mul","left":{"const":10.0},"right":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"param":"p"}}}}}}},"ic_grad":{"I__typical__1":{"p":{"grad":{"const":10.0}}},"I__prolonged__1":{"p":{"grad":{"const":-10.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":52.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S":{"deterministic":{"const":990.0}},"I__typical__1":{"deterministic":{"bin_op":{"op":"mul","left":{"const":10.0},"right":{"param":"p"}}}},"I__prolonged__1":{"deterministic":{"bin_op":{"op":"mul","left":{"const":10.0},"right":{"bin_op":{"op":"sub","left":{"const":1.0},"right":{"param":"p"}}}}}}},"ic_grad":{"I__typical__1":{"p":{"grad":{"const":10.0}}},"I__prolonged__1":{"p":{"grad":{"const":-10.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":52.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"bimodal shedding (typical ≈ 4w, prolonged ≈ 100w)","params":{"beta":0.8,"p":0.9,"tau_typ":4.0,"tau_pro":100.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"R":[],"I__typical__1":[],"I__typical__2":[],"I__prolonged__1":[]},"base_compartments":["S","R","I__typical__1","I__typical__2","I__prolonged__1"],"transmission_transitions":["infection"],"infectious_compartments":["I__typical__1","I__typical__2","I__prolonged__1"]}}}

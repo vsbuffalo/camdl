@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.33",
-  "validated_by": "ocaml-compiler-v0.33",
+  "ir_version": "0.34",
+  "validated_by": "ocaml-compiler-v0.34",
   "model": {
     "name": "ross_macdonald",
     "version": "0.3",
@@ -513,17 +513,17 @@
       {"name": "N_tested", "value": {"mode": "estimated", "bounds": [10.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
     ],
     "initial_conditions": {
-      "parameterized": {
-        "S_h": {
+      "S_h": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
             "left": { "param": "H0" },
             "right": { "param": "I_h0" }
           }
-        },
-        "I_h": { "param": "I_h0" },
-        "S_v": { "param": "M0" }
-      }
+        }
+      },
+      "I_h": { "deterministic": { "param": "I_h0" } },
+      "S_v": { "deterministic": { "param": "M0" } }
     },
     "output": {
       "times": { "regular": { "start": 0.0, "step": 1.0 } },

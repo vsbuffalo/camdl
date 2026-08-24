@@ -88,6 +88,16 @@ pub enum ValidationError {
              whole count, or declare the compartment real if fractional state is intended")]
     InitialValueNotInteger { compartment: String, value: f64 },
 
+    /// gh#733 / E515 in the OCaml validator. An initial condition may read
+    /// another compartment's initial value, so the entries are evaluated in
+    /// dependency order; a cycle has no such order and no value to report.
+    #[error("initial conditions reference each other in a cycle: {}. An initial \
+             condition may read another compartment's initial value, but the \
+             references must form a chain, not a loop. Break the cycle by writing \
+             one of these entries in terms of parameters only",
+            .0.iter().chain(.0.first()).cloned().collect::<Vec<_>>().join(" -> "))]
+    InitialConditionCycle(Vec<String>),
+
     #[error("quantity '{quantity}' uses '{leaf}', which is only meaningful inside a \
              transition rate or a likelihood, not in a quantity (a quantity is read at \
              output cadence over a finished trajectory). Reachable directly or via a \
@@ -315,11 +325,11 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
     //   - non-integer for INTEGER compartments (a near-integer tolerance allows
     //     for float round-trip noise; a clearly-fractional value errors).
     // Real compartments may hold fractional (but finite, nonnegative) values.
-    // Parameterized / FromDistribution inits carry expressions / priors rather
-    // than literals, so there is nothing to range-check statically here; their
-    // values are produced (and bounds-enforced) at sim/inference time.
+    // An init expression that is not constant-foldable (it reads a parameter,
+    // another compartment, a table) has no static value to range-check; it is
+    // produced (and bounds-enforced) at sim/inference time.
     {
-        use crate::model::InitialConditions;
+        use crate::model::InitSpec;
         // Tolerance for the integer check: a value within this of its nearest
         // integer is treated as that integer (absorbs float round-trip noise
         // like 3.0000000001). Mirrors the `1e-9` tolerance the issue specifies
@@ -360,24 +370,28 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
                 });
             }
         };
-        match &model.initial_conditions {
-            InitialConditions::Explicit(map) => {
-                for (k, v) in map {
-                    check_init_key(k, &mut errors);
-                    check_init_value(k, *v, &mut errors);
-                }
+        for (k, spec) in &model.initial_conditions {
+            check_init_key(k, &mut errors);
+            let InitSpec::Deterministic(e) = spec;
+            check_expr(e, &ctx, false, &mut errors);
+            // A literal (or arithmetic over literals) still has a static value,
+            // and the range checks above are the only thing standing between a
+            // typo and a model that starts in a negative or fractional
+            // population. Fold it here rather than at emission, so the check
+            // reaches a constant entry sitting beside a parameterized one — the
+            // mixed block that the old whole-block `Explicit`/`Parameterized`
+            // split could not express, and therefore never range-checked.
+            if let Some(v) = const_fold(e) {
+                check_init_value(k, v, &mut errors);
             }
-            InitialConditions::Parameterized(map) => {
-                for (k, e) in map {
-                    check_init_key(k, &mut errors);
-                    check_expr(e, &ctx, false, &mut errors);
-                }
-            }
-            InitialConditions::FromDistribution(map) => {
-                for k in map.keys() {
-                    check_init_key(k, &mut errors);
-                }
-            }
+        }
+
+        // Dependency cycle (gh#733): an init entry may read another
+        // compartment's initial value, so the entries are evaluated in
+        // topological order. `A = B + 1` beside `B = A - 1` has no order to
+        // evaluate in. Mirrors E515 in the OCaml validator.
+        if let Err(cycle) = crate::init_order::topo(&model.initial_conditions, &model.bindings) {
+            errors.push(ValidationError::InitialConditionCycle(cycle));
         }
     }
 
@@ -530,6 +544,48 @@ fn check_quantity_legal<'a>(
             }
             // Unknown binding name → resolved/errored at CompiledModel::new.
         }
+    }
+}
+
+/// The static value of an expression built purely from literals, or `None` if
+/// any leaf is dynamic (a parameter, a compartment, a table, time).
+///
+/// Only the initial-condition range checks use this — an init entry that folds
+/// to a number is exactly the case where "starts at -5" or "starts at 3.7
+/// individuals" is knowable before the run, and rejecting it there is cheaper
+/// than a trajectory that silently truncates. The arithmetic covered mirrors
+/// what the OCaml expander used to fold at emission time.
+fn const_fold(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Const(c) => Some(c.value),
+        Expr::BinOp(w) => {
+            let l = const_fold(&w.bin_op.left)?;
+            let r = const_fold(&w.bin_op.right)?;
+            match w.bin_op.op {
+                crate::expr::BinOp::Add => Some(l + r),
+                crate::expr::BinOp::Sub => Some(l - r),
+                crate::expr::BinOp::Mul => Some(l * r),
+                crate::expr::BinOp::Div => Some(l / r),
+                crate::expr::BinOp::Pow => Some(l.powf(r)),
+                _ => None,
+            }
+        }
+        Expr::UnOp(w) => {
+            let a = const_fold(&w.un_op.arg)?;
+            match w.un_op.op {
+                crate::expr::UnOp::Neg => Some(-a),
+                crate::expr::UnOp::Exp => Some(a.exp()),
+                crate::expr::UnOp::Log => Some(a.ln()),
+                crate::expr::UnOp::Sqrt => Some(a.sqrt()),
+                crate::expr::UnOp::Abs => Some(a.abs()),
+                crate::expr::UnOp::Floor => Some(a.floor()),
+                crate::expr::UnOp::Ceil => Some(a.ceil()),
+                crate::expr::UnOp::Sin => Some(a.sin()),
+                crate::expr::UnOp::Cos => Some(a.cos()),
+                crate::expr::UnOp::Tanh => Some(a.tanh()),
+            }
+        }
+        _ => None,
     }
 }
 
@@ -839,18 +895,79 @@ mod tests {
     #[test]
     fn init_key_unknown_compartment_is_rejected() {
         let mut m = load_sir();
-        // sir_basic uses Parameterized init keyed on S/I; add a dangling key.
-        match &mut m.initial_conditions {
-            InitialConditions::Parameterized(map) => {
-                map.insert("S_ghost".into(), Expr::const_(0.0));
-            }
-            other => panic!("expected Parameterized init in sir_basic, got {:?}", other),
-        }
+        // sir_basic's init is keyed on S/I; add a dangling key.
+        m.initial_conditions.0.insert(
+            "S_ghost".into(),
+            crate::model::InitSpec::Deterministic(Expr::const_(0.0)),
+        );
         let errs = validate(&m).expect_err("must reject init key for unknown 'S_ghost'");
         assert!(
             errs.iter().any(|e| matches!(e,
                 ValidationError::UnknownCompartmentInInitialConditions(c) if c == "S_ghost")),
             "expected UnknownCompartmentInInitialConditions for 'S_ghost', got: {:?}", errs);
+    }
+
+    /// gh#733 / E515. An init entry may read another compartment's initial
+    /// value, so the entries are evaluated in dependency order. `S = I + 1`
+    /// beside `I = S - 1` has no order to evaluate in — every candidate reads a
+    /// compartment that has not been built yet. Reject it at the contract
+    /// boundary; the alternative is picking an arbitrary order and reporting a
+    /// number that depends on it.
+    #[test]
+    fn init_dependency_cycle_is_rejected_and_the_message_names_the_cycle() {
+        use crate::model::InitSpec;
+        let mut m = load_sir();
+        m.initial_conditions.0.insert(
+            "S".into(),
+            InitSpec::Deterministic(Expr::bin_op(
+                crate::expr::BinOp::Add, Expr::pop("I"), Expr::const_(1.0))),
+        );
+        m.initial_conditions.0.insert(
+            "I".into(),
+            InitSpec::Deterministic(Expr::bin_op(
+                crate::expr::BinOp::Sub, Expr::pop("S"), Expr::const_(1.0))),
+        );
+        let errs = validate(&m).expect_err("must reject a cyclic init block");
+        let cycle = errs.iter().find_map(|e| match e {
+            ValidationError::InitialConditionCycle(c) => Some(c),
+            _ => None,
+        }).unwrap_or_else(|| panic!("expected InitialConditionCycle, got: {errs:?}"));
+        assert_eq!(
+            cycle.iter().collect::<std::collections::HashSet<_>>(),
+            ["S".to_string(), "I".to_string()].iter().collect(),
+            "the cycle must name both entries on it, got {cycle:?}"
+        );
+
+        // The rendered message is what a modeller reads, so pin its text: it
+        // must close the loop (`S -> I -> S`) rather than list two names and
+        // leave the reader to work out which reads which.
+        let msg = format!("{}", ValidationError::InitialConditionCycle(
+            vec!["S".into(), "I".into()]));
+        assert!(
+            msg.contains("initial conditions reference each other in a cycle: S -> I -> S"),
+            "message must render the closed cycle; got: {msg}"
+        );
+        assert!(
+            msg.contains("a chain, not a loop"),
+            "message must say what a valid init block looks like; got: {msg}"
+        );
+    }
+
+    /// Non-vacuity for the test above: the same shape WITHOUT the back edge —
+    /// `S = I + 1` with `I` a literal — is a legal chain and must validate.
+    /// Without this, a validator that rejected every compartment reference in
+    /// an init RHS would pass the cycle test for the wrong reason.
+    #[test]
+    fn an_init_chain_without_a_back_edge_validates() {
+        use crate::model::InitSpec;
+        let mut m = load_sir();
+        m.initial_conditions.0.insert(
+            "S".into(),
+            InitSpec::Deterministic(Expr::bin_op(
+                crate::expr::BinOp::Add, Expr::pop("I"), Expr::const_(1.0))),
+        );
+        m.initial_conditions.0.insert("I".into(), InitSpec::Deterministic(Expr::const_(10.0)));
+        validate(&m).expect("a chain of init references is legal");
     }
 
     /// (4) A table-lookup whose index ARITY differs from the IR table's rank
@@ -1063,16 +1180,16 @@ mod tests {
     // Each is a "model runs but starts in the wrong population" failure. Reject
     // them at the contract boundary instead.
 
-    /// sir_basic is Parameterized; swap in an Explicit init map keyed on the
+    /// sir_basic's init reads parameters; swap in literal values keyed on the
     /// model's (integer) compartments so the VALUE-domain checks have something
     /// to inspect.
     fn sir_with_explicit_init(s: f64, i: f64, r: f64) -> Model {
         let mut m = load_sir();
-        let mut map = std::collections::HashMap::new();
-        map.insert("S".to_string(), s);
-        map.insert("I".to_string(), i);
-        map.insert("R".to_string(), r);
-        m.initial_conditions = InitialConditions::Explicit(map);
+        m.initial_conditions = InitialConditions::constants([
+            ("S".to_string(), s),
+            ("I".to_string(), i),
+            ("R".to_string(), r),
+        ]);
         m
     }
 
@@ -1162,11 +1279,11 @@ mod tests {
         for tr in &mut m.transitions {
             tr.stoichiometry.retain(|e| e.0 != "R");
         }
-        let mut map = std::collections::HashMap::new();
-        map.insert("S".to_string(), 99.0);
-        map.insert("I".to_string(), 1.0);
-        map.insert("R".to_string(), 0.6); // fractional on a real compartment: OK
-        m.initial_conditions = InitialConditions::Explicit(map);
+        m.initial_conditions = InitialConditions::constants([
+            ("S".to_string(), 99.0),
+            ("I".to_string(), 1.0),
+            ("R".to_string(), 0.6), // fractional on a real compartment: OK
+        ]);
         validate(&m).expect("fractional init on a real compartment must validate");
     }
 
@@ -1187,11 +1304,11 @@ mod tests {
         for tr in &mut m.transitions {
             tr.stoichiometry.retain(|e| e.0 != "R");
         }
-        let mut map = std::collections::HashMap::new();
-        map.insert("S".to_string(), 99.0);
-        map.insert("I".to_string(), 1.0);
-        map.insert("R".to_string(), -0.5);
-        m.initial_conditions = InitialConditions::Explicit(map);
+        m.initial_conditions = InitialConditions::constants([
+            ("S".to_string(), 99.0),
+            ("I".to_string(), 1.0),
+            ("R".to_string(), -0.5),
+        ]);
         let errs = validate(&m).expect_err("must reject negative init on real compartment");
         assert!(
             errs.iter().any(|e| matches!(e,

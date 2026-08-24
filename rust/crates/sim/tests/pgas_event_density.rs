@@ -135,7 +135,7 @@ fn sir_with_seed_event() -> Model {
         ode_equations: vec![], time_functions: vec![], tables: vec![],
         observations: vec![],
         parameters: vec![param("beta", 0.4), param("gamma", 0.143)],
-        initial_conditions: InitialConditions::Explicit(init),
+        initial_conditions: InitialConditions::constants(init),
         output: OutputConfig {
             times: OutputSchedule::AtTimes((0..=20).map(|t| t as f64).collect()),
             format: "tsv".into(), trajectory: true, observations: false,
@@ -226,7 +226,7 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
             param("sigma", 0.33),
             param("gamma", 0.18),
         ],
-        initial_conditions: InitialConditions::Explicit(init),
+        initial_conditions: InitialConditions::constants(init),
         output: OutputConfig {
             times: OutputSchedule::AtTimes((0..=30).map(|t| t as f64).collect()),
             format: "tsv".into(), trajectory: true, observations: false,

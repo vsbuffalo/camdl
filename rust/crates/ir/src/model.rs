@@ -56,12 +56,81 @@ pub struct Compartment {
 
 // ── Initial conditions ────────────────────────────────────────────────────────
 
+/// What one compartment's initial value is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InitialConditions {
-    Explicit(HashMap<String, f64>),
-    Parameterized(HashMap<String, Expr>),
-    FromDistribution(HashMap<String, crate::parameter::PriorDist>),
+pub enum InitSpec {
+    /// `S = N0 - I`: an expression over constants, parameters and other
+    /// compartments' initial values. Whether it happens to be constant is a
+    /// runtime build detail, not a distinction the IR draws.
+    Deterministic(Expr),
+}
+
+/// One spec per compartment, keyed by expanded compartment name.
+///
+/// **Ordered.** The JSON object's key order is the model's declaration order,
+/// preserved on both sides (OCaml association list, Rust `IndexMap`) and folded
+/// into the model's content hash. The runtime evaluates the entries in
+/// *dependency* order — an entry may read another compartment's initial value —
+/// which `CompiledModel::new` derives by topologically sorting this map;
+/// declaration order is the tie-break between independent entries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InitialConditions(pub indexmap::IndexMap<String, InitSpec>);
+
+/// Order-**sensitive**, unlike the `IndexMap` equality it wraps.
+///
+/// `IndexMap`'s own `PartialEq` compares entry sets and ignores order. That is
+/// the wrong contract here: the order is folded into the model's content hash
+/// (see the `ContentAddressed` impl in `runid`), so an order-blind `==` would
+/// let two models compare equal and key differently — and a serialization
+/// round-trip that silently lost the order would pass an `assert_eq!(model,
+/// reparsed)` while every stored run under it moved.
+impl PartialEq for InitialConditions {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len() && self.0.iter().eq(other.0.iter())
+    }
+}
+
+impl InitialConditions {
+    /// Deterministic literals — `[("S", 999.0), ("I", 1.0)]`.
+    ///
+    /// **The iteration order of `entries` becomes the declaration order**, which
+    /// is folded into the model's content hash and is the runtime's tie-break
+    /// between independent entries. Pass an ordered source (an array, a `Vec`);
+    /// a `HashMap` compiles but gives a different key on every run for any model
+    /// whose identity is compared.
+    pub fn constants(entries: impl IntoIterator<Item = (String, f64)>) -> Self {
+        InitialConditions(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k, InitSpec::Deterministic(Expr::const_(v))))
+                .collect(),
+        )
+    }
+
+    /// Deterministic expressions — `[("S", N0 - I)]`. Same ordering contract as
+    /// [`Self::constants`].
+    pub fn exprs(entries: impl IntoIterator<Item = (String, Expr)>) -> Self {
+        InitialConditions(
+            entries
+                .into_iter()
+                .map(|(k, e)| (k, InitSpec::Deterministic(e)))
+                .collect(),
+        )
+    }
+
+    pub fn is_empty(&self) -> bool { self.0.is_empty() }
+    pub fn len(&self) -> usize { self.0.len() }
+
+    /// Iterate `(compartment, spec)` in declaration order.
+    pub fn iter(&self) -> indexmap::map::Iter<'_, String, InitSpec> { self.0.iter() }
+}
+
+impl<'a> IntoIterator for &'a InitialConditions {
+    type Item = (&'a String, &'a InitSpec);
+    type IntoIter = indexmap::map::Iter<'a, String, InitSpec>;
+    fn into_iter(self) -> Self::IntoIter { self.0.iter() }
 }
 
 // ── Output ────────────────────────────────────────────────────────────────────
@@ -243,13 +312,15 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_eval_bindings:  Vec<Binding>,
     pub initial_conditions: InitialConditions,
-    /// ∂(initial_state)/∂θ per parameterized initial-condition compartment — the
+    /// ∂(initial_state)/∂θ per initial-condition compartment — the
     /// forward-sensitivity seed `S(t_start)` for the ODE gradient (gh#275), keyed
     /// `compartment → (param → DerivEntry)`. A `WrtParam` differentiation of the
-    /// `InitialConditions::Parameterized` expressions; parameter-keyed (hence
-    /// [`crate::deriv::ParamGradMap`]), the `rate_grad` analogue for the IC map.
-    /// Empty (and omitted) until the OCaml pass emits it and for gradient-free
-    /// backends — so golden-neutral until Phase 1's WrtParam-over-init emission.
+    /// [`InitSpec::Deterministic`] expressions, each first closed over the other
+    /// entries (gh#733: `S = N0 - I` differentiates `I`'s own initial expression
+    /// too, because the runtime evaluates the block in dependency order);
+    /// parameter-keyed (hence [`crate::deriv::ParamGradMap`]), the `rate_grad`
+    /// analogue for the IC map. Compartments whose initial value does not depend
+    /// on any parameter are omitted, so a block of literals emits nothing.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub ic_grad:            std::collections::HashMap<String, crate::deriv::ParamGradMap>,
     pub output:             OutputConfig,

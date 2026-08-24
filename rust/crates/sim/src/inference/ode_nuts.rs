@@ -428,12 +428,12 @@ mod tests {
             .join("../../../ocaml/golden/seir_observations.ir.json");
         let mut model: ir::Model =
             ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
+        model.initial_conditions = ir::model::InitialConditions::constants([
             ("S".to_string(), 9990.0),
             ("E".to_string(), 0.0),
             ("I".to_string(), 10.0),
             ("R".to_string(), 0.0),
-        ]));
+        ]);
         model.observations.retain(|o| o.name == "weekly_cases");
         for om in &mut model.observations {
             om.likelihood = Likelihood::NegBinomial(NegBinomialLikelihood {

@@ -40,8 +40,9 @@ use ir::intervention::{
     TriggerQuantity, TriggerThreshold,
 };
 use ir::model::{
-    BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitialConditions, Model,
-    ModelStructure, OutputConfig, OutputSchedule, Preset, RegularOutputSchedule, SimulationConfig,
+    BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitSpec, InitialConditions,
+    Model, ModelStructure, OutputConfig, OutputSchedule, Preset, RegularOutputSchedule,
+    SimulationConfig,
 };
 use ir::observation::{
     ColumnRole, Likelihood, ObsColumn, ObservationModel, ObservationSchedule, Projection,
@@ -1077,22 +1078,30 @@ impl ContentAddressed for Compartment {
     }
 }
 
+impl ContentAddressed for InitSpec {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::model::InitSpec");
+        match self {
+            InitSpec::Deterministic(e) => {
+                h.write_u32(0);
+                e.hash_into(h);
+            }
+        }
+    }
+}
+
 impl ContentAddressed for InitialConditions {
+    /// Hashed **in declaration order**, unlike the sorted `write_str_map`
+    /// helpers. `InitialConditions` is an ordered container (`IndexMap`) and the
+    /// order is part of the model's identity, so sorting here would hash two
+    /// different models to the same key. Over-keying is the safe direction: a
+    /// reordered init block re-keys its runs, it never reuses another model's.
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::model::InitialConditions");
-        match self {
-            InitialConditions::Explicit(m) => {
-                h.write_u32(0);
-                h.write_str_f64_map(m.iter());
-            }
-            InitialConditions::Parameterized(m) => {
-                h.write_u32(1);
-                h.write_str_map(m.iter());
-            }
-            InitialConditions::FromDistribution(m) => {
-                h.write_u32(2);
-                h.write_str_map(m.iter());
-            }
+        h.write_len(self.0.len() as u64);
+        for (k, v) in self.iter() {
+            h.write_str(k);
+            v.hash_into(h);
         }
     }
 }

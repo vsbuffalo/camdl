@@ -110,7 +110,7 @@ fn sir_model() -> (CompiledModel, Vec<f64>) {
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.3), bounds: Some((0.01, 2.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
             Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.1), bounds: Some((0.01, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("S".into(), 990.0);
             m.insert("I".into(), 10.0);

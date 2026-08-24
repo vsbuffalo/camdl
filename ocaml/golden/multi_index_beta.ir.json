@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"multi_index_beta","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"multi_index_beta","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_north_child","kind":"integer"},
 {"name":"S_north_adult","kind":"integer"},
 {"name":"S_south_child","kind":"integer"},
@@ -26,7 +26,7 @@
 {"name":"beta_south_child","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"beta_south_adult","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null}
-],"initial_conditions":{"explicit":{"S_north_child":1000.0,"I_north_child":5.0,"S_north_adult":2000.0,"I_north_adult":5.0,"S_south_child":1500.0,"I_south_child":5.0,"S_south_adult":2500.0,"I_south_adult":5.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":120.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S_north_child":{"deterministic":{"const":1000.0}},"I_north_child":{"deterministic":{"const":5.0}},"S_north_adult":{"deterministic":{"const":2000.0}},"I_north_adult":{"deterministic":{"const":5.0}},"S_south_child":{"deterministic":{"const":1500.0}},"I_south_child":{"deterministic":{"const":5.0}},"S_south_adult":{"deterministic":{"const":2500.0}},"I_south_adult":{"deterministic":{"const":5.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":120.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"region × age transmission design matrix","params":{"beta_north_child":0.5,"beta_north_adult":0.3,"beta_south_child":0.6,"beta_south_adult":0.35,"gamma":0.1},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[{"name":"region","values":["north","south"]},{"name":"age","values":["child","adult"]}],"compartment_dims":{"S":["region","age"],"I":["region","age"],"R":["region","age"]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N_north_child","expr":{"pop_sum":["S_north_child","I_north_child","R_north_child"]}},

@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.33",
-  "validated_by": "ocaml-compiler-v0.33",
+  "ir_version": "0.34",
+  "validated_by": "ocaml-compiler-v0.34",
   "model": {
     "name": "sir_spatial_sum",
     "version": "0.3",
@@ -1972,13 +1972,11 @@
       {"name": "rho", "value": {"mode": "estimated", "bounds": [0.0, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "probability", "param_dim": null}
     ],
     "initial_conditions": {
-      "explicit": {
-        "S_p0": 4999.0,
-        "I_p0": 1.0,
-        "S_p1": 10000.0,
-        "S_p2": 8000.0,
-        "S_p3": 3000.0
-      }
+      "S_p0": { "deterministic": { "const": 4999.0 } },
+      "I_p0": { "deterministic": { "const": 1.0 } },
+      "S_p1": { "deterministic": { "const": 10000.0 } },
+      "S_p2": { "deterministic": { "const": 8000.0 } },
+      "S_p3": { "deterministic": { "const": 3000.0 } }
     },
     "output": {
       "times": { "regular": { "start": 0.0, "step": 1.0 } },

@@ -29,7 +29,7 @@ use std::collections::HashSet;
 
 use ir::deriv::DerivEntry;
 use ir::expr::Expr;
-use ir::model::InitialConditions;
+use ir::model::InitSpec;
 use ir::observation::{Likelihood, Projection};
 use ir::time_func::TimeFuncKind;
 use ir::transition::DrawMethod;
@@ -332,10 +332,8 @@ pub fn ic_coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<Stri
     }
     let mut ic_forcings = HashSet::new();
     let mut ic_tables = HashSet::new();
-    if let InitialConditions::Parameterized(map) = &model.initial_conditions {
-        for e in map.values() {
-            collect_forcing_table_refs(e, &mut ic_forcings, &mut ic_tables);
-        }
+    for (_, InitSpec::Deterministic(e)) in &model.initial_conditions {
+        collect_forcing_table_refs(e, &mut ic_forcings, &mut ic_tables);
     }
     let mut obs_forcings = HashSet::new();
     let mut obs_tables = HashSet::new();
@@ -365,10 +363,8 @@ pub fn ic_coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<Stri
     for o in &model.observations {
         collect_likelihood(&o.likelihood, &mut body);
     }
-    if let InitialConditions::Parameterized(map) = &model.initial_conditions {
-        for e in map.values() {
-            collect(e, &mut body);
-        }
+    for (_, InitSpec::Deterministic(e)) in &model.initial_conditions {
+        collect(e, &mut body);
     }
 
     let mut coeff = HashSet::new();
@@ -492,6 +488,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use ir::expr::Expr;
+    use ir::model::InitialConditions;
     use ir::time_func::{Sinusoidal, TimeFunction};
 
     fn base_model() -> ir::Model {
@@ -516,7 +513,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![],
-            initial_conditions: InitialConditions::Parameterized(HashMap::new()),
+            initial_conditions: InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![0.0]),
                 format: "tsv".into(),
@@ -574,7 +571,7 @@ mod tests {
     fn ic_referencing(m: &mut ir::Model, expr: Expr) {
         let mut ic = HashMap::new();
         ic.insert("S".to_string(), expr);
-        m.initial_conditions = InitialConditions::Parameterized(ic);
+        m.initial_conditions = InitialConditions::exprs(ic);
     }
 
     /// A transition with rate `rate` carrying `rate_grad` — used to make a

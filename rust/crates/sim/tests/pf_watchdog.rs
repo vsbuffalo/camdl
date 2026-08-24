@@ -146,7 +146,7 @@ fn pathological_sir_model() -> (CompiledModel, Vec<f64>) {
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: beta }, param_kind: None, param_dim: None },
             Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Fixed { value: gamma }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit(ic),
+        initial_conditions: InitialConditions::constants(ic),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 50.0]),
             format: "tsv".into(), trajectory: true, observations: false,
@@ -379,7 +379,7 @@ fn healthy_sir_model() -> (CompiledModel, Vec<f64>) {
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: beta }, param_kind: None, param_dim: None },
             Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Fixed { value: gamma }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit(ic),
+        initial_conditions: InitialConditions::constants(ic),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 30.0]),
             format: "tsv".into(), trajectory: true, observations: false,

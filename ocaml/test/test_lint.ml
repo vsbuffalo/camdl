@@ -57,7 +57,7 @@ let empty_model
     ?(time_functions = [])
     ?(interventions = [])
     ?(bindings = [])
-    ?(initial_conditions = Explicit [])
+    ?(initial_conditions = [])
     ?(balance = None)
     ?(identity_tracked_compartments = [])
     () : model =
@@ -253,7 +253,9 @@ let test_init_target_only_not_dead () =
     ~compartments:sir_compartments
     ~parameters:[mk_param ~kind:(Some Ir.Rate) "beta"]
     ~transitions:[infection_no_r]
-    ~initial_conditions:(Explicit [("S", 999.0); ("I", 1.0); ("R", 0.0)])
+    ~initial_conditions:[("S", Ir.Deterministic (Ir.Const 999.0));
+                         ("I", Ir.Deterministic (Ir.Const 1.0));
+                         ("R", Ir.Deterministic (Ir.Const 0.0))]
     () in
   let r = Lint.check_model m in
   Alcotest.(check bool) "R (init-target-only) is not flagged"

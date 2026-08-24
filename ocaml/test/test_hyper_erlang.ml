@@ -172,17 +172,13 @@ let test_polio_foi_sums_all_stages () =
 let test_polio_init_split_by_weight () =
   let m = compile_ok polio_src in
   (* init { I = 10 } splits across the first stages: I__typical__1 = 10*p,
-     I__prolonged__1 = 10*(1−p). After constant-folding p is a parameter, so the
-     init exprs cannot be a plain float — they appear as a derived init. We assert
-     the base I init key is gone and both first-stage keys exist (value-bearing). *)
-  match m.Ir.initial_conditions with
-  | Ir.Explicit kvs ->
-    Alcotest.(check bool) "no bare I init" false (List.mem_assoc "I" kvs)
-  | _ ->
-    (* A parameterized split init is not Explicit; that is acceptable — the point
-       is the base I init was redirected, not left dangling. The compile succeeding
-       (compile_ok) already proves the init resolved. *)
-    ()
+     I__prolonged__1 = 10*(1−p). `p` is a parameter, so these are expressions,
+     not literals — one spec shape carries both, so the assertion no longer has
+     to fork on the block's shape and can now check the split landed. *)
+  let kvs = m.Ir.initial_conditions in
+  Alcotest.(check bool) "no bare I init" false (List.mem_assoc "I" kvs);
+  Alcotest.(check bool) "I__typical__1 is seeded" true (List.mem_assoc "I__typical__1" kvs);
+  Alcotest.(check bool) "I__prolonged__1 is seeded" true (List.mem_assoc "I__prolonged__1" kvs)
 
 let test_polio_simulates () =
   (* End-to-end: the polio model compiles to a sane IR (right comp / transition

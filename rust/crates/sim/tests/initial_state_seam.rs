@@ -25,12 +25,27 @@
 //!    A length mismatch there is an out-of-bounds panic at best and a gradient
 //!    attributed to the wrong parameter at worst.
 //!
-//! Both a `Parameterized` and an `Explicit` `init {}` are covered, because they
-//! are separate arms of the producer.
+//! Two `init {}` shapes are covered — one whose entries are all literals and
+//! one whose entries are expressions over parameters. They are the same
+//! `InitSpec::Deterministic` variant, but they take different paths through the
+//! producer (constant placement vs `eval_expr` against the partially built
+//! state), so both are exercised.
 
 use std::sync::Arc;
 
+use ir::expr::Expr;
+use ir::model::InitSpec;
 use sim::{compiled_model::CompiledModel, rng::StatefulRng};
+
+/// Whether every `init {}` entry is a bare literal. The predicate the expander
+/// used to fold into the IR itself, before `InitialConditions` became one
+/// ordered map of per-compartment specs.
+fn all_entries_are_literals(model: &ir::Model) -> bool {
+    model
+        .initial_conditions
+        .iter()
+        .all(|(_, InitSpec::Deterministic(e))| matches!(e, Expr::Const(_)))
+}
 
 const SEED: u64 = 20260823;
 
@@ -41,14 +56,14 @@ fn load(rel: &str) -> ir::Model {
     ir::from_str(&json).unwrap_or_else(|e| panic!("parse {path}: {e:?}"))
 }
 
-/// SEIR with `init { S = N0 - I0; I = I0 }` — the `Parameterized` arm. Required
-/// parameters carry no value in the IR, so fill them the way
-/// `gradient_check.rs` does for this same fixture.
+/// SEIR with `init { S = N0 - I0; I = I0 }` — entries that are expressions over
+/// parameters. Required parameters carry no value in the IR, so fill them the
+/// way `gradient_check.rs` does for this same fixture.
 fn parameterized_model() -> (Arc<CompiledModel>, Vec<f64>) {
     let mut model = load("tests/fixtures/gradient/ir/seir_seasonal_lagged.ir.json");
     assert!(
-        matches!(model.initial_conditions, ir::model::InitialConditions::Parameterized(_)),
-        "fixture must exercise the Parameterized arm"
+        !all_entries_are_literals(&model),
+        "fixture must exercise expression evaluation, not constant placement"
     );
     for p in &mut model.parameters {
         if p.value.resolved_value().is_none() {
@@ -69,12 +84,12 @@ fn parameterized_model() -> (Arc<CompiledModel>, Vec<f64>) {
     (compiled, params)
 }
 
-/// SIR with constant initial counts — the `Explicit` arm.
+/// SIR with constant initial counts — every entry a literal.
 fn explicit_model() -> (Arc<CompiledModel>, Vec<f64>) {
     let model = load("tests/fixtures/corner_cases/ir/dt_rate.ir.json");
     assert!(
-        matches!(model.initial_conditions, ir::model::InitialConditions::Explicit(_)),
-        "fixture must exercise the Explicit arm"
+        all_entries_are_literals(&model),
+        "fixture must exercise constant placement"
     );
     let compiled = Arc::new(CompiledModel::new(model).expect("compile explicit fixture"));
     let params = compiled.default_params.clone();

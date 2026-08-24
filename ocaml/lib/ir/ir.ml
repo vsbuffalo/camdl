@@ -728,10 +728,21 @@ let param_hierarchical (p : parameter) : hierarchical_prior option =
 
 (* ── Initial conditions ──────────────────────────────────────────────────────── *)
 
-type initial_conditions =
-  | Explicit        of (string * float) list
-  | Parameterized   of (string * expr)  list
-  | FromDistribution of (string * prior_dist) list
+(** What one compartment's initial value is.
+
+    [Deterministic e] is `S = N0 - I`: an expression over constants, parameters
+    and other compartments' initial values. Whether [e] happens to be constant
+    is a runtime build detail, not a distinction the IR draws. *)
+type init_spec =
+  | Deterministic of expr
+
+(** One spec per compartment, in declaration order.
+
+    Ordered: the runtime evaluates the entries in DEPENDENCY order (an entry may
+    read another compartment's initial value), and the declaration order is part
+    of the model's identity. The association list carries that order; the Rust
+    side is an [IndexMap] over the same JSON object. *)
+type initial_conditions = (string * init_spec) list
 
 (* ── Output ──────────────────────────────────────────────────────────────────── *)
 

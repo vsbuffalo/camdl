@@ -168,7 +168,7 @@ fn death_model(rate: Expr) -> Arc<CompiledModel> {
                 param_dim: None,
             },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("N".into(), N0);
             m

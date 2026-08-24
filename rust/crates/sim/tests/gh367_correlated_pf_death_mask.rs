@@ -125,7 +125,7 @@ fn chain_model(foi_rate: Expr) -> (CompiledModel, Vec<f64>) {
             Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None },
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: 0.3 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("X".into(), X0);
             m.insert("Y".into(), Y0);

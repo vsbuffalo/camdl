@@ -4573,7 +4573,7 @@ mod tests {
                  "param_kind": "rate", "param_dim": null }}
               {extras}
             ],
-            "initial_conditions": {{ "explicit": {{ "S": 1.0 }} }},
+            "initial_conditions": {{ "S": {{ "deterministic": {{ "const": 1.0 }} }} }},
             "output": {{ "times": {{ "at_times": [0.0, 1.0] }},
                          "format": "tsv", "trajectory": true, "observations": false }},
             "simulation": {{ "t_start": 0.0, "t_end": 1.0, "time_semantics": "continuous",
@@ -4656,7 +4656,7 @@ mod tests {
                            "prior": "flat", "transform": "identity" },
                 "param_kind": "count", "param_dim": null }
             ],
-            "initial_conditions": { "explicit": { "S": 1.0 } },
+            "initial_conditions": { "S": { "deterministic": { "const": 1.0 } } },
             "output": { "times": { "at_times": [0.0, 1.0] },
                         "format": "tsv", "trajectory": true, "observations": false },
             "simulation": { "t_start": 0.0, "t_end": 1.0,
@@ -5013,7 +5013,7 @@ I0    = { bounds = [1, 1000] }
                            "prior": "flat", "transform": "identity" },
                 "param_kind": "rate", "param_dim": null }
             ],
-            "initial_conditions": { "explicit": { "S": 1.0 } },
+            "initial_conditions": { "S": { "deterministic": { "const": 1.0 } } },
             "output": { "times": { "at_times": [0.0, 1.0] },
                         "format": "tsv", "trajectory": true, "observations": false },
             "simulation": { "t_start": 0.0, "t_end": 1.0,
@@ -5065,7 +5065,7 @@ gamma = { bounds = [0.05, 1.0] }
                            "transform": "identity" },
                 "param_kind": "rate", "param_dim": null }
             ],
-            "initial_conditions": { "explicit": { "S": 1.0 } },
+            "initial_conditions": { "S": { "deterministic": { "const": 1.0 } } },
             "output": { "times": { "at_times": [0.0, 1.0] },
                         "format": "tsv", "trajectory": true, "observations": false },
             "simulation": { "t_start": 0.0, "t_end": 1.0,

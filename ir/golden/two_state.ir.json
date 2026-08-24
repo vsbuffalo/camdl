@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.33",
+  "ir_version": "0.34",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "two_state",
@@ -115,10 +115,8 @@
       {"name": "beta_r", "value": {"mode": "fixed", "value": 0.3}, "param_kind": null, "param_dim": null}
     ],
     "initial_conditions": {
-      "explicit": {
-        "A": 80,
-        "B": 20
-      }
+      "A": { "deterministic": { "const": 80 } },
+      "B": { "deterministic": { "const": 20 } }
     },
     "output": {
       "times": {

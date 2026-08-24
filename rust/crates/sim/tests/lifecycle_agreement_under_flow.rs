@@ -112,7 +112,7 @@ fn flow_model() -> CompiledModel {
         parameters: vec![
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: BETA }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("S".into(), S0 as f64);
             m.insert("I".into(), 0.0);

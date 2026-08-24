@@ -55,7 +55,7 @@ let empty_model
     parameters;
     bindings = [];
     per_eval_bindings = [];
-    initial_conditions = Explicit [];
+    initial_conditions = [];
     ic_grad = [];
     output = {
       times = OutRegular { start = 0.0; step = 1.0 };

@@ -1043,7 +1043,7 @@ mod tests {
                 Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
                 Parameter { name: "mu".into(), value: ParamValue::Fixed { value: 0.02 }, param_kind: None, param_dim: None },
             ],
-            initial_conditions: InitialConditions::Explicit(
+            initial_conditions: InitialConditions::constants(
                 [("I", 1000.0), ("R", 0.0), ("D", 0.0)]
                     .iter()
                     .map(|(k, v)| ((*k).into(), *v))
@@ -1139,7 +1139,7 @@ mod tests {
                     name: "beta".into(), value: ParamValue::Fixed { value: 0.001 },
                     param_kind: None, param_dim: None,
                 }],
-                initial_conditions: InitialConditions::Explicit(
+                initial_conditions: InitialConditions::constants(
                     [("S", 990.0), ("I", 10.0)].iter().map(|(k, v)| ((*k).into(), *v))
                         .collect::<HashMap<String, f64>>(),
                 ),

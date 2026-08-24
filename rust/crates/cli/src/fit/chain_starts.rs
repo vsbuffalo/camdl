@@ -1006,8 +1006,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters,
-            initial_conditions: ir::model::InitialConditions::Explicit(
-                Default::default()),
+            initial_conditions: ir::model::InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![]),
                 format: "tsv".into(),

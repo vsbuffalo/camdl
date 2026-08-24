@@ -69,7 +69,7 @@ fn model(t_end: f64, step: f64) -> CompiledModel {
         parameters: vec![
             Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Fixed { value: 0.05 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut ic = HashMap::new();
             ic.insert("S".into(), 100.0);
             ic.insert("I".into(), 0.0);

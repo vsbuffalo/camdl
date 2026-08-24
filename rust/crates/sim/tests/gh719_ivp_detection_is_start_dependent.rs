@@ -18,8 +18,6 @@
 //! value of `I0`, which is what `run_pgas` receives per chain via
 //! `chain_starts[chain_id]`.
 
-use std::collections::HashMap;
-
 use ir::{
     expr::{BinOp, ConstExpr, Expr},
     model::{
@@ -120,14 +118,14 @@ fn count_ivp_model() -> CompiledModel {
                 param_dim: None,
             },
         ],
-        initial_conditions: InitialConditions::Parameterized(HashMap::from([
+        initial_conditions: InitialConditions::exprs([
             ("I".to_string(), Expr::param("I0")),
             (
                 "S".to_string(),
                 Expr::bin_op(BinOp::Sub, Expr::const_(N_POP), Expr::param("I0")),
             ),
             ("R".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
-        ])),
+        ]),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 40.0]),
             format: "tsv".into(),
@@ -301,7 +299,7 @@ fn fraction_ivp_model() -> CompiledModel {
         param_kind: Some(ir::parameter::ParamKind::Probability),
         param_dim: None,
     };
-    model.initial_conditions = InitialConditions::Parameterized(HashMap::from([
+    model.initial_conditions = InitialConditions::exprs([
         (
             "I".to_string(),
             Expr::bin_op(BinOp::Mul, Expr::param("I0"), Expr::const_(N_POP)),
@@ -315,7 +313,7 @@ fn fraction_ivp_model() -> CompiledModel {
             ),
         ),
         ("R".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
-    ]));
+    ]);
     CompiledModel::new(model).unwrap()
 }
 

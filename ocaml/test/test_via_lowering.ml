@@ -102,11 +102,18 @@ let stage_rename_map (m : Ir.model) : (string * string) list =
       List.mapi (fun i cell -> (cell, Printf.sprintf "%s_%d" base (i + 1))) many
   ) bases
 
+(* Every fixture here seeds with literals, so each spec is a constant
+   expression; anything else is a lowering bug these tests want to see. *)
+let init_const (s : Ir.init_spec) : float =
+  match s with
+  | Ir.Deterministic (Ir.Const v) -> v
+  | Ir.Deterministic _ -> Alcotest.fail "expected a constant initial condition"
+
+let init_consts (ic : Ir.initial_conditions) : (string * float) list =
+  List.map (fun (k, s) -> (k, init_const s)) ic
+
 let canon_init map (ic : Ir.initial_conditions) : (string * float) list =
-  match ic with
-  | Ir.Explicit kvs ->
-    List.map (fun (k, v) -> (rename_name map k, v)) kvs |> List.sort compare
-  | _ -> Alcotest.fail "expected explicit init"
+  List.map (fun (k, s) -> (rename_name map k, init_const s)) ic |> List.sort compare
 
 let canon_comps map (m : Ir.model) : string list =
   List.map (fun (c : Ir.compartment) -> rename_name map c.Ir.name) m.Ir.compartments
@@ -254,11 +261,9 @@ let test_inflow_and_init_land_in_stage1 () =
   Alcotest.(check bool) "infection --> E_s1" true
     (List.mem ("E_s1", 1) inf.Ir.stoichiometry);
   (* init: E_s1 = 5, no bare E key. *)
-  (match m.Ir.initial_conditions with
-   | Ir.Explicit kvs ->
-     Alcotest.(check bool) "init has E_s1 = 5" true (List.mem ("E_s1", 5.0) kvs);
-     Alcotest.(check bool) "init has no bare E" false (List.mem_assoc "E" kvs)
-   | _ -> Alcotest.fail "expected explicit init")
+  let kvs = init_consts m.Ir.initial_conditions in
+  Alcotest.(check bool) "init has E_s1 = 5" true (List.mem ("E_s1", 5.0) kvs);
+  Alcotest.(check bool) "init has no bare E" false (List.mem_assoc "E" kvs)
 
 let test_bare_E_sums_in_foi () =
   let m = compile_ok seir_via_src in
@@ -513,11 +518,9 @@ let test_age_inflow_and_init_land_in_stage1 () =
     List.find (fun (t : Ir.transition) -> t.Ir.name = "infection_child") m.Ir.transitions in
   Alcotest.(check bool) "infection_child --> I_child_s1" true
     (List.mem ("I_child_s1", 1) inf_child.Ir.stoichiometry);
-  (match m.Ir.initial_conditions with
-   | Ir.Explicit kvs ->
-     Alcotest.(check bool) "init has I_child_s1 = 10" true (List.mem ("I_child_s1", 10.0) kvs);
-     Alcotest.(check bool) "init has no bare I_child" false (List.mem_assoc "I_child" kvs)
-   | _ -> Alcotest.fail "expected explicit init")
+  let kvs = init_consts m.Ir.initial_conditions in
+  Alcotest.(check bool) "init has I_child_s1 = 10" true (List.mem ("I_child_s1", 10.0) kvs);
+  Alcotest.(check bool) "init has no bare I_child" false (List.mem_assoc "I_child" kvs)
 
 (* ── C4a: the rewrite reaches every expr-bearing container ───────────────── *)
 

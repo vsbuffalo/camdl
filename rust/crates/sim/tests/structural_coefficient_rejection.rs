@@ -12,7 +12,6 @@
 //! defense-in-depth at IR-load time for a hand-built or future-emitted IR that
 //! reaches the runtime with a structural param.
 
-use std::collections::HashMap;
 use ir::{
     expr::Expr,
     model::{Compartment, CompartmentKind, InitialConditions, OutputConfig, OutputSchedule, SimulationConfig},
@@ -49,7 +48,7 @@ fn model_with_forcing(kind: TimeFuncKind) -> Model {
             param_kind: None,
             param_dim: None,
         }],
-        initial_conditions: InitialConditions::Parameterized(HashMap::new()),
+        initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0]),
             format: "tsv".into(),

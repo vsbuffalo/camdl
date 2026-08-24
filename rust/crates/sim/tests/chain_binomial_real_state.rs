@@ -39,14 +39,21 @@ fn load_fixture(name: &str) -> ir::Model {
 }
 
 /// Override the initial value of compartment `comp` (real-valued) in the model.
+///
+/// The fixture must seed `comp` with a literal: overwriting an expression that
+/// reads a parameter or another compartment would change what the test compares,
+/// so refuse rather than silently rewrite it.
 fn set_w_init(model: &mut ir::Model, comp: &str, value: f64) {
-    use ir::model::InitialConditions;
-    match &mut model.initial_conditions {
-        InitialConditions::Explicit(values) => {
-            values.insert(comp.to_string(), value);
-        }
-        other => panic!("fixture must use explicit initial conditions, got {:?}", other),
+    use ir::expr::Expr;
+    use ir::model::InitSpec;
+    match model.initial_conditions.0.get(comp) {
+        Some(InitSpec::Deterministic(Expr::Const(_))) => {}
+        other => panic!("fixture must seed `{comp}` with a constant, got {other:?}"),
     }
+    model
+        .initial_conditions
+        .0
+        .insert(comp.to_string(), InitSpec::Deterministic(Expr::const_(value)));
 }
 
 fn cb_run(model: &ir::Model, w_init: f64) -> sim::state::Trajectory {

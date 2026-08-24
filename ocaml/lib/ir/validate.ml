@@ -25,6 +25,7 @@ type error =
   | ZeroDelta             of string * string  (* transition, compartment *)
   | ParamInBinding        of string * string  (* binding name, param name *)
   | InitUnknownCompartment of string          (* init key naming no compartment *)
+  | InitDependencyCycle   of string list      (* gh#733: init entries that read each other *)
 
 let error_to_string = function
   | DuplicateCompartment s -> Printf.sprintf "duplicate compartment: %s" s
@@ -48,6 +49,9 @@ let error_to_string = function
     Printf.sprintf "parameter '%s' reachable from hoisted binding '%s'" p b
   | InitUnknownCompartment s ->
     Printf.sprintf "initial condition names unknown compartment: %s" s
+  | InitDependencyCycle cyc ->
+    Printf.sprintf "initial conditions reference each other in a cycle: %s"
+      (String.concat " -> " (cyc @ [List.hd cyc]))
 
 module SS = Set.Make(String)
 
@@ -223,15 +227,19 @@ let validate (m : model) : (unit, error list) result =
      real compartment in the (already fully-expanded) IR. The OCaml expander
      enforces this at the frontend (E277); this is the contract-boundary net
      so a hand-written or drifted IR cannot start a cell that doesn't exist. *)
-  let init_keys = match m.initial_conditions with
-    | Explicit kvs         -> List.map fst kvs
-    | Parameterized kvs    -> List.map fst kvs
-    | FromDistribution kvs -> List.map fst kvs
-  in
-  List.iter (fun k ->
+  List.iter (fun (k, _) ->
     if not (SS.mem k comp_names)
     then errors := InitUnknownCompartment k :: !errors
-  ) init_keys;
+  ) m.initial_conditions;
+
+  (* Initial-condition dependency cycle (gh#733). An init entry may read another
+     compartment's initial value, so the entries are evaluated in topological
+     order; `A = B + 1` beside `B = A - 1` has no order to evaluate in and no
+     value to report. Rejecting it here is what lets both the runtime and the
+     IC-gradient inlining assume a DAG. *)
+  (match Init_order.topo m.initial_conditions ~bindings:m.bindings with
+   | Ok _ -> ()
+   | Error cyc -> errors := InitDependencyCycle cyc :: !errors);
 
   (* Intervention/event action targets (gh#461). A dangling target is a silent
      no-op at best. The expander enforces this at the frontend (E265); this is

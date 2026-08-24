@@ -1489,28 +1489,24 @@ let parameter_of_json j =
 
 (* ── Initial conditions ──────────────────────────────────────────────────── *)
 
+let init_spec_to_json (s : init_spec) : Yojson.Safe.t =
+  match s with
+  | Deterministic e -> obj [("deterministic", expr_to_json e)]
+
+let init_spec_of_json j =
+  match j with
+  | `Assoc [("deterministic", e)] -> Deterministic (expr_of_json e)
+  | `Assoc [(k, _)] -> fail "unknown init spec kind '%s'" k
+  | _ -> fail "init spec must be a single-key object"
+
+(* The JSON object's key order IS the declaration order, and Yojson's [`Assoc]
+   preserves it on both directions. Rust reads the same object into an
+   [IndexMap], so the two sides agree on the order without a side channel. *)
 let initial_conditions_to_json (ic : initial_conditions) : Yojson.Safe.t =
-  match ic with
-  | Explicit kvs ->
-    obj [("explicit", obj (List.map (fun (k, v) -> (k, flt v)) kvs))]
-  | Parameterized kvs ->
-    obj [("parameterized", obj (List.map (fun (k, e) -> (k, expr_to_json e)) kvs))]
-  | FromDistribution kvs ->
-    obj [("from_distribution", obj (List.map (fun (k, p) -> (k, prior_dist_to_json p)) kvs))]
+  obj (List.map (fun (k, s) -> (k, init_spec_to_json s)) ic)
 
 let initial_conditions_of_json j =
-  match j with
-  | `Assoc [(key, v)] -> (
-    match key with
-    | "explicit" ->
-      Explicit (List.map (fun (k, vv) -> (k, as_float vv)) (as_assoc v))
-    | "parameterized" ->
-      Parameterized (List.map (fun (k, vv) -> (k, expr_of_json vv)) (as_assoc v))
-    | "from_distribution" ->
-      FromDistribution (List.map (fun (k, vv) -> (k, prior_dist_of_json vv)) (as_assoc v))
-    | k -> fail "unknown initial_conditions kind '%s'" k
-  )
-  | _ -> fail "initial_conditions must be a single-key object"
+  List.map (fun (k, v) -> (k, init_spec_of_json v)) (as_assoc j)
 
 (* ── Output ──────────────────────────────────────────────────────────────── *)
 

@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.33",
-  "validated_by": "ocaml-compiler-v0.33",
+  "ir_version": "0.34",
+  "validated_by": "ocaml-compiler-v0.34",
   "model": {
     "name": "spatial_lineage",
     "version": "0.3",
@@ -467,7 +467,10 @@
       {"name": "gamma", "value": {"mode": "estimated", "bounds": [0.0, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null}
     ],
     "initial_conditions": {
-      "explicit": { "S_a": 4000.0, "I_a": 5.0, "S_b": 2000.0, "I_b": 40.0 }
+      "S_a": { "deterministic": { "const": 4000.0 } },
+      "I_a": { "deterministic": { "const": 5.0 } },
+      "S_b": { "deterministic": { "const": 2000.0 } },
+      "I_b": { "deterministic": { "const": 40.0 } }
     },
     "output": {
       "times": { "regular": { "start": 0.0, "step": 1.0 } },

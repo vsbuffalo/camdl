@@ -18,8 +18,6 @@
 //! That's the property the bug violated, regardless of the exact
 //! mechanism (step-baking vs runtime-rescaling).
 
-use std::collections::HashMap;
-
 use ir::{
     expr::{ConstExpr, Expr},
     intervention::{Action, AbsoluteTransfer, Intervention, InterventionSchedule, RecurringSchedule},
@@ -100,7 +98,7 @@ fn periodic_xfer_model(at_day: f64, period: f64, end: f64, model_dt: Option<f64>
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![],
-        initial_conditions: InitialConditions::Parameterized(HashMap::new()),
+        initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0]),
             format: "tsv".into(),

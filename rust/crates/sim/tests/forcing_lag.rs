@@ -76,7 +76,7 @@ fn model_with_lag(lag: Option<Expr>, params: Vec<Parameter>) -> Model {
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: params,
-        initial_conditions: InitialConditions::Parameterized(HashMap::new()),
+        initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0]),
             format: "tsv".into(),

@@ -3695,7 +3695,7 @@ mod tests {
                 Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.1), bounds: Some((0.01, 1.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
                 Parameter { name: "N0".into(), value: ir::parameter::ParamValue::Estimated { init: Some(1000.0), bounds: Some((100.0, 100000.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None },
             ],
-            initial_conditions: InitialConditions::Explicit({
+            initial_conditions: InitialConditions::constants({
                 let mut m = HashMap::new();
                 m.insert("S".into(), 990.0);
                 m.insert("I".into(), 10.0);
@@ -3867,7 +3867,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((0.0, 10.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None }],
-            initial_conditions: InitialConditions::Explicit({
+            initial_conditions: InitialConditions::constants({
                 let mut m = HashMap::new(); m.insert("S".into(), 100.0); m
             }),
             output: OutputConfig {
@@ -3973,7 +3973,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![Parameter { name: "R0".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.0), bounds: Some((1.0, 200.0)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: None, param_dim: None }],
-            initial_conditions: InitialConditions::Explicit({
+            initial_conditions: InitialConditions::constants({
                 let mut m = HashMap::new(); m.insert("S".into(), 100.0); m
             }),
             output: OutputConfig {
@@ -4116,7 +4116,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![beta_with_ir_prior, gamma_no_prior],
-            initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
+            initial_conditions: ir::model::InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![]),
                 format: "tsv".into(), trajectory: true, observations: false,
@@ -4182,7 +4182,7 @@ mod tests {
             compartments: vec![], transitions: vec![], ode_equations: vec![],
             time_functions: vec![], tables: vec![], interventions: vec![], observations: vec![],
             bindings: vec![], per_eval_bindings: vec![], parameters: vec![p],
-            initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
+            initial_conditions: ir::model::InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![]),
                 format: "tsv".into(), trajectory: true, observations: false,
@@ -4936,7 +4936,7 @@ dt = 1.0
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![Parameter { name: name.into(), value: ir::parameter::ParamValue::Estimated { init: Some((lo + hi) * 0.5), bounds: Some((lo, hi)), prior: ir::parameter::PriorSpec::Flat, transform: ir::parameter::Transform::Identity }, param_kind: kind, param_dim: None }],
-            initial_conditions: InitialConditions::Explicit({
+            initial_conditions: InitialConditions::constants({
                 let mut m = HashMap::new(); m.insert("S".into(), 1.0); m
             }),
             output: OutputConfig {
@@ -5857,7 +5857,7 @@ dt = 1.0
             parameters: vec![
                 Parameter { name: "dummy".into(), value: ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
             ],
-            initial_conditions: InitialConditions::Explicit({
+            initial_conditions: InitialConditions::constants({
                 let mut h = HashMap::new();
                 h.insert("R".into(), 0.0); h
             }),

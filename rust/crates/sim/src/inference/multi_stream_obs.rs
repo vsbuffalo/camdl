@@ -2011,7 +2011,7 @@ mod hole_scoring_tests {
                 Parameter { name: "gamma".into(), value: ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
                 Parameter { name: "rho".into(), value: ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None },
             ],
-            initial_conditions: InitialConditions::Explicit({
+            initial_conditions: InitialConditions::constants({
                 let mut h = HashMap::new();
                 h.insert("S".into(), 950.0); h.insert("I".into(), 40.0); h.insert("R".into(), 10.0); h
             }),

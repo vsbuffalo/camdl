@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.33",
-  "validated_by": "ocaml-compiler-v0.33",
+  "ir_version": "0.34",
+  "validated_by": "ocaml-compiler-v0.34",
   "model": {
     "name": "sir_lineage",
     "version": "0.3",
@@ -140,7 +140,10 @@
       {"name": "gamma", "value": {"mode": "estimated", "bounds": [0.01, 1.0], "prior": "flat", "transform": "identity"}, "param_kind": "rate", "param_dim": null},
       {"name": "N0", "value": {"mode": "estimated", "bounds": [100.0, 10000.0], "prior": "flat", "transform": "identity"}, "param_kind": "count", "param_dim": null}
     ],
-    "initial_conditions": { "explicit": { "S": 499.0, "I": 1.0 } },
+    "initial_conditions": {
+      "S": { "deterministic": { "const": 499.0 } },
+      "I": { "deterministic": { "const": 1.0 } }
+    },
     "output": {
       "times": { "regular": { "start": 0.0, "step": 1.0 } },
       "format": "tsv",

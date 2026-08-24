@@ -368,71 +368,85 @@ pub fn preflight_gradient_ode(
     // (estimated param → IC compartment) pair — otherwise the seed would silently
     // drop that parameter's contribution and NUTS would sample against a gradient
     // that is zero exactly where the initial condition matters (Risk #1).
-    match &m.initial_conditions {
-        ir::model::InitialConditions::Explicit(_) => {} // ∂init/∂θ ≡ 0
-        ir::model::InitialConditions::FromDistribution(_) => {
-            return Err(SimError::Validation(
-                "ODE gradient (nuts) does not support from_distribution (ivp) initial \
-                 conditions: on the deterministic ODE there is no latent initial state to \
-                 draw, and the mean-treatment ∂(N·p)/∂p seed is a separate decision (gh#275 \
-                 §1c). Write the initial condition as a parameterized expression, or use \
-                 gradient-free `mh` on `ode`."
-                    .to_string(),
-            ));
-        }
-        ir::model::InitialConditions::Parameterized(map) => {
-            for (comp, expr) in map {
-                // A binding could hide a param reference the scan below does not
-                // descend into — refuse rather than risk a silent-zero seed.
-                if expr_has_binding_ref(expr) {
+    //
+    // The parameter set scanned per compartment is TRANSITIVE along the init
+    // dependency graph (gh#733): `init { I = I0   S = N0 - I }` makes `I0` reach
+    // `S`'s initial value even though `S`'s own expression never names it, and
+    // the compiler's `ic_grad` — which differentiates each entry with the
+    // referenced entries substituted in — emits ∂S/∂I0 accordingly. Scanning
+    // only the syntactic parameters of `S` would leave that pair unchecked, so a
+    // nondifferentiable ∂S/∂I0 could reach the seed as `Unsupported`.
+    {
+        use ir::model::InitSpec;
+        // Direct + inherited parameter references, filled in dependency order so
+        // each entry's dependencies are already resolved when it is reached.
+        let mut reaching: std::collections::HashMap<&str, HashSet<String>> = std::collections::HashMap::new();
+        let order = ir::init_order::topo(&m.initial_conditions, &m.bindings)
+            .map_err(|cycle| SimError::Validation(format!(
+                "initial conditions reference each other in a cycle: {}",
+                cycle.join(" -> ")
+            )))?;
+        for &i in &order {
+            let (comp, InitSpec::Deterministic(expr)) = m.initial_conditions.0
+                .get_index(i)
+                .expect("init_order indexes initial_conditions");
+            // A binding could hide a param reference the scan below does not
+            // descend into — refuse rather than risk a silent-zero seed.
+            if expr_has_binding_ref(expr) {
+                return Err(SimError::Validation(format!(
+                    "ODE gradient (nuts): the initial condition of `{comp}` references a \
+                     shared binding, which the gradient path does not yet trace for the \
+                     ∂init/∂θ seed (gh#275 §1c). Inline the expression, or use \
+                     gradient-free `mh` on `ode`."
+                )));
+            }
+            let mut refs = HashSet::new();
+            collect_param_refs(expr, &mut refs);
+            for dep in ir::init_order::deps(expr, &m.bindings) {
+                if let Some(inherited) = reaching.get(dep.as_str()) {
+                    refs.extend(inherited.iter().cloned());
+                }
+            }
+            for pname in refs.iter().filter(|p| estimated.contains(p.as_str())) {
+                // Real-compartment forward sensitivity is a separate follow-up.
+                let global = model.comp_index.get(comp.as_str()).copied().ok_or_else(|| {
+                    SimError::Validation(format!(
+                        "ODE gradient (nuts): initial condition names unknown compartment \
+                         `{comp}`."
+                    ))
+                })?;
+                if model.global_to_int[global].is_none() {
                     return Err(SimError::Validation(format!(
-                        "ODE gradient (nuts): the parameterized initial condition of `{comp}` \
-                         references a shared binding, which the gradient path does not yet \
-                         trace for the ∂init/∂θ seed (gh#275 §1c). Inline the expression, or \
-                         use gradient-free `mh` on `ode`."
+                        "ODE gradient (nuts): parameter-dependent initial condition on real \
+                         compartment `{comp}` — real-compartment forward sensitivity is not \
+                         yet supported (gh#275 §1c). Use gradient-free `mh` on `ode`."
                     )));
                 }
-                let mut refs = HashSet::new();
-                collect_param_refs(expr, &mut refs);
-                for pname in refs.iter().filter(|p| estimated.contains(p.as_str())) {
-                    // Real-compartment forward sensitivity is a separate follow-up.
-                    let global = model.comp_index.get(comp.as_str()).copied().ok_or_else(|| {
-                        SimError::Validation(format!(
-                            "ODE gradient (nuts): initial condition names unknown compartment \
-                             `{comp}`."
-                        ))
-                    })?;
-                    if model.global_to_int[global].is_none() {
+                match m.ic_grad.get(comp).and_then(|pm| pm.get(pname.as_str())) {
+                    Some(ir::deriv::DerivEntry::Grad(_)) => {}
+                    Some(ir::deriv::DerivEntry::Unsupported { code, .. }) => {
                         return Err(SimError::Validation(format!(
-                            "ODE gradient (nuts): parameterized initial condition on real \
-                             compartment `{comp}` — real-compartment forward sensitivity is not \
-                             yet supported (gh#275 §1c). Use gradient-free `mh` on `ode`."
+                            "ODE gradient (nuts): ∂(initial {comp})/∂{pname} is not \
+                             differentiable — it {}. Reformulate the initial condition \
+                             with a smooth expression, or use gradient-free `mh` on `ode`.",
+                            code.reason_message()
                         )));
                     }
-                    match m.ic_grad.get(comp).and_then(|pm| pm.get(pname.as_str())) {
-                        Some(ir::deriv::DerivEntry::Grad(_)) => {}
-                        Some(ir::deriv::DerivEntry::Unsupported { code, .. }) => {
-                            return Err(SimError::Validation(format!(
-                                "ODE gradient (nuts): ∂(initial {comp})/∂{pname} is not \
-                                 differentiable — it {}. Reformulate the initial condition \
-                                 with a smooth expression, or use gradient-free `mh` on `ode`.",
-                                code.reason_message()
-                            )));
-                        }
-                        None => {
-                            return Err(SimError::Validation(format!(
-                                "ODE gradient (nuts): estimated parameter `{pname}` enters the \
-                                 initial condition of `{comp}`, but there is no usable \
-                                 ∂(initial {comp})/∂{pname} — either the initial condition is not \
-                                 differentiable in `{pname}` (e.g. a floor/round of it), or this \
-                                 model was compiled before ic_grad emission (gh#275 §1c). Its \
-                                 gradient would be silently zero. Reformulate the initial \
-                                 condition, recompile, or use gradient-free `mh` on `ode`."
-                            )));
-                        }
+                    None => {
+                        return Err(SimError::Validation(format!(
+                            "ODE gradient (nuts): estimated parameter `{pname}` enters the \
+                             initial condition of `{comp}`, but there is no usable \
+                             ∂(initial {comp})/∂{pname} — either the initial condition is not \
+                             differentiable in `{pname}` (e.g. a floor/round of it), the two \
+                             occurrences cancel, or this model was compiled before ic_grad \
+                             emission (gh#275 §1c). Its gradient would be silently zero. \
+                             Reformulate the initial condition, recompile, or use \
+                             gradient-free `mh` on `ode`."
+                        )));
                     }
                 }
             }
+            reaching.insert(comp.as_str(), refs);
         }
     }
     // ── Observation projections + likelihood arguments ──────────────────────────
@@ -538,12 +552,12 @@ mod tests {
             .join("../../../ocaml/golden/seir_observations.ir.json");
         let mut model: ir::Model =
             ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        model.initial_conditions = ir::model::InitialConditions::Explicit(HashMap::from([
+        model.initial_conditions = ir::model::InitialConditions::constants([
             ("S".to_string(), 9990.0),
             ("E".to_string(), 0.0),
             ("I".to_string(), 10.0),
             ("R".to_string(), 0.0),
-        ]));
+        ]);
         // The golden now carries emitted `ic_grad` for its own parameterized IC;
         // this base forces an Explicit IC, so its ∂init/∂θ must be empty. Each IC
         // test sets `ic_grad` explicitly to model the scenario it exercises.
@@ -721,12 +735,12 @@ mod tests {
     /// contributes `∂init/∂θ = 0` for every estimated parameter, so the gate must
     /// ADMIT it (no seed needed) — guards against the old blanket refusal.
     fn parameterized_ic_i_from_i0(m: &mut ir::Model) {
-        m.initial_conditions = ir::model::InitialConditions::Parameterized(HashMap::from([
+        m.initial_conditions = ir::model::InitialConditions::exprs([
             ("S".to_string(), Expr::Const(ConstExpr { value: 9990.0 })),
             ("E".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
             ("I".to_string(), Expr::Param(ParamExpr { param: "I0".to_string() })),
             ("R".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
-        ]));
+        ]);
     }
 
     #[test]
@@ -802,12 +816,30 @@ mod tests {
         assert!(msg.contains("I0") && msg.contains("differentiable"), "{msg}");
     }
 
+    /// gh#733: `S`'s own expression never names `I0`, but `I0` reaches `S`'s
+    /// initial value through `I` — so the ic_grad completeness check has to see
+    /// the pair. Without the transitive scan the missing ∂S/∂I0 would go
+    /// unchecked and the seed would be silently short a term.
     #[test]
-    fn refuses_from_distribution_initial_condition() {
+    fn refuses_when_an_inherited_ic_parameter_has_no_seed() {
         let mut m = base_model();
-        m.initial_conditions = ir::model::InitialConditions::FromDistribution(HashMap::new());
-        let msg = gate_err(m, &["beta"]);
-        assert!(msg.contains("from_distribution") && msg.contains("ivp"), "{msg}");
+        m.initial_conditions = ir::model::InitialConditions::exprs([
+            ("I".to_string(), Expr::param("I0")),
+            (
+                "S".to_string(),
+                Expr::bin_op(ir::expr::BinOp::Sub, Expr::const_(1000.0), Expr::pop("I")),
+            ),
+        ]);
+        // Seed emitted for I but NOT for S — exactly the gap the scan must catch.
+        m.ic_grad = HashMap::from([(
+            "I".to_string(),
+            HashMap::from([(
+                "I0".to_string(),
+                DerivEntry::Grad(Expr::const_(1.0)),
+            )]),
+        )]);
+        let msg = gate_err(m, &["I0"]);
+        assert!(msg.contains("I0") && msg.contains("`S`"), "{msg}");
     }
 
     /// Set the `detection` stream to a nonlinear prevalence projection `I / S`.

@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.33",
+  "ir_version": "0.34",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "birth_death",
@@ -102,11 +102,7 @@
       {"name": "lambda", "value": {"mode": "fixed", "value": 0.1}, "param_kind": null, "param_dim": null},
       {"name": "mu", "value": {"mode": "fixed", "value": 0.15}, "param_kind": null, "param_dim": null}
     ],
-    "initial_conditions": {
-      "explicit": {
-        "X": 100
-      }
-    },
+    "initial_conditions": { "X": { "deterministic": { "const": 100 } } },
     "output": {
       "times": {
         "regular": {

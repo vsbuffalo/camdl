@@ -73,7 +73,7 @@ fn decay_model() -> Model {
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![fixed("k", 0.1), fixed("S0", 1000.0)],
-        initial_conditions: InitialConditions::Parameterized(
+        initial_conditions: InitialConditions::exprs(
             HashMap::from([("S".to_string(), Expr::param("S0"))]),
         ),
         output: OutputConfig {

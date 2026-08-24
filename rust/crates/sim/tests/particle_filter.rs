@@ -84,7 +84,7 @@ fn pure_death_model() -> (CompiledModel, Vec<f64>) {
         parameters: vec![
             Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.01 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new(); m.insert("N".into(), 100.0); m
         }),
         output: OutputConfig {

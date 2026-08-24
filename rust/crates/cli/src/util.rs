@@ -4452,7 +4452,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![],
-            initial_conditions: ir::model::InitialConditions::Explicit(
+            initial_conditions: ir::model::InitialConditions::constants(
                 std::collections::HashMap::new()),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![]),
@@ -4670,7 +4670,7 @@ mod tests {
                 },
                 param_kind: None, param_dim: None,
             }],
-            initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
+            initial_conditions: ir::model::InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![0.0]),
                 format: "tsv".into(),

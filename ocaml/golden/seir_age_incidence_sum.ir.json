@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"seir_age_incidence_sum","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"seir_age_incidence_sum","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_child","kind":"integer"},
 {"name":"S_adult","kind":"integer"},
 {"name":"E_child","kind":"integer"},
@@ -24,7 +24,7 @@
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"rho","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null},
 {"name":"k","value":{"mode":"estimated","bounds":[0.1,100.0],"prior":"flat","transform":"identity"},"param_kind":"real","param_dim":null}
-],"initial_conditions":{"explicit":{"S_child":4990.0,"S_adult":5000.0,"I_child":10.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":100.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S_child":{"deterministic":{"const":4990.0}},"S_adult":{"deterministic":{"const":5000.0}},"I_child":{"deterministic":{"const":10.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":100.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default","params":{"beta":0.05,"sigma":0.2,"gamma":0.1,"rho":0.6,"k":5.0},"enable":[],"disable":[],"t_end":100.0}
 ],"model_structure":{"dimensions":[{"name":"age","values":["child","adult"]}],"compartment_dims":{"S":["age"],"E":["age"],"I":["age"],"R":["age"]},"base_compartments":["S","E","I","R"],"transmission_transitions":[],"infectious_compartments":[]},"bindings":[
 {"name":"N_local_child","expr":{"pop_sum":["S_child","E_child","I_child","R_child"]}},

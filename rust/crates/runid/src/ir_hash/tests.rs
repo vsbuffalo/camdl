@@ -43,10 +43,15 @@ fn representative_model() -> Model {
         ir::deriv::DerivEntry::Grad(Expr::bin_op(BinOp::Mul, Expr::pop("S"), Expr::pop("I"))),
     );
 
-    let mut ic: HashMap<String, f64> = HashMap::new();
-    ic.insert("S".into(), 999.0);
-    ic.insert("I".into(), 1.0);
-    ic.insert("R".into(), 0.0);
+    // Declaration order is part of the model's identity (`InitialConditions` is
+    // an `IndexMap`, hashed in order), so this list is written out rather than
+    // collected from a `HashMap` — an unordered source would make the GOLDEN
+    // hash below flaky.
+    let ic: Vec<(String, f64)> = vec![
+        ("S".into(), 999.0),
+        ("I".into(), 1.0),
+        ("R".into(), 0.0),
+    ];
 
     let mut preset_params: HashMap<String, f64> = HashMap::new();
     preset_params.insert("beta".into(), 1.5);
@@ -151,7 +156,7 @@ fn representative_model() -> Model {
             expr: Expr::pop_sum(vec!["S".into(), "I".into(), "R".into()]),
         }],
         per_eval_bindings: vec![],
-        initial_conditions: InitialConditions::Explicit(ic),
+        initial_conditions: InitialConditions::constants(ic),
         output: OutputConfig {
             times: OutputSchedule::Regular(RegularOutputSchedule {
                 start: 0.0,
@@ -266,7 +271,17 @@ fn model_golden_hash() {
     // `hash_into`, and the SV header bumps 1→2. The representative model carries a
     // `rate_grad` (∂/∂beta), so removing it AND the SV bump move the hash once — a
     // deliberate, version-bumped re-key (gradients are derived, not identity).
-    const GOLDEN: &str = "33c669da9a280e8519592fe1ad7a4d1764b19b908d2fff6e52bbf61424948356";
+    // gh#733 (ir/VERSION -> 0.34): `initial_conditions` stopped being a
+    // three-variant enum over the whole block and became one ordered map of
+    // per-compartment `InitSpec`s. `hash_into` now writes an
+    // `ir::model::InitialConditions` header, a length, and then each entry
+    // through `InitSpec::hash_into` in DECLARATION order — where the
+    // `Explicit` arm previously wrote a SORTED `str -> f64` map. The
+    // representative model's three literals shift the model hash once — a
+    // deliberate, version-bumped re-key (the init block's order is now part of
+    // model identity, because the runtime evaluates entries in an order derived
+    // from it).
+    const GOLDEN: &str = "355822419daf10b5013519aec6fb1fd86ba8453607c1524f57da697d1321bdaf";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -766,16 +781,58 @@ fn ir_const_signed_zero_is_distinct() {
     // changes the model hash.
     let mut m_pos = representative_model();
     let mut m_neg = representative_model();
-    if let InitialConditions::Explicit(ref mut map) = m_pos.initial_conditions {
-        map.insert("R".into(), 0.0);
-    }
-    if let InitialConditions::Explicit(ref mut map) = m_neg.initial_conditions {
-        map.insert("R".into(), -0.0);
-    }
+    m_pos.initial_conditions.0.insert(
+        "R".into(), ir::model::InitSpec::Deterministic(ir::expr::Expr::const_(0.0)));
+    m_neg.initial_conditions.0.insert(
+        "R".into(), ir::model::InitSpec::Deterministic(ir::expr::Expr::const_(-0.0)));
     assert_ne!(
         m_pos.content_hash(),
         m_neg.content_hash(),
         "a -0.0 init condition must change the model hash"
+    );
+}
+
+/// gh#733: `InitialConditions` is hashed in DECLARATION order, unlike the
+/// sorted `write_str_map` helpers the other string-keyed maps use.
+///
+/// The order is not cosmetic — the runtime derives its evaluation order from
+/// the reference graph and breaks ties by declaration order, so two blocks with
+/// the same entries in a different order can seed a different state. Hashing
+/// them identically would serve one model's stored run to the other. Over-keying
+/// is the safe direction here: a reordered block that happens to be equivalent
+/// re-keys and recomputes, which costs time, not correctness.
+#[test]
+fn init_condition_order_changes_the_model_hash() {
+    let base = representative_model();
+    let mut reordered = base.clone();
+    // Same three entries, S and I swapped.
+    let mut entries: Vec<_> =
+        base.initial_conditions.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    entries.swap(0, 1);
+    reordered.initial_conditions = ir::model::InitialConditions(entries.into_iter().collect());
+
+    let keys = |m: &Model| m.initial_conditions.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
+    // Non-vacuity: same entries, different sequence.
+    assert_eq!(
+        keys(&base).iter().collect::<std::collections::HashSet<_>>(),
+        keys(&reordered).iter().collect::<std::collections::HashSet<_>>(),
+        "the swap must keep the same entry SET"
+    );
+    assert_ne!(keys(&base), keys(&reordered), "the swap must change the SEQUENCE");
+
+    assert_ne!(
+        base.content_hash(),
+        reordered.content_hash(),
+        "reordering the init block must re-key the model — the runtime's \
+         evaluation order is derived from it"
+    );
+    // `==` and `content_hash` must agree on what "the same model" means. The
+    // `IndexMap` inside compares order-blind, so `InitialConditions` carries a
+    // hand-written order-sensitive `PartialEq`; without it a round-trip that
+    // dropped the order would pass an equality assertion and re-key silently.
+    assert_ne!(
+        base.initial_conditions, reordered.initial_conditions,
+        "InitialConditions equality must be order-sensitive, to agree with the hash"
     );
 }
 

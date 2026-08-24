@@ -348,6 +348,15 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("zinb_vector_catch", "gillespie", 0x5ea758b8d07767bb),
     ("zinb_vector_catch", "chain_binomial", 0x7e8434620b14cd5f),
     ("zinb_vector_catch", "ode", 0xa3f1e32cfccb4698),
+    // gh#733: the only golden whose `init {}` entries read each other. Its
+    // starting state is `S = N0 - infected - R` with `E = k*I` and `I = I0`,
+    // so the whole trajectory is downstream of the dependency-ordered
+    // evaluation — an evaluation against a zero state seeds S at N0 (25% too
+    // large here) and every hash below moves. Captured alongside the fixture;
+    // the existing 147 entries re-verified unchanged in the same run.
+    ("init_dependency_order", "gillespie", 0x1ff926d513545893),
+    ("init_dependency_order", "chain_binomial", 0x106db514b819a113),
+    ("init_dependency_order", "ode", 0x1cf09ebb82654096),
 ];
 
 /// State-only ODE baselines (gh#166 Phase A): model -> `ode_state_hash`, captured
@@ -360,6 +369,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("branching_si_symp_asym", 0x35a833278ee1fecc),
     ("ebola_outcome_hyper", 0xfda4ae754f35311c),
     ("flu_data_forcing", 0xd55c543de04d2062),
+    ("init_dependency_order", 0x302afcb22a1f2e5b),
     ("malaria_two_species", 0xfd4699acf8596e87),
     ("multi_index_beta", 0x31fc0e11eb647500),
     ("phenom_mixing_unchecked", 0x46f766b4f10b0138),

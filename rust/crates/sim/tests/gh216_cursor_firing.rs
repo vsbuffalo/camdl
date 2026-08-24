@@ -150,7 +150,7 @@ fn build_model(interventions: Vec<Intervention>) -> CompiledModel {
             Parameter { name: "mu".into(), value: ir::parameter::ParamValue::Fixed { value: 0.0 }, param_kind: None, param_dim: None },
             Parameter { name: "dummy".into(), value: ir::parameter::ParamValue::Fixed { value: 1.0 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("N".into(), 100.0);
             m.insert("M".into(), 0.0);

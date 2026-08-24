@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# `initial_conditions` is an ORDERED map: the JSON object's key order is the
+# model's declaration order, and both sides must round-trip it (the OCaml side
+# is an association list). A `HashMap` would drop it on deserialize.
+indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

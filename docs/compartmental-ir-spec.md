@@ -652,22 +652,47 @@ for the parameter structure.
 
 ---
 
-## 7. Initial Conditions `[v0.1]`
+## 7. Initial Conditions `[v0.34]`
+
+One spec per compartment, in an **ordered** map keyed by expanded compartment
+name:
 
 ```
-initial_conditions :=
-  | Explicit(compartment_values: (string * number) list)
-      -- integer compartments: int values; real compartments: float values
-  | Parameterized(compartment_exprs: (string * expr) list)
-      -- initial values are functions of parameters
-      -- e.g., S₀ = N - I₀; W₀ = Param("W_init")
-  | FromDistribution(compartment_dists: (string * prior_dist) list)
-      -- v0.2+: initial values drawn from distributions
+initial_conditions := (string * init_spec) list   -- ORDERED: declaration order
+
+init_spec :=
+  | Deterministic(expr)
+      -- e.g. S₀ = N0 - I0; W₀ = Param("W_init"); R₀ = Const(0.0)
 ```
 
-`Parameterized` is the most common: fix total `N`, set `I₀` as a parameter,
-compute `S₀ = N - I₀`. Real compartments use the same form:
-`W₀ = Param("W_init")` or `W₀ = Const(0.0)`.
+Whether an entry happens to be a literal is a runtime build detail, not a
+distinction the IR draws — `S = 990` and `S = N0 - I0` are the same variant.
+
+**The order is load-bearing and is part of the model's identity.** The JSON
+object's key order is the model file's declaration order; both implementations
+round-trip it (OCaml association list, Rust `IndexMap`) and the content hash
+folds it in declaration order, so re-ordering an `init {}` block re-keys the
+model's runs.
+
+**An entry may read another compartment's initial value.** An `init {}` block
+writing `I = I0` and then `S = N0 - I` seeds `I` first and then reads the seeded
+`I`, so the total is `N0` by construction with no `balance {}` block. The
+runtime therefore evaluates the entries in **dependency** order, not declaration
+order: it builds the reference graph from each RHS's `Pop` / `PopSum` leaves
+(following any `BindingRef` into the hoisted binding it names), topologically
+sorts it, and evaluates each entry against the partially built state.
+Declaration order is the tie-break between independent entries. A compartment
+named in an RHS but carrying no init entry of its own is not an edge — it starts
+at 0.
+
+A reference **cycle** has no evaluation order and is rejected by both validators
+(E515), naming the whole cycle.
+
+An integer compartment's value is rounded as it is placed, so a later entry
+reading it reads the rounded count — the state a discrete backend starts from.
+The ODE gradient path is continuous end to end and reads the unrounded value,
+matching the `ic_grad` seed, which differentiates each entry with the entries it
+references substituted in.
 
 ---
 
@@ -676,11 +701,13 @@ compute `S₀ = N - I₀`. Real compartments use the same form:
 Every serialized IR file is an **envelope** wrapping the model. The top level is
 `{ir_version, validated_by, model:{…}}`:
 
-- `ir_version` — the IR **schema** version (currently `"0.20"`, tracking
-  `ir/VERSION`). This is the OCaml↔Rust contract version; a mismatch here means
-  the producer and consumer disagree on the wire format.
-- `validated_by` — provenance tag for who produced/validated the IR (e.g.
-  `"ocaml-compiler-v0.20"`, or `"hand-curated-ir-golden"` for curated goldens).
+- `ir_version` — the IR **schema** version, read from `ir/VERSION` (the single
+  source of truth; do not repeat the number here, it goes stale). This is the
+  OCaml↔Rust contract version; a mismatch here means the producer and consumer
+  disagree on the wire format.
+- `validated_by` — provenance tag for who produced/validated the IR
+  (`"ocaml-compiler-v<ir_version>"`, or `"hand-curated-ir-golden"` for curated
+  goldens).
 - `model` — the model object documented below. Note its inner `version` field is
   the **model author's** own version string, not the schema version.
 
@@ -995,16 +1022,16 @@ objects, `bin_op` expression nodes, parameterized initial conditions,
   ],
 
   "initial_conditions": {
-    "parameterized": {
-      "S": {
+    "S": {
+      "deterministic": {
         "bin_op": {
           "op": "sub",
           "left": { "param": "N0" },
           "right": { "param": "I0" }
         }
-      },
-      "I": { "param": "I0" }
-    }
+      }
+    },
+    "I": { "deterministic": { "param": "I0" } }
   },
 
   "output": {
@@ -1186,7 +1213,9 @@ one transition shown for brevity — the full file has eight.
   ],
 
   "initial_conditions": {
-    "explicit": { "S_child": 4990.0, "S_adult": 5000.0, "I_child": 10.0 }
+    "S_child": { "deterministic": { "const": 4990.0 } },
+    "S_adult": { "deterministic": { "const": 5000.0 } },
+    "I_child": { "deterministic": { "const": 10.0 } }
   },
 
   "output": {
@@ -1399,7 +1428,10 @@ projection output (§4.2).
   ],
 
   "initial_conditions": {
-    "explicit": { "S": 990, "I": 10, "R": 0, "W": 0.0 }
+    "S": { "deterministic": { "const": 990 } },
+    "I": { "deterministic": { "const": 10 } },
+    "R": { "deterministic": { "const": 0 } },
+    "W": { "deterministic": { "const": 0.0 } }
   },
 
   "output": {

@@ -1555,7 +1555,7 @@ mod tests {
     fn forward_sensitivity_matches_finite_difference_and_analytic() {
         let cm = compiled_pure_death();
         let mu = 0.1;
-        let n0 = 1000.0; // pure_death initial_conditions: {"explicit": {"N": 1000}}
+        let n0 = 1000.0; // pure_death initial_conditions: {"N": {"deterministic": {"const": 1000}}}
         let t_end = 5.0;
         let dt = 0.01;
         let pmi = [0usize]; // mu is model param index 0 (the only parameter)

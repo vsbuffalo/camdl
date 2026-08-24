@@ -49,7 +49,7 @@ fn mixed_model_ir() -> String {
         "ode_equations": [], "time_functions": [], "tables": [],
         "observations": [],
         "parameters": [],
-        "initial_conditions": { "explicit": { "S": 1000.0, "V": 0.0 } },
+        "initial_conditions": { "S": { "deterministic": { "const": 1000.0 } }, "V": { "deterministic": { "const": 0.0 } } },
         "output": {
           "times": { "regular": { "start": 0.0, "step": 1.0, "end": 20.0 } },
           "format": "tsv", "trajectory": true, "observations": false

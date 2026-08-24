@@ -3,7 +3,6 @@
 //! Invariant: eval_resolved(resolve_expr(e), ctx) == eval_expr(e, ctx)
 //! for all Expr e and all valid EvalCtx ctx.
 
-use std::collections::HashMap;
 use ir::{
     expr::{
         BinOp,
@@ -42,7 +41,7 @@ fn minimal_model(compartments: Vec<Compartment>, params: Vec<Parameter>) -> Mode
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: params,
-        initial_conditions: InitialConditions::Parameterized(HashMap::new()),
+        initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0]),
             format: "tsv".into(),

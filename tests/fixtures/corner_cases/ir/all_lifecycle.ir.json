@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"all_lifecycle","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"all_lifecycle","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -15,6 +15,6 @@
 {"name":"gamma","value":{"mode":"fixed","value":0.2},"param_kind":"rate","param_dim":null},
 {"name":"cull","value":{"mode":"fixed","value":0.5},"param_kind":"probability","param_dim":null},
 {"name":"N0","value":{"mode":"fixed","value":1000.0},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"explicit":{"S":990.0,"I":10.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":30.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"balance":{"target":"R","expr":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"pop":"S"}}},"right":{"pop":"I"}}}},"bindings":[
+],"initial_conditions":{"S":{"deterministic":{"const":990.0}},"I":{"deterministic":{"const":10.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":30.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"balance":{"target":"R","expr":{"bin_op":{"op":"sub","left":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"pop":"S"}}},"right":{"pop":"I"}}}},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
 ]}}

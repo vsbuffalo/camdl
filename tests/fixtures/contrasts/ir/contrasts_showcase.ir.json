@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"contrasts_showcase","version":"0.3","time_unit":"days","description":null,"origin":"2020-01-01","origin_rata_die":43828,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"contrasts_showcase","version":"0.3","time_unit":"days","description":null,"origin":"2020-01-01","origin_rata_die":43828,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"},
@@ -15,7 +15,7 @@
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"mu","value":{"mode":"estimated","bounds":[0.0,0.5],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"N","value":{"mode":"estimated","bounds":[1.0,1000000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"explicit":{"S":9000.0,"I":100.0,"R":0.0,"D":0.0,"V":0.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":400.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S":{"deterministic":{"const":9000.0}},"I":{"deterministic":{"const":100.0}},"R":{"deterministic":{"const":0.0}},"D":{"deterministic":{"const":0.0}},"V":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":400.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"no_sia","label":"no_sia","params":{},"enable":[],"disable":["sia"],"t_end":null},
 {"name":"with_sia","label":"with_sia","params":{},"enable":["sia"],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[],"D":[],"V":[]},"base_compartments":["S","I","R","D","V"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"quantities":[

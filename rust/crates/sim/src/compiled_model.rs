@@ -707,6 +707,16 @@ pub struct CompiledModel {
     /// seam honest.
     pub fire_times: Vec<Vec<f64>>,
 
+    /// Evaluation order for `model.initial_conditions`, as indices into that
+    /// map: every entry appears after the entries it reads (gh#733).
+    ///
+    /// An initial condition may name another compartment (`S = N0 - I`), and
+    /// the runtime evaluates it against the state built so far — so the order
+    /// is load-bearing, not cosmetic. Sorted once at build; a reference cycle
+    /// is refused by `CompiledModel::new`. Declaration order breaks ties, so
+    /// two independent entries keep the order the model file wrote them in.
+    pub init_order: Vec<usize>,
+
     /// Pre-resolved expression trees for all hot-path evaluations.
     pub resolved: ResolvedModel,
 }
@@ -1799,6 +1809,29 @@ impl CompiledModel {
             None
         };
 
+        // gh#733: an initial condition may read another compartment's initial
+        // value, so the entries are evaluated in dependency order against the
+        // partially built state. Sort once here (declaration order breaks ties
+        // between independent entries) rather than per `initial_state` call —
+        // the bootstrap PF and IF2 build one initial state per particle.
+        // A cycle is rejected by `ir::validate` at load; a model built in
+        // memory bypasses that, so refuse it here too rather than pick an
+        // arbitrary order and report a number.
+        let init_order = ir::init_order::topo(&model.initial_conditions, &model.bindings)
+            .map_err(|cycle| {
+                SimError::Validation(format!(
+                    "initial conditions reference each other in a cycle: {}. An \
+                     initial condition may read another compartment's initial \
+                     value, but the references must form a chain, not a loop",
+                    cycle
+                        .iter()
+                        .chain(cycle.first())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                ))
+            })?;
+
         let resolved = ResolvedModel {
             rates,
             bindings: resolved_bindings,
@@ -1838,6 +1871,7 @@ impl CompiledModel {
             time_dep_transitions,
             balance,
             fire_times,
+            init_order,
             resolved,
         })
     }
@@ -1917,70 +1951,54 @@ impl CompiledModel {
     /// the same number for every particle. Every stochastic forward path calls
     /// [`Self::initial_state_draw`] instead.
     ///
-    /// `init {}` cannot declare a law yet — `InitialConditions` is
-    /// `Explicit`/`Parameterized`, both deterministic — so today this is the
-    /// entire initial state and `initial_state_draw` returns exactly this.
+    /// `init {}` cannot declare a law yet — [`InitSpec::Deterministic`] is the
+    /// only spec — so today this is the entire initial state and
+    /// `initial_state_draw` returns exactly this.
+    ///
+    /// Entries are evaluated in dependency order ([`Self::init_order`]) against
+    /// the state built so far, so `init { I = I0   S = N0 - I }` reads the `I`
+    /// this call just seeded. Before gh#733 every entry saw a throwaway
+    /// all-zero state, which made `S = N0 - I` silently evaluate to `N0`.
+    ///
+    /// An integer compartment's value is rounded as it is placed, and a later
+    /// entry reading it therefore reads the ROUNDED count — the state a
+    /// discrete backend actually starts from.
     pub fn initial_state_mean(
         &self,
         params: &[f64],
     ) -> Result<(IntState, RealState), SimError> {
-        use ir::model::InitialConditions;
+        use ir::model::InitSpec;
         use crate::propensity::{eval_expr, EvalCtx};
 
         let n_int = self.int_local_to_global.len();
         let n_real = self.real_local_to_global.len();
-        let mut int_counts = vec![0i64; n_int];
-        let mut real_values = vec![0.0f64; n_real];
+        // The state under construction: read by any entry that names a
+        // compartment, and returned at the end.
+        let mut int_s = IntState::new(n_int);
+        let mut real_s = RealState::new(n_real);
 
-        // Temporary zero state for evaluating parameterized ICs
-        let zero_int = IntState::new(n_int);
-        let zero_real = RealState::new(n_real);
-
-        match &self.model.initial_conditions {
-            InitialConditions::Explicit(map) => {
-                for (name, val) in map {
-                    let global = self.comp_index.get(name.as_str())
-                        .copied()
-                        .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
-                    if let Some(local) = self.global_to_int[global] {
-                        int_counts[local] = *val as i64;
-                    } else if let Some(local) = self.global_to_real[global] {
-                        real_values[local] = *val;
-                    }
-                }
-            }
-            InitialConditions::Parameterized(map) => {
-                // dt: 0.0 — initial-condition expressions don't have
-                // access to a meaningful integrator step (init runs once,
-                // before stepping). Users referencing `dt` here get 0.0.
-                let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-                for (name, expr) in map {
-                    let global = self.comp_index.get(name.as_str())
-                        .copied()
-                        .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
-                    let v = eval_expr(expr, &ctx)?;
-                    if let Some(local) = self.global_to_int[global] {
-                        int_counts[local] = v.round() as i64;
-                    } else if let Some(local) = self.global_to_real[global] {
-                        real_values[local] = v;
-                    }
-                }
-            }
-            InitialConditions::FromDistribution(_) => {
-                // RC3 in 2026-04-19 engine review: this was a silent
-                // fall-through to "all zeros," which would start every
-                // compartment at 0 and not tell anyone. Hard-fail until
-                // the inference-side prior sampling path is wired in.
-                return Err(SimError::Validation(
-                    "initial_conditions::from_distribution is not yet \
-                     supported at the sim layer; draw initial values \
-                     via the inference pipeline and pass them in as \
-                     explicit initial_conditions instead".to_string()
-                ));
+        for &i in &self.init_order {
+            let (name, InitSpec::Deterministic(expr)) =
+                self.model.initial_conditions.0.get_index(i)
+                    .expect("init_order indexes initial_conditions");
+            let global = self.comp_index.get(name.as_str())
+                .copied()
+                .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
+            // dt: 0.0 — initial-condition expressions don't have
+            // access to a meaningful integrator step (init runs once,
+            // before stepping). Users referencing `dt` here get 0.0.
+            let v = {
+                let ctx = EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+                eval_expr(expr, &ctx)?
+            };
+            if let Some(local) = self.global_to_int[global] {
+                int_s.counts[local] = v.round() as i64;
+            } else if let Some(local) = self.global_to_real[global] {
+                real_s.values[local] = v;
             }
         }
 
-        Ok((IntState::from_vec(int_counts), RealState::from_vec(real_values)))
+        Ok((int_s, real_s))
     }
 
     /// One **draw** of the initial state, `x₀ ~ p(· | θ)`.
@@ -2061,74 +2079,62 @@ impl CompiledModel {
     /// (gh#275 §1c): the un-rounded initial state, returned as
     /// `(int_as_f64, real)`.
     ///
-    /// [`Self::initial_state_mean`] rounds/truncates integer compartments to `i64`,
+    /// [`Self::initial_state_mean`] rounds integer compartments to `i64`,
     /// correct for the discrete backends. The deterministic ODE forward
     /// sensitivity must instead start from the *continuous* initial value:
-    /// rounding a `Parameterized` initial condition to an integer makes the
-    /// likelihood piecewise-constant in the IC parameter, which contradicts the
+    /// rounding an initial condition to an integer makes the likelihood
+    /// piecewise-constant in the IC parameter, which contradicts the
     /// `∂init/∂θ` seed (`ic_grad`) and would make the reported gradient
     /// inconsistent with the value it differentiates (an FD of the rounded value
-    /// is ~0 or a boundary spike, never the analytic seed). For `Explicit`
-    /// (constant) ICs this returns exactly `initial_state_mean`'s values; the two
-    /// paths diverge only for a `Parameterized` IC that evaluates to a
+    /// is ~0 or a boundary spike, never the analytic seed). For a block of
+    /// literals this returns exactly `initial_state_mean`'s values; the two
+    /// paths diverge only where an entry evaluates to a
     /// non-integer, where the continuous value is the correct one for the ODE
-    /// skeleton. The eval context mirrors `initial_state_mean`'s parameterized arm
-    /// (zero state, `t = 0`, `dt = 0`), so the two stay in lockstep.
+    /// skeleton.
     ///
     /// This is the un-rounded *sibling* of `initial_state_mean`, not a fifth
     /// question of the initial-state seam: there is no continuous "draw",
     /// because the ODE path is deterministic by construction.
+    ///
+    /// The dependency order is the same as `initial_state_mean`'s (gh#733), but
+    /// a compartment reference reads the UNROUNDED value built here, via
+    /// `int_float_override` — so this path is internally continuous end to end
+    /// and matches the `ic_grad` seed, which differentiates each entry with the
+    /// referenced entries' expressions substituted in.
     pub fn initial_state_continuous(
         &self,
         params: &[f64],
     ) -> Result<(Vec<f64>, Vec<f64>), SimError> {
-        use ir::model::InitialConditions;
+        use ir::model::InitSpec;
         use crate::propensity::{eval_expr, EvalCtx};
 
         let n_int = self.int_local_to_global.len();
         let n_real = self.real_local_to_global.len();
         let mut int_values = vec![0.0f64; n_int];
-        let mut real_values = vec![0.0f64; n_real];
-        let zero_int = IntState::new(n_int);
-        let zero_real = RealState::new(n_real);
+        let mut real_s = RealState::new(n_real);
+        // `Pop` on an integer compartment reads `int_float_override` when set,
+        // so the partially built continuous values are what a later entry sees.
+        // `int_s` is then never consulted, but the context still requires one.
+        let unused_int = IntState::new(n_int);
 
-        // Place a continuous initial value into the int- or real-compartment slot
-        // (unrounded, unlike `initial_state_mean`'s `as i64` / `.round()`).
-        macro_rules! place {
-            ($name:expr, $v:expr) => {{
-                let global = self.comp_index.get($name.as_str())
-                    .copied()
-                    .ok_or_else(|| SimError::UnknownCompartment($name.clone()))?;
-                if let Some(local) = self.global_to_int[global] {
-                    int_values[local] = $v;
-                } else if let Some(local) = self.global_to_real[global] {
-                    real_values[local] = $v;
-                }
-            }};
-        }
-
-        match &self.model.initial_conditions {
-            InitialConditions::Explicit(map) => {
-                for (name, val) in map {
-                    place!(name, *val);
-                }
-            }
-            InitialConditions::Parameterized(map) => {
-                let ctx = EvalCtx { model: self, int_s: &zero_int, real_s: &zero_real, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
-                for (name, expr) in map {
-                    let v = eval_expr(expr, &ctx)?;
-                    place!(name, v);
-                }
-            }
-            InitialConditions::FromDistribution(_) => {
-                return Err(SimError::Validation(
-                    "initial_conditions::from_distribution is not yet supported at the \
-                     sim layer; draw initial values via the inference pipeline and pass \
-                     them in as explicit initial_conditions instead".to_string()
-                ));
+        for &i in &self.init_order {
+            let (name, InitSpec::Deterministic(expr)) =
+                self.model.initial_conditions.0.get_index(i)
+                    .expect("init_order indexes initial_conditions");
+            let v = {
+                let ctx = EvalCtx { model: self, int_s: &unused_int, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: Some(&int_values), per_eval: None };
+                eval_expr(expr, &ctx)?
+            };
+            let global = self.comp_index.get(name.as_str())
+                .copied()
+                .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
+            if let Some(local) = self.global_to_int[global] {
+                int_values[local] = v;
+            } else if let Some(local) = self.global_to_real[global] {
+                real_s.values[local] = v;
             }
         }
-        Ok((int_values, real_values))
+        Ok((int_values, real_s.values))
     }
 
     /// The forward-sensitivity seed `S(t_start) = ∂(initial state)/∂θ` (`ic_grad`,

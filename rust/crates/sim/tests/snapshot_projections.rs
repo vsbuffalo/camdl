@@ -86,7 +86,7 @@ fn model_with_obs(
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![],
-        initial_conditions: InitialConditions::Explicit(initial),
+        initial_conditions: InitialConditions::constants(initial),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 5.0]),
             format: "tsv".into(), trajectory: true, observations: false,
@@ -363,7 +363,7 @@ fn snapshot_reads_post_intervention_state() {
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![],
-        initial_conditions: InitialConditions::Explicit(init),
+        initial_conditions: InitialConditions::constants(init),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![5.0]),
             format: "tsv".into(), trajectory: true, observations: false,

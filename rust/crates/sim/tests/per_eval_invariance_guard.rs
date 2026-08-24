@@ -13,8 +13,6 @@
 //! the OCaml predicate, mirroring the overdispersion σ² and intervention-schedule
 //! `references_state` guards in `compiled_model.rs`.
 
-use std::collections::HashMap;
-
 use ir::{
     expr::{BinOp, Expr},
     model::{
@@ -56,7 +54,7 @@ fn model_with_per_eval_bindings(per_eval_bindings: Vec<Binding>) -> Model {
             param_kind: None,
             param_dim: None,
         }],
-        initial_conditions: InitialConditions::Parameterized(HashMap::new()),
+        initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0]),
             format: "tsv".into(),

@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.33",
+  "ir_version": "0.34",
   "validated_by": "hand-curated-fixture",
   "model": {
     "name": "seir_spatial_5",
@@ -9372,164 +9372,128 @@
       {"name": "k", "value": {"mode": "estimated", "bounds": [1.0, 100.0], "prior": "flat", "transform": "identity"}, "param_kind": "positive", "param_dim": null}
     ],
     "initial_conditions": {
-      "parameterized": {
-        "S_p1": {
+      "S_p1": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
             "left": {
               "bin_op": {
                 "op": "mul",
-                "left": {
-                  "param": "s0"
-                },
-                "right": {
-                  "param": "N0_p1"
-                }
+                "left": { "param": "s0" },
+                "right": { "param": "N0_p1" }
               }
             },
-            "right": {
-              "const": 50.0
-            }
+            "right": { "const": 50.0 }
           }
-        },
-        "S_p2": {
+        }
+      },
+      "S_p2": {
+        "deterministic": {
           "bin_op": {
             "op": "mul",
-            "left": {
-              "param": "s0"
-            },
-            "right": {
-              "param": "N0_p2"
-            }
+            "left": { "param": "s0" },
+            "right": { "param": "N0_p2" }
           }
-        },
-        "S_p3": {
+        }
+      },
+      "S_p3": {
+        "deterministic": {
           "bin_op": {
             "op": "mul",
-            "left": {
-              "param": "s0"
-            },
-            "right": {
-              "param": "N0_p3"
-            }
+            "left": { "param": "s0" },
+            "right": { "param": "N0_p3" }
           }
-        },
-        "S_p4": {
+        }
+      },
+      "S_p4": {
+        "deterministic": {
           "bin_op": {
             "op": "mul",
-            "left": {
-              "param": "s0"
-            },
-            "right": {
-              "param": "N0_p4"
-            }
+            "left": { "param": "s0" },
+            "right": { "param": "N0_p4" }
           }
-        },
-        "S_p5": {
+        }
+      },
+      "S_p5": {
+        "deterministic": {
           "bin_op": {
             "op": "mul",
-            "left": {
-              "param": "s0"
-            },
-            "right": {
-              "param": "N0_p5"
-            }
+            "left": { "param": "s0" },
+            "right": { "param": "N0_p5" }
           }
-        },
-        "I_p1": {
-          "const": 50.0
-        },
-        "R_p1": {
+        }
+      },
+      "I_p1": { "deterministic": { "const": 50.0 } },
+      "R_p1": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
-            "left": {
-              "param": "N0_p1"
-            },
+            "left": { "param": "N0_p1" },
             "right": {
               "bin_op": {
                 "op": "mul",
-                "left": {
-                  "param": "s0"
-                },
-                "right": {
-                  "param": "N0_p1"
-                }
+                "left": { "param": "s0" },
+                "right": { "param": "N0_p1" }
               }
             }
           }
-        },
-        "R_p2": {
+        }
+      },
+      "R_p2": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
-            "left": {
-              "param": "N0_p2"
-            },
+            "left": { "param": "N0_p2" },
             "right": {
               "bin_op": {
                 "op": "mul",
-                "left": {
-                  "param": "s0"
-                },
-                "right": {
-                  "param": "N0_p2"
-                }
+                "left": { "param": "s0" },
+                "right": { "param": "N0_p2" }
               }
             }
           }
-        },
-        "R_p3": {
+        }
+      },
+      "R_p3": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
-            "left": {
-              "param": "N0_p3"
-            },
+            "left": { "param": "N0_p3" },
             "right": {
               "bin_op": {
                 "op": "mul",
-                "left": {
-                  "param": "s0"
-                },
-                "right": {
-                  "param": "N0_p3"
-                }
+                "left": { "param": "s0" },
+                "right": { "param": "N0_p3" }
               }
             }
           }
-        },
-        "R_p4": {
+        }
+      },
+      "R_p4": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
-            "left": {
-              "param": "N0_p4"
-            },
+            "left": { "param": "N0_p4" },
             "right": {
               "bin_op": {
                 "op": "mul",
-                "left": {
-                  "param": "s0"
-                },
-                "right": {
-                  "param": "N0_p4"
-                }
+                "left": { "param": "s0" },
+                "right": { "param": "N0_p4" }
               }
             }
           }
-        },
-        "R_p5": {
+        }
+      },
+      "R_p5": {
+        "deterministic": {
           "bin_op": {
             "op": "sub",
-            "left": {
-              "param": "N0_p5"
-            },
+            "left": { "param": "N0_p5" },
             "right": {
               "bin_op": {
                 "op": "mul",
-                "left": {
-                  "param": "s0"
-                },
-                "right": {
-                  "param": "N0_p5"
-                }
+                "left": { "param": "s0" },
+                "right": { "param": "N0_p5" }
               }
             }
           }

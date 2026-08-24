@@ -442,7 +442,7 @@ fn collision_model(interventions: Vec<Intervention>) -> CompiledModel {
             param_kind: None,
             param_dim: None,
         }],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut h = HashMap::new();
             h.insert("S".into(), 100.0);
             h.insert("V".into(), 0.0);

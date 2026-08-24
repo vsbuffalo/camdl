@@ -1161,34 +1161,21 @@
     },
 
     "initial_conditions": {
+      "description": "One spec per compartment, keyed by expanded compartment name, in declaration order. Both sides preserve that order (OCaml association list, Rust IndexMap) and it is part of the model's identity. The runtime evaluates entries in DEPENDENCY order, so a spec may read another compartment's initial value; a reference cycle is rejected (E515).",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/init_spec" }
+    },
+
+    "init_spec": {
+      "description": "What one compartment's initial value is.",
       "type": "object",
       "oneOf": [
         {
-          "required": ["explicit"],
+          "required": ["deterministic"],
           "properties": {
-            "explicit": {
-              "type": "object",
-              "additionalProperties": { "type": "number" }
-            }
-          },
-          "additionalProperties": false
-        },
-        {
-          "required": ["parameterized"],
-          "properties": {
-            "parameterized": {
-              "type": "object",
-              "additionalProperties": { "$ref": "#/definitions/expr" }
-            }
-          },
-          "additionalProperties": false
-        },
-        {
-          "required": ["from_distribution"],
-          "properties": {
-            "from_distribution": {
-              "type": "object",
-              "additionalProperties": { "$ref": "#/definitions/prior_dist" }
+            "deterministic": {
+              "description": "`S = N0 - I`: an expression over constants, parameters and other compartments' initial values.",
+              "$ref": "#/definitions/expr"
             }
           },
           "additionalProperties": false

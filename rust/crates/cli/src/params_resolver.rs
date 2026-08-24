@@ -1142,7 +1142,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters,
-            initial_conditions: InitialConditions::Explicit(HashMap::new()),
+            initial_conditions: InitialConditions::default(),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![]),
                 format: "tsv".into(),

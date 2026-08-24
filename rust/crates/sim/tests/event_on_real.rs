@@ -79,7 +79,7 @@ fn model_with_real_event() -> CompiledModel {
         parameters: vec![
             Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Fixed { value: 0.05 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("S".into(), 100.0);
             m.insert("I".into(), 0.0);

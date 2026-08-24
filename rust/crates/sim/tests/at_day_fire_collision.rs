@@ -70,7 +70,7 @@ fn model_with_schedule(schedule: InterventionSchedule, end: f64) -> CompiledMode
             param_kind: None,
             param_dim: None,
         }],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut h = HashMap::new();
             h.insert("S".into(), 100.0);
             h.insert("I".into(), 0.0);

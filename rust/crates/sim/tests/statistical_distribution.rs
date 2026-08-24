@@ -227,7 +227,7 @@ fn test_overdispersion_variance_chain_binomial() {
             Parameter { name: "sigma_sq".into(), value: ir::parameter::ParamValue::Fixed { value: 0.5 }, param_kind: None, param_dim: None },
         ],
         // Start with S=10000, I=0. After one dt=1 step, about 100 events.
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new(); m.insert("S".into(), 10000.0); m.insert("I".into(), 0.0); m
         }),
         output: OutputConfig {
@@ -326,7 +326,7 @@ fn test_fraction_transfer_edge_cases() {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters: vec![],
-            initial_conditions: InitialConditions::Parameterized(HashMap::new()),
+            initial_conditions: InitialConditions::default(),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![0.0]),
                 format: "tsv".into(), trajectory: true, observations: false,

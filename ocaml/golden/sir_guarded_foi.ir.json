@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"sir_guarded_foi","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"sir_guarded_foi","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_urban","kind":"integer"},
 {"name":"S_rural","kind":"integer"},
 {"name":"S_outpost","kind":"integer"},
@@ -21,7 +21,7 @@
 {"name":"beta","value":{"mode":"estimated","bounds":[0.0,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"rho","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null}
-],"initial_conditions":{"explicit":{"S_urban":9990.0,"I_urban":10.0,"S_rural":2000.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":200.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S_urban":{"deterministic":{"const":9990.0}},"I_urban":{"deterministic":{"const":10.0}},"S_rural":{"deterministic":{"const":2000.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":200.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"default  (R0 ≈ 4 in urban)","params":{"beta":0.4,"gamma":0.1,"rho":0.3},"enable":[],"disable":[],"t_end":null},
 {"name":"high_mobility","label":"stronger between-district coupling","params":{"beta":0.4,"gamma":0.1,"rho":0.3},"enable":[],"disable":[],"t_end":null,"scale":{"rho":2.0}}
 ],"model_structure":{"dimensions":[{"name":"patch","values":["urban","rural","outpost"]}],"compartment_dims":{"S":["patch"],"I":["patch"],"R":["patch"]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[

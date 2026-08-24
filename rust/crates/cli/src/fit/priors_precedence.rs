@@ -242,7 +242,6 @@ mod tests {
     use ir::parameter::{
         BetaPrior, LogNormalPrior, NormalPrior, Parameter, PriorDist,
     };
-    use std::collections::HashMap;
 
     /// Build a minimal `ir::Model` with the given parameters. The
     /// rest of the IR is filled in with empty-but-valid stubs so the
@@ -266,7 +265,7 @@ mod tests {
             bindings: vec![],
             per_eval_bindings: vec![],
             parameters,
-            initial_conditions: ir::model::InitialConditions::Explicit(HashMap::new()),
+            initial_conditions: ir::model::InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![]),
                 format: "tsv".into(),

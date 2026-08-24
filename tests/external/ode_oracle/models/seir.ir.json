@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"seir","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"seir","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"E","kind":"integer"},
 {"name":"I","kind":"integer"},
@@ -13,6 +13,6 @@
 {"name":"gamma","value":{"mode":"fixed","value":0.25},"param_kind":"rate","param_dim":null},
 {"name":"N0","value":{"mode":"fixed","value":100000.0},"param_kind":"count","param_dim":null},
 {"name":"I0","value":{"mode":"fixed","value":10.0},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"I":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"E":[],"I":[],"R":[]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
+],"initial_conditions":{"S":{"deterministic":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}}},"I":{"deterministic":{"param":"I0"}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"E":[],"I":[],"R":[]},"base_compartments":["S","E","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","E","I","R"]}}
 ]}}

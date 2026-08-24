@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"sir_spatial_where","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"sir_spatial_where","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_p0","kind":"integer"},
 {"name":"S_p1","kind":"integer"},
 {"name":"S_p2","kind":"integer"},
@@ -36,7 +36,7 @@
 {"name":"beta","value":{"mode":"estimated","bounds":[0.0,2.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"rho","value":{"mode":"estimated","bounds":[0.0,1.0],"prior":"flat","transform":"identity"},"param_kind":"probability","param_dim":null}
-],"initial_conditions":{"explicit":{"S_p0":9990.0,"I_p0":10.0,"S_p1":10000.0,"S_p2":10000.0,"S_p3":10000.0,"S_p4":10000.0,"S_p5":10000.0}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":250.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S_p0":{"deterministic":{"const":9990.0}},"I_p0":{"deterministic":{"const":10.0}},"S_p1":{"deterministic":{"const":10000.0}},"S_p2":{"deterministic":{"const":10000.0}},"S_p3":{"deterministic":{"const":10000.0}},"S_p4":{"deterministic":{"const":10000.0}},"S_p5":{"deterministic":{"const":10000.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":250.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"radius coupling (R0=2, neighbour-to-neighbour spread)","params":{"beta":0.5,"gamma":0.25,"rho":0.03},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[{"name":"patch","values":["p0","p1","p2","p3","p4","p5"]}],"compartment_dims":{"S":["patch"],"I":["patch"],"R":["patch"]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N_p0","expr":{"pop_sum":["S_p0","I_p0","R_p0"]}},

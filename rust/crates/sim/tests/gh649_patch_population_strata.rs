@@ -22,8 +22,6 @@
 //! partially stratified model (`stratify(by = …, only = [E])`, the Erlang-stage
 //! shape of `ocaml/golden/seir_erlang.camdl`) keeps both its answers.
 
-use std::collections::HashMap;
-
 use ir::{
     model::{
         Compartment, CompartmentKind, Dimension, InitialConditions, ModelStructure, OutputConfig,
@@ -58,7 +56,7 @@ fn model_with(names: &[&str], structure: Option<ModelStructure>) -> CompiledMode
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters: vec![],
-        initial_conditions: InitialConditions::Explicit(HashMap::new()),
+        initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![]),
             format: "tsv".into(),

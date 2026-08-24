@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"ross_macdonald","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"ross_macdonald","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_h","kind":"integer"},
 {"name":"I_h","kind":"integer"},
 {"name":"S_v","kind":"integer"},
@@ -28,7 +28,7 @@
 {"name":"M0","value":{"mode":"estimated","bounds":[100.0,1000000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
 {"name":"I_h0","value":{"mode":"estimated","bounds":[1.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null},
 {"name":"N_tested","value":{"mode":"estimated","bounds":[10.0,10000.0],"prior":"flat","transform":"identity"},"param_kind":"count","param_dim":null}
-],"initial_conditions":{"parameterized":{"S_h":{"bin_op":{"op":"sub","left":{"param":"H0"},"right":{"param":"I_h0"}}},"I_h":{"param":"I_h0"},"S_v":{"param":"M0"}}},"ic_grad":{"S_h":{"H0":{"grad":{"const":1.0}},"I_h0":{"grad":{"const":-1.0}}},"I_h":{"I_h0":{"grad":{"const":1.0}}},"S_v":{"M0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":365.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S_h":{"deterministic":{"bin_op":{"op":"sub","left":{"param":"H0"},"right":{"param":"I_h0"}}}},"I_h":{"deterministic":{"param":"I_h0"}},"S_v":{"deterministic":{"param":"M0"}}},"ic_grad":{"S_h":{"H0":{"grad":{"const":1.0}},"I_h0":{"grad":{"const":-1.0}}},"I_h":{"I_h0":{"grad":{"const":1.0}}},"S_v":{"M0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":365.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"endemic transmission","params":{"a":0.3,"b_h":0.2,"b_v":0.1,"r":0.05,"sigma_v":0.1,"mu_v":0.1,"rho_sens":0.85,"rho_spec":0.95,"H0":1000.0,"M0":5000.0,"I_h0":10.0,"N_tested":200.0},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S_h":[],"I_h":[],"S_v":[],"E_v":[],"I_v":[]},"base_compartments":["S_h","I_h","S_v","E_v","I_v"],"transmission_transitions":["bite","infect_v"],"infectious_compartments":["I_v","I_h"]},"bindings":[
 {"name":"H","expr":{"pop_sum":["S_h","I_h"]}}

@@ -10504,6 +10504,87 @@ let test_init_bare_stratified_single_diagnostic () =
    | [d] -> Alcotest.(check string) "located E277" "E277" d.code
    | _ -> ())
 
+(* ── gh#733: an init entry may read another compartment's initial value ──────
+   The entries are evaluated in dependency order against the partially built
+   state, so `S = N0 - I` reads the `I` that was just seeded. Two things follow
+   and are pinned here:
+
+   1. A REFERENCE CYCLE has no evaluation order — every candidate reads a
+      compartment that has not been built yet — and is rejected as E515 naming
+      the whole loop.
+   2. The ODE forward-sensitivity seed `ic_grad` must differentiate the value
+      the runtime computes, which means each entry closed over the ones it
+      reads. `init { A = A0   B = A0 - A }` starts B at 0, so ∂B/∂A0 = 0;
+      differentiating the RAW `A0 - A`, where `Pop` is a zero leaf, would
+      report 1 — a silently wrong gradient on exactly the construct this
+      change enables. *)
+
+let init_dep_model ~init = Printf.sprintf {|
+time_unit = 'days
+compartments { A, B }
+parameters { A0 : count in [1, 1000]  mu : rate in [0, 1] }
+transitions { decay : A --> B @ mu * A }
+init { %s }
+simulate { from = 0 'days  to = 10 'days }
+|} init
+
+let test_init_dependency_cycle_rejected () =
+  compile_expect_error_code ~code:"E515" ~contains:"A -> B -> A"
+    (init_dep_model ~init:"A = B + 1\n  B = A - 1")
+
+let test_init_dependency_cycle_hint_says_chain_not_loop () =
+  compile_expect_error_code ~code:"E515" ~contains:"a chain, not a loop"
+    (init_dep_model ~init:"A = B + 1\n  B = A - 1")
+
+let test_init_chain_is_accepted () =
+  (* Non-vacuity for the two above: the same shape without the back edge is a
+     legal chain and must compile. *)
+  let m = compile_expect_ok (init_dep_model ~init:"A = A0\n  B = A0 - A") in
+  Alcotest.(check int) "both entries survive to the IR"
+    2 (List.length m.Ir.initial_conditions)
+
+let test_ic_grad_differentiates_the_closed_expression () =
+  (* `B = A0 - A` with `A = A0`: B is identically 0, so ∂B/∂A0 = 0 and the seed
+     must carry either nothing for B or a gradient that evaluates to 0. A `Grad`
+     entry of a non-zero constant here is the raw-expression bug. *)
+  let m = compile_expect_ok (init_dep_model ~init:"A = A0\n  B = A0 - A") in
+  let rec eval_const (e : Ir.expr) = match e with
+    | Ir.Const f -> Some f
+    | Ir.BinOp { op = Ir.Sub; left; right } ->
+      (match eval_const left, eval_const right with
+       | Some l, Some r -> Some (l -. r) | _ -> None)
+    | Ir.BinOp { op = Ir.Add; left; right } ->
+      (match eval_const left, eval_const right with
+       | Some l, Some r -> Some (l +. r) | _ -> None)
+    | _ -> None
+  in
+  (match List.assoc_opt "B" m.Ir.ic_grad with
+   | None -> ()  (* no seed for B at all: also ∂B/∂A0 = 0 *)
+   | Some grad ->
+     (match List.assoc_opt "A0" grad with
+      | None -> ()
+      | Some (Ir.DEGrad e) ->
+        (match eval_const e with
+         | Some v ->
+           Alcotest.(check (float 1e-12))
+             "∂B/∂A0 must be 0 — B is identically 0" 0.0 v
+         | None ->
+           Alcotest.failf
+             "∂B/∂A0 did not fold to a constant; the closed expression should \
+              be `1 - 1`")
+      | Some (Ir.DEUnsupported _) ->
+        Alcotest.failf "∂B/∂A0 should be differentiable, got Unsupported"));
+  (* Non-vacuity: ∂A/∂A0 IS 1, so the pass ran and emitted something. *)
+  (match List.assoc_opt "A" m.Ir.ic_grad with
+   | Some grad ->
+     (match List.assoc_opt "A0" grad with
+      | Some (Ir.DEGrad e) ->
+        (match eval_const e with
+         | Some v -> Alcotest.(check (float 1e-12)) "∂A/∂A0 = 1" 1.0 v
+         | None -> Alcotest.failf "∂A/∂A0 did not fold to a constant")
+      | _ -> Alcotest.failf "expected a ∂A/∂A0 gradient")
+   | None -> Alcotest.failf "no ic_grad for A — the IC autodiff pass did not run")
+
 (* ── gh#98: ISO date out-of-range validation ─────────────────────────────────
    parse_iso_date did no month/day range check, so `date("2020-02-30")`
    silently shifted to a garbage day offset with no diagnostic. Out-of-range
@@ -12456,6 +12537,12 @@ let () =
       Alcotest.test_case "E277 unknown compartment init X[child]" `Quick test_init_unknown_compartment_rejected;
       Alcotest.test_case "concrete cell init S[child] ok" `Quick test_init_concrete_cell_ok;
       Alcotest.test_case "single diagnostic for one root cause" `Quick test_init_bare_stratified_single_diagnostic;
+    ];
+    "init_dependency_order", [
+      Alcotest.test_case "E515 cycle names the loop" `Quick test_init_dependency_cycle_rejected;
+      Alcotest.test_case "E515 hint says chain not loop" `Quick test_init_dependency_cycle_hint_says_chain_not_loop;
+      Alcotest.test_case "a chain of init references compiles" `Quick test_init_chain_is_accepted;
+      Alcotest.test_case "ic_grad differentiates the closed expression" `Quick test_ic_grad_differentiates_the_closed_expression;
     ];
     "iso_date_validation", [
       Alcotest.test_case "E223 invalid day 2020-02-30" `Quick test_date_invalid_day_rejected;

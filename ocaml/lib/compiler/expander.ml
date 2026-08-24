@@ -6027,47 +6027,6 @@ let build_table_index ctx (tables : Ir.table list) : unit =
 
 (* ── Initial conditions ──────────────────────────────────────────────────── *)
 
-let is_all_const e =
-  let rec walk = function
-    | Ir.Const _ -> true
-    | Ir.BinOp b -> walk b.left && walk b.right
-    | Ir.UnOp u  -> walk u.arg
-    | _           -> false
-  in walk e
-
-let eval_const ctx e =
-  (* M14 in the 2026-04-19 review: before this, the UnOp arm was
-     missing here but present in `is_all_const`, so `init { S = -5 }`
-     produced `Ir.UnOp { Neg, Const 5.0 }`, passed the all_const
-     check, and then fell into the catch-all here, emitting a
-     false E402 and silently setting the init to 0.0. Same for
-     floor/ceil/abs/exp/log/sqrt of constants. Fix: mirror
-     autodiff's `simplify` by evaluating each UnOp arm directly. *)
-  let rec eval = function
-    | Ir.Const f -> f
-    | Ir.BinOp { op = Ir.Add; left; right } -> eval left +. eval right
-    | Ir.BinOp { op = Ir.Sub; left; right } -> eval left -. eval right
-    | Ir.BinOp { op = Ir.Mul; left; right } -> eval left *. eval right
-    | Ir.BinOp { op = Ir.Div; left; right } -> eval left /. eval right
-    | Ir.BinOp { op = Ir.Pow; left; right } -> eval left ** eval right
-    | Ir.UnOp  { op = Ir.Neg;   arg } -> -. (eval arg)
-    | Ir.UnOp  { op = Ir.Exp;   arg } -> exp (eval arg)
-    | Ir.UnOp  { op = Ir.Log;   arg } -> log (eval arg)
-    | Ir.UnOp  { op = Ir.Sqrt;  arg } -> sqrt (eval arg)
-    | Ir.UnOp  { op = Ir.Abs;   arg } -> abs_float (eval arg)
-    | Ir.UnOp  { op = Ir.Floor; arg } -> floor (eval arg)
-    | Ir.UnOp  { op = Ir.Ceil;  arg } -> ceil (eval arg)
-    | Ir.UnOp  { op = Ir.Sin;   arg } -> sin (eval arg)
-    | Ir.UnOp  { op = Ir.Cos;   arg } -> cos (eval arg)
-    | Ir.UnOp  { op = Ir.Tanh;  arg } -> tanh (eval arg)
-    | _ ->
-      Diagnostics.error ctx.diags ~code:"E402" ~loc:Diagnostics.no_loc
-        ~message:"initial condition value is not a constant expression"
-        ~hint:"Use numeric literals or arithmetic of constants for init values."
-        ();
-      0.0
-  in eval e
-
 let expand_init ctx =
   (* Hashtbl + queue to implement override-by-source-order: later entries win,
      but insertion order is preserved for deterministic output. *)
@@ -6153,13 +6112,14 @@ let expand_init ctx =
       ) combos
     end
   ) ctx.init_entries;
-  let entries = Queue.fold (fun acc name ->
-    acc @ [(name, Hashtbl.find tbl name)]
-  ) [] order in
-  if List.for_all (fun (_, e) -> is_all_const e) entries then
-    Ir.Explicit (List.map (fun (k, e) -> (k, eval_const ctx e)) entries)
-  else
-    Ir.Parameterized entries
+  (* Every entry is emitted as an expression. Whether it happens to be constant
+     is a runtime build detail, not a shape the IR distinguishes: the old
+     all-const/else split made a MIXED block (one literal beside one
+     parameterized entry) unrepresentable, and made the emitted shape depend on
+     a whole-block property rather than on the entry itself. *)
+  Queue.fold (fun acc name ->
+    acc @ [(name, Ir.Deterministic (Hashtbl.find tbl name))]
+  ) [] order
 
 (* ── Simulate / output ───────────────────────────────────────────────────── *)
 

@@ -1,4 +1,4 @@
-{"ir_version":"0.33","validated_by":"ocaml-compiler-v0.33","model":{"name":"sir_priors","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"sir_priors","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -13,7 +13,7 @@
 {"name":"I0","value":{"mode":"estimated","bounds":[1.0,1000.0],"prior":{"dist":{"exponential":{"rate":0.01}}},"transform":"identity"},"param_kind":"count","param_dim":null},
 {"name":"kappa","value":{"mode":"estimated","bounds":[1e-05,0.01],"prior":{"dist":{"log_uniform":{"lower":1e-05,"upper":0.01}}},"transform":"identity"},"param_kind":"rate","param_dim":null},
 {"name":"take","value":{"mode":"estimated","bounds":[0.3,1.0],"prior":{"dist":{"truncated_normal":{"mean":0.7,"sd":0.2,"lower":0.3,"upper":1.0}}},"transform":"identity"},"param_kind":"probability","param_dim":null}
-],"initial_conditions":{"parameterized":{"S":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}},"I":{"param":"I0"}}},"ic_grad":{"S":{"N0":{"grad":{"const":1.0}},"I0":{"grad":{"const":-1.0}}},"I":{"I0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
+],"initial_conditions":{"S":{"deterministic":{"bin_op":{"op":"sub","left":{"param":"N0"},"right":{"param":"I0"}}}},"I":{"deterministic":{"param":"I0"}}},"ic_grad":{"S":{"N0":{"grad":{"const":1.0}},"I0":{"grad":{"const":-1.0}}},"I":{"I0":{"grad":{"const":1.0}}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[
 {"name":"baseline","label":"priors default (R0 ≈ 3)","params":{"beta":0.3,"gamma":0.1,"rho":0.4,"N0":1000.0,"I0":10.0,"kappa":0.001,"take":0.7},"enable":[],"disable":[],"t_end":null}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}

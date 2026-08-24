@@ -35,7 +35,6 @@
 //!      recover it, and the weights must exert selection pressure on it
 //!      (weighted-variance ratio < 1).
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ir::{
@@ -324,7 +323,7 @@ fn pure_ic_sir_model() -> (CompiledModel, Vec<f64>) {
                 param_dim: None,
             },
         ],
-        initial_conditions: InitialConditions::Parameterized(HashMap::from([
+        initial_conditions: InitialConditions::exprs([
             (
                 "S".to_string(),
                 Expr::bin_op(
@@ -338,7 +337,7 @@ fn pure_ic_sir_model() -> (CompiledModel, Vec<f64>) {
                 Expr::bin_op(BinOp::Mul, Expr::param("i0"), Expr::const_(N_POP)),
             ),
             ("R".to_string(), Expr::Const(ConstExpr { value: 0.0 })),
-        ])),
+        ]),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 40.0]),
             format: "tsv".into(),

@@ -99,7 +99,7 @@ fn seir_model() -> (CompiledModel, Vec<f64>) {
             Parameter { name: "sigma".into(), value: ir::parameter::ParamValue::Fixed { value: 0.2 }, param_kind: None, param_dim: None },
             Parameter { name: "gamma".into(), value: ir::parameter::ParamValue::Fixed { value: 0.1 }, param_kind: None, param_dim: None },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("S".into(), 99_990.0);
             m.insert("E".into(), 0.0);

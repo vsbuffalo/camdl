@@ -105,7 +105,7 @@ fn build(
         bindings: vec![],
         per_eval_bindings: vec![],
         parameters,
-        initial_conditions: InitialConditions::Explicit(
+        initial_conditions: InitialConditions::constants(
             init.iter().map(|(k, v)| ((*k).into(), *v)).collect::<HashMap<String, f64>>(),
         ),
         output: OutputConfig {

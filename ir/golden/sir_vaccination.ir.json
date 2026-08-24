@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.33",
+  "ir_version": "0.34",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "sir_vaccination",
@@ -168,11 +168,9 @@
       {"name": "rho", "value": {"mode": "fixed", "value": 10.0}, "param_kind": null, "param_dim": null}
     ],
     "initial_conditions": {
-      "explicit": {
-        "S": 990,
-        "I": 10,
-        "R": 0
-      }
+      "S": { "deterministic": { "const": 990 } },
+      "I": { "deterministic": { "const": 10 } },
+      "R": { "deterministic": { "const": 0 } }
     },
     "output": {
       "times": {

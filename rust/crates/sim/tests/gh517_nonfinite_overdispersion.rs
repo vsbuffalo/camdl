@@ -103,7 +103,7 @@ fn overdispersed_model(sigma_expr: Expr) -> Model {
                 param_dim: None,
             },
         ],
-        initial_conditions: InitialConditions::Explicit({
+        initial_conditions: InitialConditions::constants({
             let mut m = HashMap::new();
             m.insert("S".into(), 10000.0);
             m.insert("I".into(), 0.0);
