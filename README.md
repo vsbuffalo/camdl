@@ -351,6 +351,7 @@ Every camdl binary ships its own version-matched guides offline — run
 | [`docs/intro.md`](docs/intro.md)                               | DSL tutorial                                     |
 | [`docs/camdl-language-spec.md`](docs/camdl-language-spec.md)   | Full DSL reference                               |
 | [`docs/user-features.md`](docs/user-features.md)               | Feature catalog with pomp comparison             |
+| [`docs/examples.md`](docs/examples.md)                         | Catalogue of every model shipped with camdl      |
 | [`docs/inference.md`](docs/inference.md)                       | Inference guide (PF, IF2, PGAS, NUTS)            |
 | [`docs/commands.md`](docs/commands.md)                         | Command taxonomy and workflows                   |
 | [`docs/runtimes.md`](docs/runtimes.md)                         | Simulation backend details                       |

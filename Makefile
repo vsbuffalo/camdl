@@ -122,7 +122,7 @@ dev-camdlc: build-ocaml
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+test: test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden test-rust test-inference test-integration test-docs test-cli-docs check-examples-doc test-install
 
 # Inner-loop gate: the whole Rust workspace (unit + integration + doctests) via
 # `cargo test`. Deliberately SKIPS the slow cross-language / doc phases
@@ -221,6 +221,19 @@ CLI_DOCS := docs/workflow.md docs/inference.md docs/debugging.md docs/diagnosing
 test-cli-docs: build-rust
 	bash scripts/check_cli_docs.sh --selftest
 	bash scripts/check_cli_docs.sh $(CLI_DOCS)
+
+# docs/examples.md is DERIVED from the model tree (every `.camdl` in the repo,
+# plus each one's compiled IR). This gate fails when a model is added, renamed
+# or restructured without regenerating it — including when a new model lands in
+# a directory the generator does not yet file, which would silently drop it from
+# the catalogue. It compares whitespace-normalised text, so a later `mdfmt` pass
+# over the doc never trips it. Regenerate with `make examples-doc`.
+.PHONY: examples-doc check-examples-doc
+examples-doc:
+	python3 scripts/gen_examples_doc.py
+
+check-examples-doc:
+	python3 scripts/gen_examples_doc.py --check
 
 # install.sh fast tier: shellcheck (if present) + offline unit tests
 # (version_ge, the cmake>=3.13 gate, cmake_plat, and the no-sudo contract — a

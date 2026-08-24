@@ -1,3 +1,9 @@
+# Minimal spatial SEIR whose `patch` dimension is DEFINED by a column of a data file.
+#
+# The smallest form of the pattern: `read(..., column = "patch")` supplies the
+# dimension's members and a `patch`-indexed table supplies each patch's
+# population. See `seir_defines_adj` for the two-axis version.
+
 time_unit = 'days
 
 dimensions {

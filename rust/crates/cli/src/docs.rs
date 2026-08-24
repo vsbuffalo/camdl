@@ -37,6 +37,12 @@ const TOPICS: &[Topic] = &[
         body: include_str!("../../../../docs/intro.md"),
     },
     Topic {
+        slug: "examples",
+        aliases: &["gallery", "models", "example"],
+        summary: "Catalogue of every model shipped with camdl: structure, features, and what each one demonstrates",
+        body: include_str!("../../../../docs/examples.md"),
+    },
+    Topic {
         slug: "language",
         aliases: &["dsl", "spec", "syntax"],
         summary: "Full DSL reference: units & dimensions, parameter kinds, tables, forcings",

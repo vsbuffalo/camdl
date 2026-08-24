@@ -1,3 +1,6 @@
+# Garki pre-proposal: the same malaria model written WITHOUT the Wave-1 and
+# Wave-2 features, for side-by-side comparison with `garki_post_proposal`.
+
 time_unit = 'days
 
 dimensions { age = [child, adult] }

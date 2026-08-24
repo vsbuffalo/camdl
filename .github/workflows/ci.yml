@@ -99,20 +99,35 @@ jobs:
       - name: Integration tests
         run: opam exec -- make test-integration
 
+  # docs/examples.md is DERIVED from the model tree, so it goes stale on a model
+  # add/rename/restructure AND on a hand-edit of the doc itself. Runs
+  # unconditionally (not gated on `changes.code`) because both kinds of change
+  # must be caught, and it is python-only — no toolchain build, so it is cheap
+  # enough to run on every PR.
+  examples_doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Catalogue matches the model tree
+        run: make check-examples-doc
+
   # Always-runs required gate. Passes when `test` succeeded OR was skipped
   # (doc-only change); fails only when `test` genuinely failed or was cancelled,
-  # or the change-detector itself failed. This is the check to require in branch
-  # protection.
+  # the catalogue gate failed, or the change-detector itself failed. This is the
+  # check to require in branch protection.
   ci:
-    needs: [changes, test]
+    needs: [changes, test, examples_doc]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Verdict
         run: |
-          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }}"
+          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }} examples-doc=${{ needs.examples_doc.result }}"
           if [ "${{ needs.changes.result }}" != "success" ]; then
             echo "change-detector did not succeed"; exit 1
+          fi
+          if [ "${{ needs.examples_doc.result }}" != "success" ]; then
+            echo "docs/examples.md is stale — run \`make examples-doc\`"; exit 1
           fi
           case "${{ needs.test.result }}" in
             success|skipped) echo "ok"; exit 0 ;;

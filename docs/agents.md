@@ -569,10 +569,11 @@ version-matched to the `camdl` you're running. No checkout, no network:
 | Backends / data format / debugging                  | `camdl docs backends` / `data` / `debugging`        |
 | Dated data and calendar time (`origin`, anchoring)  | `camdl docs dates`                                  |
 | Packaging a bug report (minimal repro example)      | `camdl docs mre`                                    |
+| Finding a worked example of a feature               | `camdl docs examples`                               |
 | Full topic list / search                            | `camdl docs` / `camdl docs --search <term>`         |
 
 For sustained work you can also pin the source (working `.camdl` for every
-language feature under `ocaml/golden/`):
+language feature under `ocaml/golden/`, catalogued in `camdl docs examples`):
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse \
