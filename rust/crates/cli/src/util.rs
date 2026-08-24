@@ -1530,11 +1530,14 @@ pub fn check_incidence_origin_window(
     obs_times: &[f64],
     first_value: f64,
 ) -> Result<(), String> {
-    use ir::observation::Projection;
-    let is_incidence = matches!(
-        projection,
-        Projection::CumulativeFlow(_) | Projection::CumulativeFlowSum(_)
-    );
+    // Ask the total function rather than re-listing the variants. `temporal_kind`
+    // exists precisely to answer "incidence or prevalence?" and its doc calls
+    // itself the single source of truth; a `matches!` here duplicated that list
+    // and silently excluded `WeightedFlowSum` the moment it was added — no
+    // compile error, and the gh#174 zero-width-first-window check would just not
+    // run for those streams, re-opening a `-Inf` that reads as filter degeneracy.
+    use ir::observation::TemporalKind;
+    let is_incidence = projection.temporal_kind() == TemporalKind::Interval;
     if !is_incidence {
         return Ok(());
     }
@@ -2664,6 +2667,13 @@ pub fn print_observations_summary(model: &ir::Model) {
                 (format!("incidence({})", name), false),
             ir::observation::Projection::CumulativeFlowSum(names) =>
                 (format!("incidence({})", names.join(" + ")), false),
+            // Display only — renders as the weighted sum it is. Not a snapshot:
+            // a weighted flow union is still Interval-kind.
+            ir::observation::Projection::WeightedFlowSum(terms) => (
+                format!("incidence({})",
+                    terms.iter().map(|t| format!("w*{}", t.flow))
+                        .collect::<Vec<_>>().join(" + ")),
+                false),
             ir::observation::Projection::CurrentPop(name) =>
                 (format!("prevalence({})", name), true),
             ir::observation::Projection::CurrentPopSum(names) =>

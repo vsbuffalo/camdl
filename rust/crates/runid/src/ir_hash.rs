@@ -552,6 +552,18 @@ impl ContentAddressed for Projection {
                 h.write_u32(4);
                 v.hash_into(h);
             }
+            // Increment B1 (per-term-weighted flow union) — appended at 5.
+            // Each term hashes weight-then-flow, in list order: the ORDER is
+            // identity, because two orderings are two different serialized IRs
+            // even though the sum is commutative.
+            Projection::WeightedFlowSum(terms) => {
+                h.write_u32(5);
+                h.write_u32(terms.len() as u32);
+                for t in terms {
+                    t.weight.hash_into(h);
+                    h.write_str(&t.flow);
+                }
+            }
         }
     }
 }

@@ -248,6 +248,26 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
                     });
                 }
             }
+            // Same two obligations as the unit-weighted union — every flow must
+            // exist, and the union must be disjoint (gh#678). Without this arm
+            // the variant fell through `_ => {}` and was checked by nothing.
+            crate::observation::Projection::WeightedFlowSum(terms) => {
+                let mut seen = std::collections::HashSet::new();
+                for t in terms {
+                    if !tr_names.contains(t.flow.as_str()) {
+                        errors.push(ValidationError::UnknownTransitionInObservation {
+                            obs: obs.name.clone(),
+                            transition: t.flow.clone(),
+                        });
+                    }
+                    if !seen.insert(t.flow.as_str()) {
+                        errors.push(ValidationError::DuplicateFlowInObservation {
+                            obs: obs.name.clone(),
+                            transition: t.flow.clone(),
+                        });
+                    }
+                }
+            }
             crate::observation::Projection::CumulativeFlowSum(tns) => {
                 let mut seen = std::collections::HashSet::new();
                 for tn in tns {

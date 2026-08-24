@@ -3427,6 +3427,12 @@ pub(crate) fn project_all_obs_times(
                 .collect();
             incidence_over(&flow_indices)
         }
+        // See StreamProjection::from_ir — the weighted union has no runtime
+        // binning until B2, and dropping the weights here would silently
+        // project an unweighted sum.
+        ir::observation::Projection::WeightedFlowSum(_) => Err(
+            "a per-term-weighted incidence union is not yet supported by the \
+             runtime (Increment B2 wires the per-reference accumulator)".to_string()),
         ir::observation::Projection::CumulativeFlowSum(flow_names) => {
             let flow_indices: Vec<usize> = flow_names.iter()
                 .filter_map(|fname| model.transitions.iter()

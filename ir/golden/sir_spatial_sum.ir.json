@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.35",
-  "validated_by": "ocaml-compiler-v0.35",
+  "ir_version": "0.36",
+  "validated_by": "ocaml-compiler-v0.36",
   "model": {
     "name": "sir_spatial_sum",
     "version": "0.3",

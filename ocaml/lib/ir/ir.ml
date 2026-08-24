@@ -423,6 +423,20 @@ type projection =
   (* New variants append last — keeps parity with the Rust run_id hash,
      whose variant indices are positional and permanent. *)
   | CumulativeFlowSum of string list
+  (* Increment B1: Sum wi * incidence(flow_i) — a per-term-weighted union of
+     flows accumulated over the reporting interval. The case the unit-weighted
+     [CumulativeFlowSum] cannot express: several strata pooled into ONE observed
+     column with a DIFFERENT reporting rate each. Weights are constant over the
+     observation interval (B3), because the projection is evaluated once at the
+     observation instant. Mirrors `ir::observation::Projection::WeightedFlowSum`. *)
+  | WeightedFlowSum   of weighted_flow list
+
+(* One `weight x flow` term. A record rather than a bare pair: the IR is read by
+   humans on every golden diff, and named fields say which side is which. *)
+and weighted_flow = {
+  wf_weight : expr;
+  wf_flow   : string;
+}
 
 (* Each differentiable likelihood argument carries its ∂arg/∂param map (empty ⇒
    not computed; absent key ⇒ genuine zero), the obs analogue of the transition

@@ -209,6 +209,46 @@ let expr_serde_test () =
    exercises their serde. Assert it directly (mirroring the Rust
    `round_trips_*` + `pins_wire_tags` coverage): a Reduced State quantity, a
    Derived reduction-arithmetic quantity, and the exact pinned wire shapes. *)
+(* Increment B1. The golden corpus contains no `WeightedFlowSum`, so the
+   round-trip suite — which walks the goldens — never executes its serde at all.
+   Without this the OCaml emitter and reader were shipped unexercised, and the
+   FIRST model to use the variant would have been the test.
+
+   Pins the wire shape as well as the round-trip, because the Rust side derives
+   its own serde independently: if OCaml emits a key Rust does not accept, the
+   two halves of the contract disagree and no OCaml-only test would notice. *)
+let weighted_flow_sum_serde_test () =
+  let open Ir in
+  let terms = [
+    { wf_weight = Param "rho_child"; wf_flow = "infection_child" };
+    { wf_weight = BinOp { op = Mul; left = Param "rho_adult"; right = Const 0.5 };
+      wf_flow   = "infection_adult" };
+  ] in
+  let p = WeightedFlowSum terms in
+  (* 1. round-trip *)
+  Alcotest.(check bool) "WeightedFlowSum round-trips" true
+    (Serde.projection_of_json (Serde.projection_to_json p) = p);
+  (* 2. the wire shape, pinned — this is the half Rust must agree with *)
+  let wire = Yojson.Safe.to_string (Serde.projection_to_json p) in
+  let expected =
+    {|{"weighted_flow_sum":[{"weight":{"param":"rho_child"},"flow":"infection_child"},|} ^
+    {|{"weight":{"bin_op":{"op":"mul","left":{"param":"rho_adult"},"right":{"const":0.5}}},|} ^
+    {|"flow":"infection_adult"}]}|} in
+  Alcotest.(check string) "WeightedFlowSum wire shape" expected wire;
+  (* 3. an empty term list must survive the trip rather than collapsing *)
+  Alcotest.(check bool) "empty WeightedFlowSum round-trips" true
+    (Serde.projection_of_json (Serde.projection_to_json (WeightedFlowSum [])) =
+     WeightedFlowSum []);
+  (* 4. the sibling variants must be untouched by the new arm *)
+  List.iter (fun q ->
+    Alcotest.(check bool) "sibling projection round-trips" true
+      (Serde.projection_of_json (Serde.projection_to_json q) = q))
+    [ CumulativeFlow "infection";
+      CumulativeFlowSum ["infection_child"; "infection_adult"];
+      CurrentPop "I";
+      CurrentPopSum ["I_child"; "I_adult"];
+      DerivedExpr (Pop "I") ]
+
 let quantity_serde_test () =
   let open Ir in
   let roundtrips (q : quantity) =
@@ -587,6 +627,8 @@ let () =
     Alcotest.test_case "integrator serde (rk45 round-trip + strict)" `Quick integrator_serde_test;
     Alcotest.test_case "expr serde (PerEvalRef round-trips)" `Quick expr_serde_test;
     Alcotest.test_case "quantity serde (round-trip + pinned wire)" `Quick quantity_serde_test;
+    Alcotest.test_case "weighted_flow_sum serde (round-trip + pinned wire)" `Quick
+      weighted_flow_sum_serde_test;
     Alcotest.test_case "contrast serde (round-trip + pinned wire)" `Quick contrast_serde_test;
   ] in
   Alcotest.run "IR round-trip" [

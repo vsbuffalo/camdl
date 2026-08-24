@@ -138,6 +138,10 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
     (match obs.projection with
      | CumulativeFlow _flow -> ()   (* transition name, not a compartment *)
      | CumulativeFlowSum _flows -> ()  (* transition names, not compartments *)
+     (* Flows are transition names; a weight IS an expression, so walk it. B3
+        keeps weights state-free, so this finds nothing on a frontend-produced
+        IR — it is here so a hand-written one is not under-counted. *)
+     | WeightedFlowSum terms -> List.iter (fun t -> add_expr t.wf_weight) terms
      | CurrentPop name -> add name
      | CurrentPopSum names -> List.iter add names
      | DerivedExpr e -> add_expr e);

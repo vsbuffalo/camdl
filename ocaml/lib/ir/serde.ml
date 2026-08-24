@@ -873,6 +873,11 @@ let projection_to_json (p : projection) : Yojson.Safe.t =
   match p with
   | CumulativeFlow    tn -> obj [("cumulative_flow",     str tn)]
   | CumulativeFlowSum fs -> obj [("cumulative_flow_sum", arr (List.map str fs))]
+  | WeightedFlowSum terms ->
+    obj [("weighted_flow_sum",
+          arr (List.map (fun t ->
+            obj [("weight", expr_to_json t.wf_weight); ("flow", str t.wf_flow)])
+            terms))]
   | CurrentPop        cn -> obj [("current_pop",         str cn)]
   | CurrentPopSum     cs -> obj [("current_pop_sum",     arr (List.map str cs))]
   | DerivedExpr       e  -> obj [("derived_expr",        expr_to_json e)]
@@ -883,6 +888,10 @@ let projection_of_json j =
     match key with
     | "cumulative_flow"     -> CumulativeFlow    (as_string v)
     | "cumulative_flow_sum" -> CumulativeFlowSum (List.map as_string (as_list v))
+    | "weighted_flow_sum" ->
+      WeightedFlowSum (List.map (fun t ->
+        { wf_weight = expr_of_json (member "weight" t);
+          wf_flow   = as_string  (member "flow"   t) }) (as_list v))
     | "current_pop"         -> CurrentPop        (as_string v)
     | "current_pop_sum"     -> CurrentPopSum     (List.map as_string (as_list v))
     | "derived_expr"        -> DerivedExpr       (expr_of_json v)

@@ -813,6 +813,20 @@ let obs_projection_dim st (m : model) (stream : string) : dim =
   | Some o ->
     (match o.projection with
      | DerivedExpr e -> read_dim st e
+     (* Sum wi * flow_i. A flow is a count [P], so the sum carries
+        dim(w) * [P]. The intended weight is a reporting fraction —
+        dimensionless — which gives a plain count, exactly like the unit-weighted
+        variants. A dimensioned weight is NOT silently accepted: the dim falls
+        out of the arithmetic and the likelihood's own count check rejects it
+        downstream. Terms are assumed to agree; the frontend builds them from one
+        expression, and a disagreement surfaces at the first term. *)
+     | WeightedFlowSum terms ->
+       (match terms with
+        | [] -> Known population
+        | t :: _ ->
+          (match read_dim st t.wf_weight with
+           | Known w -> Known (dim_mul w population)
+           | d -> d))
      | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ ->
        Known population)
   | None -> Unknown (-1)
@@ -1081,6 +1095,16 @@ let check_model (m : model) : result =
          missing-`/N` bug (a count used as `p`). *)
       st.projected_dim <- Some (match obs.projection with
         | DerivedExpr e -> infer st ~ctx e
+        (* See obs_projection_dim: dim = dim(weight) * [P]. Inferring through the
+           weight (rather than assuming [P]) is what makes a dimensioned weight
+           visible to the likelihood's count check instead of silently passing. *)
+        | WeightedFlowSum terms ->
+          (match terms with
+           | [] -> Known population
+           | t :: _ ->
+             (match infer st ~ctx t.wf_weight with
+              | Known w -> Known (dim_mul w population)
+              | d -> d))
         | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ ->
           Known population);
       (match obs.likelihood with

@@ -128,6 +128,10 @@ let fold_draw_method fe (dm : draw_method) : draw_method =
 let fold_projection fe (p : projection) : projection =
   match p with
   | DerivedExpr e -> DerivedExpr (fe e)
+  | WeightedFlowSum terms ->
+    (* The weights are ordinary expressions and fold like any other; the flow
+       names are transition identifiers and are untouched. *)
+    WeightedFlowSum (List.map (fun t -> { t with wf_weight = fe t.wf_weight }) terms)
   | (CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _) as p -> p
 
 let fold_likelihood fe (lik : likelihood) : likelihood =

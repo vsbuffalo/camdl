@@ -236,6 +236,19 @@ impl StreamProjection {
                         obs_name, flow_name))?;
                 Ok(StreamProjection::FlowSum(vec![idx]))
             }
+            // Increment B1 foundation. The IR variant exists so the frontend
+            // lowering and the per-reference accumulator (B2) can land against a
+            // settled schema, but no runtime path bins per-term yet: today's
+            // `acc` has ONE bin per stream, which cannot carry terms with
+            // different weights. Refuse loudly rather than silently dropping the
+            // weights and scoring a unit-weighted sum — that would be a
+            // plausible-looking wrong likelihood.
+            P::WeightedFlowSum(_) => Err(format!(
+                "observation '{}': a per-term-weighted incidence union is not yet \
+                 supported by the runtime (Increment B2 wires the per-reference \
+                 accumulator). Use an unweighted union and put a single reporting \
+                 rate in the likelihood.",
+                obs_name)),
             P::CumulativeFlowSum(flow_names) => {
                 // Un-indexed `incidence()` over a stratified transition family:
                 // the OCaml compiler resolved the family to explicit per-stratum

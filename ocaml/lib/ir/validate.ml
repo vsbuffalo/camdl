@@ -190,6 +190,19 @@ let validate (m : model) : (unit, error list) result =
          if Hashtbl.mem seen tn then
            errors := DuplicateFlowInUnion (tn, here) :: !errors
          else Hashtbl.add seen tn ()) tns
+     | WeightedFlowSum terms ->
+       (* Same two obligations as the unit-weighted union: every flow must exist,
+          and the union must be disjoint (gh#678). A repeated flow is still
+          double counting — with weights it is expressible as one term carrying
+          the summed weight, so a repeat is a mistake there too. Without this arm
+          the variant fell through `| _ -> ()` and was checked by nothing. *)
+       let seen = Hashtbl.create 8 in
+       List.iter (fun t ->
+         if not (SS.mem t.wf_flow tr_set) then
+           errors := UnknownTransition (t.wf_flow, here) :: !errors;
+         if Hashtbl.mem seen t.wf_flow then
+           errors := DuplicateFlowInUnion (t.wf_flow, here) :: !errors
+         else Hashtbl.add seen t.wf_flow ()) terms
      | CurrentPop cn ->
        if not (SS.mem cn comp_names) then errors := UnknownCompartment (cn, here) :: !errors
      | CurrentPopSum cns ->

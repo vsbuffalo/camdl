@@ -17,6 +17,37 @@ pub enum Projection {
     // variants by position, so declaration order == hash index, and that
     // index is permanent. Inserting earlier would churn stored run_ids.
     CumulativeFlowSum(Vec<String>),
+    /// Σ wᵢ · incidence(flowᵢ) — a per-term-weighted union of flows, accumulated
+    /// over the reporting interval (Increment B1 of the 2026-07-31 aggregation
+    /// proposal). The case a unit-weighted [`Projection::CumulativeFlowSum`]
+    /// cannot express: several strata pooled into ONE observed column with a
+    /// DIFFERENT reporting rate each.
+    ///
+    /// Weights are constant over the observation interval (enforced in the
+    /// frontend, B3): the projection is evaluated once, at the observation
+    /// instant, so `w(t_obs)·ΣΔN` equals `∫w(s)dN(s)` only when `w` does not
+    /// move. That is why a weight may not read `t`, a time function, a `cond`,
+    /// or state.
+    ///
+    /// Deliberately a projection VARIANT rather than a flow-read node in
+    /// [`Expr`]: it keeps [`Projection::temporal_kind`] a total function of the
+    /// variant, and makes `∂proj/∂flowᵢ = wᵢ` structurally free.
+    WeightedFlowSum(Vec<WeightedFlow>),
+}
+
+/// One `weight × flow` term of a [`Projection::WeightedFlowSum`].
+///
+/// A named struct rather than the proposal's `(Expr, String)` tuple — a
+/// documented deviation. The IR is read by humans (every golden diff is
+/// reviewed), and `{"weight": …, "flow": "infection_child"}` says which side is
+/// which where `[…, "infection_child"]` does not. The wire cost is one key per
+/// term; the review cost of a positional pair is paid on every golden.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WeightedFlow {
+    /// Constant over the observation interval — see [`Projection::WeightedFlowSum`].
+    pub weight: Expr,
+    /// The transition whose interval-accumulated flow this term weights.
+    pub flow: String,
 }
 
 /// Whether an observation stream measures a quantity accumulated over a
@@ -47,7 +78,9 @@ impl Projection {
     pub fn temporal_kind(&self) -> TemporalKind {
         match self {
             // incidence — cumulative flow over the reporting interval
-            Projection::CumulativeFlow(_) | Projection::CumulativeFlowSum(_) => {
+            Projection::CumulativeFlow(_)
+            | Projection::CumulativeFlowSum(_)
+            | Projection::WeightedFlowSum(_) => {
                 TemporalKind::Interval
             }
             // prevalence — state read at the observation instant
@@ -273,6 +306,50 @@ pub struct ObservationModel {
 mod tests {
     use super::*;
     use crate::expr::{ConstExpr, Expr};
+
+    /// The OCaml↔Rust contract for `WeightedFlowSum`, pinned to the EXACT bytes
+    /// the OCaml emitter produces.
+    ///
+    /// The two sides derive their serde independently — OCaml hand-writes
+    /// `projection_to_json` in `serde.ml`, Rust uses `#[derive(Deserialize)]` —
+    /// so nothing structural forces them to agree. The golden corpus contains no
+    /// `WeightedFlowSum`, so the round-trip suite that walks the goldens does not
+    /// exercise this variant on either side: without this test the first model to
+    /// use it would have been the integration test.
+    ///
+    /// The literal below is copied from the OCaml side's pinned wire assertion
+    /// (`ocaml/test/test_ir_roundtrip.ml`, `weighted_flow_sum_serde_test`). If
+    /// either emitter changes, one of the two tests fails — which is the point.
+    #[test]
+    fn weighted_flow_sum_accepts_the_ocaml_wire_bytes() {
+        // Exactly what camdlc writes.
+        let ocaml_wire = r#"{"weighted_flow_sum":[{"weight":{"param":"rho_child"},"flow":"infection_child"},{"weight":{"bin_op":{"op":"mul","left":{"param":"rho_adult"},"right":{"const":0.5}}},"flow":"infection_adult"}]}"#;
+
+        let p: Projection = serde_json::from_str(ocaml_wire)
+            .expect("Rust must accept the bytes camdlc emits for weighted_flow_sum");
+
+        match &p {
+            Projection::WeightedFlowSum(terms) => {
+                assert_eq!(terms.len(), 2, "both terms survive deserialization");
+                assert_eq!(terms[0].flow, "infection_child");
+                assert_eq!(terms[1].flow, "infection_adult");
+                // Order is identity (see the run_id hash arm) — assert it, so a
+                // reordering shows up here rather than as a silent re-key.
+                assert!(matches!(terms[0].weight, Expr::Param(_)),
+                    "first weight is a bare param");
+            }
+            other => panic!("expected WeightedFlowSum, got {other:?}"),
+        }
+
+        // And Rust must re-emit the same bytes, or a round-trip through the
+        // runtime would silently rewrite a model's IR.
+        let reemitted = serde_json::to_string(&p).expect("serializes");
+        assert_eq!(reemitted, ocaml_wire,
+            "Rust re-emission must be byte-identical to the OCaml wire");
+
+        assert_eq!(p.temporal_kind(), TemporalKind::Interval,
+            "a weighted flow union accumulates over the interval");
+    }
 
     #[test]
     fn temporal_kind_classifies_every_projection_variant() {

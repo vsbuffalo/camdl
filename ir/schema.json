@@ -715,6 +715,24 @@
           "additionalProperties": false
         },
         {
+          "required": ["weighted_flow_sum"],
+          "properties": {
+            "weighted_flow_sum": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["weight", "flow"],
+                "properties": {
+                  "weight": { "$ref": "#/definitions/expr" },
+                  "flow":   { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "required": ["current_pop"],
           "properties": {
             "current_pop": { "type": "string" }
