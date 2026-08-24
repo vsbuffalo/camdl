@@ -1314,12 +1314,14 @@ impl Formatter {
 
     /// Per-chain saved-vs-forkable latent paths for a PGAS stage (gh#727).
     ///
-    /// A PGAS chain writes a latent path every `traj_stride` sweeps and retains
-    /// a posterior draw every `thin` sweeps, on two rules that do not know
-    /// about each other. Only a path whose sweep is ALSO a retained draw can be
-    /// forked (`simulate --init-state fit`) or read by a `last_obs`-anchored
-    /// `quantities {}` entry, so the two counts are reported side by side and
-    /// the shortfall is named rather than left for the reader to subtract.
+    /// A PGAS chain retains a posterior draw every `thin` sweeps and writes a
+    /// latent path on every `draw_stride`-th of those draws, so every written
+    /// path is one a consumer can join to a draw — `simulate --init-state fit`
+    /// or a `last_obs`-anchored `quantities {}` entry. The two counts are
+    /// reported side by side anyway: they are measured from what each chain
+    /// wrote, so a shortfall is a real event (a record skipped as incoherent,
+    /// a chain resumed partway in) and is named rather than left for the
+    /// reader to subtract.
     ///
     /// Reads the block `pgas.rs` writes into `pgas_summary.json`, through that
     /// module's own reader, so producer and consumer cannot drift.
@@ -1358,9 +1360,11 @@ impl Formatter {
                 "{} of {} written paths cannot be joined to a posterior draw",
                 total_saved - total_forkable, total_saved))));
             s.push_str(&format!("    {}\n", self.dim(&format!(
-                "a path is usable only when its sweep is also a retained draw; \
-                 stride {} is not a multiple of thin {}",
-                report.traj_stride.map_or("—".to_string(), |v| v.to_string()),
+                "a path is written on every {} retained draw (thin {}), so every \
+                 one should be joinable; the shortfall is paths that were \
+                 written outside this stage's retained set or skipped as \
+                 incoherent records",
+                report.draw_stride.map_or("—".to_string(), |v| v.to_string()),
                 report.thin))));
         }
         s.push('\n');
@@ -3404,7 +3408,7 @@ mod tests {
     /// block — the only key `saved_path_table` reads.
     fn write_traj_summary(
         dir: &std::path::Path,
-        traj_stride: u64,
+        draw_stride: u64,
         thin: u64,
         per_chain: &[(u64, u64)],
     ) {
@@ -3412,7 +3416,7 @@ mod tests {
             "stage": "pgas",
             "thin": thin,
             "trajectories": {
-                "traj_stride": traj_stride,
+                "draw_stride": draw_stride,
                 "thin": thin,
                 "n_saved": per_chain.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
                 "n_forkable": per_chain.iter().map(|(_, b)| *b).collect::<Vec<_>>(),
@@ -3422,46 +3426,49 @@ mod tests {
             serde_json::to_string_pretty(&summary).unwrap()).unwrap();
     }
 
-    /// gh#727: the shortfall between written and forkable latent paths lands in
-    /// the rendered summary, per chain, with the total named — not left for the
-    /// reader to subtract, and not only on a consumer's stderr.
+    /// gh#727: a shortfall between written and forkable latent paths lands in
+    /// the rendered summary, per chain, with the total named. The path-save
+    /// rule cannot produce one, so this is the regression detector: if the two
+    /// rules ever decouple again, or a chain's records are skipped, the number
+    /// is in the artifact rather than only on a consumer's stderr.
     #[test]
     fn saved_path_table_names_the_unusable_paths_per_chain() {
         let dir = crate::test_support::unique_temp_dir("summary_gh727_lossy");
         std::fs::create_dir_all(&dir).unwrap();
-        // The issue's long run: stride 144 against thin 5, two chains.
-        write_traj_summary(&dir, 144, 5, &[(250, 50), (250, 50)]);
+        // Two chains, one path every 28 retained draws at thin 5; chain 1 had
+        // 200 of its 250 records skipped as incoherent, chain 2 none.
+        write_traj_summary(&dir, 28, 5, &[(250, 50), (250, 250)]);
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
         let t = fmt.saved_path_table(&dir);
         assert!(t.contains("saved latent paths"), "header present:\n{t}");
         // Two per-chain rows carrying written / forkable / unusable.
         assert!(t.contains("     1        250         50       200\n"),
             "chain 1 row must show 250 written, 50 forkable, 200 unusable:\n{t}");
-        assert!(t.contains("     2        250         50       200\n"),
-            "chain 2 row must show the same:\n{t}");
-        assert!(t.contains("400 of 500 written paths cannot be joined"),
+        assert!(t.contains("     2        250        250         0\n"),
+            "chain 2 row must show nothing unusable:\n{t}");
+        assert!(t.contains("200 of 500 written paths cannot be joined"),
             "the total shortfall must be stated:\n{t}");
-        assert!(t.contains("stride 144 is not a multiple of thin 5"),
-            "the reason must be stated:\n{t}");
+        assert!(t.contains("every 28 retained draw"),
+            "the rule the shortfall is against must be stated:\n{t}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Negative control: a stride that IS a multiple of `thin` renders the
-    /// counts and says nothing about a shortfall, because there is none.
+    /// Negative control, and the ordinary case: every written path landed on a
+    /// retained draw, so the counts render and nothing claims a shortfall.
     #[test]
     fn saved_path_table_is_quiet_when_every_path_is_forkable() {
         let dir = crate::test_support::unique_temp_dir("summary_gh727_clean");
         std::fs::create_dir_all(&dir).unwrap();
-        write_traj_summary(&dir, 180, 5, &[(200, 200), (200, 200)]);
+        write_traj_summary(&dir, 36, 5, &[(200, 200), (200, 200)]);
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
         let t = fmt.saved_path_table(&dir);
         assert!(t.contains("saved latent paths"), "header still present:\n{t}");
         assert!(t.contains("     1        200        200         0\n"),
             "the counts still render, with nothing unusable:\n{t}");
         assert!(!t.contains("cannot be joined"),
-            "an aligned stride must claim no shortfall:\n{t}");
-        assert!(!t.contains("not a multiple"),
-            "an aligned stride must not explain a shortfall it does not have:\n{t}");
+            "no shortfall must be claimed:\n{t}");
+        assert!(!t.contains("skipped as"),
+            "a shortfall it does not have must not be explained:\n{t}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
