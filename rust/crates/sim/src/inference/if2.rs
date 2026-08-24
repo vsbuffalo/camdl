@@ -133,7 +133,7 @@ pub struct IF2Config {
     /// such a parameter the first reweight is a no-op and ic-free
     /// degenerates to silently dropping y₁ — the fit-config layer
     /// rejects that case.
-    /// See docs/dev/proposals/2026-04-18-ic-free-inference.md.
+    /// See docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
     pub skip_first_obs_from_loglik: bool,
 
     /// gh#241. Deterministic per-call compute budget (max cumulative
@@ -646,7 +646,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             // observation still reweights and resamples (that's the
             // pinning of x₀ given y₁) but is dropped from the
             // accumulated log-likelihood. See
-            // docs/dev/proposals/2026-04-18-ic-free-inference.md.
+            // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
             let ll_inc = log_sum_exp(&log_weights) - (n as f64).ln();
             if !(config.skip_first_obs_from_loglik && obs_idx == 0) {
                 if ll_inc.is_finite() {

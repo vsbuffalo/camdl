@@ -512,7 +512,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         // returned log-likelihood. Subsequent observations contribute
         // normally, giving the conditional likelihood
         //   log L_c(θ | y_1) = Σ_{t=2}^{T} log p(y_t | y_{1:t-1}).
-        // See docs/dev/proposals/2026-04-18-ic-free-inference.md.
+        // See docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
         let ll_increment = log_sum_exp(&swarm.log_weights) - (n_particles as f64).ln();
         if !(config.skip_first_obs_from_loglik && obs_idx == 0) {
             total_loglik += ll_increment;

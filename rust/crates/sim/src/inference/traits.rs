@@ -275,7 +275,7 @@ pub struct SMCConfig {
     /// particle's θ before it draws (gh#364). Without spread, the first
     /// reweight is a no-op and ic-free degenerates to silently dropping the
     /// first observation. Validation is at the fit-config layer. See
-    /// docs/dev/proposals/2026-04-18-ic-free-inference.md.
+    /// docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
     pub skip_first_obs_from_loglik: bool,
 
     /// Record per-step pre-resample particle states + log-weights and

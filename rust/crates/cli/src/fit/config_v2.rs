@@ -112,7 +112,7 @@ pub struct FitConfigV2 {
     /// `[estimate.*]` entry with `perturb_only_at_t0 = true` to give
     /// particles spread at t=0.
     ///
-    /// See docs/dev/proposals/2026-04-18-ic-free-inference.md.
+    /// See docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
     #[serde(default)]
     pub ic_free: Option<bool>,
 

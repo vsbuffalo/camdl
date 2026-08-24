@@ -707,7 +707,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // visible on the startup block so the user can confirm the PF is
     // computing log L_c (conditional on y₁) rather than log L. Silent
     // when ic_free is false or absent. See
-    // docs/dev/proposals/2026-04-18-ic-free-inference.md.
+    // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
     if config.ic_free.unwrap_or(false) {
         let perturb_only_at_t0_params: Vec<&str> = config.estimate.iter()
             .filter(|(_, spec)| spec.perturb_only_at_t0)

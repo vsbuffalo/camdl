@@ -75,7 +75,7 @@ pub struct FitRunConfig {
     /// weight and resample — that's how the initial state gets pinned).
     /// Mirrors `FitConfigV2::ic_free`.
     /// Flows into `SMCConfig.skip_first_obs_from_loglik`. See
-    /// docs/dev/proposals/2026-04-18-ic-free-inference.md.
+    /// docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
     pub ic_free: bool,
     /// Clean-evaluation re-scoring config (Step 4 plumbing for §Proposal 1).
     /// Set per stage at the `camdl fit run` dispatch site (CLI overrides
