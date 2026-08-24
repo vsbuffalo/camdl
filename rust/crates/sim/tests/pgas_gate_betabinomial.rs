@@ -212,7 +212,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
             lower: 0.01,
             upper: 100.0,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
@@ -318,7 +318,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
             lower: 0.1,
             upper: 10.0,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];

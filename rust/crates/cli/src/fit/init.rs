@@ -1328,7 +1328,7 @@ mod tests {
             lower,
             upper,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         }
     }
 
@@ -2200,7 +2200,7 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
             lower,
             upper,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         }
     }
 }

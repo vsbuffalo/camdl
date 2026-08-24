@@ -258,7 +258,7 @@ fn if2_bails_on_ess_collapse() {
         transform: Transform::Log { lo: 0.01, hi: 100.0 },
         lower: 0.01,
         upper: 100.0,
-        ivp: false,
+        perturb_only_at_t0: false,
     }];
 
     let config = IF2Config {
@@ -428,7 +428,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
         transform: Transform::Log { lo: 0.01, hi: 5.0 },
         lower: 0.01,
         upper: 5.0,
-        ivp: false,
+        perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles: 100,
@@ -640,7 +640,7 @@ fn if2_iteration_budget_aborts_pre_window() {
         transform: Transform::Log { lo: 0.01, hi: 100.0 },
         lower: 0.01,
         upper: 100.0,
-        ivp: false,
+        perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles,

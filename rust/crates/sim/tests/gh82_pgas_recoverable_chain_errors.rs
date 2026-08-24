@@ -272,7 +272,7 @@ fn k_param() -> EstimatedParam {
         lower: 0.0,
         upper: 10.0,
         rw_sd_auto: false,
-        ivp: false,
+        perturb_only_at_t0: false,
     }
 }
 
@@ -289,7 +289,7 @@ fn mu_param() -> EstimatedParam {
         lower: 0.005,
         upper: 0.02,
         rw_sd_auto: false,
-        ivp: false,
+        perturb_only_at_t0: false,
     }
 }
 

@@ -530,7 +530,7 @@ fn format_text(
                 // IF2 keeps the rich FitState rendering — gate, params
                 // table, per-chain loglik-eval, provenance — because it
                 // surfaces information the typed `If2StageResult`
-                // doesn't (e.g. ivp markers, per-chain SE, raw
+                // doesn't (e.g. perturb_only_at_t0 markers, per-chain SE, raw
                 // start_values). The typed payload is the source of
                 // truth for headline scalars; FitState is the source
                 // for the rendered tables.
@@ -961,7 +961,8 @@ impl Formatter {
             s.push('\n');
             return s;
         }
-        let ivp_set: std::collections::HashSet<&str> = state.ivp_params.iter()
+        let t0_set: std::collections::HashSet<&str> =
+            state.perturb_only_at_t0_params.iter()
             .map(|s| s.as_str()).collect();
         let mut keys: Vec<&String> = state.start_values.keys().collect();
         keys.sort();
@@ -990,8 +991,8 @@ impl Formatter {
                 Some(r) => format!("Â={:.3} {}", r, self.a_glyph(&gate, r)),
                 None => self.dim("Â=—").to_string(),
             };
-            let ivp_marker = if ivp_set.contains(k.as_str()) {
-                format!(" {}", self.dim("(ivp)"))
+            let t0_marker = if t0_set.contains(k.as_str()) {
+                format!(" {}", self.dim("(t0-only)"))
             } else {
                 String::new()
             };
@@ -1000,7 +1001,7 @@ impl Formatter {
                 None => String::new(),
             };
             s.push_str(&format!("    {:12} = {:<12.6}  {}{}{}\n",
-                k, v, agreement_str, ivp_marker, date_marker));
+                k, v, agreement_str, t0_marker, date_marker));
         }
         s.push('\n');
         s
@@ -1774,7 +1775,9 @@ pub struct ParameterReport {
     pub name: String,
     pub estimate: f64,
     pub chain_agreement: Option<f64>,
-    pub ivp: bool,
+    /// Declared `perturb_only_at_t0 = true` in `[estimate]` — an
+    /// initial-state parameter, perturbed at t=0 only under IF2.
+    pub perturb_only_at_t0: bool,
     /// Calendar date of `estimate` for `instant`-kind params when the
     /// model declares an `origin` (2026-05-22 calendar-time §6.7).
     /// Additive field — `None`/omitted for non-instant params and
@@ -2079,7 +2082,8 @@ fn if2_stage_report(
     };
 
     // Parameters
-    let ivp_set: std::collections::HashSet<&str> = state.ivp_params.iter()
+    let t0_set: std::collections::HashSet<&str> =
+        state.perturb_only_at_t0_params.iter()
         .map(|s| s.as_str()).collect();
     let mut keys: Vec<&String> = state.start_values.keys().collect();
     keys.sort();
@@ -2095,7 +2099,7 @@ fn if2_stage_report(
             name: (*k).clone(),
             estimate,
             chain_agreement: state.tail_chain_agreement.get(*k).copied(),
-            ivp: ivp_set.contains(k.as_str()),
+            perturb_only_at_t0: t0_set.contains(k.as_str()),
             estimate_date: cal.date_for(k, estimate),
         }
     }).collect();
@@ -2336,7 +2340,7 @@ fn render_md_stage(stage: &StageReport) -> String {
             let a_str = p.chain_agreement
                 .map(|r| format!("{:.3}", r))
                 .unwrap_or_else(|| "—".into());
-            let flag = if p.ivp { "ivp" } else { "" };
+            let flag = if p.perturb_only_at_t0 { "t0-only" } else { "" };
             let est_cell = match &p.estimate_date {
                 Some(date) => format!("{:.6} ({})", p.estimate, date),
                 None => format!("{:.6}", p.estimate),
@@ -2466,7 +2470,7 @@ fn render_latex_stage(stage: &StageReport) -> String {
                 .chain_agreement
                 .map(|r| format!("{:.3}", r))
                 .unwrap_or_else(|| "---".into());
-            let flag = if p.ivp { "ivp" } else { "" };
+            let flag = if p.perturb_only_at_t0 { "t0-only" } else { "" };
             let est_cell = match &p.estimate_date {
                 Some(date) => format!("{:.6} ({})", p.estimate, date),
                 None => format!("{:.6}", p.estimate),
@@ -2690,7 +2694,7 @@ mod tests {
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: agreement,
-            ivp_params: vec!["I0".into()],
+            perturb_only_at_t0_params: vec!["I0".into()],
             chain_logliks: vec![-3810.0; 8],
             chain_eval_logliks: vec![
                 -3810.5, -3805.1, -3812.0, -3808.7,
@@ -3910,7 +3914,7 @@ mod tests {
             name: "tau".into(),
             estimate: 23.0,
             chain_agreement: Some(1.02),
-            ivp: false,
+            perturb_only_at_t0: false,
             estimate_date: Some("2020-03-18".into()),
         };
         let json = serde_json::to_value(&with_date).unwrap();
@@ -3923,7 +3927,7 @@ mod tests {
             name: "R0".into(),
             estimate: 2.5,
             chain_agreement: Some(1.01),
-            ivp: false,
+            perturb_only_at_t0: false,
             estimate_date: None,
         };
         let json = serde_json::to_value(&without).unwrap();

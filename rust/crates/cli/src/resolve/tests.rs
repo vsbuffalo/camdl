@@ -672,9 +672,15 @@ fn cas_identity_pins() {
         // the five below are byte-for-byte their pre-gh#641 values — that is the
         // scope claim this list exists to make checkable.
         ("sim", "99e7f1d94ed2ab526c8bdbf8e9833c6d67b909ce9ff19145a8a5cc69424aff11"),
-        // Unchanged by gh#442 (verified: this is the value the pre-fix build
-        // produced for the same fixture).
-        ("fit", "c2707d3d973cbdaf9c0d5afc553264ca59f6002c60055b5957f31aa2431f673f"),
+        // Re-keyed by the `ivp` → `perturb_only_at_t0` rename: the fit
+        // canonical JSON serializes `EstimateSpecV2` field-by-field, so the
+        // renamed TOML key changes the hashed bytes for every fit leaf even at
+        // its `false` default. `fit` ALONE moves — no other kind embeds
+        // `FitConfigV2`, which is the scope claim this list makes checkable.
+        // (Unchanged by gh#442 before that: the pre-fix build produced
+        // c2707d3d973cbdaf9c0d5afc553264ca59f6002c60055b5957f31aa2431f673f for
+        // the same fixture.)
+        ("fit", "5c04cd634aa930a1805463e3b5112354e67984d9401c2ea83ed78116b952645f"),
         // Re-keyed by gh#442: these four hashed the RAW model, so their `model`
         // level folded `output.format = "tsv"` / `time_semantics = "continuous"`.
         ("pfilter", "08df1f4d17f0b2a4428202b055bc1cc7c9cc5c6573fe2c3387e95bfdbe55ad3e"),

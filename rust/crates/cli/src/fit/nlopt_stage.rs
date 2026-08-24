@@ -264,10 +264,10 @@ pub fn run_stage(
             rw_sd.insert(name.clone(), p.rw_sd);
         }
     }
-    let ivp_params: Vec<String> = arc_config
+    let perturb_only_at_t0_params: Vec<String> = arc_config
         .estimated_params
         .iter()
-        .filter(|p| p.ivp)
+        .filter(|p| p.perturb_only_at_t0)
         .map(|p| p.name.clone())
         .collect();
 
@@ -293,7 +293,7 @@ pub fn run_stage(
         acceptance_rate: None,
         tail_chain_agreement: convergence.chain_agreement.iter()
             .map(|(k, v)| (k.clone(), *v)).collect(),
-        ivp_params,
+        perturb_only_at_t0_params,
         chain_logliks,
         chain_eval_logliks: Vec::new(),
         chain_eval_ses: Vec::new(),

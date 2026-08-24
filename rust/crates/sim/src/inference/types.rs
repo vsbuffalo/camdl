@@ -64,9 +64,13 @@ pub struct EstimatedParam {
     pub upper: f64,
     /// Whether `rw_sd` was auto-computed from the data (for preflight reporting).
     pub rw_sd_auto: bool,
-    /// If true, perturb only at t=0 (initial-value parameter: S₀, E₀, I₀ …).
-    /// Matches pomp's `ivp()` in `rw.sd`.
-    pub ivp: bool,
+    /// If true, this parameter is perturbed only at t=0, not at every
+    /// observation — the IF2 perturbation schedule for an initial-state
+    /// parameter (S₀, E₀, I₀ …), whose whole effect on the trajectory is
+    /// spent before the first step. Only IF2 has a perturbation schedule,
+    /// so the flag is meaningless (and rejected at config load) under every
+    /// other algorithm. Corresponds to pomp's `ivp()` marker in `rw.sd`.
+    pub perturb_only_at_t0: bool,
 }
 
 /// Is `z` outside the `Log` transform's declared support `[lo, hi]`?
@@ -591,7 +595,7 @@ mod tests {
             lower: lo,
             upper: hi,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         }
     }
 

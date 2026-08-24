@@ -438,8 +438,8 @@ samples = 500
 
 `nuts` needs a **differentiable model**: the capability gate refuses — naming
 the reason — an undifferentiable rate/observation gradient, an adaptive `rk45`
-integrator, a scheduled `interventions {}` / `events {}` effect, or a
-parameterized (`ivp`) initial condition; fit those with gradient-free `mh` or
+integrator, a scheduled `interventions {}` / `events {}` effect, or an initial
+condition its ∂init/∂θ seed cannot express; fit those with gradient-free `mh` or
 the stochastic-process methods instead. This targets a different statistical
 object than the stochastic backends — `p(y | θ, ODE skeleton)` rather than
 `p(y | θ)` — so see `camdl docs inference` (the ODE-backend fitting section) for

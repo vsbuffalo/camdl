@@ -1594,7 +1594,7 @@ mod tests {
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: agreement,
-            ivp_params: vec![],
+            perturb_only_at_t0_params: vec![],
             chain_logliks: vec![-3810.0, -3805.0, -3812.0, -3804.9],
             chain_eval_logliks: vec![-3810.0, -3805.0, -3812.0, -3804.9],
             chain_eval_ses: vec![1.0, 1.0, 1.0, 1.0],

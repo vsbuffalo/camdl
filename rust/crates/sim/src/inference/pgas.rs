@@ -4540,7 +4540,7 @@ mod prior_grad_tests {
         EstimatedParam {
             name: "p".into(), index: 0, initial: 1.0, rw_sd: 0.1,
             transform: Transform::Log { lo, hi },
-            lower: lo, upper: hi, rw_sd_auto: false, ivp: false,
+            lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
@@ -4548,7 +4548,7 @@ mod prior_grad_tests {
         EstimatedParam {
             name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1,
             transform: Transform::None,
-            lower: lo, upper: hi, rw_sd_auto: false, ivp: false,
+            lower: lo, upper: hi, rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
@@ -4622,7 +4622,7 @@ mod prior_grad_tests {
         let lp = EstimatedParam {
             name: "p".into(), index: 0, initial: 0.7, rw_sd: 0.1,
             transform: Transform::Logit { lo: 0.3, hi: 1.0 },
-            lower: 0.3, upper: 1.0, rw_sd_auto: false, ivp: false,
+            lower: 0.3, upper: 1.0, rw_sd_auto: false, perturb_only_at_t0: false,
         };
         assert_grad_matches_fd(
             &Prior::Fixed(Density::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 }),

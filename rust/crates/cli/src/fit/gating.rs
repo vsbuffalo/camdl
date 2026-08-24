@@ -5,7 +5,8 @@
 //! `docs/dev/proposals/2026-04-19-refine-gates-scout-convergence.md`:
 //!
 //! - Gate 1 (pre-refine): scout's tail chain-agreement (Â) on every
-//!   non-IVP estimated parameter must be below `gate.a_thresh`. If it isn't,
+//!   structural estimated parameter (every one not declared
+//!   `perturb_only_at_t0`) must be below `gate.a_thresh`. If it isn't,
 //!   refine refuses to start. Overridable via `--allow-nonconverged-scout`.
 //!
 //! - Gate 2 (post-refine): refine's best loglik must not regress
@@ -111,14 +112,15 @@ pub enum ScoutGateVerdict {
     Ok,
     SoftWarn { param_agreement: Vec<(String, f64)> },
     Hard {
-        /// All non-IVP params with Â ≥ `gate.a_thresh`. Named and
+        /// All structural params with Â ≥ `gate.a_thresh`. Named and
         /// sorted worst-first so the error message leads with the
         /// most obvious failure.
         failing: Vec<(String, f64)>,
-        /// Every non-IVP Â, for the full diagnostic table.
+        /// Every structural Â, for the full diagnostic table.
         all_structural: Vec<(String, f64)>,
-        /// IVP Â values (reported but not gated).
-        ivp: Vec<(String, f64)>,
+        /// Â for the `perturb_only_at_t0` (initial-state) params —
+        /// reported but not gated.
+        perturb_only_at_t0: Vec<(String, f64)>,
         /// Spread across scout's per-chain final logliks. A wide
         /// spread is the strongest signal of multi-modality.
         loglik_spread: f64,
@@ -140,7 +142,8 @@ pub enum ScoutGateVerdict {
 ///
 /// Compound gate (Step 8, proposal §Proposal 3):
 ///
-/// 1. Chain-agreement Â on every non-IVP param must be `< gate.a_thresh`.
+/// 1. Chain-agreement Â on every structural (non-`perturb_only_at_t0`)
+///    param must be `< gate.a_thresh`.
 ///    Failure → `Hard`. Â in `[A_SOFT, gate.a_thresh)` → `SoftWarn`.
 /// 2. If both `chain_eval_logliks` and `chain_eval_ses` are populated
 ///    (≥ 2 entries), the inter-chain decibans-spread of clean-eval
@@ -160,19 +163,20 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
         return ScoutGateVerdict::Ok;
     }
 
-    let ivp_set: std::collections::HashSet<&str> = scout.ivp_params.iter()
-        .map(|s| s.as_str()).collect();
+    let t0_set: std::collections::HashSet<&str> =
+        scout.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
     let mut structural: Vec<(String, f64)> = Vec::new();
-    let mut ivp: Vec<(String, f64)> = Vec::new();
+    let mut perturb_only_at_t0: Vec<(String, f64)> = Vec::new();
     for (name, &agreement) in &scout.tail_chain_agreement {
-        if ivp_set.contains(name.as_str()) {
-            ivp.push((name.clone(), agreement));
+        if t0_set.contains(name.as_str()) {
+            perturb_only_at_t0.push((name.clone(), agreement));
         } else {
             structural.push((name.clone(), agreement));
         }
     }
     structural.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ivp.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    perturb_only_at_t0
+        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let worst = structural.iter().map(|(_, r)| *r)
         .fold(0.0_f64, f64::max);
@@ -195,7 +199,7 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
             return ScoutGateVerdict::Hard {
                 failing,
                 all_structural: structural,
-                ivp,
+                perturb_only_at_t0,
                 loglik_spread,
             };
         }
@@ -363,7 +367,7 @@ pub fn format_hard_verdict(
     gate: &GateConfig,
     failing: &[(String, f64)],
     all_structural: &[(String, f64)],
-    ivp: &[(String, f64)],
+    perturb_only_at_t0: &[(String, f64)],
     loglik_spread: f64,
     scout_best_loglik: f64,
     scout_best_chain_values: Option<&[(String, f64)]>,
@@ -384,8 +388,9 @@ pub fn format_hard_verdict(
                 String::new()
             }));
     }
-    for (name, agreement) in ivp {
-        msg.push_str(&format!("      {:<10} Â = {:>6.3}   (ivp — not gated)\n",
+    for (name, agreement) in perturb_only_at_t0 {
+        msg.push_str(&format!(
+            "      {:<10} Â = {:>6.3}   (perturb_only_at_t0 — not gated)\n",
             name, agreement));
     }
     if loglik_spread > 0.0 {
@@ -410,7 +415,8 @@ pub fn format_hard_verdict(
     } else {
         msg.push_str("\n    ");
     }
-    msg.push_str("- mark weakly-identified params as `ivp = true`\n      \
+    msg.push_str("- mark weakly-identified initial-state params as \
+                  `perturb_only_at_t0 = true`\n      \
                   (reported but not gated)\n\n  \
                   To run refine anyway (results may launder multi-modality):\n    \
                   camdl fit run fit.toml --allow-nonconverged-scout");
@@ -423,7 +429,7 @@ mod tests {
 
     fn make_state(
         tail_chain_agreement: &[(&str, f64)],
-        ivp_params: &[&str],
+        perturb_only_at_t0_params: &[&str],
         chain_logliks: &[f64],
         best_loglik: f64,
     ) -> FitState {
@@ -443,7 +449,8 @@ mod tests {
             acceptance_rate: None,
             tail_chain_agreement: tail_chain_agreement.iter()
                 .map(|(k, v)| (k.to_string(), *v)).collect(),
-            ivp_params: ivp_params.iter().map(|s| s.to_string()).collect(),
+            perturb_only_at_t0_params: perturb_only_at_t0_params.iter()
+                .map(|s| s.to_string()).collect(),
             chain_logliks: chain_logliks.to_vec(),
             chain_eval_logliks: vec![],
             chain_eval_ses: vec![],
@@ -455,8 +462,8 @@ mod tests {
     }
 
     /// Legacy GateConfig matching the pre-§Proposal 3 thresholds —
-    /// useful for tests that exercise the SoftWarn band and IVP
-    /// exemption logic, both of which were defined before the new
+    /// useful for tests that exercise the SoftWarn band and the
+    /// initial-state exemption logic, both of which were defined before the new
     /// stricter default `a_thresh = 1.01`.
     fn legacy_gate() -> GateConfig {
         GateConfig { a_thresh: 1.10, decibans_thresh: f64::INFINITY }
@@ -478,9 +485,10 @@ mod tests {
                     "beta (Â=3.5) must fail the gate: {:?}", names);
                 assert!(names.contains(&"gamma"),
                     "gamma (Â=1.2) must fail: {:?}", names);
-                // IVP param I0 must NOT appear in failing.
+                // The perturb_only_at_t0 param I0 must NOT appear in failing.
                 assert!(!names.contains(&"I0"),
-                    "I0 is ivp — must not be in failing: {:?}", names);
+                    "I0 is perturb_only_at_t0 — must not be in failing: {:?}",
+                    names);
                 // Loglik spread computed: 854.6 − 60.2 = 794.4
                 assert!((loglik_spread - 794.4).abs() < 0.1,
                     "loglik spread {:.1}, expected 794.4", loglik_spread);
@@ -490,9 +498,10 @@ mod tests {
     }
 
     #[test]
-    fn ivp_agreement_not_gated_even_when_extreme() {
-        // All structural params are green; only IVP has extreme Â.
-        // Gate should pass — IVP is expected to be hard to identify.
+    fn perturb_only_at_t0_agreement_not_gated_even_when_extreme() {
+        // All structural params are green; only the perturb_only_at_t0 params
+        // have extreme Â. The check must pass — an initial-state parameter is
+        // expected to be hard to identify.
         let s = make_state(
             &[("beta", 1.02), ("gamma", 1.01), ("I0", 16.5), ("R_init", 5.5)],
             &["I0", "R_init"],
@@ -501,7 +510,8 @@ mod tests {
         );
         match check_scout_convergence(&s, &legacy_gate()) {
             ScoutGateVerdict::Ok => (),
-            other => panic!("expected Ok (IVP exempt), got {:?}", other),
+            other => panic!(
+                "expected Ok (perturb_only_at_t0 exempt), got {:?}", other),
         }
     }
 

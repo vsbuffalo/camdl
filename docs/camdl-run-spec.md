@@ -2123,25 +2123,25 @@ Three properties govern the whole surface:
 Every key `FitConfigV2` accepts at the top level. Anything else fails at load
 with the serde list quoted in §6.9.
 
-| key              | type                        | required | default                | meaning                                                                                                                                  |
-| ---------------- | --------------------------- | -------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `[model]`        | table                       | **yes**  | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                              |
-| `[data]`         | table                       | one of   | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                    |
-| `[synthetic]`    | table                       | one of   | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                        |
-| `[estimate]`     | table of tables             | **yes**  | —                      | The free parameters. See §6.3.                                                                                                           |
-| `[fixed]`        | table                       | **yes**  | —                      | The held-constant parameters. See §6.4.                                                                                                  |
-| `[stages.<n>]`   | table of tables             | **yes**  | —                      | The inference pipeline, executed in declaration order. See §6.5.                                                                         |
-| `[config]`       | table                       | no       | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                    |
-| `output_dir`     | string                      | no       | `results`              | Output root. Anchored at the `fit.toml`. Not part of the fit identity.                                                                   |
-| `fit_seeds`      | list of ints                | no       | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                            |
-| `simplex_groups` | array of tables             | no       | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.         |
-| `fit_starts`     | `"model_default"`/`"prior"` | no       | `model_default`        | **Inert.** Parsed and hashed, but no runner reads it (see §6.9, note).                                                                   |
-| `scenario`       | string                      | no       | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`. |
-| `enable`         | list of strings             | no       | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                            |
-| `disable`        | list of strings             | no       | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                             |
-| `ic_free`        | bool                        | no       | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires an `ivp = true` parameter and a non-missing `y₁`.    |
-| `condition_from` | string **or** table         | no       | none                   | Conditioning boundary for a covariate-informed burn-in. See below.                                                                       |
-| `[provenance]`   | table                       | no       | none                   | Lineage metadata. See §6.7.                                                                                                              |
+| key              | type                        | required | default                | meaning                                                                                                                                                                                                                         |
+| ---------------- | --------------------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[model]`        | table                       | **yes**  | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                                                                                                                     |
+| `[data]`         | table                       | one of   | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                                                                                                           |
+| `[synthetic]`    | table                       | one of   | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                                                                                                               |
+| `[estimate]`     | table of tables             | **yes**  | —                      | The free parameters. See §6.3.                                                                                                                                                                                                  |
+| `[fixed]`        | table                       | **yes**  | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                         |
+| `[stages.<n>]`   | table of tables             | **yes**  | —                      | The inference pipeline, executed in declaration order. See §6.5.                                                                                                                                                                |
+| `[config]`       | table                       | no       | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                           |
+| `output_dir`     | string                      | no       | `results`              | Output root. Anchored at the `fit.toml`. Not part of the fit identity.                                                                                                                                                          |
+| `fit_seeds`      | list of ints                | no       | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                   |
+| `simplex_groups` | array of tables             | no       | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                |
+| `fit_starts`     | `"model_default"`/`"prior"` | no       | `model_default`        | **Inert.** Parsed and hashed, but no runner reads it (see §6.9, note).                                                                                                                                                          |
+| `scenario`       | string                      | no       | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                        |
+| `enable`         | list of strings             | no       | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                   |
+| `disable`        | list of strings             | no       | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                    |
+| `ic_free`        | bool                        | no       | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. `if2` only — it is the one algorithm whose particles differ in x₀ (gh#732). Requires a `perturb_only_at_t0 = true` parameter and a non-missing `y₁`. |
+| `condition_from` | string **or** table         | no       | none                   | Conditioning boundary for a covariate-informed burn-in. See below.                                                                                                                                                              |
+| `[provenance]`   | table                       | no       | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                     |
 
 `[config]` (`FitBackendConfig`, `config_v2.rs:294`):
 
@@ -2215,14 +2215,14 @@ time, or `fit predict` refuses and names the fix.
 Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
 `EstimateSpecV2` (`config_v2.rs:607`):
 
-| key         | type                                 | default                       | meaning                                                                            |
-| ----------- | ------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------- |
-| `bounds`    | `[lo, hi]`                           | the model's `in [lo, hi]`     | Search box. May only **narrow** the model's declared range; loosening is an error. |
-| `start`     | float                                | model value, else bounds draw | The stage's base point. An upstream stage's result (`init_mle`) overrides it.      |
-| `prior`     | inline table                         | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`/`nuts`.    |
-| `transform` | `"log"` \| `"logit"` \| `"identity"` | derived from the param's type | Inference-scale transform. Also sets the clamp box IF2 keeps particles inside.     |
-| `ivp`       | bool                                 | `false`                       | Initial-value parameter — perturbed only at t=0 in IF2. Required by `ic_free`.     |
-| `rw_sd`     | float                                | auto-scaled from bounds       | IF2 per-parameter random-walk SD, on the natural scale.                            |
+| key                  | type                                 | default                       | meaning                                                                                                                                                                                                                     |
+| -------------------- | ------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bounds`             | `[lo, hi]`                           | the model's `in [lo, hi]`     | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                          |
+| `start`              | float                                | model value, else bounds draw | The stage's base point. An upstream stage's result (`init_mle`) overrides it.                                                                                                                                               |
+| `prior`              | inline table                         | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`/`nuts`.                                                                                                                                             |
+| `transform`          | `"log"` \| `"logit"` \| `"identity"` | derived from the param's type | Inference-scale transform. Also sets the clamp box IF2 keeps particles inside.                                                                                                                                              |
+| `perturb_only_at_t0` | bool                                 | `false`                       | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Config-load error on a `pgas`/`pmmh`/`mh`/`nuts`/`nl-*` stage, which have no perturbation schedule. Required by `ic_free`. |
+| `rw_sd`              | float                                | auto-scaled from bounds       | IF2 per-parameter random-walk SD, on the natural scale.                                                                                                                                                                     |
 
 An entry with no fields at all (`beta = {}`) is legal: it means "estimate this,
 take everything from the model."
@@ -2616,7 +2616,7 @@ executes.
 13. Non-empty `bounds` on every entry that declares them.
     > `estimate.beta: bounds [0.6, 0.15] are empty (lo must be < hi)`
 14. Simplex groups: ≥ 2 members, every member in `[estimate]`, no member in two
-    groups, no member with `ivp = true`, no negative lower bound.
+    groups, no member with `perturb_only_at_t0 = true`, no negative lower bound.
 
 `validate_priors_present` runs next, with the model IR in scope so the `~`
 fallback is honored; then two warnings that do not stop the run — priors
@@ -2996,7 +2996,7 @@ error: refine stage requires scout convergence.
   Pick one:
     - re-run scout with more chains or iterations
     - narrow bounds to the basin scout's best chain found
-    - mark weakly-identified params as `ivp = true`
+    - mark weakly-identified initial-state params as `perturb_only_at_t0 = true`
       (reported but not gated)
 
   To run refine anyway (results may launder multi-modality):
@@ -3431,7 +3431,8 @@ Rhat:
 `nuts` is the gradient-based sibling of `mh` on this backend (`warmup` +
 `samples` instead of `iterations` + `burn_in`). It requires a differentiable
 model: the capability gate refuses an unsupported rate or observation gradient,
-an adaptive `rk45` integrator, a scheduled effect, or an `ivp` parameter.
+an adaptive `rk45` integrator, a scheduled effect, or an initial condition the
+gradient path cannot seed.
 
 ### 8.4 Shared fixed parameters and a train/holdout split
 

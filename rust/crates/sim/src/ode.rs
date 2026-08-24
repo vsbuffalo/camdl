@@ -1045,7 +1045,7 @@ struct AugState {
 ///
 /// `state_sens_0` is the `S(t_start) = ∂(initial_state)/∂θ` seed (`ic_grad`, §1c
 /// C-seed): zero for a parameter that does not enter an initial condition, nonzero
-/// for an `ivp` parameter. Passed in (not derived here) so the seed computation is
+/// for one that does. Passed in (not derived here) so the seed computation is
 /// a separate, independently-tested concern.
 ///
 /// Refuses (hard error, §1c/§1h) an adaptive integrator, a `dt`-in-rate

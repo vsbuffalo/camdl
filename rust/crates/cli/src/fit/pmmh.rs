@@ -963,7 +963,7 @@ pub fn run_stage(
         // Bayesian stages don't produce an IF2-style Â table; the
         // refine-gates proposal only gates on scout→refine handoffs.
         tail_chain_agreement: std::collections::BTreeMap::new(),
-        ivp_params: Vec::new(),
+        perturb_only_at_t0_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
         chain_eval_ses: Vec::new(),

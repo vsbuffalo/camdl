@@ -192,11 +192,11 @@ fn test_if2_converges_from_dispersed_start() {
     let if2_params = vec![
         EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.8,
-            rw_sd: 0.05, transform: Transform::Logit { lo: 0.01, hi: 2.0 }, lower: 0.01, upper: 2.0, ivp: false, rw_sd_auto: false,
+            rw_sd: 0.05, transform: Transform::Logit { lo: 0.01, hi: 2.0 }, lower: 0.01, upper: 2.0, perturb_only_at_t0: false, rw_sd_auto: false,
         },
         EstimatedParam {
             name: "gamma".into(), index: 1, initial: 0.3,
-            rw_sd: 0.01, transform: Transform::Logit { lo: 0.01, hi: 1.0 }, lower: 0.01, upper: 1.0, ivp: false, rw_sd_auto: false,
+            rw_sd: 0.01, transform: Transform::Logit { lo: 0.01, hi: 1.0 }, lower: 0.01, upper: 1.0, perturb_only_at_t0: false, rw_sd_auto: false,
         },
     ];
 
@@ -263,12 +263,12 @@ fn test_if2_respects_bounds() {
         EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.3,
             rw_sd: 0.1, // aggressive — would escape without bounds
-            transform: Transform::Logit { lo: 0.1, hi: 0.5 }, lower: 0.1, upper: 0.5, ivp: false, rw_sd_auto: false,
+            transform: Transform::Logit { lo: 0.1, hi: 0.5 }, lower: 0.1, upper: 0.5, perturb_only_at_t0: false, rw_sd_auto: false,
         },
         EstimatedParam {
             name: "gamma".into(), index: 1, initial: 0.1,
             rw_sd: 0.03,
-            transform: Transform::Logit { lo: 0.05, hi: 0.2 }, lower: 0.05, upper: 0.2, ivp: false, rw_sd_auto: false,
+            transform: Transform::Logit { lo: 0.05, hi: 0.2 }, lower: 0.05, upper: 0.2, perturb_only_at_t0: false, rw_sd_auto: false,
         },
     ];
 
@@ -314,7 +314,7 @@ fn test_if2_no_cooling_explores() {
     let if2_params = vec![
         EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.3,
-            rw_sd: 0.02, transform: Transform::Logit { lo: 0.01, hi: 2.0 }, lower: 0.01, upper: 2.0, ivp: false, rw_sd_auto: false,
+            rw_sd: 0.02, transform: Transform::Logit { lo: 0.01, hi: 2.0 }, lower: 0.01, upper: 2.0, perturb_only_at_t0: false, rw_sd_auto: false,
         },
     ];
 
@@ -352,7 +352,7 @@ fn log_transform_clamps_to_bounds() {
     let param = EstimatedParam {
         name: "test".into(), index: 0, initial: 1.0, rw_sd: 0.1,
         transform: Transform::Log { lo: 0.01, hi: 100.0 },
-        lower: 0.01, upper: 100.0, ivp: false, rw_sd_auto: false,
+        lower: 0.01, upper: 100.0, perturb_only_at_t0: false, rw_sd_auto: false,
     };
     // Extreme positive z → exp(z) → clamped to hi
     assert_eq!(param.from_transformed(1000.0), 100.0);
@@ -368,7 +368,7 @@ fn logit_transform_enforces_bounds() {
     let param = EstimatedParam {
         name: "test".into(), index: 0, initial: 0.5, rw_sd: 0.1,
         transform: Transform::Logit { lo: 0.0, hi: 1.0 },
-        lower: 0.0, upper: 1.0, ivp: false, rw_sd_auto: false,
+        lower: 0.0, upper: 1.0, perturb_only_at_t0: false, rw_sd_auto: false,
     };
     // Any z → result in [lo, hi] (saturates at bounds for extreme z)
     let v1 = param.from_transformed(100.0);
@@ -387,7 +387,7 @@ fn log_round_trip_within_bounds() {
     let param = EstimatedParam {
         name: "test".into(), index: 0, initial: 5.0, rw_sd: 0.1,
         transform: Transform::Log { lo: 0.001, hi: 1000.0 },
-        lower: 0.001, upper: 1000.0, ivp: false, rw_sd_auto: false,
+        lower: 0.001, upper: 1000.0, perturb_only_at_t0: false, rw_sd_auto: false,
     };
     for &x in &[0.001, 0.01, 1.0, 10.0, 100.0, 1000.0] {
         let z = param.to_transformed(x);
@@ -401,7 +401,7 @@ fn logit_round_trip() {
     let param = EstimatedParam {
         name: "test".into(), index: 0, initial: 0.5, rw_sd: 0.1,
         transform: Transform::Logit { lo: 0.0, hi: 1.0 },
-        lower: 0.0, upper: 1.0, ivp: false, rw_sd_auto: false,
+        lower: 0.0, upper: 1.0, perturb_only_at_t0: false, rw_sd_auto: false,
     };
     for &x in &[0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99] {
         let z = param.to_transformed(x);
@@ -416,7 +416,7 @@ fn scaled_logit_round_trip() {
     let param = EstimatedParam {
         name: "s0".into(), index: 0, initial: 0.03, rw_sd: 0.005,
         transform: Transform::Logit { lo: 0.01, hi: 0.10 },
-        lower: 0.01, upper: 0.10, ivp: true, rw_sd_auto: false,
+        lower: 0.01, upper: 0.10, perturb_only_at_t0: true, rw_sd_auto: false,
     };
     for &x in &[0.015, 0.03, 0.05, 0.08, 0.095] {
         let z = param.to_transformed(x);

@@ -526,7 +526,8 @@ The structure is identical to the particle filter, with two additions:
 1. PERTURB: jitter each particle's parameters (NEW in IF2)
    For each particle i, for each estimated parameter:
      θ_i += Normal(0, rw_sd × cooling) on the transformed scale
-   IVP parameters (initial conditions) are only perturbed at t=0.
+   Parameters declared `perturb_only_at_t0` (initial conditions) are
+   perturbed at t=0 only.
 
 2. PROPAGATE: same as PF, but each particle uses its OWN params
    particle_i simulates with particle_params[i], not shared θ
@@ -667,12 +668,13 @@ Cooling is pomp's `cooling.fraction.50` (cf50) convention: the parameter is the
 halfway-point SD fraction, the end-of-stage SD is its square. Formula, worked
 example, and empirical iter-by-iter table: `docs/methods/cooling.md`.
 
-### IVP parameters
+### Initial-state parameters (`perturb_only_at_t0`)
 
 Initial conditions (S₀, E₀, I₀) set the starting state but don't change during
-simulation, so they are perturbed only at t=0, not at every observation. They
-are model-declared parameters: list them under `[estimate]` in the `fit.toml`
-like any other parameter, and the fit estimates them. The filter jitters their
+simulation, so they are perturbed only at t=0, not at every observation. Declare
+that with `perturb_only_at_t0 = true` on the `[estimate]` entry. They are
+model-declared parameters: list them under `[estimate]` in the `fit.toml` like
+any other parameter, and the fit estimates them. The filter jitters their
 initial values once when particles initialize, then holds them fixed as it runs
 forward — whereas a parameter like R₀ is perturbed at every observation time.
 
@@ -688,8 +690,8 @@ in no observation model reaches the likelihood through this path and no other.
 PGAS instead draws a genuinely stochastic initial state
 ($S_0 \sim \text{Binomial}(N_0, s_0)$) because its Gibbs step needs a tractable
 initial-state _density_ $p(x_0 \mid \theta)$ in the complete-data likelihood;
-see "IVP parameters (s0, e0)" below. IF2 needs only a draw, so it uses the
-model's own (deterministic) initial-condition expressions evaluated at each
+see "Initial-state parameters (s0, e0)" below. IF2 needs only a draw, so it uses
+the model's own (deterministic) initial-condition expressions evaluated at each
 particle's parameters.
 
 ---
@@ -1089,7 +1091,7 @@ df = pd.read_csv("chain_1/trajectories.tsv", sep="\t", comment="#")
 band = df.groupby("time")[["S", "E", "I", "R"]].quantile([0.05, 0.5, 0.95])
 ```
 
-### IVP parameters (s0, e0)
+### Initial-state parameters (s0, e0)
 
 Parameters that determine the initial state (like the initial susceptible
 fraction s0) require special treatment. The complete-data log-likelihood is
@@ -1099,8 +1101,10 @@ recomputed.
 PGAS handles IVPs by making the initial state stochastic: each CSMC particle
 draws $S_0 \sim \text{Binomial}(N_0, s_0)$ independently, giving the CSMC
 diverse initial states to select among. A Binomial density term is added to the
-complete-data LL to constrain s0 via the MH ratio. IVP parameters are
-auto-detected at startup.
+complete-data LL to constrain s0 via the MH ratio. The parameters that get this
+treatment are auto-detected at startup — this is a PGAS-internal detection,
+unrelated to the `perturb_only_at_t0` flag, which is an IF2 perturbation
+schedule and is rejected at config load under PGAS.
 
 ### Spatial models and seeding (iota)
 
@@ -1269,13 +1273,14 @@ and with a message naming the reason, a model that has:
   `rk4`;
 - a **scheduled effect** — an `interventions {}` or `events {}` entry, a
   discrete state jump the smooth sensitivity flow cannot cross;
-- a **parameterized initial condition** (an `ivp` parameter) — camdl emits no
-  gradient for initial-condition expressions.
+- an **initial condition the ∂init/∂θ seed cannot express** — one drawn from a
+  distribution, or a parameterized one whose expression camdl emits no
+  initial-condition gradient for.
 
 Any of these is a hard error that points at the fix. A model that genuinely
 needs one of them — a mid-run campaign, an estimated $S_0$ — is fit either with
 gradient-free `mh` on the ODE backend, or with the stochastic-process methods,
-which handle scheduled effects and IVP parameters.
+which handle scheduled effects and estimated initial states.
 
 ### Running an ODE Bayesian fit
 

@@ -135,7 +135,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
         lower: 0.001,
         upper: 10.0,
         rw_sd_auto: false,
-        ivp: false,
+        perturb_only_at_t0: false,
     }];
 
     // A hierarchical (Normal) prior on `beta`. The arg expressions are not

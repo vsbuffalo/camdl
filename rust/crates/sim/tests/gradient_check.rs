@@ -421,7 +421,7 @@ fn test_nuts_target_gradient_on_z_scale() {
             rw_sd: 0.02,
             transform: Transform::Log { lo: 0.001, hi: 100.0 },
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         })
         .collect();
 

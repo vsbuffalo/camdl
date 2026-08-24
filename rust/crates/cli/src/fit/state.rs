@@ -50,13 +50,13 @@ pub struct FitState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tail_chain_agreement: BTreeMap<String, f64>,
 
-    /// Names of estimated parameters declared `ivp = true`. Refine's
-    /// Â gate exempts these — IVP parameters are expected to be
-    /// harder to identify and shouldn't block the pipeline when
-    /// structural convergence is fine. Stored here (not re-derived
+    /// Names of estimated parameters declared `perturb_only_at_t0 = true`.
+    /// Refine's Â check exempts these — an initial-state parameter is
+    /// expected to be harder to identify and shouldn't block the pipeline
+    /// when structural convergence is fine. Stored here (not re-derived
     /// from fit.toml in the downstream) so the two can't drift.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ivp_params: Vec<String>,
+    pub perturb_only_at_t0_params: Vec<String>,
 
     /// Per-chain final log-likelihoods (the full distribution behind
     /// `best_loglik`). Refine's post-run loglik-regression gate uses
@@ -217,7 +217,7 @@ mod tests {
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement,
-            ivp_params: vec!["s0".into()],
+            perturb_only_at_t0_params: vec!["s0".into()],
             chain_logliks: vec![-130.0, -123.45],
             chain_eval_logliks: vec![-128.7, -123.1],
             chain_eval_ses: vec![1.5, 0.8],
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(loaded.chain_eval_ses, vec![1.5, 0.8]);
         assert_eq!(loaded.chain_logliks, vec![-130.0, -123.45]);
         assert_eq!(loaded.tail_chain_agreement.get("beta").copied(), Some(1.02));
-        assert_eq!(loaded.ivp_params, vec!["s0".to_string()]);
+        assert_eq!(loaded.perturb_only_at_t0_params, vec!["s0".to_string()]);
         // Phase 3: resolved gate / clean-eval persisted with the
         // verdict so summary can report against the threshold the
         // run was actually judged by, not whatever fit.toml says

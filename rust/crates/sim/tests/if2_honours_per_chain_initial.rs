@@ -107,7 +107,7 @@ fn spec(initial: f64) -> Vec<EstimatedParam> {
         transform: Transform::Log { lo: 0.01, hi: 10.0 },
         lower: 0.01,
         upper: 10.0,
-        ivp: false,
+        perturb_only_at_t0: false,
         rw_sd_auto: false,
     }]
 }

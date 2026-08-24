@@ -146,7 +146,7 @@ fn if2_weights_the_same_theta_that_drove_the_step() {
         transform: Transform::Log { lo: 0.01, hi: 10.0 },
         lower: 0.01,
         upper: 10.0,
-        ivp: false,
+        perturb_only_at_t0: false,
         rw_sd_auto: false,
     }];
 

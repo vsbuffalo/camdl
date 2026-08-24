@@ -1,5 +1,6 @@
 //! gh#364 — every IF2 particle must draw its OWN initial state from its OWN
-//! perturbed θ, otherwise a pure initial-condition `ivp` parameter is
+//! perturbed θ, otherwise a pure initial-condition parameter (declared
+//! `perturb_only_at_t0`) is
 //! unestimatable: the swarm has zero initial-state spread, the weights carry
 //! no selection pressure on it, and the reported mean does an unselected
 //! random walk.
@@ -149,8 +150,9 @@ fn if2_initial_state_uses_each_particles_own_theta() {
         lower: 0.001,
         upper: 0.5,
         // Pure initial-condition parameter: perturbed at t=0 only, exactly
-        // like pomp's `ivp()` entry in `rw.sd`.
-        ivp: true,
+        // like pomp's `ivp()` entry in `rw.sd`. camdl spells the flag
+        // `perturb_only_at_t0` — it is a perturbation schedule, nothing more.
+        perturb_only_at_t0: true,
         rw_sd_auto: false,
     }];
 
@@ -174,7 +176,8 @@ fn if2_initial_state_uses_each_particles_own_theta() {
         config.n_particles * N_OBS_MOCK * config.n_iterations
     );
 
-    // Negative control: an `ivp` parameter is perturbed at t=0 only, so the
+    // Negative control: a `perturb_only_at_t0` parameter is perturbed at
+    // t=0 only, so the
     // spread must come from that single perturbation. If it were zero, the
     // equality below would hold vacuously.
     let distinct = pairs
@@ -201,12 +204,13 @@ fn if2_initial_state_uses_each_particles_own_theta() {
     );
 }
 
-// ── Test 2: a pure-IC `ivp` parameter must actually be identified ───────────
+// ── Test 2: a pure-IC `perturb_only_at_t0` param must be identified ────────
 
 const N_POP: f64 = 10_000.0;
 const TRUE_I0: f64 = 0.006; // I₀ = 60
 // I₀ = 100 — 1.67× HIGH, and deliberately on the far side of the truth from
-// the midpoint of the declared bounds (0.0253). An `ivp` parameter perturbed
+// the midpoint of the declared bounds (0.0253). A `perturb_only_at_t0`
+// parameter perturbed
 // symmetrically on the logit scale but averaged back on the natural scale
 // picks up a Jensen drift toward that midpoint, which is data-free: it happens
 // whether or not the weights carry any information. Starting BELOW the truth
@@ -459,7 +463,7 @@ fn pure_ic_ivp_param_is_identified() {
         transform: Transform::Logit { lo: 0.0005, hi: 0.05 },
         lower: 0.0005,
         upper: 0.05,
-        ivp: true,
+        perturb_only_at_t0: true,
         rw_sd_auto: false,
     }];
 
@@ -510,7 +514,8 @@ fn pure_ic_ivp_param_is_identified() {
     // away from TRUE_I0 < START_I0. Closing this gap requires selection.
     assert!(
         (i0_hat - TRUE_I0).abs() < 0.3 * TRUE_I0,
-        "gh#364: IF2 did not recover the pure-IC ivp param: started at {:.5}, \
+        "gh#364: IF2 did not recover the pure-IC perturb_only_at_t0 param: \
+         started at {:.5}, \
          truth {:.5}, estimate {:.5}. Every particle shared one initial state \
          evaluated from the swarm mean, so the weights could not select on i0 \
          and its filter mean did an unselected random walk. \

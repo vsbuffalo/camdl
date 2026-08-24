@@ -527,7 +527,7 @@ mod tests {
             lower: 0.05,
             upper: 5.0,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         }];
         let priors = vec![Prior::Fixed(crate::inference::prior::Density::Flat)];
 
@@ -615,12 +615,12 @@ mod tests {
             EstimatedParam {
                 name: "beta".to_string(), index: beta_idx, initial: 0.6, rw_sd: 0.0,
                 transform: Transform::Log { lo: 0.05, hi: 5.0 }, lower: 0.05, upper: 5.0,
-                rw_sd_auto: false, ivp: false,
+                rw_sd_auto: false, perturb_only_at_t0: false,
             },
             EstimatedParam {
                 name: "gamma".to_string(), index: gamma_idx, initial: 0.2, rw_sd: 0.0,
                 transform: Transform::Log { lo: 0.01, hi: 1.0 }, lower: 0.01, upper: 1.0,
-                rw_sd_auto: false, ivp: false,
+                rw_sd_auto: false, perturb_only_at_t0: false,
             },
         ];
         let priors = vec![

@@ -1340,7 +1340,7 @@ pub fn run_stage(
             .sum::<f64>() / best_chain.1.len().max(1) as f64),
         // Bayesian stage, no IF2-style Â (chain agreement).
         tail_chain_agreement: std::collections::BTreeMap::new(),
-        ivp_params: Vec::new(),
+        perturb_only_at_t0_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
         chain_eval_ses: Vec::new(),

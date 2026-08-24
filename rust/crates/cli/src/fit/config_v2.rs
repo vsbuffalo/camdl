@@ -108,8 +108,9 @@ pub struct FitConfigV2 {
     /// false means standard inference over `y_{1:T}` with a committed
     /// initial state. True means the PF / IF2 / PGAS weight-and-resample
     /// at y₁ (pinning the initial state) but accumulate log-likelihood
-    /// only from y₂ onward. Requires at least one `[estimate.*]` entry
-    /// with `ivp = true` to give particles spread at t=0.
+    /// only from y₂ onward. Requires an IF2 stage and at least one
+    /// `[estimate.*]` entry with `perturb_only_at_t0 = true` to give
+    /// particles spread at t=0.
     ///
     /// See docs/dev/proposals/2026-04-18-ic-free-inference.md.
     #[serde(default)]
@@ -690,9 +691,13 @@ pub struct EstimateSpecV2 {
     #[serde(default)]
     pub prior: Option<EstimatePriorSpec>,
 
-    /// Initial value parameter: perturbed only at t=0 in IF2.
+    /// Perturb this parameter only at t=0, never at an observation — the
+    /// IF2 perturbation schedule for an initial-state parameter (`S0`, `I0`,
+    /// …), whose effect on the trajectory is spent before the first step.
+    /// IF2 is the only algorithm with a perturbation schedule, so declaring
+    /// this under any other algorithm is a config-load error.
     #[serde(default)]
-    pub ivp: bool,
+    pub perturb_only_at_t0: bool,
 
     /// Per-parameter random walk SD for IF2. If omitted, auto-scaled from bounds.
     #[serde(default)]
@@ -2930,8 +2935,8 @@ impl FitConfigV2 {
     ///  - `params.len() >= 2` (single-member simplex is degenerate)
     ///  - Every member appears in `[estimate]`
     ///  - No member appears in more than one simplex group
-    ///  - No member is `ivp = true` (the simplex transform owns the
-    ///    initial perturbation; ivp would conflict)
+    ///  - No member is `perturb_only_at_t0 = true` (the simplex transform
+    ///    owns the initial perturbation; the two would conflict)
     ///  - Each member's bounds lower must be ≥ 0 (members are non-negative)
     ///  - (Algorithm-aware) If any non-IF2 stage exists alongside
     ///    simplex groups, emit a warning to stderr — non-IF2 methods
@@ -2960,13 +2965,14 @@ impl FitConfigV2 {
                          appears in another simplex group. Each parameter \
                          can belong to at most one simplex.", gi, name));
                 }
-                if spec.ivp {
+                if spec.perturb_only_at_t0 {
                     return Err(format!(
-                        "simplex_groups[{}]: member '{}' has ivp = true. \
-                         The simplex transform owns the initial \
-                         perturbation; ivp would conflict. Drop ivp on \
-                         simplex members and rely on the simplex's \
-                         barycentric perturbation for spread.",
+                        "simplex_groups[{}]: member '{}' has \
+                         perturb_only_at_t0 = true. The simplex transform \
+                         owns the initial perturbation; the two would \
+                         conflict. Drop perturb_only_at_t0 on simplex \
+                         members and rely on the simplex's barycentric \
+                         perturbation for spread.",
                         gi, name));
                 }
                 // Skip when fit.toml omits bounds — model bounds get
@@ -4487,7 +4493,7 @@ weekly_cases = "data/cases.tsv"
 [config]
 dt = 1.0
 [estimate]
-S0_y = { bounds = [0, 1], ivp = true }
+S0_y = { bounds = [0, 1], perturb_only_at_t0 = true }
 S0_a = { bounds = [0, 1] }
 S0_e = { bounds = [0, 1] }
 beta = { bounds = [0.01, 2.0] }
@@ -4506,7 +4512,7 @@ params = ["S0_y", "S0_a", "S0_e"]
         let model_params = vec!["S0_y".into(), "S0_a".into(), "S0_e".into(),
                                 "beta".into(), "N0".into()];
         let err = config.validate(&model_params).unwrap_err();
-        assert!(err.contains("ivp = true"), "got: {}", err);
+        assert!(err.contains("perturb_only_at_t0 = true"), "got: {}", err);
         assert!(err.contains("S0_y"), "got: {}", err);
     }
 
@@ -4697,7 +4703,7 @@ camdl = "models/sir.camdl"
 weekly_cases = "data/cases.tsv"
 
 [estimate]
-beta = { bounds = [0.01, 2.0], ivp = true }
+beta = { bounds = [0.01, 2.0], perturb_only_at_t0 = true }
 
 [fixed]
 N0 = 1000
@@ -5053,7 +5059,7 @@ cooling = 0.9
                 bounds: None,
                 transform: None,
                 prior: None,
-                ivp: false,
+                perturb_only_at_t0: false,
                 rw_sd: None,
                 start: None,
             });

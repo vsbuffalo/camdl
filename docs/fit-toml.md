@@ -25,7 +25,7 @@ beta  = { bounds = [0.001, 0.5], start = 0.04, transform = "log",
           prior = { log_normal = { mu = -2.0, sigma = 1.0 } } }
 gamma = { bounds = [0.01,  1.0], start = 0.12,
           prior = { log_normal = { mu = -1.2, sigma = 0.5 } } }
-s0    = { bounds = [0.01, 0.30], ivp = true }        # initial-value parameter
+s0    = { bounds = [0.01, 0.30], perturb_only_at_t0 = true }  # initial state
 
 [fixed]                           # held at a value, not estimated
 rho = 0.6
@@ -58,14 +58,14 @@ model, each mapped to a TSV path. For out-of-sample validation, add
 
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
 
-| key                                          | meaning                                                                                                                                                    |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen. |
-| `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                     |
-| `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh` stage; `if2` ignores it. See "Priors" below.                                                          |
-| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type if omitted.                                                              |
-| `ivp = true`                                 | initial-value parameter (e.g. `s0`, `i0`) — perturbed only at t=0.                                                                                         |
-| `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds.                                                                                      |
+| key                                          | meaning                                                                                                                                                                                                                                         |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                                      |
+| `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                                          |
+| `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh` stage; `if2` ignores it. See "Priors" below.                                                                                                                                               |
+| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type if omitted.                                                                                                                                                   |
+| `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is an IF2 perturbation schedule, so it is a config-load error on any stage that estimates without one (`pgas`, `pmmh`, `mh`, `nuts`, `nl-*`). |
+| `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds.                                                                                                                                                                           |
 
 **`[fixed]`** — `param = value` for every model parameter you are _not_
 estimating. camdl requires every declared parameter to be either estimated or
@@ -297,9 +297,9 @@ marginal likelihood** `p(y | θ, ODE skeleton)` rather than the stochastic
 `p(y | θ)` — a different statistical object, appropriate for equilibrium or
 large-population models. `nuts` requires a differentiable model (the capability
 gate refuses an undifferentiable gradient, an adaptive `rk45` integrator, a
-scheduled effect, or an `ivp` parameter); `mh` is gradient-free and carries no
-such requirement. See `camdl docs inference` (the ODE-backend fitting section)
-for when to pick which.
+scheduled effect, or an initial condition the gradient path cannot seed); `mh`
+is gradient-free and carries no such requirement. See `camdl docs inference`
+(the ODE-backend fitting section) for when to pick which.
 
 ```toml
 # A gradient-based Bayesian fit on the ODE skeleton.

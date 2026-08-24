@@ -164,9 +164,10 @@ fn i0_spec(compiled: &CompiledModel) -> Vec<EstimatedParam> {
         lower: I0_LOWER,
         upper: I0_UPPER,
         rw_sd_auto: false,
-        // NOT declared an IVP — the downstream fit configs carry no `ivp`
-        // key for `I0`. The detector enters the IVP path regardless.
-        ivp: false,
+        // NOT declared `perturb_only_at_t0` — the downstream fit configs
+        // carry no such key for `I0`. The detector enters the IVP path
+        // regardless.
+        perturb_only_at_t0: false,
     }]
 }
 
@@ -329,7 +330,7 @@ fn fraction_spec(compiled: &CompiledModel) -> Vec<EstimatedParam> {
         lower: 0.0005,
         upper: 0.05,
         rw_sd_auto: false,
-        ivp: false,
+        perturb_only_at_t0: false,
     }]
 }
 

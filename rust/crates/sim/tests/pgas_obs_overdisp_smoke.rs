@@ -138,7 +138,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
             lower: 0.001,
             upper: 2.0,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
@@ -260,7 +260,7 @@ fn smoke_pgas_nuts_estimates_rho() {
             lower: 0.001,
             upper: 0.999,
             rw_sd_auto: false,
-            ivp: false,
+            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];

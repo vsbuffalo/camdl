@@ -685,7 +685,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
 
     // Specs honour the fit-toml `[estimate]` block when supplied
-    // (gh#73): bounds, transform, and ivp flow through to
+    // (gh#73): bounds, transform, and perturb_only_at_t0 flow through to
     // `build_if2_params_from_specs`'s fit-toml-bounds-within-model
     // resolver. `rw_sd` and `transform` from CLI still win when both
     // sides declare them (CLI `--rw-sd` is the per-invocation
@@ -697,7 +697,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             rw_sd: rw_sd_map_raw.get(name).and_then(|v| *v)
                 .or_else(|| from_fit.and_then(|e| e.rw_sd)),
             transform: from_fit.and_then(|e| e.transform.as_ref().map(|t| t.as_str().to_string())),
-            ivp: from_fit.map(|e| e.ivp).unwrap_or(false),
+            perturb_only_at_t0:
+                from_fit.map(|e| e.perturb_only_at_t0).unwrap_or(false),
             bounds: from_fit.and_then(|e| e.bounds),
         }
     }).collect();
@@ -722,7 +723,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     .or_else(|| from_fit.and_then(|e| e.rw_sd)),
                 transform: from_fit.and_then(|e|
                     e.transform.as_ref().map(|t| t.as_str().to_string())),
-                ivp: from_fit.map(|e| e.ivp).unwrap_or(false),
+                perturb_only_at_t0:
+                    from_fit.map(|e| e.perturb_only_at_t0).unwrap_or(false),
                 bounds: from_fit.and_then(|e| e.bounds),
             }
         }).collect();
@@ -2124,13 +2126,13 @@ mod tests {
             name: "tau".into(), index: 0, initial: -5.0, rw_sd: 0.0,
             transform: Transform::None,
             lower: -86.0, upper: 0.0,
-            rw_sd_auto: false, ivp: false,
+            rw_sd_auto: false, perturb_only_at_t0: false,
         };
         let n_seed_spec = EstimatedParam {
             name: "n_seed".into(), index: 1, initial: 100.0, rw_sd: 0.0,
             transform: Transform::Log { lo: 1.0, hi: 1000.0 },
             lower: 1.0, upper: 1000.0,
-            rw_sd_auto: false, ivp: false,
+            rw_sd_auto: false, perturb_only_at_t0: false,
         };
         let tau_prior = Prior::Fixed(Density::Uniform { lower: -86.0, upper: 0.0 });
         let n_seed_prior = Prior::Fixed(Density::TransformedNormal {
@@ -2175,7 +2177,7 @@ mod tests {
             name: "tau".into(), index: 0, initial: -100.0, rw_sd: 0.0,
             transform: Transform::None,
             lower: -86.0, upper: 0.0,
-            rw_sd_auto: false, ivp: false,
+            rw_sd_auto: false, perturb_only_at_t0: false,
         };
         let prior = Prior::Fixed(Density::Uniform { lower: -86.0, upper: 0.0 });
         let offset = compute_focal_log_prior_offset(
@@ -2365,7 +2367,7 @@ mod tests {
             initial: 0.5, rw_sd: 0.1,
             transform: sim::inference::types::Transform::None,
             lower: 0.0, upper: 1.0,
-            ivp: false, rw_sd_auto: false,
+            perturb_only_at_t0: false, rw_sd_auto: false,
         }
     }
 

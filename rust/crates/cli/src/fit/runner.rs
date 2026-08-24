@@ -462,8 +462,9 @@ impl FitRunConfig {
         // accumulated loglik). If y₁ is missing — a hole (`NA`) in every stream
         // at the first observation index — there is nothing to condition on, so
         // ic_free would silently degenerate to *no* initial-state conditioning
-        // (a weaker estimand than requested). Checked before the ivp
-        // precondition: a missing y₁ makes ic_free impossible regardless of ivp.
+        // (a weaker estimand than requested). Checked before the
+        // perturb_only_at_t0 precondition: a missing y₁ makes ic_free
+        // impossible regardless of the parameter flags.
         if ic_free
             && !streams.is_empty()
             && streams.iter().all(|s| s.cells.first().is_some_and(|c| c.is_none()))
@@ -475,18 +476,23 @@ impl FitRunConfig {
                  observation, or disable ic_free.".into());
         }
         // IC-free precondition (config): at least one estimated param must be
-        // marked ivp. Without per-particle spread at t=0, the first
-        // reweight can't discriminate and ic-free degenerates to
-        // silently dropping y₁. Error at config build so the mistake
-        // surfaces before any PF time is spent.
-        if ic_free && !if2_params.iter().any(|p| p.ivp) {
+        // marked perturb_only_at_t0. Under IF2 — the only algorithm ic_free is
+        // admitted for (`methods::validate_ic_free`) — the t=0 perturbation
+        // moves each particle's θ and each particle then draws its own x₀ from
+        // that θ (gh#364), which is what gives the first reweight something to
+        // discriminate between. Without such a parameter the first reweight is
+        // a no-op and ic-free degenerates to silently dropping y₁. Error at
+        // config build so the mistake surfaces before any PF time is spent.
+        if ic_free && !if2_params.iter().any(|p| p.perturb_only_at_t0) {
             return Err(
                 "ic_free = true requires at least one [estimate.*] entry with \
-                 ivp = true. Without per-particle variation at t=0, the first \
-                 observation cannot discriminate between particles and ic_free \
-                 degenerates to dropping the first data point.\n\n\
-                 Example: mark your initial-state parameter as ivp:\n\n    \
-                 [estimate]\n    I0 = { bounds = [1, 500], ivp = true }".into());
+                 perturb_only_at_t0 = true. Without per-particle variation at \
+                 t=0, the first observation cannot discriminate between \
+                 particles and ic_free degenerates to dropping the first data \
+                 point.\n\n\
+                 Example: mark your initial-state parameter perturb_only_at_t0:\
+                 \n\n    [estimate]\n    \
+                 I0 = { bounds = [1, 500], perturb_only_at_t0 = true }".into());
         }
 
         let param_names: Vec<String> =
@@ -634,7 +640,7 @@ fn build_if2_params(
             name: name.clone(),
             rw_sd,
             transform: est.transform.as_ref().map(|t| t.as_str().to_string()),
-            ivp: est.ivp,
+            perturb_only_at_t0: est.perturb_only_at_t0,
             // Bounds plumbing (gh#42-followup + bounds-optional fix):
             // pass through the Option as-is. `build_if2_params_from_specs`
             // resolves fit.toml > model > unbounded fallback. None now
@@ -975,7 +981,9 @@ pub struct ParamSpec {
     pub rw_sd: Option<f64>,
     /// None = auto from param_kind. Some("log") = override.
     pub transform: Option<String>,
-    pub ivp: bool,
+    /// Perturb only at t=0 (the IF2 schedule for an initial-state
+    /// parameter). See `EstimatedParam::perturb_only_at_t0`.
+    pub perturb_only_at_t0: bool,
     /// Caller-supplied bounds override (typically from fit.toml's
     /// `[estimate].bounds`). When `Some`, replaces the model-declared
     /// `ir_param.bounds` for both the `EstimatedParam.{lower, upper}`
@@ -1050,7 +1058,7 @@ pub fn build_if2_params_from_specs(
             transform,
             lower: lo,
             upper: hi,
-            ivp: spec.ivp,
+            perturb_only_at_t0: spec.perturb_only_at_t0,
             rw_sd_auto: spec.rw_sd.is_none(),
         });
     }
@@ -3518,7 +3526,7 @@ mod tests {
         EstimatedParam {
             name: name.to_string(), index: 0, initial, rw_sd: 0.1,
             transform: sim::inference::types::Transform::None,
-            lower: 0.0, upper: 1.0, rw_sd_auto: false, ivp: false,
+            lower: 0.0, upper: 1.0, rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
@@ -3710,7 +3718,7 @@ mod tests {
             transform: Transform::Log { lo: 0.01, hi: 2.0 },
             lower: 0.01,
             upper: 2.0,
-            ivp: false, rw_sd_auto: false,
+            perturb_only_at_t0: false, rw_sd_auto: false,
         }];
 
         // Fake chain result: MLE has beta=0.5
@@ -3783,7 +3791,7 @@ mod tests {
             name: name.into(), index: idx, initial: 0.0,
             lower: 0.0, upper: 10.0, rw_sd: 0.1, rw_sd_auto: false,
             transform: Transform::None,
-            ivp: false,
+            perturb_only_at_t0: false,
         };
         let if2_params = vec![mk_param("beta", 0), mk_param("gamma", 1)];
 
@@ -3838,7 +3846,7 @@ mod tests {
         let if2_params = vec![EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.0,
             lower: 0.0, upper: 10.0, rw_sd: 0.1, rw_sd_auto: false,
-            transform: Transform::None, ivp: false,
+            transform: Transform::None, perturb_only_at_t0: false,
         }];
 
         // Minimal compiled stand-in. The writer only reads
@@ -3950,7 +3958,7 @@ mod tests {
         let if2_params = vec![EstimatedParam {
             name: "R0".into(), index: 0, initial: 0.0,
             lower: 1.0, upper: 200.0, rw_sd: 1.0, rw_sd_auto: false,
-            transform: Transform::None, ivp: false,
+            transform: Transform::None, perturb_only_at_t0: false,
         }];
         let model = ir::Model {
             ic_grad: Default::default(),
@@ -4128,7 +4136,7 @@ mod tests {
                 bounds: Some((0.01, 2.0)), transform: None,
                 prior: Some(crate::fit::config_v2::EstimatePriorSpec::Dist(
                     PriorDist::Normal(NormalPrior { mean, sd }))),
-                ivp: false, rw_sd: None, start: None,
+                perturb_only_at_t0: false, rw_sd: None, start: None,
             });
             m
         };
@@ -4213,7 +4221,7 @@ mod tests {
             bounds: Some((0.05, 1.0)), transform: None,
             prior: Some(EstimatePriorSpec::UniformOverBounds {
                 uniform: UniformOverBoundsMarker {} }),
-            ivp: false, rw_sd: None, start: None });
+            perturb_only_at_t0: false, rw_sd: None, start: None });
 
         let (prior, src) = resolve_prior("beta", &est, &model);
         match prior {
@@ -4258,7 +4266,7 @@ mod tests {
         let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
         est.insert("kappa".into(), EstimateSpecV2 {
             bounds: Some((1e-5, 1e-2)), transform: None, prior: None,
-            ivp: false, rw_sd: None, start: None });
+            perturb_only_at_t0: false, rw_sd: None, start: None });
 
         // rate param_kind → Log transform → ok.
         assert!(validate_prior_transform_compat(&est, &model).is_ok(),
@@ -4298,7 +4306,7 @@ mod tests {
                 bounds: Some((blo, bhi)), transform: None,
                 prior: Some(EstimatePriorSpec::Dist(PriorDist::TruncatedNormal(
                     TruncatedNormalPrior { mean: 0.7, sd: 0.2, lower: lo, upper: hi }))),
-                ivp: false, rw_sd: None, start: None });
+                perturb_only_at_t0: false, rw_sd: None, start: None });
             m
         };
 
@@ -4406,7 +4414,7 @@ dt = 1.0
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: std::collections::BTreeMap::new(),
-            ivp_params: Vec::new(),
+            perturb_only_at_t0_params: Vec::new(),
             chain_logliks: Vec::new(),
             chain_eval_logliks: Vec::new(),
             chain_eval_ses: Vec::new(),
@@ -4434,11 +4442,11 @@ dt = 1.0
 
     // ── IC-free inference: config validation ────────────────────────────
 
-    fn ic_free_fixture(dir: &std::path::Path, ic_free: bool, ivp: bool)
+    fn ic_free_fixture(dir: &std::path::Path, ic_free: bool, perturb_t0: bool)
         -> super::super::config_v2::FitConfigV2
     {
         // Minimal v2 fit.toml against the seir_observations golden IR.
-        // Toggles ic_free and whether I0 is ivp-flagged independently
+        // Toggles ic_free and whether I0 is perturb_only_at_t0-flagged independently
         // so all four combinations can be built.
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!(
@@ -4446,7 +4454,8 @@ dt = 1.0
         let data_path = dir.join("obs.tsv");
         std::fs::write(&data_path,
             "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
-        let ivp_line = if ivp { "ivp    = true\n" } else { "" };
+        let perturb_t0_line =
+            if perturb_t0 { "perturb_only_at_t0 = true\n" } else { "" };
         let fit_toml_path = dir.join("fit.toml");
         let toml_src = format!(r#"
 output_dir = "{}"
@@ -4481,7 +4490,7 @@ cooling    = 0.5
 
 [config]
 dt = 1.0
-"#, dir.display(), ic_free, ir_path, data_path.display(), ivp_line);
+"#, dir.display(), ic_free, ir_path, data_path.display(), perturb_t0_line);
         std::fs::write(&fit_toml_path, toml_src).unwrap();
         super::super::config_v2::FitConfigV2::load(
             &fit_toml_path.to_string_lossy())
@@ -4496,31 +4505,31 @@ dt = 1.0
         d
     }
 
-    /// ic_free=true WITHOUT any ivp estimate → build errors with a
+    /// ic_free=true WITHOUT any perturb_only_at_t0 estimate → build errors with a
     /// helpful message naming the fix.
     #[test]
-    fn ic_free_true_requires_ivp() {
+    fn ic_free_true_requires_perturb_only_at_t0() {
         let dir = ic_free_test_dir("requires_ivp");
         let fit = ic_free_fixture(&dir, true, false);
         let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
-            Ok(_)  => panic!("ic_free=true + no ivp must error"),
+            Ok(_)  => panic!("ic_free=true + no perturb_only_at_t0 must error"),
             Err(e) => e,
         };
-        assert!(err.contains("ic_free") && err.contains("ivp"),
-            "error must name both ic_free and ivp: {}", err);
-        assert!(err.contains("I0 = {") || err.contains("ivp = true"),
+        assert!(err.contains("ic_free") && err.contains("perturb_only_at_t0"),
+            "error must name both ic_free and perturb_only_at_t0: {}", err);
+        assert!(err.contains("I0 = {") || err.contains("perturb_only_at_t0 = true"),
             "error should include a copy-pasteable example: {}", err);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// ic_free=true WITH an ivp estimate → build succeeds and
+    /// ic_free=true WITH a perturb_only_at_t0 estimate → build succeeds and
     /// config.ic_free is propagated.
     #[test]
-    fn ic_free_true_with_ivp_succeeds() {
+    fn ic_free_true_with_perturb_only_at_t0_succeeds() {
         let dir = ic_free_test_dir("with_ivp");
         let fit = ic_free_fixture(&dir, true, true);
         let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
-            .expect("ic_free=true + ivp must build");
+            .expect("ic_free=true + perturb_only_at_t0 must build");
         assert!(config.ic_free, "FitRunConfig.ic_free must be true");
         // The SMCConfig view also carries the flag — that's what reaches
         // the PF / IF2 loop.
@@ -4529,14 +4538,14 @@ dt = 1.0
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// ic_free=true WITH ivp but the FIRST observation is a hole (`NA`) →
+    /// ic_free=true WITH perturb_only_at_t0 but the FIRST observation is a hole (`NA`) →
     /// build errors: there is no y₁ to condition on, so ic_free would silently
-    /// degenerate to no initial-state conditioning. The ivp precondition is
+    /// degenerate to no initial-state conditioning. The perturb_only_at_t0 precondition is
     /// satisfied here, so only the missing-y₁ guard can fire — isolating it.
     #[test]
     fn ic_free_with_missing_first_obs_is_rejected() {
         let dir = ic_free_test_dir("first_na");
-        let fit = ic_free_fixture(&dir, true, true); // ic_free + ivp (passes ivp gate)
+        let fit = ic_free_fixture(&dir, true, true); // passes the perturb_only_at_t0 check
         // Overwrite the data so the FIRST observation (t=7) is a hole. build()
         // loads the data fresh, so it sees this holed series.
         std::fs::write(dir.join("obs.tsv"),
@@ -4546,22 +4555,126 @@ dt = 1.0
             Err(e) => e,
         };
         assert!(err.contains("nothing to condition on"),
-            "error must name the missing-y₁ cause, not the ivp precondition: {err}");
+            "error must name the missing-y₁ cause, not the perturb_only_at_t0 precondition: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /// ic_free absent (default false) → build succeeds regardless of
-    /// ivp presence, and the SMCConfig view reports ic_free=false.
+    /// perturb_only_at_t0 presence, and the SMCConfig view reports ic_free=false.
     /// Regression guard: the new flag must default to OFF so no
     /// existing fit.toml silently changes behaviour.
     #[test]
-    fn ic_free_default_off_does_not_require_ivp() {
+    fn ic_free_default_off_does_not_require_perturb_only_at_t0() {
         let dir = ic_free_test_dir("default_off");
         let fit = ic_free_fixture(&dir, false, false);
         let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
-            .expect("ic_free=false + no ivp must build");
+            .expect("ic_free=false + no perturb_only_at_t0 must build");
         assert!(!config.ic_free);
         assert!(!config.smc_config().skip_first_obs_from_loglik);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `perturb_only_at_t0` TOML key must reach `EstimatedParam` — the
+    /// field IF2 reads to decide which parameters it skips at every
+    /// observation (`if2.rs`, the inner perturbation loop). If the key stopped
+    /// deserializing, or stopped being copied through `ParamSpec`, IF2 would
+    /// silently perturb an initial-state parameter at every observation and
+    /// the flag would be inert with no diagnostic.
+    #[test]
+    fn perturb_only_at_t0_key_reaches_the_estimated_param() {
+        let dir = ic_free_test_dir("flag_reaches_param");
+        let fit = ic_free_fixture(&dir, false, true);
+        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+            .expect("fixture must build");
+        let i0 = config.estimated_params.iter()
+            .find(|p| p.name == "I0")
+            .expect("I0 is the fixture's only estimated parameter");
+        assert!(i0.perturb_only_at_t0,
+            "`perturb_only_at_t0 = true` in [estimate.I0] must set the flag on \
+             the EstimatedParam IF2 reads");
+
+        // Negative control on the same builder: without the key the flag is
+        // false, so the assertion above cannot pass by the field defaulting to
+        // true or by every parameter being flagged.
+        let dir2 = ic_free_test_dir("flag_absent");
+        let fit2 = ic_free_fixture(&dir2, false, false);
+        let config2 = FitRunConfig::build(&fit2, None, 1, 100, 1, 0.5, 50, 1, false)
+            .expect("fixture must build");
+        assert!(!config2.estimated_params.iter().any(|p| p.perturb_only_at_t0),
+            "no [estimate] entry declares the key, so no param may carry it");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    /// End-to-end pin for the scout-convergence exemption: a parameter
+    /// declared `perturb_only_at_t0` in fit.toml must land in
+    /// `FitState::perturb_only_at_t0_params` and be exempted from the
+    /// refine-stage Â check, even at an Â far above `a_thresh`.
+    ///
+    /// The unit test in `gating.rs` starts from a hand-written FitState, so it
+    /// cannot see a break in the TOML → `EstimatedParam` → FitState chain.
+    /// This one spans that chain: it derives the name list with the same
+    /// expression `fit/mod.rs` uses when it writes the scout's fit_state.
+    #[test]
+    fn perturb_only_at_t0_param_is_exempt_from_the_scout_a_check() {
+        use crate::fit::gating::{check_scout_convergence, ScoutGateVerdict};
+        use crate::fit::state::FitState;
+
+        let dir = ic_free_test_dir("scout_exempt");
+        let fit = ic_free_fixture(&dir, false, true);
+        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+            .expect("fixture must build");
+
+        let names: Vec<String> = config.estimated_params.iter()
+            .filter(|p| p.perturb_only_at_t0)
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(names, vec!["I0".to_string()],
+            "the scout's fit_state must record I0 as perturb_only_at_t0");
+
+        let mk_state = |t0_params: Vec<String>| FitState {
+            stage: "scout".into(),
+            seed: 1,
+            timestamp: "2026-08-23T00:00:00Z".into(),
+            input_hash: None,
+            camdl_version: None,
+            best_loglik: -60.2,
+            initial_loglik: f64::NEG_INFINITY,
+            best_chain: 0,
+            n_chains: 2,
+            n_good_chains: None,
+            start_values: Default::default(),
+            rw_sd: Default::default(),
+            loglik_type: Some(crate::fit::loglik::LoglikType::If2),
+            acceptance_rate: None,
+            // I0's Â is wildly above any threshold; beta's is fine.
+            tail_chain_agreement: [("beta".to_string(), 1.00),
+                                   ("I0".to_string(), 16.5)]
+                .into_iter().collect(),
+            perturb_only_at_t0_params: t0_params,
+            chain_logliks: vec![-60.2, -60.5],
+            chain_eval_logliks: vec![],
+            chain_eval_ses: vec![],
+            resolved_gate: None,
+            resolved_loglik_eval: None,
+            chain_init_source: None,
+            dt_check: None,
+        };
+        let gate = super::super::config_v2::GateConfig::default();
+        match check_scout_convergence(&mk_state(names.clone()), &gate) {
+            ScoutGateVerdict::Ok => {}
+            other => panic!(
+                "I0 is perturb_only_at_t0 and must be exempt from the Â check; \
+                 got {other:?}"),
+        }
+
+        // Negative control: the SAME Â on a parameter that is NOT declared
+        // perturb_only_at_t0 must fail, so the pass above is the exemption
+        // doing work rather than the check being inert.
+        assert!(matches!(check_scout_convergence(&mk_state(vec![]), &gate),
+                         ScoutGateVerdict::Hard { .. }),
+            "Â = 16.5 on a structural param must fail the scout check");
+
         std::fs::remove_dir_all(&dir).ok();
     }
     /// pipeline that pgas.rs / pmmh.rs use to build the Prior vector.
@@ -4632,7 +4745,7 @@ dt = 1.0
             bounds: Some((0.01, 5.0)), transform: None,
             prior: Some(crate::fit::config_v2::EstimatePriorSpec::Dist(
                 PriorDist::Normal(NormalPrior { mean: 0.25, sd: 0.05 }))),
-            ivp: false, rw_sd: None, start: None,
+            perturb_only_at_t0: false, rw_sd: None, start: None,
         });
 
         let (p, src) = resolve_prior("beta", &estimate, &model);
@@ -4850,7 +4963,7 @@ dt = 1.0
             name: "beta".into(),
             rw_sd: None,
             transform: None,
-            ivp: false,
+            perturb_only_at_t0: false,
             bounds: Some((0.1, 0.5)),  // tightened
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
@@ -4871,7 +4984,7 @@ dt = 1.0
             name: "beta".into(),
             rw_sd: None,
             transform: None,
-            ivp: false,
+            perturb_only_at_t0: false,
             bounds: Some((1e-3, 0.5)),
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
@@ -4894,7 +5007,7 @@ dt = 1.0
             name: "beta".into(),
             rw_sd: None,
             transform: None,
-            ivp: false,
+            perturb_only_at_t0: false,
             bounds: Some((-0.5, 2.0)),  // wider than model — must reject
         }];
         let err = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
@@ -4913,7 +5026,7 @@ dt = 1.0
             name: "beta".into(),
             rw_sd: None,
             transform: None,
-            ivp: false,
+            perturb_only_at_t0: false,
             bounds: None,
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
@@ -4935,11 +5048,11 @@ dt = 1.0
         let (model, compiled) = make_one_param_model("beta", 1e-6, 1.0, Some(ir::parameter::ParamKind::Rate));
         let base_params = compiled.default_params.clone();
         let wide = vec![ParamSpec {
-            name: "beta".into(), rw_sd: None, transform: None, ivp: false,
+            name: "beta".into(), rw_sd: None, transform: None, perturb_only_at_t0: false,
             bounds: None,  // model bounds [1e-6, 1.0]
         }];
         let tight = vec![ParamSpec {
-            name: "beta".into(), rw_sd: None, transform: None, ivp: false,
+            name: "beta".into(), rw_sd: None, transform: None, perturb_only_at_t0: false,
             bounds: Some((0.1, 0.5)),
         }];
         let r_wide  = build_if2_params_from_specs(&model, &compiled, &base_params, &wide).unwrap();
@@ -4977,7 +5090,7 @@ dt = 1.0
             name: "tau".into(),
             rw_sd: None,
             transform: None,
-            ivp: false,
+            perturb_only_at_t0: false,
             bounds: Some((0.0, 55.0)),
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
@@ -5006,7 +5119,7 @@ dt = 1.0
             name: "tau".into(),
             rw_sd: None,
             transform: None,
-            ivp: false,
+            perturb_only_at_t0: false,
             bounds: Some((-30.0, 30.0)),
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
@@ -5079,7 +5192,7 @@ dt = 1.0
             name: name.into(), index: idx, initial: 1.0,
             rw_sd: 0.1, transform: Transform::None,
             lower: 0.0, upper: 10.0,
-            ivp: false, rw_sd_auto: false,
+            perturb_only_at_t0: false, rw_sd_auto: false,
         }
     }
 
@@ -6026,11 +6139,11 @@ dt = 1.0
             dir: &std::path::Path,
             condition_from: Option<&str>,
             ic_free: bool,
-            ivp: bool,
+            perturb_t0: bool,
         ) -> FitConfigV2 {
             // Default: weekly obs from t=7 — first window is one cadence, so the
             // W329 first-window guard never fires.
-            fixture_with_obs(dir, condition_from, ic_free, ivp,
+            fixture_with_obs(dir, condition_from, ic_free, perturb_t0,
                 "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n")
         }
 
@@ -6041,7 +6154,7 @@ dt = 1.0
             dir: &std::path::Path,
             condition_from: Option<&str>,
             ic_free: bool,
-            ivp: bool,
+            perturb_t0: bool,
             obs_tsv: &str,
         ) -> FitConfigV2 {
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -6052,7 +6165,8 @@ dt = 1.0
             let cond_line = condition_from
                 .map(|c| format!("condition_from = {c}\n"))
                 .unwrap_or_default();
-            let ivp_line = if ivp { "ivp    = true\n" } else { "" };
+            let perturb_t0_line =
+                if perturb_t0 { "perturb_only_at_t0 = true\n" } else { "" };
             let fit_toml_path = dir.join("fit.toml");
             let toml_src = format!(r#"
 output_dir = "{}"
@@ -6067,7 +6181,7 @@ weekly_cases = "{}"
 [estimate.I0]
 bounds = [1, 1000]
 start  = 5
-{ivp_line}
+{perturb_t0_line}
 [fixed]
 sigma    = 0.25
 gamma    = 0.3
@@ -6211,7 +6325,7 @@ dt = 1.0
         #[test]
         fn condition_from_with_ic_free_errors_loudly() {
             let dir = test_dir("with_icfree");
-            // ic_free + ivp (so the ivp precondition passes and only the
+            // ic_free + perturb_only_at_t0 (so that precondition passes and only the
             // missing-y₁ guard can fire) + an interior condition_from.
             let fit = fixture(&dir, Some("\"3.0\""), true, true);
             let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {

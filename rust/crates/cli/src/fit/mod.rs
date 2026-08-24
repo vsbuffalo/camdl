@@ -700,12 +700,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // when ic_free is false or absent. See
     // docs/dev/proposals/2026-04-18-ic-free-inference.md.
     if config.ic_free.unwrap_or(false) {
-        let ivp_params: Vec<&str> = config.estimate.iter()
-            .filter(|(_, spec)| spec.ivp)
+        let perturb_only_at_t0_params: Vec<&str> = config.estimate.iter()
+            .filter(|(_, spec)| spec.perturb_only_at_t0)
             .map(|(n, _)| n.as_str())
             .collect();
         eprintln!("\n  \x1b[36mic-free inference:\x1b[0m conditioning on y₁");
-        eprintln!("    - initial state spread from ivp params: [{}]", ivp_params.join(", "));
+        eprintln!("    - initial state spread from perturb_only_at_t0 params: [{}]",
+            perturb_only_at_t0_params.join(", "));
         eprintln!("    - log-likelihood accumulation from t = 2 (y₁ reweights and resamples only)");
     }
 
@@ -1216,8 +1217,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
                 // Gate 1 — pre-stage: if this stage consumes a prior
                 // stage (starts_from), refuse to run when the prior
-                // stage's tail Â failed convergence on any
-                // non-IVP param. Skipped when starts_from is absent
+                // stage's tail Â failed convergence on any structural
+                // (non-`perturb_only_at_t0`) param. Skipped when starts_from is absent
                 // (this stage is itself the scout). Overridable via
                 // --allow-nonconverged-scout. See proposal
                 // docs/dev/proposals/2026-04-19-refine-gates-scout-convergence.md.
@@ -1241,10 +1242,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                                         .map(|(n, r)| format!("{} (Â={:.2})", n, r))
                                         .collect::<Vec<_>>().join(", "));
                             }
-                            ScoutGateVerdict::Hard { failing, all_structural, ivp, loglik_spread } => {
+                            ScoutGateVerdict::Hard {
+                                failing, all_structural, perturb_only_at_t0, loglik_spread
+                            } => {
                                 let msg = gating::format_hard_verdict(
                                     &effective_gate,
-                                    &failing, &all_structural, &ivp,
+                                    &failing, &all_structural, &perturb_only_at_t0,
                                     loglik_spread, ps.best_loglik, None);
                                 if allow_nonconverged_scout {
                                     eprintln!("\x1b[33m  warning:\x1b[0m {}", msg);
@@ -1556,8 +1559,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     loglik_type: Some(loglik::LoglikType::If2),
                     acceptance_rate: None,
                     tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                    ivp_params: run_config.estimated_params.iter()
-                        .filter(|p| p.ivp).map(|p| p.name.clone()).collect(),
+                    perturb_only_at_t0_params: run_config.estimated_params.iter()
+                        .filter(|p| p.perturb_only_at_t0)
+                        .map(|p| p.name.clone()).collect(),
                     chain_logliks: chain_results.results.iter()
                         .map(|(_, r)| r.final_loglik).collect(),
                     chain_eval_logliks: chain_results.chain_eval_logliks(),

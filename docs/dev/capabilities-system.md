@@ -232,13 +232,14 @@ Out of scope for this doc, listed so the map is complete:
 
 - **parameter-attribute × {attribute, config-flag}** — prior↔transform and
   prior↔bounds (`fit/runner.rs::validate_prior_transform_compat`),
-  `ivp`↔`ic_free` (`runner.rs`), `ivp`↔simplex-membership (`config_v2.rs`).
-  Purely parameter-level; no algorithm or backend involved. Partly typed
-  already: `docs/dev/proposals/2026-06-08-typed-parameter-surface.md` (landed,
-  IR 0.11) made prior-on-a-fixed-value and prior+hierarchical unrepresentable
-  via the `ParamValue`/`PriorSpec` ADTs; the prior↔transform and `ivp` checks
-  above stay runtime predicates by design (`ivp` is a fit-layer concept, not an
-  IR property).
+  `perturb_only_at_t0`↔`ic_free` (`runner.rs`),
+  `perturb_only_at_t0`↔simplex-membership (`config_v2.rs`). Purely
+  parameter-level; no algorithm or backend involved. Partly typed already:
+  `docs/dev/proposals/2026-06-08-typed-parameter-surface.md` (landed, IR 0.11)
+  made prior-on-a-fixed-value and prior+hierarchical unrepresentable via the
+  `ParamValue`/`PriorSpec` ADTs; the prior↔transform and `perturb_only_at_t0`
+  checks above stay runtime predicates by design (`perturb_only_at_t0` is a
+  fit-layer perturbation schedule, not an IR property).
 - **CLI-flag × {algorithm, obs-structure}** — `--flow`×multi-stream
   (`pfilter.rs`/`profile.rs`), `--resume`×algorithm (`fit/mod.rs`),
   `--init`×companion-path (`args/mod.rs`), `obs_alignment`×algorithm

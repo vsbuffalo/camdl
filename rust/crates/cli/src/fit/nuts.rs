@@ -439,7 +439,7 @@ pub fn run_stage(
         loglik_type: Some(LoglikType::OdeMarginal),
         acceptance_rate: None,
         tail_chain_agreement: Default::default(),
-        ivp_params: Vec::new(),
+        perturb_only_at_t0_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
         chain_eval_ses: Vec::new(),

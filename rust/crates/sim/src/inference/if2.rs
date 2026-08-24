@@ -126,8 +126,8 @@ pub struct IF2Config {
     /// IC-free inference: still weight and resample at the first
     /// observation (pinning x₀ given y₁) but don't accumulate that
     /// step's log-sum-exp into the returned log-likelihood. Requires
-    /// per-particle spread at t=0, typically from an `ivp` estimated
-    /// parameter: the t=0 perturbation moves each particle's θ and each
+    /// per-particle spread at t=0, typically from a `perturb_only_at_t0`
+    /// estimated parameter: the t=0 perturbation moves each particle's θ and each
     /// particle then draws its own x₀ from that θ (gh#364), so the
     /// first reweight has something to discriminate between. Without
     /// such a parameter the first reweight is a no-op and ic-free
@@ -446,15 +446,16 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // X^F_{0,j} ~ f_{X_0}(·; Θ^F_{0,j}) — Ionides et al. (2015) Algorithm 1.
         // Runs AFTER the t=0 perturbation, once per particle, from THAT
         // particle's own θ. A parameter reaching the model only through
-        // `initial_conditions` (a pure-IC `ivp` param — `S0`, `E0`, `I0`, or a
-        // simplex composition) has no other channel: it is absent from every
+        // `initial_conditions` (a pure-IC `perturb_only_at_t0` param — `S0`,
+        // `E0`, `I0`, or a simplex composition) has no other channel: it is
+        // absent from every
         // rate and from the observation model, so unless it moves x₀ the
         // weights are independent of it, the resampling is a blind subsample,
         // and its filter mean drifts without ever being selected. Evaluating
         // the initial state once from the swarm mean and copying it to every
         // particle did exactly that (gh#364) — and silently, since
-        // `ic_free = true` validates that an `ivp` param exists precisely to
-        // guarantee the t=0 spread this now delivers.
+        // `ic_free = true` validates that a `perturb_only_at_t0` param exists
+        // precisely to guarantee the t=0 spread this now delivers.
         //
         // Seam: `ProcessModel::initial_state_draw` is the existing producer of
         // x₀ and was already the one being called; the fix is to route each
@@ -517,9 +518,10 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             // 6.4.0.2): `randwalk_perturbation` → `rprocess` → `dmeasure`,
             // all three on one `tparams`.
             //
-            // IVP params and simplex members are skipped — IVP perturbed at
-            // t=0 only (pomp's `ivp()` in `rw.sd`), simplex members perturbed
-            // jointly at t=0 only (they're always IVP).
+            // `perturb_only_at_t0` params and simplex members are skipped —
+            // the former are perturbed at t=0 only (pomp's `ivp()` in
+            // `rw.sd`), simplex members perturbed jointly at t=0 only (they
+            // are always initial-state parameters).
             //
             // `cooling_now` is also read by the per-parameter diagnostics
             // after the weighting; the `global_step` accounting is unchanged
@@ -528,7 +530,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             let cooling_now = per_step_cooling.powf(global_step as f64);
             for i in 0..n {
                 for (pi, spec) in if2_params.iter().enumerate() {
-                    if spec.ivp || simplex_member_indices.contains(&spec.index) { continue; }
+                    if spec.perturb_only_at_t0 || simplex_member_indices.contains(&spec.index) { continue; }
                     let current = particle_params[i][spec.index];
                     let sd = spec.transformed_sd(spec.rw_sd, current) * cooling_now;
                     let z = spec.to_transformed(current);

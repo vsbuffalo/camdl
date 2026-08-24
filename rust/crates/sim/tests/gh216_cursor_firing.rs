@@ -308,7 +308,7 @@ fn if2_firing_invariant_to_offgrid_obs_stream() {
         name: "dummy".into(), index: compiled.param_index["dummy"],
         initial: 1.0, rw_sd: 0.1,
         transform: Transform::Log { lo: 1e-3, hi: 10.0 },
-        lower: 1e-3, upper: 10.0, rw_sd_auto: false, ivp: false,
+        lower: 1e-3, upper: 10.0, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles: 64, n_iterations: 1, cooling_fraction: 0.5,
@@ -380,7 +380,7 @@ fn if2_event_firing_invariant_to_offgrid_obs_stream() {
         name: "dummy".into(), index: compiled.param_index["dummy"],
         initial: 1.0, rw_sd: 0.1,
         transform: Transform::Log { lo: 1e-3, hi: 10.0 },
-        lower: 1e-3, upper: 10.0, rw_sd_auto: false, ivp: false,
+        lower: 1e-3, upper: 10.0, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles: 64, n_iterations: 1, cooling_fraction: 0.5,
@@ -567,7 +567,7 @@ fn if2_rejects_at_times_expr_under_exact() {
         name: "dummy".into(), index: compiled.param_index["dummy"],
         initial: 4.0, rw_sd: 0.1,
         transform: Transform::Log { lo: 1.0, hi: 8.0 },
-        lower: 1.0, upper: 8.0, rw_sd_auto: false, ivp: false,
+        lower: 1.0, upper: 8.0, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles: 16, n_iterations: 1, cooling_fraction: 0.5,
@@ -628,7 +628,7 @@ fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str
         name: "dummy".into(), index: compiled.param_index["dummy"],
         initial: 1.0, rw_sd: 0.1,
         transform: Transform::Log { lo: 1e-3, hi: 10.0 },
-        lower: 1e-3, upper: 10.0, rw_sd_auto: false, ivp: false,
+        lower: 1e-3, upper: 10.0, rw_sd_auto: false, perturb_only_at_t0: false,
     }];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_model = pgas_obs_model(compiled, obs_times);

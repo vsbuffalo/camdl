@@ -311,7 +311,7 @@ mod tests {
             bounds: Some((0.01, 2.0)),
             transform: None,
             prior: prior.map(crate::fit::config_v2::EstimatePriorSpec::Dist),
-            ivp: false,
+            perturb_only_at_t0: false,
             rw_sd: None,
             start: None,
         }

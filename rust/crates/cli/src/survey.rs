@@ -827,7 +827,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 name: name.clone(),
                 rw_sd: spec.rw_sd,
                 transform: spec.transform.as_ref().map(|t| t.as_str().to_string()),
-                ivp: spec.ivp,
+                perturb_only_at_t0: spec.perturb_only_at_t0,
                 // Pass through Option as-is; build_if2_params_from_specs
                 // resolves fit.toml > model > unbounded.
                 bounds: spec.bounds,
@@ -995,7 +995,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             name: e.name.clone(),
             rw_sd: None,
             transform: None,
-            ivp: false,
+            perturb_only_at_t0: false,
             bounds: Some((e.lo, e.hi)),
         }).collect();
         let estimated = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)?;
@@ -1792,12 +1792,12 @@ mod tests {
             EstimatedParam {
                 name: "beta".into(), index: 0, initial: 0.5, rw_sd: 0.1,
                 transform: Transform::None, lower: 0.0, upper: 1.0,
-                rw_sd_auto: false, ivp: false,
+                rw_sd_auto: false, perturb_only_at_t0: false,
             },
             EstimatedParam {
                 name: "gamma".into(), index: 1, initial: 0.2, rw_sd: 0.1,
                 transform: Transform::None, lower: 0.01, upper: 0.5,
-                rw_sd_auto: false, ivp: false,
+                rw_sd_auto: false, perturb_only_at_t0: false,
             },
         ];
         let rows = vec![
@@ -1840,7 +1840,7 @@ mod tests {
         let estimated = vec![EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.5, rw_sd: 0.1,
             transform: Transform::None, lower: 0.0, upper: 1.0,
-            rw_sd_auto: false, ivp: false,
+            rw_sd_auto: false, perturb_only_at_t0: false,
         }];
         let rows = vec![
             LandscapeRow {

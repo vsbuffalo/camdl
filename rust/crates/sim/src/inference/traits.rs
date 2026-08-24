@@ -269,10 +269,10 @@ pub struct SMCConfig {
     /// the second observation.
     ///
     /// The caller is responsible for ensuring particle spread at t=0 —
-    /// typically via an `ivp = true` estimated parameter. Without
-    /// spread, the first reweight is a no-op and ic-free degenerates to
-    /// silently dropping the first observation. Validation is at the
-    /// fit-config layer. See
+    /// typically via a `perturb_only_at_t0 = true` estimated parameter under
+    /// IF2. Without spread, the first reweight is a no-op and ic-free
+    /// degenerates to silently dropping the first observation. Validation is
+    /// at the fit-config layer. See
     /// docs/dev/proposals/2026-04-18-ic-free-inference.md.
     pub skip_first_obs_from_loglik: bool,
 

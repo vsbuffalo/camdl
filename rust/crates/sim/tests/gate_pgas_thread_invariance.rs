@@ -129,7 +129,7 @@ fn run_once() -> PGASResult {
         lower: 0.01,
         upper: 2.0,
         rw_sd_auto: false,
-        ivp: false,
+        perturb_only_at_t0: false,
     }];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 

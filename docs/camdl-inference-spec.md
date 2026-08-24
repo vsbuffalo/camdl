@@ -87,9 +87,9 @@ sigma = {} # auto rw_sd from bounds
 gamma = {} # auto rw_sd from bounds
 rho = { rw_sd = 0.02 } # explicit override
 amplitude = {}
-S0 = { ivp = true } # auto rw_sd, perturbed only at t=0
-E0 = { ivp = true }
-I0 = { ivp = true }
+S0 = { perturb_only_at_t0 = true } # auto rw_sd, perturbed only at t=0
+E0 = { perturb_only_at_t0 = true }
+I0 = { perturb_only_at_t0 = true }
 
 # Optional: override starting value (default: from model)
 # sigma = { start = 0.1 }
@@ -354,14 +354,15 @@ When set:
   `log L(θ)`. These differ by `log p(y_1)` and are not directly comparable
   across runs with different `ic_free` settings.
 
-Precondition: at least one `[estimate.*]` entry must be `ivp = true`. Without
-per-particle spread at `t=0`, the first reweight cannot discriminate between
-particles and `ic_free` silently degenerates to dropping the first observation.
-Config validation rejects the degenerate case:
+Precondition: the stage's algorithm must be `if2`, and at least one
+`[estimate.*]` entry must be `perturb_only_at_t0 = true`. Without per-particle
+spread at `t=0`, the first reweight cannot discriminate between particles and
+`ic_free` silently degenerates to dropping the first observation. Config
+validation rejects the degenerate case:
 
 ```toml
 [estimate]
-I0 = { bounds = [1, 500], ivp = true } # required under ic_free
+I0 = { bounds = [1, 500], perturb_only_at_t0 = true } # required under ic_free
 ```
 
 See `docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md` for
@@ -518,7 +519,7 @@ chain_eval_logliks = [
 ]
 chain_eval_ses = [0.5, 0.4, 0.6, 0.5, 0.4, 0.7, 0.5, 0.5]
 
-ivp_params = ["S0", "E0", "I0"]
+perturb_only_at_t0_params = ["S0", "E0", "I0"]
 
 # Resolved compound-gate config (Phase 3): the values actually in
 # force at runtime, after the priority chain
@@ -929,9 +930,9 @@ fit/he2010/ — He et al. 2010 London measles
     gamma     = 0.0832  rw_sd=0.005  ✓ identified  CI: [0.077, 0.090]
     rho       = 0.488   rw_sd=0.02   ✓ identified  CI: [0.45, 0.53]
     amplitude = 0.554   rw_sd=0.03   ✓ identified  CI: [0.49, 0.61]
-    S0        = 73151   rw_sd=5000   ✓ identified  (ivp)
-    E0        = 127     rw_sd=100    ✓ identified  (ivp)
-    I0        = 127     rw_sd=50     ✓ identified  (ivp)
+    S0        = 73151   rw_sd=5000   ✓ identified  (t0-only)
+    E0        = 127     rw_sd=100    ✓ identified  (t0-only)
+    I0        = 127     rw_sd=50     ✓ identified  (t0-only)
 
   Fixed (5 parameters):
     N0     = 2462500
@@ -1016,7 +1017,7 @@ Top-level shape:
       },
       "stage_progression": null,
       "parameters": [
-        {"name": "R0", "estimate": 87.67, "chain_agreement": 1.21, "ivp": false},
+        {"name": "R0", "estimate": 87.67, "chain_agreement": 1.21, "perturb_only_at_t0": false},
         ...
       ],
       "chains": [

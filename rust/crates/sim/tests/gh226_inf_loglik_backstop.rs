@@ -34,7 +34,7 @@ fn mu_param() -> EstimatedParam {
         lower: 1e-6,
         upper: 1.0,
         rw_sd_auto: false,
-        ivp: false,
+        perturb_only_at_t0: false,
     }
 }
 
