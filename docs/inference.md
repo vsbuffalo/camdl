@@ -1120,6 +1120,50 @@ detector and that density were removed (gh#719). The `perturb_only_at_t0` flag
 is a separate thing — an IF2 perturbation schedule, refused at config load under
 PGAS.
 
+#### Why a deterministic initial condition identifies its parameter poorly
+
+This is the part that surprises people, and it is worth understanding before
+reading a posterior for an initial-state parameter.
+
+An integer compartment's initial value is **rounded**. Written `I = I0`, the
+compartment starts at `round(I0)`, so `I0 = 50.0` and `I0 = 50.4` produce the
+_same_ initial state, the _same_ trajectory density, and the _same_ likelihood.
+The likelihood is a **step function** of `I0`: its derivative is zero almost
+everywhere, and non-existent at the boundaries.
+
+Two consequences follow, and both show up in a posterior:
+
+- **A gradient-based move learns nothing about it.** NUTS sees a flat direction,
+  so `I0` moves only when a proposal happens to cross a rounding boundary. Its
+  marginal ends up close to its prior — not because the data are uninformative
+  about the seed, but because the model cannot express the difference.
+- **Its correlations with other parameters are hidden.** Any real coupling —
+  between the seed and the growth rate, say, or the reporting fraction — is
+  smeared across each rounding bin, because within a bin the data cannot
+  distinguish one value of `I0` from another. Pair plots look less structured
+  than the model actually is.
+
+Writing `I ~ poisson(rate = I0)` removes both. The rate is continuous while the
+draw is integral, so `log p(x_0 \mid \theta)` is **smooth** in `I0`; the
+parameter has a real gradient everywhere and the sampler explores `(x_0, θ)`
+jointly. Correlations that were previously invisible become visible. They were
+always in the model — the rounding was hiding them.
+
+Expect the drawn parameterisation to give a **wider** marginal for `I0`, not
+just a better-resolved one: the law puts a layer between `I0` and the realised
+seed, so `I0` is one step further from the data. A narrower posterior after the
+change is worth understanding before trusting it.
+
+A second, smaller effect: writing the complement as a coefficient
+(`S = N0 - 3.386 * I0`) does not survive rounding, because
+`round(a·I0) + round(b·I0) ≠ round((a+b)·I0)`. Such a model carries a small
+population imbalance that varies with `I0`. Writing `S = N0 - I - E1 - E2 - E3`
+against the drawn values makes the budget exact.
+
+_The `~` form arrived in `d4e89659` (2026-08-24), which also removed the
+auto-detector described above; before it, every initial condition was
+deterministic-and-rounded and behaved as this section describes._
+
 ### Spatial models and seeding (iota)
 
 Spatial models with inter-patch coupling need care to ensure inference works

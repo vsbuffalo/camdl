@@ -3739,6 +3739,15 @@ parameter; a `count` there is E344 with the parameter named.
 independent — the dispersion `r` controls how much more variable the count is
 than a Poisson of the same mean, and large `r` recovers Poisson.
 
+**`~` is not merely a stochastic flourish; it changes what the data can tell you
+about the parameter.** An integer compartment written with `=` is *rounded*, so
+`I = I0` starts at `round(I0)` and the likelihood is a step function of `I0` —
+flat within each rounding bin, so a fit learns much less about the seed than the
+data contain. A drawn initial condition is smooth in its parameter and does not
+have this problem. See "Initial-state parameters" in
+[`docs/inference.md`](inference.md) for what that means when reading a
+posterior.
+
 A law may not be declared on the `balance {}` target (E345): the balance stage
 recomputes its compartment after every substep, so the draw would be overwritten
 before the first step is taken.
