@@ -5,7 +5,7 @@
 //!
 //! The detector (`detect_ivp_mappings`) nudges each estimated parameter by
 //! `(upper - lower).min(1.0) * PROBE_STEP` and asks whether any non-balance
-//! compartment's *rounded* initial count moved. `CompiledModel::initial_state`
+//! compartment's *rounded* initial count moved. `initial_state_mean`
 //! rounds integer compartments to `i64`, so for a parameter whose range is
 //! wider than 1.0 the probe is a flat 0.01 in the parameter's own units:
 //!
@@ -205,10 +205,10 @@ fn a_count_parameter_never_enters_the_ivp_path() {
     // round(614.4998) = 614, round(614.5098) = 615. It is the case that used to
     // register, so it is the one that proves the guard rather than the probe.
     let crossing = params_with_i0(&compiled, 614.4998);
-    let (base, _) = compiled.initial_state(&crossing).unwrap();
+    let (base, _) = compiled.initial_state_mean(&crossing).unwrap();
     let mut nudged = crossing.clone();
     nudged[compiled.param_index["I0"]] += step;
-    let (pert, _) = compiled.initial_state(&nudged).unwrap();
+    let (pert, _) = compiled.initial_state_mean(&nudged).unwrap();
     assert_ne!(
         base.counts, pert.counts,
         "this start must still move a rounded initial count, else the guard is          not what is being tested — the probe simply missed"
