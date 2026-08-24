@@ -121,11 +121,19 @@ survey_top_k_n = 10
 
 The survey is consumed as a starting-point source; it never becomes a stage.
 
-### The fit pipeline: scout → refine → posterior
+### The fit pipeline: stages
 
-A `fit.toml` declares named stages that run in order. The canonical ladder is a
-fast MLE _scout_ (IF2) to locate the mode, a _refine_ that sharpens it, and a
-_posterior_ stage (PGAS) that characterizes uncertainty:
+A `fit.toml` declares named stages that run in order. **One `pgas` stage,
+started from the prior or from the default boundary-avoiding draws, is the
+ordinary shape** — a Bayesian fit does not need an optimizer to find the mode
+first, and starting from a point estimate concentrates the chains before they
+have earned it.
+
+Stages exist for pipelines that genuinely have a sequence: a cheap pass to rule
+a region out, a coarse fit whose posterior seeds a finer one, or a run extended
+in stages under a compute budget. The example below shows the machinery on the
+MLE-scout-then-posterior shape because it exercises every knob; read it as a
+demonstration of staging, not as the recommended default:
 
 ```toml
 [stages.scout]
