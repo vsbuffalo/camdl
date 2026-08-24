@@ -1589,135 +1589,59 @@ impl Stage {
     /// recompiles because `serde_json` sorts object keys lexically
     /// when serializing maps.
     pub fn identity_payload(&self) -> serde_json::Value {
-        use serde_json::json;
+        // SUBTRACTIVE, not enumerated: serialize the whole stage and remove
+        // only the keys that must not be hashed. The four sampler arms used
+        // to LIST their included fields and destructure the rest with `..`,
+        // which made stage identity exclude-by-default — a field added to a
+        // variant but forgotten here was silently absent from the key, and
+        // two fits differing only in it collided. That is the shape behind
+        // gh#514, gh#540 and the 2026-08-23 batch; the invariant even lived
+        // in a comment ("`burnin_dt` … MUST be listed here"), because nothing
+        // enforced it. Now a new field is hashed unless it is deliberately
+        // named below.
+        //
+        // What is subtracted, and why:
+        //  - the EXTENSION DIMENSION (PGAS `sweeps`, PMMH/Mh `iterations`,
+        //    Nuts `samples`): a resumed run extends a base run, so the two
+        //    must share a prefix identity; the length is folded separately
+        //    by `cas_target_length`.
+        //  - PGAS `n_trajectories`: an output-shaping count, folded by
+        //    `cas_n_trajectories` (count-in-the-key) rather than here, so
+        //    hashing it in both places would double-fold it.
+        //
+        // IF2/PFilter/NLopt have no extension dimension and subtract nothing.
+        //
+        // Keys are the TOML-side spellings (`init_mle`, `init`) because they
+        // come from the stage's own serialization; the enumerated arms used
+        // the Rust field names, so those two spellings disagreed across
+        // variants. Returned as `serde_json::Value` so
+        // `provenance::fit_stage_hash` can hash it via `serde_json::to_vec`,
+        // stable across recompiles (serde_json sorts object keys).
         match self {
-            // PGAS: omit ONLY `sweeps` (extension dimension) and
-            // `n_trajectories` (output-only knob; saving more or fewer
-            // posterior trajectories doesn't change chain dynamics). Every
-            // other field is identity-defining and MUST be hashed —
-            // crucially `init_method` / `survey_path` / `survey_top_k_n`,
-            // which choose the per-chain starting points and therefore the
-            // stored chains/posterior. Dropping them silently served the
-            // first run's posterior as a differently-initialised second
-            // run's (gh#147 count-in-the-key; survey CONTENT, not just the
-            // path, is additionally folded via `ctx.deps` in
-            // `resolve_fit_stage`).
-            Stage::PGAS {
-                backend, chains, particles, starts_from, burn_in, thin,
-                tempering, max_tree_depth, trajectory_warmup,
-                csmc_sweeps_per_nuts, dense_mass, use_nuts,
-                init_method, survey_path, survey_top_k_n,
-                ..
-            } => json!({
-                "algorithm": "pgas",
-                "backend": backend,
-                "chains": chains,
-                "particles": particles,
-                "starts_from": starts_from,
-                "init_method": init_method,
-                "survey_path": survey_path,
-                "survey_top_k_n": survey_top_k_n,
-                "burn_in": burn_in,
-                "thin": thin,
-                "tempering": tempering,
-                "max_tree_depth": max_tree_depth,
-                "trajectory_warmup": trajectory_warmup,
-                "csmc_sweeps_per_nuts": csmc_sweeps_per_nuts,
-                "dense_mass": dense_mass,
-                "use_nuts": use_nuts,
-            }),
-            // PMMH: omit ONLY `iterations` (extension dimension). All other
-            // fields — adapt / adapt_start / rho AND the init selectors
-            // (init_method / survey_path / survey_top_k_n) — are
-            // identity-defining, for the same reason as PGAS.
-            Stage::PMMH {
-                backend, chains, particles, starts_from, burn_in, thin,
-                adapt, adapt_start, rho,
-                init_method, survey_path, survey_top_k_n,
-                ..
-            } => json!({
-                "algorithm": "pmmh",
-                "backend": backend,
-                "chains": chains,
-                "particles": particles,
-                "starts_from": starts_from,
-                "init_method": init_method,
-                "survey_path": survey_path,
-                "survey_top_k_n": survey_top_k_n,
-                "burn_in": burn_in,
-                "thin": thin,
-                "adapt": adapt,
-                "adapt_start": adapt_start,
-                "rho": rho,
-            }),
-            // Mh (deterministic ODE marginal-likelihood MH): omit ONLY
-            // `iterations` (extension dimension). No `particles` / `rho`
-            // (deterministic path has neither). All other fields — adapt /
-            // adapt_start / burnin_dt AND the init selectors — are identity-
-            // defining, for the same reason as PMMH. `burnin_dt` changes the
-            // coarsely-integrated warm-up → the scored trajectory → the draws, so it
-            // MUST be listed here (leaving it swept into `..` would silently collide
-            // two fits that differ only in burnin_dt — the count-in-the-key rule).
-            Stage::Mh {
-                backend, chains, starts_from, burn_in, thin,
-                adapt, adapt_start, burnin_dt, dt_check,
-                init_method, survey_path, survey_top_k_n,
-                ..
-            } => json!({
-                "algorithm": "mh",
-                "backend": backend,
-                "chains": chains,
-                "starts_from": starts_from,
-                "init_method": init_method,
-                "survey_path": survey_path,
-                "survey_top_k_n": survey_top_k_n,
-                "burn_in": burn_in,
-                "thin": thin,
-                "adapt": adapt,
-                "adapt_start": adapt_start,
-                "burnin_dt": burnin_dt,
-                // gh#726: the dt-check result is stored in
-                // fit_state.toml.dt_check, so its config is
-                // count-in-the-key like burnin_dt above.
-                "dt_check": dt_check,
-            }),
-            // Nuts (deterministic ODE gradient sampler): omit ONLY `samples`
-            // (extension dimension, folded via `cas_target_length` like Mh's
-            // `iterations`). Every other field — warmup / max_tree_depth /
-            // target_accept / dense_mass / burnin_dt AND the init selectors — is
-            // identity-defining, for the same reason as Mh. `burnin_dt` changes the
-            // coarsely-integrated warm-up → the scored trajectory → the draws, so it
-            // MUST be listed here (leaving it swept into `..` would silently collide
-            // two fits that differ only in burnin_dt — the count-in-the-key rule).
-            Stage::Nuts {
-                backend, chains, warmup, starts_from,
-                init_method, survey_path, survey_top_k_n,
-                max_tree_depth, target_accept, dense_mass, burnin_dt,
-                ..
-            } => json!({
-                "algorithm": "nuts",
-                "backend": backend,
-                "chains": chains,
-                "warmup": warmup,
-                "starts_from": starts_from,
-                "init_method": init_method,
-                "survey_path": survey_path,
-                "survey_top_k_n": survey_top_k_n,
-                "max_tree_depth": max_tree_depth,
-                "target_accept": target_accept,
-                "dense_mass": dense_mass,
-                "burnin_dt": burnin_dt,
-            }),
-            // No extension dimension: hash the full stage. NLopt stages
-            // also have no extension dimension — every knob (chains,
-            // tolerance, max_evals, init_method, gate) is identity-
-            // defining, so hash the full struct.
+            Stage::PGAS { .. } => self.payload_minus(&["sweeps", "n_trajectories"]),
+            Stage::PMMH { .. } | Stage::Mh { .. } => self.payload_minus(&["iterations"]),
+            Stage::Nuts { .. } => self.payload_minus(&["samples"]),
             Stage::IF2 { .. }
             | Stage::PFilter { .. }
             | Stage::NlSbplx(_)
-            | Stage::NlBobyqa(_) =>
-                serde_json::to_value(self).unwrap_or(json!({})),
+            | Stage::NlBobyqa(_) => self.payload_minus(&[]),
         }
+    }
+
+    /// The stage serialized in full, minus `exclude`d top-level keys.
+    ///
+    /// The subtractive primitive behind [`Self::identity_payload`]: include
+    /// by default, and name every omission. A missing key here is a
+    /// deliberate, greppable decision; a missing field in an enumerated
+    /// `json!` was invisible.
+    fn payload_minus(&self, exclude: &[&str]) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or(serde_json::json!({}));
+        if let serde_json::Value::Object(ref mut m) = v {
+            for key in exclude {
+                m.remove(*key);
+            }
+        }
+        v
     }
 
     /// The survey directory feeding `init = "survey_top_k"`, if this stage
@@ -3440,6 +3364,52 @@ init       = "{init}"
                  is served the OTHER setting's stored result (gh#540)."
             );
         }
+    }
+
+    /// The subtractive payload is include-by-default: every stage field is in
+    /// the identity unless deliberately subtracted. The enumerated arms it
+    /// replaced swallowed anything they forgot to list, which is the shape
+    /// behind gh#514, gh#540 and the 2026-08-23 batch.
+    #[test]
+    fn identity_payload_includes_every_field_but_the_named_exclusions() {
+        let payload = pgas_stage().identity_payload();
+        let obj = payload.as_object().expect("payload is an object");
+        // The extension dimension and the separately-folded output count are
+        // the ONLY omissions.
+        assert!(!obj.contains_key("sweeps"),
+            "the extension dimension stays out (folded by cas_target_length)");
+        assert!(!obj.contains_key("n_trajectories"),
+            "folded by cas_n_trajectories instead — hashing it here double-folds");
+        // Everything else the stage carries is present, under its TOML spelling.
+        for key in ["algorithm", "backend", "chains", "particles", "burn_in", "thin",
+                    "tempering", "use_nuts", "dense_mass", "max_tree_depth",
+                    "init", "init_mle", "trajectory_warmup", "csmc_sweeps_per_nuts"] {
+            assert!(obj.contains_key(key),
+                "'{key}' must be in the stage identity; present keys: {:?}",
+                obj.keys().collect::<Vec<_>>());
+        }
+        // And the point of the change: a knob the enumerated arm never listed
+        // now re-keys. `loglik_eval` decides how the stage's stored MLE is
+        // re-scored, and IF2 hashed it only because that arm full-serialized.
+        let mut hot = scout_stage("single");
+        if let Stage::IF2 { loglik_eval, .. } = &mut hot { loglik_eval.n_particles += 1; }
+        assert_ne!(scout_stage("single").identity_payload(), hot.identity_payload(),
+            "a clean-eval knob that changes the stored loglik must re-key");
+    }
+
+    /// The extension dimension must stay OUT: a resumed run extends a base
+    /// run, so the two share a prefix identity by design — the length reaches
+    /// identity through `cas_target_length` instead.
+    #[test]
+    fn extension_dimension_stays_out_of_the_payload() {
+        let base = pmmh_stage();
+        let mut longer = pmmh_stage();
+        if let Stage::PMMH { iterations, .. } = &mut longer { *iterations *= 4; }
+        assert_eq!(base.identity_payload(), longer.identity_payload(),
+            "iterations is PMMH's extension dimension — it must not re-key the \
+             payload, or --resume could never share a prefix identity");
+        assert_ne!(base.cas_target_length(), longer.cas_target_length(),
+            "…but it MUST reach identity through cas_target_length");
     }
 
     /// `--n-trajectories` is the sharpest case, because `cas.rs` documents it
@@ -6680,7 +6650,14 @@ decibans_thresh = 100.0
         let stage = make_pgas_stage(1000);
         let payload_bytes = serde_json::to_vec(&stage.identity_payload()).unwrap();
         let payload_str = String::from_utf8(payload_bytes).unwrap();
-        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"init_method":"uniform_unconstrained","max_tree_depth":10,"particles":100,"starts_from":"random","survey_path":null,"survey_top_k_n":null,"tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
+        // Updated 2026-08-23 with the subtractive rewrite: the payload now
+        // comes from the stage's own serialization, so the two chain-start
+        // keys carry their TOML spellings (`init_mle` / `init`) where the
+        // enumerated arm used the Rust field names (`starts_from` /
+        // `init_method`). Same fields, same values — a deliberate re-key,
+        // approved as part of the 2026-08-23 batch. See the commit for the
+        // --resume consequence.
+        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"init":"uniform_unconstrained","init_mle":"random","max_tree_depth":10,"particles":100,"survey_path":null,"survey_top_k_n":null,"tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
         assert_eq!(payload_str, expected,
             "identity_payload byte format drifted — every existing \
              resume_state.bin would be invalidated. If this change is \
@@ -6693,7 +6670,8 @@ decibans_thresh = 100.0
     fn pmmh_identity_payload_byte_stable() {
         let stage = make_pmmh_stage(1000);
         let payload_str = serde_json::to_string(&stage.identity_payload()).unwrap();
-        let expected = r#"{"adapt":true,"adapt_start":300,"algorithm":"pmmh","backend":"chain_binomial","burn_in":200,"chains":4,"init_method":"uniform_unconstrained","particles":100,"rho":null,"starts_from":"random","survey_path":null,"survey_top_k_n":null,"thin":2}"#;
+        // Updated 2026-08-23 — see the PGAS golden above for the reason.
+        let expected = r#"{"adapt":true,"adapt_start":300,"algorithm":"pmmh","backend":"chain_binomial","burn_in":200,"chains":4,"init":"uniform_unconstrained","init_mle":"random","particles":100,"rho":null,"survey_path":null,"survey_top_k_n":null,"thin":2}"#;
         assert_eq!(payload_str, expected,
             "PMMH identity_payload byte format drifted — see \
              pgas_identity_payload_byte_stable for context.");
