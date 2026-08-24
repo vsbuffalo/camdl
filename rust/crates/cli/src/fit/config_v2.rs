@@ -6070,8 +6070,10 @@ cases = "data/cases.tsv"
     // `ic_free = true` is honored only by IF2, the bootstrap PF, and plain
     // (uncorrelated) PMMH. PGAS, the ODE-MLE optimizers, and correlated PMMH
     // score every obs unconditionally — running ic_free on them silently
-    // computes the unconditional likelihood. validate() must hard-error those
-    // cells; the honoring cells must still pass.
+    // computes the unconditional likelihood. `pfilter` and plain `pmmh` DO
+    // drop y₁, but run the bootstrap PF, which copies one deterministic
+    // initial state to every particle, so ic_free has no spread to condition
+    // on (gh#732). validate() must hard-error every cell but IF2.
 
     /// Model params for the ic_free fixtures (sir with beta/gamma/N0/I0).
     fn ic_free_model_params() -> Vec<String> {
@@ -6080,8 +6082,11 @@ cases = "data/cases.tsv"
 
     #[test]
     fn ic_free_with_if2_stage_still_validates() {
-        // Regression: IF2 honors conditioning — ic_free=true must NOT be
-        // rejected by the gate (it would break ic_free_true_with_ivp_succeeds).
+        // IF2 both drops y₁ from the accumulated loglik AND gives each
+        // particle its own x₀ drawn from its own perturbed θ (gh#364), so
+        // ic_free = true must NOT be rejected. Negative control for the
+        // gh#732 refusals below: without this, "refuse everything" would
+        // pass them all.
         let src = format!(
             "ic_free = true\n{}\n[data.observations]\ncases = \"data/cases.tsv\"\n",
             minimal_fit_stages()
@@ -6263,6 +6268,82 @@ rho = 0.99
             .validate(&ic_free_model_params())
             .expect_err("ic_free=true on a correlated PMMH stage must be rejected");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
+    }
+
+    /// gh#732. Plain PMMH (no `rho`) wraps the bootstrap particle filter,
+    /// which evaluates ONE deterministic initial state and copies it to every
+    /// particle. `ic_free`'s first reweight therefore scores every particle
+    /// identically and the run drops y₁ instead of conditioning on it — the
+    /// exact outcome the `perturb_only_at_t0` precondition was written to
+    /// prevent. Refuse at config load, naming the reason.
+    #[test]
+    fn ic_free_with_plain_pmmh_stage_is_rejected() {
+        let src = r#"ic_free = true
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+cases = "data/cases.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+
+[stages.bayes]
+algorithm = "pmmh"
+backend = "chain_binomial"
+chains = 1
+particles = 500
+iterations = 100
+"#;
+        let config = parse(src).unwrap();
+        let err = config
+            .validate(&ic_free_model_params())
+            .expect_err("ic_free=true on a plain PMMH stage must be rejected (gh#732)");
+        assert!(err.contains("ic_free"), "error must name ic_free: {err}");
+        assert!(err.contains("pmmh"), "error must name the offending algorithm: {err}");
+        assert!(err.contains("bootstrap particle filter"),
+            "error must name the mechanism that fails, not just refuse: {err}");
+        assert!(err.contains("gh#732"), "error must cite the issue: {err}");
+        assert!(err.contains("if2"), "error must name the algorithm that works: {err}");
+    }
+
+    /// gh#732, same defect, other exposed cell: `pfilter` is admitted by the
+    /// same arm and wraps the same bootstrap PF.
+    #[test]
+    fn ic_free_with_pfilter_stage_is_rejected() {
+        let src = r#"ic_free = true
+[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+cases = "data/cases.tsv"
+
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+
+[fixed]
+N0 = 1000
+I0 = 5
+gamma = 0.1
+
+[stages.check]
+algorithm = "pfilter"
+backend = "chain_binomial"
+particles = 500
+"#;
+        let config = parse(src).unwrap();
+        let err = config
+            .validate(&ic_free_model_params())
+            .expect_err("ic_free=true on a pfilter stage must be rejected (gh#732)");
+        assert!(err.contains("ic_free"), "error must name ic_free: {err}");
+        assert!(err.contains("pfilter"), "error must name the offending algorithm: {err}");
+        assert!(err.contains("copies it to every particle"),
+            "error must say why the spread is absent: {err}");
     }
 
     // ── per_fit_prefix layout ──────────────────────────────────────────────
