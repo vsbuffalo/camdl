@@ -1003,7 +1003,11 @@ pub struct FitRunArgs {
     /// research-quality fits where sub-nat differences matter for
     /// paper-grade conclusions; the routine default (2.0 / 0.5)
     /// allows more give before flagging.
-    #[arg(long)]
+    /// Requires --stage: the threshold it selects is stored in the leaf
+    /// (fit_state.toml.dt_check), so it is resolved into that stage's
+    /// dt_check.threshold_nats and keyed into its identity (gh#730). A stage
+    /// that declares its own threshold_nats is unaffected.
+    #[arg(long, requires = "stage")]
     pub dt_check_strict: bool,
 
     /// Override `n_halvings` on the dt-check (gh#52). Default 2

@@ -45,7 +45,6 @@ pub fn run_stage(
     model_identity: &str,
     data_hashes: &[(String, String)],
     dt_check_cfg: &DtCheckConfig,
-    dt_check_strict: bool,
 ) -> Result<(), String> {
     let (algorithm, knobs) = extract_nlopt_config(stage)?;
 
@@ -242,7 +241,6 @@ pub fn run_stage(
         &winner_full,
         dt,
         dt_check_cfg,
-        dt_check_strict,
     )
     .unwrap_or_else(|e| {
         eprintln!("error: {}", e);

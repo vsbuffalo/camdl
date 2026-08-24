@@ -125,8 +125,9 @@ pub fn run_stage(
     starts_from: Option<&str>,
     // Post-fit deterministic ODE dt-check config (gh#52, gh#227). `Some` only on
     // the `mh` (ODE) dispatch; PMMH passes `None` (its dt-check is PF-based and
-    // wired on the IF2 path). The bool is `--dt-check-strict`.
-    dt_check_opt: Option<(super::config_v2::DtCheckConfig, bool)>,
+    // wired on the IF2 path). `--dt-check-strict` is resolved into the config's
+    // `threshold_nats` before identity is taken (gh#730), so no flag rides here.
+    dt_check_opt: Option<super::config_v2::DtCheckConfig>,
 ) -> Result<(), String> {
     // The PMMH prefer-PGAS-for-long-series caveat banner is emitted by the
     // dispatch chokepoint (`methods::emit_status_banner`), driven by the
@@ -919,7 +920,7 @@ pub fn run_stage(
     // (its dt-check is the PF-based one wired on the IF2 path). Reuses the
     // obs_model / obs_times / dt built once for the ODE-MH chain evals.
     let dt_check_result = match (is_ode_mh, &dt_check_opt) {
-        (true, Some((cfg, strict))) => {
+        (true, Some(cfg)) => {
             let obs_model = ode_obs_model.as_deref()
                 .expect("ode_obs_model built on the is_ode_mh path");
             let result = super::dt_check::run_richardson_ladder_ode(
@@ -929,7 +930,6 @@ pub fn run_stage(
                 &map_result.map_params,
                 ode_dt,
                 cfg,
-                *strict,
             )?;
             super::dt_check::print_terminal_report(&result);
             if matches!(result.verdict, super::dt_check::DtCheckVerdict::Skipped) {

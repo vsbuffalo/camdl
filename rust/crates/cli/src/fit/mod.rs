@@ -265,6 +265,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         decibans_thresh:      a.decibans_thresh,
         no_dt_check:          a.no_dt_check,
         dt_check_halvings:    a.dt_check_halvings,
+        dt_check_strict:      a.dt_check_strict,
         record_ancestry:      a.record_ancestry,
         record_prequential:   a.record_prequential,
     };
@@ -1530,7 +1531,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     winner_theta,
                     &effective_dt_check,
                     *backend,
-                    a.dt_check_strict,
                     &dt_check::DtCheckInherits {
                         n_particles:  effective_loglik_eval.n_particles,
                         n_replicates: effective_loglik_eval.n_replicates,
@@ -1726,7 +1726,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     seed, force,
                     a.resume.is_some(),
                     effective_starts.as_deref(),
-                    Some((mh_dt_check, a.dt_check_strict)),
+                    Some(mh_dt_check),
                 ).unwrap_or_else(|e| {
                     eprintln!("error running mh stage '{}': {}", stage_name, e);
                     std::process::exit(1);
@@ -1807,7 +1807,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         &model_identity_for_prov,
                         &data_hashes_for_prov,
                         &nl_dt_check,
-                        a.dt_check_strict,
                     ).unwrap_or_else(|e| {
                         eprintln!("error running nlopt stage '{}': {}", stage_name, e);
                         std::process::exit(1);
