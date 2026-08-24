@@ -7,7 +7,6 @@ use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
 use sim::inference::pgas::{simulate_reference, complete_data_loglik, log_transition_density_substep, build_obs_at_substep};
 use sim::inference::MultiStreamObsModel;
-use sim::inference::pgas::IVPMapping;
 use sim::inference::particle_filter::Observation;
 use sim::rng::StatefulRng;
 
@@ -45,13 +44,12 @@ fn test_density_matches_step_one_sir() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let observations: Vec<Observation> = vec![];
 
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
     let ll = complete_data_loglik(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings, &oas,
+        &obs_model, &oas,
     ).unwrap().total;
 
     eprintln!("  SIR basic: complete-data LL = {:.4} ({} substeps, {} transitions, {} groups)",
@@ -92,13 +90,12 @@ fn test_density_matches_step_one_sir_demography() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let observations: Vec<Observation> = vec![];
 
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
     let ll = complete_data_loglik(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings, &oas,
+        &obs_model, &oas,
     ).unwrap().total;
 
     eprintln!("  SIR demography: complete-data LL = {:.4} ({} substeps, {} transitions, {} groups)",
@@ -131,7 +128,7 @@ fn test_density_matches_step_one_two_patch() {
     let oas = build_obs_at_substep(&empty_obs, compiled.model.simulation.t_start, dt).unwrap();
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let ll = complete_data_loglik(
-        &compiled, &trajectory, &params, &empty_obs, dt, &obs_model, &[], &oas,
+        &compiled, &trajectory, &params, &empty_obs, dt, &obs_model, &oas,
     ).unwrap().total;
     eprintln!("  two_patch: LL={:.4} ({} substeps, {} tr, {} groups)",
         ll, trajectory.substeps.len(), compiled.model.transitions.len(), compiled.source_groups.len());
@@ -181,13 +178,12 @@ fn test_density_matches_step_one_polio_spatial_5() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let observations: Vec<Observation> = vec![];
 
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
     let ll = complete_data_loglik(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings, &oas,
+        &obs_model, &oas,
     ).unwrap().total;
 
     eprintln!("  spatial: complete-data LL = {:.4} ({} substeps)",
@@ -292,7 +288,7 @@ fn test_density_seir_spatial_5_vignette_regression() {
     let oas = build_obs_at_substep(&empty_obs, compiled.model.simulation.t_start, dt).unwrap();
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let ll = complete_data_loglik(
-        &compiled, &trajectory, &params, &empty_obs, dt, &obs_model, &[], &oas,
+        &compiled, &trajectory, &params, &empty_obs, dt, &obs_model, &oas,
     ).unwrap().total;
     eprintln!("  complete-data LL = {:.4}", ll);
     assert!(ll.is_finite(), "LL should be finite, got {}", ll);

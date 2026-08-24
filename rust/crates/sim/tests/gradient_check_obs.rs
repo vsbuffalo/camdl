@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
-use sim::inference::pgas::{IVPMapping, simulate_reference, complete_data_loglik, build_obs_at_substep};
+use sim::inference::pgas::{simulate_reference, complete_data_loglik, build_obs_at_substep};
 use sim::inference::pgas_grad::complete_data_loglik_grad;
 use sim::inference::{BoundObs, MultiStreamObsModel, dense_cells};
 use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, eval_stream_projection};
@@ -387,13 +387,12 @@ fn fd_check(
         &compiled.resolved.rate_grads_indexed,
         &model_to_estimated,
     );
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let oas = build_obs_at_substep(observations, compiled.model.simulation.t_start, dt).unwrap();
     let estimated_to_model: Vec<usize> = estimated_indices.to_vec();
 
     let (ll, grad) = complete_data_loglik_grad(
         compiled, trajectory, params, observations, dt,
-        obs_model, &ivp_mappings,
+        obs_model,
         d, &rate_grads_for_run, &oas,
         &estimated_to_model,
     ).unwrap();
@@ -412,11 +411,11 @@ fn fd_check(
 
         let ll_plus = complete_data_loglik(
             compiled, trajectory, &p_plus, observations, dt,
-            obs_model, &ivp_mappings, &oas,
+            obs_model, &oas,
         ).unwrap().total;
         let ll_minus = complete_data_loglik(
             compiled, trajectory, &p_minus, observations, dt,
-            obs_model, &ivp_mappings, &oas,
+            obs_model, &oas,
         ).unwrap().total;
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
 
@@ -1104,7 +1103,7 @@ fn gh180_parametric_projection_grad_matches_fd() {
     let oas = build_obs_at_substep(&observations, t_start, dt).unwrap();
     let (_ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &[], d, &rate_grads_for_run, &oas, &estimated_indices,
+        &obs_model, d, &rate_grads_for_run, &oas, &estimated_indices,
     ).unwrap();
     let qgam_est = estimated_indices.iter().position(|&i| i == qgam_idx).unwrap();
     eprintln!("[gh180_parametric_projection] d(ll)/d(qgam) = {:.6e} (analytic)", grad[qgam_est]);

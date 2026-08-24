@@ -303,11 +303,87 @@ type stratify_decl = {
   sonly : string list option;
 }
 
+type likelihood_kind =
+  | LikNegBinomial  of (string * expr) list
+  | LikPoisson      of (string * expr) list
+  | LikNormal       of (string * expr) list
+  | LikBinomial     of (string * expr) list
+  | LikBetaBinomial of (string * expr) list
+  | LikBeta         of (string * expr) list
+  | LikBernoulli    of (string * expr) list
+  (* Zero-inflated NB. Surface: `zero_inflated(base = neg_binomial(mean=, r=),
+     pi = )`, desugared here at parse time to the base's kwargs (`mean`, `r`)
+     plus `pi`. *)
+  | LikZeroInflatedNegBinomial of (string * expr) list
+
+(* What one `init { }` entry says its compartment starts at.
+
+   [IVExpr e]   — `S = N0 - I`, a value COMPUTED from parameters, constants and
+                  other compartments' seeded values.
+   [IVLaw (l, loc)] — `I ~ poisson(rate = I0)`, a value DRAWN from [l] once per
+                  particle at t_start. The location is the law's own span, so a
+                  kind or placement diagnostic points at the distribution rather
+                  than at the whole entry.
+
+   One field, not two: an entry is computed or drawn, never both and never
+   neither. *)
+type init_value =
+  | IVExpr of expr
+  | IVLaw  of likelihood_kind * loc
+
+(* The keyword arguments of a distribution call, whichever family it is. *)
+let likelihood_kwargs (l : likelihood_kind) : (string * expr) list =
+  match l with
+  | LikNegBinomial a | LikPoisson a | LikNormal a | LikBinomial a
+  | LikBetaBinomial a | LikBeta a | LikBernoulli a
+  | LikZeroInflatedNegBinomial a -> a
+
+(* The family keyword as written in the model file (`poisson`,
+   `neg_binomial`, ...). One definition, so a diagnostic and the IR tag cannot
+   disagree about what a distribution is called. *)
+let lik_family_name (l : likelihood_kind) : string =
+  match l with
+  | LikNegBinomial _  -> "neg_binomial"
+  | LikPoisson _      -> "poisson"
+  | LikNormal _       -> "normal"
+  | LikBinomial _     -> "binomial"
+  | LikBetaBinomial _ -> "beta_binomial"
+  | LikBeta _         -> "beta"
+  | LikBernoulli _    -> "bernoulli"
+  | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
+
+(* Rewrite every keyword-argument expression, keeping the family. *)
+let map_likelihood_kwargs (f : expr -> expr) (l : likelihood_kind) : likelihood_kind =
+  let g = List.map (fun (k, e) -> (k, f e)) in
+  match l with
+  | LikNegBinomial a  -> LikNegBinomial  (g a)
+  | LikPoisson a      -> LikPoisson      (g a)
+  | LikNormal a       -> LikNormal       (g a)
+  | LikBinomial a     -> LikBinomial     (g a)
+  | LikBetaBinomial a -> LikBetaBinomial (g a)
+  | LikBeta a         -> LikBeta         (g a)
+  | LikBernoulli a    -> LikBernoulli    (g a)
+  | LikZeroInflatedNegBinomial a -> LikZeroInflatedNegBinomial (g a)
+
+(* Every expression an init entry evaluates — the RHS, or every argument of the
+   law. The passes that walk init expressions (index resolution, the Rule-1
+   unit walk, the substitution rewrites) all go through this, so a law's
+   arguments get exactly the same treatment as a deterministic RHS. *)
+let init_value_exprs (v : init_value) : expr list =
+  match v with
+  | IVExpr e -> [e]
+  | IVLaw (l, _) -> List.map snd (likelihood_kwargs l)
+
+let map_init_value (f : expr -> expr) (v : init_value) : init_value =
+  match v with
+  | IVExpr e -> IVExpr (f e)
+  | IVLaw (l, loc) -> IVLaw (map_likelihood_kwargs f l, loc)
+
 type init_entry = {
   icomp     : string;
   iindices  : index_item list;       (* positional: S[child] *)
   ibindings : index_binding list;    (* loop: [p in patch] *)
-  ivalue    : expr;
+  ivalue    : init_value;
   iloc      : loc;
 }
 
@@ -322,19 +398,6 @@ type obs_projection =
   | ProjIncidence  of string * index_item list
   | ProjPrevalence of string * index_item list
   | ProjDerived    of expr
-
-type likelihood_kind =
-  | LikNegBinomial  of (string * expr) list
-  | LikPoisson      of (string * expr) list
-  | LikNormal       of (string * expr) list
-  | LikBinomial     of (string * expr) list
-  | LikBetaBinomial of (string * expr) list
-  | LikBeta         of (string * expr) list
-  | LikBernoulli    of (string * expr) list
-  (* Zero-inflated NB. Surface: `zero_inflated(base = neg_binomial(mean=, r=),
-     pi = )`, desugared here at parse time to the base's kwargs (`mean`, `r`)
-     plus `pi`. *)
-  | LikZeroInflatedNegBinomial of (string * expr) list
 
 (* A measurement-model statement: `<scored_col> ~ Dist(kw = ..., ...)`.
    The left side is a declared value column (the scored outcome); the right

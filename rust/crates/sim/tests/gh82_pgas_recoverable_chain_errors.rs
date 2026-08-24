@@ -330,7 +330,7 @@ fn harness_produces_a_recoverable_error_at_a_proposed_theta() {
     let mut proposed = params.clone();
     proposed[K_IDX] = K0 + 0.5;
     let err = complete_data_loglik(
-        &compiled, &traj, &proposed, &obs, DT, &obs_m, &[], &obs_at_substep,
+        &compiled, &traj, &proposed, &obs, DT, &obs_m, &obs_at_substep,
     )
     .expect_err("k outside the pinhole must hit the degenerate rate branch");
 
@@ -351,7 +351,7 @@ fn harness_produces_a_recoverable_error_at_a_proposed_theta() {
     // And the same call at the current k is clean — so the error above is a
     // property of the PROPOSAL, not of the fixture as a whole.
     let ok = complete_data_loglik(
-        &compiled, &traj, &params, &obs, DT, &obs_m, &[], &obs_at_substep,
+        &compiled, &traj, &params, &obs, DT, &obs_m, &obs_at_substep,
     )
     .expect("k = K0 must score cleanly");
     assert!(ok.total.is_finite(), "start point must have finite density, got {}", ok.total);

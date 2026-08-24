@@ -413,8 +413,7 @@ fn gate_licm_inference_producer_byte_identical() {
 fn gate_licm_pgas_loglik_byte_identical() {
     use std::sync::Arc;
     use sim::inference::pgas::{
-        build_substep_grid, complete_data_loglik, simulate_reference_on_grid, IVPMapping,
-        ObsAtSubstep,
+        build_substep_grid, complete_data_loglik, simulate_reference_on_grid, ObsAtSubstep,
     };
     use sim::inference::pgas_grad::{complete_data_loglik_grad, resolve_rate_grad_for_run};
     use sim::inference::particle_filter::Observation;
@@ -451,11 +450,10 @@ fn gate_licm_pgas_loglik_byte_identical() {
         let traj =
             simulate_reference_on_grid(compiled, params, dt, &grid.steps, None, &mut rng).unwrap();
         let obs_model = MultiStreamObsModel::empty(compiled.clone());
-        let ivp: Vec<IVPMapping> = vec![];
         let no_obs: Vec<Observation> = vec![];
         let no_map = ObsAtSubstep::new();
         let comps =
-            complete_data_loglik(compiled, &traj, params, &no_obs, dt, &obs_model, &ivp, &no_map)
+            complete_data_loglik(compiled, &traj, params, &no_obs, dt, &obs_model, &no_map)
                 .unwrap();
         let n_params = params.len();
         let model_to_estimated: Vec<Option<usize>> = (0..n_params).map(Some).collect();
@@ -463,7 +461,7 @@ fn gate_licm_pgas_loglik_byte_identical() {
         let rate_grads =
             resolve_rate_grad_for_run(&compiled.resolved.rate_grads_indexed, &model_to_estimated);
         let (ll, grad) = complete_data_loglik_grad(
-            compiled, &traj, params, &no_obs, dt, &obs_model, &ivp, n_params, &rate_grads, &no_map,
+            compiled, &traj, params, &no_obs, dt, &obs_model, n_params, &rate_grads, &no_map,
             &estimated_to_model,
         )
         .unwrap();

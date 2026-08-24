@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::Differentiate;
 use crate::{
     contrast::Contrast,
     expr::Expr,
     intervention::Intervention,
-    observation::ObservationModel,
+    observation::{
+        BinomialLikelihood, NegBinomialLikelihood, NormalLikelihood, ObservationModel,
+        PoissonLikelihood,
+    },
     ode_equation::OdeEquation,
     parameter::Parameter,
     quantity::Quantity,
@@ -56,7 +60,51 @@ pub struct Compartment {
 
 // ── Initial conditions ────────────────────────────────────────────────────────
 
+/// A law an INTEGER compartment's initial count is drawn from.
+///
+/// The argument structs are the observation ones ([`PoissonLikelihood`] and
+/// friends), reused deliberately — but **not** the [`Likelihood`] enum, which
+/// would make `bernoulli` or `beta` on a count compartment representable.
+/// Each argument is a [`Diffable`]: the expression paired with its
+/// per-parameter classified `∂arg/∂θ` from the OCaml autodiff pass, which is
+/// what makes a law's density gradient correct by construction rather than by
+/// hand. `BinomialLikelihood::n` carries the `#[differentiate(skip)]` seal
+/// ("must be θ-independent"), so a `n` that moved with θ is a compile-time
+/// refusal here too, not a silently dropped `∂n/∂θ`.
+///
+/// `NegBinomial` ships beside `Poisson` rather than after it: introduction
+/// counts are clustered rather than Poisson (Lloyd-Smith, Schreiber, Kopp &
+/// Getz 2005, *Nature* 438:355–359, doi:10.1038/nature04153), and NegBinomial
+/// contains Poisson as `dispersion → ∞`.
+///
+/// [`Likelihood`]: crate::observation::Likelihood
+/// [`Diffable`]: crate::deriv::Diffable
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
+#[serde(rename_all = "snake_case")]
+pub enum InitCountLaw {
+    Poisson(PoissonLikelihood),
+    Binomial(BinomialLikelihood),
+    NegBinomial(NegBinomialLikelihood),
+}
+
+/// A law a REAL compartment's initial value is drawn from. Real compartments
+/// hold a continuous quantity (a reservoir, a concentration), so the count
+/// laws are not admissible and vice versa — [`CompartmentKind`] selects the
+/// admissible set at construction, which is why these are two enums and not
+/// one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
+#[serde(rename_all = "snake_case")]
+pub enum InitRealLaw {
+    Normal(NormalLikelihood),
+}
+
 /// What one compartment's initial value is.
+///
+/// Deliberately NOT `#[derive(Differentiate)]`: `Deterministic(Expr)` is not a
+/// differentiable-argument carrier, and a uniform `diffables()` over the whole
+/// spec would present an init RHS as if it were a likelihood argument. The two
+/// law enums carry the derive; a consumer that wants every `Diffable` matches
+/// the variant first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InitSpec {
@@ -64,6 +112,86 @@ pub enum InitSpec {
     /// compartments' initial values. Whether it happens to be constant is a
     /// runtime build detail, not a distinction the IR draws.
     Deterministic(Expr),
+    /// `I ~ poisson(rate = I0)` on an integer compartment.
+    Count(InitCountLaw),
+    /// `V ~ normal(mean = v0, sd = s)` on a real compartment.
+    Real(InitRealLaw),
+}
+
+impl InitCountLaw {
+    /// The snake_case family name, matching the `serde` variant tag and the
+    /// DSL's distribution keyword.
+    pub fn name(&self) -> &'static str {
+        match self {
+            InitCountLaw::Poisson(_) => "poisson",
+            InitCountLaw::Binomial(_) => "binomial",
+            InitCountLaw::NegBinomial(_) => "neg_binomial",
+        }
+    }
+}
+
+impl InitRealLaw {
+    /// The snake_case family name, matching the `serde` variant tag and the
+    /// DSL's distribution keyword.
+    pub fn name(&self) -> &'static str {
+        match self {
+            InitRealLaw::Normal(_) => "normal",
+        }
+    }
+}
+
+impl InitSpec {
+    /// Every expression this spec evaluates, in argument order.
+    ///
+    /// Dependency extraction ([`crate::init_order`]) walks **all** of them, not
+    /// just the mean: a `binomial(n = N0 - R, p = ...)` reads `R`'s seeded value
+    /// through `n`, so `n` is a real edge in the init DAG even though it
+    /// contributes to the mean only as a factor.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            InitSpec::Deterministic(e) => vec![e],
+            InitSpec::Count(InitCountLaw::Poisson(l)) => vec![&l.rate.expr],
+            InitSpec::Count(InitCountLaw::Binomial(l)) => vec![&l.n, &l.p.expr],
+            InitSpec::Count(InitCountLaw::NegBinomial(l)) => {
+                vec![&l.mean.expr, &l.dispersion.expr]
+            }
+            InitSpec::Real(InitRealLaw::Normal(l)) => vec![&l.mean.expr, &l.sd.expr],
+        }
+    }
+
+    /// The expression whose value is this compartment's **mean** initial value —
+    /// what the deterministic paths (the ODE skeleton, `render`, the pre-flight
+    /// state) start from, and what the `∂init/∂θ` forward-sensitivity seed
+    /// (`ic_grad`) differentiates.
+    ///
+    /// Owned rather than borrowed because `binomial(n, p)` has mean `n·p`,
+    /// which is not a subexpression of the spec.
+    pub fn mean_expr(&self) -> Expr {
+        match self {
+            InitSpec::Deterministic(e) => e.clone(),
+            InitSpec::Count(InitCountLaw::Poisson(l)) => l.rate.expr.clone(),
+            InitSpec::Count(InitCountLaw::Binomial(l)) => {
+                Expr::bin_op(crate::expr::BinOp::Mul, l.n.clone(), l.p.expr.clone())
+            }
+            InitSpec::Count(InitCountLaw::NegBinomial(l)) => l.mean.expr.clone(),
+            InitSpec::Real(InitRealLaw::Normal(l)) => l.mean.expr.clone(),
+        }
+    }
+
+    /// The distribution keyword, or `None` for a deterministic entry. Used by
+    /// diagnostics that name the law the author wrote.
+    pub fn law_name(&self) -> Option<&'static str> {
+        match self {
+            InitSpec::Deterministic(_) => None,
+            InitSpec::Count(l) => Some(l.name()),
+            InitSpec::Real(l) => Some(l.name()),
+        }
+    }
+
+    /// Whether this entry is drawn (a law) rather than computed (an
+    /// expression). The predicate the sampler, the density and the gradient
+    /// all branch on, so they cannot disagree about which entries are random.
+    pub fn is_law(&self) -> bool { self.law_name().is_some() }
 }
 
 /// One spec per compartment, keyed by expanded compartment name.

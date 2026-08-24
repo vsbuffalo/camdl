@@ -136,7 +136,6 @@ fn dt_rate_density_reads_realized_records_under_exact_clip() {
         &[],
         DT,
         &obs_model,
-        &[],
         &ObsAtSubstep::new(),
     )
     .expect("complete_data_loglik");

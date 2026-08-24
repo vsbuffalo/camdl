@@ -1475,7 +1475,7 @@ let apply_via_rewrite ctx (rw : expr -> expr) : unit =
   ctx.let_bindings <- List.map (fun (lb : let_binding) ->
     { lb with lbody = rw lb.lbody }) ctx.let_bindings;
   ctx.init_entries <- List.map (fun (ie : init_entry) ->
-    { ie with ivalue = rw ie.ivalue }) ctx.init_entries;
+    { ie with ivalue = map_init_value rw ie.ivalue }) ctx.init_entries;
   ctx.balance_decl <- Option.map (fun (bd : balance_decl) ->
     { bd with bexpr = rw bd.bexpr }) ctx.balance_decl;
   ctx.obs_decls <- List.map (fun (od : obs_decl) ->
@@ -1937,11 +1937,32 @@ let lower_via_transitions ctx =
                 hyper-staged unstratified source can carry. *)
           ctx.init_entries <- List.concat_map (fun (ie : init_entry) ->
             if ie.icomp = src && ie.ibindings = [] && ie.iindices = [] then
-              List.map (fun b ->
-                { ie with
-                  icomp   = List.hd (branch_cells b);
-                  ivalue  = EBinOp (Mul, ie.ivalue, weight_of_branch b) })
-                branches
+              match ie.ivalue with
+              | IVExpr v ->
+                List.map (fun b ->
+                  { ie with
+                    icomp   = List.hd (branch_cells b);
+                    ivalue  = IVExpr (EBinOp (Mul, v, weight_of_branch b)) })
+                  branches
+              | IVLaw (l, lloc) ->
+                (* A DRAWN seed cannot be split by branch weight. Scaling a
+                   Poisson rate would be correct (thinning a Poisson gives
+                   independent Poissons), but the same rewrite applied to a
+                   Binomial or a NegBinomial changes the distribution rather
+                   than partitioning it — and one silently-wrong seed of the
+                   three is one too many. Reject, naming the compartment and
+                   the law. *)
+                Diagnostics.error ctx.diags ~code:"E346"
+                  ~loc:(diag_loc_of_ast_ctx ctx lloc)
+                  ~message:(Printf.sprintf
+                    "init '%s' is drawn from `%s`, but '%s' is hyper-staged into \
+                     weighted branches; a drawn seed cannot be split across them"
+                    src (lik_family_name l) src)
+                  ~hint:(Printf.sprintf
+                    "seed the branch first-stage cells directly (one `~` entry \
+                     per branch), or write '%s' as a computed initial value" src)
+                  ();
+                [ ie ]
             else [ ie ]
           ) ctx.init_entries;
 
@@ -6027,14 +6048,171 @@ let build_table_index ctx (tables : Ir.table list) : unit =
 
 (* ── Initial conditions ──────────────────────────────────────────────────── *)
 
-let expand_init ctx =
+(* Lower one `comp ~ D(kw = ...)` init entry to its IR spec.
+
+   [comp] is the EXPANDED cell name, [is_real] its declared kind. Returns
+   [None] when a diagnostic has already fired, in which case the entry is
+   dropped and the compile is aborted by the error. *)
+let init_law_spec ctx ~(comp : string) ~(is_real : bool) ~(loc : Diagnostics.loc)
+    ~(env : (string * string) list) (l : likelihood_kind) : Ir.init_spec option =
+  let family = lik_family_name l in
+  let kwargs = likelihood_kwargs l in
+  (* Reject an argument the family does not have, rather than dropping it — a
+     typo'd `lambda =` on a poisson would otherwise seed the compartment from a
+     missing `rate` with no sign that the author wrote anything. *)
+  let check_no_extra required =
+    List.iter (fun (k, _) ->
+      if k <> "" && not (List.mem k required) then
+        Diagnostics.error ctx.diags ~code:"E251" ~loc
+          ~message:(Printf.sprintf
+            "initial condition '%s ~ %s(...)': `%s` is not an argument of `%s`"
+            comp family k family)
+          ~hint:(Printf.sprintf "expected %s"
+                   (String.concat ", " (List.map (fun r -> r ^ " = <expr>") required)))
+          ()) kwargs
+  in
+  let kw required name =
+    check_no_extra required;
+    match List.assoc_opt name kwargs with
+    | Some e -> Some (normalize_expr (resolve_expr ctx env e))
+    | None ->
+      Diagnostics.error ctx.diags ~code:"E250" ~loc
+        ~message:(Printf.sprintf
+          "initial condition '%s ~ %s(...)': missing required argument '%s'"
+          comp family name)
+        ~hint:(Printf.sprintf "write `%s ~ %s(%s)`" comp family
+                 (String.concat ", " (List.map (fun r -> r ^ " = <expr>") required)))
+        ();
+      None
+  in
+  let diff e : Ir.diffable = { Ir.expr = e; Ir.grad = []; Ir.proj_grad = None } in
+  (* `CompartmentKind` selects the admissible set. A continuous law seeds no
+     count and a count law seeds no reservoir, so the pair is refused here
+     rather than made representable in the IR. *)
+  let kind_mismatch expected =
+    Diagnostics.error ctx.diags ~code:"E344" ~loc
+      ~message:(Printf.sprintf
+        "initial condition '%s ~ %s(...)': `%s` seeds %s, but '%s' is declared %s"
+        comp family family expected comp
+        (if is_real then "real" else "an integer compartment (a count)"))
+      ~hint:(if is_real
+             then "a real compartment is seeded by a continuous law — `normal(mean = .., sd = ..)`"
+             else "an integer compartment is seeded by a count law — `poisson(rate = ..)`, \
+                   `binomial(n = .., p = ..)` or `neg_binomial(mean = .., r = ..)`")
+      ();
+    None
+  in
+  (* gh#719: the Binomial `p` reads its argument as a PROBABILITY. A count or a
+     rate passed there is charged `log(1e-10)` per individual outside the
+     compartment — a large finite offset that no non-finite guard catches. The
+     declared kind is the check; naming the parameter and its kind is what makes
+     the message actionable. *)
+  let check_probability_arg (e : Ir.expr) =
+    match e with
+    | Ir.Param pname ->
+      let declared =
+        List.find_map (fun (pd : param_decl) ->
+          match pd with
+          | PScalar { pname = n; pkind; _ } when n = pname -> Some pkind
+          | PIndexed { pname = n; pkind; _ }
+            when n = pname
+                 || (String.length pname > String.length n
+                     && String.sub pname 0 (String.length n + 1) = n ^ "_") -> Some pkind
+          | _ -> None) ctx.param_decls
+      in
+      (match declared with
+       | Some PProbability | None -> ()
+       | Some k ->
+         Diagnostics.error ctx.diags ~code:"E344" ~loc
+           ~message:(Printf.sprintf
+             "initial condition '%s ~ binomial(...)': `p` is the parameter '%s', \
+              declared `%s`; binomial's `p` is a probability"
+             comp pname (param_kind_to_string k))
+           ~hint:(Printf.sprintf
+             "declare '%s : probability in [0, 1]`, or seed '%s' with a count law \
+              — `poisson(rate = ..)` or `neg_binomial(mean = .., r = ..)`" pname comp)
+           ())
+    | _ -> ()
+  in
+  match l with
+  | LikPoisson _ when is_real -> kind_mismatch "an integer compartment (a count)"
+  | LikBinomial _ when is_real -> kind_mismatch "an integer compartment (a count)"
+  | LikNegBinomial _ when is_real -> kind_mismatch "an integer compartment (a count)"
+  | LikNormal _ when not is_real -> kind_mismatch "a real compartment"
+  | LikPoisson _ ->
+    Option.map (fun rate -> Ir.InitCount (Ir.InitPoisson { Ir.rate = diff rate }))
+      (kw ["rate"] "rate")
+  | LikBinomial _ ->
+    (match kw ["n"; "p"] "n", kw ["n"; "p"] "p" with
+     | Some n, Some pe -> check_probability_arg pe;
+       Some (Ir.InitCount (Ir.InitBinomial { Ir.n; Ir.p = diff pe }))
+     | _ -> None)
+  | LikNegBinomial _ ->
+    (match kw ["mean"; "r"] "mean", kw ["mean"; "r"] "r" with
+     | Some mean, Some r ->
+       Some (Ir.InitCount (Ir.InitNegBinomial { Ir.mean = diff mean;
+                                                Ir.dispersion = diff r }))
+     | _ -> None)
+  | LikNormal _ ->
+    (match kw ["mean"; "sd"] "mean", kw ["mean"; "sd"] "sd" with
+     | Some mean, Some sd ->
+       Some (Ir.InitReal (Ir.InitNormal { Ir.mean = diff mean; Ir.sd = diff sd }))
+     | _ -> None)
+  | LikBetaBinomial _ | LikBeta _ | LikBernoulli _ | LikZeroInflatedNegBinomial _ ->
+    (* The observation vocabulary is wider than the initial-state one on
+       purpose: these three describe a MEASUREMENT of a compartment, not the
+       compartment itself. Enumerating what IS admissible is the useful half of
+       the message. *)
+    Diagnostics.error ctx.diags ~code:"E343" ~loc
+      ~message:(Printf.sprintf
+        "initial condition '%s ~ %s(...)': `%s` is an observation likelihood, \
+         not an initial-state law" comp family family)
+      ~hint:"an integer compartment is seeded by `poisson(rate = ..)`, \
+             `binomial(n = .., p = ..)` or `neg_binomial(mean = .., r = ..)`; a real \
+             compartment by `normal(mean = .., sd = ..)`"
+      ();
+    None
+
+let expand_init ctx ~(comps : Ir.compartment list) =
   (* Hashtbl + queue to implement override-by-source-order: later entries win,
      but insertion order is preserved for deterministic output. *)
-  let tbl   : (string, Ir.expr) Hashtbl.t = Hashtbl.create 64 in
+  let tbl   : (string, Ir.init_spec) Hashtbl.t = Hashtbl.create 64 in
   let order : string Queue.t = Queue.create () in
   let add_entry name value =
     if not (Hashtbl.mem tbl name) then Queue.add name order;
     Hashtbl.replace tbl name value
+  in
+  let real_comps : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun (c : Ir.compartment) ->
+    match c.Ir.kind with Ir.Real -> Hashtbl.replace real_comps c.Ir.name () | Ir.Integer -> ())
+    comps;
+  let balance_target = Option.map (fun (bd : balance_decl) -> bd.bcomp) ctx.balance_decl in
+  (* Resolve one entry's value against [env], emitting the diagnostics a law
+     placement or kind error deserves. *)
+  let spec_of ie env concrete_name : Ir.init_spec option =
+    match ie.ivalue with
+    | IVExpr e -> Some (Ir.Deterministic (normalize_expr (resolve_expr ctx env e)))
+    | IVLaw (l, lloc) ->
+      let loc = diag_loc_of_ast_ctx ctx lloc in
+      (* The balance stage recomputes its target from the declared expression
+         after EVERY substep (`lifecycle.rs`), so a draw placed there never
+         survives to the first scored state: the model would read as stochastic
+         and behave deterministically. *)
+      if balance_target = Some ie.icomp then begin
+        Diagnostics.error ctx.diags ~code:"E345" ~loc
+          ~message:(Printf.sprintf
+            "initial condition '%s ~ %s(...)': '%s' is the `balance { }` target, so \
+             the balance expression overwrites it after every substep and the draw \
+             is discarded"
+            ie.icomp (lik_family_name l) ie.icomp)
+          ~hint:"draw one of the other compartments and let `balance` absorb it, or \
+                 drop the `balance { }` block and write the budget as an init \
+                 expression (`S = N0 - I`, which reads the drawn `I`)"
+          ();
+        None
+      end else
+        init_law_spec ctx ~comp:concrete_name
+          ~is_real:(Hashtbl.mem real_comps concrete_name) ~loc ~env l
   in
   (* gh#114: every emitted init key must name a real expanded compartment.
      `expand_init` previously emitted a bare/concatenated key with no check,
@@ -6094,8 +6272,9 @@ let expand_init ctx =
           String.concat "_" (ie.icomp :: idx_vals)
       in
       check_membership ie concrete_name;
-      let resolved = normalize_expr (resolve_expr ctx [] ie.ivalue) in
-      add_entry concrete_name resolved
+      (match spec_of ie [] concrete_name with
+       | Some spec -> add_entry concrete_name spec
+       | None -> ())
     end else begin
       (* Loop binding form *)
       let combos =
@@ -6107,8 +6286,9 @@ let expand_init ctx =
           else ie.icomp ^ "_" ^ String.concat "_" parts
         in
         check_membership ie concrete_name;
-        let resolved = normalize_expr (resolve_expr ctx env ie.ivalue) in
-        add_entry concrete_name resolved
+        (match spec_of ie env concrete_name with
+         | Some spec -> add_entry concrete_name spec
+         | None -> ())
       ) combos
     end
   ) ctx.init_entries;
@@ -6118,7 +6298,7 @@ let expand_init ctx =
      parameterized entry) unrepresentable, and made the emitted shape depend on
      a whole-block property rather than on the entry itself. *)
   Queue.fold (fun acc name ->
-    acc @ [(name, Ir.Deterministic (Hashtbl.find tbl name))]
+    acc @ [(name, Hashtbl.find tbl name)]
   ) [] order
 
 (* ── Simulate / output ───────────────────────────────────────────────────── *)
@@ -8436,16 +8616,7 @@ let expand_observations ctx =
          E250 — missing required kwarg (or only positional args supplied)
          E251 — unknown kwarg name (typo / wrong distribution)
        Mirrors E231/E233 on priors. *)
-    let lik_name = match lik_v with
-      | LikNegBinomial _  -> "neg_binomial"
-      | LikPoisson _      -> "poisson"
-      | LikNormal _       -> "normal"
-      | LikBinomial _     -> "binomial"
-      | LikBetaBinomial _ -> "beta_binomial"
-      | LikBeta _         -> "beta"
-      | LikBernoulli _    -> "bernoulli"
-      | LikZeroInflatedNegBinomial _ -> "zero_inflated_neg_binomial"
-    in
+    let lik_name = lik_family_name lik_v in
     let required_kwargs = match lik_v with
       | LikNegBinomial _  -> ["mean"; "r"]
       | LikPoisson _      -> ["rate"]
@@ -9602,8 +9773,10 @@ let check_no_shadowing ctx =
       (loop_vars_of_indices lb.lindices) lb.lbody
   ) ctx.let_bindings;
   List.iter (fun (ie : init_entry) ->
-    walk (Printf.sprintf "init '%s'" ie.icomp)
-      (loop_vars_of_indices ie.ibindings) ie.ivalue
+    List.iter
+      (walk (Printf.sprintf "init '%s'" ie.icomp)
+         (loop_vars_of_indices ie.ibindings))
+      (init_value_exprs ie.ivalue)
   ) ctx.init_entries;
   List.iter (fun (od : obs_decl) ->
     let decl = Printf.sprintf "observation '%s'" od.oname in
@@ -9882,8 +10055,10 @@ let check_surface_time_typing ctx =
 
   (* ── init values ────────────────────────────────────────────────────── *)
   List.iter (fun (ie : init_entry) ->
-    walk_expr_rule1 ~loc:(diag_loc_of_ast_ctx ctx ie.iloc)
-      ~context:(Printf.sprintf "init '%s'" ie.icomp) ie.ivalue
+    List.iter
+      (walk_expr_rule1 ~loc:(diag_loc_of_ast_ctx ctx ie.iloc)
+         ~context:(Printf.sprintf "init '%s'" ie.icomp))
+      (init_value_exprs ie.ivalue)
   ) ctx.init_entries;
 
   (* ── simulate block: Rule 1 walk + bare-numeric W324 ────────────────── *)
@@ -11066,7 +11241,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.parameters         = expand_parameters ctx;
     Ir.bindings           = [];   (* filled below from ctx.hoisted_rev once all resolution is done *)
     Ir.per_eval_bindings  = [];   (* gh#272 LICM: empty until the LICM pass runs (post-autodiff) *)
-    Ir.initial_conditions = expand_init ctx;
+    Ir.initial_conditions = expand_init ctx ~comps:expanded_comps;
     Ir.ic_grad            = [];
     Ir.output             = expand_output ctx;
     Ir.simulation         = expand_simulate ctx;

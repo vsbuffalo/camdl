@@ -98,6 +98,27 @@ pub enum ValidationError {
             .0.iter().chain(.0.first()).cloned().collect::<Vec<_>>().join(" -> "))]
     InitialConditionCycle(Vec<String>),
 
+    /// E344 in the OCaml frontend. `CompartmentKind` selects which laws an
+    /// `init {}` entry may draw from — a count law seeds an integer
+    /// compartment, a continuous law seeds a real one — so this pair is an
+    /// illegal state that only a hand-written or drifted IR can reach.
+    #[error("initial condition '{compartment}' is drawn from `{law}`, which seeds \
+             {expected}; '{compartment}' is not one. A count law (poisson, binomial, \
+             neg_binomial) seeds an integer compartment and a continuous law (normal) \
+             seeds a real one")]
+    InitLawKindMismatch { compartment: String, law: String, expected: &'static str },
+
+    /// E345 in the OCaml frontend. The balance stage recomputes its target from
+    /// the declared expression after every substep, so a draw placed there is
+    /// overwritten before the first step is scored — the model would look
+    /// stochastic and behave deterministically.
+    #[error("initial condition '{0}' is drawn from a law, but '{0}' is the \
+             `balance {{ }}` target: the balance expression overwrites it after every \
+             substep, so the draw is discarded. Draw one of the other compartments \
+             instead, or drop the `balance {{ }}` block and write the budget as an \
+             init expression")]
+    InitLawOnBalanceTarget(String),
+
     #[error("quantity '{quantity}' uses '{leaf}', which is only meaningful inside a \
              transition rate or a likelihood, not in a quantity (a quantity is read at \
              output cadence over a finished trajectory). Reachable directly or via a \
@@ -372,8 +393,41 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
         };
         for (k, spec) in &model.initial_conditions {
             check_init_key(k, &mut errors);
-            let InitSpec::Deterministic(e) = spec;
-            check_expr(e, &ctx, false, &mut errors);
+            for e in spec.exprs() {
+                check_expr(e, &ctx, false, &mut errors);
+            }
+            // A law's admissible set is selected by the compartment's kind: a
+            // continuous law seeds no count, and a count law seeds no
+            // reservoir. The OCaml frontend reports this with a located E344;
+            // this is the contract-boundary net, so a hand-written or drifted
+            // IR cannot start an integer compartment from a Normal.
+            match spec {
+                InitSpec::Deterministic(_) => {}
+                InitSpec::Count(law) => {
+                    if comp_names.contains(k.as_str()) && !int_comps.contains(k.as_str()) {
+                        errors.push(ValidationError::InitLawKindMismatch {
+                            compartment: k.clone(),
+                            law: law.name().to_string(),
+                            expected: "an integer compartment",
+                        });
+                    }
+                }
+                InitSpec::Real(law) => {
+                    if comp_names.contains(k.as_str()) && int_comps.contains(k.as_str()) {
+                        errors.push(ValidationError::InitLawKindMismatch {
+                            compartment: k.clone(),
+                            law: law.name().to_string(),
+                            expected: "a real compartment",
+                        });
+                    }
+                }
+            }
+            // A law on the `balance {}` target is discarded: the balance stage
+            // overwrites its compartment after every substep, so the draw never
+            // survives to t=0+dt. Mirrors E345 in the OCaml frontend.
+            if spec.is_law() && model.balance.as_ref().is_some_and(|b| &b.target == k) {
+                errors.push(ValidationError::InitLawOnBalanceTarget(k.clone()));
+            }
             // A literal (or arithmetic over literals) still has a static value,
             // and the range checks above are the only thing standing between a
             // typo and a model that starts in a negative or fractional
@@ -381,8 +435,15 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
             // reaches a constant entry sitting beside a parameterized one — the
             // mixed block that the old whole-block `Explicit`/`Parameterized`
             // split could not express, and therefore never range-checked.
-            if let Some(v) = const_fold(e) {
-                check_init_value(k, v, &mut errors);
+            //
+            // Only for a DETERMINISTIC entry. A law's mean is not the value the
+            // compartment starts at — a `poisson(rate = 0.4)` seed is a legal
+            // draw of 0 or 1 whose mean is fractional, so range-checking the
+            // mean would reject a well-formed model.
+            if let InitSpec::Deterministic(e) = spec {
+                if let Some(v) = const_fold(e) {
+                    check_init_value(k, v, &mut errors);
+                }
             }
         }
 

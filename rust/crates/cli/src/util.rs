@@ -3520,19 +3520,22 @@ pub fn run_simulation_event_log(
     let t_start = model.simulation.t_start;
     let t_end = model.simulation.t_end;
 
-    // Seed the recorder's initial-pool table from the t=0 state. Pre-flight
-    // sizing, before any backend runs — the mean, not a draw: this call must
-    // not consume from (or diverge from) the simulation's own RNG stream, which
-    // the backend below seeds from `run.seed`.
+    // Seed the recorder's initial-pool table from the state the RUN starts in.
     //
-    // NOTE for the initial-state laws (proposal
-    // 2026-08-23-initial-state-parameters.md, staging step 4): once `init {}`
-    // can declare a law, the backend's `initial_state_draw` will no longer
-    // equal this mean, and the recorder would be seeded from a state the run
-    // never occupied. The fix then is to hand the recorder the backend's drawn
-    // x₀ rather than to re-derive one here.
+    // The recorder must exist before the backend does, so this reproduces the
+    // backend's own draw rather than reading it back: both backends below
+    // construct `StatefulRng::new(seed)` and immediately call
+    // `initial_state_draw`, so an independently constructed generator at the
+    // same seed yields the same x₀ and consumes nothing from theirs. Taking the
+    // MEAN instead would seed the recorder from a state the run never occupied
+    // for any model whose `init {}` declares a law.
+    //
+    // The duplication of that seeding convention is checked, not assumed: the
+    // assertion after the run compares this x₀ against the trajectory's own
+    // t_start snapshot and fails loudly if the two ever diverge.
+    let mut init_rng = sim::rng::StatefulRng::new(run.seed);
     let (initial_int, _initial_real) = compiled
-        .initial_state_mean(&params)
+        .initial_state_draw(&params, &mut init_rng)
         .map_err(|e| format!("initial state error: {:?}", e))?;
     let mut recorder = EventRecorder::new(&compiled, &initial_int)
         .map_err(|e| format!("event recorder init error: {:?}", e))?;
@@ -3554,6 +3557,22 @@ pub fn run_simulation_event_log(
         ForwardBackend::Ode => unreachable!("ODE rejected above"),
     }
     .map_err(|e| format!("simulation error: {:?}", e))?;
+
+    // The recorder's initial pool was built from a reproduction of the
+    // backend's initial draw (see above). Check it against the state the
+    // backend actually started in, so a change to either backend's RNG
+    // construction order surfaces here rather than as a lineage tree rooted in
+    // a population that never existed.
+    if let Some(first) = traj.snapshots.first() {
+        if first.t == t_start && first.int_state.counts != initial_int.counts {
+            return Err(format!(
+                "internal error: the lineage recorder's initial pool does not match \
+                 the run's own t={} state ({:?} vs {:?}). The `--event-log` path \
+                 reproduces the backend's initial draw from `run.seed`; a backend \
+                 that changed how it constructs its RNG has broken that.",
+                t_start, initial_int.counts, first.int_state.counts));
+        }
+    }
 
     let exact = matches!(run.backend, ForwardBackend::Gillespie);
     let event_log = recorder.into_event_log();

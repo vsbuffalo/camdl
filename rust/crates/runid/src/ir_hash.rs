@@ -40,7 +40,8 @@ use ir::intervention::{
     TriggerQuantity, TriggerThreshold,
 };
 use ir::model::{
-    BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitSpec, InitialConditions,
+    BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitCountLaw, InitRealLaw,
+    InitSpec, InitialConditions,
     Model, ModelStructure, OutputConfig, OutputSchedule, Preset, RegularOutputSchedule,
     SimulationConfig,
 };
@@ -1091,6 +1092,50 @@ impl ContentAddressed for Compartment {
     }
 }
 
+impl ContentAddressed for InitCountLaw {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::model::InitCountLaw");
+        // Variant index (declaration order — permanent, new variants append).
+        h.write_u32(match self {
+            InitCountLaw::Poisson(_) => 0,
+            InitCountLaw::Binomial(_) => 1,
+            InitCountLaw::NegBinomial(_) => 2,
+        });
+        // The θ-independent `n` (Binomial) carries no gradient, so it is not a
+        // `Diffable` and the derived traversal below cannot see it — hash it
+        // explicitly, or two models differing only in their number of trials
+        // would share a run_id. Exhaustive (no `_` arm) so a new law whose
+        // argument is a bare `Expr` is a compile error here, not a silent
+        // omission (gh#734).
+        match self {
+            InitCountLaw::Binomial(l) => l.n.hash_into(h),
+            InitCountLaw::Poisson(_) | InitCountLaw::NegBinomial(_) => {}
+        }
+        // Every differentiable position, in declaration order, via the derived
+        // traversal — a new argument is hashed automatically.
+        for (_, d) in self.diffables() {
+            d.hash_into(h);
+        }
+    }
+}
+
+impl ContentAddressed for InitRealLaw {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::model::InitRealLaw");
+        h.write_u32(match self {
+            InitRealLaw::Normal(_) => 0,
+        });
+        // No bare-`Expr` argument in any variant; exhaustive so adding one is a
+        // compile error (gh#734).
+        match self {
+            InitRealLaw::Normal(_) => {}
+        }
+        for (_, d) in self.diffables() {
+            d.hash_into(h);
+        }
+    }
+}
+
 impl ContentAddressed for InitSpec {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::model::InitSpec");
@@ -1098,6 +1143,14 @@ impl ContentAddressed for InitSpec {
             InitSpec::Deterministic(e) => {
                 h.write_u32(0);
                 e.hash_into(h);
+            }
+            InitSpec::Count(law) => {
+                h.write_u32(1);
+                law.hash_into(h);
+            }
+            InitSpec::Real(law) => {
+                h.write_u32(2);
+                law.hash_into(h);
             }
         }
     }

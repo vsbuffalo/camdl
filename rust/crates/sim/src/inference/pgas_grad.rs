@@ -17,8 +17,7 @@ use crate::resolved_expr::{eval_resolved, eval_emitted_grad, eval_deriv_entry, R
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{binom_logpmf, digamma, gamma_multiplier_log_density};
 use crate::inference::numerics::BINOM_PROB_EPS;
-use crate::inference::types::PROB_FRACTION_EPS;
-use crate::inference::pgas::{PGASTrajectory, IVPMapping, OVERDISP_SIGMA_SQ_FLOOR};
+use crate::inference::pgas::{PGASTrajectory, OVERDISP_SIGMA_SQ_FLOOR};
 use crate::inference::particle_filter::Observation;
 
 /// Build a run-specific rate-gradient table re-keyed to estimated-param indices.
@@ -409,7 +408,8 @@ fn gamma_density_value_and_grad_substep(
 /// Gradient of the complete-data log-likelihood over all substeps.
 ///
 /// Returns (log_p, grad) summed over four terms (all wired as of gh#76):
-/// 1. Initial-state Binom density gradient (IVP params).
+/// 1. Initial-state density and its gradient, from the laws the model
+///    DECLARES (`init { I ~ poisson(rate = I0) }`), through the shared seam.
 /// 2. Transition rate-density gradient (via compiler-emitted `rate_grad` and
 ///    the binomial-chain-rule machinery in `log_transition_density_grad`).
 /// 3. Gamma-multiplier-density gradient w.r.t. σ² (gh#20) — chain rule through
@@ -429,7 +429,6 @@ pub fn complete_data_loglik_grad(
     _observations: &[Observation],
     dt: f64,
     obs_model: &super::multi_stream_obs::MultiStreamObsModel,
-    ivp_mappings: &[IVPMapping],
     d: usize,
     rate_grads_for_run: &[ResolvedGradMap],
     obs_at_substep: &super::pgas::ObsAtSubstep,
@@ -449,19 +448,21 @@ pub fn complete_data_loglik_grad(
     let mut log_p = 0.0;
     let mut grad = vec![0.0; d];
 
-    // Initial state density gradient: d/dθ log Binom(S₀; N₀, s0)
-    // N₀ is the per-patch population (not global) for stratified models.
-    if !ivp_mappings.is_empty() {
-        for ivp in ivp_mappings {
-            let count = trajectory.initial_counts[ivp.compartment_idx] as u64;
-            let frac = params[ivp.model_param_idx].clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
-            let patch_pop = super::pgas::patch_population(model, &trajectory.initial_counts, ivp.compartment_idx);
-            log_p += binom_logpmf(count, patch_pop as u64, frac);
-
-            // d/d(frac) log Binom(count; N, frac) = count/frac - (N-count)/(1-frac)
-            let dbinom_dfrac = count as f64 / frac
-                - (patch_pop as u64 - count) as f64 / (1.0 - frac);
-            grad[ivp.param_idx] += dbinom_dfrac;
+    // Initial-state density AND its gradient, from the SAME seam the value path
+    // (`complete_data_loglik`) and the sampler (`csmc_as`) use. A law is a
+    // sampler and a density and a gradient; taking two of the three from one
+    // place and the third from another is how NUTS ends up with a gradient
+    // identically zero on a coordinate the energy does depend on.
+    //
+    // `initial_state_logpdf_grad` is indexed by MODEL parameter; the NUTS
+    // basis is the estimated set, so map it through `estimated_to_model` here
+    // (the same projection the observation and σ² terms use below).
+    {
+        log_p += model.initial_state_logpdf(&trajectory.initial_counts, &[], params)?;
+        let init_grad =
+            model.initial_state_logpdf_grad(&trajectory.initial_counts, &[], params)?;
+        for (i, &model_idx) in estimated_to_model.iter().enumerate() {
+            grad[i] += init_grad[model_idx];
         }
     }
 

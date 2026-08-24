@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
-use sim::inference::pgas::{IVPMapping, simulate_reference, complete_data_loglik, build_obs_at_substep};
+use sim::inference::pgas::{simulate_reference, complete_data_loglik, build_obs_at_substep};
 use sim::inference::pgas_grad::complete_data_loglik_grad;
 use sim::inference::MultiStreamObsModel;
 use sim::inference::particle_filter::Observation;
@@ -70,7 +70,6 @@ fn test_gradient_vs_finite_differences_sir() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
-    let ivp_mappings: Vec<IVPMapping> = vec![];
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
 
@@ -80,8 +79,7 @@ fn test_gradient_vs_finite_differences_sir() {
     let estimated_to_model: Vec<usize> = (0..n_params).collect();
     let (ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings,
-        n_params, &rate_grads_for_run, &oas,
+        &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
     ).unwrap();
 
@@ -99,11 +97,11 @@ fn test_gradient_vs_finite_differences_sir() {
 
         let ll_plus = complete_data_loglik(
             &compiled, &trajectory, &p_plus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
         let ll_minus = complete_data_loglik(
             &compiled, &trajectory, &p_minus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
 
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
@@ -190,7 +188,6 @@ fn test_gradient_vs_finite_differences_spatial_bindings() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
     // gh#76: complete_data_loglik_grad gained estimated_to_model (estimated→model
@@ -199,8 +196,7 @@ fn test_gradient_vs_finite_differences_spatial_bindings() {
 
     let (ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings,
-        n_params, &rate_grads_for_run, &oas,
+        &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
     ).unwrap();
     eprintln!("  log-likelihood: {:.4}", ll);
@@ -217,11 +213,11 @@ fn test_gradient_vs_finite_differences_spatial_bindings() {
 
         let ll_plus = complete_data_loglik(
             &compiled, &trajectory, &p_plus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
         let ll_minus = complete_data_loglik(
             &compiled, &trajectory, &p_minus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
 
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
@@ -319,15 +315,13 @@ fn test_gradient_vs_finite_differences_meanfield_coupling() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
     let estimated_to_model: Vec<usize> = (0..n_params).collect();
 
     let (ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings,
-        n_params, &rate_grads_for_run, &oas,
+        &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
     ).unwrap();
     assert!(ll.is_finite(), "complete-data LL must be finite");
@@ -335,8 +329,8 @@ fn test_gradient_vs_finite_differences_meanfield_coupling() {
     // FD ground truth for the rate-flowing parameters. gamma flows through the
     // recovery transition (unaffected by the fold); beta flows through the
     // folded infection gradient. N0/I0 parameterize the initial conditions — an
-    // orthogonal IVP-gradient path (ic_grad), not exercised here (empty
-    // ivp_mappings), so they are not asserted.
+    // orthogonal initial-condition gradient path (ic_grad); this fixture's
+    // `init {}` is deterministic, so they are not asserted.
     let rate_params = ["beta", "gamma"];
     let eps = 1e-5;
     let mut checked = 0;
@@ -349,11 +343,11 @@ fn test_gradient_vs_finite_differences_meanfield_coupling() {
 
         let ll_plus = complete_data_loglik(
             &compiled, &trajectory, &p_plus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
         let ll_minus = complete_data_loglik(
             &compiled, &trajectory, &p_minus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
 
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
@@ -406,7 +400,6 @@ fn test_nuts_target_gradient_on_z_scale() {
     let trajectory = simulate_reference(&compiled, &[0.4, 0.1, 1000.0, 10.0], t_end, dt, &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
 
@@ -457,8 +450,7 @@ fn test_nuts_target_gradient_on_z_scale() {
 
         let (ll, ll_grad_theta) = sim::inference::pgas_grad::complete_data_loglik_grad(
             &compiled, &trajectory, &params, &observations, dt,
-            &obs_model, &ivp_mappings,
-            d_nuts, &rate_grads_for_run_nuts, &oas,
+            &obs_model, d_nuts, &rate_grads_for_run_nuts, &oas,
             &estimated_to_model_nuts,
         ).unwrap_or((f64::NEG_INFINITY, vec![0.0; d_nuts]));
 
@@ -628,7 +620,6 @@ fn test_gradient_vs_finite_differences_seasonal() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
 
@@ -642,8 +633,7 @@ fn test_gradient_vs_finite_differences_seasonal() {
     // Analytic gradient (the rate-density gradient NUTS consumes).
     let (ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings,
-        n_params, &rate_grads_for_run, &oas,
+        &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
     ).unwrap();
     assert!(ll.is_finite(), "seasonal complete-data LL must be finite");
@@ -669,11 +659,11 @@ fn test_gradient_vs_finite_differences_seasonal() {
 
         let ll_plus = complete_data_loglik(
             &compiled, &trajectory, &p_plus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
         let ll_minus = complete_data_loglik(
             &compiled, &trajectory, &p_minus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
 
@@ -739,7 +729,6 @@ fn test_gradient_vs_finite_differences_lagged_forcing() {
     let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
 
@@ -752,8 +741,7 @@ fn test_gradient_vs_finite_differences_lagged_forcing() {
 
     let (ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings,
-        n_params, &rate_grads_for_run, &oas,
+        &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
     ).unwrap();
     assert!(ll.is_finite(), "lagged complete-data LL must be finite");
@@ -776,11 +764,11 @@ fn test_gradient_vs_finite_differences_lagged_forcing() {
 
         let ll_plus = complete_data_loglik(
             &compiled, &trajectory, &p_plus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
         let ll_minus = complete_data_loglik(
             &compiled, &trajectory, &p_minus, &observations, dt,
-            &obs_model, &ivp_mappings, &oas,
+            &obs_model, &oas,
         ).unwrap().total;
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
 

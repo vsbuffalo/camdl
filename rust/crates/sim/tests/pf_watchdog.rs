@@ -525,6 +525,9 @@ impl ProcessModel for CountingProcess {
         Ok(ParticleState::new(self.n_int, self.n_tr, 0))
     }
 
+    /// A hand-built process, so there is no `init { }` block and no law.
+    fn declares_init_law(&self) -> bool { false }
+
     fn step(
         &self,
         _state: &mut ParticleState,

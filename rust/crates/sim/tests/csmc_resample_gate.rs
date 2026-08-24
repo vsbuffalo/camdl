@@ -150,7 +150,6 @@ fn sweep(f: &Fixture, seed: u64) -> (PGASTrajectory, sim::inference::pgas::CSMCD
         16,
         DT,
         &f.obs_model,
-        &[],
         seed,
         &f.obs_at_substep,
         EffectFiring::default(),

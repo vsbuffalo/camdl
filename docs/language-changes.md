@@ -13,6 +13,56 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-24 — `init { }` accepts `~`: an initial condition may be DRAWN
+
+**What.** `init { }` used to accept only `compartment = expr`. It now also
+accepts `compartment ~ D(kw = ...)`, which says the compartment starts at a draw
+from `D` rather than at a computed value:
+
+```
+init {
+  I ~ poisson(rate = I0)   # the number introduced is a draw around I0
+  S = N0 - I               # reads the DRAWN I, so S + I = N0 on every draw
+}
+```
+
+Nothing about `=` changed, and no existing model needs to move.
+
+The admissible laws are chosen by the compartment's kind: an integer compartment
+by `poisson(rate = ..)`, `binomial(n = .., p = ..)` or
+`neg_binomial(mean = .., r = ..)`; a `: real` compartment by
+`normal(mean = .., sd = ..)`. The entries are evaluated in dependency order, so
+a deterministic entry reads what the laws above it drew.
+
+**Migration.** None required. Where a model previously wrote a point estimate of
+an introduction size (`init { I = I0 }`) and let the filter absorb the
+uncertainty, `I ~ poisson(rate = I0)` states that uncertainty instead — and
+under `pgas` the law's parameters are then estimated with `log p(x₀ | θ)` in the
+target, reported per sweep in the trace's new `initial_state_ll` column.
+
+**Diagnostics.**
+
+- `E343` — the named distribution is an observation likelihood, not an
+  initial-state law (`bernoulli`, `beta`, `beta_binomial`). Those describe a
+  measurement of a compartment, not the compartment itself.
+- `E344` — the law does not match the compartment's kind (a `normal` on an
+  integer compartment, a count law on a `: real` one), or `binomial`'s `p` names
+  a parameter whose declared kind is not `probability`.
+- `E345` — a law on the `balance { }` target. The balance stage overwrites its
+  compartment after every substep, so the draw would be discarded.
+- `E346` — a law on a compartment that `via hyper_erlang(...)` splits into
+  weighted branches. Seed the branch first-stage cells directly instead.
+
+**Also.** PGAS no longer INFERS an initial-state density. It used to attach a
+Binomial term to whichever compartment a finite-difference probe found moving
+with an estimated parameter — a decision that depended on the chain's starting
+draw, so two chains of one fit could carry different targets (gh#719). That
+probe is gone: the term is declared or it does not exist. A fit run before this
+change on a model where the probe fired is **not numerically comparable** to one
+run after it.
+
+---
+
 ## 2026-08-20 — `incidence(...)` takes exactly one transition; add flows with `+`
 
 **What.** A projection head `incidence(...)` names one flow. Giving it several

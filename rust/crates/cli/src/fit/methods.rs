@@ -574,12 +574,13 @@ pub fn resolve_obs_alignment(
 /// Property 2 is why `pfilter` and plain `pmmh` are refused (gh#732): both run
 /// the bootstrap particle filter, which makes ONE call to
 /// `initial_state_draw` and copies the result to every particle
-/// (`particle_filter.rs` → `p.counts.copy_from_slice`). The initial-state seam
-/// split (mean/draw/logpdf/logpdf_grad) did not change that: no `init {}` entry
-/// can declare a law yet, so the draw is still deterministic and the swarm
-/// still has zero spread at t=0. These two cells satisfy property 1 and fail
-/// property 2, so they passed the old check and then did the exact thing it
-/// existed to prevent.
+/// (`particle_filter.rs` → `p.counts.copy_from_slice`). Neither the
+/// initial-state seam split nor the declared `init {}` laws changed that: the
+/// bootstrap filter still evaluates ONE initial state and copies it, so the
+/// swarm still has zero spread at t=0 (a model that DECLARES a law is refused
+/// outright by `bootstrap_filter` for the same reason). These two cells satisfy
+/// property 1 and fail property 2, so they passed the old check and then did
+/// the exact thing it existed to prevent.
 ///
 /// Property 1 is why the rest are refused:
 ///

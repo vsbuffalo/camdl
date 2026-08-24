@@ -29,7 +29,6 @@ use std::collections::HashSet;
 
 use ir::deriv::DerivEntry;
 use ir::expr::Expr;
-use ir::model::InitSpec;
 use ir::observation::{Likelihood, Projection};
 use ir::time_func::TimeFuncKind;
 use ir::transition::DrawMethod;
@@ -332,8 +331,12 @@ pub fn ic_coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<Stri
     }
     let mut ic_forcings = HashSet::new();
     let mut ic_tables = HashSet::new();
-    for (_, InitSpec::Deterministic(e)) in &model.initial_conditions {
-        collect_forcing_table_refs(e, &mut ic_forcings, &mut ic_tables);
+    for (_, spec) in &model.initial_conditions {
+        // EVERY expression the spec evaluates, not just the mean: a law's `n`
+        // or `sd` reaching a forcing is the same silent-zero coefficient.
+        for e in spec.exprs() {
+            collect_forcing_table_refs(e, &mut ic_forcings, &mut ic_tables);
+        }
     }
     let mut obs_forcings = HashSet::new();
     let mut obs_tables = HashSet::new();
@@ -363,8 +366,10 @@ pub fn ic_coefficient_only_estimated(model: &ir::Model, estimated: &HashSet<Stri
     for o in &model.observations {
         collect_likelihood(&o.likelihood, &mut body);
     }
-    for (_, InitSpec::Deterministic(e)) in &model.initial_conditions {
-        collect(e, &mut body);
+    for (_, spec) in &model.initial_conditions {
+        for e in spec.exprs() {
+            collect(e, &mut body);
+        }
     }
 
     let mut coeff = HashSet::new();

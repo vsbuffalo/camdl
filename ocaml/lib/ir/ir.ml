@@ -728,13 +728,40 @@ let param_hierarchical (p : parameter) : hierarchical_prior option =
 
 (* ── Initial conditions ──────────────────────────────────────────────────────── *)
 
+(** A law an INTEGER compartment's initial count is drawn from.
+
+    The argument records are the OBSERVATION ones ([poisson_likelihood] and
+    friends), reused deliberately — but NOT the [likelihood] variant, which
+    would make `bernoulli` or `beta` on a count compartment representable.
+    Each argument is a [diffable]: the expression together with its
+    per-parameter classified ∂arg/∂θ from the autodiff pass, which is what
+    makes a law's density gradient correct by construction rather than by hand.
+    [binomial_likelihood.n] is a bare expr — θ-independent, no gradient. *)
+type init_count_law =
+  | InitPoisson     of poisson_likelihood
+  | InitBinomial    of binomial_likelihood
+  | InitNegBinomial of neg_binomial_likelihood
+
+(** A law a REAL compartment's initial value is drawn from. Two enums rather
+    than one, so the compartment kind selects the admissible set at
+    construction: a continuous law seeds no count and a count law seeds no
+    reservoir. *)
+type init_real_law =
+  | InitNormal of normal_likelihood
+
 (** What one compartment's initial value is.
 
     [Deterministic e] is `S = N0 - I`: an expression over constants, parameters
     and other compartments' initial values. Whether [e] happens to be constant
-    is a runtime build detail, not a distinction the IR draws. *)
+    is a runtime build detail, not a distinction the IR draws.
+
+    [InitCount l] is `I ~ poisson(rate = I0)` — the compartment is DRAWN from
+    [l] at t_start, once per particle. [InitReal l] is the same for a real
+    compartment. *)
 type init_spec =
   | Deterministic of expr
+  | InitCount     of init_count_law
+  | InitReal      of init_real_law
 
 (** One spec per compartment, in declaration order.
 
@@ -743,6 +770,41 @@ type init_spec =
     of the model's identity. The association list carries that order; the Rust
     side is an [IndexMap] over the same JSON object. *)
 type initial_conditions = (string * init_spec) list
+
+(** Every expression a spec evaluates, in argument order.
+
+    Dependency extraction walks ALL of them, not just the mean: a
+    `binomial(n = N0 - R, p = q)` reads `R`'s seeded value through `n`, so `n`
+    is a real edge in the init DAG. *)
+let init_spec_exprs (s : init_spec) : expr list =
+  match s with
+  | Deterministic e -> [e]
+  | InitCount (InitPoisson l) -> [l.rate.expr]
+  | InitCount (InitBinomial l) -> [l.n; l.p.expr]
+  | InitCount (InitNegBinomial l) -> [l.mean.expr; l.dispersion.expr]
+  | InitReal (InitNormal l) -> [l.mean.expr; l.sd.expr]
+
+(** The expression whose value is this compartment's MEAN initial value — what
+    the deterministic paths (the ODE skeleton, render, the pre-flight state)
+    start from, and what the ∂init/∂θ forward-sensitivity seed [ic_grad]
+    differentiates. `binomial(n, p)` has mean `n * p`, which is not a
+    subexpression of the spec, so this constructs rather than selects. *)
+let init_spec_mean_expr (s : init_spec) : expr =
+  match s with
+  | Deterministic e -> e
+  | InitCount (InitPoisson l) -> l.rate.expr
+  | InitCount (InitBinomial l) -> BinOp { op = Mul; left = l.n; right = l.p.expr }
+  | InitCount (InitNegBinomial l) -> l.mean.expr
+  | InitReal (InitNormal l) -> l.mean.expr
+
+(** The distribution keyword, or [None] for a deterministic entry. *)
+let init_spec_law_name (s : init_spec) : string option =
+  match s with
+  | Deterministic _ -> None
+  | InitCount (InitPoisson _) -> Some "poisson"
+  | InitCount (InitBinomial _) -> Some "binomial"
+  | InitCount (InitNegBinomial _) -> Some "neg_binomial"
+  | InitReal (InitNormal _) -> Some "normal"
 
 (* ── Output ──────────────────────────────────────────────────────────────────── *)
 

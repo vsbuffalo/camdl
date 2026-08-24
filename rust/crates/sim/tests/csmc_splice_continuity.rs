@@ -129,7 +129,6 @@ fn csmc_returns_a_continuous_path() {
             32,
             DT,
             &obs_model,
-            &[],
             SEED + seed,
             &obs_at_substep,
             EffectFiring::default(),

@@ -83,6 +83,9 @@ impl ProcessModel for ThetaStampProcess {
     ) -> Result<ParticleState, SimError> {
         Ok(ParticleState::new(1, 1, 0))
     }
+
+    /// A hand-built process, so there is no `init { }` block and no law.
+    fn declares_init_law(&self) -> bool { false }
     fn step(
         &self,
         state: &mut ParticleState,

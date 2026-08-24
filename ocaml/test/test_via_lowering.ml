@@ -108,6 +108,8 @@ let init_const (s : Ir.init_spec) : float =
   match s with
   | Ir.Deterministic (Ir.Const v) -> v
   | Ir.Deterministic _ -> Alcotest.fail "expected a constant initial condition"
+  | Ir.InitCount _ | Ir.InitReal _ ->
+    Alcotest.fail "expected a constant initial condition, got a drawn one"
 
 let init_consts (ic : Ir.initial_conditions) : (string * float) list =
   List.map (fun (k, s) -> (k, init_const s)) ic

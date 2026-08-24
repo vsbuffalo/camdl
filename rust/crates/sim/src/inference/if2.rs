@@ -459,22 +459,17 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         //
         // Seam: `ProcessModel::initial_state_draw` is the existing producer of
         // x₀ and was already the one being called; the fix is to route each
-        // particle through it rather than the swarm mean. PGAS's per-particle
-        // `Binomial(N₀, θ)` draw (`pgas.rs::csmc_as`) is deliberately NOT
-        // reused: it exists because PGAS needs a tractable initial-state
-        // *density* p(x₀|θ) for the complete-data likelihood, it is built from
-        // `IVPMapping`s that finite-difference a `&CompiledModel` (which
-        // `ProcessModel` only optionally exposes), and it would add Monte-Carlo
-        // variance that Algorithm 1 does not ask for. IF2 needs a draw, not a
-        // density. pomp agrees: `mif2_pfilter` calls
-        // `rinit(object, params=tparams)` on the per-particle perturbed
-        // parameter matrix.
+        // particle through it rather than the swarm mean. IF2 needs a DRAW, not
+        // a density — the initial-state density `log p(x₀ | θ)` belongs to
+        // PGAS's complete-data target and has no place in Algorithm 1. pomp
+        // agrees: `mif2_pfilter` calls `rinit(object, params=tparams)` on the
+        // per-particle perturbed parameter matrix.
         //
         // Each particle draws from its OWN stream `rngs[j]`, which is the
-        // spread `ic_free` requires. `initial_state_draw` consumes nothing
-        // today (no `init {}` entry can declare a law), so the streams the
-        // propagation loop reads are unchanged; when a law lands, IF2 gets
-        // per-particle initial-state spread here with no further change.
+        // spread `ic_free` requires. For a deterministic `init {}`
+        // `initial_state_draw` consumes nothing, so those streams are unchanged;
+        // for a model whose `init {}` declares a law this is where IF2 gets its
+        // per-particle initial-state spread, with no further change.
         for ((s, pp), rng) in states.iter_mut()
             .zip(particle_params.iter())
             .zip(rngs.iter_mut())

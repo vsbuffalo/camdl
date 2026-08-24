@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
-use sim::inference::pgas::{IVPMapping, simulate_reference, complete_data_loglik, build_obs_at_substep};
+use sim::inference::pgas::{simulate_reference, complete_data_loglik, build_obs_at_substep};
 use sim::inference::pgas_grad::complete_data_loglik_grad;
 use sim::inference::MultiStreamObsModel;
 use sim::inference::particle_filter::Observation;
@@ -78,14 +78,12 @@ fn fd_check(
         &compiled.resolved.rate_grads_indexed,
         &model_to_estimated,
     );
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let oas = build_obs_at_substep(observations, compiled.model.simulation.t_start, dt).unwrap();
     let estimated_to_model: Vec<usize> = estimated_indices.to_vec();
 
     let (ll, grad) = complete_data_loglik_grad(
         compiled, trajectory, params, observations, dt,
-        obs_model, &ivp_mappings,
-        d, &rate_grads_for_run, &oas,
+        obs_model, d, &rate_grads_for_run, &oas,
         &estimated_to_model,
     ).unwrap();
     assert!(ll.is_finite(), "[{}] log-likelihood must be finite, got {}", name, ll);
@@ -103,11 +101,11 @@ fn fd_check(
 
         let ll_plus = complete_data_loglik(
             compiled, trajectory, &p_plus, observations, dt,
-            obs_model, &ivp_mappings, &oas,
+            obs_model, &oas,
         ).unwrap().total;
         let ll_minus = complete_data_loglik(
             compiled, trajectory, &p_minus, observations, dt,
-            obs_model, &ivp_mappings, &oas,
+            obs_model, &oas,
         ).unwrap().total;
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
 
@@ -374,19 +372,18 @@ fn run_spine_oracle(sigma_se: f64, seed: u64, dt: f64) {
     for (e, &m) in estimated_indices.iter().enumerate() { model_to_estimated[m] = Some(e); }
     let rate_grads = sim::inference::pgas_grad::resolve_rate_grad_for_run(
         &compiled.resolved.rate_grads_indexed, &model_to_estimated);
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let oas = build_obs_at_substep(
         &observations, compiled.model.simulation.t_start, dt).unwrap();
     let d = estimated_indices.len();
 
     let value = complete_data_loglik(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings, &oas,
+        &obs_model, &oas,
     ).unwrap().total;
 
     let (energy, _grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
-        &obs_model, &ivp_mappings, d, &rate_grads, &oas, &estimated_indices,
+        &obs_model, d, &rate_grads, &oas, &estimated_indices,
     ).unwrap();
 
     assert_eq!(
@@ -514,18 +511,17 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
     for (e, &mi) in estimated_indices.iter().enumerate() { model_to_estimated[mi] = Some(e); }
     let rate_grads = sim::inference::pgas_grad::resolve_rate_grad_for_run(
         &compiled.resolved.rate_grads_indexed, &model_to_estimated);
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let oas = build_obs_at_substep(
         &observations, compiled.model.simulation.t_start, 1.0).unwrap();
     let d = estimated_indices.len();
 
     let value = complete_data_loglik(
         &compiled, &trajectory, &params, &observations, 1.0,
-        &obs_model, &ivp_mappings, &oas,
+        &obs_model, &oas,
     ).unwrap().total;
     let (energy, _grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, 1.0,
-        &obs_model, &ivp_mappings, d, &rate_grads, &oas, &estimated_indices,
+        &obs_model, d, &rate_grads, &oas, &estimated_indices,
     ).unwrap();
 
     assert_eq!(
@@ -571,18 +567,17 @@ fn spine_oracle_two_overdispersed_multi_gamma_bit_exact() {
     for (e, &mi) in estimated_indices.iter().enumerate() { model_to_estimated[mi] = Some(e); }
     let rate_grads = sim::inference::pgas_grad::resolve_rate_grad_for_run(
         &compiled.resolved.rate_grads_indexed, &model_to_estimated);
-    let ivp_mappings: Vec<IVPMapping> = vec![];
     let oas = build_obs_at_substep(
         &observations, compiled.model.simulation.t_start, 1.0).unwrap();
     let d = estimated_indices.len();
 
     let value = complete_data_loglik(
         &compiled, &trajectory, &params, &observations, 1.0,
-        &obs_model, &ivp_mappings, &oas,
+        &obs_model, &oas,
     ).unwrap().total;
     let (energy, _grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, 1.0,
-        &obs_model, &ivp_mappings, d, &rate_grads, &oas, &estimated_indices,
+        &obs_model, d, &rate_grads, &oas, &estimated_indices,
     ).unwrap();
 
     assert_eq!(

@@ -3689,6 +3689,69 @@ evaluated at runtime.
 This is fully supported. Per-stratum initial values come from index binders and
 compile-time table lookups; there is no `distribute(...)` allocation helper.
 
+### 15.4 Drawn Initial Conditions
+
+An initial condition may be **drawn** rather than computed. Where `=` says "this
+compartment starts at this value", `~` says "this compartment starts at a draw
+from this distribution" — the same reading `~` has for a parameter prior (§4)
+and for an observation likelihood (§9).
+
+<!-- camdl-doctest-preamble: init-drawn
+compartments { S, I, R }
+parameters {
+  beta  : rate
+  gamma : rate
+  N0    : count
+  I0    : count
+}
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+-->
+
+```camdl preamble=init-drawn
+init {
+  I ~ poisson(rate = I0)   # the number introduced is a DRAW around I0
+  S = N0 - I               # reads the drawn I, so S + I = N0 exactly
+}
+```
+
+The entries are evaluated in **dependency order**, so `S` reads the value `I`
+was drawn as, not the value it was expected to be. The population budget
+therefore holds on every draw with no `balance {}` block.
+
+Which laws are admissible is decided by the compartment's kind:
+
+| compartment | admissible laws                                                                  |
+| ----------- | -------------------------------------------------------------------------------- |
+| integer     | `poisson(rate = ..)`, `binomial(n = .., p = ..)`, `neg_binomial(mean = .., r = ..)` |
+| `: real`    | `normal(mean = .., sd = ..)`                                                      |
+
+A mismatch is a compile error (E344), as is a law the initial-state vocabulary
+does not have (E343) — `bernoulli`, `beta` and `beta_binomial` describe a
+*measurement* of a compartment, not the compartment itself, so they belong in
+`observations {}` and not here. `binomial`'s `p` must be a `probability`-kinded
+parameter; a `count` there is E344 with the parameter named.
+
+`neg_binomial` is the choice when introductions are **clustered** rather than
+independent — the dispersion `r` controls how much more variable the count is
+than a Poisson of the same mean, and large `r` recovers Poisson.
+
+A law may not be declared on the `balance {}` target (E345): the balance stage
+recomputes its compartment after every substep, so the draw would be overwritten
+before the first step is taken.
+
+**What a drawn initial condition does at fit time.** Under `pgas` it becomes a
+term of the target — `log p(x₀ | θ)` appears in the complete-data likelihood and
+in the `initial_state_ll` column of each chain's trace — so the law's parameters
+are estimated from the data rather than fixed. Under `if2` each particle draws
+its own initial state. `pfilter` and `pmmh` refuse a model with a drawn initial
+condition: their bootstrap filter evaluates one initial state and copies it to
+every particle, which would condition the whole swarm on a single realization of
+`x₀`. The deterministic (ODE) fits start every compartment at its law's mean.
+
 ---
 
 ## 16. Output and Quantities

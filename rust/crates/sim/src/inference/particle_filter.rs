@@ -121,6 +121,18 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // incidence stream, sized from the OBS model (the process does not know it).
     let n_acc = obs_model.n_interval_streams();
 
+    // The bootstrap filter copies ONE initial state to every particle (see the
+    // note at the draw below). A model whose `init {}` declares a law needs the
+    // per-particle draw that staging step 5 of the initial-state proposal
+    // installs; running it here would silently condition the whole swarm on one
+    // realization of x₀, which is a wrong likelihood, not a noisy one.
+    if process.declares_init_law() {
+        return Err(SimError::Validation(
+            "this model's `init { }` DRAWS a compartment from a law              (`I ~ poisson(...)`), which the bootstrap particle filter cannot              yet represent: it evaluates ONE initial state and copies it to              every particle, so the swarm would condition on a single              realization of x0 instead of integrating over p(x0 | theta).\n\n               Use `algorithm = pgas` (its conditional SMC draws a per-particle              initial state and scores log p(x0 | theta) as part of the target),              or `algorithm = if2` (each particle draws its own x0 from its own              perturbed parameters), or write the initial condition as an              expression (`I = I0`) instead of a law."
+                .to_string(),
+        ));
+    }
+
     // Per-particle RNG streams (deterministic, derived from seed).
     // stream_offset = 0: particles use stream indices [0, n_particles).
     // Built before the initial state because drawing x₀ is a draw from a
@@ -134,13 +146,13 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // projects `acc[k]`) does not index out of bounds. Swarm states are sized
     // by `ParticleSwarm::new`.
     //
-    // ONE draw, copied to every particle — the pre-split behaviour, kept
-    // because no `init {}` entry can declare a law yet, so `initial_state_draw`
-    // is deterministic and consumes nothing from `rngs[0]`. gh#732 (proposal
-    // 2026-08-23-initial-state-parameters.md, staging step 5) is exactly the
-    // move of this call into the loop below so particle j draws from `rngs[j]`;
-    // particle 0 already reads its own stream here, so that move leaves this
-    // draw where it is.
+    // ONE draw, copied to every particle. For a deterministic `init {}` that is
+    // exact — `initial_state_draw` consumes nothing and every particle would
+    // get the same state anyway. For a model whose `init {}` DECLARES a law it
+    // would be a wrong estimator: the filter would condition on one random x₀
+    // instead of integrating over p(x₀ | θ). Moving this call into the loop so
+    // particle j draws from `rngs[j]` is staging step 5 of the proposal
+    // (gh#732); until then such a model is REFUSED above rather than run.
     //
     // `rngs` is empty when `n_particles == 0` — a degenerate swarm the
     // degeneracy layer deliberately tolerates (`check_pf_degeneracy`'s

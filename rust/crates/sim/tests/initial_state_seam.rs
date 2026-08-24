@@ -2,25 +2,22 @@
 //!
 //! `CompiledModel::initial_state` split into the four questions an
 //! initial-state law has to answer (proposal
-//! `docs/dev/proposals/2026-08-23-initial-state-parameters.md`, staging step
-//! 3). Two of the four — `initial_state_logpdf` and
-//! `initial_state_logpdf_grad` — have no consumer until staging step 4 wires
-//! PGAS's Binomial IVP term through them, so this file is what exercises them
-//! in the meantime, and it pins the parts of the contract step 4 will build on.
+//! `docs/dev/proposals/2026-08-23-initial-state-parameters.md`). This file
+//! covers the LAW-FREE side of that contract — the corpus of 100+ goldens
+//! whose `init {}` is entirely deterministic. The law-bearing side is
+//! `init_laws.rs`.
 //!
 //! What is asserted here is NOT "0.0 == 0.0". It is:
 //!
-//! 1. **The draw does not consume randomness while no `init {}` entry declares
-//!    a law.** That is the whole basis for calling step 3 value-preserving:
-//!    every stochastic forward path (chain-binomial, Gillespie, the bootstrap
-//!    and correlated filters, IF2, PGAS's reference walk) now hands its own
-//!    stream to `initial_state_draw`, and if that call started consuming, every
-//!    one of those trajectories would silently shift. When step 4 lands a law,
-//!    this test should keep passing for a LAW-FREE model and the law-bearing
-//!    case gets its own test — the RNG-order change must be a deliberate,
-//!    visible decision, not a baseline diff someone discovers later.
+//! 1. **The draw consumes no randomness when no `init {}` entry declares a
+//!    law.** That is the whole basis for calling the seam split
+//!    value-preserving: every stochastic forward path (chain-binomial,
+//!    Gillespie, the bootstrap and correlated filters, IF2, PGAS's reference
+//!    walk) hands its own stream to `initial_state_draw`, and if that call
+//!    started consuming for a deterministic model, every one of those
+//!    trajectories would silently shift.
 //! 2. **`logpdf_grad` is indexed by MODEL parameter, length `params.len()`.**
-//!    Step 4's callers (`complete_data_loglik_grad`, ODE-NUTS) work in an
+//!    Its callers (`complete_data_loglik_grad`, ODE-NUTS) work in an
 //!    ESTIMATED-parameter basis and map through their own `estimated_to_model`.
 //!    A length mismatch there is an out-of-bounds panic at best and a gradient
 //!    attributed to the wrong parameter at worst.
@@ -44,7 +41,7 @@ fn all_entries_are_literals(model: &ir::Model) -> bool {
     model
         .initial_conditions
         .iter()
-        .all(|(_, InitSpec::Deterministic(e))| matches!(e, Expr::Const(_)))
+        .all(|(_, s)| matches!(s, InitSpec::Deterministic(Expr::Const(_))))
 }
 
 const SEED: u64 = 20260823;
@@ -138,7 +135,7 @@ fn the_draw_equals_the_mean_and_leaves_the_stream_untouched() {
             .initial_state_draw(&params, &mut rng)
             .expect("draw");
 
-        // No `init {}` entry can declare a law yet, so the draw IS the mean.
+        // These two fixtures declare no `init {}` law, so the draw IS the mean.
         assert_eq!(draw_int.counts, mean_int.counts, "{who}: draw != mean (int)");
         assert_eq!(draw_real.values, mean_real.values, "{who}: draw != mean (real)");
 
@@ -165,11 +162,13 @@ fn the_density_and_its_gradient_agree_that_there_is_no_law() {
         let (int_s, real_s) = compiled.initial_state_mean(&params).expect("mean");
         assert_state_is_populated(&int_s.counts, who);
 
-        let lp = compiled.initial_state_logpdf(&int_s.counts, &real_s.values, &params);
+        let lp = compiled.initial_state_logpdf(&int_s.counts, &real_s.values, &params)
+            .expect("logpdf");
         assert!(lp.is_finite(), "{who}: logpdf is not finite ({lp})");
         assert_eq!(lp, 0.0, "{who}: a deterministic init {{}} contributes no density");
 
-        let grad = compiled.initial_state_logpdf_grad(&int_s.counts, &real_s.values, &params);
+        let grad = compiled.initial_state_logpdf_grad(&int_s.counts, &real_s.values, &params)
+            .expect("logpdf_grad");
 
         // The shape contract staging step 4 depends on: MODEL-parameter basis,
         // so a caller in an estimated-parameter basis can index it through its

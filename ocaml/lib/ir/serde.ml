@@ -1489,13 +1489,64 @@ let parameter_of_json j =
 
 (* ── Initial conditions ──────────────────────────────────────────────────── *)
 
+(* The law argument records are the observation ones, so each differentiable
+   argument serialises through [diffable_to_json] — the same nested
+   {"expr": …, "grad": …} shape a likelihood argument uses. `n` (Binomial) is a
+   bare expr: θ-independent, no grad. *)
+let init_count_law_to_json (l : init_count_law) : Yojson.Safe.t =
+  match l with
+  | InitPoisson p ->
+    obj [("poisson", obj [("rate", diffable_to_json p.rate)])]
+  | InitBinomial b ->
+    obj [("binomial", obj [
+      ("n", expr_to_json b.n); ("p", diffable_to_json b.p)])]
+  | InitNegBinomial nb ->
+    obj [("neg_binomial", obj [
+      ("mean", diffable_to_json nb.mean);
+      ("dispersion", diffable_to_json nb.dispersion)])]
+
+let init_count_law_of_json j =
+  match j with
+  | `Assoc [(key, v)] -> (
+    match key with
+    | "poisson" -> InitPoisson { rate = diffable_of_json (member "rate" v) }
+    | "binomial" ->
+      InitBinomial { n = expr_of_json (member "n" v);
+                     p = diffable_of_json (member "p" v) }
+    | "neg_binomial" ->
+      InitNegBinomial { mean = diffable_of_json (member "mean" v);
+                        dispersion = diffable_of_json (member "dispersion" v) }
+    | k -> fail "unknown initial-state count law '%s'" k)
+  | _ -> fail "initial-state count law must be a single-key object"
+
+let init_real_law_to_json (l : init_real_law) : Yojson.Safe.t =
+  match l with
+  | InitNormal n ->
+    obj [("normal", obj [
+      ("mean", diffable_to_json n.mean);
+      ("sd",   diffable_to_json n.sd)])]
+
+let init_real_law_of_json j =
+  match j with
+  | `Assoc [(key, v)] -> (
+    match key with
+    | "normal" ->
+      InitNormal { mean = diffable_of_json (member "mean" v);
+                   sd   = diffable_of_json (member "sd" v) }
+    | k -> fail "unknown initial-state real law '%s'" k)
+  | _ -> fail "initial-state real law must be a single-key object"
+
 let init_spec_to_json (s : init_spec) : Yojson.Safe.t =
   match s with
   | Deterministic e -> obj [("deterministic", expr_to_json e)]
+  | InitCount l -> obj [("count", init_count_law_to_json l)]
+  | InitReal l  -> obj [("real",  init_real_law_to_json l)]
 
 let init_spec_of_json j =
   match j with
   | `Assoc [("deterministic", e)] -> Deterministic (expr_of_json e)
+  | `Assoc [("count", l)] -> InitCount (init_count_law_of_json l)
+  | `Assoc [("real",  l)] -> InitReal  (init_real_law_of_json l)
   | `Assoc [(k, _)] -> fail "unknown init spec kind '%s'" k
   | _ -> fail "init spec must be a single-key object"
 

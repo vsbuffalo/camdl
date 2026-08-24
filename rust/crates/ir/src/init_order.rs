@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::expr::Expr;
-use crate::model::{Binding, InitSpec, InitialConditions};
+use crate::model::{Binding, InitialConditions};
 
 /// Compartments an initial-condition expression reads.
 ///
@@ -155,10 +155,24 @@ pub fn topo(ic: &InitialConditions, bindings: &[Binding]) -> Result<Vec<usize>, 
                     mark.insert(i, Mark::Grey);
                     path.push(i);
                     stack.push(Step::Exit(i));
-                    let InitSpec::Deterministic(e) = ic.0.get_index(i).unwrap().1;
+                    // EVERY expression the spec evaluates is an edge source: a
+                    // law's arguments are evaluated against the partially built
+                    // state exactly as a deterministic RHS is, so
+                    // `I ~ binomial(n = N0 - R, p = q)` depends on `R`.
+                    let spec = ic.0.get_index(i).unwrap().1;
                     // Push dependencies in reverse so the first-declared
                     // dependency is visited first.
-                    let d = deps(e, bindings);
+                    let d: Vec<String> = {
+                        let mut acc: Vec<String> = Vec::new();
+                        for e in spec.exprs() {
+                            for name in deps(e, bindings) {
+                                if !acc.contains(&name) {
+                                    acc.push(name);
+                                }
+                            }
+                        }
+                        acc
+                    };
                     for name in d.iter().rev() {
                         if let Some(j) = ic.0.get_index_of(name.as_str()) {
                             if mark.get(&j) != Some(&Mark::Black) {

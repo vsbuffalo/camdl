@@ -456,6 +456,26 @@ let diagnose_validate_error ctx (err : Validate.error) : Diagnostics.diagnostic 
             means the IR was hand-written or has drifted",
       (* The IR carries no per-init-entry source span. *)
       Diagnostics.no_loc
+    | InitLawKindMismatch (comp, family, seeds) ->
+      (* The frontend reports this with a located E344; a bare E516 here means
+         the IR was hand-written or has drifted. *)
+      "E516",
+      Printf.sprintf
+        "initial condition '%s' is drawn from `%s`, which seeds %s; '%s' is not one"
+        comp family seeds comp,
+      Some "a count law (poisson, binomial, neg_binomial) seeds an integer \
+            compartment and a continuous law (normal) seeds a real one",
+      Diagnostics.no_loc
+    | InitLawOnBalanceTarget comp ->
+      "E517",
+      Printf.sprintf
+        "initial condition '%s' is drawn from a law, but '%s' is the `balance { }` \
+         target: the balance expression overwrites it after every substep, so the \
+         draw is discarded" comp comp,
+      Some "draw one of the other compartments and let `balance` absorb it. The \
+            frontend reports this with a located E345 — a bare E517 here means the \
+            IR was hand-written or has drifted",
+      Diagnostics.no_loc
     | InitDependencyCycle cyc ->
       (* gh#733. An init entry may read another compartment's initial value, so
          the entries are evaluated in dependency order. A cycle has no such
@@ -781,11 +801,23 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
           (Init_order.closed d.model.Ir.initial_conditions
              ~bindings:d.model.Ir.bindings))
     in
+    (* Initial-state law autodiff: ∂arg/∂θ for every argument of a drawn initial
+       condition, which is what `initial_state_logpdf_grad` chains through. A
+       law is a sampler AND a density AND a gradient; emitting the first two and
+       leaving the third empty would give NUTS a gradient identically zero on
+       that coordinate. Distinct from [ic_grad] above, which differentiates the
+       MEAN for the deterministic ODE forward-sensitivity seed. *)
+    let initial_conditions =
+      Passtime.time "autodiff-init-law" (fun () ->
+        Autodiff.differentiate_initial_conditions
+          d.model.Ir.initial_conditions param_names tfs tbls)
+    in
     (* Write the resolved quantity dimensions (#5) back onto the model before the
        value-preserving transforms (constant-fold/LICM never touch quantities). *)
     let m = annotate_quantity_dims qdims
               { d.model with Ir.transitions = transitions;
                              Ir.observations = observations;
+                             Ir.initial_conditions;
                              Ir.ic_grad } in
     Ok (maybe_licm (maybe_constant_fold m))
 

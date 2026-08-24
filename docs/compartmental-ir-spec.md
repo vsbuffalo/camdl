@@ -652,10 +652,10 @@ for the parameter structure.
 
 ---
 
-## 7. Initial Conditions `[v0.34]`
+## 7. Initial Conditions `[v0.35]`
 
 One spec per compartment, in an **ordered** map keyed by expanded compartment
-name:
+name. A compartment is either COMPUTED from an expression or DRAWN from a law:
 
 ```
 initial_conditions := (string * init_spec) list   -- ORDERED: declaration order
@@ -663,10 +663,43 @@ initial_conditions := (string * init_spec) list   -- ORDERED: declaration order
 init_spec :=
   | Deterministic(expr)
       -- e.g. S₀ = N0 - I0; W₀ = Param("W_init"); R₀ = Const(0.0)
+  | Count(init_count_law)   -- INTEGER compartments only
+  | Real(init_real_law)     -- REAL compartments only
+
+init_count_law :=
+  | Poisson     { rate: diffable }
+  | Binomial    { n: expr, p: diffable }   -- n is θ-independent, no gradient
+  | NegBinomial { mean: diffable, dispersion: diffable }
+
+init_real_law :=
+  | Normal { mean: diffable, sd: diffable }
 ```
 
-Whether an entry happens to be a literal is a runtime build detail, not a
-distinction the IR draws — `S = 990` and `S = N0 - I0` are the same variant.
+Whether a `Deterministic` entry happens to be a literal is a runtime build
+detail, not a distinction the IR draws — `S = 990` and `S = N0 - I0` are the
+same variant.
+
+The law argument records are the OBSERVATION ones (`poisson_likelihood` and
+friends), so each differentiable argument is a `diffable` — the expression
+paired with its per-parameter classified `∂arg/∂θ` — and serializes as the same
+nested `{"expr": …, "grad": …}` shape a likelihood argument does. The
+observation `likelihood` VARIANT SET is deliberately not reused: `Bernoulli`,
+`Beta` and `BetaBinomial` describe a measurement of a compartment rather than
+the compartment itself, and admitting them on a count would be an illegal state
+made representable. `CompartmentKind` selects the admissible set, which is why
+there are two law types and not one.
+
+Both validators reject a law whose kind does not match its compartment (E516 /
+`InitLawKindMismatch`) and a law on the `balance {}` target (E517 /
+`InitLawOnBalanceTarget`) — the balance stage overwrites its target after every
+substep, so a draw placed there is discarded.
+
+The runtime answers four questions of this block, through one seam: the MEAN
+(deterministic paths — the ODE skeleton, `render`, the fit preflight — where a
+law contributes `rate`, `n·p`, or `mean`), a DRAW (every stochastic forward
+path, once per particle), the DENSITY `log p(x₀ | θ)` (a term of PGAS's
+complete-data likelihood, zero when no law is declared), and its GRADIENT. A law
+is all four or none of them.
 
 **The order is load-bearing and is part of the model's identity.** The JSON
 object's key order is the model file's declaration order; both implementations
@@ -687,6 +720,13 @@ at 0.
 
 A reference **cycle** has no evaluation order and is rejected by both validators
 (E515), naming the whole cycle.
+
+A law's arguments are evaluated against the partially built state on the same
+footing as a deterministic RHS, so `I ~ poisson(rate = I0)` followed by
+`S = N0 - I` makes `S` read the DRAWN `I` and the population budget hold on
+every draw. The density evaluates each law's arguments against the given `x₀`
+with `x₀` held fixed, which is what makes the emitted gradient the honest
+derivative of the density.
 
 An integer compartment's value is rounded as it is placed, so a later entry
 reading it reads the rounded count — the state a discrete backend starts from.

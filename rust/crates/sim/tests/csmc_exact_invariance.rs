@@ -256,7 +256,6 @@ fn exact_target(f: &Fixture) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>
             &f.obs,
             DT,
             &f.obs_model,
-            &[],
             &f.obs_at_substep,
         )
         .expect("complete_data_loglik")
@@ -415,7 +414,6 @@ fn check_invariance(
             n_particles,
             DT,
             &f.obs_model,
-            &[],
             0x5eed_0000_0000_0000u64.wrapping_add(i as u64),
             &f.obs_at_substep,
             EffectFiring::default(),

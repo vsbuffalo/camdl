@@ -24,7 +24,7 @@ use crate::inference::particle_filter::Observation;
 use crate::inference::resampling::conditional_multinomial_resample;
 use crate::inference::pmmh::Prior;
 use crate::inference::prior::Density;
-use crate::inference::types::{EstimatedParam, PROB_FRACTION_EPS, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
+use crate::inference::types::{EstimatedParam, RESAMPLE_RNG_STREAM, init_particle_rngs, restore_z_values};
 
 /// Process-noise variance floor below which an overdispersed transition is
 /// treated as carrying no gamma multiplier. MUST match between the PGAS
@@ -287,125 +287,6 @@ impl PGASTrajectory {
     }
 }
 
-/// Mapping from an IVP parameter to the compartment it controls.
-/// Used to make the initial state stochastic in CSMC-AS and to add
-/// the initial state density to the complete-data LL.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IVPMapping {
-    /// Index into if2_params / priors vectors.
-    pub param_idx: usize,
-    /// Index into the model's param vector (if2_params[param_idx].index).
-    pub model_param_idx: usize,
-    /// Which compartment this IVP controls (local int index).
-    pub compartment_idx: usize,
-}
-
-/// Which estimated parameters move an initial compartment count, and which
-/// compartment each one moves.
-///
-/// The test is a one-sided finite difference: nudge the parameter and see
-/// whether any non-balance compartment's *rounded* initial count changes. The
-/// balance compartment is skipped because it moves as a consequence of every
-/// other compartment, not as a consequence of this parameter.
-///
-/// The result is a property of `current_params`, not of the model alone, and
-/// under PGAS that means it is a property of the *chain's starting draw* —
-/// `run_pgas` calls this once per chain from that chain's own start. Two
-/// chains of one fit can therefore disagree about whether a parameter is an
-/// IVP, which makes the Binomial term in [`complete_data_loglik`] present on
-/// some chains and absent on others. See `PROBE_STEP` for when that happens.
-pub fn detect_ivp_mappings(
-    model: &CompiledModel,
-    if2_params: &[EstimatedParam],
-    current_params: &[f64],
-) -> Result<Vec<IVPMapping>, SimError> {
-    // Both arms of the finite difference take the MEAN: the probe asks whether
-    // a parameter moves the initial state deterministically, so a draw on
-    // either side would put Monte-Carlo noise into the difference and make the
-    // detection random.
-    let (init_base, _) = model.initial_state_mean(current_params)?;
-    let mut mappings = Vec::new();
-    for (i, spec) in if2_params.iter().enumerate() {
-        let mut perturbed = current_params.to_vec();
-        let delta = (spec.upper - spec.lower).min(1.0) * PROBE_STEP;
-        perturbed[spec.index] = (perturbed[spec.index] + delta).min(spec.upper);
-        let (init_pert, _) = model.initial_state_mean(&perturbed)?;
-        // Find which compartment changed
-        for (c, (&base_c, &pert_c)) in init_base.counts.iter()
-            .zip(init_pert.counts.iter()).enumerate()
-        {
-            // Skip balance compartment (it changes as a consequence)
-            if model.balance.as_ref().is_some_and(|b| b.local_int_idx == c) {
-                continue;
-            }
-            if base_c != pert_c {
-                // The term this would add is `log Binom(x0[c]; N_patch, θ)`,
-                // which reads θ as a PROBABILITY. A parameter of any other
-                // kind is not one, and passing it in anyway is gh#719: a
-                // count like `I0 = 615` clamps to `1 - PROB_FRACTION_EPS` and
-                // charges `log(1e-10)` for every individual outside the
-                // compartment — a finite ~-4e8 offset that the non-finite
-                // guard walks straight past.
-                //
-                // Skipping rather than erroring, because the skip IS the
-                // behaviour such a model already gets whenever the probe
-                // above fails to fire, which is the overwhelmingly common
-                // case: the initial condition stays deterministic in θ and θ
-                // is estimated through the trajectory density. Refusing would
-                // reject models that fit correctly today. What it does buy is
-                // DETERMINISM — with counts and rates filtered out, every
-                // parameter that survives has slope `N_patch` in the initial
-                // count, so the probe fires from every start rather than
-                // from ~1% of them, and two chains of one fit can no longer
-                // carry different targets.
-                let kind = model.model.parameters.iter()
-                    .find(|p| p.name == spec.name)
-                    .and_then(|p| p.param_kind);
-                if kind != Some(ir::parameter::ParamKind::Probability) {
-                    eprintln!("  {} moves initial compartment {} but is \
-                               {} — NOT adding the initial-state Binomial \
-                               density (it reads the parameter as a \
-                               probability). The initial condition stays \
-                               deterministic in this parameter; it is still \
-                               estimated through the trajectory density. \
-                               gh#719.",
-                        spec.name, c,
-                        match kind {
-                            Some(k) => format!("declared `{}`", k.as_str()),
-                            None => "of undetermined kind".to_string(),
-                        });
-                    break;
-                }
-                eprintln!("  {} detected as IVP → compartment {} \
-                          (stochastic init, Binom density in LL)", spec.name, c);
-                mappings.push(IVPMapping {
-                    param_idx: i,
-                    model_param_idx: spec.index,
-                    compartment_idx: c,
-                });
-                break;
-            }
-        }
-    }
-    Ok(mappings)
-}
-
-/// Fraction of a parameter's range (capped at 1.0) used as the probe step in
-/// [`detect_ivp_mappings`].
-///
-/// The cap is what makes the probe value-dependent. For a parameter whose
-/// range is wider than 1.0 the step is a flat `0.01` in the parameter's own
-/// units, so the probe only registers a mapping when the initial-condition
-/// expression happens to cross a rounding boundary within that `0.01` —
-/// `CompiledModel::initial_state` rounds integer compartments to `i64`.
-///
-/// For a *fraction* parameter driving a large population the slope is the
-/// population size, so a `0.01` step moves the count by thousands and the
-/// probe always fires. For a *count* parameter the slope is 1, so the probe
-/// fires only for starts within `0.01` of a half-integer — about 1% of them.
-/// That is the difference between a deterministic detection and a coin flip.
-pub const PROBE_STEP: f64 = 0.01;
-
 /// Number of equal-width time bins `CSMCDiagnostics::renewal_by_bin` resolves
 /// renewal into.
 ///
@@ -560,8 +441,16 @@ pub struct LogLikComponents {
     pub transition: f64,
     /// Sum of observation densities (joint_obs_weight).
     pub observation: f64,
-    /// Initial state density (Binomial for IVP params).
-    pub ivp: f64,
+    /// `log p(x₀ | θ)` — the density of the trajectory's own initial state
+    /// under the laws the model DECLARES (`init { I ~ poisson(rate = I0) }`).
+    /// Zero for a model whose `init {}` is entirely deterministic, and zero
+    /// there because there is no law, not because the term was dropped.
+    ///
+    /// Reported on its own in the sweep trace (`initial_state_ll`), not left to
+    /// be recovered by subtracting `transition_ll` and `obs_ll` from the total:
+    /// a constant component of the target that is only visible by subtraction
+    /// is what made gh#719 need trace forensics to find.
+    pub initial_state: f64,
 }
 
 /// Result of one Gibbs sweep.
@@ -583,6 +472,14 @@ pub struct PGASSweep {
     pub transition_ll: f64,
     /// Observation component of the complete-data log-likelihood.
     pub obs_ll: f64,
+    /// Initial-state component `log p(x₀ | θ)` of the complete-data
+    /// log-likelihood — the density of the sweep's own `x₀` under the laws
+    /// declared in `init { }`. Zero for a deterministic `init { }`.
+    ///
+    /// Recorded as its own field for the same reason it gets its own trace
+    /// column: a term recoverable only by subtracting the other two from the
+    /// total is one nobody looks at until a fit is already wrong (gh#719).
+    pub initial_state_ll: f64,
     /// Per-sweep NUTS diagnostics for the cold chain's `θ|X` update (gh#294).
     /// Zero on the non-gradient (random-walk MH) proposal path, which takes no
     /// NUTS step.
@@ -1209,8 +1106,13 @@ pub fn fold_gamma_multiplier_log_density_substep(
 ///                 + Σ_s log p(x_s | x_{s-1}, θ, g_s)
 ///                 + Σ_k log p(y_k | project(x_{obs_k}), θ)
 ///
-/// The initial state density log p(x₀ | θ) is included for IVP parameters
-/// (e.g., S₀ ~ Binom(N₀, s0)). Without it, IVPs are invisible to the MH step.
+/// The initial-state density `log p(x₀ | θ)` comes from the laws the model
+/// DECLARES (`init { I ~ poisson(rate = I0) }`), through the shared seam
+/// `CompiledModel::initial_state_logpdf`. It is zero for a deterministic
+/// `init {}`. Nothing is inferred: before the laws landed this term was a
+/// Binomial the runtime attached to whichever compartment a finite-difference
+/// probe found moving, so two chains of one fit could carry different targets
+/// (gh#719).
 pub fn complete_data_loglik(
     model: &CompiledModel,
     trajectory: &PGASTrajectory,
@@ -1218,7 +1120,6 @@ pub fn complete_data_loglik(
     _observations: &[Observation],
     dt: f64,
     obs_model: &super::multi_stream_obs::MultiStreamObsModel,
-    ivp_mappings: &[IVPMapping],
     obs_at_substep: &ObsAtSubstep,
 ) -> Result<LogLikComponents, SimError> {
     let n_substeps = trajectory.substeps.len();
@@ -1229,38 +1130,25 @@ pub fn complete_data_loglik(
     let per_eval_scratch =
         crate::resolved_expr::stage_per_eval(model, params, model.model.simulation.t_start, dt);
     let per_eval = per_eval_scratch.as_deref();
-    let mut ivp_ll = 0.0;
     let mut transition_ll = 0.0;
     let mut observation_ll = 0.0;
 
-    // Initial state density: log p(x₀ | θ) for IVP-controlled compartments.
-    // S₀ ~ Binom(N₀, s0) → log Binom(S₀; N₀, s0) constrains s0.
-    // N₀ is the total population of the PATCH containing this compartment,
-    // not the global population across all patches. We compute it as the
-    // sum of initial counts in the same stratification group.
-    if !ivp_mappings.is_empty() {
-        for ivp in ivp_mappings {
-            let count = trajectory.initial_counts[ivp.compartment_idx] as u64;
-            let frac = params[ivp.model_param_idx].clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
-            let patch_pop = patch_population(model, &trajectory.initial_counts, ivp.compartment_idx);
-            let this_ivp_ll = binom_logpmf(count, patch_pop as u64, frac);
-            if !this_ivp_ll.is_finite() {
-                let comp_name = &model.model.compartments[ivp.compartment_idx].name;
-                eprintln!("  IVP density -inf: Binom({}, {}, {:.6e}) for {} (comp={}, patch_pop={})",
-                    count, patch_pop, frac,
-                    comp_name, ivp.compartment_idx, patch_pop);
-            }
-            ivp_ll += this_ivp_ll;
-        }
-    }
+    // `log p(x₀ | θ)` from the DECLARED initial-state laws, through the same
+    // seam the sampler and the gradient use, so the three cannot disagree about
+    // which entries are random. CSMC free particles carry integer counts only
+    // (the real reservoir is not advanced), so the real half is empty — a real
+    // compartment already fails the chain-binomial inference capability check
+    // (gh#191) before reaching here.
+    let initial_state_ll =
+        model.initial_state_logpdf(&trajectory.initial_counts, &[], params)?;
 
-    if !ivp_ll.is_finite() {
-        log::debug!("complete_data_loglik: -inf after IVP density (ivp_ll={:.1})", ivp_ll);
+    if !initial_state_ll.is_finite() {
+        log::debug!("complete_data_loglik: -inf initial-state density ({initial_state_ll:.1})");
         return Ok(LogLikComponents {
             total: f64::NEG_INFINITY,
             transition: 0.0,
             observation: 0.0,
-            ivp: ivp_ll,
+            initial_state: initial_state_ll,
         });
     }
 
@@ -1303,7 +1191,7 @@ pub fn complete_data_loglik(
                 total: f64::NEG_INFINITY,
                 transition: transition_ll + td,
                 observation: observation_ll,
-                ivp: ivp_ll,
+                initial_state: initial_state_ll,
             });
         }
         transition_ll += td;
@@ -1344,14 +1232,14 @@ pub fn complete_data_loglik(
                 log::debug!("complete_data_loglik: obs density -inf at substep {} (obs_idx={})", s, obs_idx);
             }
             observation_ll += obs_ll;
-            let total = ivp_ll + transition_ll + observation_ll;
+            let total = initial_state_ll + transition_ll + observation_ll;
             if !total.is_finite() {
                 log::debug!("complete_data_loglik: -inf after obs at substep {} (cumulative)", s);
                 return Ok(LogLikComponents {
                     total: f64::NEG_INFINITY,
                     transition: transition_ll,
                     observation: observation_ll,
-                    ivp: ivp_ll,
+                    initial_state: initial_state_ll,
                 });
             }
             // `cum_flows` blanket-zeroed (unchanged); the per-stream `acc` bins
@@ -1362,10 +1250,10 @@ pub fn complete_data_loglik(
     }
 
     Ok(LogLikComponents {
-        total: ivp_ll + transition_ll + observation_ll,
+        total: initial_state_ll + transition_ll + observation_ll,
         transition: transition_ll,
         observation: observation_ll,
-        ivp: ivp_ll,
+        initial_state: initial_state_ll,
     })
 }
 
@@ -1497,8 +1385,8 @@ pub fn simulate_reference_on_grid(
 ) -> Result<PGASTrajectory, SimError> {
     // A reference trajectory is one realization of the process, so its x₀ is a
     // DRAW from the same stream the substep loop below consumes — not the mean.
-    // (Nothing is consumed today: no `init {}` entry can declare a law, so the
-    // walk's draw sequence is unchanged.)
+    // (For a deterministic `init {}` nothing is consumed, so the walk's draw
+    // sequence is unchanged from before the laws landed.)
     let (init_int, _) = model.initial_state_draw(params, rng)?;
     let n_tr = model.model.transitions.len();
 
@@ -2106,7 +1994,6 @@ pub fn csmc_as(
     n_particles: usize,
     dt: f64,
     obs_model: &super::multi_stream_obs::MultiStreamObsModel,
-    ivp_mappings: &[IVPMapping],
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
     firing: EffectFiring<'_>,
@@ -2138,57 +2025,40 @@ pub fn csmc_as(
     let baseline =
         reference_baseline(model, reference, params, obs_model, obs_at_substep, per_eval)?;
 
-    // Initialize particles with stochastic initial states for IVP compartments.
-    // Each free particle draws S₀ ~ Binom(N₀, s0) independently, giving the
-    // CSMC diverse initial states to select among. This is what enables
-    // posterior sampling of IVP parameters like s0.
-    //
-    // The MEAN, deliberately, on all three of its uses here: it is the
-    // deterministic base the hand-rolled Binomial sampler below perturbs, and
-    // it supplies `total_pop` and the per-patch `N₀` — population scales that
-    // must be the same number for every particle, so a draw would make the
-    // Binomial's own `n` random. When the declared laws land (proposal
-    // 2026-08-23-initial-state-parameters.md, staging step 4) the per-particle
-    // block below is replaced by `initial_state_draw` on `rngs[j]` and the
-    // Binomial density/gradient move to `initial_state_logpdf` /
-    // `initial_state_logpdf_grad`; this `_mean` call stays, for the population
-    // scales.
-    let (init_int, _) = model.initial_state_mean(params)?;
-    let total_pop = init_int.counts.iter().sum::<i64>();
-
-    // Precompute per-IVP patch populations (for stratified models, N₀ is the
-    // patch population, not the global population).
-    let ivp_patch_pops: Vec<i64> = ivp_mappings.iter()
-        .map(|ivp| patch_population(model, &init_int.counts, ivp.compartment_idx))
-        .collect();
-
     // Per-particle RNGs via ChaCha8 stream counter (IM1 fix 2026-04-19).
     let mut rngs = init_particle_rngs(seed, n_particles, 0);
 
+    // Each free particle draws its own initial state, through the same seam
+    // every forward path uses. For a model whose `init {}` declares a law that
+    // is a genuine per-particle draw — the spread CSMC selects among, and what
+    // makes an initial-state parameter estimable at all. For a deterministic
+    // `init {}` the seam consumes nothing from the RNG and every free particle
+    // gets the same state, exactly as before.
     let mut counts: Vec<Vec<i64>> = (0..n_particles)
-        .map(|j| {
+        .map(|j| -> Result<Vec<i64>, SimError> {
             if j == j_ref {
-                reference.initial_counts.clone()
-            } else {
-                let mut c = init_int.counts.clone();
-                // Draw stochastic initial state for IVP compartments
-                for (k, ivp) in ivp_mappings.iter().enumerate() {
-                    let frac = params[ivp.model_param_idx].clamp(PROB_FRACTION_EPS, 1.0 - PROB_FRACTION_EPS);
-                    let patch_n = ivp_patch_pops[k] as u64;
-                    c[ivp.compartment_idx] = rngs[j].binomial(patch_n, frac) as i64;
-                }
-                // Reapply balance constraint if present
-                if let Some(ref bal) = model.balance {
-                    let bal_val: i64 = total_pop - c.iter().enumerate()
-                        .filter(|&(i, _)| i != bal.local_int_idx)
-                        .map(|(_, &v)| v)
-                        .sum::<i64>();
-                    c[bal.local_int_idx] = bal_val;
-                }
-                c
+                return Ok(reference.initial_counts.clone());
             }
+            let (int_s, real_s) = model.initial_state_draw(params, &mut rngs[j])?;
+            let mut c = int_s.counts;
+            // Re-apply the balance constraint to the drawn state. The DECLARED
+            // expression, evaluated exactly as `lifecycle.rs` evaluates it every
+            // substep — not the hardcoded `total_pop − Σothers` this used to
+            // assume. Any model whose balance expression is not that got two
+            // different initial states from the two paths.
+            if let Some(ref bal) = model.balance {
+                let int_view = crate::state::IntState::from_vec(c.clone());
+                let ctx = crate::propensity::EvalCtx {
+                    model, int_s: &int_view, real_s: &real_s, params,
+                    t: t_start, dt: 0.0, projected: None, aux: None,
+                    int_float_override: None, per_eval,
+                };
+                c[bal.local_int_idx] =
+                    crate::resolved_expr::eval_resolved(&bal.expr, &ctx).round() as i64;
+            }
+            Ok(c)
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Per-particle per-substep flows (reset each substep)
     let mut substep_flows: Vec<Vec<u64>> = (0..n_particles)
@@ -2689,43 +2559,6 @@ fn sample_categorical_log(log_weights: &[f64], rng: &mut StatefulRng) -> Option<
     Some(weights.len() - 1)
 }
 
-/// Population of the stratum containing `compartment_idx` — the Binomial
-/// denominator N₀ in the IVP initial-value density `Binom(S₀; N₀, s₀)`.
-///
-/// The stratum comes from the model's *declared* dimensions
-/// (`model_structure.dimensions` / `compartment_dims`, via
-/// [`CompiledModel::deme_map`]), never from the compartment name. A name
-/// suffix identifies the stratum in neither of the two shapes that matter: a
-/// compartment stratified by more than one dimension (`S_p1_child` shares its
-/// suffix with `S_p2_child`, a different patch), and a dimension value that
-/// itself contains `_` (`patch = [north_kivu, south_kivu]` gives every
-/// compartment in the model the suffix `kivu`). Both silently inflate N₀, and
-/// the Binomial MLE of `s₀` is `k/N₀` (gh#649).
-///
-/// For an unstratified model every compartment is in the one stratum, so this
-/// returns the total initial population.
-///
-/// `initial_counts` is indexed by *global* compartment index. PGAS runs the
-/// chain-binomial backend, which admits integer compartments only, so the
-/// local-integer and global indexings coincide — the same assumption the three
-/// callers make when they pass `ivp.compartment_idx` here.
-pub fn patch_population(
-    model: &CompiledModel,
-    initial_counts: &[i64],
-    compartment_idx: usize,
-) -> i64 {
-    debug_assert_eq!(
-        initial_counts.len(),
-        model.model.compartments.len(),
-        "patch_population indexes initial_counts by GLOBAL compartment index"
-    );
-    model
-        .deme_map()
-        .stratum_members(crate::lineage::CompartmentId(compartment_idx))
-        .map(|c| initial_counts[c.0])
-        .sum()
-}
-
 /// Prior log-density AND its gradient on the z (unconstrained) scale.
 ///
 /// Delegates the density computation to `Prior::log_density` and computes
@@ -3192,13 +3025,11 @@ pub fn run_pgas(
         // when the obs term was the cause.
         //
         // This block only EXPLAINS; it does not decide. A non-finite total
-        // here reappears in `current_ll` below (same trajectory, same params,
-        // plus the IVP term), where the gh#607 chain-start refusal turns it
-        // into a skipped chain.
+        // here reappears in `current_ll` below (same trajectory, same params),
+        // where the gh#607 chain-start refusal turns it into a skipped chain.
         let sanity = complete_data_loglik(
             model, &trajectory, &current_params, observations,
-            config.dt, obs_model, &[],  // empty IVP mappings
-            &obs_at_substep,
+            config.dt, obs_model, &obs_at_substep,
         )?;
         if !sanity.total.is_finite() {
             let trans_inf = !sanity.transition.is_finite();
@@ -3230,8 +3061,9 @@ pub fn run_pgas(
                     eprintln!("    {} = {}", p.name, current_params[idx]);
                 }
             }
-            eprintln!("  components: transition={:.1}, observation={:.1}, ivp={:.1}",
-                sanity.transition, sanity.observation, sanity.ivp);
+            eprintln!("  components: transition={:.1}, observation={:.1}, \
+                       initial_state={:.1}",
+                sanity.transition, sanity.observation, sanity.initial_state);
         } else {
             eprintln!("  simulate_reference LL sanity check: {:.1} (finite ✓)", sanity.total);
         }
@@ -3263,28 +3095,22 @@ pub fn run_pgas(
         })
         .collect();
 
-    // Detect IVP parameters: parameters that affect initial_state but not
-    // propensities. These get stochastic initial states in CSMC and a
-    // Binomial density term in the complete-data LL, enabling posterior
-    // sampling through the Gibbs structure.
-    let ivp_mappings: Vec<IVPMapping> =
-        detect_ivp_mappings(model, if2_params, &current_params)?;
-
-    // Initial complete-data log-likelihood (now includes initial state density)
+    // Initial complete-data log-likelihood (includes the initial-state density
+    // of any DECLARED `init {}` law)
     //
     // gh#80: same split-by-component diagnostic as the sanity check above —
     // distinguish a step_one/density mismatch (transition term) from a
     // data-vs-model incompatibility (observation term).
     let current_components = complete_data_loglik(
         model, &trajectory, &current_params, observations,
-        config.dt, obs_model, &ivp_mappings, &obs_at_substep,
+        config.dt, obs_model, &obs_at_substep,
     )?;
     let current_ll = current_components.total;
     eprintln!("  initial complete-data ll: {:.1}", current_ll);
     if !current_ll.is_finite() {
         let trans_inf = !current_components.transition.is_finite();
         let obs_inf   = !current_components.observation.is_finite();
-        let ivp_inf   = !current_components.ivp.is_finite();
+        let init_inf  = !current_components.initial_state.is_finite();
         if trans_inf {
             eprintln!("  WARNING: initial *transition* log-density is non-finite \
                        (transition_ll = {}).", current_components.transition);
@@ -3299,16 +3125,18 @@ pub fn run_pgas(
                        NUTS / MH will propose into a feasible region if one exists.",
                        current_components.observation);
         }
-        if ivp_inf {
-            eprintln!("  WARNING: initial *IVP* log-density is non-finite \
-                       (ivp_ll = {}) — initial-state Binom is incompatible \
-                       with the IVP fraction parameter.",
-                       current_components.ivp);
+        if init_inf {
+            eprintln!("  WARNING: initial *initial-state* log-density is \
+                       non-finite (initial_state_ll = {}) — the reference \
+                       trajectory's x0 has zero probability under the declared \
+                       `init {{ }}` law at these starting parameters.",
+                       current_components.initial_state);
         }
-        eprintln!("  components: transition={:.1}, observation={:.1}, ivp={:.1}",
+        eprintln!("  components: transition={:.1}, observation={:.1}, \
+                   initial_state={:.1}",
             current_components.transition,
             current_components.observation,
-            current_components.ivp);
+            current_components.initial_state);
         eprintln!("  Model has {} transitions, {} source groups",
             model.model.transitions.len(),
             model.source_groups.len());
@@ -3377,7 +3205,7 @@ pub fn run_pgas(
                 initial_log_posterior,
                 current_components.transition,
                 current_components.observation,
-                current_components.ivp,
+                current_components.initial_state,
                 initial_log_prior,
             ))
         }
@@ -3560,12 +3388,12 @@ pub fn run_pgas(
                 let (new_traj, _diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
-                    &ivp_mappings, csmc_seed, &obs_at_substep, firing,
+                    csmc_seed, &obs_at_substep, firing,
                 )?;
                 rungs[rung].trajectory = new_traj;
                 rungs[rung].ll = complete_data_loglik(
                     model, &rungs[rung].trajectory, &rungs[rung].params, observations,
-                    config.dt, obs_model, &ivp_mappings, &obs_at_substep,
+                    config.dt, obs_model, &obs_at_substep,
                 )?.total;
             }
             if warmup_sweep % 10 == 0 {
@@ -3584,6 +3412,7 @@ pub fn run_pgas(
         // Cold rung LL components (populated during rung loop)
         let mut cold_transition_ll = 0.0_f64;
         let mut cold_obs_ll = 0.0_f64;
+        let mut cold_initial_state_ll = 0.0_f64;
         let mut cold_nuts = NutsSweepDiag::default();
 
         for rung in 0..n_rungs {
@@ -3608,7 +3437,7 @@ pub fn run_pgas(
 
                     let (ll, ll_grad_theta) = match super::pgas_grad::complete_data_loglik_grad(
                         model, rung_traj, &params, observations,
-                        config.dt, obs_model, &ivp_mappings,
+                        config.dt, obs_model,
                         d, &rate_grads_for_run, &obs_at_substep,
                         &estimated_to_model,
                     ) {
@@ -3780,7 +3609,7 @@ pub fn run_pgas(
                     // still propagates — see `theta_proposal_score`.
                     let proposed_ll = theta_proposal_score(complete_data_loglik(
                         model, &rungs[rung].trajectory, &proposed_params, observations,
-                        config.dt, obs_model, &ivp_mappings, &obs_at_substep,
+                        config.dt, obs_model, &obs_at_substep,
                     ))?;
 
                     let proposed_log_prior_i = priors[i].log_density(theta_new, z_new);
@@ -3844,7 +3673,7 @@ pub fn run_pgas(
                 let (new_trajectory, diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
-                    &ivp_mappings, csmc_seed, &obs_at_substep, firing,
+                    csmc_seed, &obs_at_substep, firing,
                 )?;
                 rungs[rung].trajectory = new_trajectory;
                 csmc_diag = diag;
@@ -3853,7 +3682,7 @@ pub fn run_pgas(
             // Recompute complete-data LL at β=1 (untempered, for swap proposals)
             let ll_components = complete_data_loglik(
                 model, &rungs[rung].trajectory, &rungs[rung].params, observations,
-                config.dt, obs_model, &ivp_mappings, &obs_at_substep,
+                config.dt, obs_model, &obs_at_substep,
             )?;
             rungs[rung].ll = ll_components.total;
 
@@ -3863,6 +3692,7 @@ pub fn run_pgas(
             if rung == 0 {
                 cold_transition_ll = ll_components.transition;
                 cold_obs_ll = ll_components.observation;
+                cold_initial_state_ll = ll_components.initial_state;
             }
         } // end rung loop
 
@@ -4019,6 +3849,7 @@ pub fn run_pgas(
             proposal_sds: cold_proposal_sd,
             transition_ll: cold_transition_ll,
             obs_ll: cold_obs_ll,
+            initial_state_ll: cold_initial_state_ll,
             nuts: cold_nuts,
         };
 
@@ -4451,7 +4282,7 @@ mod theta_proposal_score_tests {
     use crate::error::{CollapseKind, NegativeCountCause};
 
     fn components(total: f64) -> LogLikComponents {
-        LogLikComponents { total, transition: total, observation: 0.0, ivp: 0.0 }
+        LogLikComponents { total, transition: total, observation: 0.0, initial_state: 0.0 }
     }
 
     #[test]

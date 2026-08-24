@@ -935,6 +935,43 @@ let differentiate_ic (ic_expr : expr) (param_names : string list)
       | None -> None)
     param_names
 
+(** Fill the [grad] of every differentiable argument of an initial-state law
+    (`I ~ poisson(rate = I0)`), so `∂/∂θ log p(x₀ | θ)` has a compiler-emitted
+    per-parameter derivative to chain through.
+
+    [Pop] differentiates to 0, which is the RIGHT convention here and not an
+    oversight: the density is scored with x₀ held FIXED (in PGAS it is the
+    conditioning trajectory's own initial state, in NUTS it is data for the θ
+    update), so the only θ-dependence is through the law's arguments. That is
+    also what makes the emitted gradient finite-difference-checkable against
+    [initial_state_logpdf] at fixed x₀.
+
+    No projection is involved (an initial condition is not an observation), so
+    nothing is inlined and [proj_grad] is [None] — set by FULL RECONSTRUCTION,
+    like [differentiate_likelihood], so a new [diffable] field is a compile
+    error here until it is differentiated. *)
+let differentiate_initial_conditions (ic : initial_conditions)
+    (param_names : string list) (tfs : time_function list) (tbls : table list)
+    : initial_conditions =
+  let d (arg : diffable) : diffable =
+    { expr = arg.expr;
+      grad = differentiate_ic arg.expr param_names tfs tbls;
+      proj_grad = None }
+  in
+  List.map
+    (fun (comp, spec) ->
+      let spec' =
+        match spec with
+        | Deterministic _ -> spec
+        | InitCount (InitPoisson l) -> InitCount (InitPoisson { rate = d l.rate })
+        | InitCount (InitBinomial l) -> InitCount (InitBinomial { n = l.n; p = d l.p })
+        | InitCount (InitNegBinomial l) ->
+          InitCount (InitNegBinomial { mean = d l.mean; dispersion = d l.dispersion })
+        | InitReal (InitNormal l) -> InitReal (InitNormal { mean = d l.mean; sd = d l.sd })
+      in
+      (comp, spec'))
+    ic
+
 (** Differentiate one likelihood argument: keep its [expr] (raw — the projection
     is inlined only inside the gradient, never stored) and fill its [grad]. *)
 let differentiate_diffable (proj : projection) (d : diffable)

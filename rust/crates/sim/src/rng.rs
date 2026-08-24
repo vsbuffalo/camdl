@@ -162,6 +162,30 @@ impl StatefulRng {
         self.poisson(mean * g)
     }
 
+    /// NB2 draw with the observation parameterization: mean `mu`, dispersion
+    /// `k`, so `Var = mu + mu²/k` and `k → ∞` recovers Poisson(mu). This is the
+    /// sampler for `x ~ neg_binomial(mean = .., r = ..)`, and it is the exact
+    /// inverse of [`crate::inference::obs_loglik::negbin_logpmf`]'s `(mu, k)`.
+    ///
+    /// Distinct from [`Self::neg_binomial`] above, which takes `(mean, σ², dt)`
+    /// — the He et al. RATE-overdispersion parameterization, whose variance
+    /// scales with the integrator step. An initial state is drawn once, not per
+    /// step, so it has no `dt` to scale by; passing one parameterization where
+    /// the other is meant silently changes the dispersion.
+    pub fn neg_binomial_dispersion(&mut self, mean: f64, k: f64) -> u64 {
+        if mean <= 0.0 { return 0; }
+        // k <= 0 is outside the family; the density returns -inf there, so the
+        // nearest well-defined draw is the k → ∞ limit.
+        if !(k > 0.0) || !k.is_finite() { return self.poisson(mean); }
+        // Unit-mean Gamma(k, 1/k) mixed into a Poisson: E[G] = 1,
+        // Var[G] = 1/k, so Var[count] = mu + mu²/k.
+        let g = match Gamma::new(k, 1.0 / k) {
+            Ok(g) => g.sample(&mut self.0),
+            Err(_) => 1.0,
+        };
+        self.poisson(mean * g)
+    }
+
     /// Unit-mean Gamma multiplier for overdispersed rates (He et al. 2010).
     /// G ~ Gamma(dt/σ², σ²/dt), E[G] = 1, Var[G] = σ²/dt.
     /// Used by chain-binomial to noise the rate before probability conversion.

@@ -277,7 +277,7 @@ fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
     (0..n_sweeps)
         .map(|seed| {
             let (_traj, diag) = csmc_as(
-                &compiled, &params, &obs, &reference, n_particles, DT, &obs_model, &[],
+                &compiled, &params, &obs, &reference, n_particles, DT, &obs_model,
                 SEED + seed, &obs_at_substep, EffectFiring::default(),
             )
             .expect("csmc_as");

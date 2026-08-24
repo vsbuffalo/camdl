@@ -1166,8 +1166,90 @@
       "additionalProperties": { "$ref": "#/definitions/init_spec" }
     },
 
+    "diffable": {
+      "description": "A differentiable likelihood/law argument: the expression paired with its per-parameter classified gradient from the OCaml autodiff pass. `grad` is omitted when every derivative is a genuine zero. The `likelihood` argument positions above carry this same shape.",
+      "type": "object",
+      "required": ["expr"],
+      "properties": {
+        "expr": { "$ref": "#/definitions/expr" },
+        "grad": { "type": "object", "description": "parameter name -> deriv_entry" },
+        "proj_grad": { "type": "object", "description": "d(arg)/d(projected); absent for an initial-state law, which has no projection" }
+      }
+    },
+
+    "init_count_law": {
+      "description": "A law an INTEGER compartment's initial count is drawn from. The argument records are the observation ones, but NOT the observation `likelihood` variant set: `bernoulli`, `beta` and `beta_binomial` describe a MEASUREMENT of a compartment, not the compartment itself, and are not admissible here.",
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["poisson"],
+          "properties": {
+            "poisson": {
+              "type": "object",
+              "required": ["rate"],
+              "properties": {
+                "rate": { "$ref": "#/definitions/diffable" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["binomial"],
+          "properties": {
+            "binomial": {
+              "type": "object",
+              "description": "`n` must be theta-independent and carries no gradient, so it is a bare expr.",
+              "required": ["n", "p"],
+              "properties": {
+                "n": { "$ref": "#/definitions/expr" },
+                "p": { "$ref": "#/definitions/diffable" }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["neg_binomial"],
+          "properties": {
+            "neg_binomial": {
+              "type": "object",
+              "description": "NB2: Var = mean + mean^2/dispersion. Contains Poisson as dispersion -> infinity.",
+              "required": ["mean", "dispersion"],
+              "properties": {
+                "mean": { "$ref": "#/definitions/diffable" },
+                "dispersion": { "$ref": "#/definitions/diffable" }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "init_real_law": {
+      "description": "A law a REAL compartment's initial value is drawn from. Two law sets rather than one, so the compartment's kind selects the admissible one.",
+      "type": "object",
+      "oneOf": [
+        {
+          "required": ["normal"],
+          "properties": {
+            "normal": {
+              "type": "object",
+              "required": ["mean", "sd"],
+              "properties": {
+                "mean": { "$ref": "#/definitions/diffable" },
+                "sd": { "$ref": "#/definitions/diffable" }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
     "init_spec": {
-      "description": "What one compartment's initial value is.",
+      "description": "What one compartment's initial value is: COMPUTED from an expression, or DRAWN from a law.",
       "type": "object",
       "oneOf": [
         {
@@ -1176,6 +1258,26 @@
             "deterministic": {
               "description": "`S = N0 - I`: an expression over constants, parameters and other compartments' initial values.",
               "$ref": "#/definitions/expr"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["count"],
+          "properties": {
+            "count": {
+              "description": "`I ~ poisson(rate = I0)` on an integer compartment.",
+              "$ref": "#/definitions/init_count_law"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["real"],
+          "properties": {
+            "real": {
+              "description": "`V ~ normal(mean = v0, sd = s)` on a real compartment.",
+              "$ref": "#/definitions/init_real_law"
             }
           },
           "additionalProperties": false

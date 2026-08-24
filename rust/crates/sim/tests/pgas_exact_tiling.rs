@@ -28,7 +28,7 @@ use std::sync::Arc;
 use sim::compiled_model::CompiledModel;
 use sim::inference::pgas::{
     build_substep_grid, complete_data_loglik, log_transition_density_substep,
-    simulate_reference, simulate_reference_on_grid, IVPMapping, ObsAtSubstep, PGASTrajectory,
+    simulate_reference, simulate_reference_on_grid, ObsAtSubstep, PGASTrajectory,
 };
 use sim::inference::pgas_grad::{complete_data_loglik_grad, resolve_rate_grad_for_run};
 use sim::inference::particle_filter::Observation;
@@ -170,11 +170,10 @@ fn exact_shortened_substep_density_recompute() {
     // transition component must equal the independent recompute bit-for-bit
     // (this model has no overdispersion → no gamma term). No obs-scoring.
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
-    let ivp: Vec<IVPMapping> = vec![];
     let no_obs: Vec<Observation> = vec![];
     let no_map = ObsAtSubstep::new();
     let comps = complete_data_loglik(
-        &compiled, &traj, &params, &no_obs, dt, &obs_model, &ivp, &no_map,
+        &compiled, &traj, &params, &no_obs, dt, &obs_model, &no_map,
     ).unwrap();
     assert_eq!(comps.transition.to_bits(), d_exact.to_bits(),
         "complete_data_loglik must read rec.(t0,dt_substep): {} vs recompute {}",
@@ -208,7 +207,6 @@ fn exact_shortened_substep_gradient_matches_fd() {
         "gate is vacuous without a shortened substep");
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
-    let ivp: Vec<IVPMapping> = vec![];
     let no_obs: Vec<Observation> = vec![];
     let no_map = ObsAtSubstep::new();
     let model_to_estimated: Vec<Option<usize>> = (0..n_params).map(Some).collect();
@@ -218,15 +216,14 @@ fn exact_shortened_substep_gradient_matches_fd() {
 
     // Analytic gradient on the shortened-substep trajectory.
     let (ll, grad) = complete_data_loglik_grad(
-        &compiled, &traj, &params, &no_obs, dt, &obs_model, &ivp,
-        n_params, &rate_grads_for_run, &no_map, &estimated_to_model,
+        &compiled, &traj, &params, &no_obs, dt, &obs_model, n_params, &rate_grads_for_run, &no_map, &estimated_to_model,
     ).unwrap();
     assert!(ll.is_finite(), "LL must be finite");
 
     // FD the INDEPENDENT value function (complete_data_loglik) — cross-function,
     // so a t/dt drift confined to one function cannot cancel.
     let value = |p: &[f64]| -> f64 {
-        complete_data_loglik(&compiled, &traj, p, &no_obs, dt, &obs_model, &ivp, &no_map)
+        complete_data_loglik(&compiled, &traj, p, &no_obs, dt, &obs_model, &no_map)
             .unwrap()
             .total
     };

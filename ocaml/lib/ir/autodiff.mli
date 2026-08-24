@@ -50,6 +50,16 @@ val differentiate_ic :
   expr -> string list -> time_function list -> table list ->
   (string * deriv_entry) list
 
+(** Attach per-parameter gradients to every argument of every DRAWN initial
+    condition (`I ~ poisson(rate = I0)`), so `∂/∂θ log p(x₀ | θ)` has an
+    emitted derivative to chain through. [Pop] differentiates to 0 by design:
+    the density is scored with x₀ held fixed, so the only θ-dependence is
+    through the law's arguments. Distinct from [differentiate_ic], which
+    differentiates the MEAN for the ODE forward-sensitivity seed. *)
+val differentiate_initial_conditions :
+  initial_conditions -> string list -> time_function list -> table list ->
+  initial_conditions
+
 (** Attach per-parameter gradients to a single likelihood's arguments. *)
 val differentiate_likelihood :
   projection -> likelihood -> string list -> time_function list -> table list ->

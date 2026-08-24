@@ -73,8 +73,11 @@ let deps ~(bindings : Ir.binding list) (e : Ir.expr) : string list =
    (the default) and constrains nothing. *)
 let topo (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
   : (string list, string list) result =
-  let expr_of = function Ir.Deterministic e -> e in
-  let entry = List.fold_left (fun m (k, s) -> SM.add k (expr_of s) m) SM.empty ic in
+  (* EVERY expression the spec evaluates is an edge source: a law's arguments
+     are evaluated against the partially built state exactly as a deterministic
+     RHS is, so `I ~ binomial(n = N0 - R, p = q)` depends on `R`. *)
+  let entry =
+    List.fold_left (fun m (k, s) -> SM.add k (Ir.init_spec_exprs s) m) SM.empty ic in
   (* absent = unvisited, `Grey = on the current DFS path, `Black = finished *)
   let state : (string, [ `Grey | `Black ]) Hashtbl.t = Hashtbl.create 32 in
   let out = ref [] in
@@ -96,11 +99,14 @@ let topo (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
     | _ ->
       (match SM.find_opt name entry with
        | None -> ()   (* no init entry: starts at 0, imposes no order *)
-       | Some e ->
+       | Some es ->
          Hashtbl.replace state name `Grey;
          List.iter
-           (fun d -> if SM.mem d entry then visit (name :: path) d)
-           (deps ~bindings e);
+           (fun e ->
+              List.iter
+                (fun d -> if SM.mem d entry then visit (name :: path) d)
+                (deps ~bindings e))
+           es;
          Hashtbl.replace state name `Black;
          out := name :: !out)
   in
@@ -123,7 +129,12 @@ let topo (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
    identically 0), but the raw expression differentiates to 1.
 
    A referenced compartment with no init entry closes to [Const 0.0], matching
-   the runtime, where an unseeded compartment starts at 0. *)
+   the runtime, where an unseeded compartment starts at 0.
+
+   A LAW entry closes over its MEAN expression. `ic_grad` seeds the ODE forward
+   sensitivity, and the ODE path is deterministic: it starts every compartment
+   at [Ir.init_spec_mean_expr]. Closing over anything else would differentiate a
+   value that path never computes. *)
 let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
   : (string * Ir.expr) list =
   match topo ic ~bindings with
@@ -132,8 +143,12 @@ let closed (ic : Ir.initial_conditions) ~(bindings : Ir.binding list)
        on validate errors before this pass runs. *)
     failwith "init dependency cycle reached the IC-gradient pass (gh#733)"
   | Ok order ->
-    let expr_of = function Ir.Deterministic e -> e in
-    let entry = List.fold_left (fun m (k, s) -> SM.add k (expr_of s) m) SM.empty ic in
+    (* The MEAN expression, for a law: the ODE forward-sensitivity seed
+       differentiates the value the deterministic path starts from, and that
+       path takes each law at its mean. *)
+    let entry =
+      List.fold_left
+        (fun m (k, s) -> SM.add k (Ir.init_spec_mean_expr s) m) SM.empty ic in
     let body_of =
       List.fold_left
         (fun m (b : Ir.binding) -> SM.add b.bname b.bexpr m)

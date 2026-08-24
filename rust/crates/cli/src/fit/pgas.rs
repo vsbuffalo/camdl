@@ -762,7 +762,7 @@ pub fn run_stage(
             // the ancestor-sampling counters because the three are read
             // together: the profile says WHERE the path is stuck, `as_accept`
             // and `as_proposed` say why.
-            let mut trace_columns: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 12);
+            let mut trace_columns: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 13);
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
             // gh#718: `as_opportunity` is how many substeps in the sweep drew
@@ -772,8 +772,13 @@ pub fn run_stage(
             // observation contributes none. Read it as the denominator behind
             // `as_proposed` — a low renewal with `as_opportunity` near zero is
             // a schedule with nowhere to renew, not a sampler that will not.
+            // The three complete-data components are named by the shared
+            // constants, so the writer here and the readers in
+            // `chain_diagnostics` cannot drift on a column name.
             trace_columns.extend(["as_opportunity", "as_accept", "as_proposed",
-                  "transition_ll", "obs_ll",
+                  super::loglik::TRACE_COL_TRANSITION_LL,
+                  super::loglik::TRACE_COL_OBS_LL,
+                  super::loglik::TRACE_COL_INITIAL_STATE_LL,
                   "tree_depth", "n_leapfrog", "step_size", "accept_stat",
                   "n_divergent", "energy"]);
             let trace_writer = super::trace_writer::TraceWriter::new(
@@ -844,6 +849,7 @@ pub fn run_stage(
                 let as_opportunity_str = result.csmc_diag.n_resampled.to_string();
                 let transition_ll_str = format!("{:.4}", result.transition_ll);
                 let obs_ll_str = format!("{:.4}", result.obs_ll);
+                let initial_state_ll_str = format!("{:.4}", result.initial_state_ll);
                 // Per-sweep cold-chain NUTS diagnostics (gh#294).
                 let nd = &result.nuts;
                 let tree_depth_str = nd.tree_depth.to_string();
@@ -852,13 +858,14 @@ pub fn run_stage(
                 let accept_stat_str = format!("{:.4}", nd.accept_stat);
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
-                let mut extra: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 12);
+                let mut extra: Vec<&str> = Vec::with_capacity(RENEWAL_BINS + 13);
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
                 extra.extend([
                     as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
                     transition_ll_str.as_str(), obs_ll_str.as_str(),
+                    initial_state_ll_str.as_str(),
                     tree_depth_str.as_str(), n_leapfrog_str.as_str(), step_size_str.as_str(),
                     accept_stat_str.as_str(), n_divergent_str.as_str(), energy_str.as_str(),
                 ]);

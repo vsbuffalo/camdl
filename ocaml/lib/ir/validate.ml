@@ -26,6 +26,9 @@ type error =
   | ParamInBinding        of string * string  (* binding name, param name *)
   | InitUnknownCompartment of string          (* init key naming no compartment *)
   | InitDependencyCycle   of string list      (* gh#733: init entries that read each other *)
+  | InitLawKindMismatch   of string * string * string
+      (* compartment, law family, the kind the law seeds *)
+  | InitLawOnBalanceTarget of string          (* compartment drawn AND balanced *)
 
 let error_to_string = function
   | DuplicateCompartment s -> Printf.sprintf "duplicate compartment: %s" s
@@ -52,6 +55,12 @@ let error_to_string = function
   | InitDependencyCycle cyc ->
     Printf.sprintf "initial conditions reference each other in a cycle: %s"
       (String.concat " -> " (cyc @ [List.hd cyc]))
+  | InitLawKindMismatch (comp, family, seeds) ->
+    Printf.sprintf "initial condition '%s' is drawn from '%s', which seeds %s"
+      comp family seeds
+  | InitLawOnBalanceTarget comp ->
+    Printf.sprintf "initial condition '%s' is drawn from a law but is the balance target"
+      comp
 
 module SS = Set.Make(String)
 
@@ -230,6 +239,30 @@ let validate (m : model) : (unit, error list) result =
   List.iter (fun (k, _) ->
     if not (SS.mem k comp_names)
     then errors := InitUnknownCompartment k :: !errors
+  ) m.initial_conditions;
+
+  (* Initial-state law admissibility. The compartment's kind selects which laws
+     may seed it, and the `balance { }` target may be seeded by none of them —
+     the balance stage overwrites it after every substep, so a draw there is
+     discarded. The frontend reports both with a located E344/E345; these are
+     the contract-boundary nets, and they mirror `rust/crates/ir/src/validate.rs`
+     so the two sides agree by construction rather than by comment. *)
+  List.iter (fun (comp, spec) ->
+    let real = SS.mem comp real_comps in
+    (match spec with
+     | Deterministic _ -> ()
+     | InitCount _ when real ->
+       errors := InitLawKindMismatch
+                   (comp, Option.get (init_spec_law_name spec),
+                    "an integer compartment") :: !errors
+     | InitReal _ when not real && SS.mem comp comp_names ->
+       errors := InitLawKindMismatch
+                   (comp, Option.get (init_spec_law_name spec),
+                    "a real compartment") :: !errors
+     | InitCount _ | InitReal _ -> ());
+    if init_spec_law_name spec <> None
+       && (match m.balance with Some b -> b.balance_target = comp | None -> false)
+    then errors := InitLawOnBalanceTarget comp :: !errors
   ) m.initial_conditions;
 
   (* Initial-condition dependency cycle (gh#733). An init entry may read another

@@ -1330,12 +1330,26 @@ init_entry_sep:
   | i = init_entry       { i }
   | i = init_entry COMMA { comma_sep_error ~sp:$startpos ~ep:$endpos "init"; i }
 
+(* Two forms, distinguished by a single terminal after a shared prefix:
+     `S = N0 - I`            — a COMPUTED initial value (EQ)
+     `I ~ poisson(rate = I0)`— a DRAWN one (TILDE)
+   `~` already reads "is distributed as" for parameter priors and observation
+   likelihoods, and [obs_likelihood] is reused verbatim so the two surfaces
+   cannot drift in how a distribution call is spelled. *)
 init_entry:
   | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET EQ v = expr
-      { { icomp = comp; iindices = []; ibindings = ibs; ivalue = v;
+      { { icomp = comp; iindices = []; ibindings = ibs; ivalue = IVExpr v;
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
   | comp = IDENT idxs = index_items_opt EQ v = expr
-      { { icomp = comp; iindices = idxs; ibindings = []; ivalue = v;
+      { { icomp = comp; iindices = idxs; ibindings = []; ivalue = IVExpr v;
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | comp = IDENT LBRACKET ibs = separated_nonempty_list(COMMA, index_binding) RBRACKET TILDE l = obs_likelihood
+      { { icomp = comp; iindices = []; ibindings = ibs;
+          ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
+          iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+  | comp = IDENT idxs = index_items_opt TILDE l = obs_likelihood
+      { { icomp = comp; iindices = idxs; ibindings = [];
+          ivalue = IVLaw (l, Parser_errors.ast_loc_of ~sp:$startpos(l) ~ep:$endpos(l));
           iloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
 
 (* ── Timepoints block ────────────────────────────────────────────────────── *)

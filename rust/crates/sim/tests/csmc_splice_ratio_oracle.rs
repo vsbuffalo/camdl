@@ -204,7 +204,7 @@ fn spliced(reference: &PGASTrajectory, s: usize, offset: &[i64]) -> PGASTrajecto
 
 fn cdl(f: &Fixture, traj: &PGASTrajectory) -> f64 {
     complete_data_loglik(
-        &f.compiled, traj, &f.params, &f.obs, DT, &f.obs_model, &[], &f.obs_at_substep,
+        &f.compiled, traj, &f.params, &f.obs, DT, &f.obs_model, &f.obs_at_substep,
     )
     .expect("complete_data_loglik")
     .total

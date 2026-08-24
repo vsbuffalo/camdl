@@ -1,4 +1,4 @@
-{"ir_version":"0.34","validated_by":"ocaml-compiler-v0.34","model":{"name":"sir_coupling","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.35","validated_by":"ocaml-compiler-v0.35","model":{"name":"sir_coupling","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_young","kind":"integer"},
 {"name":"S_old","kind":"integer"},
 {"name":"I_young","kind":"integer"},

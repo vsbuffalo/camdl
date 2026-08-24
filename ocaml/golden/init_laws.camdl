@@ -1,0 +1,137 @@
+# An SEIR whose introduction is DRAWN rather than assumed, with a real-valued
+# environmental reservoir whose starting level is also uncertain.
+#
+# WHAT THIS MODEL IS
+#
+# Susceptible people (S) who meet an infectious person become exposed (E) —
+# infected but not yet infectious — then become infectious (I), then recover
+# with immunity (R). Alongside the human compartments, `W` is a continuous
+# environmental reservoir (a pathogen concentration in water, in arbitrary
+# units) that infectious people shed into and that decays first-order. `W` is
+# real-valued because a concentration is not a count of anything, and it is
+# a downstream tally in this model: it is fed by the epidemic but does not
+# feed back into transmission.
+#
+# WHAT THIS FIXTURE IS FOR
+#
+# The `init { }` block is the point. It exercises, in one block, every form the
+# initial-condition surface takes as of ir/VERSION 0.35:
+#
+#   * `~` with EACH of the three count laws, on integer compartments —
+#     `poisson` (I), `binomial` (R), `neg_binomial` (E);
+#   * `~` with the real-valued law, on a real compartment — `normal` (W);
+#   * a law COMBINED WITH A DEPENDENT DETERMINISTIC ENTRY — `S` is written as
+#     `N0 - I - E - R`, so it reads the values the three laws above DREW, not
+#     their means;
+#   * declaration order that is NOT dependency order — `S` is written first and
+#     depends on three entries below it;
+#   * a `binomial` whose `p` is a `probability`-kinded parameter, which is the
+#     only kind that argument admits.
+#
+# THE PROPERTY TO READ OFF IT
+#
+# The living population is exactly `N0` at t=0, ON EVERY DRAW, with no
+# `balance { }` block: `S` is what is left after the drawn E, I and R are taken
+# out of `N0`. The draws are random, so no single trajectory value is
+# hand-checkable — but `S + E + I + R == N0` is, and it is the invariant the
+# dependency-ordered evaluation exists to guarantee. Evaluate the entries
+# against a zero state (or take each law at its mean while drawing the others)
+# and the budget breaks by exactly the sampling error of the three draws.
+#
+# The means under the `baseline` scenario are I = 50, E = 75, R = 20000, so
+# S averages 79875 — but any given run will differ from that in every one of
+# the four terms while still summing to 100000.
+
+time_unit = 'days
+
+compartments {
+  S, E, I, R,
+  W : real
+}
+
+parameters {
+  #' per-capita person-to-person transmission rate
+  #' @symbol β
+  beta        : rate        in [0.001, 2.0]
+  #' rate of leaving the exposed class; 1/sigma is the mean latent period
+  #' @symbol σ
+  sigma       : rate        in [0.01, 1.0]
+  #' recovery rate; 1/gamma is the mean infectious period
+  #' @symbol γ
+  gamma       : rate        in [0.01, 1.0]
+  #' shedding rate into the reservoir, per infectious person per day
+  shed        : rate        in [0.0, 10.0]
+  #' first-order decay rate of the reservoir
+  decay       : rate        in [0.001, 1.0]
+  #' living population at t_start
+  N0          : count       in [100, 1000000]
+  #' EXPECTED number of infectious people at t_start. The realized number is a
+  #' Poisson draw around it: an introduction is a counting process, and at a
+  #' seed of this size the difference between the mean and a draw is the
+  #' difference between a fitted outbreak and an over-confident one.
+  I0          : count       in [1.0, 10000.0]
+  #' expected exposed people per infectious person at t_start. A growing
+  #' epidemic carries more latent than infectious infections, so this exceeds 1.
+  exposed_per_infectious : positive in [0.1, 10.0]
+  #' clustering of the exposed count around its mean. NegBinomial rather than
+  #' Poisson because introductions are clustered rather than independent
+  #' (Lloyd-Smith et al. 2005, Nature 438:355-359); as k grows the two agree.
+  #' @symbol k
+  exposed_k   : positive    in [0.1, 1000.0]
+  #' probability that a member of the population is already immune at t_start
+  frac_immune : probability in [0.0, 0.9]
+  #' expected reservoir concentration at t_start, in shedding-days per litre
+  W0          : real        in [0.0, 1000.0]
+  #' standard deviation of the reservoir's starting concentration
+  W0_sd       : real        in [0.001, 500.0]
+}
+
+let N = S + E + I + R   # living population — the transmission denominator
+
+transitions {
+  infection   : S --> E  @ beta * S * I / N
+  progression : E --> I  @ sigma * E
+  recovery    : I --> R  @ gamma * I
+}
+
+ode {
+  W = shed * I - decay * W
+}
+
+init {
+  # Written in the order a modeller thinks about them — the remainder first,
+  # then what it is made of. The runtime does NOT evaluate them in this order:
+  # the edges are S -> {E, I, R}, and E -> I, so the sort puts I, then E and R,
+  # then S. Each `~` entry is DRAWN once per particle, and `S` reads what was
+  # drawn, not what was expected.
+  S = N0 - I - E - R
+  I ~ poisson(rate = I0)
+  E ~ neg_binomial(mean = exposed_per_infectious * I, r = exposed_k)
+  R ~ binomial(n = N0, p = frac_immune)
+  W ~ normal(mean = W0, sd = W0_sd)
+}
+
+simulate {
+  from = 0 'days
+  to   = 120 'days
+}
+
+scenarios {
+  baseline {
+    label = "drawn introduction"
+    set = {
+      beta                   = 0.6
+      sigma                  = 0.2
+      gamma                  = 0.1
+      shed                   = 0.5
+      decay                  = 0.2
+      N0                     = 100000
+      I0                     = 50
+      exposed_per_infectious = 1.5
+      exposed_k              = 5.0
+      frac_immune            = 0.2
+      W0                     = 10.0
+      W0_sd                  = 2.0
+    }
+  }
+}

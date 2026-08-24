@@ -281,14 +281,30 @@ pub fn bootstrap_filter_correlated(
         .map(|i| StatefulRng::new_stream(seed, i as u64))
         .collect();
 
-    // ONE draw, copied to every particle — the pre-split behaviour, kept
-    // because no `init {}` entry can declare a law yet, so `initial_state_draw`
-    // is deterministic and consumes nothing from `rngs[0]`. Note the pre-drawn
-    // correlated randoms in `randoms` cover the transition kernel only; a
-    // future initial-state law drawn here would be an *uncorrelated* addition
-    // to a CPM proposal, which is a design question step 5 owes an answer.
-    // `rngs` is empty when `n_particles == 0`; see the same guard in
-    // `particle_filter.rs::bootstrap_filter`.
+    // A declared `init { }` law is refused here, and for a reason of its own —
+    // not the bootstrap filter's.
+    //
+    // Correlated PMMH works because the WHOLE particle system is a
+    // deterministic function of the pre-drawn correlated random vector
+    // (`randoms`), so a small perturbation of that vector gives a small
+    // perturbation of the likelihood estimate, and the two estimates in the MH
+    // ratio share most of their noise. `randoms` covers the transition kernel
+    // only. Drawing x0 from a ChaCha stream here would add randomness that is
+    // NOT part of the correlated vector — uncorrelated noise injected into the
+    // one place the method's efficiency depends on it being correlated. Making
+    // x0 part of the correlated vector is a design change to CPM, not a wiring
+    // fix, so it is refused rather than guessed at.
+    if model.has_init_law {
+        return Err(SimError::Validation(
+            "this model's `init { }` DRAWS a compartment from a law              (`I ~ poisson(...)`), which correlated PMMH (a `pmmh` stage with              `rho` set) cannot represent: its pre-drawn correlated randoms              cover the transition kernel only, so an initial-state draw would              be uncorrelated noise added to the one quantity the method needs              correlated between the current and proposed theta.\n\n               Drop `rho` to run plain PMMH, or use `algorithm = pgas` /              `algorithm = if2`, or write the initial condition as an expression              (`I = I0`) instead of a law."
+                .to_string(),
+        ));
+    }
+
+    // ONE draw, copied to every particle. Exact for a deterministic `init { }`:
+    // `initial_state_draw` consumes nothing from `rngs[0]` and every particle
+    // would get the same state anyway. `rngs` is empty when `n_particles == 0`;
+    // see the same guard in `particle_filter.rs::bootstrap_filter`.
     let (init_int, _init_real) = match rngs.first_mut() {
         Some(rng0) => model.initial_state_draw(params, rng0)?,
         None => model.initial_state_draw(

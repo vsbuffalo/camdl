@@ -171,7 +171,7 @@ fn tally(interval: bool, sweeps: u64) -> AsTally {
     let mut t = AsTally { proposed: 0, accepted: 0, inadmissible: 0, substeps: 0, renewal: 0.0 };
     for seed in 0..sweeps {
         let (_traj, diag) = csmc_as(
-            &compiled, &params, &obs, &reference, 32, DT, &obs_model, &[],
+            &compiled, &params, &obs, &reference, 32, DT, &obs_model,
             SEED + seed, &obs_at_substep, EffectFiring::default(),
         )
         .expect("csmc_as");

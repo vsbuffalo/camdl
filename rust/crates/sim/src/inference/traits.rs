@@ -63,16 +63,26 @@ pub trait ProcessModel: Send + Sync {
     /// a stochastic filter, so every caller wants a draw; the mean, the
     /// density and its gradient are asked of the `CompiledModel` directly.
     ///
-    /// `rng` is the stream the returned state is drawn from. No `init {}`
-    /// entry can declare a law yet, so no implementation consumes it and the
-    /// returned state is the deterministic `init {}` evaluation — but the
-    /// stream a caller passes is the stream the draw will come from once laws
-    /// land, so pass the one whose spread you want (per-particle, not shared).
+    /// `rng` is the stream the returned state is drawn from, and for a model
+    /// whose `init {}` declares a law it IS consumed — so pass the stream whose
+    /// spread you want (per-particle, not shared). For a deterministic
+    /// `init {}` nothing is consumed and the returned state is the `init {}`
+    /// evaluation.
     fn initial_state_draw(
         &self,
         params: &[f64],
         rng: &mut StatefulRng,
     ) -> Result<Self::State, SimError>;
+
+    /// Does this model's `init {}` DRAW any compartment from a law
+    /// (`I ~ poisson(rate = I0)`), rather than computing all of them?
+    ///
+    /// Required, not defaulted: a filter that copies one `initial_state_draw`
+    /// to every particle gives a swarm with no t=0 spread, which for a model
+    /// with a law is a wrong estimator rather than a slow one. Every
+    /// implementation must answer, so a new process cannot inherit a `false`
+    /// that happens to be wrong.
+    fn declares_init_law(&self) -> bool;
 
     /// Advance state by one timestep.
     ///

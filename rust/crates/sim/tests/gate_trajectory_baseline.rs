@@ -357,6 +357,18 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("init_dependency_order", "gillespie", 0x1ff926d513545893),
     ("init_dependency_order", "chain_binomial", 0x106db514b819a113),
     ("init_dependency_order", "ode", 0x1cf09ebb82654096),
+    // The only golden whose `init {}` DRAWS its compartments
+    // (`I ~ poisson`, `E ~ neg_binomial`, `R ~ binomial`, `W ~ normal`). Its
+    // starting state is a draw from the run's own RNG stream, so these hashes
+    // pin the seed→x₀ mapping as well as the dynamics: any change to how many
+    // draws `initial_state_draw` takes, or in what order, moves all three.
+    // The `ode` row is the deterministic skeleton, which starts every
+    // compartment at its law's MEAN — so it moves if `mean_expr` changes, and
+    // not if the sampler does. Captured alongside the fixture; the existing 150
+    // entries re-verified unchanged in the same run.
+    ("init_laws", "gillespie", 0x73f9b219dd68dd54),
+    ("init_laws", "chain_binomial", 0x99b799b03100b590),
+    ("init_laws", "ode", 0x4380a0837ed47599),
 ];
 
 /// State-only ODE baselines (gh#166 Phase A): model -> `ode_state_hash`, captured
@@ -370,6 +382,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("ebola_outcome_hyper", 0xfda4ae754f35311c),
     ("flu_data_forcing", 0xd55c543de04d2062),
     ("init_dependency_order", 0x302afcb22a1f2e5b),
+    ("init_laws", 0x25f3dd8651ed7ce4),
     ("malaria_two_species", 0xfd4699acf8596e87),
     ("multi_index_beta", 0x31fc0e11eb647500),
     ("phenom_mixing_unchecked", 0x46f766b4f10b0138),

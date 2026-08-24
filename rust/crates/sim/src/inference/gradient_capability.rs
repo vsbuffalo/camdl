@@ -377,7 +377,6 @@ pub fn preflight_gradient_ode(
     // only the syntactic parameters of `S` would leave that pair unchecked, so a
     // nondifferentiable ∂S/∂I0 could reach the seed as `Unsupported`.
     {
-        use ir::model::InitSpec;
         // Direct + inherited parameter references, filled in dependency order so
         // each entry's dependencies are already resolved when it is reached.
         let mut reaching: std::collections::HashMap<&str, HashSet<String>> = std::collections::HashMap::new();
@@ -387,9 +386,13 @@ pub fn preflight_gradient_ode(
                 cycle.join(" -> ")
             )))?;
         for &i in &order {
-            let (comp, InitSpec::Deterministic(expr)) = m.initial_conditions.0
+            let (comp, spec) = m.initial_conditions.0
                 .get_index(i)
                 .expect("init_order indexes initial_conditions");
+            // The MEAN expression: the ODE path starts every compartment at its
+            // law's mean, and `ic_grad` differentiates that same expression, so
+            // it is the one whose parameter reach must be covered.
+            let expr = &spec.mean_expr();
             // A binding could hide a param reference the scan below does not
             // descend into — refuse rather than risk a silent-zero seed.
             if expr_has_binding_ref(expr) {
@@ -402,7 +405,9 @@ pub fn preflight_gradient_ode(
             }
             let mut refs = HashSet::new();
             collect_param_refs(expr, &mut refs);
-            for dep in ir::init_order::deps(expr, &m.bindings) {
+            for dep in spec.exprs().into_iter()
+                .flat_map(|e| ir::init_order::deps(e, &m.bindings))
+            {
                 if let Some(inherited) = reaching.get(dep.as_str()) {
                     refs.extend(inherited.iter().cloned());
                 }

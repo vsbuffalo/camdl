@@ -215,7 +215,6 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
                 32,
                 DT,
                 &f.obs_model,
-                &[],
                 SEED + seed,
                 &f.obs_at_substep,
                 EffectFiring::default(),

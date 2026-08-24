@@ -717,6 +717,16 @@ pub struct CompiledModel {
     /// two independent entries keep the order the model file wrote them in.
     pub init_order: Vec<usize>,
 
+    /// Whether any `init {}` entry is DRAWN rather than computed.
+    ///
+    /// The one predicate the sampler, the density and the gradient all branch
+    /// on, so they cannot disagree about whether this model has an
+    /// initial-state term. For the deterministic corpus it is `false` and each
+    /// of the three short-circuits — `initial_state_draw` to the shared mean
+    /// producer (consuming nothing from the RNG), the density to `0.0`, the
+    /// gradient to zeros.
+    pub has_init_law: bool,
+
     /// Pre-resolved expression trees for all hot-path evaluations.
     pub resolved: ResolvedModel,
 }
@@ -1832,6 +1842,8 @@ impl CompiledModel {
                 ))
             })?;
 
+        let has_init_law = model.initial_conditions.iter().any(|(_, s)| s.is_law());
+
         let resolved = ResolvedModel {
             rates,
             bindings: resolved_bindings,
@@ -1872,6 +1884,7 @@ impl CompiledModel {
             balance,
             fire_times,
             init_order,
+            has_init_law,
             resolved,
         })
     }
@@ -1943,17 +1956,17 @@ impl CompiledModel {
     /// rather than a silently-zero coordinate in the NUTS gradient.
     ///
     /// Call this only where the *mean* is what is wanted. Today that is the
-    /// deterministic ODE path (`ode.rs::run_ode`), pre-flight state built
-    /// before any backend runs (the `--event-log` lineage recorder's initial
-    /// pool), the deterministic IVP finite-difference probe
-    /// (`pgas.rs::detect_ivp_mappings`), and structural quantities derived
-    /// from the initial state — a patch population, a total — which must be
-    /// the same number for every particle. Every stochastic forward path calls
+    /// deterministic ODE path (`ode.rs::run_ode`), `render`, the fit-time
+    /// preflight, and structural quantities derived from the initial state — a
+    /// total, a denominator — which must be the same number for every
+    /// particle. Every stochastic forward path calls
     /// [`Self::initial_state_draw`] instead.
     ///
-    /// `init {}` cannot declare a law yet — [`InitSpec::Deterministic`] is the
-    /// only spec — so today this is the entire initial state and
-    /// `initial_state_draw` returns exactly this.
+    /// A DRAWN entry (`I ~ poisson(rate = I0)`) contributes its law's **mean**
+    /// here — `rate` for Poisson, `n·p` for Binomial, `mean` for NegBinomial
+    /// and Normal ([`InitSpec::mean_expr`]). That is the same expression the
+    /// `∂init/∂θ` forward-sensitivity seed differentiates, so the ODE skeleton
+    /// and its gradient agree about where the model starts.
     ///
     /// Entries are evaluated in dependency order ([`Self::init_order`]) against
     /// the state built so far, so `init { I = I0   S = N0 - I }` reads the `I`
@@ -1967,7 +1980,6 @@ impl CompiledModel {
         &self,
         params: &[f64],
     ) -> Result<(IntState, RealState), SimError> {
-        use ir::model::InitSpec;
         use crate::propensity::{eval_expr, EvalCtx};
 
         let n_int = self.int_local_to_global.len();
@@ -1978,9 +1990,9 @@ impl CompiledModel {
         let mut real_s = RealState::new(n_real);
 
         for &i in &self.init_order {
-            let (name, InitSpec::Deterministic(expr)) =
-                self.model.initial_conditions.0.get_index(i)
-                    .expect("init_order indexes initial_conditions");
+            let (name, spec) = self.model.initial_conditions.0.get_index(i)
+                .expect("init_order indexes initial_conditions");
+            let expr = &spec.mean_expr();
             let global = self.comp_index.get(name.as_str())
                 .copied()
                 .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
@@ -2010,18 +2022,76 @@ impl CompiledModel {
     /// initialisation, and PGAS's reference-trajectory walk — so that when a
     /// law lands they all get it from one place.
     ///
-    /// No `init {}` entry can declare a law yet, so there is nothing to draw:
-    /// this returns [`Self::initial_state_mean`] and **consumes nothing from
-    /// `rng`**. A caller's RNG stream is therefore byte-identical to what the
-    /// single pre-split `initial_state` produced. `rng` is threaded now so
-    /// that adding the draw is a change to this function only.
+    /// Entries are evaluated in dependency order against the state built so
+    /// far, exactly as in [`Self::initial_state_mean`], so a deterministic
+    /// entry reads the value a law just DREW: `I ~ poisson(rate = I0)` followed
+    /// by `S = N0 - I` keeps `S + I == N0` on every draw, without a
+    /// `balance {}` block.
+    ///
+    /// **Consumes nothing from `rng` for a model whose `init {}` is entirely
+    /// deterministic**, so such a caller's RNG stream is byte-identical to what
+    /// the single pre-split `initial_state` produced. A model that declares a
+    /// law consumes one draw per law entry, in dependency order.
     pub fn initial_state_draw(
         &self,
         params: &[f64],
         rng: &mut crate::rng::StatefulRng,
     ) -> Result<(IntState, RealState), SimError> {
-        let _ = rng;
-        self.initial_state_mean(params)
+        use ir::model::{InitCountLaw, InitRealLaw, InitSpec};
+        use crate::propensity::{eval_expr, EvalCtx};
+
+        // A block with no law has nothing to draw and nothing to allocate;
+        // short-circuit to the shared producer so the deterministic corpus
+        // keeps one code path (and one RNG stream).
+        if !self.has_init_law {
+            return self.initial_state_mean(params);
+        }
+
+        let n_int = self.int_local_to_global.len();
+        let n_real = self.real_local_to_global.len();
+        let mut int_s = IntState::new(n_int);
+        let mut real_s = RealState::new(n_real);
+
+        for &i in &self.init_order {
+            let (name, spec) = self.model.initial_conditions.0.get_index(i)
+                .expect("init_order indexes initial_conditions");
+            let global = self.comp_index.get(name.as_str())
+                .copied()
+                .ok_or_else(|| SimError::UnknownCompartment(name.clone()))?;
+            // Every argument is evaluated against the state built so far —
+            // the same partial state a deterministic RHS sees.
+            let arg = |e: &ir::expr::Expr| -> Result<f64, SimError> {
+                let ctx = EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+                eval_expr(e, &ctx)
+            };
+            let v: f64 = match spec {
+                InitSpec::Deterministic(e) => arg(e)?,
+                InitSpec::Count(InitCountLaw::Poisson(l)) => {
+                    rng.poisson(arg(&l.rate.expr)?) as f64
+                }
+                InitSpec::Count(InitCountLaw::Binomial(l)) => {
+                    let n = arg(&l.n)?;
+                    let p = arg(&l.p.expr)?;
+                    rng.binomial(n.round().max(0.0) as u64, p) as f64
+                }
+                InitSpec::Count(InitCountLaw::NegBinomial(l)) => {
+                    rng.neg_binomial_dispersion(
+                        arg(&l.mean.expr)?, arg(&l.dispersion.expr)?) as f64
+                }
+                InitSpec::Real(InitRealLaw::Normal(l)) => {
+                    let mean = arg(&l.mean.expr)?;
+                    let sd = arg(&l.sd.expr)?;
+                    mean + sd.max(0.0) * rng.normal()
+                }
+            };
+            if let Some(local) = self.global_to_int[global] {
+                int_s.counts[local] = v.round() as i64;
+            } else if let Some(local) = self.global_to_real[global] {
+                real_s.values[local] = v;
+            }
+        }
+
+        Ok((int_s, real_s))
     }
 
     /// `log p(x₀ | θ)` — the initial-state term of the complete-data
@@ -2035,20 +2105,92 @@ impl CompiledModel {
     /// departure from the proposal's shorthand `(x0, params)`, which does not
     /// type `x0`.
     ///
-    /// **Returns `0.0` today**: a deterministic `init {}` contributes no
-    /// density — `x₀` is a function of `θ`, not a random variable, so it adds
-    /// no `θ`-dependent term to the complete-data likelihood. The existing
-    /// PGAS Binomial IVP term (`pgas.rs`, `complete_data_loglik`) is a
-    /// *detected*, not declared, initial-state law and is deliberately left
-    /// where it is until the laws land.
+    /// **Only DRAWN entries contribute.** A deterministic `init {}` entry is a
+    /// function of `θ` and of the entries before it, not a random variable, so
+    /// it adds no `θ`-dependent term: a model whose `init {}` declares no law
+    /// returns `0.0`, exactly as before the laws landed.
+    ///
+    /// Each law's arguments are evaluated against `x0` itself, not against a
+    /// rebuilt state. Dependency order guarantees a law's arguments name only
+    /// entries seeded *before* it, so reading them from the finished `x0` and
+    /// reading them from the partial prefix give the same numbers — and reading
+    /// the finished state is what makes this a pure function of `(x0, θ)`,
+    /// which is what the PGAS `θ | X` update needs.
+    ///
+    /// Fallible, unlike the proposal's shorthand signature: evaluating a law's
+    /// arguments goes through `eval_expr`, whose error surface (a table lookup
+    /// off its domain, a division by zero, a non-finite parameter) is real and
+    /// θ-dependent. Swallowing it into a `0.0` would silently drop the
+    /// initial-state term from the target for exactly the θ where it is
+    /// pathological; the caller already classifies `SimError` for every other
+    /// density it evaluates.
     pub fn initial_state_logpdf(
         &self,
         x0_int: &[i64],
         x0_real: &[f64],
         params: &[f64],
-    ) -> f64 {
-        let _ = (x0_int, x0_real, params);
-        0.0
+    ) -> Result<f64, SimError> {
+        use ir::model::{InitCountLaw, InitRealLaw, InitSpec};
+        use crate::inference::obs_loglik::{binom_logpmf, negbin_logpmf, normal_logpdf,
+                                           poisson_logpmf};
+
+        if !self.has_init_law {
+            return Ok(0.0);
+        }
+        let (int_s, real_s) = self.state_view(x0_int, x0_real);
+        let mut ll = 0.0;
+        for (name, spec) in &self.model.initial_conditions {
+            let Some(x) = self.init_law_value(name, &int_s, &real_s, spec)? else { continue };
+            let arg = |e: &ir::expr::Expr| -> Result<f64, SimError> {
+                let ctx = crate::propensity::EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+                crate::propensity::eval_expr(e, &ctx)
+            };
+            ll += match spec {
+                InitSpec::Deterministic(_) => 0.0,
+                InitSpec::Count(InitCountLaw::Poisson(l)) => {
+                    poisson_logpmf(x, arg(&l.rate.expr)?)
+                }
+                InitSpec::Count(InitCountLaw::Binomial(l)) => {
+                    let n = arg(&l.n)?.round().max(0.0) as u64;
+                    let k = x.round().max(0.0) as u64;
+                    binom_logpmf(k, n, arg(&l.p.expr)?)
+                }
+                InitSpec::Count(InitCountLaw::NegBinomial(l)) => {
+                    negbin_logpmf(x, arg(&l.mean.expr)?, arg(&l.dispersion.expr)?)
+                }
+                InitSpec::Real(InitRealLaw::Normal(l)) => {
+                    normal_logpdf(x, arg(&l.mean.expr)?, arg(&l.sd.expr)?)
+                }
+            };
+        }
+        Ok(ll)
+    }
+
+    /// Borrow `(x0_int, x0_real)` as the state pair `eval_expr` reads.
+    fn state_view(&self, x0_int: &[i64], x0_real: &[f64]) -> (IntState, RealState) {
+        (IntState::from_vec(x0_int.to_vec()), RealState::from_vec(x0_real.to_vec()))
+    }
+
+    /// The realized value of a DRAWN entry, read out of the given state;
+    /// `None` for a deterministic entry (nothing to score or differentiate).
+    fn init_law_value(
+        &self,
+        name: &str,
+        int_s: &IntState,
+        real_s: &RealState,
+        spec: &ir::model::InitSpec,
+    ) -> Result<Option<f64>, SimError> {
+        if !spec.is_law() {
+            return Ok(None);
+        }
+        let global = self.comp_index.get(name)
+            .copied()
+            .ok_or_else(|| SimError::UnknownCompartment(name.to_string()))?;
+        Ok(if let Some(local) = self.global_to_int[global] {
+            Some(int_s.counts[local] as f64)
+        } else {
+            self.global_to_real[global].map(|local| real_s.values[local])
+        })
     }
 
     /// `∂/∂θ log p(x₀ | θ)` — the gradient half of the initial-state seam (see
@@ -2060,19 +2202,101 @@ impl CompiledModel {
     /// basis here is what lets the signature stay `(x0, params)` as the
     /// proposal specifies, with no estimated-set argument.
     ///
-    /// **Returns all zeros today**, for the same reason
-    /// [`Self::initial_state_logpdf`] returns `0.0`: `∂/∂θ` of a constant is
-    /// zero, and it is zero *because there is no law*, not because the
-    /// gradient was forgotten. That distinction is the whole point of the
-    /// split — the density and the gradient move together or not at all.
+    /// **All zeros for a model whose `init {}` declares no law**, and zero
+    /// there *because there is no law*, not because the gradient was
+    /// forgotten. That distinction is the whole point of the split — the
+    /// density and the gradient move together or not at all.
+    ///
+    /// For a law entry the chain rule is `Σ_arg ∂logpdf/∂arg · ∂arg/∂θ`, where
+    /// `∂arg/∂θ` is the compiler-emitted [`Diffable::grad`] (OCaml
+    /// `Autodiff.differentiate_initial_conditions`) evaluated at `x0`, and
+    /// `∂logpdf/∂arg` is the same analytic helper the observation scorer uses.
+    /// `x0` is held FIXED, which is what makes this the honest derivative of
+    /// [`Self::initial_state_logpdf`] and finite-difference-checkable against
+    /// it. Binomial's `n` is θ-independent (`#[differentiate(skip)]`) and
+    /// contributes no term.
+    ///
+    /// [`Diffable::grad`]: ir::deriv::Diffable::grad
     pub fn initial_state_logpdf_grad(
         &self,
         x0_int: &[i64],
         x0_real: &[f64],
         params: &[f64],
-    ) -> Vec<f64> {
-        let _ = (x0_int, x0_real);
-        vec![0.0; params.len()]
+    ) -> Result<Vec<f64>, SimError> {
+        use ir::model::{InitCountLaw, InitRealLaw, InitSpec};
+        use crate::inference::obs_loglik::{negbin_logpmf_grad, normal_logpdf_grad,
+                                           poisson_logpmf_grad};
+
+        let mut grad = vec![0.0; params.len()];
+        if !self.has_init_law {
+            return Ok(grad);
+        }
+        let (int_s, real_s) = self.state_view(x0_int, x0_real);
+        for (name, spec) in &self.model.initial_conditions {
+            let Some(x) = self.init_law_value(name, &int_s, &real_s, spec)? else { continue };
+            let ctx = crate::propensity::EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
+            let arg = |e: &ir::expr::Expr| crate::propensity::eval_expr(e, &ctx);
+            // `∂arg/∂θ_j` for every model parameter, from the emitted map.
+            let chain = |d: &ir::deriv::Diffable, dlogp_darg: f64,
+                             grad: &mut Vec<f64>| -> Result<(), SimError> {
+                if dlogp_darg == 0.0 || !dlogp_darg.is_finite() {
+                    return Ok(());
+                }
+                for (pname, entry) in &d.grad {
+                    let Some(j) = self.param_index.get(pname.as_str()).copied() else { continue };
+                    match entry {
+                        ir::deriv::DerivEntry::Grad(e) => {
+                            grad[j] += dlogp_darg * crate::propensity::eval_expr(e, &ctx)?;
+                        }
+                        // Unreachable on a gated path: the fit-time gradient
+                        // preflight refuses an estimated parameter whose
+                        // ∂arg/∂θ the compiler could not emit, exactly as it
+                        // does for an observation argument.
+                        ir::deriv::DerivEntry::Unsupported { code, .. } => {
+                            debug_assert!(false,
+                                "ungated Unsupported initial-state gradient ({code:?}) reached \
+                                 eval — the fit-time preflight invariant was violated");
+                        }
+                    }
+                }
+                Ok(())
+            };
+            match spec {
+                InitSpec::Deterministic(_) => {}
+                InitSpec::Count(InitCountLaw::Poisson(l)) => {
+                    let rate = arg(&l.rate.expr)?;
+                    chain(&l.rate, poisson_logpmf_grad(x, rate), &mut grad)?;
+                }
+                InitSpec::Count(InitCountLaw::Binomial(l)) => {
+                    let n = arg(&l.n)?.round().max(0.0);
+                    let p = arg(&l.p.expr)?;
+                    // d/dp log Binom(k; n, p) = k/p - (n-k)/(1-p). Zero outside
+                    // the open unit interval, matching the value function's
+                    // -inf floor (the gradient of a constant floor is zero).
+                    let dp = if p > 0.0 && p < 1.0 && x <= n {
+                        x / p - (n - x) / (1.0 - p)
+                    } else {
+                        0.0
+                    };
+                    chain(&l.p, dp, &mut grad)?;
+                }
+                InitSpec::Count(InitCountLaw::NegBinomial(l)) => {
+                    let mu = arg(&l.mean.expr)?;
+                    let k = arg(&l.dispersion.expr)?;
+                    let (d_mu, d_k) = negbin_logpmf_grad(x, mu, k);
+                    chain(&l.mean, d_mu, &mut grad)?;
+                    chain(&l.dispersion, d_k, &mut grad)?;
+                }
+                InitSpec::Real(InitRealLaw::Normal(l)) => {
+                    let mu = arg(&l.mean.expr)?;
+                    let sd = arg(&l.sd.expr)?;
+                    let (d_mu, d_sd) = normal_logpdf_grad(x, mu, sd);
+                    chain(&l.mean, d_mu, &mut grad)?;
+                    chain(&l.sd, d_sd, &mut grad)?;
+                }
+            }
+        }
+        Ok(grad)
     }
 
     /// Continuous initial compartment values for the ODE **gradient** path
@@ -2105,7 +2329,6 @@ impl CompiledModel {
         &self,
         params: &[f64],
     ) -> Result<(Vec<f64>, Vec<f64>), SimError> {
-        use ir::model::InitSpec;
         use crate::propensity::{eval_expr, EvalCtx};
 
         let n_int = self.int_local_to_global.len();
@@ -2118,9 +2341,9 @@ impl CompiledModel {
         let unused_int = IntState::new(n_int);
 
         for &i in &self.init_order {
-            let (name, InitSpec::Deterministic(expr)) =
-                self.model.initial_conditions.0.get_index(i)
-                    .expect("init_order indexes initial_conditions");
+            let (name, spec) = self.model.initial_conditions.0.get_index(i)
+                .expect("init_order indexes initial_conditions");
+            let expr = &spec.mean_expr();
             let v = {
                 let ctx = EvalCtx { model: self, int_s: &unused_int, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: Some(&int_values), per_eval: None };
                 eval_expr(expr, &ctx)?

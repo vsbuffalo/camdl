@@ -42,6 +42,15 @@ pub const TRACE_COL_TRANSITION_LL: &str = "transition_ll";
 /// conditioned path reproduces the observed data.
 pub const TRACE_COL_OBS_LL: &str = "obs_ll";
 
+/// PGAS's initial-state term `log p(x₀ | θ)`, from the laws the model declares
+/// in `init { }`. Zero for a deterministic `init { }`.
+///
+/// Written as its own column rather than left to be recovered by subtracting
+/// the other two from `log_complete_data_ll`: a constant component of the
+/// target that is only visible by subtraction is what made gh#719 need trace
+/// forensics to find.
+pub const TRACE_COL_INITIAL_STATE_LL: &str = "initial_state_ll";
+
 /// The comparison class of a log-likelihood value. Serializes to the same
 /// `snake_case` tags the codebase used as free strings before gh#280
 /// (`"if2"`, `"marginal"`, `"ode_marginal"`, `"complete_data"`), so legacy

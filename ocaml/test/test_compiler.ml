@@ -10585,6 +10585,111 @@ let test_ic_grad_differentiates_the_closed_expression () =
       | _ -> Alcotest.failf "expected a ∂A/∂A0 gradient")
    | None -> Alcotest.failf "no ic_grad for A — the IC autodiff pass did not run")
 
+(* ── Initial-state laws: `comp ~ D(...)` in `init { }` ──────────────────────
+   An initial condition may be DRAWN rather than computed. `~` already reads
+   "is distributed as" for parameter priors and observation likelihoods, and
+   the same `D(kw = ...)` grammar is reused, so the tests below are about
+   which laws are ADMISSIBLE where — the part a shared grammar cannot decide.
+
+   Three refusals, each a class that would otherwise be a silent wrong answer:
+
+   1. a law the initial-state vocabulary does not have (E343). The observation
+      vocabulary is wider on purpose: `bernoulli` / `beta` / `beta_binomial`
+      describe a MEASUREMENT of a compartment, not the compartment itself.
+   2. a law whose support does not match the compartment's kind (E344), in
+      both directions — and the `count`-parameter-as-a-Binomial-`p` case,
+      which is gh#719's ~-4.2e8 offset made a compile error.
+   3. a law on the `balance { }` target (E345): the balance stage overwrites
+      its target after every substep, so the draw is discarded and the model
+      reads stochastic while behaving deterministically. *)
+
+let init_law_model ?(extra_params = "") ?(balance = "") ~init () = Printf.sprintf {|
+time_unit = 'days
+compartments { S, I, R, W : real }
+parameters {
+  beta  : rate        in [0.001, 2.0]
+  gamma : rate        in [0.001, 1.0]
+  decay : rate        in [0.001, 1.0]
+  N0    : count       in [10, 100000]
+  I0    : count       in [1, 1000]
+  frac  : probability in [0, 1]
+  W0    : real        in [0, 100]
+  W0_sd : real        in [0.001, 50]%s
+}
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+ode { W = gamma * I - decay * W }
+init { %s }
+%s
+simulate { from = 0 'days  to = 10 'days }
+|} extra_params init balance
+
+let test_init_law_poisson_binomial_negbin_and_normal_compile () =
+  let m = compile_expect_ok (init_law_model
+    ~init:"S = N0 - I - R\n  I ~ poisson(rate = I0)\n  \
+           R ~ binomial(n = N0, p = frac)\n  \
+           W ~ normal(mean = W0, sd = W0_sd)" ()) in
+  let law name = Ir.init_spec_law_name (List.assoc name m.Ir.initial_conditions) in
+  Alcotest.(check (option string)) "I is a poisson draw" (Some "poisson") (law "I");
+  Alcotest.(check (option string)) "R is a binomial draw" (Some "binomial") (law "R");
+  Alcotest.(check (option string)) "W is a normal draw" (Some "normal") (law "W");
+  Alcotest.(check (option string)) "S stays computed" None (law "S")
+
+let test_init_law_neg_binomial_compiles () =
+  let m = compile_expect_ok (init_law_model
+    ~extra_params:"\n  k : positive in [0.1, 100]"
+    ~init:"I ~ neg_binomial(mean = I0, r = k)" ()) in
+  Alcotest.(check (option string)) "I is a neg_binomial draw"
+    (Some "neg_binomial") (Ir.init_spec_law_name (List.assoc "I" m.Ir.initial_conditions))
+
+let test_init_law_arguments_carry_a_gradient () =
+  (* A law is a sampler AND a density AND a gradient. If the autodiff pass did
+     not visit the law's arguments, `initial_state_logpdf_grad` would be
+     identically zero on I0 — the silent-bias class, and invisible from the
+     value alone. *)
+  let m = compile_expect_ok (init_law_model
+    ~init:"I ~ poisson(rate = I0)" ()) in
+  match List.assoc "I" m.Ir.initial_conditions with
+  | Ir.InitCount (Ir.InitPoisson l) ->
+    (match List.assoc_opt "I0" l.Ir.rate.Ir.grad with
+     | Some (Ir.DEGrad (Ir.Const 1.0)) -> ()
+     | Some (Ir.DEGrad _) ->
+       Alcotest.fail "expected drate/dI0 to be the constant 1"
+     | Some (Ir.DEUnsupported _) ->
+       Alcotest.fail "drate/dI0 should be differentiable, got Unsupported"
+     | None -> Alcotest.fail "no drate/dI0 emitted — the init-law autodiff pass did not run")
+  | _ -> Alcotest.fail "I should be a count law"
+
+let test_init_law_observation_only_family_rejected () =
+  compile_expect_error_code ~code:"E343" ~contains:"observation likelihood"
+    (init_law_model ~init:"I ~ bernoulli(p = frac)" ())
+
+let test_init_law_continuous_on_integer_rejected () =
+  compile_expect_error_code ~code:"E344" ~contains:"declared an integer compartment"
+    (init_law_model ~init:"I ~ normal(mean = W0, sd = W0_sd)" ())
+
+let test_init_law_count_on_real_rejected () =
+  compile_expect_error_code ~code:"E344" ~contains:"declared real"
+    (init_law_model ~init:"W ~ poisson(rate = I0)" ())
+
+let test_init_law_binomial_p_must_be_a_probability () =
+  (* gh#719: a `count` in the Binomial `p` position clamps to 1 - 1e-10 and
+     charges log(1e-10) per individual outside the compartment. The message
+     must name the parameter and its declared kind. *)
+  compile_expect_error_code ~code:"E344" ~contains:"'I0', declared `count`"
+    (init_law_model ~init:"I ~ binomial(n = N0, p = I0)" ())
+
+let test_init_law_on_balance_target_rejected () =
+  compile_expect_error_code ~code:"E345" ~contains:"balance"
+    (init_law_model ~balance:"balance { S = N0 - I - R }"
+       ~init:"S ~ poisson(rate = I0)" ())
+
+let test_init_law_missing_argument_rejected () =
+  compile_expect_error_code ~code:"E250" ~contains:"missing required argument 'rate'"
+    (init_law_model ~init:"I ~ poisson(lambda = I0)" ())
+
 (* ── gh#98: ISO date out-of-range validation ─────────────────────────────────
    parse_iso_date did no month/day range check, so `date("2020-02-30")`
    silently shifted to a garbage day offset with no diagnostic. Out-of-range
@@ -12538,6 +12643,26 @@ let () =
       Alcotest.test_case "concrete cell init S[child] ok" `Quick test_init_concrete_cell_ok;
       Alcotest.test_case "single diagnostic for one root cause" `Quick test_init_bare_stratified_single_diagnostic;
     ];
+    "init_laws", [
+      Alcotest.test_case "all four laws compile" `Quick
+        test_init_law_poisson_binomial_negbin_and_normal_compile;
+      Alcotest.test_case "neg_binomial compiles" `Quick
+        test_init_law_neg_binomial_compiles;
+      Alcotest.test_case "law arguments carry a gradient" `Quick
+        test_init_law_arguments_carry_a_gradient;
+      Alcotest.test_case "E343 observation-only family" `Quick
+        test_init_law_observation_only_family_rejected;
+      Alcotest.test_case "E344 normal on an integer compartment" `Quick
+        test_init_law_continuous_on_integer_rejected;
+      Alcotest.test_case "E344 poisson on a real compartment" `Quick
+        test_init_law_count_on_real_rejected;
+      Alcotest.test_case "E344 binomial p must be a probability" `Quick
+        test_init_law_binomial_p_must_be_a_probability;
+      Alcotest.test_case "E345 law on the balance target" `Quick
+        test_init_law_on_balance_target_rejected;
+      Alcotest.test_case "E250 missing law argument" `Quick
+        test_init_law_missing_argument_rejected;
+    ];
     "init_dependency_order", [
       Alcotest.test_case "E515 cycle names the loop" `Quick test_init_dependency_cycle_rejected;
       Alcotest.test_case "E515 hint says chain not loop" `Quick test_init_dependency_cycle_hint_says_chain_not_loop;
@@ -12580,6 +12705,8 @@ let () =
       Alcotest.test_case "sir_reservoir"           `Quick (test_golden "sir_reservoir");
       Alcotest.test_case "sir_priors"              `Quick (test_golden "sir_priors");
       Alcotest.test_case "sir_init_table"          `Quick (test_golden "sir_init_table");
+      Alcotest.test_case "init_laws"               `Quick (test_golden "init_laws");
+      Alcotest.test_case "init_dependency_order"   `Quick (test_golden "init_dependency_order");
       Alcotest.test_case "sir_patches_5"           `Quick (test_golden "sir_patches_5");
       Alcotest.test_case "sir_spatial_sum"         `Quick (test_golden "sir_spatial_sum");
       Alcotest.test_case "sir_dim_annotated"       `Quick (test_golden "sir_dim_annotated");

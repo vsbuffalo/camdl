@@ -1,22 +1,24 @@
-//! gh#719 / gh#723 — PGAS decides whether a parameter is an initial-value
-//! parameter by a rounding-gated finite difference on the *chain's own start*,
-//! so two chains of one fit can disagree, and a count-valued parameter that
-//! wins the coin flip is then used directly as a Binomial probability.
+//! gh#719 / gh#723 — an initial-state density is DECLARED or it does not
+//! exist.
 //!
-//! The detector (`detect_ivp_mappings`) nudges each estimated parameter by
-//! `(upper - lower).min(1.0) * PROBE_STEP` and asks whether any non-balance
-//! compartment's *rounded* initial count moved. `initial_state_mean`
-//! rounds integer compartments to `i64`, so for a parameter whose range is
-//! wider than 1.0 the probe is a flat 0.01 in the parameter's own units:
+//! PGAS used to decide whether a parameter was an initial-value parameter by a
+//! rounding-gated finite difference on the *chain's own start*
+//! (`detect_ivp_mappings`, `PROBE_STEP`), then attached a Binomial density to
+//! whatever compartment that parameter moved — reading the parameter as a
+//! probability. Two chains of one fit could disagree about whether the term was
+//! there at all, and a count-valued parameter that won the coin flip clamped to
+//! `1 - 1e-10` and charged `log(1e-10)` for every individual outside the
+//! compartment: a finite ~-4.2e8 offset the non-finite chain-start guard walks
+//! straight past.
 //!
-//!   * a FRACTION parameter driving a large population has slope `N0`, so
-//!     0.01 moves the count by thousands and the probe always fires;
-//!   * a COUNT parameter has slope 1, so the probe fires only for starts
-//!     within 0.01 of a half-integer — about 1% of them.
+//! Both the detector and the density it attached are gone. The initial-state
+//! term now comes from `init { I ~ poisson(rate = I0) }` through the shared
+//! seam (`CompiledModel::initial_state_logpdf`), so a model that declares no
+//! law has no term — from ANY start, on EVERY chain.
 //!
-//! Both tests below are on the same model and differ only in the starting
-//! value of `I0`, which is what `run_pgas` receives per chain via
-//! `chain_starts[chain_id]`.
+//! The model below is the one gh#719 reports: `I0 : count`, `init { I = I0 }`,
+//! at the ebola national population. The starts include `614.4998`, which is
+//! exactly the rounding-boundary crossing the old probe fired on.
 
 use ir::{
     expr::{BinOp, ConstExpr, Expr},
@@ -32,7 +34,6 @@ use sim::{
     compiled_model::CompiledModel,
     inference::{
         obs_loglik::binom_logpmf,
-        pgas::{detect_ivp_mappings, PROBE_STEP},
         types::{EstimatedParam, Transform, PROB_FRACTION_EPS},
     },
 };
@@ -151,6 +152,7 @@ fn count_ivp_model() -> CompiledModel {
     CompiledModel::new(model).unwrap()
 }
 
+#[allow(dead_code)]
 fn i0_spec(compiled: &CompiledModel) -> Vec<EstimatedParam> {
     let idx = compiled.param_index["I0"];
     vec![EstimatedParam {
@@ -175,34 +177,22 @@ fn params_with_i0(compiled: &CompiledModel, i0: f64) -> Vec<f64> {
     p
 }
 
-/// The fix: a `count`-kinded parameter never enters the IVP path, from ANY
-/// start — including the one that used to fire.
+/// A model that declares no `init { }` law carries no initial-state density —
+/// from every start, including the one the deleted probe used to fire on.
 ///
-/// Before the kind guard, this was decided per chain by a rounding-gated probe.
-/// `run_pgas` calls `detect_ivp_mappings` once per chain from
-/// `chain_starts[chain_id]`, nudging each parameter by
-/// `(upper - lower).min(1.0) * PROBE_STEP` and asking whether any compartment's
-/// ROUNDED initial count moved. For `I0` with a range wider than 1.0 that step
-/// is a flat 0.01 individuals, so with `I = I0` it fired only for starts within
-/// 0.01 of a half-integer — about 1% of them. Two chains of one fit therefore
-/// carried different targets: one with a ~4.2e8 offset, one with no IVP term.
-///
-/// The guard removes the whole class rather than the nondeterminism alone: the
-/// Binomial term reads the parameter as a probability, and a count is not one.
+/// The non-vacuity guard comes first: this model's initial state genuinely
+/// MOVES with `I0`, and at `614.4998` a 0.01 nudge genuinely crosses a rounding
+/// boundary. So a zero density here is "nothing was declared", not "the
+/// parameter is inert" and not "the probe happened to miss".
 #[test]
-fn a_count_parameter_never_enters_the_ivp_path() {
+fn an_undeclared_initial_state_carries_no_density() {
     let compiled = count_ivp_model();
-    let specs = i0_spec(&compiled);
 
-    let step = (I0_UPPER - I0_LOWER).min(1.0) * PROBE_STEP;
-    assert!(
-        (step - 0.01).abs() < 1e-12,
-        "probe step should be 0.01 individuals for a count parameter, got {step}"
-    );
+    // The probe's own step, spelled out rather than imported: `PROBE_STEP` is
+    // deleted, and the number is what makes the crossing start meaningful.
+    let step = (I0_UPPER - I0_LOWER).min(1.0) * 0.01;
+    assert!((step - 0.01).abs() < 1e-12, "expected a 0.01-individual step, got {step}");
 
-    // `614.4998` is the start that DOES cross a rounding boundary:
-    // round(614.4998) = 614, round(614.5098) = 615. It is the case that used to
-    // register, so it is the one that proves the guard rather than the probe.
     let crossing = params_with_i0(&compiled, 614.4998);
     let (base, _) = compiled.initial_state_mean(&crossing).unwrap();
     let mut nudged = crossing.clone();
@@ -210,37 +200,62 @@ fn a_count_parameter_never_enters_the_ivp_path() {
     let (pert, _) = compiled.initial_state_mean(&nudged).unwrap();
     assert_ne!(
         base.counts, pert.counts,
-        "this start must still move a rounded initial count, else the guard is          not what is being tested — the probe simply missed"
+        "this start must still move a rounded initial count, else a zero density \
+         below would prove nothing"
     );
 
+    assert!(!compiled.has_init_law, "this fixture declares no `init {{ }}` law");
+
     for start in [614.998_f64, 614.4998, 3.0, 2999.5] {
-        let m = detect_ivp_mappings(&compiled, &specs, &params_with_i0(&compiled, start))
-            .expect("detection must not error");
+        let params = params_with_i0(&compiled, start);
+        let (int_s, real_s) = compiled.initial_state_mean(&params).unwrap();
+        let lp = compiled
+            .initial_state_logpdf(&int_s.counts, &real_s.values, &params)
+            .expect("logpdf");
+        assert_eq!(
+            lp, 0.0,
+            "no law is declared, so there is no initial-state density; got {lp} at \
+             start {start}"
+        );
+        let g = compiled
+            .initial_state_logpdf_grad(&int_s.counts, &real_s.values, &params)
+            .expect("logpdf_grad");
         assert!(
-            m.is_empty(),
-            "a `count` parameter must never register an IVP mapping; it did at              start {start}: {m:?}"
+            g.iter().all(|&v| v == 0.0),
+            "the density and its gradient move together or not at all; got {g:?} at \
+             start {start}"
         );
     }
 
-    // Negative control, and the other half of the contract: a `probability`
-    // parameter still registers, and now does so from EVERY start, because its
-    // slope in the initial count is the population rather than 1.
+    // The other half of the old contract, and the sharper half: a
+    // `probability`-kinded parameter driving the same initial state used to
+    // register from EVERY start, so this model carried the Binomial term
+    // whether or not its author asked for one. It no longer does.
     let frac = fraction_ivp_model();
-    let frac_specs = fraction_spec(&frac);
+    assert!(!frac.has_init_law, "the fraction twin declares no law either");
     for start in [0.001_f64, 0.00131, 0.0491, 0.02] {
-        let m = detect_ivp_mappings(&frac, &frac_specs, &params_with_frac(&frac, start))
-            .expect("detection must not error");
+        let params = params_with_frac(&frac, start);
+        let (int_s, real_s) = frac.initial_state_mean(&params).unwrap();
+        let lp = frac
+            .initial_state_logpdf(&int_s.counts, &real_s.values, &params)
+            .expect("logpdf");
         assert_eq!(
-            m.len(), 1,
-            "a probability IVP must register from every start; missed at {start}"
+            lp, 0.0,
+            "a probability-kinded parameter no longer attracts an undeclared \
+             Binomial; got {lp} at start {start}"
         );
     }
 }
 
-/// The consequence: once a COUNT parameter has registered, `complete_data_loglik`
-/// uses it directly as a Binomial probability, where the clamp turns it into
-/// `1 - 1e-10` and the term becomes an ~4.2e8 constant offset on the chain's
-/// log-posterior — finite, so `NonFiniteChainStart` walks straight past it.
+/// What the deleted class cost, kept as arithmetic rather than as prose: a
+/// count used directly as a Binomial probability clamps to `1 - 1e-10` and
+/// becomes an ~-4.2e8 constant offset on the chain's log-posterior — FINITE, so
+/// `NonFiniteChainStart` walks straight past it.
+///
+/// This is why the surface is `binomial(n = ..., p = ...)` with an explicit,
+/// kind-checked `p`: the author writes the denominator and the probability, and
+/// a `count`-kinded parameter in the `p` position is a compile error (E344)
+/// rather than a number this large.
 #[test]
 fn a_count_used_as_a_binomial_probability_is_finite_and_astronomically_wrong() {
     // The value gh#719 reports from the frozen ebola chain.
@@ -317,6 +332,7 @@ fn fraction_ivp_model() -> CompiledModel {
     CompiledModel::new(model).unwrap()
 }
 
+#[allow(dead_code)]
 fn fraction_spec(compiled: &CompiledModel) -> Vec<EstimatedParam> {
     let idx = compiled.param_index["I0"];
     vec![EstimatedParam {

@@ -579,7 +579,7 @@ fn exact_target(f: &Fixture) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>
     let mut logp = Vec::new();
     for traj in enumerate_paths(&f.initial_counts, f.n_substeps) {
         let ll = complete_data_loglik(
-            &f.compiled, &traj, &f.params, &f.obs, DT, &f.obs_model, &[], &f.obs_at_substep,
+            &f.compiled, &traj, &f.params, &f.obs, DT, &f.obs_model, &f.obs_at_substep,
         )
         .expect("complete_data_loglik")
         .total;
@@ -656,7 +656,6 @@ fn snare_geometry_is_a_live_unrepaired_ancestor_move() {
             n_particles,
             DT,
             &f.obs_model,
-            &[],
             0x5eed_a5a5_0000_0000u64.wrapping_add(i as u64),
             &f.obs_at_substep,
             EffectFiring::default(),

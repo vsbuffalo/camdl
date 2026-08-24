@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.34",
+  "ir_version": "0.35",
   "validated_by": "hand-curated-guard-fixture",
   "model": {
     "name": "intervention_nonfinite",

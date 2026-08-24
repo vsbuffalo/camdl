@@ -162,7 +162,9 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
   List.iter
     (fun (comp, spec) ->
        add comp;
-       match spec with Deterministic e -> add_expr e)
+       (* Every expression the spec evaluates, so a compartment read only
+          through a law's argument counts as live. *)
+       List.iter add_expr (Ir.init_spec_exprs spec))
     m.initial_conditions;
 
   (* Balance constraint: target compartment + balance expr operands. *)
