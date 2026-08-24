@@ -736,7 +736,7 @@ mod tests {
     /// also checked against the WRITTEN draws, because the two share their row
     /// decode — a differential alone would agree happily on a wrong value.
     #[test]
-    fn read_trajectories_matches_the_single_key_reader_on_every_key() {
+    fn read_trajectories_returns_exactly_what_was_written() {
         let tmp = std::env::temp_dir()
             .join(format!("camdl_io_traj_multi_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
@@ -749,49 +749,24 @@ mod tests {
 
         for w in &written {
             let (chain, draw) = (w.chain, w.draw);
-            let (one_traj, one_inc) =
-                read_trajectory(&path, &columns, chain, draw).expect("single-key read");
             let (many_traj, many_inc) =
                 many.get(&(chain, draw)).expect("the map is total over the requested keys");
 
-            assert_eq!(
-                many_inc, &one_inc,
-                "incidence rows differ for (chain {chain}, draw {draw})"
-            );
             assert_eq!(
                 many_inc, &w.incidence,
                 "incidence rows differ from what was WRITTEN for (chain {chain}, draw {draw})"
             );
             assert_eq!(
                 many_traj.snapshots.len(),
-                one_traj.snapshots.len(),
-                "snapshot count differs for (chain {chain}, draw {draw})"
-            );
-            assert_eq!(
-                many_traj.snapshots.len(),
                 w.path.snapshots.len(),
                 "snapshot count differs from what was WRITTEN for (chain {chain}, draw {draw})"
             );
-            for (i, ((m, o), w)) in many_traj
+            for (i, (m, w)) in many_traj
                 .snapshots
                 .iter()
-                .zip(one_traj.snapshots.iter())
                 .zip(w.path.snapshots.iter())
                 .enumerate()
             {
-                assert_eq!(m.t, o.t, "time differs at snapshot {i} of (chain {chain}, draw {draw})");
-                assert_eq!(
-                    m.int_state.counts, o.int_state.counts,
-                    "integer compartments differ at snapshot {i} of (chain {chain}, draw {draw})"
-                );
-                assert_eq!(
-                    m.real_state.values, o.real_state.values,
-                    "real compartments differ at snapshot {i} of (chain {chain}, draw {draw})"
-                );
-                assert_eq!(
-                    m.flows, o.flows,
-                    "flows differ at snapshot {i} of (chain {chain}, draw {draw})"
-                );
                 // Ground truth: what the writer was handed.
                 assert_eq!(m.t, w.t, "time differs from WRITTEN at snapshot {i}");
                 assert_eq!(
@@ -1220,37 +1195,19 @@ pub fn read_trajectory(
     chain: usize,
     draw: usize,
 ) -> Result<SavedPath, String> {
-    let txt = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
-    let layout = RowLayout::resolve(path, header_of(path, lines.next())?, columns)?;
-
-    let mut snapshots: Vec<Snapshot> = Vec::new();
-    let mut incidence: Vec<Vec<f64>> = Vec::new();
-    let mut fields: Vec<&str> = Vec::new();
-
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if layout.ids(line)? != (chain, draw) {
-            continue;
-        }
-        fields.clear();
-        fields.extend(line.split('\t'));
-        let (snap, inc_row) = layout.decode(&fields)?;
-        snapshots.push(snap);
-        incidence.push(inc_row);
-    }
-
-    if snapshots.is_empty() {
-        return Err(no_saved_path(path, chain, draw));
-    }
-
-    Ok((
-        Trajectory { snapshots, transition_diagnostics: Vec::new(), reactive_log: None },
-        incidence,
-    ))
+    // Delegates rather than carrying a second row-selection loop. A duplicate
+    // implementation kept alive only to be a test's reference oracle is worse
+    // than no oracle: the two drift, and a differential test between them
+    // agrees happily on a shared wrong answer. The tests that carry weight
+    // here compare against what was WRITTEN.
+    //
+    // `read_trajectories` is total over its `keys` — an absent one is already
+    // the `no_saved_path` refusal — so the `ok_or_else` below is unreachable
+    // by that contract. It stays because a library returns an error rather
+    // than panicking if the contract is ever weakened.
+    read_trajectories(path, columns, &[(chain, draw)])?
+        .remove(&(chain, draw))
+        .ok_or_else(|| no_saved_path(path, chain, draw))
 }
 
 /// Reconstruct the saved paths for SEVERAL `(chain, draw)` keys in ONE pass
