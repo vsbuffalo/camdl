@@ -441,8 +441,12 @@ pub fn run_stage(
                     Ok(state) => {
                         if state.config_hash != config_hash {
                             eprintln!("error: config hash mismatch for chain {} — \
-                                model/data/priors have changed since the original run. \
-                                Cannot resume. Re-run from scratch with --force.",
+                                cannot resume. Either the model/data/priors changed \
+                                since the original run, or this chain predates a camdl \
+                                version that changed how a stage's identity is computed \
+                                (the 2026-08-23 subtractive-identity change re-keyed \
+                                every pgas/pmmh/mh/nuts stage). Re-run from scratch \
+                                with --force.",
                                 chain_id + 1);
                             std::process::exit(1);
                         }
