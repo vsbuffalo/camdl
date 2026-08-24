@@ -116,6 +116,79 @@ fn obs_stream_files(seed_leaf: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Enabling `[obs]` over a store whose trajectories were already computed
+/// WITHOUT it must still produce observations.
+///
+/// The obs subtree is a child, written only by `merge_cell`, so a cached
+/// trajectory used to skip the cell and take its obs with it: `batch run` with
+/// `[obs] enabled = true` over an obs-free store reported every cell cached
+/// and wrote no observations at all, silently. The user asked for a thing,
+/// got nothing, and the output said "cached".
+#[test]
+fn enabling_obs_over_an_obs_free_store_still_writes_observations() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir.camdl");
+    let params = tmp.path().join("params.toml");
+    let output = tmp.path().join("output");
+    write_sir_with_obs(&model);
+    std::fs::write(&params,
+        "beta = 0.6\ngamma = 0.2\nrho = 0.5\nN0 = 10000\nI0 = 10\n").unwrap();
+
+    let manifest = |obs_enabled: bool| format!(r#"
+[config]
+model = "{model}"
+params = "{params}"
+output_dir = "{out}"
+backend = "chain_binomial"
+dt = 1
+seeds = {{ list = [1, 2] }}
+parallel = 1
+
+[[scenario]]
+name = "baseline"
+
+[obs]
+enabled = {obs}
+"#, model = model.display(), params = params.display(),
+    out = output.display(), obs = obs_enabled);
+
+    let batch = tmp.path().join("batch.toml");
+
+    // First: trajectories only, no obs.
+    std::fs::write(&batch, manifest(false)).unwrap();
+    let first = Command::new(&bin)
+        .args(["batch", "run", &batch.to_string_lossy()])
+        .output().expect("spawn");
+    assert!(first.status.success(), "obs-free batch run failed. stderr:\n{}",
+        String::from_utf8_lossy(&first.stderr));
+    let leaves = run_leaves(&output.join("sims"));
+    assert_eq!(leaves.len(), 2, "expected one leaf per seed, got {:?}", leaves);
+    for leaf in &leaves {
+        assert!(!leaf.join("obs").is_dir(),
+            "the obs-free run must not have written an obs subtree");
+    }
+
+    // Now enable obs. Every trajectory is a cache hit, so the cells would have
+    // been skipped — and their observations never written.
+    std::fs::write(&batch, manifest(true)).unwrap();
+    let second = Command::new(&bin)
+        .args(["batch", "run", &batch.to_string_lossy()])
+        .output().expect("spawn");
+    assert!(second.status.success(), "obs-enabled batch run failed. stderr:\n{}",
+        String::from_utf8_lossy(&second.stderr));
+
+    let leaves = run_leaves(&output.join("sims"));
+    assert_eq!(leaves.len(), 2, "enabling obs must not fork new trajectory leaves");
+    for leaf in &leaves {
+        assert!(leaf.join("obs").is_dir(),
+            "enabling [obs] over an obs-free store must WRITE the observations, \
+             not report the cell cached and skip them: {}", leaf.display());
+        assert!(!obs_stream_files(leaf).is_empty(),
+            "the obs subtree must contain per-stream files: {}", leaf.display());
+    }
+}
+
 /// #4 — obs ensemble in the CAS. `batch run` over 3 seeds with obs enabled
 /// must deposit, under every seed leaf, an `obs/<...>/<stream>.tsv`.
 #[test]

@@ -1226,7 +1226,30 @@ impl crate::engine::RunSink for CasSink {
                 // change a stored artifact.
                 let root = self.root();
                 match crate::resolve::check_reuse(&store, &root, &artifact, policy) {
-                    Ok(crate::resolve::ReuseVerdict::CacheHit { .. }) => false,
+                    Ok(crate::resolve::ReuseVerdict::CacheHit { dir }) => {
+                        // A trajectory hit is not enough when observations were
+                        // asked for: the obs subtree is a CHILD, written only
+                        // by `merge_cell`, so skipping a cached cell also skips
+                        // its obs. `batch --obs` over a store populated by
+                        // obs-free runs therefore produced no observations at
+                        // all, silently — the user asked for a thing and got
+                        // nothing, with a "cached" line implying otherwise.
+                        //
+                        // The check is PRESENCE of the obs subtree, not its
+                        // exact address: `should_run` has only `base_model`,
+                        // while `merge_cell` writes from `cell.model` (scenario
+                        // + sweep applied). Recomputing the subtree hash from
+                        // the wrong model would reintroduce the
+                        // divergent-resolution class this arc exists to remove.
+                        // Residual, tracked separately: a leaf holding SOME
+                        // obs subtree but not this cadence's still skips.
+                        // `true` here means RUN. Run when observations were
+                        // requested and this leaf has none; otherwise the
+                        // trajectory hit stands and the cell is skipped.
+                        self.obs_enabled
+                            && !self.base_model.observations.is_empty()
+                            && !dir.join("obs").is_dir()
+                    }
                     Ok(crate::resolve::ReuseVerdict::MustRun) => true,
                     // Cache check failed → run; the error surfaces in merge_cell.
                     Err(_) => true,
