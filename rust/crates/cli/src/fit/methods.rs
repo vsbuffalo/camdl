@@ -581,7 +581,6 @@ pub fn resolve_obs_alignment(
 /// property 2, so they passed the old check and then did the exact thing it
 /// existed to prevent.
 ///
-///
 /// Property 1 is why the rest are refused:
 ///
 ///   * `pgas`                   — no conditioning field anywhere in `pgas.rs`.
@@ -665,46 +664,76 @@ pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(),
     }
 }
 
-/// The `(algorithm × perturb_only_at_t0)` support check (axis 3).
+/// Can a stage running `algorithm` make sense of `perturb_only_at_t0`?
 ///
-/// `perturb_only_at_t0 = true` on an `[estimate.*]` entry is a **perturbation
-/// schedule**: perturb this parameter once at t=0 rather than again at every
-/// observation. IF2 is the only algorithm in camdl that perturbs parameters at
-/// all (`if2.rs`, the inner loop that skips exactly these entries) — every
-/// other algorithm proposes θ from a kernel with no notion of "when", so the
-/// flag has nothing to modify and is read nowhere.
+/// `if2` **reads** it: the flag is its perturbation schedule — "perturb this
+/// parameter once at t=0 rather than again at every observation" (`if2.rs`,
+/// the inner loop that skips exactly these entries).
 ///
-/// A declaration that is read nowhere is the failure mode this check exists
-/// for: under PGAS it is currently parsed, folded into the fit hash, and
-/// otherwise ignored, so a modeller who writes it believes they have said
-/// something about the initial state and has said nothing. Refuse instead.
+/// `pfilter` **tolerates** it: it estimates nothing, it evaluates the
+/// likelihood at a fixed θ, so the flag is as inert there as `rw_sd` or
+/// `transform` are — inert, not wrong.
 ///
-/// `pfilter` is deliberately NOT refused. It estimates nothing — it evaluates
-/// the likelihood at a fixed θ — so the flag is as inert there as `rw_sd` or
-/// `transform` are, and refusing it would break the ordinary
-/// `scout = if2` → `check = pfilter` pipeline for any fit that declares an
-/// initial-state parameter. `nuts` IS refused: it is a parameter-estimating
-/// ODE sampler with no perturbation schedule, i.e. the same case as `mh`.
-pub fn validate_perturb_only_at_t0(algorithm: FitAlgorithm) -> Result<(), String> {
+/// Everything else proposes θ from a kernel with no notion of "when", so there
+/// is no schedule for the flag to modify and the declaration is read nowhere.
+/// `nuts` is in this group: a parameter-estimating ODE sampler with no
+/// perturbation schedule, i.e. the same case as `mh`.
+///
+/// The match is exhaustive on purpose — a new algorithm must decide.
+pub fn stage_tolerates_perturb_only_at_t0(algorithm: FitAlgorithm) -> bool {
     use FitAlgorithm as A;
     match algorithm {
-        // The only perturbation schedule in camdl.
-        A::If2 => Ok(()),
-        // Estimates nothing; the flag is inert but harmless. See above.
-        A::Pfilter => Ok(()),
-        A::Pgas | A::Pmmh | A::Mh | A::Nuts | A::NlSbplx | A::NlBobyqa => Err(format!(
-            "perturb_only_at_t0 = true is not supported with the \
-             `{algorithm}` algorithm. It is an IF2 perturbation schedule — \
-             \"perturb this parameter at t=0 only, not again at every \
-             observation\" — and `{algorithm}` has no perturbation schedule to \
-             modify, so the declaration would be read nowhere and silently do \
-             nothing.\n\n  \
-             Either drop `perturb_only_at_t0 = true` from the [estimate] \
-             entries (initial-state parameters are estimated by \
-             `{algorithm}` like any other), or run this stage with \
-             `algorithm = if2`."
-        )),
+        A::If2 | A::Pfilter => true,
+        A::Pgas | A::Pmmh | A::Mh | A::Nuts | A::NlSbplx | A::NlBobyqa => false,
     }
+}
+
+/// The `perturb_only_at_t0` support check (axis 3) — **fit-level, not
+/// per-stage**.
+///
+/// The declaration is refused only when NO stage in the fit can use it. That
+/// asymmetry is forced by the config's shape: `[estimate]` is global to the fit
+/// while the algorithm is per stage, so the flag is a property of the fit and
+/// has to be judged against the fit.
+///
+/// Judging it per stage was wrong, and wrong in the expensive direction. It
+/// refused the ordinary scout-then-refine shape — an `if2` scout that needs the
+/// flag, followed by a `pgas` posterior that ignores it — and left the user two
+/// escapes, both worse than the status quo: drop the flag, which makes the IF2
+/// scout perturb an initial-value parameter at every observation (exactly the
+/// thing the flag exists to prevent), or split one fit into two.
+///
+/// The defect this check exists for is still caught. Under a fit with no stage
+/// that can use it, the declaration is parsed, folded into the fit hash, and
+/// read nowhere: a modeller writes it believing they have said something about
+/// the initial state, and has said nothing. That fit is refused.
+///
+/// One cell is deliberately let through: a fit whose only stage is `pfilter`.
+/// The flag is inert there too, but `pfilter` estimates nothing at all, so the
+/// declaration is no more meaningful — and no less — than the `rw_sd` sitting
+/// beside it. Refusing on that basis would be a rule about `pfilter` configs
+/// generally, not about this flag.
+pub fn validate_perturb_only_at_t0(
+    stage_algorithms: &[FitAlgorithm],
+    declared_on: &[&str],
+) -> Result<(), String> {
+    if stage_algorithms.iter().copied().any(stage_tolerates_perturb_only_at_t0) {
+        return Ok(());
+    }
+    let stages: Vec<&str> = stage_algorithms.iter().map(|a| a.as_str()).collect();
+    Err(format!(
+        "perturb_only_at_t0 = true is declared on {}, but no stage in this fit \
+         can use it. It is an IF2 perturbation schedule — \"perturb this \
+         parameter at t=0 only, not again at every observation\" — and this \
+         fit's stages ({}) have no perturbation schedule to modify, so the \
+         declaration would be read nowhere and silently do nothing.\n\n  \
+         Add an `if2` stage (the flag then applies to it, and the other stages \
+         simply ignore it), or drop `perturb_only_at_t0 = true` from the \
+         [estimate] entries — an initial-state parameter is estimated by these \
+         algorithms like any other.",
+        declared_on.join(", "),
+        stages.join(", "),
+    ))
 }
 
 pub fn check_model_capabilities(
@@ -1286,34 +1315,70 @@ mod tests {
             "plain PMMH is refused for the missing t=0 spread, not for rho: {plain}");
     }
 
-    // ── perturb_only_at_t0 × algorithm (axis 3) ────────────────────────────
+    // ── perturb_only_at_t0 (axis 3, fit-level) ─────────────────────────────
+    //
+    // The flag is refused only when NO stage in the fit can use it. `[estimate]`
+    // is global to the fit while the algorithm is per stage, so a scout-then-
+    // refine pipeline that declares the flag for its `if2` scout must be
+    // accepted even though its `pgas` posterior ignores it.
+
+    use FitAlgorithm as FA;
 
     #[test]
-    fn perturb_only_at_t0_is_accepted_where_a_perturbation_schedule_exists() {
-        // IF2 owns the schedule; pfilter estimates nothing, so the flag is
-        // inert there and refusing it would break scout(if2) → check(pfilter).
-        validate_perturb_only_at_t0(FitAlgorithm::If2)
-            .expect("IF2 is the perturbation schedule the flag describes");
-        validate_perturb_only_at_t0(FitAlgorithm::Pfilter)
-            .expect("pfilter estimates nothing; the flag is inert, not wrong");
+    fn perturb_only_at_t0_stage_predicate_is_if2_and_pfilter() {
+        assert!(stage_tolerates_perturb_only_at_t0(FA::If2),
+            "IF2 reads the flag — it is IF2's own perturbation schedule");
+        assert!(stage_tolerates_perturb_only_at_t0(FA::Pfilter),
+            "pfilter estimates nothing; the flag is inert there, not wrong");
+        for algo in [FA::Pgas, FA::Pmmh, FA::Mh, FA::Nuts, FA::NlSbplx, FA::NlBobyqa] {
+            assert!(!stage_tolerates_perturb_only_at_t0(algo),
+                "{algo} has no perturbation schedule for the flag to modify");
+        }
     }
 
+    /// The case the per-stage rule got wrong: an `if2` scout that needs the
+    /// flag, followed by a `pgas` posterior that ignores it. One stage can use
+    /// it, so the fit is accepted.
     #[test]
-    fn perturb_only_at_t0_is_refused_where_no_perturbation_schedule_exists() {
-        for algo in [
-            FitAlgorithm::Pgas, FitAlgorithm::Pmmh, FitAlgorithm::Mh,
-            FitAlgorithm::Nuts, FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa,
-        ] {
-            let err = validate_perturb_only_at_t0(algo).unwrap_err();
-            assert!(err.contains("perturb_only_at_t0"),
-                "{algo}: must name the flag: {err}");
-            assert!(err.contains(algo.as_str()),
-                "{algo}: must name the offending algorithm: {err}");
-            assert!(err.contains("perturbation schedule"),
-                "{algo}: must say WHY it is refused, not just that it is: {err}");
-            assert!(err.contains("if2"),
-                "{algo}: must name the algorithm that honours it: {err}");
+    fn perturb_only_at_t0_accepted_when_any_stage_is_if2() {
+        validate_perturb_only_at_t0(&[FA::If2, FA::Pgas], &["I0"])
+            .expect("if2 scout + pgas posterior must be accepted");
+        validate_perturb_only_at_t0(&[FA::If2, FA::Pmmh, FA::Pfilter], &["I0"])
+            .expect("the if2 stage is enough, wherever it sits in the pipeline");
+    }
+
+    /// ...but a fit where the declaration genuinely does nothing is still
+    /// refused, and the message says it needs an `if2` stage.
+    #[test]
+    fn perturb_only_at_t0_refused_when_no_stage_can_use_it() {
+        let err = validate_perturb_only_at_t0(&[FA::Pgas], &["I0"]).unwrap_err();
+        assert!(err.contains("perturb_only_at_t0"), "must name the flag: {err}");
+        assert!(err.contains("no stage in this fit"),
+            "must say the refusal is about the FIT, not one stage: {err}");
+        assert!(err.contains("`if2`"),
+            "must name the stage kind that would give the flag meaning: {err}");
+        assert!(err.contains("I0"),
+            "must name the parameter that declared it: {err}");
+        assert!(err.contains("perturbation schedule"),
+            "must say WHY, not just that it refused: {err}");
+
+        // Every non-tolerating algorithm, alone, is refused.
+        for algo in [FA::Pgas, FA::Pmmh, FA::Mh, FA::Nuts, FA::NlSbplx, FA::NlBobyqa] {
+            validate_perturb_only_at_t0(&[algo], &["I0"])
+                .expect_err("{algo} alone cannot use the flag");
         }
+        // ...and so is a pipeline built only from them.
+        validate_perturb_only_at_t0(&[FA::Pgas, FA::Pmmh], &["I0"])
+            .expect_err("no if2 anywhere in the pipeline");
+    }
+
+    /// A `pfilter`-only fit is let through. The flag is inert there, but
+    /// `pfilter` estimates nothing at all, so refusing on that basis would be a
+    /// rule about pfilter configs rather than about this flag.
+    #[test]
+    fn perturb_only_at_t0_pfilter_only_fit_is_tolerated() {
+        validate_perturb_only_at_t0(&[FA::Pfilter], &["I0"])
+            .expect("pfilter tolerates the flag; see stage_tolerates_perturb_only_at_t0");
     }
 
     #[test]

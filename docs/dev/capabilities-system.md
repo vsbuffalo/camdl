@@ -209,15 +209,27 @@ same backend by another**. Representative confirmed cases:
   is the axis's second silent-wrong-answer guard, and it was wrong until gh#732:
   it tested a _proxy_ (is some parameter flagged?) for a _property_ (does spread
   exist?), and the proxy did not imply the property.
-- **`perturb_only_at_t0` requires a perturbation schedule**
-  (`methods.rs::validate_perturb_only_at_t0`, called per stage from
+- **`perturb_only_at_t0` requires the fit to have an `if2` stage**
+  (`methods.rs::validate_perturb_only_at_t0`, called once from
   `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"
-  — and IF2 is the only algorithm that perturbs at all, so `pgas`, `pmmh`, `mh`,
-  `nuts` and the nlopt family reject it rather than parse it, hash it and read
-  it nowhere. `pfilter` is exempt: it estimates nothing, so the flag is inert
-  there rather than misleading. Note the shape — `[estimate]` is global to the
-  fit while the algorithm is per stage, so an if2-scout → pgas-refine pipeline
-  that declares the flag is refused.
+  — and IF2 is the only algorithm that perturbs at all, so under `pgas`, `pmmh`,
+  `mh`, `nuts` or the nlopt family it is parsed, hashed, and read nowhere.
+  **This one is checked against the whole fit, not per stage**, and it is the
+  exception worth remembering on this axis: `[estimate]` is global to the fit
+  while the algorithm is per stage, so the flag is a property of the fit. An
+  if2-scout → pgas-posterior pipeline is accepted (one stage reads it, the other
+  ignores it); a fit with no `if2` stage anywhere is refused, because there the
+  declaration genuinely does nothing. A `pfilter`-only fit is tolerated —
+  `pfilter` estimates nothing, so the flag is no more inert than the `rw_sd`
+  beside it.
+
+  Checking it per stage instead was a real regression, caught in review before
+  it shipped: it refused the ordinary scout-then-refine shape and left the user
+  only worse escapes — drop the flag, and the IF2 scout perturbs an
+  initial-value parameter at every observation, which is the thing the flag
+  exists to prevent. The general lesson for this axis: when a config key is
+  fit-scoped and the algorithm is stage-scoped, the check belongs at the fit
+  level.
 
 Because there is no registry for this axis, the only way to know whether an
 algorithm accepts a model feature is to read the algorithm. That is the cost of
