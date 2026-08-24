@@ -27,7 +27,7 @@
 //! conventions.
 
 use runid::inputs::{EngineVersion, ModelDigest};
-use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
+use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 
 use crate::fit::cas::canonical_config_hash;
 
@@ -72,7 +72,7 @@ pub struct EnsembleCtx<'a> {
     pub cells: &'a [EnsembleCell],
 }
 
-use crate::fit::cas::level;
+use crate::fit::cas::{level, structural_level_hash};
 
 /// Compact `dt` rendering for the `config` segment label (`1`, `0.5`, …).
 fn fmt_dt(dt: f64) -> String {
@@ -144,7 +144,7 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
     let grid_label = format!("cells-n{}", ctx.cells.len());
 
     let levels = vec![
-        level("model", ctx.stem, model_digest.content_hash()),
+        level("model", ctx.stem, structural_level_hash(&model_digest)),
         level("config", &config_label, canonical_config_hash(&config_level, &[])?),
         level("params", "base", canonical_config_hash(&params_sorted, &[])?),
         level("grid", &grid_label, canonical_config_hash(&grid_level, &[])?),
@@ -172,7 +172,7 @@ pub fn ensemble_deps(cells: &[EnsembleCell]) -> Vec<runid::inputs::ArtifactRef> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::cas::digest_value;
+    use runid::ContentAddressed;
 
     fn cell(scenario: &str, seed: u64, draw: usize, rid: u8) -> EnsembleCell {
         EnsembleCell {
@@ -187,13 +187,13 @@ mod tests {
     /// The `grid` level is `digest_value` over the same blob `resolve` builds;
     /// unit-testing it pins the collision-freeness of the cell-set identity
     /// without an `ir::Model` fixture (mirrors `survey_cas::tests`).
-    fn grid_level(cells: &[EnsembleCell]) -> ContentHash {
+    fn grid_level(cells: &[EnsembleCell]) -> crate::fit::cas::LevelHash {
         let mut s: Vec<(&str, u64, usize, String)> = cells
             .iter()
             .map(|c| (c.scenario_label.as_str(), c.process_seed, c.draw_idx, c.sim_run_id.to_hex()))
             .collect();
         s.sort();
-        digest_value(&serde_json::json!({ "n_cells": cells.len(), "cells": s }))
+        canonical_config_hash(&serde_json::json!({ "n_cells": cells.len(), "cells": s }), &[]).unwrap()
     }
 
     /// Byte-neutrality of the struct rewrite: `EnsembleGridLevel` /
@@ -215,7 +215,7 @@ mod tests {
         let cfg = EnsembleConfigLevel { backend: "chain_binomial", dt: 1.0 };
         assert_eq!(
             canonical_config_hash(&cfg, &[]).unwrap(),
-            digest_value(&serde_json::json!({ "backend": "chain_binomial", "dt": 1.0 })),
+            canonical_config_hash(&serde_json::json!({ "backend": "chain_binomial", "dt": 1.0 }), &[]).unwrap(),
             "the config struct must reproduce the literal's digest");
     }
 

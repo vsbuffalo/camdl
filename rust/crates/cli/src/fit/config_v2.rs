@@ -1640,13 +1640,12 @@ impl Stage {
     /// deliberate, greppable decision; a missing field in an enumerated
     /// `json!` was invisible.
     fn payload_minus(&self, exclude: &[&str]) -> serde_json::Value {
-        let mut v = serde_json::to_value(self).unwrap_or(serde_json::json!({}));
-        if let serde_json::Value::Object(ref mut m) = v {
-            for key in exclude {
-                m.remove(*key);
-            }
-        }
-        v
+        // The shared subtraction (`fit::cas::serialize_minus`), not a third
+        // copy of it. Infallible here by the same fallback this always had:
+        // `identity_payload` returns a `Value`, and a stage that cannot
+        // serialize is caught by `stage_config_hash`'s gate, which runs on the
+        // stage itself.
+        super::cas::serialize_minus(self, exclude).unwrap_or_else(|_| serde_json::json!({}))
     }
 
     /// The survey directory feeding `init = "survey_top_k"`, if this stage

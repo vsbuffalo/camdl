@@ -2080,12 +2080,13 @@ fn run_simulate(a: &args::SimulateArgs) {
     if let Some((event_log, exact)) = recorded {
         // The leaf's `event_log.tsv` is a real file path `lineage realize` can
         // read directly (run_path is relative to the cas root, includes the
-        // `sims/` prefix). gh#241: on a cache HIT the leaf already existed and
-        // commit_atomic discarded our freshly-staged event_log.tsv, so the file
-        // may be absent — only hand finish_event_log a path that actually
-        // exists, so it never points the user at a missing file. (The full fix
-        // — event log as a child sub-artifact like obs, or augment-on-recommit
-        // — is a store-protocol follow-up.)
+        // `sims/` prefix). On a cache HIT the leaf already existed and
+        // commit_atomic discards the freshly-staged event_log.tsv, so the
+        // merge path re-adds it with the store's `augment` door — the
+        // "augment-on-recommit" this comment used to defer as a follow-up.
+        // The existence filter stays as a belt: augment is best-effort per
+        // artifact (its failure is reported, not fatal), so never hand
+        // finish_event_log a path that is not there.
         let leaf_event_log = sink.cas.completed_runs.last()
             .map(|e| format!("{}/{}/event_log.tsv", cas_root, e.run_path))
             .filter(|p| std::path::Path::new(p).exists());

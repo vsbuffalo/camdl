@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use super::*;
+    use runid::ContentAddressed;
 use crate::args::types::ForwardBackend;
 use ir::model::{
     InitialConditions, Model, OutputConfig, OutputSchedule, RegularOutputSchedule, SimulationConfig,
@@ -577,8 +578,14 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     // profile — levels[0] is the `profile` base level (folds the model digest).
     let focal = [("beta".to_string(), 0.3_f64)];
     let grid = [("beta".to_string(), vec![0.1_f64, 0.3, 0.5])];
-    let base_config = serde_json::json!({ "fixed": { "N0": 1000.0 } });
-    let method_config = serde_json::json!({ "algorithm": "if2" });
+    // Hashed through the same helper production uses. Serializing a `Value`
+    // yields that same `Value`, so these digests are identical to the
+    // pre-helper `digest_value` ones — which is exactly why the pinned
+    // run_ids below must not move.
+    let base_config = crate::fit::cas::canonical_config_hash(
+        &serde_json::json!({ "fixed": { "N0": 1000.0 } }), &[]).unwrap();
+    let method_config = crate::fit::cas::canonical_config_hash(
+        &serde_json::json!({ "algorithm": "if2" }), &[]).unwrap();
     let pr = resolve_profile_point(&ProfilePointCtx {
         model,
         ir_version: IRV,
@@ -586,8 +593,8 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         stem: "sir",
         method_name: "if2",
         data: &data,
-        base_config: &base_config,
-        method_config: &method_config,
+        base_config,
+        method_config,
         focal: &focal,
         grid: &grid,
         seed: 7,

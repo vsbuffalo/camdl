@@ -1357,10 +1357,12 @@ impl crate::engine::RunSink for CasSink {
         // exact-set (so the on-disk `event_log.tsv` path is a valid input to
         // `lineage realize`). The recorder is passive (Tier 2a) so the run_id
         // is unchanged — a freshly-committed leaf a plain `simulate` would
-        // write simply gains one more artifact. (Re-recording into a leaf that
-        // already exists without it is an idempotent no-op — same as the obs
-        // child — so `--force` or a fresh identity is needed to add it after
-        // the fact.)
+        // write simply gains one more artifact. Recording into a leaf that
+        // already exists WITHOUT the log is handled below by `augment`, which
+        // adds it in place; the store gained that door precisely because this
+        // case used to lose the log. (This comment previously said `--force`
+        // or a fresh identity was needed — neither was true: forcing
+        // re-commits into the same discard.)
         // Kept alongside the staged set so they can be re-added to an
         // ALREADY-COMPLETED leaf below: a cache hit discards the staged
         // artifacts wholesale, which is how `--event-log` against an existing

@@ -307,8 +307,23 @@ impl FsCasStore {
         name: &str,
         bytes: &[u8],
     ) -> Result<(), CasError> {
-        let mut record = match self.lookup(path, expected) {
-            Lookup::Hit(r) => r,
+        // ADVISORY pre-check, deliberately outside the lock: it only decides
+        // whether there is anything here worth locking for. Every decision
+        // that matters — idempotent re-add, divergence, the manifest we write
+        // back — is re-made under the lock below, against a fresh read.
+        //
+        // This ordering is load-bearing. `augment` is the store's only
+        // read-modify-write of `run.json` (`commit_atomic` gets its atomicity
+        // from staging + rename instead), so checking a pre-lock snapshot and
+        // writing it back after locking loses concurrent work two ways: two
+        // augments of the SAME name with different bytes both pass the check
+        // and the second silently overwrites the first (defeating the very
+        // guarantee `DivergentRecompute` exists to make), and two augments of
+        // DIFFERENT names each write back a snapshot missing the other's
+        // entry, orphaning a file and staleing a completed leaf. `batch`
+        // augments exactly such a pair (`event_log.tsv`, `reactive_log.tsv`).
+        match self.lookup(path, expected) {
+            Lookup::Hit(_) => {}
             Lookup::Collision(_) => {
                 return Err(CasError::AlreadyCompleted { path: path.display().to_string() })
             }
@@ -317,23 +332,23 @@ impl FsCasStore {
                 // The caller's next run will write it from scratch.
                 return Ok(());
             }
-        };
-
-        // Idempotent re-add / divergence check, before taking the lock.
-        let digest = ContentHash::digest_bytes(bytes);
-        if let Some(existing) = record.artifacts.get(name) {
-            if existing.digest == digest {
-                return Ok(());
-            }
-            return Err(CasError::DivergentRecompute {
-                path: path.display().to_string(),
-                file: name.to_string(),
-                ours: digest.to_hex(),
-                theirs: existing.digest.to_hex(),
-            });
         }
 
-        // Exclude concurrent claimants for the duration.
+        // TEST-ONLY: fire at the instant a caller has read the leaf but not
+        // yet locked it — the window in which the pre-fix code made its
+        // idempotency/divergence decision. A test drives a full competing
+        // augment through here and asserts this caller, on resume, sees the
+        // competitor's write under the lock instead of clobbering it.
+        #[cfg(test)]
+        augment_gap_hook(path);
+
+        // Take the leaf's lock. A `.lock` on a COMPLETED leaf is either a
+        // concurrent augment (refuse) or debris from a crashed one (take
+        // over) — the same question every other lock consumer in this file
+        // asks, so it routes through the same answer. A bare
+        // `AlreadyExists -> FitInProgress` here would report "fit in progress"
+        // under a dead pid and wedge the leaf until `--force`, which is the
+        // failure `reclaim_or_refuse`'s own comment warns about.
         let lock = path.join(".lock");
         match OpenOptions::new().write(true).create_new(true).open(&lock) {
             Ok(mut f) => {
@@ -341,13 +356,39 @@ impl FsCasStore {
                 f.sync_all()?;
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                let pid = read_lock_pid(&lock).unwrap_or(0);
-                return Err(CasError::FitInProgress { path: path.display().to_string(), pid });
+                reclaim_or_refuse(path, &lock)?;
             }
             Err(e) => return Err(e.into()),
         }
 
         let outcome = (|| -> Result<(), CasError> {
+            // Re-read UNDER the lock: the snapshot above may be stale.
+            let mut record = match self.lookup(path, expected) {
+                Lookup::Hit(r) => r,
+                Lookup::Collision(_) => {
+                    return Err(CasError::AlreadyCompleted { path: path.display().to_string() })
+                }
+                // The leaf went away (or was reclaimed) between the two reads.
+                _ => return Ok(()),
+            };
+
+            let digest = ContentHash::digest_bytes(bytes);
+            if let Some(existing) = record.artifacts.get(name) {
+                if existing.digest == digest {
+                    return Ok(());
+                }
+                // Preserve the rejected bytes, as `DivergentRecompute`
+                // promises: the one signal the store emits for a suspected
+                // identity bug must not send the reader to an empty directory.
+                let kept = self.quarantine_bytes(path, name, bytes, &digest)?;
+                return Err(CasError::DivergentRecompute {
+                    path: path.display().to_string(),
+                    file: name.to_string(),
+                    ours: format!("{} (kept at {})", digest.to_hex(), kept.display()),
+                    theirs: existing.digest.to_hex(),
+                });
+            }
+
             let fp = path.join(name);
             if let Some(parent) = fp.parent() {
                 fs::create_dir_all(parent)?;
@@ -369,6 +410,32 @@ impl FsCasStore {
 
         fs::remove_file(&lock).ok();
         outcome
+    }
+
+    /// Preserve bytes an `augment` refused, under `.quarantine/`, and return
+    /// where they landed. The commit path quarantines a whole staging dir;
+    /// this is the single-file analogue, so both routes to
+    /// [`CasError::DivergentRecompute`] leave the evidence its message names.
+    fn quarantine_bytes(
+        &self,
+        leaf: &Path,
+        name: &str,
+        bytes: &[u8],
+        digest: &ContentHash,
+    ) -> Result<PathBuf, CasError> {
+        let q = self.quarantine_root();
+        fs::create_dir_all(&q)?;
+        let leaf_name = leaf
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "leaf".into());
+        // Artifact names may nest (`chain_1/trace.tsv`); flatten so the
+        // evidence is one file, and tag it with the digest so two rejected
+        // versions of one name cannot overwrite each other.
+        let flat = name.replace(['/', '\\'], "_");
+        let dest = q.join(format!("{}.{}.{}", leaf_name, flat, &digest.to_hex()[..8]));
+        write_file_synced(&dest, bytes)?;
+        Ok(dest)
     }
 
     pub fn commit_atomic(
@@ -1192,6 +1259,33 @@ fn write_record_atomic(dir: &Path, record: &RunRecord) -> Result<(), CasError> {
     write_file_synced(&tmp, &json)?;
     fs::rename(&tmp, dir.join("run.json"))?;
     Ok(())
+}
+
+/// TEST-ONLY hook fired inside [`FsCasStore::augment`] after its advisory
+/// pre-read and before it takes the leaf lock — the window where the pre-fix
+/// code decided idempotency/divergence on a snapshot it later wrote back. A
+/// test drives a competing augment through this instant and asserts the
+/// resuming caller re-reads under the lock rather than clobbering. `None` for
+/// every test that does not opt in.
+#[cfg(test)]
+type AugmentGapHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+static AUGMENT_GAP_HOOK: std::sync::Mutex<Option<AugmentGapHook>> = std::sync::Mutex::new(None);
+
+/// TEST-ONLY: serializes the tests that install [`AUGMENT_GAP_HOOK`], a
+/// process-global, so it never fires inside another test's augment.
+#[cfg(test)]
+static AUGMENT_HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn augment_gap_hook(leaf: &Path) {
+    // Cloned out and invoked with the mutex RELEASED: the driven competitor
+    // re-enters `augment` and would self-deadlock on a held guard.
+    let hook = AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(h) = hook {
+        h(leaf);
+    }
 }
 
 /// TEST-ONLY hook fired inside `reclaim_or_refuse`, at the instant just before
