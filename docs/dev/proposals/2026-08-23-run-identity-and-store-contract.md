@@ -22,12 +22,8 @@ documented at their types and repeated here so this stays the decision record.
   time into the `threshold_nats` the config already carries and hashes, so the
   runtime `strict` parameter is gone rather than duplicated into
   `CliStageOverrides`.
-- **The `canonical_config_hash` helper (I2) is NOT implemented.** The
-  subtractive `Stage` arms and the profile/pfilter keying landed directly; the
-  shared helper that would make exclude-by-default _unwritable_ at the remaining
-  blob sites is still owed. Without it, `pfilter_cas`, `survey_cas` and
-  `sim_ensemble_cas` still hand-roll canonicalize + gate + subtract. Tracked as
-  the first item of the follow-on work.
+- **`canonical_config_hash` (I2) landed after Phases 1–3**, in the follow-on
+  branch rather than PR#736 — see "Phase 4 status" below for what it covers.
 
 ## Problem
 
