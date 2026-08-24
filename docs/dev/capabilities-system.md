@@ -197,6 +197,27 @@ same backend by another**. Representative confirmed cases:
   substep counts, state-dependent overdispersion σ², >1 overdispersed transition
   per source group, etc. — all keyed on the correlated-PMMH _algorithm variant_
   (rho ≠ None), not the backend.
+- **`ic_free` requires `if2`** (`methods.rs::validate_ic_free`, called per stage
+  from `FitConfigV2::validate`). Two properties are needed, not one: the
+  algorithm must drop y₁ from the accumulated log-likelihood, _and_ its
+  particles must differ in x₀ — the reweight at y₁ is what pins the initial
+  state, and with one shared x₀ it scores every particle identically. Only IF2
+  has both (it perturbs θ per particle at t=0 and each particle draws its own x₀
+  from its own θ, gh#364). `pgas` / the ODE algorithms / correlated `pmmh` fail
+  the first; `pfilter` and plain `pmmh` fail the second, because the bootstrap
+  particle filter copies one deterministic x₀ to every particle (gh#732). This
+  is the axis's second silent-wrong-answer guard, and it was wrong until gh#732:
+  it tested a _proxy_ (is some parameter flagged?) for a _property_ (does spread
+  exist?), and the proxy did not imply the property.
+- **`perturb_only_at_t0` requires a perturbation schedule**
+  (`methods.rs::validate_perturb_only_at_t0`, called per stage from
+  `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"
+  — and IF2 is the only algorithm that perturbs at all, so `pgas`, `pmmh`, `mh`,
+  `nuts` and the nlopt family reject it rather than parse it, hash it and read
+  it nowhere. `pfilter` is exempt: it estimates nothing, so the flag is inert
+  there rather than misleading. Note the shape — `[estimate]` is global to the
+  fit while the algorithm is per stage, so an if2-scout → pgas-refine pipeline
+  that declares the flag is refused.
 
 Because there is no registry for this axis, the only way to know whether an
 algorithm accepts a model feature is to read the algorithm. That is the cost of
@@ -232,7 +253,8 @@ Out of scope for this doc, listed so the map is complete:
 
 - **parameter-attribute × {attribute, config-flag}** — prior↔transform and
   prior↔bounds (`fit/runner.rs::validate_prior_transform_compat`),
-  `perturb_only_at_t0`↔`ic_free` (`runner.rs`),
+  `perturb_only_at_t0`↔`ic_free` (`runner.rs` — the residual parameter-level
+  half; the algorithm-level half moved to axis 3, above),
   `perturb_only_at_t0`↔simplex-membership (`config_v2.rs`). Purely
   parameter-level; no algorithm or backend involved. Partly typed already:
   `docs/dev/proposals/2026-06-08-typed-parameter-surface.md` (landed, IR 0.11)
