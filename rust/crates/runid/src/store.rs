@@ -272,6 +272,105 @@ impl FsCasStore {
         Ok(())
     }
 
+    /// Add one artifact to a leaf that is already `Completed`.
+    ///
+    /// The store had no way for a finished leaf to gain a file, and the gap
+    /// was load-bearing: `simulate --event-log` stages `event_log.tsv` into a
+    /// leaf that may already exist, and the whole staged set was then
+    /// discarded as an already-completed no-op, so the log was silently lost.
+    /// The in-code note said `--force` was the workaround; it was not (that
+    /// path re-commits and hits the same discard). This is the operation both
+    /// wanted.
+    ///
+    /// Contract:
+    /// - the leaf must be `Completed` AND carry `expected`'s identity — a
+    ///   different identity at this path is someone else's artifact;
+    /// - a live `.lock` holder blocks (someone is claiming/reclaiming);
+    /// - re-adding the SAME bytes is an idempotent no-op, so a rerun that
+    ///   records the log again is harmless;
+    /// - re-adding DIFFERENT bytes under one name is
+    ///   [`CasError::DivergentRecompute`], for the reason the commit path
+    ///   gives: same key, same bytes, or it is an identity bug.
+    ///
+    /// Identity is untouched — `artifacts` is recorded, not hashed — so a leaf
+    /// that gains a file keeps its `run_id`.
+    ///
+    /// Crash-safety: the file is written and fsync'd BEFORE the record names
+    /// it. A crash in that window leaves an unmanifested file, which the
+    /// exact-set scan reports as `Stale(OrphanFiles)` and the next run
+    /// recomputes — the safe direction, never a manifest pointing at bytes
+    /// that were never flushed.
+    pub fn augment(
+        &self,
+        path: &Path,
+        expected: &LeafIdentity,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), CasError> {
+        let mut record = match self.lookup(path, expected) {
+            Lookup::Hit(r) => r,
+            Lookup::Collision(_) => {
+                return Err(CasError::AlreadyCompleted { path: path.display().to_string() })
+            }
+            _ => {
+                // Not a completed leaf of this identity: nothing to augment.
+                // The caller's next run will write it from scratch.
+                return Ok(());
+            }
+        };
+
+        // Idempotent re-add / divergence check, before taking the lock.
+        let digest = ContentHash::digest_bytes(bytes);
+        if let Some(existing) = record.artifacts.get(name) {
+            if existing.digest == digest {
+                return Ok(());
+            }
+            return Err(CasError::DivergentRecompute {
+                path: path.display().to_string(),
+                file: name.to_string(),
+                ours: digest.to_hex(),
+                theirs: existing.digest.to_hex(),
+            });
+        }
+
+        // Exclude concurrent claimants for the duration.
+        let lock = path.join(".lock");
+        match OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(mut f) => {
+                write!(f, "{}", std::process::id())?;
+                f.sync_all()?;
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                let pid = read_lock_pid(&lock).unwrap_or(0);
+                return Err(CasError::FitInProgress { path: path.display().to_string(), pid });
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        let outcome = (|| -> Result<(), CasError> {
+            let fp = path.join(name);
+            if let Some(parent) = fp.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_file_synced(&fp, bytes)?;
+            let meta = fs::metadata(&fp)?;
+            record.artifacts.insert(
+                name.to_string(),
+                FileChecksum {
+                    bytes: bytes.len() as u64,
+                    mtime: fmt_mtime(meta.modified()?),
+                    digest,
+                },
+            );
+            write_record_atomic(path, &record)?;
+            fsync_dir(path)?;
+            Ok(())
+        })();
+
+        fs::remove_file(&lock).ok();
+        outcome
+    }
+
     pub fn commit_atomic(
         &self,
         path: &Path,

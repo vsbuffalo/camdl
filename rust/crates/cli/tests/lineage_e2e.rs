@@ -72,6 +72,89 @@ fn count_tips(newick: &str) -> usize {
     newick.matches("ind").count()
 }
 
+/// A leaf first written WITHOUT an event log, then re-run with
+/// `--event-log`, must end up holding the log.
+///
+/// Before the store had an augment door this silently lost it: the second run
+/// staged `event_log.tsv` into a leaf that already existed, the commit path
+/// returned the incumbent and discarded the whole staged set, and nothing
+/// reported the loss. The in-code note claimed `--force` was the workaround;
+/// it was not — that path re-commits and reaches the same discard.
+#[test]
+fn event_log_is_added_to_a_leaf_first_written_without_one() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("evaugment");
+    let model = tmp.join("sir.camdl");
+    std::fs::write(&model, SIR_LINEAGE).unwrap();
+
+    let ir = tmp.join("sir.ir.json");
+    let compiled = run(
+        &camdl,
+        &["dev", "compile", model.to_str().unwrap(), "-o", ir.to_str().unwrap()],
+    );
+    if !compiled.status.success() {
+        eprintln!("skipping: camdl compile failed (camdlc likely unavailable)");
+        return;
+    }
+
+    let store = tmp.join("store");
+    let store_s = store.to_str().unwrap();
+    let model_arg = ir.to_str().unwrap();
+    let base: Vec<&str> = vec![
+        "simulate", model_arg, "--backend", "gillespie", "--seed", "7",
+        "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500",
+        "--cas", "--output-dir", store_s,
+    ];
+
+    // First run: no --event-log. The leaf is committed without one.
+    let first = run(&camdl, &base);
+    assert!(first.status.success(), "plain simulate failed: {}",
+        String::from_utf8_lossy(&first.stderr));
+
+    let leaves = sim_leaves(&store);
+    assert_eq!(leaves.len(), 1, "expected one sim leaf, got {leaves:?}");
+    assert!(!leaves[0].join("event_log.tsv").exists(),
+        "the first run must not have written an event log");
+
+    // Second run, same identity, now recording. The leaf must gain the log.
+    let ev = tmp.join("ev.tsv");
+    let mut args = base.clone();
+    args.extend(["--event-log", ev.to_str().unwrap()]);
+    let second = run(&camdl, &args);
+    assert!(second.status.success(), "simulate --event-log failed: {}",
+        String::from_utf8_lossy(&second.stderr));
+
+    let leaves = sim_leaves(&store);
+    assert_eq!(leaves.len(), 1, "the re-run must reuse the same leaf, not fork one");
+    assert!(leaves[0].join("event_log.tsv").exists(),
+        "the completed leaf must GAIN event_log.tsv — this is the artifact that \
+         was silently discarded before the augment door existed");
+
+    // And it is part of the exact set, not an orphan: a third plain run still
+    // sees a valid cache hit rather than a stale leaf.
+    let third = run(&camdl, &base);
+    assert!(third.status.success(), "third run failed: {}",
+        String::from_utf8_lossy(&third.stderr));
+    assert!(leaves[0].join("event_log.tsv").exists(),
+        "the augmented artifact must survive a later plain run");
+}
+
+/// Committed sim leaves (dirs holding a run.json) under `<store>/sims`.
+fn sim_leaves(store: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![store.join("sims")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.join("run.json").exists() { out.push(p); } else { stack.push(p); }
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn lineage_end_to_end_tsv_and_parquet() {
     let camdl = camdl_bin();
