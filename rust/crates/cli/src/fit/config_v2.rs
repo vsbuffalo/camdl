@@ -2759,6 +2759,30 @@ impl FitConfigV2 {
             }
         }
 
+        // perturb_only_at_t0 × algorithm (axis 3). The flag is an IF2
+        // perturbation schedule; under an algorithm with no schedule it is
+        // parsed, folded into the fit hash, and read nowhere — a declaration
+        // the modeller believes says something about the initial state and
+        // which in fact says nothing. Checked per stage, because `[estimate]`
+        // is global to the fit while the algorithm is per stage: a pipeline
+        // that declares the flag and then refines with `pgas` is refused, and
+        // that refusal is the point.
+        let t0_params: Vec<&str> = self.estimate.iter()
+            .filter(|(_, spec)| spec.perturb_only_at_t0)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !t0_params.is_empty() {
+            for (stage_name, stage) in &self.stages {
+                if let Err(msg) =
+                    super::methods::validate_perturb_only_at_t0(stage.method_kind())
+                {
+                    return Err(format!(
+                        "stage '{}': {}\n\n  Declared on: {}",
+                        stage_name, msg, t0_params.join(", ")));
+                }
+            }
+        }
+
         // IF2 stages require at least one iteration — zero iterations would
         // leave `iterations` empty and cause `last().unwrap()` to panic in
         // `run_if2`. Catch it here so the user gets a config error, not a crash.
@@ -6344,6 +6368,92 @@ particles = 500
         assert!(err.contains("pfilter"), "error must name the offending algorithm: {err}");
         assert!(err.contains("copies it to every particle"),
             "error must say why the spread is absent: {err}");
+    }
+
+    // ── perturb_only_at_t0 × algorithm (axis 3) ────────────────────────────
+    //
+    // The flag is an IF2 perturbation schedule. Under an algorithm with no
+    // schedule it is parsed, folded into the fit hash, and read nowhere.
+    // `[estimate]` is global to the fit and the algorithm is per stage, so the
+    // check runs per stage: an if2 scout + pgas refine that declares the flag
+    // is refused.
+
+    fn t0_fit(algorithm: &str, stage_body: &str, declare_flag: bool) -> String {
+        let flag = if declare_flag { ", perturb_only_at_t0 = true" } else { "" };
+        format!(r#"[model]
+camdl = "models/sir.camdl"
+
+[data.observations]
+cases = "data/cases.tsv"
+
+[estimate]
+I0 = {{ bounds = [1, 500]{flag} }}
+
+[fixed]
+beta = 0.3
+gamma = 0.1
+N0 = 1000
+
+[stages.s]
+algorithm = "{algorithm}"
+{stage_body}
+"#)
+    }
+
+    #[test]
+    fn perturb_only_at_t0_with_if2_stage_validates() {
+        let src = t0_fit("if2",
+            "backend = \"chain_binomial\"\nchains = 2\nparticles = 100\n\
+             iterations = 10\ncooling = 0.9\n", true);
+        parse(&src).unwrap()
+            .validate(&ic_free_model_params())
+            .expect("IF2 honours perturb_only_at_t0 — it is IF2's own schedule");
+    }
+
+    #[test]
+    fn perturb_only_at_t0_with_pgas_stage_is_rejected() {
+        let src = t0_fit("pgas",
+            "backend = \"chain_binomial\"\nchains = 2\nparticles = 500\n\
+             sweeps = 100\nburn_in = 10\n", true);
+        let err = parse(&src).unwrap()
+            .validate(&ic_free_model_params())
+            .expect_err("PGAS has no perturbation schedule; the flag must be refused");
+        assert!(err.contains("perturb_only_at_t0"), "must name the flag: {err}");
+        assert!(err.contains("pgas"), "must name the offending algorithm: {err}");
+        assert!(err.contains("perturbation schedule"),
+            "must say why, not just that it refused: {err}");
+        assert!(err.contains("I0"), "must name the parameter that declared it: {err}");
+    }
+
+    #[test]
+    fn perturb_only_at_t0_with_ode_stages_is_rejected() {
+        for (algo, body) in [
+            ("mh", "backend = \"ode\"\nchains = 2\niterations = 2000\nburn_in = 500\n"),
+            ("nl-sbplx", "backend = \"ode\"\nchains = 1\n"),
+        ] {
+            let err = parse(&t0_fit(algo, body, true)).unwrap()
+                .validate(&ic_free_model_params())
+                .unwrap_err();
+            assert!(err.contains("perturb_only_at_t0"), "{algo}: must name the flag: {err}");
+            assert!(err.contains(algo), "{algo}: must name the algorithm: {err}");
+        }
+    }
+
+    /// Negative control: the SAME stages validate when no `[estimate]` entry
+    /// declares the flag. Without this, "PGAS configs are rejected" could pass
+    /// for an unrelated reason (a missing prior, a bad stage field) and the
+    /// test above would prove nothing about the flag.
+    #[test]
+    fn a_config_without_the_flag_is_unaffected() {
+        for (algo, body) in [
+            ("pgas", "backend = \"chain_binomial\"\nchains = 2\nparticles = 500\nsweeps = 100\nburn_in = 10\n"),
+            ("mh", "backend = \"ode\"\nchains = 2\niterations = 2000\nburn_in = 500\n"),
+            ("nl-sbplx", "backend = \"ode\"\nchains = 1\n"),
+        ] {
+            parse(&t0_fit(algo, body, false)).unwrap()
+                .validate(&ic_free_model_params())
+                .unwrap_or_else(|e| panic!("{algo} without the flag must validate: {e}"));
+        }
     }
 
     // ── per_fit_prefix layout ──────────────────────────────────────────────

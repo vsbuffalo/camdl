@@ -661,6 +661,48 @@ pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(),
     }
 }
 
+/// The `(algorithm × perturb_only_at_t0)` support check (axis 3).
+///
+/// `perturb_only_at_t0 = true` on an `[estimate.*]` entry is a **perturbation
+/// schedule**: perturb this parameter once at t=0 rather than again at every
+/// observation. IF2 is the only algorithm in camdl that perturbs parameters at
+/// all (`if2.rs`, the inner loop that skips exactly these entries) — every
+/// other algorithm proposes θ from a kernel with no notion of "when", so the
+/// flag has nothing to modify and is read nowhere.
+///
+/// A declaration that is read nowhere is the failure mode this check exists
+/// for: under PGAS it is currently parsed, folded into the fit hash, and
+/// otherwise ignored, so a modeller who writes it believes they have said
+/// something about the initial state and has said nothing. Refuse instead.
+///
+/// `pfilter` is deliberately NOT refused. It estimates nothing — it evaluates
+/// the likelihood at a fixed θ — so the flag is as inert there as `rw_sd` or
+/// `transform` are, and refusing it would break the ordinary
+/// `scout = if2` → `check = pfilter` pipeline for any fit that declares an
+/// initial-state parameter. `nuts` IS refused: it is a parameter-estimating
+/// ODE sampler with no perturbation schedule, i.e. the same case as `mh`.
+pub fn validate_perturb_only_at_t0(algorithm: FitAlgorithm) -> Result<(), String> {
+    use FitAlgorithm as A;
+    match algorithm {
+        // The only perturbation schedule in camdl.
+        A::If2 => Ok(()),
+        // Estimates nothing; the flag is inert but harmless. See above.
+        A::Pfilter => Ok(()),
+        A::Pgas | A::Pmmh | A::Mh | A::Nuts | A::NlSbplx | A::NlBobyqa => Err(format!(
+            "perturb_only_at_t0 = true is not supported with the \
+             `{algorithm}` algorithm. It is an IF2 perturbation schedule — \
+             \"perturb this parameter at t=0 only, not again at every \
+             observation\" — and `{algorithm}` has no perturbation schedule to \
+             modify, so the declaration would be read nowhere and silently do \
+             nothing.\n\n  \
+             Either drop `perturb_only_at_t0 = true` from the [estimate] \
+             entries (initial-state parameters are estimated by \
+             `{algorithm}` like any other), or run this stage with \
+             `algorithm = if2`."
+        )),
+    }
+}
+
 pub fn check_model_capabilities(
     backend: InferenceBackend,
     compiled: &sim::CompiledModel,
@@ -1238,6 +1280,36 @@ mod tests {
         let plain = validate_ic_free(FitAlgorithm::Pmmh, false).unwrap_err();
         assert!(plain.contains("bootstrap particle filter"),
             "plain PMMH is refused for the missing t=0 spread, not for rho: {plain}");
+    }
+
+    // ── perturb_only_at_t0 × algorithm (axis 3) ────────────────────────────
+
+    #[test]
+    fn perturb_only_at_t0_is_accepted_where_a_perturbation_schedule_exists() {
+        // IF2 owns the schedule; pfilter estimates nothing, so the flag is
+        // inert there and refusing it would break scout(if2) → check(pfilter).
+        validate_perturb_only_at_t0(FitAlgorithm::If2)
+            .expect("IF2 is the perturbation schedule the flag describes");
+        validate_perturb_only_at_t0(FitAlgorithm::Pfilter)
+            .expect("pfilter estimates nothing; the flag is inert, not wrong");
+    }
+
+    #[test]
+    fn perturb_only_at_t0_is_refused_where_no_perturbation_schedule_exists() {
+        for algo in [
+            FitAlgorithm::Pgas, FitAlgorithm::Pmmh, FitAlgorithm::Mh,
+            FitAlgorithm::Nuts, FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa,
+        ] {
+            let err = validate_perturb_only_at_t0(algo).unwrap_err();
+            assert!(err.contains("perturb_only_at_t0"),
+                "{algo}: must name the flag: {err}");
+            assert!(err.contains(algo.as_str()),
+                "{algo}: must name the offending algorithm: {err}");
+            assert!(err.contains("perturbation schedule"),
+                "{algo}: must say WHY it is refused, not just that it is: {err}");
+            assert!(err.contains("if2"),
+                "{algo}: must name the algorithm that honours it: {err}");
+        }
     }
 
     #[test]
