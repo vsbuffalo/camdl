@@ -13,6 +13,7 @@
 //! (IF2 / NLopt), which produce no draws cloud, are refused with an actionable
 //! message rather than silently plugged in.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -830,10 +831,65 @@ struct ConditionedSource {
     /// subsample the engine was handed): the `(chain, draw)` key of its saved
     /// path, `None` when that draw is outside the forkable subset.
     per_draw: Vec<Option<(usize, usize)>>,
-    /// The stage directory holding `chain_<N+1>/trajectories.tsv`.
-    stage_dir: PathBuf,
-    /// Column layout for [`io::trajectories::read_trajectory`].
-    columns: io::trajectories::TrajColumnSpec,
+    /// Every path `per_draw` names, keyed by `(chain, draw)`, read up front —
+    /// ONE pass per `chain_<N+1>/trajectories.tsv`, not one per draw (see
+    /// [`ConditionedSource::load`]).
+    paths: std::collections::HashMap<(usize, usize), sim::Trajectory>,
+}
+
+impl ConditionedSource {
+    /// Read every saved path this design cell will need, one pass per chain
+    /// file.
+    ///
+    /// The reporting configuration is hundreds of posterior draws over a
+    /// handful of chains, and a `trajectories.tsv` at substep resolution is
+    /// large. Reading it per draw is `n_draws × file_size`: 300 draws over a
+    /// 190 MB fixture took 35 s of pure re-scanning. Grouping the keys by the
+    /// file that holds them makes it `n_chains × file_size`.
+    ///
+    /// The cost is peak memory: the forkable subset's paths are resident at
+    /// once rather than one at a time. That is the same shape as what the
+    /// engine already does — `run_job` collects every cell's forward trajectory
+    /// before the merge phase — but not the same size, because a saved
+    /// smoothing path is at SUBSTEP resolution while a forward trajectory is at
+    /// the output cadence. Order of magnitude: the parsed paths run about
+    /// twice the on-disk size of the `trajectories.tsv` files they came from.
+    /// If that ever binds, the fix is to stream chain by chain (the merge phase
+    /// is in canonical `point_idx` order, and a PGAS cloud is chain-major), not
+    /// to go back to reading the file once per draw.
+    fn load(
+        scenario: String,
+        per_draw: Vec<Option<(usize, usize)>>,
+        stage_dir: &Path,
+        model: &ir::Model,
+    ) -> Result<Self, String> {
+        // No incidence columns: only STATE quantities route to the smoothing
+        // path, and requiring `inc_<stream>` here would refuse a file that has
+        // none.
+        let columns = io::trajectories::TrajColumnSpec::from_model(model, &[]);
+        // Group the keys by the file that holds them. The on-disk chain dir is
+        // 1-based (`chain_{N+1}`); the in-file `chain` column is the 0-based key.
+        let mut by_chain: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+        for key in per_draw.iter().flatten() {
+            by_chain.entry(key.0).or_default().push(*key);
+        }
+        let mut paths = std::collections::HashMap::new();
+        for (chain, keys) in by_chain {
+            let traj_path =
+                stage_dir.join(format!("chain_{}", chain + 1)).join("trajectories.tsv");
+            let read = io::trajectories::read_trajectories(&traj_path, &columns, &keys)
+                .map_err(|e| {
+                    format!(
+                        "reading the smoothing paths of chain {chain} to evaluate a \
+                         quantity anchored inside the observed record: {e}"
+                    )
+                })?;
+            // The `inc_<stream>` sidecar is empty by construction here (no
+            // incidence columns requested); the state path is the operand.
+            paths.extend(read.into_iter().map(|(k, (traj, _inc))| (k, traj)));
+        }
+        Ok(ConditionedSource { scenario, per_draw, paths })
+    }
 }
 
 /// A [`RunSink`] that samples `y_rep` for every fit leaf on its emission grid,
@@ -967,29 +1023,21 @@ impl crate::engine::RunSink for PredictiveSink {
         // draw's CONDITIONED smoothing path, not off the replay above. Only the
         // no-overlay fitted arm has one (see [`ConditionedSource::scenario`]),
         // and only the forkable subset of draws — a draw outside it censors
-        // rather than silently borrowing the replay's answer.
-        let conditioned_path: Option<sim::Trajectory> = match &self.conditioned {
+        // rather than silently borrowing the replay's answer. The paths were
+        // all read up front (`ConditionedSource::load`), so this is a lookup,
+        // not a scan of the chain's `trajectories.tsv`.
+        let conditioned_path: Option<&sim::Trajectory> = match &self.conditioned {
             Some(src) if src.scenario == scenario_name => {
                 match src.per_draw.get(cell.spec.point_idx).copied().flatten() {
-                    Some((chain, draw)) => {
-                        // The on-disk chain dir is 1-based (`chain_{N+1}`); the
-                        // in-file `chain` column is the 0-based key.
-                        let traj_path = src
-                            .stage_dir
-                            .join(format!("chain_{}", chain + 1))
-                            .join("trajectories.tsv");
-                        let (path, _incidence) = io::trajectories::read_trajectory(
-                            &traj_path, &src.columns, chain, draw,
-                        )
-                        .map_err(|e| {
+                    Some((chain, draw)) => Some(src.paths.get(&(chain, draw)).ok_or_else(
+                        || {
                             format!(
-                                "reading the smoothing path for (chain {chain}, draw \
-                                 {draw}) to evaluate a quantity anchored inside the \
-                                 observed record: {e}"
+                                "internal: the smoothing path for (chain {chain}, draw \
+                                 {draw}) was not among the paths read for this run — the \
+                                 preloaded set must cover every keyed draw"
                             )
-                        })?;
-                        Some(path)
-                    }
+                        },
+                    )?),
                     None => None,
                 }
             }
@@ -1765,15 +1813,12 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 (Some(saved), Some(scenario))
                     if conditioned_here(&ff_saved, &conditioned_scenario, sweep_pt, scenario) =>
                 {
-                    Some(ConditionedSource {
-                        scenario: scenario.clone(),
-                        per_draw: saved.per_draw.clone(),
-                        stage_dir: saved.stage_dir.clone(),
-                        // No incidence columns: only STATE quantities route to
-                        // the smoothing path, and requiring `inc_<stream>` here
-                        // would refuse a file that has none.
-                        columns: io::trajectories::TrajColumnSpec::from_model(&model, &[]),
-                    })
+                    Some(ConditionedSource::load(
+                        scenario.clone(),
+                        saved.per_draw.clone(),
+                        &saved.stage_dir,
+                        &model,
+                    )?)
                 }
                 _ => None,
             };
