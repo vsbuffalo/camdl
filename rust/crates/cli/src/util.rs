@@ -3383,10 +3383,11 @@ pub fn simulate_compiled(
     Ok(traj)
 }
 /// The refusal for `--init-state` on a backend with no start-from-state seam
-/// (gh#641). Gillespie (`gillespie.rs`) and ODE (`ode.rs`) call
-/// `CompiledModel::initial_state` unconditionally; there is no injection point,
-/// so the alternative to this error is silently starting from `init {}` — a
-/// forecast that looks like a forecast and is the model's epidemic from t=0.
+/// (gh#641). Gillespie (`gillespie.rs`) and ODE (`ode.rs`) build the initial
+/// state from the model unconditionally (`initial_state_draw` and
+/// `initial_state_mean` respectively); there is no injection point, so the
+/// alternative to this error is silently starting from `init {}` — a forecast
+/// that looks like a forecast and is the model's epidemic from t=0.
 ///
 /// Also the honest answer scientifically: the states come from the bootstrap
 /// particle filter, whose process model is chain-binomial. Propagating them
@@ -3434,12 +3435,12 @@ pub fn run_simulation_event_log(
     // gh#641. This function shares `resolve_run_model` with the ordinary
     // simulate path, so an `--init-state` run arrives here with
     // `simulation.t_start` ALREADY moved to the forecast origin — but it builds
-    // its state from `initial_state` below and passes `Resume::default()`, so
-    // the state itself is never restored. Unguarded that is the worst outcome
-    // available: the trajectory starts from `init {}` while its leaf commits
-    // under the run_id that says the state WAS restored, so two different
-    // trajectories share one content address and whichever ran first wins the
-    // cache.
+    // its state from the model below (`initial_state_mean`) and passes
+    // `Resume::default()`, so the state itself is never restored. Unguarded
+    // that is the worst outcome available: the trajectory starts from
+    // `init {}` while its leaf commits under the run_id that says the state WAS
+    // restored, so two different trajectories share one content address and
+    // whichever ran first wins the cache.
     //
     // The refusal is not a gap to close later — it is the engine's own answer.
     // `chain_binomial`'s resume seam rejects a resume with an attached observer
