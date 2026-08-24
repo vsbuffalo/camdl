@@ -127,6 +127,60 @@ pub(crate) fn digest_value(v: &serde_json::Value) -> ContentHash {
     ContentHash::digest_bytes(&bytes)
 }
 
+/// Hash one identity level from a `Serialize` value: gate finiteness on the
+/// RAW value, serialize it whole, subtract named top-level keys, canonicalize,
+/// digest. The regime-2 hashing path in one call.
+///
+/// **Why this exists.** Every level that used to build a `serde_json::json!`
+/// literal by hand was exclude-by-default: the hash contained what the author
+/// remembered to list, so a knob added later was silently absent from the key
+/// and two runs differing only in it collided. That is the shape behind gh#514,
+/// gh#540 and the 2026-08-23 audit. Passing a STRUCT instead inverts the
+/// default — a field added to the struct is hashed automatically, and an
+/// omission has to be written down as an `exclude` entry, where a reviewer can
+/// see it.
+///
+/// The finiteness gate runs **before** serialization, not on the built
+/// `Value`: `json!`/`to_value` collapse NaN and ±Inf to `Null`, so a check
+/// applied afterwards can never fire and two runs at `NaN` and `Inf` hash
+/// alike. Four call sites had that inverted before the audit.
+///
+/// `exclude` subtracts TOP-LEVEL keys only — enough for the extension
+/// dimensions and separately-folded counts that are the real cases, and a
+/// deliberate limit: a nested omission is a sign the level wants splitting,
+/// not a deeper path syntax.
+///
+/// Deviation from the proposal, which placed this in `runid`: the regime-2
+/// machinery it composes — [`canonical`], [`digest_value`], the `FiniteCheck`
+/// serializer — all lives here, and the crate doc names `cli/fit/cas.rs` as
+/// this regime's home. Splitting the helper from its parts across a crate
+/// boundary would create exactly the second implementation it exists to
+/// prevent.
+pub(crate) fn canonical_config_hash<T: serde::Serialize>(
+    value: &T,
+    exclude: &[&str],
+) -> Result<ContentHash, String> {
+    ensure_finite(value)?;
+    let mut v = serde_json::to_value(value)
+        .map_err(|e| format!("cannot serialize identity level for hashing: {e}"))?;
+    if !exclude.is_empty() {
+        match v {
+            serde_json::Value::Object(ref mut m) => {
+                for key in exclude {
+                    m.remove(*key);
+                }
+            }
+            // `exclude` on a non-object is a programming error, not a data
+            // one: the caller asked to subtract a key from something that has
+            // none, so the subtraction silently did nothing.
+            _ => return Err(
+                "canonical_config_hash: `exclude` given for a level that does \
+                 not serialize to a JSON object".to_string()),
+        }
+    }
+    Ok(digest_value(&v))
+}
+
 // ── Non-finite finiteness gate ───────────────────────────────────────────────
 //
 // serde_json 1.0.150 serializes a non-finite f64/f32 (NaN / ±Inf) as `null`

@@ -17,7 +17,7 @@ use runid::{
     run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId,
 };
 
-use crate::fit::cas::{digest_value, ensure_finite};
+use crate::fit::cas::canonical_config_hash;
 
 /// A fully-resolved pfilter-eval leaf: the four factored levels (in path
 /// order) and the leaf `run_id` composed from their hashes.
@@ -70,6 +70,29 @@ pub struct PfilterCtx<'a> {
 
 use crate::fit::cas::{data_digests, level};
 
+/// The `config` level's identity: the scoring setup a pfilter log-likelihood
+/// is computed under.
+///
+/// A STRUCT, not a `json!` literal, so the level is include-by-default: add a
+/// field here and it is hashed, where the literal this replaced hashed only
+/// what someone remembered to list (that omission is how `--condition-from`
+/// stayed out of the key). Field names and shapes reproduce the literal
+/// exactly, so existing pfilter leaves keep their `run_id`s — pinned by
+/// `config_level_is_byte_identical_to_the_literal_it_replaced`.
+#[derive(serde::Serialize)]
+struct PfilterConfigLevel<'a> {
+    particles: u32,
+    replicates: u32,
+    dt: f64,
+    obs_block: &'a str,
+    flow_indices: &'a [u32],
+    data: &'a [(&'a str, &'a str)],
+    /// Omitted entirely when nothing conditions, so an unconditioned run keys
+    /// exactly as it did before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    condition_from: Option<&'a crate::fit::config_v2::ConditionFrom>,
+}
+
 /// Resolve a pfilter-eval leaf's identity: the four factored levels and the
 /// `run_id` derived from their hashes.
 pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
@@ -79,12 +102,9 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     let mut params_sorted: Vec<(&str, f64)> =
         ctx.params.iter().map(|(n, v)| (n.as_str(), *v)).collect();
     params_sorted.sort_by(|a, b| a.0.cmp(b.0));
-    // Gate the RAW values: `json!` collapses NaN/Inf to `Null` on the way in,
-    // so a check applied to the built blob can never see a non-finite and
-    // NaN vs Inf would hash alike (2026-08-23 audit). The comment above has
-    // always described this order; the code did not.
-    ensure_finite(&params_sorted)?;
-    let params_blob = serde_json::json!(params_sorted);
+    // The `params` level is the sorted (name, value) list itself — a
+    // sequence, with no field set to forget, so it needs no wrapper struct
+    // (and wrapping it would re-key: an object is not an array).
 
     // The scoring setup, with the observed data folded in (guardrail: the
     // model level stays the pure IR; the data the loglik is computed against
@@ -93,25 +113,15 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     let mut data_sorted: Vec<(&str, &str)> =
         ctx.data.iter().map(|(n, h)| (n.as_str(), h.as_str())).collect();
     data_sorted.sort_by(|a, b| a.0.cmp(b.0));
-    // `dt` is the only float here; gate it before `json!` sees it.
-    ensure_finite(&ctx.dt)?;
-    let mut config_blob = serde_json::json!({
-        "particles": ctx.particles,
-        "replicates": ctx.replicates,
-        "dt": ctx.dt,
-        "obs_block": ctx.obs_block,
-        "flow_indices": ctx.flow_indices,
-        "data": data_sorted,
-    });
-    // Inserted only when conditioning is in force, so an unconditioned run's
-    // blob — and therefore its `run_id` — is byte-identical to one produced
-    // before this field existed. `ConditionFrom` serializes untagged (a
-    // string, or a BTreeMap whose key order is stable), so the digest is
-    // deterministic.
-    if let Some(cond) = ctx.condition_from {
-        config_blob["condition_from"] = serde_json::to_value(cond)
-            .map_err(|e| format!("cannot serialize condition_from for hashing: {e}"))?;
-    }
+    let config_level = PfilterConfigLevel {
+        particles: ctx.particles,
+        replicates: ctx.replicates,
+        dt: ctx.dt,
+        obs_block: ctx.obs_block,
+        flow_indices: ctx.flow_indices,
+        data: &data_sorted,
+        condition_from: ctx.condition_from,
+    };
 
     let model_digest = ModelDigest::from_model(
         ctx.model,
@@ -124,8 +134,8 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
 
     let levels = vec![
         level("model", ctx.stem, model_digest.content_hash()),
-        level("config", &config_label, digest_value(&config_blob)),
-        level("params", "params", digest_value(&params_blob)),
+        level("config", &config_label, canonical_config_hash(&config_level, &[])?),
+        level("params", "params", canonical_config_hash(&params_sorted, &[])?),
         level("seed", &format!("seed_{}", ctx.seed), seed.content_hash()),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
@@ -145,6 +155,7 @@ fn fmt_dt(dt: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fit::cas::{digest_value, ensure_finite};
 
     fn h(byte: u8) -> String {
         ContentHash::digest_bytes(&[byte]).to_hex()
@@ -217,6 +228,51 @@ mod tests {
             "obs_block": "", "flow_indices": Vec::<u32>::new(),
             "data": vec![("cases", hh.as_str())],
         })), "an unconditioned pfilter must key exactly as before");
+    }
+
+    /// Byte-neutrality of the struct rewrite: `PfilterConfigLevel` must digest
+    /// EXACTLY as the hand-built `json!` literal it replaced, or every stored
+    /// pfilter leaf silently re-keys. `digest_value` canonicalizes (sorts keys
+    /// recursively), so equality holds as long as the key set and values match
+    /// — this pins that rather than assuming it.
+    #[test]
+    fn config_level_is_byte_identical_to_the_literal_it_replaced() {
+        let hh = h(1);
+        let data: Vec<(&str, &str)> = vec![("cases", hh.as_str())];
+        let flow: Vec<u32> = Vec::new();
+
+        // The struct, as production builds it.
+        let lvl = PfilterConfigLevel {
+            particles: 100, replicates: 1, dt: 1.0,
+            obs_block: "", flow_indices: &flow, data: &data,
+            condition_from: None,
+        };
+        // The literal, verbatim from before the rewrite.
+        let literal = serde_json::json!({
+            "particles": 100u32,
+            "replicates": 1u32,
+            "dt": 1.0,
+            "obs_block": "",
+            "flow_indices": Vec::<u32>::new(),
+            "data": vec![("cases", hh.as_str())],
+        });
+        assert_eq!(canonical_config_hash(&lvl, &[]).unwrap(), digest_value(&literal),
+            "the struct must reproduce the literal's digest — otherwise every \
+             stored pfilter leaf re-keys silently");
+
+        // And with conditioning in force, matching the insert-when-Some form.
+        let cond = crate::fit::config_v2::ConditionFrom::All("first_obs - 3 'days".into());
+        let lvl_c = PfilterConfigLevel {
+            particles: 100, replicates: 1, dt: 1.0,
+            obs_block: "", flow_indices: &flow, data: &data,
+            condition_from: Some(&cond),
+        };
+        let mut literal_c = literal.clone();
+        literal_c["condition_from"] = serde_json::to_value(&cond).unwrap();
+        assert_eq!(canonical_config_hash(&lvl_c, &[]).unwrap(), digest_value(&literal_c));
+        assert_ne!(canonical_config_hash(&lvl, &[]).unwrap(),
+                   canonical_config_hash(&lvl_c, &[]).unwrap(),
+                   "conditioning must still change the key");
     }
 
     /// A non-finite scored value must be REFUSED, not hashed. `json!` maps

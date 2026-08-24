@@ -128,6 +128,55 @@ const PROFILE_SUPPLY: &str = "pass `--data PATH` (single-stream), \
     `--data NAME=PATH` (repeatable, multi-stream), or `--fit FOO.toml` with a \
     [data.observations] section.";
 
+/// The `base` level's identity: the inference PROBLEM a profile is computed
+/// over — which model, data, fixed values, priors and scoring window.
+///
+/// A struct rather than a `json!` literal so the level is include-by-default:
+/// add a field here and it is hashed. The literal this replaced was
+/// exclude-by-default, and `condition_from` is exactly what fell through it —
+/// present in the computation, absent from the key, so a rerun under a
+/// different window was served the previous landscape.
+#[derive(serde::Serialize)]
+struct ProfileBaseLevel<'a> {
+    base_params: &'a str,
+    fixed: &'a [String],
+    obs_family: &'a str,
+    fit_toml: &'a Option<String>,
+    priors: &'a [(String, String)],
+    condition_from: Option<&'a crate::fit::config_v2::ConditionFrom>,
+}
+
+/// The `stage` level's identity: the METHOD, i.e. how each cell is fitted.
+#[derive(serde::Serialize)]
+struct ProfileMethodLevel<'a> {
+    algorithm: &'a str,
+    if2: ProfileIf2Knobs,
+    pmmh: ProfilePmmhKnobs,
+    /// Resolved per-parameter perturbation magnitudes, sorted by name.
+    rw_sd: &'a [(&'a str, Option<f64>)],
+    /// `--rw-sd auto` derives magnitudes from the model rather than the flag,
+    /// so it is its own discriminator rather than a value.
+    rw_sd_auto: bool,
+    init: &'a crate::fit::init::InitMethod,
+    pf_max_substeps: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct ProfileIf2Knobs {
+    particles: usize,
+    iterations: usize,
+    cooling: f64,
+    dt: f64,
+    starts: usize,
+}
+
+#[derive(serde::Serialize)]
+struct ProfilePmmhKnobs {
+    steps: usize,
+    particles: usize,
+    rho: Option<f64>,
+}
+
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // Parse the CLI strings into the typed registry entry (the string boundary);
     // all downstream dispatch reads the typed FitAlgorithm / InferenceBackend.
@@ -1094,13 +1143,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `ConditionFrom` serializes untagged (a string, or a BTreeMap with
     // stable key order), and `null` when absent — so an unconditioned profile
     // re-keys here too, which is unavoidable: this level is a single blob.
-    let base_config_blob = serde_json::json!({
-        "base_params": base_params_hash,
-        "fixed":       fixed_blob,
-        "obs_family":  obs_family_key,
-        "fit_toml":    fit_toml_hash,
-        "priors":      priors_blob,
-        "condition_from": condition_from,
+    let base_config_blob = serde_json::to_value(ProfileBaseLevel {
+        base_params: &base_params_hash,
+        fixed: &fixed_blob,
+        obs_family: &obs_family_key,
+        fit_toml: &fit_toml_hash,
+        priors: &priors_blob,
+        condition_from: condition_from.as_ref(),
+    }).unwrap_or_else(|e| {
+        eprintln!("error: cannot serialize profile base identity: {e}");
+        std::process::exit(1);
     });
     // Gate the RAW floats before `json!` sees them: the macro collapses
     // NaN/Inf to `Null`, so `resolve_profile_point`'s gate on the built blob
@@ -1133,15 +1185,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let mut rw_sd_blob: Vec<(&str, Option<f64>)> =
         specs.iter().map(|s| (s.name.as_str(), s.rw_sd)).collect();
     rw_sd_blob.sort_by(|a, b| a.0.cmp(b.0));
-    let method_config_blob = serde_json::json!({
-        "algorithm": algorithm,
-        "if2": { "particles": n_particles, "iterations": n_iterations,
-                 "cooling": cooling, "dt": dt, "starts": n_starts },
-        "pmmh": { "steps": pmmh_steps, "particles": pmmh_particles, "rho": pmmh_rho_opt },
-        "rw_sd": rw_sd_blob,
-        "rw_sd_auto": rw_sd_auto,
-        "init": init_method,
-        "pf_max_substeps": a.inference.pf_max_substeps,
+    let method_config_blob = serde_json::to_value(ProfileMethodLevel {
+        algorithm: &algorithm,
+        if2: ProfileIf2Knobs {
+            particles: n_particles, iterations: n_iterations,
+            cooling, dt, starts: n_starts,
+        },
+        pmmh: ProfilePmmhKnobs {
+            steps: pmmh_steps, particles: pmmh_particles, rho: pmmh_rho_opt,
+        },
+        rw_sd: &rw_sd_blob,
+        rw_sd_auto,
+        init: &init_method,
+        pf_max_substeps: a.inference.pf_max_substeps,
+    }).unwrap_or_else(|e| {
+        eprintln!("error: cannot serialize profile method identity: {e}");
+        std::process::exit(1);
     });
     // The base fit's `starts_from` lineage would fold into the base as
     // a dep (guardrail 3-base). `camdl profile` does not currently
@@ -2106,6 +2165,68 @@ mod tests {
     use super::*;
     use sim::inference::if2::EstimatedParam;
     use sim::inference::types::Transform;
+
+    /// Byte-neutrality of the struct rewrite: `ProfileBaseLevel` /
+    /// `ProfileMethodLevel` must serialize EXACTLY as the `json!` literals
+    /// they replaced. Profile's identity was re-keyed once already (rw_sd /
+    /// init / conditioning / PF budget); this rewrite must not move it a
+    /// SECOND time, which would invalidate every leaf produced since.
+    ///
+    /// `digest_value` canonicalizes (sorts keys recursively), so equality of
+    /// the serialized values is what matters, not field order.
+    #[test]
+    fn identity_levels_are_byte_identical_to_the_literals_they_replaced() {
+        let fixed: Vec<String> = vec!["N0".into()];
+        let priors: Vec<(String, String)> = vec![("beta".into(), "log_normal".into())];
+        let fit_toml: Option<String> = Some("abc123".into());
+        let cond: Option<crate::fit::config_v2::ConditionFrom> = None;
+
+        let base_struct = serde_json::to_value(ProfileBaseLevel {
+            base_params: "bp-hash",
+            fixed: &fixed,
+            obs_family: "poisson",
+            fit_toml: &fit_toml,
+            priors: &priors,
+            condition_from: cond.as_ref(),
+        }).unwrap();
+        let base_literal = serde_json::json!({
+            "base_params": "bp-hash",
+            "fixed":       fixed,
+            "obs_family":  "poisson",
+            "fit_toml":    fit_toml,
+            "priors":      priors,
+            "condition_from": cond,
+        });
+        assert_eq!(base_struct, base_literal,
+            "ProfileBaseLevel must reproduce the literal — otherwise every \
+             stored profile leaf re-keys a second time");
+
+        let rw_sd: Vec<(&str, Option<f64>)> = vec![("N0", Some(5.0))];
+        let init = crate::fit::init::InitMethod::Lhs;
+        let method_struct = serde_json::to_value(ProfileMethodLevel {
+            algorithm: "if2",
+            if2: ProfileIf2Knobs {
+                particles: 30, iterations: 5, cooling: 0.7, dt: 1.0, starts: 1,
+            },
+            pmmh: ProfilePmmhKnobs { steps: 0, particles: 0, rho: None },
+            rw_sd: &rw_sd,
+            rw_sd_auto: false,
+            init: &init,
+            pf_max_substeps: None,
+        }).unwrap();
+        let method_literal = serde_json::json!({
+            "algorithm": "if2",
+            "if2": { "particles": 30usize, "iterations": 5usize,
+                     "cooling": 0.7, "dt": 1.0, "starts": 1usize },
+            "pmmh": { "steps": 0usize, "particles": 0usize, "rho": None::<f64> },
+            "rw_sd": rw_sd,
+            "rw_sd_auto": false,
+            "init": init,
+            "pf_max_substeps": None::<u64>,
+        });
+        assert_eq!(method_struct, method_literal,
+            "ProfileMethodLevel must reproduce the literal");
+    }
 
     /// gh#118 regression: `log_posterior` in profile output was built
     /// from the nuisance-only prior sum, silently excluding focal-

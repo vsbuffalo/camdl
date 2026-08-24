@@ -29,7 +29,7 @@
 use runid::inputs::{EngineVersion, ModelDigest};
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
 
-use crate::fit::cas::{digest_value, ensure_finite};
+use crate::fit::cas::canonical_config_hash;
 
 /// One cell of a multi-cell `simulate`, contributing to the ensemble's `grid`
 /// digest and to its `deps` (the cell's `Sim` leaf).
@@ -85,17 +85,34 @@ fn fmt_dt(dt: f64) -> String {
 
 /// Resolve an ensemble leaf's identity: the four factored levels and the
 /// `run_id` derived from their hashes.
+/// The `config` level: backend + step size the ensemble was produced under.
+/// A struct rather than a `json!` literal so the level is include-by-default —
+/// see `PfilterConfigLevel` for the full argument.
+#[derive(serde::Serialize)]
+struct EnsembleConfigLevel<'a> {
+    backend: &'a str,
+    dt: f64,
+}
+
+/// The `grid` level: the sorted cell list plus the explicit count, so N vs
+/// N+1 replicates is a different ensemble.
+#[derive(serde::Serialize)]
+struct EnsembleGridLevel<'a> {
+    n_cells: usize,
+    cells: &'a [(&'a str, u64, usize, String)],
+}
+
 pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, String> {
     // params level — the resolved base map, sorted + finiteness-gated (a
     // non-finite would null-collapse and collide distinct values).
     let mut params_sorted: Vec<(&str, f64)> =
         ctx.base_params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
     params_sorted.sort_by(|a, b| a.0.cmp(b.0));
-    // Gate the RAW values: `json!` collapses NaN/Inf to `Null`, so a check on
-    // the built blob can never fire — the collision this comment warns about
-    // was live (2026-08-23 audit).
-    ensure_finite(&params_sorted)?;
-    let params_blob = serde_json::json!(params_sorted);
+    // The `params` level is the sorted (name, value) list itself — a sequence
+    // with no field set to forget, so it takes no wrapper struct (and wrapping
+    // it would re-key: an object is not an array). `canonical_config_hash`
+    // gates finiteness on the raw values, which `json!` would already have
+    // collapsed for a NaN.
 
     // grid level — the sorted cell list + the explicit cell count. Each cell is
     // (scenario, seed, draw, sim_run_id); sorting is order-independent. The
@@ -113,12 +130,7 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
         })
         .collect();
     cells_sorted.sort();
-    // The grid blob carries no floats (labels, seeds, indices, hex digests),
-    // so there is nothing to gate here.
-    let grid_blob = serde_json::json!({
-        "n_cells": ctx.cells.len(),
-        "cells": cells_sorted,
-    });
+    let grid_level = EnsembleGridLevel { n_cells: ctx.cells.len(), cells: &cells_sorted };
 
     let model_digest = ModelDigest::from_model(
         ctx.model,
@@ -126,21 +138,16 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
         EngineVersion(ctx.engine_version.to_string()),
     );
 
-    // `dt` is the only float; gate it before `json!` sees it.
-    ensure_finite(&ctx.dt)?;
     let config_label = format!("{}-dt{}", ctx.backend.as_str(), fmt_dt(ctx.dt));
-    let config_blob = serde_json::json!({
-        "backend": ctx.backend.as_str(),
-        "dt": ctx.dt,
-    });
+    let config_level = EnsembleConfigLevel { backend: ctx.backend.as_str(), dt: ctx.dt };
 
     let grid_label = format!("cells-n{}", ctx.cells.len());
 
     let levels = vec![
         level("model", ctx.stem, model_digest.content_hash()),
-        level("config", &config_label, digest_value(&config_blob)),
-        level("params", "base", digest_value(&params_blob)),
-        level("grid", &grid_label, digest_value(&grid_blob)),
+        level("config", &config_label, canonical_config_hash(&config_level, &[])?),
+        level("params", "base", canonical_config_hash(&params_sorted, &[])?),
+        level("grid", &grid_label, canonical_config_hash(&grid_level, &[])?),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::SimEnsemble, &level_hashes);
@@ -165,6 +172,7 @@ pub fn ensemble_deps(cells: &[EnsembleCell]) -> Vec<runid::inputs::ArtifactRef> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fit::cas::digest_value;
 
     fn cell(scenario: &str, seed: u64, draw: usize, rid: u8) -> EnsembleCell {
         EnsembleCell {
@@ -186,6 +194,29 @@ mod tests {
             .collect();
         s.sort();
         digest_value(&serde_json::json!({ "n_cells": cells.len(), "cells": s }))
+    }
+
+    /// Byte-neutrality of the struct rewrite: `EnsembleGridLevel` /
+    /// `EnsembleConfigLevel` must digest EXACTLY as the `json!` literals they
+    /// replaced — `grid_level` above IS that literal — or every stored
+    /// ensemble leaf silently re-keys.
+    #[test]
+    fn levels_are_byte_identical_to_the_literals_they_replaced() {
+        let cells = [cell("baseline", 1, 0, 1), cell("baseline", 2, 0, 2)];
+        let mut sorted: Vec<(&str, u64, usize, String)> = cells
+            .iter()
+            .map(|c| (c.scenario_label.as_str(), c.process_seed, c.draw_idx, c.sim_run_id.to_hex()))
+            .collect();
+        sorted.sort();
+        let grid = EnsembleGridLevel { n_cells: cells.len(), cells: &sorted };
+        assert_eq!(canonical_config_hash(&grid, &[]).unwrap(), grid_level(&cells),
+            "the grid struct must reproduce the literal's digest");
+
+        let cfg = EnsembleConfigLevel { backend: "chain_binomial", dt: 1.0 };
+        assert_eq!(
+            canonical_config_hash(&cfg, &[]).unwrap(),
+            digest_value(&serde_json::json!({ "backend": "chain_binomial", "dt": 1.0 })),
+            "the config struct must reproduce the literal's digest");
     }
 
     /// Count-in-the-key: 3 cells vs 4 cells (one extra replicate-seed) MUST
