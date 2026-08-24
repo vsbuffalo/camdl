@@ -87,6 +87,103 @@ fn commit_then_lookup_hit() {
     cleanup(&root);
 }
 
+// ── S4: the augment door ────────────────────────────────────────────────────
+
+/// A completed leaf can gain an artifact. Before this the store had no such
+/// operation, so `simulate --event-log` against an existing leaf staged the
+/// log and had the whole set discarded — the log silently lost.
+#[test]
+fn augment_adds_an_artifact_to_a_completed_leaf() {
+    let root = tmp_root("augment");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"S\tI\n9\t1\n")).unwrap();
+
+    store.augment(&dest, &LeafIdentity::new(a), "event_log.tsv", b"t\tevent\n").unwrap();
+
+    // The file is there, the record names it, and the leaf is still a Hit —
+    // i.e. the added file is part of the exact set, not an orphan.
+    assert_eq!(fs::read(dest.join("event_log.tsv")).unwrap(), b"t\tevent\n");
+    match store.lookup(&dest, &LeafIdentity::new(a)) {
+        Lookup::Hit(r) => assert!(r.artifacts.contains_key("event_log.tsv"),
+            "the augmented file must be in the manifest, or the exact-set scan \
+             reports it as an orphan and the leaf goes Stale"),
+        other => panic!("expected Hit after augment, got {other:?}"),
+    }
+    cleanup(&root);
+}
+
+/// Re-adding the same bytes is a no-op, so a rerun that records the same log
+/// again is harmless.
+#[test]
+fn augment_is_idempotent_for_identical_bytes() {
+    let root = tmp_root("augmentidem");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+    let idl = LeafIdentity::new(a);
+    store.augment(&dest, &idl, "event_log.tsv", b"same").unwrap();
+    store.augment(&dest, &idl, "event_log.tsv", b"same").unwrap();
+    assert!(matches!(store.lookup(&dest, &idl), Lookup::Hit(_)));
+    cleanup(&root);
+}
+
+/// Re-adding DIFFERENT bytes under one name is the same identity bug the
+/// commit path refuses: same key must mean same bytes.
+#[test]
+fn augment_refuses_divergent_bytes() {
+    let root = tmp_root("augmentdiverge");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+    let idl = LeafIdentity::new(a);
+    store.augment(&dest, &idl, "event_log.tsv", b"first").unwrap();
+    let err = store.augment(&dest, &idl, "event_log.tsv", b"second").unwrap_err();
+    match &err {
+        CasError::DivergentRecompute { file, .. } => assert_eq!(file, "event_log.tsv"),
+        other => panic!("expected DivergentRecompute, got {other:?}"),
+    }
+    assert_eq!(fs::read(dest.join("event_log.tsv")).unwrap(), b"first",
+        "the incumbent artifact must be untouched");
+    cleanup(&root);
+}
+
+/// Never augment somebody else's artifact, and never one a live process holds.
+#[test]
+fn augment_respects_identity_and_live_holders() {
+    let root = tmp_root("augmentguard");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    store.commit_atomic(&leaf, record(id(0xaa)), arts(b"traj")).unwrap();
+
+    // Different identity at this path → refused, nothing written.
+    let err = store.augment(&leaf, &LeafIdentity::new(id(0xbb)), "x.tsv", b"x").unwrap_err();
+    assert!(matches!(err, CasError::AlreadyCompleted { .. }), "got {err:?}");
+    assert!(!leaf.join("x.tsv").exists());
+
+    // Live holder → refused.
+    fs::write(leaf.join(".lock"), std::process::id().to_string()).unwrap();
+    let err = store.augment(&leaf, &LeafIdentity::new(id(0xaa)), "y.tsv", b"y").unwrap_err();
+    assert!(matches!(err, CasError::FitInProgress { .. }), "got {err:?}");
+    assert!(!leaf.join("y.tsv").exists());
+    cleanup(&root);
+}
+
+/// Augmenting something that is not a completed leaf of this identity is a
+/// no-op, not an error: the caller's next run writes it from scratch.
+#[test]
+fn augment_on_a_missing_leaf_is_a_no_op() {
+    let root = tmp_root("augmentmiss");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    store.augment(&leaf, &LeafIdentity::new(id(0xaa)), "event_log.tsv", b"x").unwrap();
+    assert!(!leaf.join("event_log.tsv").exists());
+    cleanup(&root);
+}
+
 // ── S2: the overwrite door ──────────────────────────────────────────────────
 
 /// `--force` had no store-level meaning: there was no path that replaced a

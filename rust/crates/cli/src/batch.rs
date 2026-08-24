@@ -1338,9 +1338,17 @@ impl crate::engine::RunSink for CasSink {
         // already exists without it is an idempotent no-op — same as the obs
         // child — so `--force` or a fresh identity is needed to add it after
         // the fact.)
+        // Kept alongside the staged set so they can be re-added to an
+        // ALREADY-COMPLETED leaf below: a cache hit discards the staged
+        // artifacts wholesale, which is how `--event-log` against an existing
+        // leaf silently lost its log.
+        let mut optional_artifacts: Vec<(&'static str, Vec<u8>)> = Vec::new();
         if let Some(ref el) = cell.event_log {
             match sim::lineage::event_log_io::to_tsv_bytes(el) {
-                Ok(bytes) => { artifacts.insert("event_log.tsv", bytes); }
+                Ok(bytes) => {
+                    optional_artifacts.push(("event_log.tsv", bytes.clone()));
+                    artifacts.insert("event_log.tsv", bytes);
+                }
                 Err(e) => {
                     self.counter += 1;
                     self.errors.push(format!("scenario={} seed={}: event log serialize: {:?}",
@@ -1358,6 +1366,7 @@ impl crate::engine::RunSink for CasSink {
         // gains one more declared artifact, never an optional-on-cache-hit one.
         if let Some(ref firings) = cell.traj.reactive_log {
             let bytes = sim::reactive::format_reactive_log(firings).into_bytes();
+            optional_artifacts.push(("reactive_log.tsv", bytes.clone()));
             artifacts.insert("reactive_log.tsv", bytes);
         }
         // Declare the tabular outputs' column schema in run.json — classify the
@@ -1398,6 +1407,25 @@ impl crate::engine::RunSink for CasSink {
                 return Ok(());
             }
         };
+
+        // A cache hit at commit returns the INCUMBENT leaf and discards
+        // everything we staged, so an optional artifact this run recorded but
+        // the stored leaf lacks — `--event-log` against a leaf first written
+        // without it — would simply vanish. (The old comment here claimed
+        // `--force` was the workaround; it was not: that path re-commits and
+        // reaches the same discard.) `augment` adds it under the leaf's lock;
+        // it is a no-op when the bytes already match, which is the fresh-commit
+        // case, and it refuses divergent bytes for the same reason the commit
+        // path does.
+        for (artifact, bytes) in &optional_artifacts {
+            if let Err(e) = store.augment(
+                &dest, &runid::LeafIdentity::new(rt.run_id), artifact, bytes)
+            {
+                self.errors.push(format!(
+                    "scenario={} seed={}: recording {} into {}: {}",
+                    name, spec.process_seed, artifact, dest.display(), e));
+            }
+        }
 
         // Obs ensemble: written into the committed leaf's `obs/` child. A
         // failure here is non-fatal — children are independent, so a missing
