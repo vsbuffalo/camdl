@@ -1,7 +1,32 @@
 # Run-identity and store-contract hardening
 
-Date: 2026-08-23 Status: draft for maintainer review Audit ref:
+Date: 2026-08-23 Status: Phases 1–3 implemented; Phase 4 pending Audit ref:
 `docs/dev/reviews/2026-08-23-run-identity-and-store-design-review.md`
+
+## Implementation status
+
+Phases 1–3 landed on `worktree-refactor-cli`, each with the full `make test`
+gate green. Two designed items changed shape during implementation; both are
+documented at their types and repeated here so this stays the decision record.
+
+- **S2's single `WriteVerdict` became two functions** (`WritePolicy` +
+  `check_reuse`, with `begin_resolved_write` unchanged). Reuse must be decided
+  BEFORE a cell is computed; `begin_resolved_write` runs after, with results in
+  hand. One call could not serve both moments without forcing every command to
+  compute first and ask later — the wasted work the cache exists to prevent.
+- **S1's "report a staged superset" waits for S2's verdict type.** `runid` is a
+  library with no logging channel, so the superset case (a completed leaf
+  gaining an artifact) dedups silently until the S4 augment door lands.
+- **gh#730 needed no schema change.** `--dt-check-strict` resolves at override
+  time into the `threshold_nats` the config already carries and hashes, so the
+  runtime `strict` parameter is gone rather than duplicated into
+  `CliStageOverrides`.
+- **The `canonical_config_hash` helper (I2) is NOT implemented.** The
+  subtractive `Stage` arms and the profile/pfilter keying landed directly; the
+  shared helper that would make exclude-by-default _unwritable_ at the remaining
+  blob sites is still owed. Without it, `pfilter_cas`, `survey_cas` and
+  `sim_ensemble_cas` still hand-roll canonicalize + gate + subtract. Tracked as
+  the first item of the follow-on work.
 
 ## Problem
 
@@ -188,17 +213,32 @@ change, per `.claude/rules/run-identity.md`.
   `TrajectoryCtx`) rather than detect-and-rerun — an obs-bearing leaf is a
   distinct artifact; detection papers over identity. Decided; S1 backstops it
   meanwhile.
-- **pfilter claim failure is an error, not a warning.** Decided; falls out of
-  S2's verdict type.
+- **pfilter claim failure is loud but NOT fatal; profile's is fatal.** REVISED
+  during implementation. The original call ("an error, not a warning") was right
+  about the silence and wrong about the remedy for pfilter: by the time the
+  claim runs, the filter has delivered its loglik, `--save-final-state` and
+  traces, so the leaf is a cache artifact and aborting discards completed work
+  over a cache miss — which downstream reads as an honest not-found, never as a
+  wrong number. Profile keeps the fatal treatment because its point leaves ARE
+  the deliverable: a vanished point silently corrupts the landscape.
 
-## Named follow-ups (genuinely the maintainer's)
+## Named follow-ups
 
 - **gh#731: cluster/shared-store locking.** The `.lock` records PID only; PID
-  liveness is host-local. If fits run on shared storage across hosts, the lock
-  needs host + process-start-time. Blocked on the maintainer confirming whether
-  cross-host store sharing is a real deployment; recommendation if yes: extend
-  the lock record (no re-key — locks are not identity).
-- **Timing of Phase 3's re-key** relative to the active outbreak-fitting
-  campaign: the batch invalidates profile and four-variant fit-stage caches.
-  Recommendation: land Phases 1–2 now; hold Phase 3 until the current fits land
-  or the maintainer waves it through.
+  liveness is host-local, so on shared storage a remote holder is probed against
+  the wrong process table. Maintainer has deprioritized this (2026-08-23): not a
+  current deployment. Fix when it becomes one — the lock record needs host +
+  process-start-time (no re-key; locks are not identity).
+- **gh#734: `Likelihood`'s wildcard match arm.** The exhaustive-destructure
+  guard covers new IR _fields_; a new likelihood _family_ with a bare-`Expr`
+  argument would still be silently un-hashed.
+- **gh#735: CLI tests share one repo-relative `results/` store.** Seven files
+  invoke pfilter with no isolation; a concurrent quarantine/rename can pull a
+  directory out from under a claim. Also names the production-side question:
+  `claim_streaming` has no retry where the commit path does.
+- **`canonical_config_hash` (I2's helper).** Not implemented; the remaining blob
+  sites still hand-roll canonicalize + finiteness gate + subtract. This is what
+  makes exclude-by-default _unwritable_ rather than merely fixed case-by-case,
+  so it is the highest-value piece of the follow-on work.
+- **Phase 4** (S4 augment + real obs children, I1's full resolve-once seam, I4's
+  derive hardening + orphan-struct deletion) is unstarted.
