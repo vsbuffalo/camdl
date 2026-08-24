@@ -580,6 +580,13 @@ impl ContentAddressed for Likelihood {
         // (scoring-only, no `Diffable`), so all three of its arguments must be
         // hashed explicitly too — otherwise `diffables()` sees nothing and two
         // ZI models differing only in mean/dispersion/pi would collide.
+        //
+        // EXHAUSTIVE, no `_` arm (gh#734). A wildcard here meant a new family
+        // whose argument is a bare `Expr` would be silently un-hashed and two
+        // models differing only in that argument would share a run_id. The
+        // ZI-NB arm is the proof the hazard is real, not hypothetical: it
+        // exists precisely because bare-`Expr` arguments need the explicit
+        // match. Adding a variant is now a compile error here.
         match self {
             Likelihood::Binomial(l) => l.n.hash_into(h),
             Likelihood::BetaBinomial(l) => l.n.hash_into(h),
@@ -588,7 +595,13 @@ impl ContentAddressed for Likelihood {
                 l.dispersion.hash_into(h);
                 l.pi.hash_into(h);
             }
-            _ => {}
+            // Every argument is a `Diffable`; the derived traversal below hashes
+            // them all, so there is nothing to add here.
+            Likelihood::Poisson(_)
+            | Likelihood::NegBinomial(_)
+            | Likelihood::Normal(_)
+            | Likelihood::Beta(_)
+            | Likelihood::Bernoulli(_) => {}
         }
         // Every differentiable position (each `Diffable` = expr + classified grad
         // map), in declaration order, via the derived traversal — so a new
