@@ -24,7 +24,7 @@ use runid::inputs::{
     Backend, CalendarMode, DataDigest, EngineVersion, InterventionId, ModelDigest, ParamId,
     ResolvedOutputSchedule, ResolvedParams, ResolvedScenario, Seed, SimConfig,
 };
-use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, FiniteF64, LevelId, ResolveError};
+use runid::{run_id, ArtifactKind, ContentHash, FiniteF64, LevelId, ResolveError};
 
 /// A fully-resolved trajectory leaf: the factored identity levels (in path
 /// order) and the leaf `run_id` (composed from the level hashes).
@@ -176,7 +176,7 @@ fn config_label(b: crate::args::types::ForwardBackend, dt: f64) -> String {
     format!("{}-dt{}", b.as_str(), dt)
 }
 
-use crate::fit::cas::level;
+use crate::fit::cas::{level, structural_level_hash};
 
 /// Resolve a trajectory leaf's identity: its `TrajectoryInput`, the five
 /// factored levels (model/config/params/scenario/seed, in path order), and
@@ -208,11 +208,11 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
     // Each level hashes a disjoint slice of the input; the union is the whole
     // resolved input set. The label is provenance, the hash is identity.
     let levels = vec![
-        level("model", ctx.model_stem, model.content_hash()),
-        level("config", &config_label(ctx.backend, ctx.dt), config.content_hash()),
-        level("params", ctx.param_label, params.content_hash()),
-        level("scenario", ctx.scenario_label, scenario.content_hash()),
-        level("seed", &format!("seed_{}", ctx.base_seed), seed.content_hash()),
+        level("model", ctx.model_stem, structural_level_hash(&model)),
+        level("config", &config_label(ctx.backend, ctx.dt), structural_level_hash(&config)),
+        level("params", ctx.param_label, structural_level_hash(&params)),
+        level("scenario", ctx.scenario_label, structural_level_hash(&scenario)),
+        level("seed", &format!("seed_{}", ctx.base_seed), structural_level_hash(&seed)),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::Sim, &level_hashes);

@@ -20,7 +20,7 @@
 //!   - **seed** — the resolved LHS / PF base seed.
 
 use runid::inputs::{EngineVersion, ModelDigest, Seed};
-use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
+use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 
 use crate::fit::cas::canonical_config_hash;
 
@@ -55,7 +55,7 @@ pub struct SurveyCtx<'a> {
     pub seed: u64,
 }
 
-use crate::fit::cas::{data_digests, level};
+use crate::fit::cas::{data_digests, level, structural_level_hash};
 
 /// The `config` level: the eval setup and problem context a landscape is
 /// computed under. A struct rather than a `json!` literal so the level is
@@ -115,10 +115,10 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
     let box_label = format!("box-n{}", ctx.n_points);
 
     let levels = vec![
-        level("model", ctx.stem, model_digest.content_hash()),
+        level("model", ctx.stem, structural_level_hash(&model_digest)),
         level("config", &config_label, canonical_config_hash(&config_level, &[])?),
         level("box", &box_label, canonical_config_hash(&box_level, &[])?),
-        level("seed", &format!("seed_{}", ctx.seed), seed.content_hash()),
+        level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::Survey, &level_hashes);
@@ -128,7 +128,7 @@ pub fn resolve_survey(ctx: &SurveyCtx) -> Result<ResolvedSurvey, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::cas::digest_value;
+    use runid::ContentAddressed;
 
     fn h(byte: u8) -> String {
         ContentHash::digest_bytes(&[byte]).to_hex()
@@ -140,20 +140,20 @@ mod tests {
     // fixture (mirrors `pfilter_cas::tests`).
 
     fn config_level(method: &str, particles: u32, replicates: u32,
-                    data: &[(&str, &str)], scenario: Option<&str>) -> ContentHash {
+                    data: &[(&str, &str)], scenario: Option<&str>) -> crate::fit::cas::LevelHash {
         let mut d: Vec<(&str, &str)> = data.to_vec();
         d.sort_by(|a, b| a.0.cmp(b.0));
-        digest_value(&serde_json::json!({
+        canonical_config_hash(&serde_json::json!({
             "eval_method": method, "eval_particles": particles,
             "eval_replicates": replicates, "data": d,
             "fixed": Vec::<(&str, f64)>::new(), "scenario": scenario,
-        }))
+        }), &[]).unwrap()
     }
 
-    fn box_level(bounds: &[(&str, f64, f64)], n_points: u32) -> ContentHash {
+    fn box_level(bounds: &[(&str, f64, f64)], n_points: u32) -> crate::fit::cas::LevelHash {
         let mut b: Vec<(&str, f64, f64)> = bounds.to_vec();
         b.sort_by(|a, x| a.0.cmp(x.0));
-        digest_value(&serde_json::json!({ "bounds": b, "n_points": n_points }))
+        canonical_config_hash(&serde_json::json!({ "bounds": b, "n_points": n_points }), &[]).unwrap()
     }
 
     /// Byte-neutrality of the struct rewrite: `SurveyConfigLevel` /

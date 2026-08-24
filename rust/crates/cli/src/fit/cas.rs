@@ -75,8 +75,53 @@ pub(crate) const LEVEL_SCHEMA_VERSION: u16 = 1;
 /// Build a CAS [`LevelId`] with the canonical schema version. The single
 /// constructor every artifact-kind resolver (`fit`/`pfilter`/`survey`/
 /// `profile`/`sim_ensemble`/`resolve`) routes through.
-pub(crate) fn level(name: &str, label: &str, hash: ContentHash) -> LevelId {
-    LevelId { name: name.into(), label: label.into(), hash, schema_version: LEVEL_SCHEMA_VERSION }
+pub(crate) fn level(name: &str, label: &str, hash: LevelHash) -> LevelId {
+    LevelId {
+        name: name.into(),
+        label: label.into(),
+        hash: hash.0,
+        schema_version: LEVEL_SCHEMA_VERSION,
+    }
+}
+
+/// A hash that is allowed to become an identity level.
+///
+/// The point is what CANNOT construct one. There is no `From<ContentHash>` and
+/// no public field: the only two mints are [`canonical_config_hash`] (a
+/// `Serialize` value, gated for finiteness and serialized WHOLE) and
+/// [`structural_level_hash`] (a `ContentAddressed` value, i.e. the
+/// `#[derive(RunInput)]` path). A hash produced any other way — most
+/// pointedly, `digest_value` over a hand-built `json!` literal listing the
+/// fields someone remembered — cannot reach [`level`].
+///
+/// Without this type the include-by-default property was a convention: the
+/// helper made the right thing convenient, and nothing stopped the next CAS
+/// site from writing `level("config", label, digest_value(&json!({…})))` and
+/// silently reintroducing exclude-by-default. `digest_value` is now private to
+/// this module, so that line does not compile elsewhere. This is the
+/// parse-don't-validate move from `.claude/rules/rust-conventions.md`, applied
+/// where its own test applies: two `ContentHash`es with different provenance,
+/// swappable into one slot, where the wrong one is silently wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LevelHash(ContentHash);
+
+impl LevelHash {
+    /// Unwrap for embedding INSIDE another structurally-hashed input (profile
+    /// folds its base/method level hashes into `ProfileBase`/`ProfileStage`).
+    ///
+    /// This direction is safe and deliberately one-way: the guarantee is about
+    /// what may BECOME a level, so there is no `From<ContentHash>` going back.
+    pub(crate) fn into_inner(self) -> ContentHash {
+        self.0
+    }
+}
+
+/// Mint a [`LevelHash`] from a structurally-hashed value — the
+/// `#[derive(RunInput)]` path, which is include-by-default by construction
+/// (every non-provenance field is folded, and a non-hashable field is a
+/// compile error).
+pub(crate) fn structural_level_hash<T: ContentAddressed>(v: &T) -> LevelHash {
+    LevelHash(v.content_hash())
 }
 
 /// Per-stream data digests from **pre-computed** SHA-256 hex hashes, sorted by
@@ -116,7 +161,7 @@ fn canonical(v: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-pub(crate) fn digest_value(v: &serde_json::Value) -> ContentHash {
+fn digest_value(v: &serde_json::Value) -> ContentHash {
     // The Value is built from a finiteness-gated source (see `ensure_finite`),
     // so it contains no non-finite floats and `to_vec` of a valid Value is
     // infallible. `.expect` (not `unwrap_or_default`) so a future caller that
@@ -159,8 +204,27 @@ pub(crate) fn digest_value(v: &serde_json::Value) -> ContentHash {
 pub(crate) fn canonical_config_hash<T: serde::Serialize>(
     value: &T,
     exclude: &[&str],
-) -> Result<ContentHash, String> {
+) -> Result<LevelHash, String> {
     ensure_finite(value)?;
+    Ok(LevelHash(digest_value(&serialize_minus(value, exclude)?)))
+}
+
+/// Serialize `value` whole, then remove `exclude`d TOP-LEVEL keys.
+///
+/// The one implementation of "include by default, and name every omission".
+/// It had three: this, [`fit_config_blob_hash`]'s inline copy, and
+/// `Stage::payload_minus` — which is how the helper's own docstring came to
+/// warn against creating "the second implementation it exists to prevent"
+/// while shipping as the third. Both now call this.
+///
+/// Does NOT gate finiteness: callers that hash gate first
+/// ([`canonical_config_hash`]), while `Stage::payload_minus` returns a `Value`
+/// whose gate happens later at `stage_config_hash`. Gating here would
+/// double-gate one caller and change the other's signature for nothing.
+pub(crate) fn serialize_minus<T: serde::Serialize>(
+    value: &T,
+    exclude: &[&str],
+) -> Result<serde_json::Value, String> {
     let mut v = serde_json::to_value(value)
         .map_err(|e| format!("cannot serialize identity level for hashing: {e}"))?;
     if !exclude.is_empty() {
@@ -174,11 +238,11 @@ pub(crate) fn canonical_config_hash<T: serde::Serialize>(
             // one: the caller asked to subtract a key from something that has
             // none, so the subtraction silently did nothing.
             _ => return Err(
-                "canonical_config_hash: `exclude` given for a level that does \
-                 not serialize to a JSON object".to_string()),
+                "serialize_minus: `exclude` given for a value that does not \
+                 serialize to a JSON object".to_string()),
         }
     }
-    Ok(digest_value(&v))
+    Ok(v)
 }
 
 // ── Non-finite finiteness gate ───────────────────────────────────────────────
@@ -356,16 +420,10 @@ fn build_holdout_digests(config: &FitConfigV2) -> Result<Vec<DataDigest>, String
 /// model/data *paths* stay (a rename is a harmless over-invalidate; their
 /// *content* rides in `FitDigest.model`/`.data`).
 fn fit_config_blob_hash(config: &FitConfigV2) -> Result<ContentHash, String> {
-    // Reject non-finite floats first — `to_value` would null them (collision).
-    ensure_finite(config)?;
-    let mut v = serde_json::to_value(config)
-        .map_err(|e| format!("cannot serialize fit config for hashing: {}", e))?;
-    if let serde_json::Value::Object(ref mut m) = v {
-        m.remove("stages");
-        m.remove("fit_seeds");
-        m.remove("output_dir");
-    }
-    Ok(digest_value(&v))
+    // The subtractive helper, with this level's three named omissions. It
+    // gates finiteness, serializes whole, subtracts, and digests — exactly
+    // what this function used to spell out, so the hash is unchanged.
+    Ok(canonical_config_hash(config, &["stages", "fit_seeds", "output_dir"])?.into_inner())
 }
 
 /// The config-MEANING hash: what a `fit.toml` handle is looked up by (gh#653).
@@ -535,13 +593,13 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
 
     let levels = vec![
-        level("fit", ctx.fit_stem, fit.content_hash()),
+        level("fit", ctx.fit_stem, structural_level_hash(&fit)),
         level(
             "stage",
             &format!("{:02}-{}", ctx.ordinal, ctx.stage_name),
-            stage_level.content_hash(),
+            structural_level_hash(&stage_level),
         ),
-        level("seed", &format!("seed_{}", ctx.seed), seed.content_hash()),
+        level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::FitStage, &level_hashes);

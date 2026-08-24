@@ -114,6 +114,155 @@ fn augment_adds_an_artifact_to_a_completed_leaf() {
     cleanup(&root);
 }
 
+/// The TOCTOU proof: a competing augment that lands entirely inside the window
+/// between our read and our lock must NOT be clobbered.
+///
+/// `augment` is the store's only read-modify-write of `run.json`. Deciding
+/// idempotency/divergence on a pre-lock snapshot and writing that snapshot
+/// back after locking loses the competitor's work — and for the same artifact
+/// name with different bytes it also defeats `DivergentRecompute`, leaving the
+/// store holding bytes that disagree with a prior run's at one key with a
+/// self-consistent manifest. Same `run_id`, different bytes, no error: the
+/// worst outcome this store can produce.
+#[test]
+fn a_competing_augment_inside_the_window_is_not_clobbered() {
+    let _serial = super::AUGMENT_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("augmentrace");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+
+    // The competitor writes the SAME artifact name with DIFFERENT bytes,
+    // entirely within our pre-lock window.
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let root2 = root.clone();
+        let fired2 = fired.clone();
+        *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::sync::Arc::new(move |leaf: &std::path::Path| {
+                // Fire once — the competitor re-enters this same hook.
+                if fired2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+                    return;
+                }
+                let s2 = FsCasStore::new(&root2);
+                s2.augment(leaf, &LeafIdentity::new(id(0xaa)), "event_log.tsv", b"COMPETITOR")
+                    .expect("the competing augment must succeed");
+            }));
+    }
+
+    let err = store
+        .augment(&dest, &LeafIdentity::new(a), "event_log.tsv", b"OURS")
+        .expect_err("our augment must see the competitor's write, not clobber it");
+    *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    match &err {
+        CasError::DivergentRecompute { file, .. } => assert_eq!(file, "event_log.tsv"),
+        other => panic!("expected DivergentRecompute, got {other:?}"),
+    }
+    // The competitor's bytes stand, and the leaf is still internally consistent.
+    assert_eq!(fs::read(dest.join("event_log.tsv")).unwrap(), b"COMPETITOR");
+    assert!(matches!(store.lookup(&dest, &LeafIdentity::new(a)), Lookup::Hit(_)),
+        "the leaf must remain a valid cache hit, not go Stale");
+    cleanup(&root);
+}
+
+/// The other half of the same window: two augments of DIFFERENT names. A
+/// snapshot write-back drops the competitor's manifest entry, orphaning its
+/// file and staleing a completed leaf. `batch` augments exactly such a pair
+/// (`event_log.tsv`, `reactive_log.tsv`).
+#[test]
+fn a_competing_augment_of_another_name_keeps_both_entries() {
+    let _serial = super::AUGMENT_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("augmentrace2");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let root2 = root.clone();
+        let fired2 = fired.clone();
+        *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::sync::Arc::new(move |leaf: &std::path::Path| {
+                if fired2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+                    return;
+                }
+                let s2 = FsCasStore::new(&root2);
+                s2.augment(leaf, &LeafIdentity::new(id(0xaa)), "reactive_log.tsv", b"REACTIVE")
+                    .expect("the competing augment must succeed");
+            }));
+    }
+
+    store
+        .augment(&dest, &LeafIdentity::new(a), "event_log.tsv", b"EVENTS")
+        .expect("our augment must succeed alongside the competitor's");
+    *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    match store.lookup(&dest, &LeafIdentity::new(a)) {
+        Lookup::Hit(r) => {
+            assert!(r.artifacts.contains_key("event_log.tsv"), "ours must be manifested");
+            assert!(r.artifacts.contains_key("reactive_log.tsv"),
+                "the competitor's entry must survive — dropping it orphans its \
+                 file and staleens a completed leaf");
+        }
+        other => panic!("expected Hit, got {other:?} — a dropped manifest entry \
+                         orphans a file and staleens the leaf"),
+    }
+    cleanup(&root);
+}
+
+/// A `.lock` left by a DEAD process must not make `augment` claim a fit is in
+/// progress. Every other lock consumer in the store tests liveness; a bare
+/// `AlreadyExists -> FitInProgress` wedges the leaf until `--force`.
+#[test]
+fn augment_takes_over_a_lock_held_by_a_dead_pid() {
+    let _serial = super::RECLAIM_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("augmentdeadlock");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+
+    let mut child = std::process::Command::new("true").spawn().expect("spawn");
+    let dead_pid = child.id();
+    child.wait().expect("reap");
+    fs::write(dest.join(".lock"), dead_pid.to_string()).unwrap();
+
+    store
+        .augment(&dest, &LeafIdentity::new(a), "event_log.tsv", b"log")
+        .expect("a lock held by a dead pid must be taken over, not reported as \
+                 a fit in progress");
+    assert_eq!(fs::read(dest.join("event_log.tsv")).unwrap(), b"log");
+    assert!(!dest.join(".lock").exists(), "the lock must be released");
+    cleanup(&root);
+}
+
+/// Refused bytes are preserved, as `DivergentRecompute`'s message promises.
+#[test]
+fn augment_quarantines_the_bytes_it_refuses() {
+    let root = tmp_root("augmentevidence");
+    let store = FsCasStore::new(&root);
+    let leaf = root.join("sims").join("sir-aaaaaaaa");
+    let a = id(0xaa);
+    let dest = store.commit_atomic(&leaf, record(a), arts(b"traj")).unwrap();
+    let idl = LeafIdentity::new(a);
+    store.augment(&dest, &idl, "event_log.tsv", b"first").unwrap();
+    let err = store.augment(&dest, &idl, "event_log.tsv", b"second").unwrap_err();
+    assert!(matches!(err, CasError::DivergentRecompute { .. }), "got {err:?}");
+
+    let q = root.join(".quarantine");
+    let kept: Vec<_> = fs::read_dir(&q).map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert_eq!(kept.len(), 1, "the refused bytes must be preserved, got {kept:?}");
+    assert_eq!(fs::read(&kept[0]).unwrap(), b"second",
+        "the QUARANTINED bytes are the rejected ones, not the incumbent's");
+    assert_eq!(fs::read(dest.join("event_log.tsv")).unwrap(), b"first",
+        "the incumbent artifact is untouched");
+    cleanup(&root);
+}
+
 /// Re-adding the same bytes is a no-op, so a rerun that records the same log
 /// again is harmless.
 #[test]

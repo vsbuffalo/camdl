@@ -1143,28 +1143,25 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `ConditionFrom` serializes untagged (a string, or a BTreeMap with
     // stable key order), and `null` when absent — so an unconditioned profile
     // re-keys here too, which is unavoidable: this level is a single blob.
-    let base_config_blob = serde_json::to_value(ProfileBaseLevel {
+    let base_config_hash = crate::fit::cas::canonical_config_hash(&ProfileBaseLevel {
         base_params: &base_params_hash,
         fixed: &fixed_blob,
         obs_family: &obs_family_key,
         fit_toml: &fit_toml_hash,
         priors: &priors_blob,
         condition_from: condition_from.as_ref(),
-    }).unwrap_or_else(|e| {
-        eprintln!("error: cannot serialize profile base identity: {e}");
+    }, &[]).unwrap_or_else(|e| {
+        eprintln!("error: profile base identity: {e}");
         std::process::exit(1);
     });
     // Gate the RAW floats before `json!` sees them: the macro collapses
     // NaN/Inf to `Null`, so `resolve_profile_point`'s gate on the built blob
     // could never fire and NaN vs Inf would hash alike (2026-08-23 audit).
-    // These are the floats in either blob (rw_sd values included).
-    let rw_sd_floats: Vec<f64> = specs.iter().filter_map(|s| s.rw_sd).collect();
-    if let Err(e) = crate::fit::cas::ensure_finite(
-        &(cooling, dt, pmmh_rho_opt, &rw_sd_floats))
-    {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
+    // No hand-enumerated finiteness tuple here: `canonical_config_hash` gates
+    // the WHOLE struct before serializing, so a float field added to either
+    // level is covered automatically. The tuple this replaced listed
+    // (cooling, dt, rho, rw_sd) by hand — exclude-by-default applied to
+    // finiteness, and the same forget-me shape as the literals themselves.
     // 2026-08-23 audit: three per-cell knobs reached the computation but not
     // the key, so a rerun that changed any of them was served the previous
     // run's landscape, cell for cell, under a "cached — resuming" line.
@@ -1185,7 +1182,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let mut rw_sd_blob: Vec<(&str, Option<f64>)> =
         specs.iter().map(|s| (s.name.as_str(), s.rw_sd)).collect();
     rw_sd_blob.sort_by(|a, b| a.0.cmp(b.0));
-    let method_config_blob = serde_json::to_value(ProfileMethodLevel {
+    let method_config_hash = crate::fit::cas::canonical_config_hash(&ProfileMethodLevel {
         algorithm: &algorithm,
         if2: ProfileIf2Knobs {
             particles: n_particles, iterations: n_iterations,
@@ -1198,8 +1195,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         rw_sd_auto,
         init: &init_method,
         pf_max_substeps: a.inference.pf_max_substeps,
-    }).unwrap_or_else(|e| {
-        eprintln!("error: cannot serialize profile method identity: {e}");
+    }, &[]).unwrap_or_else(|e| {
+        eprintln!("error: profile method identity: {e}");
         std::process::exit(1);
     });
     // The base fit's `starts_from` lineage would fold into the base as
@@ -1286,8 +1283,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             stem: &stem_label,
             method_name: &algorithm,
             data: &data_hashes,
-            base_config: &base_config_blob,
-            method_config: &method_config_blob,
+            base_config: base_config_hash,
+            method_config: method_config_hash,
             focal: &focal,
             grid: &grid_spec,
             seed,

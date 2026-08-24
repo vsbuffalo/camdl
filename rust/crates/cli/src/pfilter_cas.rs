@@ -14,7 +14,7 @@
 
 use runid::inputs::{EngineVersion, ModelDigest, Seed};
 use runid::{
-    run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId,
+    run_id, ArtifactKind, ContentHash, LevelId,
 };
 
 use crate::fit::cas::canonical_config_hash;
@@ -68,7 +68,7 @@ pub struct PfilterCtx<'a> {
     pub seed: u64,
 }
 
-use crate::fit::cas::{data_digests, level};
+use crate::fit::cas::{data_digests, level, structural_level_hash};
 
 /// The `config` level's identity: the scoring setup a pfilter log-likelihood
 /// is computed under.
@@ -133,10 +133,10 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
     let config_label = format!("pf-N{}-r{}-dt{}", ctx.particles, ctx.replicates, fmt_dt(ctx.dt));
 
     let levels = vec![
-        level("model", ctx.stem, model_digest.content_hash()),
+        level("model", ctx.stem, structural_level_hash(&model_digest)),
         level("config", &config_label, canonical_config_hash(&config_level, &[])?),
         level("params", "params", canonical_config_hash(&params_sorted, &[])?),
-        level("seed", &format!("seed_{}", ctx.seed), seed.content_hash()),
+        level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::Pfilter, &level_hashes);
@@ -155,7 +155,8 @@ fn fmt_dt(dt: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::cas::{digest_value, ensure_finite};
+    use runid::ContentAddressed;
+    use crate::fit::cas::ensure_finite;
 
     fn h(byte: u8) -> String {
         ContentHash::digest_bytes(&[byte]).to_hex()
@@ -167,19 +168,19 @@ mod tests {
     // `ir::Model` fixture (the `model` level is `ModelDigest::from_model`,
     // covered by the integration round-trip; mirrors `profile_cas::tests`).
 
-    fn params_level(params: &[(&str, f64)]) -> ContentHash {
+    fn params_level(params: &[(&str, f64)]) -> crate::fit::cas::LevelHash {
         let mut s: Vec<(&str, f64)> = params.to_vec();
         s.sort_by(|a, b| a.0.cmp(b.0));
-        digest_value(&serde_json::json!(s))
+        canonical_config_hash(&serde_json::json!(s), &[]).unwrap()
     }
 
-    fn config_level(particles: u32, replicates: u32, dt: f64, obs: &str, data: &[(&str, &str)]) -> ContentHash {
+    fn config_level(particles: u32, replicates: u32, dt: f64, obs: &str, data: &[(&str, &str)]) -> crate::fit::cas::LevelHash {
         let mut d: Vec<(&str, &str)> = data.to_vec();
         d.sort_by(|a, b| a.0.cmp(b.0));
-        digest_value(&serde_json::json!({
+        canonical_config_hash(&serde_json::json!({
             "particles": particles, "replicates": replicates, "dt": dt,
             "obs_block": obs, "flow_indices": Vec::<u32>::new(), "data": d,
-        }))
+        }), &[]).unwrap()
     }
 
     /// The same blob with a conditioning spec folded in, mirroring
@@ -187,7 +188,7 @@ mod tests {
     fn config_level_conditioned(
         particles: u32, replicates: u32, dt: f64, obs: &str, data: &[(&str, &str)],
         cond: &crate::fit::config_v2::ConditionFrom,
-    ) -> ContentHash {
+    ) -> crate::fit::cas::LevelHash {
         let mut d: Vec<(&str, &str)> = data.to_vec();
         d.sort_by(|a, b| a.0.cmp(b.0));
         let mut blob = serde_json::json!({
@@ -195,7 +196,7 @@ mod tests {
             "obs_block": obs, "flow_indices": Vec::<u32>::new(), "data": d,
         });
         blob["condition_from"] = serde_json::to_value(cond).unwrap();
-        digest_value(&blob)
+        canonical_config_hash(&blob, &[]).unwrap()
     }
 
     /// The conditioning window decides WHICH observations are scored, so two
@@ -223,11 +224,11 @@ mod tests {
 
         // Hash-neutrality: the unconditioned blob has no condition_from key at
         // all, so its digest is what it was before the field was added.
-        assert_eq!(plain, digest_value(&serde_json::json!({
+        assert_eq!(plain, canonical_config_hash(&serde_json::json!({
             "particles": 100u32, "replicates": 1u32, "dt": 1.0,
             "obs_block": "", "flow_indices": Vec::<u32>::new(),
             "data": vec![("cases", hh.as_str())],
-        })), "an unconditioned pfilter must key exactly as before");
+        }), &[]).unwrap(), "an unconditioned pfilter must key exactly as before");
     }
 
     /// Byte-neutrality of the struct rewrite: `PfilterConfigLevel` must digest
@@ -256,7 +257,7 @@ mod tests {
             "flow_indices": Vec::<u32>::new(),
             "data": vec![("cases", hh.as_str())],
         });
-        assert_eq!(canonical_config_hash(&lvl, &[]).unwrap(), digest_value(&literal),
+        assert_eq!(canonical_config_hash(&lvl, &[]).unwrap(), canonical_config_hash(&literal, &[]).unwrap(),
             "the struct must reproduce the literal's digest — otherwise every \
              stored pfilter leaf re-keys silently");
 
@@ -269,7 +270,7 @@ mod tests {
         };
         let mut literal_c = literal.clone();
         literal_c["condition_from"] = serde_json::to_value(&cond).unwrap();
-        assert_eq!(canonical_config_hash(&lvl_c, &[]).unwrap(), digest_value(&literal_c));
+        assert_eq!(canonical_config_hash(&lvl_c, &[]).unwrap(), canonical_config_hash(&literal_c, &[]).unwrap());
         assert_ne!(canonical_config_hash(&lvl, &[]).unwrap(),
                    canonical_config_hash(&lvl_c, &[]).unwrap(),
                    "conditioning must still change the key");
@@ -290,8 +291,8 @@ mod tests {
         assert!(ensure_finite(&vec![("beta", 0.3)]).is_ok(), "finite points pass");
         // The hazard the gate exists to prevent: without it these collide.
         assert_eq!(
-            digest_value(&serde_json::json!(vec![("beta", f64::NAN)])),
-            digest_value(&serde_json::json!(vec![("beta", f64::INFINITY)])),
+            canonical_config_hash(&serde_json::json!(vec![("beta", f64::NAN)]), &[]).unwrap(),
+            canonical_config_hash(&serde_json::json!(vec![("beta", f64::INFINITY)]), &[]).unwrap(),
             "json! nulls both — which is exactly why the gate must run on the \
              raw values, before the blob is built"
         );

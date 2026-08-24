@@ -20,9 +20,8 @@ use runid::inputs::{
     ArtifactRef, Deps, EngineVersion, ModelDigest, ParamId, ProfileBase,
     ProfilePointConfig, ProfileStage, Seed, StartLevel,
 };
-use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId};
+use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 
-use crate::fit::cas::digest_value;
 
 /// A fully-resolved profile-point leaf: the five factored levels (in path
 /// order) and the leaf `run_id` composed from their hashes.
@@ -48,9 +47,9 @@ pub struct ProfilePointCtx<'a> {
     pub data: &'a [(String, String)],
     /// Canonical base config blob: base params + fixed + obs + priors +
     /// fit.toml. The focal GRID and method config are EXCLUDED here.
-    pub base_config: &'a serde_json::Value,
+    pub base_config: crate::fit::cas::LevelHash,
     /// The sub-fit method + hyperparams (algorithm + if2/pmmh).
-    pub method_config: &'a serde_json::Value,
+    pub method_config: crate::fit::cas::LevelHash,
     /// The pinned focal `(param, value)` for this grid point.
     pub focal: &'a [(String, f64)],
     /// The full resolved sweep grid — each focal axis name and its values,
@@ -65,19 +64,18 @@ pub struct ProfilePointCtx<'a> {
     pub deps: Vec<ArtifactRef>,
 }
 
-use crate::fit::cas::{data_digests, level};
+use crate::fit::cas::{data_digests, level, structural_level_hash};
 
 /// Resolve a profile-point leaf's identity: the five factored levels and the
 /// `run_id` derived from their hashes.
 pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoint, String> {
-    // NOTE: `base_config` / `method_config` arrive as already-built
-    // `serde_json::Value`s, and `json!` has by then collapsed any NaN/Inf to
-    // `Null` — so a finiteness gate HERE cannot see a non-finite (the
-    // 2026-08-23 audit found the previous gate at this point vacuous). The
-    // caller gates the raw floats before building the blobs
-    // (`profile.rs`, `ensure_finite(&(cooling, dt, pmmh_rho_opt))`). When
-    // these blobs migrate onto `canonical_config_hash` (proposal §I2) the
-    // gate moves inside that helper and this note goes away.
+    // `base_config` / `method_config` arrive already hashed, by
+    // `canonical_config_hash` in the caller — which gates finiteness on the
+    // RAW struct before serializing. That ordering is the point: `json!` /
+    // `to_value` collapse NaN and Inf to `Null`, so a gate applied to a built
+    // `Value` can never fire, and a float field added to either level would be
+    // hashed but ungated (NaN colliding with Inf). Taking a `ContentHash`
+    // here makes that impossible to get wrong from this side.
 
     // Canonicalize the sweep grid: axes sorted by name, values ascending, so
     // the identity depends only on the *set* of cells, not `--sweep` order.
@@ -102,7 +100,7 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
             EngineVersion(ctx.engine_version.to_string()),
         ),
         data: data_digests(ctx.data)?,
-        base_config: digest_value(ctx.base_config),
+        base_config: ctx.base_config.into_inner(),
         grid,
         engine: EngineVersion(ctx.engine_version.to_string()),
         deps: Deps(ctx.deps.clone()),
@@ -114,7 +112,7 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         focal.push((ParamId(name.clone()), fv));
     }
     let point = ProfilePointConfig { focal };
-    let stage = ProfileStage { config: digest_value(ctx.method_config) };
+    let stage = ProfileStage { config: ctx.method_config.into_inner() };
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
     let start = StartLevel { index: ctx.start_index };
 
@@ -126,11 +124,11 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         .join("__");
 
     let levels = vec![
-        level("profile", ctx.stem, base.content_hash()),
-        level("point", &point_label, point.content_hash()),
-        level("stage", ctx.method_name, stage.content_hash()),
-        level("seed", &format!("seed_{}", ctx.seed), seed.content_hash()),
-        level("start", &format!("start_{}", ctx.start_index), start.content_hash()),
+        level("profile", ctx.stem, structural_level_hash(&base)),
+        level("point", &point_label, structural_level_hash(&point)),
+        level("stage", ctx.method_name, structural_level_hash(&stage)),
+        level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
+        level("start", &format!("start_{}", ctx.start_index), structural_level_hash(&start)),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::ProfilePoint, &level_hashes);
