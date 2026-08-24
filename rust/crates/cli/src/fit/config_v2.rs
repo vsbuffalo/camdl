@@ -1749,17 +1749,19 @@ impl Stage {
                 if let Some(s) = cli.adapt_start { *adapt_start = s; }
                 if let Some(r) = cli.rho { *rho = Some(r); }
             }
-            Stage::Mh { adapt, adapt_start, dt_check, .. } => {
+            Stage::Mh { adapt, adapt_start, dt_check, backend, .. } => {
                 if cli.no_adapt { *adapt = false; }
                 if let Some(s) = cli.adapt_start { *adapt_start = s; }
                 if cli.no_dt_check { dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { dt_check.n_halvings = n; }
+                resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict);
             }
-            Stage::IF2 { cooling_target_iters, gate, dt_check, .. } => {
+            Stage::IF2 { cooling_target_iters, gate, dt_check, backend, .. } => {
                 if let Some(n) = cli.cooling_target_iters { *cooling_target_iters = n; }
                 if let Some(db) = cli.decibans_thresh { gate.decibans_thresh = db; }
                 if cli.no_dt_check { dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { dt_check.n_halvings = n; }
+                resolve_dt_check_strict(dt_check, *backend, cli.dt_check_strict);
             }
             Stage::PFilter { record_ancestry, record_prequential, .. } => {
                 // One-way overrides to true: the toml can opt out
@@ -1771,6 +1773,8 @@ impl Stage {
                 if let Some(db) = cli.decibans_thresh { cfg.gate.decibans_thresh = db; }
                 if cli.no_dt_check { cfg.dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { cfg.dt_check.n_halvings = n; }
+                let backend = cfg.backend;
+                resolve_dt_check_strict(&mut cfg.dt_check, backend, cli.dt_check_strict);
             }
         }
     }
@@ -1821,12 +1825,41 @@ pub struct CliStageOverrides {
     /// `--dt-check-halvings`: dt-check ladder depth. Same stages as
     /// `no_dt_check`.
     pub dt_check_halvings: Option<usize>,
+    /// `--dt-check-strict`: use the strict warning threshold. Resolved to a
+    /// concrete `dt_check.threshold_nats` when applied (gh#730), because the
+    /// threshold is STORED in `fit_state.toml.dt_check` — it was treated as
+    /// leaf-byte-neutral abort policy, but it selects the stored verdict and
+    /// threshold whenever the TOML leaves `threshold_nats` unset.
+    pub dt_check_strict: bool,
     /// `--record-ancestry` (PFilter): one-way override to true; adds the
     /// ancestor trace to the stored leaf.
     pub record_ancestry: bool,
     /// `--record-prequential` (PFilter): one-way override to true; adds the
     /// prequential trace to the stored leaf.
     pub record_prequential: bool,
+}
+
+/// Resolve `--dt-check-strict` into a concrete stored threshold (gh#730).
+///
+/// The flag was treated as un-keyed abort policy, but it is not
+/// leaf-byte-neutral: `threshold_nats` (and the verdict and notes derived from
+/// it) are serialized into `fit_state.toml.dt_check`, so two runs differing
+/// only in the flag stored different bytes under one `run_id`. Rather than add
+/// a `strict` field to the schema, resolve the flag HERE — before the identity
+/// is taken — into the `threshold_nats` the config already carries and already
+/// hashes.
+///
+/// A TOML-set `threshold_nats` wins, preserving today's semantics exactly: the
+/// flag was already inert whenever the stage declared its own threshold.
+fn resolve_dt_check_strict(
+    dt_check: &mut DtCheckConfig,
+    backend: crate::run_meta::InferenceBackend,
+    strict: bool,
+) {
+    if strict && dt_check.threshold_nats.is_none() {
+        dt_check.threshold_nats =
+            Some(super::dt_check::default_threshold_for_backend(backend, true));
+    }
 }
 
 impl CliStageOverrides {
@@ -3342,6 +3375,14 @@ init       = "{init}"
              CliStageOverrides { dt_check_halvings: Some(3), ..Default::default() }),
             ("--no-dt-check (nl-sbplx)", nl_sbplx_stage(),
              CliStageOverrides { no_dt_check: true, ..Default::default() }),
+            // gh#730: --dt-check-strict selects the threshold that is STORED
+            // in fit_state.toml.dt_check (verdict + threshold_nats +
+            // threshold_se_aware_nats + notes all derive from it), so it was
+            // never the leaf-byte-neutral abort policy it was treated as.
+            ("--dt-check-strict (if2)", scout_stage("single"),
+             CliStageOverrides { dt_check_strict: true, ..Default::default() }),
+            ("--dt-check-strict (mh)", mh_stage(),
+             CliStageOverrides { dt_check_strict: true, ..Default::default() }),
             ("--decibans-thresh (nl-sbplx)", nl_sbplx_stage(),
              CliStageOverrides { decibans_thresh: Some(5.0), ..Default::default() }),
         ];
@@ -3355,6 +3396,41 @@ init       = "{init}"
                  is served the OTHER setting's stored result (gh#540)."
             );
         }
+    }
+
+    /// gh#730: `--dt-check-strict` resolves to a CONCRETE threshold at
+    /// override time, so it is keyed like any other stored setting — and a
+    /// stage that declares its own `threshold_nats` is unaffected, exactly as
+    /// before (the flag was already inert there).
+    #[test]
+    fn dt_check_strict_resolves_to_the_stored_threshold() {
+        use crate::fit::dt_check::default_threshold_for_backend;
+        use crate::run_meta::InferenceBackend;
+
+        let mut if2 = scout_stage("single");
+        if2.apply_cli_overrides(&CliStageOverrides {
+            dt_check_strict: true, ..Default::default() });
+        match &if2 {
+            Stage::IF2 { dt_check, backend, .. } => assert_eq!(
+                dt_check.threshold_nats,
+                Some(default_threshold_for_backend(*backend, true)),
+                "strict must be resolved into the stored threshold"),
+            other => panic!("expected IF2, got {}", other.method_name()),
+        }
+        // chain_binomial strict is 0.5 nats (vs 2.0 routine) — pin the value
+        // so a change to the constant surfaces here rather than in a fit.
+        assert_eq!(default_threshold_for_backend(InferenceBackend::ChainBinomial, true), 0.5);
+
+        // A TOML-declared threshold wins: the flag stays inert there.
+        let mut declared = scout_stage("single");
+        if let Stage::IF2 { dt_check, .. } = &mut declared {
+            dt_check.threshold_nats = Some(1.25);
+        }
+        let before = declared.clone();
+        declared.apply_cli_overrides(&CliStageOverrides {
+            dt_check_strict: true, ..Default::default() });
+        assert_eq!(before.identity_payload(), declared.identity_payload(),
+            "a stage that declares threshold_nats must be unmoved by the flag");
     }
 
     /// The subtractive payload is include-by-default: every stage field is in

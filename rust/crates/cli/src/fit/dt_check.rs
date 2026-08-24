@@ -289,12 +289,14 @@ pub fn run_richardson_ladder(
     theta_hat: &[f64],
     config: &DtCheckConfig,
     backend: InferenceBackend,
-    strict: bool,
     inherits: &DtCheckInherits,
     seed: u64,
 ) -> Result<DtCheckResult, String> {
+    // `--dt-check-strict` is resolved INTO `config.threshold_nats` before the
+    // stage identity is taken (gh#730), so the fallback here is the routine
+    // default; there is no runtime strict flag to consult.
     let threshold_floor = config.threshold_nats
-        .unwrap_or_else(|| default_threshold_for_backend(backend, strict));
+        .unwrap_or_else(|| default_threshold_for_backend(backend, false));
     if !config.enabled {
         return Ok(skipped_result(threshold_floor, "skipped: dt_check.enabled = false."));
     }
@@ -363,10 +365,10 @@ pub fn run_richardson_ladder_ode(
     theta_hat: &[f64],
     dt_fit: f64,
     config: &DtCheckConfig,
-    strict: bool,
 ) -> Result<DtCheckResult, String> {
+    // See `run_richardson_ladder`: strict is resolved into the config.
     let threshold_floor = config.threshold_nats
-        .unwrap_or_else(|| default_threshold_for_backend(InferenceBackend::Ode, strict));
+        .unwrap_or_else(|| default_threshold_for_backend(InferenceBackend::Ode, false));
     if !config.enabled {
         return Ok(skipped_result(threshold_floor, "skipped: dt_check.enabled = false."));
     }
