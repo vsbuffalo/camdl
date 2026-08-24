@@ -172,7 +172,6 @@ pub fn ensemble_deps(cells: &[EnsembleCell]) -> Vec<runid::inputs::ArtifactRef> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runid::ContentAddressed;
 
     fn cell(scenario: &str, seed: u64, draw: usize, rid: u8) -> EnsembleCell {
         EnsembleCell {
