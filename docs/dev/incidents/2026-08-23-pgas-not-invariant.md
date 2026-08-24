@@ -573,6 +573,11 @@ The identical comparison under multinomial returns machine zero (≤ 6e−15), w
 is what makes this a statement about systematic resampling rather than about our
 algebra.
 
+Reproduce with `cargo test -p sim --test zz_cond_systematic_probe`. The
+enumeration is exact — it walks the resampling law over every ancestry rather
+than sampling — so the numbers above are properties of the two schemes, not
+Monte Carlo estimates with a tolerance.
+
 **So multinomial was not a way of sidestepping the question. It was the
 answer.** Chopin & Singh say as much, in §5.3: the label dependence induced by
 "particularly systematic resampling … makes it more difficult to update one
