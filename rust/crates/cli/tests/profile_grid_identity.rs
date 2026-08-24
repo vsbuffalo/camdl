@@ -90,6 +90,13 @@ simulate { from = 0 'days  to = 6 'days }
 
 /// Run a profile with the given sweep specs into `root` (`CAMDL_OUTPUT_DIR`).
 fn run_profile(bin: &Path, ir: &Path, data: &Path, root: &Path, beta: &str, gamma: &str) {
+    run_profile_with(bin, ir, data, root, beta, gamma, "auto");
+}
+
+fn run_profile_with(
+    bin: &Path, ir: &Path, data: &Path, root: &Path,
+    beta: &str, gamma: &str, rw_sd: &str,
+) {
     let out = Command::new(bin)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_OUTPUT_DIR", root)
@@ -104,7 +111,7 @@ fn run_profile(bin: &Path, ir: &Path, data: &Path, root: &Path, beta: &str, gamm
             "--particles", "30",
             "--iterations", "5",
             "--starts", "1",
-            "--rw-sd", "auto",
+            "--rw-sd", rw_sd,
             "--seed", "1",
         ])
         .output().expect("spawn camdl profile");
@@ -119,6 +126,66 @@ fn base_dirs(root: &Path) -> BTreeSet<String> {
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect()).unwrap_or_default()
+}
+
+/// The perturbation magnitudes are part of the method, so they belong in the
+/// key. `--rw-sd` is a REQUIRED flag whose values drive the IF2 sampler, yet
+/// only the estimated *set* was keyed (incidentally, via the priors blob) —
+/// the magnitudes were not. So `--rw-sd "beta=0.05"` after `--rw-sd
+/// "beta=0.5"` was served the FIRST run's profile, cell for cell, under a
+/// "cached — resuming" line (2026-08-23 audit).
+#[test]
+fn distinct_rw_sd_gets_a_distinct_base_dir() {
+    let bin = camdl_bin();
+    let tmp = tempdir("rwsd");
+    let (ir, data) = write_fixture(tmp.path());
+    let root = tmp.path().join("out");
+    let (beta, gamma) = ("beta=lin(0.1,0.5,3)", "gamma=lin(0.03,0.25,3)");
+
+    // rw_sd rides the `stage` level (the method config), not the base dir —
+    // so the observable is the set of stage segments under a point. The
+    // magnitude must be on a NON-focal parameter: beta and gamma are pinned
+    // by the sweep, so only N0 is actually estimated here.
+    run_profile_with(&bin, &ir, &data, &root, beta, gamma, "N0=5.0");
+    let after_a = stage_dirs(&root);
+    assert_eq!(after_a.len(), 1, "one run → one stage segment, got {:?}", after_a);
+
+    // Same magnitudes again — a cache hit, no new segment (the negative
+    // control: this must NOT fork, or the assertion below proves nothing).
+    run_profile_with(&bin, &ir, &data, &root, beta, gamma, "N0=5.0");
+    assert_eq!(stage_dirs(&root), after_a,
+        "re-running with the SAME rw_sd must reuse its stage segment");
+
+    // Different magnitudes — a different sampler, so a different artifact.
+    run_profile_with(&bin, &ir, &data, &root, beta, gamma, "N0=50.0");
+    let after_b = stage_dirs(&root);
+    assert_eq!(after_b.len(), 2,
+        "a different --rw-sd must create a distinct stage segment rather than \
+         being served the previous run's landscape — got {:?}", after_b);
+    assert!(after_b.is_superset(&after_a),
+        "the first run's stage segment must still be present alongside the second's");
+}
+
+/// The `stage` segments (`<method>-<methodhash>`) across every point, which is
+/// where the method config — particles, iterations, cooling, rw_sd, init —
+/// lands in the leaf path.
+fn stage_dirs(root: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![root.join("profiles")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() { continue }
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("if2-") || name.starts_with("pmmh-") {
+                out.insert(name);
+            } else {
+                stack.push(p);
+            }
+        }
+    }
+    out
 }
 
 #[test]

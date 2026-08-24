@@ -1662,21 +1662,12 @@ impl Stage {
     /// leaf's `fit_state.toml` digest through `starts_from_override` /
     /// `cas_dep_from_dir`, and adding a second dep for it would double-count.
     pub fn init_source_file(&self) -> Option<(std::path::PathBuf, &'static str)> {
-        use super::init::{InitMethod, PosteriorSource};
-        let init = match self {
+        match self {
             Stage::IF2 { init_method, .. }
             | Stage::PGAS { init_method, .. }
             | Stage::PMMH { init_method, .. }
             | Stage::Mh { init_method, .. }
-            | Stage::Nuts { init_method, .. } => init_method,
-            _ => return None,
-        };
-        match init {
-            InitMethod::FromPosterior { source } => Some(match source {
-                PosteriorSource::DrawsTsv(p) => (p.clone(), "draws.tsv"),
-                PosteriorSource::FitDir(d)   => (d.join("draws.tsv"), "draws.tsv"),
-            }),
-            InitMethod::FromParams { path } => Some((path.clone(), "params.toml")),
+            | Stage::Nuts { init_method, .. } => init_method.source_file(),
             _ => None,
         }
     }
