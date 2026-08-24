@@ -4318,11 +4318,28 @@ writes the marginal particle-filter estimate (`log_likelihood`), PGAS the
 complete-data conditional value (`log_complete_data_ll`), which is many orders
 of magnitude more negative. A shared bare name would invite comparing the two.
 `extra` columns are method-specific; `param` columns follow in `[estimate]`
-order. A real PGAS-with-NUTS trace header:
+order. A real PGAS-with-NUTS trace header, from a two-stream fit estimating
+`beta` and `gamma`:
 
 ```
-sweep	log_complete_data_ll	log_posterior	trajectory_renewal	transition_ll	obs_ll	tree_depth	n_leapfrog	step_size	accept_stat	n_divergent	energy	beta	gamma
+sweep	log_complete_data_ll	log_posterior	trajectory_renewal	renewal_b0	renewal_b1	renewal_b2	renewal_b3	renewal_b4	renewal_b5	renewal_b6	renewal_b7	renewal_b8	renewal_b9	as_opportunity	as_accept	as_proposed	transition_ll	obs_ll	initial_state_ll	obs_ll_cases	obs_ll_confirmations	tree_depth	n_leapfrog	step_size	accept_stat	n_divergent	energy	beta	gamma
 ```
+
+Two of PGAS's diagnostic blocks need reading before the positions make sense,
+and one of them varies in width with the model — so a reader must take the
+header as authoritative rather than assume fixed column positions:
+
+- `renewal_b0 … renewal_b9` — always ten columns: `trajectory_renewal` resolved
+  in time, one bin per tenth of the substep series. A bin holding no substep
+  renders `NA`, not `0.0`: "no substep fell here" and "no substep here was
+  renewed" are different diagnoses.
+- `obs_ll_<stream>` — the observation term `obs_ll` resolved by declared
+  observation stream, one column per stream, each summing over that stream's own
+  observation times and (for an indexed stream) its strata. A row is a sweep and
+  a sweep evaluates the whole likelihood, so every column carries a number on
+  every row even when the streams are on different cadences. They add up to
+  `obs_ll` to floating-point round-off — the scalar sums time-major and the
+  decomposition stream-major.
 
 The index column is `sweep` for PGAS and `step` for PMMH. Diagnostic columns
 render `{:.4}`; parameter columns use the shortest round-trippable `Display` (a
