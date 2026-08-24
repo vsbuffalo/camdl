@@ -354,16 +354,32 @@ When set:
   `log L(θ)`. These differ by `log p(y_1)` and are not directly comparable
   across runs with different `ic_free` settings.
 
-Precondition: the stage's algorithm must be `if2`, and at least one
-`[estimate.*]` entry must be `perturb_only_at_t0 = true`. Without per-particle
-spread at `t=0`, the first reweight cannot discriminate between particles and
-`ic_free` silently degenerates to dropping the first observation. Config
-validation rejects the degenerate case:
+Precondition: the swarm must have spread at `t=0`. Without it the first reweight
+cannot discriminate between particles and `ic_free` silently degenerates to
+dropping the first observation, so config validation rejects the degenerate
+case. Two things supply that spread, and either is enough:
 
-```toml
-[estimate]
-I0 = { bounds = [1, 500], perturb_only_at_t0 = true } # required under ic_free
-```
+- **A drawn initial condition in the model.** Every filter draws `x₀` per
+  particle from that particle's own random stream, so a law makes the draws
+  differ (gh#732). This is the only source that works under `pfilter` and plain
+  `pmmh`, where θ is shared by the whole swarm:
+
+  ```camdl
+  init { I ~ poisson(rate = I0)
+         S = N0 - I }
+  ```
+
+- **A `perturb_only_at_t0` parameter, under `if2`.** IF2 moves each particle's θ
+  at `t=0` and each particle then builds its own initial state from that θ:
+
+  ```toml
+  [estimate]
+  I0 = { bounds = [1, 500], perturb_only_at_t0 = true }
+  ```
+
+The stage's algorithm must be `if2`, `pfilter` or plain `pmmh`; `pgas`,
+correlated `pmmh` (`rho` set) and the ODE algorithms accumulate every
+observation unconditionally and are rejected outright.
 
 See `docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md` for
 the mathematical derivation, references (King Nguyen Ionides 2016 JSS, Ionides

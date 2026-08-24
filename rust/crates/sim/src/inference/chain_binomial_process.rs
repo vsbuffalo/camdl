@@ -64,8 +64,6 @@ impl ProcessModel for ChainBinomialProcess {
         Ok(state)
     }
 
-    fn declares_init_law(&self) -> bool { self.compiled.has_init_law }
-
     fn step(
         &self,
         state: &mut ParticleState,

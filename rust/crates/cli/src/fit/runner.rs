@@ -475,22 +475,38 @@ impl FitRunConfig {
                  stream — there is nothing to condition on. Provide the first \
                  observation, or disable ic_free.".into());
         }
-        // IC-free precondition (config): at least one estimated param must be
-        // marked perturb_only_at_t0. Under IF2 — the only algorithm ic_free is
-        // admitted for (`methods::validate_ic_free`) — the t=0 perturbation
-        // moves each particle's θ and each particle then draws its own x₀ from
-        // that θ (gh#364), which is what gives the first reweight something to
-        // discriminate between. Without such a parameter the first reweight is
-        // a no-op and ic-free degenerates to silently dropping y₁. Error at
-        // config build so the mistake surfaces before any PF time is spent.
-        if ic_free && !if2_params.iter().any(|p| p.perturb_only_at_t0) {
+        // IC-free precondition (config): the swarm must have SOME source of
+        // per-particle variation at t=0, or the first reweight cannot
+        // discriminate between particles and ic-free degenerates to silently
+        // dropping y₁. There are exactly two sources, and either suffices:
+        //
+        //   * a declared `init { }` law — every filter draws x₀ per particle
+        //     from that particle's own stream, so the draws differ (gh#732);
+        //   * an estimated parameter marked `perturb_only_at_t0` — under IF2
+        //     the t=0 perturbation moves each particle's θ and each particle
+        //     then draws its own x₀ from that θ (gh#364). This one is IF2-only:
+        //     under `pfilter`/`pmmh` θ is global to the swarm. That asymmetry
+        //     is already handled — `methods::validate_ic_free` admits those two
+        //     algorithms only for a model that declares a law — so the
+        //     disjunction here is not more permissive than it reads.
+        //
+        // Error at config build so the mistake surfaces before any PF time is
+        // spent.
+        if ic_free
+            && !compiled.has_init_law
+            && !if2_params.iter().any(|p| p.perturb_only_at_t0)
+        {
             return Err(
-                "ic_free = true requires at least one [estimate.*] entry with \
-                 perturb_only_at_t0 = true. Without per-particle variation at \
-                 t=0, the first observation cannot discriminate between \
-                 particles and ic_free degenerates to dropping the first data \
-                 point.\n\n\
-                 Example: mark your initial-state parameter perturb_only_at_t0:\
+                "ic_free = true requires per-particle variation at t=0, and \
+                 this fit has none: the model's `init { }` computes every \
+                 compartment from an expression, and no [estimate.*] entry is \
+                 marked perturb_only_at_t0. Without that variation the first \
+                 observation cannot discriminate between particles and ic_free \
+                 degenerates to dropping the first data point.\n\n\
+                 Either declare the initial state as a law in the model:\
+                 \n\n    init { I ~ poisson(rate = I0) }\n\n\
+                 or, for an `if2` stage, mark your initial-state parameter \
+                 perturb_only_at_t0:\
                  \n\n    [estimate]\n    \
                  I0 = { bounds = [1, 500], perturb_only_at_t0 = true }".into());
         }

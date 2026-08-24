@@ -552,37 +552,53 @@ pub fn resolve_obs_alignment(
     }
 }
 
-/// The `(algorithm × ic_free)` support check at the fit-dispatch seam (F1).
+/// Does the model's `init { }` DRAW any compartment from a law
+/// (`I ~ poisson(rate = I0)`), rather than computing every one of them from an
+/// expression?
+///
+/// The one MODEL fact [`validate_ic_free`] needs, and the reason that check
+/// cannot be settled from the algorithm alone. Carried as a named type rather
+/// than a bare `bool` so a call site says which fact it is asserting; the
+/// producer is `Model::initial_conditions` (`InitSpec::is_law`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitLaw {
+    /// Every `init { }` entry is an expression. Every particle of a bootstrap
+    /// swarm therefore starts at the SAME x₀.
+    Absent,
+    /// At least one entry is a law, so each particle draws its own x₀.
+    Declared,
+}
+
+/// The `(algorithm × model × ic_free)` support check at the fit-dispatch seam
+/// (F1).
 ///
 /// `ic_free = true` requests IC-free / conditional-likelihood inference:
 /// weight-and-resample at the first observation (pinning the initial state on
 /// y₁) but drop y₁ from the accumulated log-likelihood. That estimand needs
-/// **two** properties of the algorithm, not one:
+/// **two** properties, and only the first is a property of the algorithm alone:
 ///
-/// 1. **It drops the first increment.** Otherwise it silently returns the
-///    UNCONDITIONAL likelihood while the startup banner claims conditioning.
-/// 2. **Its particles differ in x₀.** The reweight at y₁ is what pins the
+/// 1. **The algorithm drops the first increment.** Otherwise it silently
+///    returns the UNCONDITIONAL likelihood while the startup banner claims
+///    conditioning.
+/// 2. **The particles differ in x₀.** The reweight at y₁ is what pins the
 ///    initial state; with every particle carrying the SAME x₀ that reweight
 ///    is a no-op — every particle scores identically — and `ic_free`
 ///    degenerates to *dropping* y₁ rather than conditioning on it.
 ///
-/// Only `if2` has both. It perturbs θ per particle at t=0 and each particle
-/// then draws its own x₀ from its own θ (gh#364, pinned by
-/// `sim/tests/gh364_if2_per_particle_initial_state.rs`); that is what a
+/// `if2` has both for any model: it perturbs θ per particle at t=0 and each
+/// particle then draws its own x₀ from its own θ (gh#364, pinned by
+/// `sim/tests/gh364_if2_per_particle_initial_state.rs`) — which is what a
 /// `perturb_only_at_t0 = true` parameter buys, and it buys it under IF2 only.
 ///
-/// Property 2 is why `pfilter` and plain `pmmh` are refused (gh#732): both run
-/// the bootstrap particle filter, which makes ONE call to
-/// `initial_state_draw` and copies the result to every particle
-/// (`particle_filter.rs` → `p.counts.copy_from_slice`). Neither the
-/// initial-state seam split nor the declared `init {}` laws changed that: the
-/// bootstrap filter still evaluates ONE initial state and copies it, so the
-/// swarm still has zero spread at t=0 (a model that DECLARES a law is refused
-/// outright by `bootstrap_filter` for the same reason). These two cells satisfy
-/// property 1 and fail property 2, so they passed the old check and then did
-/// the exact thing it existed to prevent.
+/// `pfilter` and plain `pmmh` have property 1 always and property 2 **only for
+/// a model that declares an `init { }` law** (gh#732). Both run the bootstrap
+/// particle filter, which draws x₀ per particle from that particle's own RNG
+/// stream. Under a law those draws differ; under a deterministic `init { }`
+/// they are all the same state, the swarm has no spread at t=0, and admitting
+/// `ic_free` would do the exact thing this check exists to prevent. So the two
+/// cells split on the MODEL, not on the algorithm.
 ///
-/// Property 1 is why the rest are refused:
+/// Property 1 is why the rest are refused for every model:
 ///
 ///   * `pgas`                   — no conditioning field anywhere in `pgas.rs`.
 ///   * `nl-sbplx` / `nl-bobyqa` / `mh` / `nuts` — score via
@@ -590,25 +606,26 @@ pub fn resolve_obs_alignment(
 ///     skip.
 ///   * `pmmh` **with** `rho` (correlated PMMH) — routes to
 ///     `correlated_pf::bootstrap_filter_correlated`, which adds every
-///     increment unconditionally.
+///     increment unconditionally. (That filter also refuses a declared
+///     `init { }` law outright, for a reason of its own: its pre-drawn
+///     correlated randoms cover the transition kernel only.)
 ///
 /// Each is a hard error at config-load time naming its own reason —
 /// converting a silent wrong answer into a loud failure. `correlated` is
 /// `true` for a PMMH stage with `rho` set.
-///
-/// The refusal of `pfilter` / plain `pmmh` is the honest interim, not the end
-/// state: once the bootstrap PF draws a per-particle x₀ they satisfy property
-/// 2 and this check re-admits them
-/// (`docs/dev/proposals/2026-08-23-initial-state-parameters.md`, the
-/// `initial_state_draw` seam).
-pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(), String> {
+pub fn validate_ic_free(
+    algorithm: FitAlgorithm,
+    correlated: bool,
+    init_law: InitLaw,
+) -> Result<(), String> {
     use FitAlgorithm as A;
     match algorithm {
-        // The only cell with BOTH properties: drops the first increment, and
-        // gives each particle its own x₀ drawn from its own perturbed θ.
+        // Drops the first increment, and gives each particle its own x₀ drawn
+        // from its own perturbed θ — for any model.
         A::If2 => Ok(()),
         // Correlated PMMH fails property 1 as well, and for a different
-        // reason than the bootstrap-PF cells — say which.
+        // reason than the bootstrap-PF cells — say which. Ordered before the
+        // bootstrap-PF arms so `rho` decides first.
         A::Pmmh if correlated => Err(
             "ic_free = true is not supported with correlated PMMH (a `pmmh` \
              stage with `rho` set). The correlated particle filter \
@@ -616,29 +633,32 @@ pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(),
              increment unconditionally, so it would silently compute the \
              UNCONDITIONAL likelihood while reporting that it conditioned on \
              y₁.\n\n  \
-             ic_free is honored by `if2` only.\n  \
-             Use `algorithm = if2` for IC-free inference, or remove \
+             Drop `rho` to run plain PMMH, use `algorithm = if2`, or remove \
              `ic_free = true`."
                 .into(),
         ),
-        // gh#732: these two DO drop the first increment, but they run the
-        // bootstrap PF, which copies one deterministic x₀ to every particle.
+        // gh#732. The bootstrap PF draws x₀ per particle, so a declared law
+        // gives these two the spread the first reweight needs.
+        A::Pfilter | A::Pmmh if init_law == InitLaw::Declared => Ok(()),
+        // …and a deterministic `init { }` gives them none, because every
+        // particle's draw returns the same state.
         A::Pfilter | A::Pmmh => Err(format!(
-            "ic_free = true is not supported with the `{algorithm}` algorithm. \
-             ic_free conditions the initial state on y₁ by weighting and \
-             resampling at the first observation, which requires the particles \
-             to DIFFER in their initial state — otherwise the first reweight \
-             scores every particle identically and ic_free degenerates to \
-             silently dropping y₁ instead of conditioning on it.\n\n  \
-             `{algorithm}` runs the bootstrap particle filter, which evaluates \
-             ONE deterministic initial state and copies it to every particle \
-             (particle_filter.rs), so that spread does not exist — no matter \
-             which parameters are declared perturb_only_at_t0 (gh#732).\n\n  \
-             Only `if2` delivers per-particle initial-state spread today: it \
-             perturbs θ per particle at t=0 and each particle then draws its \
-             own x₀ from its own θ (gh#364).\n  \
-             Use `algorithm = if2` for IC-free inference, or remove \
-             `ic_free = true` from the fit."
+            "ic_free = true is not supported for this model with the \
+             `{algorithm}` algorithm, because the model's `init {{ }}` computes \
+             every compartment from an expression. ic_free conditions the \
+             initial state on y₁ by weighting and resampling at the first \
+             observation, which requires the particles to DIFFER in their \
+             initial state — otherwise the first reweight scores every particle \
+             identically and ic_free degenerates to silently dropping y₁ \
+             instead of conditioning on it (gh#732).\n\n  \
+             `{algorithm}` runs the bootstrap particle filter, which DOES draw \
+             x₀ per particle — but a deterministic `init {{ }}` returns the same \
+             state on every draw, so the swarm has no spread at t=0. Declaring \
+             the initial state as a law gives it that spread:\n\n      \
+             init {{ I ~ poisson(rate = I0) }}\n\n  \
+             Otherwise use `algorithm = if2`, which perturbs θ per particle at \
+             t=0 and lets each particle draw its own x₀ from its own θ \
+             (gh#364), or remove `ic_free = true` from the fit."
         )),
         A::Pgas => Err(
             "ic_free = true is not supported with the `pgas` algorithm. PGAS \
@@ -647,9 +667,9 @@ pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(),
              ancestor-sampling path), so it would silently compute the \
              UNCONDITIONAL likelihood while reporting that it conditioned on \
              y₁.\n\n  \
-             ic_free is honored by `if2` only.\n  \
-             Use `algorithm = if2` for IC-free inference, or remove \
-             `ic_free = true` from the fit."
+             ic_free is honored by `if2`, and by `pfilter` / plain `pmmh` on a \
+             model whose `init { }` declares a law.\n  \
+             Use one of those, or remove `ic_free = true` from the fit."
                 .into(),
         ),
         A::NlSbplx | A::NlBobyqa | A::Mh | A::Nuts => Err(format!(
@@ -658,9 +678,9 @@ pub fn validate_ic_free(algorithm: FitAlgorithm, correlated: bool) -> Result<(),
              sums over every observation time with no first-observation skip, so \
              it would silently compute the UNCONDITIONAL likelihood while \
              reporting that it conditioned on y₁.\n\n  \
-             ic_free is honored by `if2` only.\n  \
-             Use `algorithm = if2` for IC-free inference, or remove \
-             `ic_free = true` from the fit."
+             ic_free is honored by `if2`, and by `pfilter` / plain `pmmh` on a \
+             model whose `init {{ }}` declares a law.\n  \
+             Use one of those, or remove `ic_free = true` from the fit."
         )),
     }
 }
@@ -1238,54 +1258,78 @@ mod tests {
 
     // ── ic_free / conditioning support check (F1) ──────────────────────────
     //
-    // `ic_free = true` (IC-free / conditional likelihood) needs an algorithm
-    // that BOTH drops y₁ from the accumulated loglik AND gives its particles
-    // different initial states. Only IF2 does both. PGAS, the ODE algorithms
-    // (via `compute_ode_loglik`) and correlated PMMH (via
-    // `bootstrap_filter_correlated`) score every observation unconditionally;
-    // `pfilter` and plain `pmmh` drop y₁ but run the bootstrap PF, which
-    // copies one deterministic initial state to every particle (gh#732).
-    // Everything but IF2 is a hard error.
+    // `ic_free = true` (IC-free / conditional likelihood) needs BOTH: an
+    // algorithm that drops y₁ from the accumulated loglik, and particles that
+    // differ in x₀. PGAS, the ODE algorithms (via `compute_ode_loglik`) and
+    // correlated PMMH (via `bootstrap_filter_correlated`) fail the first for
+    // every model. `pfilter` and plain `pmmh` pass the first always and the
+    // second only when the MODEL declares an `init { }` law — the bootstrap PF
+    // draws x₀ per particle, and a deterministic `init { }` returns the same
+    // state on every draw (gh#732). Those are the four cells below.
 
     #[test]
-    fn ic_free_is_accepted_for_if2() {
+    fn ic_free_is_accepted_for_if2_under_either_model() {
         // IF2 perturbs θ per particle at t=0 and each particle draws its own
-        // x₀ from its own θ (gh#364) — the one cell with real spread at t=0.
-        assert!(validate_ic_free(FitAlgorithm::If2, false).is_ok());
+        // x₀ from its own θ (gh#364), so its spread does not depend on the
+        // model's `init { }`.
+        for law in [InitLaw::Absent, InitLaw::Declared] {
+            assert!(validate_ic_free(FitAlgorithm::If2, false, law).is_ok(),
+                "if2 must be admitted with init law {law:?}");
+        }
     }
 
-    /// gh#732. `pfilter` and plain `pmmh` both wrap the bootstrap particle
-    /// filter, which builds ONE deterministic initial state and copies it to
-    /// every particle — so the per-particle spread `ic_free` conditions on does
-    /// not exist and `ic_free` degenerates to dropping y₁. They must be
-    /// refused, and the refusal must say WHY, not merely that it refused.
+    /// gh#732, the cell this change OPENS. The bootstrap particle filter draws
+    /// x₀ per particle from that particle's own stream, so a model whose
+    /// `init { }` declares a law gives the swarm real spread at t=0 — which is
+    /// exactly the property `ic_free`'s first reweight needs.
     #[test]
-    fn ic_free_bootstrap_pf_cells_are_refused_naming_the_missing_spread() {
+    fn ic_free_bootstrap_pf_cells_are_admitted_when_the_model_draws_x0() {
         for algo in [FitAlgorithm::Pfilter, FitAlgorithm::Pmmh] {
-            let err = validate_ic_free(algo, false).unwrap_err();
+            assert!(
+                validate_ic_free(algo, false, InitLaw::Declared).is_ok(),
+                "{algo} with a declared init law must be admitted: {:?}",
+                validate_ic_free(algo, false, InitLaw::Declared)
+            );
+        }
+    }
+
+    /// gh#732, the cell that stays SHUT. With a deterministic `init { }` every
+    /// particle's draw returns the same state, so the first reweight scores
+    /// them identically and `ic_free` degenerates to dropping y₁. Refused, and
+    /// the refusal must say WHY and how to fix it — not merely that it refused.
+    #[test]
+    fn ic_free_bootstrap_pf_cells_are_refused_on_a_deterministic_init() {
+        for algo in [FitAlgorithm::Pfilter, FitAlgorithm::Pmmh] {
+            let err = validate_ic_free(algo, false, InitLaw::Absent).unwrap_err();
             assert!(err.contains("ic_free"), "{algo}: must name ic_free: {err}");
             assert!(err.contains(algo.as_str()),
                 "{algo}: must name the offending algorithm: {err}");
-            // The REASON, not just the refusal: one shared initial state.
+            // The REASON, not just the refusal.
             assert!(err.contains("bootstrap particle filter"),
                 "{algo}: must name the mechanism that fails: {err}");
-            assert!(err.contains("copies it to every particle"),
-                "{algo}: must say why the spread is absent: {err}");
+            assert!(err.contains("no spread at t=0"),
+                "{algo}: must say what is missing: {err}");
             assert!(err.contains("gh#732"),
                 "{algo}: must cite the issue: {err}");
-            // And the way out.
+            // …and the two ways out, the model one first.
+            assert!(err.contains("poisson(rate = I0)"),
+                "{algo}: must show the init-law form that fixes it: {err}");
             assert!(err.contains("if2"),
-                "{algo}: must name the algorithm that does work: {err}");
+                "{algo}: must name the algorithm that works regardless: {err}");
         }
     }
 
     #[test]
     fn ic_free_pgas_is_hard_error_naming_the_limitation() {
-        let err = validate_ic_free(FitAlgorithm::Pgas, false).unwrap_err();
-        assert!(err.contains("ic_free"), "must name ic_free: {err}");
-        assert!(err.contains("pgas"), "must name the offending algorithm: {err}");
-        // Points the user at the supported alternative.
-        assert!(err.contains("if2"), "must name a supported cell: {err}");
+        // PGAS fails property 1 (it scores every obs), which no `init { }` law
+        // changes — so both model shapes are refused.
+        for law in [InitLaw::Absent, InitLaw::Declared] {
+            let err = validate_ic_free(FitAlgorithm::Pgas, false, law).unwrap_err();
+            assert!(err.contains("ic_free"), "must name ic_free: {err}");
+            assert!(err.contains("pgas"), "must name the offending algorithm: {err}");
+            // Points the user at the supported alternative.
+            assert!(err.contains("if2"), "must name a supported cell: {err}");
+        }
     }
 
     #[test]
@@ -1293,7 +1337,7 @@ mod tests {
         // Both NLopt deterministic optimizers score every obs via
         // compute_ode_loglik — conditioning is silently ignored.
         for algo in [FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa] {
-            let err = validate_ic_free(algo, false).unwrap_err();
+            let err = validate_ic_free(algo, false, InitLaw::Declared).unwrap_err();
             assert!(err.contains("ic_free"), "{algo}: must name ic_free: {err}");
             assert!(err.contains(algo.as_str()), "{algo}: must name the algorithm: {err}");
         }
@@ -1302,16 +1346,22 @@ mod tests {
     #[test]
     fn ic_free_correlated_pmmh_names_the_correlated_reason() {
         // Correlated PMMH (rho set) routes to bootstrap_filter_correlated,
-        // which adds every increment unconditionally. Both PMMH variants are
-        // refused, but for DIFFERENT reasons, and each says its own — a
-        // user who unsets `rho` must not be told to unset it again.
-        let err = validate_ic_free(FitAlgorithm::Pmmh, true).unwrap_err();
-        assert!(err.contains("ic_free"), "must name ic_free: {err}");
-        assert!(
-            err.contains("correlated") || err.contains("rho"),
-            "must name the correlated/rho condition: {err}"
-        );
-        let plain = validate_ic_free(FitAlgorithm::Pmmh, false).unwrap_err();
+        // which adds every increment unconditionally. That refusal is
+        // independent of the model: `rho` decides before the init law does, so
+        // a declared law does NOT open this cell, and the message must still
+        // be the rho one — a user who unsets `rho` must not be told to unset
+        // it again.
+        for law in [InitLaw::Absent, InitLaw::Declared] {
+            let err = validate_ic_free(FitAlgorithm::Pmmh, true, law).unwrap_err();
+            assert!(err.contains("ic_free"), "must name ic_free: {err}");
+            assert!(
+                err.contains("correlated") || err.contains("rho"),
+                "must name the correlated/rho condition: {err}"
+            );
+        }
+        // …and plain PMMH on the same deterministic model is refused for the
+        // OTHER reason, so the two messages stay distinguishable.
+        let plain = validate_ic_free(FitAlgorithm::Pmmh, false, InitLaw::Absent).unwrap_err();
         assert!(plain.contains("bootstrap particle filter"),
             "plain PMMH is refused for the missing t=0 spread, not for rho: {plain}");
     }

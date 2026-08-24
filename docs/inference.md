@@ -687,12 +687,11 @@ reweight can discriminate between particles — the precondition `ic_free = true
 relies on. A parameter that appears in `initial_conditions` and in no rate and
 in no observation model reaches the likelihood through this path and no other.
 
-PGAS instead draws a genuinely stochastic initial state
-($S_0 \sim \text{Binomial}(N_0, s_0)$) because its Gibbs step needs a tractable
-initial-state _density_ $p(x_0 \mid \theta)$ in the complete-data likelihood;
-see "Initial-state parameters (s0, e0)" below. IF2 needs only a draw, so it uses
-the model's own (deterministic) initial-condition expressions evaluated at each
-particle's parameters.
+The other way to put spread in the swarm at $t = 0$ is to declare the initial
+condition as a law in the model (`init { I ~ poisson(rate = I0) }`), which every
+filter draws per particle. That one works under `pfilter` and plain `pmmh` too,
+where $\theta$ is shared by the whole swarm and the jitter above does not exist.
+See "Initial-state parameters" below.
 
 ---
 
@@ -1091,20 +1090,35 @@ df = pd.read_csv("chain_1/trajectories.tsv", sep="\t", comment="#")
 band = df.groupby("time")[["S", "E", "I", "R"]].quantile([0.05, 0.5, 0.95])
 ```
 
-### Initial-state parameters (s0, e0)
+### Initial-state parameters
 
-Parameters that determine the initial state (like the initial susceptible
-fraction s0) require special treatment. The complete-data log-likelihood is
-invariant to them because the trajectory's initial state is stored, not
-recomputed.
+A parameter that only sets the initial state (an initial infected count `I0`, an
+initial susceptible fraction) reaches the complete-data log-likelihood through
+one channel and no other: the trajectory's initial state is stored, not
+recomputed, so under PGAS the transition and observation terms are invariant to
+it. For the data to inform it, the initial state has to be a random variable.
 
-PGAS handles IVPs by making the initial state stochastic: each CSMC particle
-draws $S_0 \sim \text{Binomial}(N_0, s_0)$ independently, giving the CSMC
-diverse initial states to select among. A Binomial density term is added to the
-complete-data LL to constrain s0 via the MH ratio. The parameters that get this
-treatment are auto-detected at startup — this is a PGAS-internal detection,
-unrelated to the `perturb_only_at_t0` flag, which is an IF2 perturbation
-schedule and is rejected at config load under PGAS.
+That is a declaration in the model, not something the sampler infers:
+
+```camdl
+init { I ~ poisson(rate = I0)
+       S = N0 - I }
+```
+
+With it, PGAS's CSMC draws each particle's own $x_0$ and
+$\log p(x_0 \mid \theta)$ enters the complete-data likelihood as its own term —
+reported per sweep in the `initial_state_ll` column of the chain trace — so the
+MH ratio constrains `I0`. IF2, `pfilter` and plain `pmmh` use the same
+declaration for the draw alone. Without it the term is exactly zero, on every
+chain and from every start.
+
+Nothing auto-detects initial-value parameters. PGAS used to: it finite-
+differenced a rounded initial count from the chain's own starting draw and
+attached a Binomial density to whatever compartment the parameter moved, so two
+chains of one fit could disagree about whether the term existed at all. Both the
+detector and that density were removed (gh#719). The `perturb_only_at_t0` flag
+is a separate thing — an IF2 perturbation schedule, refused at config load under
+PGAS.
 
 ### Spatial models and seeding (iota)
 

@@ -2618,7 +2618,18 @@ impl FitConfigV2 {
     }
 
     /// Exhaustive partition check + stage DAG validation + data consistency.
-    pub fn validate(&self, model_params: &[String]) -> Result<(), String> {
+    ///
+    /// `init_law` is the one MODEL fact this otherwise config-only check needs:
+    /// whether `init { }` DRAWS a compartment from a law. It decides the
+    /// `ic_free` × `pfilter`/`pmmh` cells, because under the bootstrap particle
+    /// filter a declared law is the whole source of the swarm's spread at t=0
+    /// (gh#732). Derive it at the call site with
+    /// `model.initial_conditions.iter().any(|(_, s)| s.is_law())`.
+    pub fn validate(
+        &self,
+        model_params: &[String],
+        init_law: super::methods::InitLaw,
+    ) -> Result<(), String> {
         // Data source must be exactly one of [data] or [synthetic].
         match (&self.data, &self.synthetic) {
             (Some(_), Some(_)) => return Err(
@@ -2724,19 +2735,21 @@ impl FitConfigV2 {
             }
         }
 
-        // ic_free / conditioning support gate (F1). `ic_free = true` is
-        // honored only by the cells that actually drop y₁ from the
-        // accumulated loglik (if2, pfilter, plain pmmh). PGAS, the ODE-MLE
-        // optimizers, and correlated PMMH score every obs unconditionally —
-        // running ic_free on them would silently compute the UNCONDITIONAL
-        // likelihood while the banner claims conditioning. Reject loudly.
+        // ic_free / conditioning support check (F1). `ic_free = true` is
+        // honored only by the cells that BOTH drop y₁ from the accumulated
+        // loglik AND give the swarm spread at t=0. PGAS, the ODE-MLE
+        // optimizers, and correlated PMMH score every obs unconditionally;
+        // `pfilter` / plain `pmmh` do condition, but only have the spread when
+        // the MODEL declares an `init { }` law — hence `init_law` here.
+        // Running ic_free without either property would silently compute the
+        // UNCONDITIONAL likelihood while the banner claims conditioning.
         if self.ic_free.unwrap_or(false) {
             for (stage_name, stage) in &self.stages {
                 let correlated =
                     matches!(stage, Stage::PMMH { rho: Some(_), .. });
-                if let Err(msg) =
-                    super::methods::validate_ic_free(stage.method_kind(), correlated)
-                {
+                if let Err(msg) = super::methods::validate_ic_free(
+                    stage.method_kind(), correlated, init_law,
+                ) {
                     return Err(format!("stage '{}': {}", stage_name, msg));
                 }
             }
@@ -3084,6 +3097,7 @@ pub(crate) fn format_dataset_dir(idx: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fit::methods::InitLaw;
     use std::path::Path;
 
     fn parse(toml_str: &str) -> Result<FitConfigV2, String> {
@@ -3930,7 +3944,7 @@ cooling = 0.70
             "beta".to_string(), "gamma".to_string(),
             "N0".to_string(), "I0".to_string(),
         ];
-        assert!(config.validate(&model_params).is_ok());
+        assert!(config.validate(&model_params, InitLaw::Absent).is_ok());
     }
 
     #[test]
@@ -3964,7 +3978,7 @@ cooling = 0.70
             "beta".to_string(), "gamma".to_string(),
             "N0".to_string(), "I0".to_string(),
         ];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("neither estimated nor fixed"));
         assert!(err.contains("gamma"));
         assert!(err.contains("I0"));
@@ -3999,7 +4013,7 @@ cooling = 0.70
         "#).unwrap();
 
         let model_params = vec!["beta".to_string(), "N0".to_string()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("both [estimate] and [fixed]"));
         assert!(err.contains("beta"));
     }
@@ -4033,7 +4047,7 @@ cooling = 0.70
         "#).unwrap();
 
         let model_params = vec!["beta".to_string(), "N0".to_string()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("not in model"));
         assert!(err.contains("typo_param"));
     }
@@ -4071,7 +4085,7 @@ sweeps = 5000
 
         let model_params = vec!["beta".to_string(), "N0".to_string()];
         // The partition/dag/etc. check passes — priors are not its concern.
-        config.validate(&model_params).expect("validate() should not check priors");
+        config.validate(&model_params, InitLaw::Absent).expect("validate() should not check priors");
         // The new prior-presence check, with empty IR-priors, still fails.
         // gh#75 reworded the error text to enumerate three remedies
         // (model `~`, fit-toml `prior`, explicit `prior = { flat = {} }`);
@@ -4294,7 +4308,7 @@ cooling = 0.70
         "#).unwrap();
 
         let model_params = vec!["beta".to_string(), "N0".to_string()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("declared after"));
     }
 
@@ -4327,7 +4341,7 @@ init_mle = "nonexistent"
         "#).unwrap();
 
         let model_params = vec!["beta".to_string(), "N0".to_string()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("does not match any stage"));
     }
 
@@ -4359,7 +4373,7 @@ cooling = 0.70
         "#).unwrap();
 
         let model_params = vec!["beta".to_string(), "N0".to_string()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("bounds"));
         assert!(err.contains("empty"));
     }
@@ -4429,7 +4443,7 @@ cooling = 0.7
 params = ["S0_y"]
         "#).unwrap();
         let model_params = vec!["S0_y".into(), "beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("at least 2"), "expected size error: {}", err);
     }
 
@@ -4462,7 +4476,7 @@ params = ["S0_y", "S0_a", "S0_e"]
         // S0_e is in [fixed], not [estimate] — must reject
         let model_params = vec!["S0_y".into(), "S0_a".into(), "S0_e".into(),
                                 "beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("not in [estimate]"), "got: {}", err);
         assert!(err.contains("S0_e"), "got: {}", err);
     }
@@ -4497,7 +4511,7 @@ params = ["S0_a", "S0_e"]
         "#).unwrap();
         let model_params = vec!["S0_y".into(), "S0_a".into(), "S0_e".into(),
                                 "beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("already appears in another simplex group"),
             "got: {}", err);
     }
@@ -4530,7 +4544,7 @@ params = ["S0_y", "S0_a", "S0_e"]
         "#).unwrap();
         let model_params = vec!["S0_y".into(), "S0_a".into(), "S0_e".into(),
                                 "beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("perturb_only_at_t0 = true"), "got: {}", err);
         assert!(err.contains("S0_y"), "got: {}", err);
     }
@@ -4563,7 +4577,7 @@ params = ["S0_y", "S0_a"]
         "#).unwrap();
         let model_params = vec!["S0_y".into(), "S0_a".into(), "S0_e".into(),
                                 "beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("non-negative"), "got: {}", err);
     }
 
@@ -4595,7 +4609,7 @@ params = ["S0_y", "S0_a", "S0_e"]
         "#).unwrap();
         let model_params = vec!["S0_y".into(), "S0_a".into(), "S0_e".into(),
                                 "beta".into(), "N0".into()];
-        config.validate(&model_params).expect("well-formed simplex must validate");
+        config.validate(&model_params, InitLaw::Absent).expect("well-formed simplex must validate");
     }
 
     #[test]
@@ -4630,7 +4644,7 @@ iterations = 50
 cooling = 0.7
         "#).unwrap();
         let model_params = vec!["beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("mutually exclusive"),
             "expected mutex error: got {}", err);
         assert!(err.contains("[data]") && err.contains("[synthetic]"),
@@ -4696,7 +4710,7 @@ iterations = 30
 cooling = 0.9
         "#).unwrap();
 
-        let err = cfg.validate(&["beta".into(), "N0".into()]).unwrap_err();
+        let err = cfg.validate(&["beta".into(), "N0".into()], InitLaw::Absent).unwrap_err();
         assert!(err.contains("mutually exclusive"),
             "error should call out mutual exclusion: {}", err);
         assert!(err.contains("file") && err.contains("observations"),
@@ -4736,7 +4750,7 @@ iterations = 30
 cooling = 0.9
         "#).unwrap();
 
-        let err = cfg.validate(&["beta".into(), "N0".into()]).unwrap_err();
+        let err = cfg.validate(&["beta".into(), "N0".into()], InitLaw::Absent).unwrap_err();
         assert!(err.contains("condition_from") && err.contains("ic_free"),
             "error should name both condition_from and ic_free: {}", err);
     }
@@ -4765,7 +4779,7 @@ iterations = 30
 cooling = 0.9
         "#).unwrap();
 
-        let err = cfg.validate(&["beta".into(), "N0".into()]).unwrap_err();
+        let err = cfg.validate(&["beta".into(), "N0".into()], InitLaw::Absent).unwrap_err();
         assert!(err.contains("must specify either"),
             "error should suggest both forms: {}", err);
     }
@@ -5204,7 +5218,7 @@ iterations = 50
 cooling = 0.7
         "#).unwrap();
         let model_params = vec!["beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("neither"),
             "expected 'neither data nor synthetic' error: got {}", err);
     }
@@ -5240,7 +5254,7 @@ iterations = 50
 cooling = 0.7
         "#).unwrap();
         let model_params = vec!["beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("mutually exclusive"),
             "expected mutex error: got {}", err);
         assert!(err.contains("scenario"),
@@ -5276,7 +5290,7 @@ iterations = 50
 cooling = 0.7
         "#).unwrap();
         let model_params = vec!["beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("empty"),
             "expected empty-list error: got {}", err);
     }
@@ -5310,7 +5324,7 @@ iterations = 50
 cooling = 0.7
         "#).unwrap();
         let model_params = vec!["beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("duplicate"),
             "expected duplicate-seed error: got {}", err);
         assert!(err.contains("2"),
@@ -5344,7 +5358,7 @@ iterations = 0
 cooling = 0.7
         "#).unwrap();
         let model_params = vec!["beta".into(), "N0".into()];
-        let err = config.validate(&model_params).unwrap_err();
+        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err.contains("iterations must be"),
             "expected iterations error: got {}", err);
         assert!(err.contains("mle"),
@@ -5385,7 +5399,7 @@ cooling = 0.70
         "#).unwrap();
 
         let model_params = vec!["beta".to_string(), "N0".to_string()];
-        let err_msg = err.validate(&model_params).unwrap_err();
+        let err_msg = err.validate(&model_params, InitLaw::Absent).unwrap_err();
         assert!(err_msg.contains("mutually exclusive"));
     }
 
@@ -5625,7 +5639,7 @@ cooling = 0.70
 
         // Validate with correct model params
         let model_params = vec!["beta".to_string(), "N0".to_string(), "I0".to_string()];
-        assert!(config.validate(&model_params).is_ok());
+        assert!(config.validate(&model_params, InitLaw::Absent).is_ok());
     }
 
     #[test]
@@ -5796,7 +5810,7 @@ true_params = "truth.toml"
 sim_seeds   = "1:5"
 "#, minimal_fit_stages());
         let config = parse(&src).unwrap();
-        let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()])
+        let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()], InitLaw::Absent)
             .unwrap_err();
         assert!(err.contains("[data]") && err.contains("[synthetic]"),
             "error must name both blocks: {}", err);
@@ -5806,7 +5820,7 @@ sim_seeds   = "1:5"
     fn neither_data_nor_synthetic_errors() {
         let src = minimal_fit_stages().to_string();
         let config = parse(&src).unwrap();
-        let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()])
+        let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()], InitLaw::Absent)
             .unwrap_err();
         assert!(err.contains("[data]") && err.contains("[synthetic]"),
             "error must mention both options: {}", err);
@@ -6079,20 +6093,21 @@ cooling = 0.7
 cases = "data/cases.tsv"
 "#, minimal_fit_stages());
         let config = parse(&src).unwrap();
-        let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()])
+        let err = config.validate(&["beta".into(), "gamma".into(), "N0".into(), "I0".into()], InitLaw::Absent)
             .unwrap_err();
         assert!(err.contains("duplicate"), "must reject duplicate fit seeds: {}", err);
     }
 
-    // ── ic_free / conditioning support gate (F1) ───────────────────────────
+    // ── ic_free / conditioning support check (F1) ──────────────────────────
     //
-    // `ic_free = true` is honored only by IF2, the bootstrap PF, and plain
-    // (uncorrelated) PMMH. PGAS, the ODE-MLE optimizers, and correlated PMMH
-    // score every obs unconditionally — running ic_free on them silently
-    // computes the unconditional likelihood. `pfilter` and plain `pmmh` DO
-    // drop y₁, but run the bootstrap PF, which copies one deterministic
-    // initial state to every particle, so ic_free has no spread to condition
-    // on (gh#732). validate() must hard-error every cell but IF2.
+    // `ic_free = true` needs an algorithm that drops y₁ from the accumulated
+    // loglik AND a swarm whose particles differ in x₀. PGAS, the ODE-MLE
+    // optimizers and correlated PMMH score every obs unconditionally, for every
+    // model. `pfilter` and plain `pmmh` DO drop y₁, and their bootstrap PF
+    // draws x₀ per particle — so they have the spread exactly when the MODEL's
+    // `init { }` declares a law, and not when it computes every compartment
+    // from an expression (gh#732). `validate()` therefore takes that model fact
+    // as `InitLaw`.
 
     /// Model params for the ic_free fixtures (sir with beta/gamma/N0/I0).
     fn ic_free_model_params() -> Vec<String> {
@@ -6112,7 +6127,7 @@ cases = "data/cases.tsv"
         );
         let config = parse(&src).unwrap();
         config
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect("ic_free=true on an IF2 stage must validate (IF2 honors conditioning)");
     }
 
@@ -6142,7 +6157,7 @@ sweeps = 100
 "#;
         let config = parse(src).unwrap();
         let err = config
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("ic_free=true on a PGAS stage must be rejected (PGAS ignores conditioning)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("pgas"), "error must name the offending stage's algorithm: {err}");
@@ -6171,7 +6186,7 @@ iterations = 2000
 burn_in = 3000
 "#;
         let config = parse(src).unwrap();
-        let err = config.validate(&ic_free_model_params())
+        let err = config.validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("burn_in ≥ iterations must be rejected: no retained samples");
         assert!(err.contains("burn_in"), "error must name burn_in: {err}");
         assert!(err.contains("iterations"), "error must name iterations: {err}");
@@ -6198,7 +6213,7 @@ chains = 2
 iterations = 2000
 "#;
         let config = parse(src).unwrap();
-        let err = config.validate(&ic_free_model_params())
+        let err = config.validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("default burn_in (5000) ≥ iterations (2000) must be rejected");
         assert!(err.contains("5000"), "error should surface the default burn_in: {err}");
     }
@@ -6223,7 +6238,7 @@ iterations = 2000
 burn_in = 500
 "#;
         let config = parse(src).unwrap();
-        config.validate(&ic_free_model_params())
+        config.validate(&ic_free_model_params(), InitLaw::Absent)
             .expect("burn_in < iterations must validate");
     }
 
@@ -6251,7 +6266,7 @@ chains = 1
 "#;
         let config = parse(src).unwrap();
         let err = config
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("ic_free=true on an ODE-MLE stage must be rejected (compute_ode_loglik ignores conditioning)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("nl-sbplx"), "error must name the offending algorithm: {err}");
@@ -6284,17 +6299,17 @@ rho = 0.99
 "#;
         let config = parse(src).unwrap();
         let err = config
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("ic_free=true on a correlated PMMH stage must be rejected");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
     }
 
     /// gh#732. Plain PMMH (no `rho`) wraps the bootstrap particle filter,
-    /// which evaluates ONE deterministic initial state and copies it to every
-    /// particle. `ic_free`'s first reweight therefore scores every particle
-    /// identically and the run drops y₁ instead of conditioning on it — the
-    /// exact outcome the `perturb_only_at_t0` precondition was written to
-    /// prevent. Refuse at config load, naming the reason.
+    /// which draws x₀ per particle — but on a model whose `init { }` computes
+    /// every compartment from an expression each of those draws returns the
+    /// same state, so `ic_free`'s first reweight scores every particle
+    /// identically and the run drops y₁ instead of conditioning on it. Refuse
+    /// at config load, naming the reason.
     #[test]
     fn ic_free_with_plain_pmmh_stage_is_rejected() {
         let src = r#"ic_free = true
@@ -6321,7 +6336,7 @@ iterations = 100
 "#;
         let config = parse(src).unwrap();
         let err = config
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("ic_free=true on a plain PMMH stage must be rejected (gh#732)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("pmmh"), "error must name the offending algorithm: {err}");
@@ -6331,8 +6346,8 @@ iterations = 100
         assert!(err.contains("if2"), "error must name the algorithm that works: {err}");
     }
 
-    /// gh#732, same defect, other exposed cell: `pfilter` is admitted by the
-    /// same arm and wraps the same bootstrap PF.
+    /// gh#732, same cell, other algorithm: `pfilter` runs through the same arm
+    /// and the same bootstrap PF.
     #[test]
     fn ic_free_with_pfilter_stage_is_rejected() {
         let src = r#"ic_free = true
@@ -6357,12 +6372,47 @@ particles = 500
 "#;
         let config = parse(src).unwrap();
         let err = config
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("ic_free=true on a pfilter stage must be rejected (gh#732)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("pfilter"), "error must name the offending algorithm: {err}");
-        assert!(err.contains("copies it to every particle"),
+        assert!(err.contains("no spread at t=0"),
             "error must say why the spread is absent: {err}");
+    }
+
+    /// gh#732, the cell this change OPENS, at the config seam: the SAME two
+    /// configs that are refused above validate against a model whose `init { }`
+    /// declares a law. Only the model fact differs — which is the point: the
+    /// refusal is a property of (algorithm × model), not of the algorithm.
+    #[test]
+    fn ic_free_with_bootstrap_pf_stages_validates_when_the_model_draws_x0() {
+        for (who, stage) in [
+            ("pmmh", "[stages.bayes]\nalgorithm = \"pmmh\"\nbackend = \"chain_binomial\"\n\
+                      chains = 1\nparticles = 500\niterations = 100\nburn_in = 10\n"),
+            ("pfilter", "[stages.check]\nalgorithm = \"pfilter\"\n\
+                         backend = \"chain_binomial\"\nparticles = 500\n"),
+        ] {
+            let src = format!(
+                "ic_free = true\n\
+                 [model]\ncamdl = \"models/sir.camdl\"\n\n\
+                 [data.observations]\ncases = \"data/cases.tsv\"\n\n\
+                 [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n\n\
+                 [fixed]\nN0 = 1000\nI0 = 5\ngamma = 0.1\n\n{stage}"
+            );
+            let config = parse(&src).unwrap();
+            config
+                .validate(&ic_free_model_params(), InitLaw::Declared)
+                .unwrap_or_else(|e| panic!(
+                    "{who} + a declared init law must validate — the bootstrap PF \
+                     draws x₀ per particle, so the swarm has spread at t=0: {e}"));
+            // Non-vacuity: the same config with the same algorithm IS refused
+            // when the model's init is deterministic, so the accept above is
+            // the model fact doing the work and not a config that would pass
+            // either way.
+            config
+                .validate(&ic_free_model_params(), InitLaw::Absent)
+                .expect_err(&format!("{who} + a deterministic init must still be refused"));
+        }
     }
 
     // ── perturb_only_at_t0 (axis 3, fit-level) ─────────────────────────────
@@ -6403,7 +6453,7 @@ algorithm = "{algorithm}"
     #[test]
     fn perturb_only_at_t0_with_if2_stage_validates() {
         parse(&t0_fit("if2", IF2_BODY, true)).unwrap()
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect("IF2 honours perturb_only_at_t0 — it is IF2's own schedule");
     }
 
@@ -6438,7 +6488,7 @@ init_mle = "scout"
 {PGAS_BODY}
 "#);
         parse(&src).unwrap()
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect("an if2 stage exists, so the flag has a stage that reads it; \
                      the pgas posterior ignoring it is not a reason to refuse the fit");
     }
@@ -6448,7 +6498,7 @@ init_mle = "scout"
     #[test]
     fn perturb_only_at_t0_with_pgas_only_is_rejected() {
         let err = parse(&t0_fit("pgas", PGAS_BODY, true)).unwrap()
-            .validate(&ic_free_model_params())
+            .validate(&ic_free_model_params(), InitLaw::Absent)
             .expect_err("no stage can use the flag; it must be refused");
         assert!(err.contains("perturb_only_at_t0"), "must name the flag: {err}");
         assert!(err.contains("no stage in this fit"),
@@ -6467,7 +6517,7 @@ init_mle = "scout"
             ("nl-sbplx", "backend = \"ode\"\nchains = 1\n"),
         ] {
             let err = parse(&t0_fit(algo, body, true)).unwrap()
-                .validate(&ic_free_model_params())
+                .validate(&ic_free_model_params(), InitLaw::Absent)
                 .unwrap_err();
             assert!(err.contains("perturb_only_at_t0"), "{algo}: must name the flag: {err}");
             assert!(err.contains(algo), "{algo}: must name the stage present: {err}");
@@ -6486,7 +6536,7 @@ init_mle = "scout"
             ("nl-sbplx", "backend = \"ode\"\nchains = 1\n"),
         ] {
             parse(&t0_fit(algo, body, false)).unwrap()
-                .validate(&ic_free_model_params())
+                .validate(&ic_free_model_params(), InitLaw::Absent)
                 .unwrap_or_else(|e| panic!("{algo} without the flag must validate: {e}"));
         }
     }
@@ -7155,7 +7205,7 @@ cooling = 0.7
 "#;
         let config: FitConfigV2 = toml::from_str(toml_str).unwrap();
         let model_params = vec!["beta".to_string(), "N0".to_string(), "I0".to_string()];
-        config.validate(&model_params).expect("validation must pass with omitted bounds");
+        config.validate(&model_params, InitLaw::Absent).expect("validation must pass with omitted bounds");
     }
 
     #[test]
@@ -7187,7 +7237,7 @@ cooling = 0.7
 "#;
         let config: FitConfigV2 = toml::from_str(toml_str).unwrap();
         let model_params = vec!["beta".to_string(), "N0".to_string(), "I0".to_string()];
-        let err = config.validate(&model_params)
+        let err = config.validate(&model_params, InitLaw::Absent)
             .expect_err("inverted explicit bounds must error");
         assert!(err.contains("are empty") || err.contains("lo must be < hi"),
             "error must name the lo/hi violation; got: {err}");

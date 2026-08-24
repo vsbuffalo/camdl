@@ -74,16 +74,6 @@ pub trait ProcessModel: Send + Sync {
         rng: &mut StatefulRng,
     ) -> Result<Self::State, SimError>;
 
-    /// Does this model's `init {}` DRAW any compartment from a law
-    /// (`I ~ poisson(rate = I0)`), rather than computing all of them?
-    ///
-    /// Required, not defaulted: a filter that copies one `initial_state_draw`
-    /// to every particle gives a swarm with no t=0 spread, which for a model
-    /// with a law is a wrong estimator rather than a slow one. Every
-    /// implementation must answer, so a new process cannot inherit a `false`
-    /// that happens to be wrong.
-    fn declares_init_law(&self) -> bool;
-
     /// Advance state by one timestep.
     ///
     /// This is the hot path — called n_particles × n_substeps × n_obs times.
@@ -278,11 +268,13 @@ pub struct SMCConfig {
     /// returned log-likelihood. Log-likelihood accumulation starts from
     /// the second observation.
     ///
-    /// The caller is responsible for ensuring particle spread at t=0 —
-    /// typically via a `perturb_only_at_t0 = true` estimated parameter under
-    /// IF2. Without spread, the first reweight is a no-op and ic-free
-    /// degenerates to silently dropping the first observation. Validation is
-    /// at the fit-config layer. See
+    /// The caller is responsible for ensuring particle spread at t=0. Two
+    /// things provide it: a model whose `init {}` DECLARES a law, which every
+    /// filter draws per particle (gh#732), or — under IF2 only — a
+    /// `perturb_only_at_t0 = true` estimated parameter, which moves each
+    /// particle's θ before it draws (gh#364). Without spread, the first
+    /// reweight is a no-op and ic-free degenerates to silently dropping the
+    /// first observation. Validation is at the fit-config layer. See
     /// docs/dev/proposals/2026-04-18-ic-free-inference.md.
     pub skip_first_obs_from_loglik: bool,
 

@@ -95,9 +95,6 @@ impl ProcessModel for ICStampProcess {
         s.counts[0] = stamp(params[IVP_IDX]);
         Ok(s)
     }
-
-    /// A hand-built process, so there is no `init { }` block and no law.
-    fn declares_init_law(&self) -> bool { false }
     fn step(
         &self,
         _state: &mut ParticleState,

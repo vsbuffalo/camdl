@@ -3746,11 +3746,17 @@ before the first step is taken.
 **What a drawn initial condition does at fit time.** Under `pgas` it becomes a
 term of the target — `log p(x₀ | θ)` appears in the complete-data likelihood and
 in the `initial_state_ll` column of each chain's trace — so the law's parameters
-are estimated from the data rather than fixed. Under `if2` each particle draws
-its own initial state. `pfilter` and `pmmh` refuse a model with a drawn initial
-condition: their bootstrap filter evaluates one initial state and copies it to
-every particle, which would condition the whole swarm on a single realization of
-`x₀`. The deterministic (ODE) fits start every compartment at its law's mean.
+are estimated from the data rather than fixed. Under `if2`, `pfilter` and plain
+`pmmh` each particle draws its own initial state from its own random stream, so
+the swarm integrates over `p(x₀ | θ)` rather than conditioning on one
+realization of it. That per-particle spread is also what makes `ic_free = true`
+meaningful under `pfilter` / plain `pmmh`: with a deterministic `init {}` every
+particle starts at the same state, the first reweight cannot discriminate, and
+`ic_free` is refused. Correlated PMMH (a `pmmh` stage with `rho` set) refuses a
+drawn initial condition outright — its pre-drawn correlated randoms cover the
+transition kernel only, so an `x₀` draw would inject uncorrelated noise into the
+one quantity the method needs correlated. The deterministic (ODE) fits start
+every compartment at its law's mean.
 
 ---
 

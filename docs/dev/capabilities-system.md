@@ -197,40 +197,44 @@ same backend by another**. Representative confirmed cases:
   substep counts, state-dependent overdispersion σ², >1 overdispersed transition
   per source group, etc. — all keyed on the correlated-PMMH _algorithm variant_
   (rho ≠ None), not the backend.
-- **`ic_free` requires `if2`** (`methods.rs::validate_ic_free`, called per stage
-  from `FitConfigV2::validate`). Two properties are needed, not one: the
-  algorithm must drop y₁ from the accumulated log-likelihood, _and_ its
-  particles must differ in x₀ — the reweight at y₁ is what pins the initial
-  state, and with one shared x₀ it scores every particle identically. Only IF2
-  has both (it perturbs θ per particle at t=0 and each particle draws its own x₀
-  from its own θ, gh#364). `pgas` / the ODE algorithms / correlated `pmmh` fail
-  the first; `pfilter` and plain `pmmh` fail the second, because the bootstrap
-  particle filter copies one deterministic x₀ to every particle (gh#732). This
-  is the axis's second silent-wrong-answer guard, and it was wrong until gh#732:
-  it tested a _proxy_ (is some parameter flagged?) for a _property_ (does spread
-  exist?), and the proxy did not imply the property.
-- **A DECLARED `init { }` law requires a filter that draws x₀ per particle**
-  (`particle_filter.rs::bootstrap_filter` and
-  `correlated_pf.rs::bootstrap_filter_correlated`, keyed on
-  `ProcessModel::declares_init_law` / `CompiledModel::has_init_law`). Since
-  ir/VERSION 0.35 an initial condition may be drawn (`I ~ poisson(rate = I0)`),
-  which makes x₀ a random variable the filter has to integrate over. The
-  bootstrap filter evaluates ONE initial state and copies it to every particle,
-  so it would condition the whole swarm on a single realization — a wrong
-  likelihood, not a noisy one — and correlated PMMH would additionally be adding
-  uncorrelated noise to the one quantity it needs correlated between the current
-  and proposed θ. Both refuse by name, pointing at `pgas` (its conditional SMC
-  draws per particle and scores `log p(x₀ | θ)` as part of the target) and `if2`
-  (each particle draws from its own perturbed θ). Moving the bootstrap draw into
-  the per-particle loop is staging step 5 of the initial-state proposal; the
-  refusal is the honest interim, and re-admitting those two cells is a one-line
-  change to each guard.
+- **`ic_free` requires `if2`, or a model that DRAWS its initial state**
+  (`methods.rs::validate_ic_free`, called per stage from
+  `FitConfigV2::validate`). Two properties are needed, not one: the algorithm
+  must drop y₁ from the accumulated log-likelihood, _and_ its particles must
+  differ in x₀ — the reweight at y₁ is what pins the initial state, and with one
+  shared x₀ it scores every particle identically. `if2` has both for any model
+  (it perturbs θ per particle at t=0 and each particle draws its own x₀ from its
+  own θ, gh#364). `pgas` / the ODE algorithms / correlated `pmmh` fail the
+  first, for every model. `pfilter` and plain `pmmh` have the first always and
+  the second **only when the model's `init { }` declares a law**: their
+  bootstrap filter draws x₀ per particle, and a deterministic `init { }` returns
+  the same state on every draw (gh#732). So this check takes a model fact
+  (`methods::InitLaw`) alongside the algorithm — the only one
+  `FitConfigV2::validate` takes beyond the parameter names.
+
+  This is the axis's second silent-wrong-answer guard, and it was wrong until
+  gh#732: it tested a _proxy_ (is some parameter flagged?) for a _property_
+  (does spread exist?), and the proxy did not imply the property. The same
+  property is re-checked in `FitRunConfig::build`, where a fit with neither
+  source — no `init { }` law and no `perturb_only_at_t0` parameter — is refused
+  before any filter time is spent.
+- **Correlated PMMH refuses a DECLARED `init { }` law**
+  (`correlated_pf.rs::bootstrap_filter_correlated`, keyed on
+  `CompiledModel::has_init_law`). Since ir/VERSION 0.35 an initial condition may
+  be drawn (`I ~ poisson(rate = I0)`), which makes x₀ a random variable the
+  filter has to integrate over. The bootstrap filter (`pfilter`, plain `pmmh`,
+  `if2`) draws it per particle and needs no guard. Correlated PMMH does: its
+  efficiency comes from the whole particle system being a deterministic function
+  of one pre-drawn correlated random vector, and that vector covers the
+  transition kernel only — an x₀ draw from a separate stream would inject
+  uncorrelated noise into exactly the quantity the method needs correlated
+  between the current and proposed θ. Putting x₀ into the correlated vector is a
+  design change to the CPM proposal, not a wiring fix, so it refuses by name and
+  points at plain `pmmh` (drop `rho`), `pgas` or `if2`.
 
   Unusually for this axis, the check lives at the ENFORCEMENT point rather than
   in `FitConfigV2::validate`: the predicate is a property of the compiled model,
-  which config validation does not hold. `ProcessModel::declares_init_law` is
-  deliberately a REQUIRED trait method with no default, so a new process must
-  answer rather than inherit a `false` that happens to be wrong.
+  which config validation does not hold.
 - **`perturb_only_at_t0` requires the fit to have an `if2` stage**
   (`methods.rs::validate_perturb_only_at_t0`, called once from
   `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"
@@ -287,10 +291,11 @@ Out of scope for this doc, listed so the map is complete:
 
 - **parameter-attribute × {attribute, config-flag}** — prior↔transform and
   prior↔bounds (`fit/runner.rs::validate_prior_transform_compat`),
-  `perturb_only_at_t0`↔`ic_free` (`runner.rs` — the residual parameter-level
-  half; the algorithm-level half moved to axis 3, above),
-  `perturb_only_at_t0`↔simplex-membership (`config_v2.rs`). Purely
-  parameter-level; no algorithm or backend involved. Partly typed already:
+  `perturb_only_at_t0`↔`ic_free` (`runner.rs` — the residual half, now a
+  disjunction with the model's `init { }`: either source of t=0 spread
+  satisfies it; the algorithm-level half is on axis 3, above),
+  `perturb_only_at_t0`↔simplex-membership (`config_v2.rs`). No algorithm or
+  backend involved. Partly typed already:
   `docs/dev/proposals/2026-06-08-typed-parameter-surface.md` (landed, IR 0.11)
   made prior-on-a-fixed-value and prior+hierarchical unrepresentable via the
   `ParamValue`/`PriorSpec` ADTs; the prior↔transform and `perturb_only_at_t0`

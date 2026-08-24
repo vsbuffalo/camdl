@@ -121,18 +121,6 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // incidence stream, sized from the OBS model (the process does not know it).
     let n_acc = obs_model.n_interval_streams();
 
-    // The bootstrap filter copies ONE initial state to every particle (see the
-    // note at the draw below). A model whose `init {}` declares a law needs the
-    // per-particle draw that staging step 5 of the initial-state proposal
-    // installs; running it here would silently condition the whole swarm on one
-    // realization of x₀, which is a wrong likelihood, not a noisy one.
-    if process.declares_init_law() {
-        return Err(SimError::Validation(
-            "this model's `init { }` DRAWS a compartment from a law              (`I ~ poisson(...)`), which the bootstrap particle filter cannot              yet represent: it evaluates ONE initial state and copies it to              every particle, so the swarm would condition on a single              realization of x0 instead of integrating over p(x0 | theta).\n\n               Use `algorithm = pgas` (its conditional SMC draws a per-particle              initial state and scores log p(x0 | theta) as part of the target),              or `algorithm = if2` (each particle draws its own x0 from its own              perturbed parameters), or write the initial condition as an              expression (`I = I0`) instead of a law."
-                .to_string(),
-        ));
-    }
-
     // Per-particle RNG streams (deterministic, derived from seed).
     // stream_offset = 0: particles use stream indices [0, n_particles).
     // Built before the initial state because drawing x₀ is a draw from a
@@ -140,35 +128,32 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // streams the propagation loop sees below are unchanged.
     let mut rngs = init_particle_rngs(seed, n_particles, 0);
 
-    // Initialize particles from model init. The process sizes `acc` to 0 (it
-    // does not know `n_interval_streams`); resize the init state's `acc` to
-    // `n_acc` so the `has_predictions` probe (`obs_model.mean(&init, …)`, which
-    // projects `acc[k]`) does not index out of bounds. Swarm states are sized
-    // by `ParticleSwarm::new`.
+    // x₀ is drawn PER PARTICLE — particle j from its OWN stream `rngs[j]`
+    // (gh#732). For a model whose `init {}` declares a law, that spread is what
+    // makes the swarm integrate over p(x₀ | θ); one draw copied across would
+    // condition every particle on a single realization of x₀, which is a wrong
+    // likelihood rather than a noisy one. No density term accompanies it: in a
+    // bootstrap filter the initial-state law is both the proposal and the prior
+    // (Gordon, Salmond & Smith 1993), so the two cancel in the weight.
     //
-    // ONE draw, copied to every particle. For a deterministic `init {}` that is
-    // exact — `initial_state_draw` consumes nothing and every particle would
-    // get the same state anyway. For a model whose `init {}` DECLARES a law it
-    // would be a wrong estimator: the filter would condition on one random x₀
-    // instead of integrating over p(x₀ | θ). Moving this call into the loop so
-    // particle j draws from `rngs[j]` is staging step 5 of the proposal
-    // (gh#732); until then such a model is REFUSED above rather than run.
+    // For a deterministic `init {}` — every model in the corpus today — this is
+    // byte-identical to the single draw it replaces: `initial_state_draw`
+    // short-circuits to `initial_state_mean` and consumes nothing, so each
+    // particle's stream is where `init_particle_rngs` left it and every
+    // particle gets the same state. That property is pinned directly, on the
+    // producer, by `sim/tests/initial_state_seam.rs`
+    // (`the_draw_equals_the_mean_and_leaves_the_stream_untouched`).
     //
-    // `rngs` is empty when `n_particles == 0` — a degenerate swarm the
-    // degeneracy layer deliberately tolerates (`check_pf_degeneracy`'s
-    // `n_particles > 0` guard), so it must not panic here. With no particle
-    // there is also no particle to hand the state to, so a scratch stream is
-    // the whole of the answer.
-    let mut init = match rngs.first_mut() {
-        Some(rng0) => process.initial_state_draw(params, rng0)?,
-        None => process.initial_state_draw(
-            params, &mut StatefulRng::new_stream(seed, 0),
-        )?,
-    };
-    init.acc.resize(n_acc, 0);
+    // The process sizes each draw's `acc` to 0 (it does not know
+    // `n_interval_streams`); only `counts` crosses over, and `ParticleSwarm`
+    // has already sized every swarm state's `acc` to `n_acc`. With
+    // `n_particles == 0` — a degenerate swarm the degeneracy layer deliberately
+    // tolerates (`check_pf_degeneracy`'s `n_particles > 0` guard) — the zip is
+    // empty and no stream is indexed.
     let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
-    for p in &mut swarm.states {
-        p.counts.copy_from_slice(&init.counts);
+    for (p, rng) in swarm.states.iter_mut().zip(rngs.iter_mut()) {
+        let x0 = process.initial_state_draw(params, rng)?;
+        p.counts.copy_from_slice(&x0.counts);
     }
 
     // Separate RNG streams for diagnostic draws (rmeasure).
@@ -200,7 +185,22 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     let mut ess_trace = Vec::with_capacity(n_obs);
     let mut logw_var_trace = Vec::with_capacity(n_obs);
     let mut ll_increments = Vec::with_capacity(n_obs);
-    let has_predictions = obs_model.n_streams() > 0 && !obs_model.mean(&init, 0, params).is_empty();
+    // Can this obs model project a state at all? A SHAPE question — `mean()`
+    // returns `vec![]` for an impl that does not override it — asked of
+    // particle 0, whose `acc` is sized `n_acc` so a projection that indexes
+    // `acc[k]` is in bounds. With no particles there is none to ask, so the
+    // probe is a state off a scratch stream; `rngs` is empty there and
+    // indexing it would panic.
+    let has_predictions = obs_model.n_streams() > 0 && match swarm.states.first() {
+        Some(s) => !obs_model.mean(s, 0, params).is_empty(),
+        None => {
+            let mut probe = process.initial_state_draw(
+                params, &mut StatefulRng::new_stream(seed, 0),
+            )?;
+            probe.acc.resize(n_acc, 0);
+            !obs_model.mean(&probe, 0, params).is_empty()
+        }
+    };
     let mut predictions: Vec<PredictionDiag> = if has_predictions {
         Vec::with_capacity(n_obs)
     } else {

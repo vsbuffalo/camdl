@@ -417,7 +417,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         std::process::exit(1);
     });
     let model_params: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
-    config.validate(&model_params).unwrap_or_else(|e| {
+    // The one model fact `validate` needs beyond the parameter names: does
+    // `init { }` DRAW a compartment from a law? It decides the ic_free ×
+    // pfilter/pmmh cells (gh#732) — under the bootstrap particle filter a
+    // declared law is the whole source of the swarm's spread at t=0.
+    let init_law = if model.initial_conditions.iter().any(|(_, s)| s.is_law()) {
+        crate::fit::methods::InitLaw::Declared
+    } else {
+        crate::fit::methods::InitLaw::Absent
+    };
+    config.validate(&model_params, init_law).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
@@ -705,8 +714,25 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .map(|(n, _)| n.as_str())
             .collect();
         eprintln!("\n  \x1b[36mic-free inference:\x1b[0m conditioning on y₁");
-        eprintln!("    - initial state spread from perturb_only_at_t0 params: [{}]",
-            perturb_only_at_t0_params.join(", "));
+        // Name every ACTUAL source of the t=0 spread. There are two — a
+        // declared `init { }` law, which every filter draws per particle
+        // (gh#732), and, under IF2, a `perturb_only_at_t0` parameter (gh#364).
+        // Reporting only the second told a user with a law that the list was
+        // empty, i.e. that there was no spread — the one thing this line exists
+        // to confirm.
+        let mut sources: Vec<String> = Vec::new();
+        let drawn: Vec<&str> = model.initial_conditions.iter()
+            .filter(|(_, s)| s.is_law())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !drawn.is_empty() {
+            sources.push(format!("`init {{ }}` laws on [{}]", drawn.join(", ")));
+        }
+        if !perturb_only_at_t0_params.is_empty() {
+            sources.push(format!("perturb_only_at_t0 params [{}] (if2 stages only)",
+                perturb_only_at_t0_params.join(", ")));
+        }
+        eprintln!("    - initial state spread from: {}", sources.join("; "));
         eprintln!("    - log-likelihood accumulation from t = 2 (y₁ reweights and resamples only)");
     }
 
