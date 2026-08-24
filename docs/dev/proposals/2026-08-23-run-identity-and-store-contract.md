@@ -1,6 +1,7 @@
 # Run-identity and store-contract hardening
 
-Date: 2026-08-23 Status: Phases 1–3 implemented; Phase 4 pending Audit ref:
+Date: 2026-08-23 Status: Phases 1–3 merged (PR#736); Phase 4 partial — see
+"Phase 4 status" Audit ref:
 `docs/dev/reviews/2026-08-23-run-identity-and-store-design-review.md`
 
 ## Implementation status
@@ -229,16 +230,43 @@ change, per `.claude/rules/run-identity.md`.
   the wrong process table. Maintainer has deprioritized this (2026-08-23): not a
   current deployment. Fix when it becomes one — the lock record needs host +
   process-start-time (no re-key; locks are not identity).
-- **gh#734: `Likelihood`'s wildcard match arm.** The exhaustive-destructure
-  guard covers new IR _fields_; a new likelihood _family_ with a bare-`Expr`
-  argument would still be silently un-hashed.
-- **gh#735: CLI tests share one repo-relative `results/` store.** Seven files
-  invoke pfilter with no isolation; a concurrent quarantine/rename can pull a
-  directory out from under a claim. Also names the production-side question:
-  `claim_streaming` has no retry where the commit path does.
-- **`canonical_config_hash` (I2's helper).** Not implemented; the remaining blob
-  sites still hand-roll canonicalize + finiteness gate + subtract. This is what
-  makes exclude-by-default _unwritable_ rather than merely fixed case-by-case,
-  so it is the highest-value piece of the follow-on work.
-- **Phase 4** (S4 augment + real obs children, I1's full resolve-once seam, I4's
-  derive hardening + orphan-struct deletion) is unstarted.
+- **gh#737: `claim_streaming` has no retry for a contended rename**, where
+  `rename_staged_into_place` does. Split out of gh#735, which framed it as test
+  hygiene: it is a concurrency gap in shipped code that presents as an
+  intermittent ENOENT under parallel runs — the profile of a defect that gets
+  called flakiness for weeks. Costs completed work, not correctness.
+- **gh#735: CLI tests share one repo-relative `results/` store.** Narrowed to
+  test isolation now that gh#737 carries the production half. Seven files invoke
+  pfilter without isolation, so they can also serve each other cache hits.
+- **gh#738: `batch --obs` still skips a cached cell whose obs subtree exists at
+  a DIFFERENT cadence.** The presence check below closes the reported case; the
+  exact-address check wants I1's resolve-once seam, because computing the
+  subtree address in `should_run` from `base_model` (while `merge_cell` writes
+  from `cell.model`) would re-introduce the divergent-resolution class.
+- **I4's derive hardening + orphan-struct deletion** is unstarted:
+  `#[run_input(index = N)]` for the positional-variant-index hazard, and
+  deleting the never-constructed composed leaf-input types.
+- **I1's resolve-once seam** is unstarted, and is now the gating item for gh#738
+  as well as the standing fix for the divergent-resolution class.
+
+## Phase 4 status
+
+- **S4 augment door: done.** `FsCasStore::augment` adds an artifact to a
+  Completed leaf under its lock — identity-checked, live-holder-blocked,
+  idempotent on identical bytes, `DivergentRecompute` on differing ones, file
+  fsync'd before the record names it. Wired for `event_log.tsv` /
+  `reactive_log.tsv`, called unconditionally after commit (a no-op on a fresh
+  commit, a repair on a cache hit), which closes the documented `--event-log`
+  loss.
+- **Obs as a REAL child leaf: not done.** The declared child id is still
+  `digest("{run_id}:{obs_seed}:{obs_hash}")` — a synthetic id pointing at no
+  record, so the "children are validated recursively on their own lookup"
+  contract in `record.rs` is unimplemented for it, and the subtree is written
+  with raw unsynced `fs::write`. What IS fixed is the user-visible half: a
+  cached cell is no longer skipped when observations were requested and the leaf
+  has none.
+- **`canonical_config_hash`: done**, and further than the helper — all four
+  level sites (pfilter config, survey config + box, ensemble config + grid,
+  profile base + method) now hash from STRUCTS, so a field added to one is
+  hashed automatically. Byte-neutral at every site, each pinned by a test
+  against the literal it replaced.
