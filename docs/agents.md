@@ -249,6 +249,54 @@ downstream can map an estimate back to a date, and the loss is invisible in
 every artifact, so it can survive a long way into an analysis before anyone
 notices.
 
+**If a scheduled day is unusable, write `NA` — never drop the row.** This is the
+one that costs the most time to diagnose, because the symptom does not point at
+the cause.
+
+For a stream whose `projected` is an `incidence(...)`, camdl accumulates
+modelled flow over the interval **since that stream's previous row** — not over
+a window you name. So the two ways of handling a bad day mean different things:
+
+| you write         | the model sees                                              |
+| ----------------- | ----------------------------------------------------------- |
+| `2026-07-14  NA`  | scheduled, unobserved — no likelihood term, interval CLOSES |
+| (no row on 07-14) | not scheduled — the NEXT row's interval spans the gap       |
+
+Filtering unusable days out therefore _silently widens_ the next row's exposure
+window while its own count still covers one day. A real case: after filtering,
+the retained rows sat up to 13 days apart, so `projected` was compared against
+13 days of modelled flow against one day of specimens — a 13x inflation that
+**refused 23 of 24 chains at initialisation**, because a modelled flow above the
+specimen count is impossible rather than merely a poor fit. Nothing in that
+error mentions the filtering.
+
+So: **emit every scheduled time, and make the unusable ones `NA`.** The days you
+cannot use then contribute no observation at all — which is what they are,
+rather than a fabricated zero or an invisible widening.
+
+```python
+# polars: reindex onto the full span, then left-join, so gaps become nulls
+span = pl.date_range(out["time"].min(), out["time"].max(),
+                     interval="1d", eager=True).alias("time")
+full = pl.DataFrame({"time": span}).join(out, on="time", how="left")
+full.write_csv(path, separator="\t", null_value="NA")
+```
+
+Two traps that follow:
+
+- **A proportion stream needs a non-zero denominator even on unscored rows.** If
+  the stream is `k / n`, fill `n` with `1` (or any positive value) on the `NA`
+  rows. The observation is `NA` so the denominator is never read, but a `0`
+  there can still reach a division depending on how the projection is written.
+- **`NA` is not a null token in every tool.** polars does not parse it as null
+  by default, so one `NA` turns a numeric column into a string column, and a
+  plotting library will then draw those strings at the axis baseline — holes
+  rendering as _observed zeros_ in a figure that looks entirely plausible. Read
+  with `null_values="NA"`.
+
+Full semantics, including how a hole differs from an observed `0`:
+[`camdl-data-spec.md`](camdl-data-spec.md), "Missing observations".
+
 camdl refuses the dated file rather than guessing, and the refusal names the
 fix:
 

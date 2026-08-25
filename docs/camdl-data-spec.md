@@ -630,6 +630,53 @@ as categorical and can draw them at the axis baseline — holes rendering as
 _observed zeros_ in a figure that looks entirely plausible. Read observation
 files with `NA` declared as the null value (in polars, `null_values="NA"`).
 
+### Building the file: emit the schedule, not the usable subset
+
+The rule above is stated from the reader's side. From the _writer's_ side it
+inverts into one instruction, and it is the instruction most often got wrong:
+
+> **Emit a row for every scheduled time. Make the unusable ones `NA`. Never
+> filter them out.**
+
+A pipeline that drops bad days is doing the natural thing — a filter is how you
+remove data you cannot trust. But for an `incidence(...)` stream a filter does
+not remove a day; it _merges_ that day into the next observation's window, while
+the surviving row's count still covers only its own day.
+
+**What that costs, from a real case.** A daily lab stream whose unusable days
+were filtered rather than nulled left the retained rows up to **13 days apart**.
+Each was scored against 13 days of accumulated modelled flow and one day of
+specimens — a 13x inflation of `projected/tests`, which **refused 23 of 24
+chains at initialisation**. That refusal is correct: a modelled flow above the
+specimen count is impossible, not merely a poor fit. But nothing in the
+diagnostic mentions the filter, and the pipeline that caused it looks like
+ordinary data cleaning.
+
+Re-indexing onto the full span is the fix, and it is three lines:
+
+```python
+span = pl.date_range(out["time"].min(), out["time"].max(),
+                     interval="1d", eager=True).alias("time")
+full = pl.DataFrame({"time": span}).join(out, on="time", how="left")
+full.write_csv(path, separator="\t", null_value="NA")
+```
+
+Every scored bin is then exactly one cadence wide, and the days you could not
+use contribute no observation at all.
+
+**Proportion streams need a denominator on the unscored rows too.** For a stream
+scored as `k / n`, fill `n` with `1` — or any positive value — where the
+observation is `NA`. The value is never read, because the observation is a hole;
+the fill exists so a `0` denominator cannot reach a division. Leaving it null or
+zero makes the file's validity depend on how the projection happens to be
+written.
+
+**The count you should check.** After building, assert that the number of rows
+equals the number of scheduled times, and that the number of _non-null_ rows
+equals the number of usable observations. Those two numbers differing by exactly
+the number of holes is the property this section exists to protect; if the row
+count equals the usable count, the filter is still there.
+
 ---
 
 ## Complete Nigeria model with data model
