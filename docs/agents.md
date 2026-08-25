@@ -514,6 +514,9 @@ old one instead of overwriting it. Scatter fits into per-experiment directories
 and all three are lost. A leaf belongs to camdl — never write a derived summary
 into one.
 
+The reasoning behind each directory, and the house style for a model file's
+header, is `docs/camdl-style.md` in the camdl repo.
+
 ### camdl 'scope — read a fit store in a browser
 
 **camdl 'scope** is a browser-based viewer and live monitor for a fit store. Per
