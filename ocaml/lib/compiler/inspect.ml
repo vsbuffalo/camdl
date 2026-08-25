@@ -165,7 +165,28 @@ let decl_of_param (ctx : Expander.context) (p : Ir.parameter) : Ast.param_decl o
 let run_summary ppf (model : Ir.model) ctx (sum : Expander.model_summary) =
   (* Model name in bold blue *)
   Term_style.bold (Term_style.transition Fmt.string) ppf model.name;
-  Fmt.pf ppf "@\n@\n";
+  Fmt.pf ppf "@\n";
+  (* The model's own `#'` block (gh#750) — the answer to "what is this model?"
+     without opening the file. One source line per output line, so a
+     `@base`/`@adds`/`@changes` lineage header stays readable. *)
+  (match model.doc_index.di_model with
+   | Some d ->
+     Fmt.pf ppf "@\n";
+     (match d.text with
+      | Some t ->
+        List.iter
+          (fun line ->
+             Term_style.dim_style Fmt.string ppf "  ";
+             Term_style.dim_style Fmt.string ppf line;
+             Fmt.pf ppf "@\n")
+          (String.split_on_char '\n' t)
+      | None -> ());
+     (match d.reference with
+      | Some r -> Term_style.dim_style Fmt.string ppf (Printf.sprintf "  [%s]" r);
+                  Fmt.pf ppf "@\n"
+      | None -> ())
+   | None -> ());
+  Fmt.pf ppf "@\n";
   let lbl s = Term_style.dim_style Fmt.string ppf s in
   let num n = Term_style.bold Fmt.string ppf (fmt_number n) in
   (* Compartments *)

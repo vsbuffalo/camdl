@@ -577,12 +577,15 @@ pub struct FitSidecar {
     /// `fixed` above are the single source of truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<ObsSchema>,
-    /// The model's `#'` documentation dictionary ([`ir::ModelDocs`]): params /
+    /// The model's `#'` documentation dictionary ([`ir::ModelDocs`]): the
+    /// model's own header block (`docs.model`, gh#750) plus params /
     /// compartments / transitions / observations / dimensions / quantities →
     /// `{symbol, text, ref}`, keyed by base declaration name. A downstream
     /// consumer labels any output column (posterior-draw parameter names,
     /// trajectory compartments, predict streams, generated quantities) by joining
-    /// its name against this. Empty (and omitted) when the model documents nothing.
+    /// its name against this, and answers "a fit of WHAT model?" from
+    /// `docs.model` without re-reading the `.camdl`. Empty (and omitted) when
+    /// the model documents nothing.
     #[serde(default, skip_serializing_if = "ir::ModelDocs::is_empty")]
     pub docs: ir::ModelDocs,
 }

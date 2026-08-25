@@ -162,6 +162,18 @@ easiest to forget and carry the most hidden meaning), then the non-obvious
 describes what a parameter _is_; its _value_ still lives in a `--params` TOML,
 never in the model.
 
+A `#'` block at the very **top of the file**, before any declaration, documents
+the model as a whole — what it is and what it is fitted to:
+
+```camdl
+#' Bare SIR fitted to weekly reported cases, with a constant reporting fraction.
+
+time_unit = 'days
+```
+
+It is the one place a `#'` block attaches to no declaration, and it is the
+cheapest way to make a model answerable at a glance.
+
 ### Let bindings: compile-time inlining
 
 ```camdl

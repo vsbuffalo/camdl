@@ -350,6 +350,30 @@ model — `#'` is the right home for the intent that otherwise leaks into a
 `# FIXED = 0.3` comment (which does nothing, drifts from the real value, and is
 exactly what `#'` replaces).
 
+**Open the file with a `#'` block saying what the model is.** A `#'` block at
+the very top — above `time_unit`, with only blank lines or `#` comments before
+it — documents the model itself rather than any one declaration:
+
+```camdl
+#' National SEIR with a facility-death delay: cases and deaths come from one
+#' confirmation flow, deaths lagged through an isolation compartment.
+#' Fitted to weekly confirmed cases and weekly confirmed deaths.
+#' @base bvd_national_twocfr.camdl
+#' @adds nothing
+#' @changes f_cfr_unret becomes free with a beta(2,2) prior
+
+time_unit = 'days
+```
+
+Say what the compartments mean, what observation streams it is fitted to, and —
+when the model is a variant of another — what it branches from and what that
+variant changes. `@base` / `@adds` / `@changes` are free text the compiler keeps
+verbatim; nothing validates them, and no other `@tag` is refused here. The block
+reaches `camdl inspect`, both `camdl render` projections, and the fit sidecar,
+so "what is this model?" is answerable without opening the file. It is envelope
+metadata, so correcting it never re-keys a fit — write real content, and fix it
+when it is wrong.
+
 **Backend choice for fits.** Use `chain_binomial` — the production fit backend.
 Gillespie is for forward-simulation sanity checks, not fits (too slow).
 

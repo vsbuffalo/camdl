@@ -1,4 +1,4 @@
-{"ir_version":"0.35","validated_by":"ocaml-compiler-v0.35","model":{"name":"sir_basic","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.36","validated_by":"ocaml-compiler-v0.36","model":{"name":"sir_basic","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -15,4 +15,4 @@
 {"name":"high_r0","label":"high R0  (R0 = 5)","params":{"beta":0.5,"gamma":0.1,"N0":1000.0,"I0":5.0},"enable":[],"disable":[],"t_end":80.0}
 ],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
-]},"docs":{"parameters":{"beta":{"text":"per-capita transmission rate (contact rate × per-contact transmission probability)","symbol":"β"},"gamma":{"text":"recovery rate; the mean infectious period is 1/gamma","symbol":"γ"},"N0":{"text":"total population size"},"I0":{"text":"initial number infectious"}}}}
+]},"docs":{"model":{"text":"Bare SIR: susceptible individuals become infectious on contact and recover to permanent immunity. Three compartments, two transitions, no demography and no observation model — the smallest model in the corpus, and the one every other golden is read against (§23.1).\n@base none — root model\n@adds nothing\n@changes nothing","ref":"Kermack and McKendrick 1927"},"parameters":{"beta":{"text":"per-capita transmission rate (contact rate × per-contact transmission probability)","symbol":"β"},"gamma":{"text":"recovery rate; the mean infectious period is 1/gamma","symbol":"γ"},"N0":{"text":"total population size"},"I0":{"text":"initial number infectious"}}}}

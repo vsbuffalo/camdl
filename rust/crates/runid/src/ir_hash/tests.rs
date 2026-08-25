@@ -974,3 +974,48 @@ fn projection_variant_hashes_are_pinned() {
         "df05acb4d865d837590a535138e7be26546f019da197fb68d7d92603c020f09a"
     );
 }
+
+/// gh#750: the model's own `#'` doc block rides the IR **envelope**
+/// (`ModelDocs::model`), not the `Model`, so a documented model and its
+/// undocumented twin key to the same `model_ir_hash` — the single answer to
+/// "which model is this?" that every CAS path shares.
+///
+/// That property is what makes a model header worth writing real content into:
+/// a wrong description can be corrected without orphaning a completed fit. If
+/// this assertion ever fails, fixing a typo in a model header silently
+/// invalidates every fit of that model.
+///
+/// Driven off a committed golden envelope with the doc spliced into the JSON
+/// text, so it exercises the real deserialize path rather than a constructed
+/// `ModelDocs`.
+#[test]
+fn a_model_level_doc_does_not_re_key_the_model() {
+    use crate::inputs::model_ir_hash;
+
+    let plain = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../ir/golden/sir_basic.ir.json"
+    ))
+    .expect("read sir_basic.ir.json");
+    let documented = plain.replacen(
+        "\"model\":",
+        "\"docs\":{\"model\":{\"text\":\"National SEIR with a facility-death delay.\\n\
+         @base bvd_national_twocfr.camdl\",\"ref\":\"Camacho et al. 2015\"}},\"model\":",
+        1,
+    );
+    assert_ne!(plain, documented, "the splice must actually change the JSON");
+
+    let env_plain = ir::envelope_from_str(&plain).expect("parse plain envelope");
+    let env_doc = ir::envelope_from_str(&documented).expect("parse documented envelope");
+
+    // Non-vacuous: the doc really is present on one side and absent on the other.
+    assert!(env_plain.docs.model.is_none());
+    assert!(env_doc.docs.model.is_some());
+
+    assert_eq!(
+        model_ir_hash(&env_plain.model).to_hex(),
+        model_ir_hash(&env_doc.model).to_hex(),
+        "a model-level `#'` doc must not move model_ir_hash — it would orphan \
+         every fit of every documented model"
+    );
+}

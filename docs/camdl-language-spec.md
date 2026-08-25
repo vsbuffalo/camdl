@@ -94,7 +94,8 @@ the base model with global names and specifies how dimensions interact.
 @    rate expression (how fast, always total propensity)
 -->  flow direction
 #    comment
-#'   doc comment (attaches to the declaration below it)
+#'   doc comment (attaches to the declaration below it; at the top
+     of the file, to the model as a whole)
 { }  block grouping
 [ ]  index access and list literals
 ( )  function arguments
@@ -124,6 +125,40 @@ Writing `#'` above `compartments {` is a syntax error, because a block has no
 declaration for it to describe. The sites that take one are: `compartments`
 members, `parameters` members, `dimensions` entries, `transitions`,
 `observations` streams, `quantities`, and top-level `let` bindings.
+
+The one place a `#'` block attaches to no declaration is the **top of the
+file**, where it documents the model itself:
+
+```camdl
+#' National SEIR with a facility-death delay: cases and deaths come from one
+#' confirmation flow, deaths lagged through an isolation compartment.
+#' @base bvd_national_twocfr.camdl
+#' @adds nothing
+#' @changes f_cfr_unret becomes free with a beta(2,2) prior
+
+time_unit = 'days
+```
+
+The rule is positional: a `#'` block is the model's iff every line above it is
+blank or a comment — that is, no declaration has started. Everywhere else a
+`#'` block must be followed by a declaration, and a stray one is still `E001`.
+(Consequence: in a file whose first declaration is a top-level `let`, the header
+block documents the model and the `let` is undocumented. Put the `let` after
+another declaration if you want a doc on it.)
+
+Inside the model block the tag vocabulary is **open**: `@symbol` and `@ref`
+behave as they do on a declaration, and any other `@tag` line is kept verbatim
+as free text. `@base` / `@adds` / `@changes` above are a house convention for
+recording where a model variant came from — the compiler stores them as prose,
+validates nothing about them, and does not check that the parent file exists.
+On a *declaration* the vocabulary stays closed (`@default 0.3` is still `E111`),
+because there a tag reads as though it sets something.
+
+A model's `#'` block and its `description = "…"` are not the same thing.
+`description` is a short string **inside** the model, so it is part of run
+identity: editing it re-keys every fit. The `#'` block rides the IR envelope, so
+it can be corrected freely — which is what makes it the right home for a real
+description (see §16.4).
 
 Whether `C` means "confirmed and still transmitting" or "confirmed, isolated,
 terminal" decides whether the `I` dwell is the effective infectious period, and
@@ -3996,7 +4031,11 @@ model's `run_id`.
 metadata: the compiler emits it into the IR envelope's `docs` dictionary, which
 sits *outside* the `model` object that run identity is computed from. Rewording
 a docstring — correcting a citation, sharpening a caveat — therefore leaves
-`model_identity` unchanged and orphans no completed fit. Both rules exist so
+`model_identity` unchanged and orphans no completed fit. This holds for the
+file-header block that documents the whole model (§1) exactly as it does for a
+parameter's, which is why that block, and not `description = "…"`, is where a
+model's real description belongs: a description nobody dares correct is worse
+than none. Both rules exist so
 that the two edits a modeller most often wants to make *after* a long run, the
 reporting vocabulary and the scholarly record of why a prior is what it is, are
 free to make. What *does* re-key is anything the model computes with: a rate, a

@@ -145,6 +145,7 @@ let parse_unit (parse_diags : Diagnostics.t) ~(filename : string) (src : string)
 let decl_kind_name : Ast.declaration -> string = function
   | DTimeUnit _     -> "a `time_unit`"
   | DDescription _  -> "a `description`"
+  | DModelDoc _     -> "a model-level `#'` doc block"
   | DOrigin _       -> "an `origin`"
   | DDimensions _   -> "a `dimensions { }` block"
   | DCompartments _ -> "a `compartments { }` block"
@@ -188,9 +189,20 @@ let splice_quantities (diags : Diagnostics.t) ~(file : string)
         "the quantities file '%s' also declares %s; a file supplied to \
          --quantities may contain only a `quantities { }` block"
         file (decl_kind_name other))
-      ~hint:"a quantities file is a reporting vocabulary applied to a model \
-             that already exists — move the model declarations back into the \
-             model file"
+      (* A file-header `#'` block (gh#750) reaches here too, and the generic
+         "move the declarations back" hint would be wrong advice for it: the
+         author wrote a description, not a declaration. Point at the fix that
+         applies — the model's header documents the model; a vocabulary file
+         describes itself in an ordinary comment. *)
+      ~hint:(match other with
+        | Ast.DModelDoc _ ->
+          "a `#'` block at the top of a file documents the MODEL, and a \
+           vocabulary file is not one — describe the vocabulary with an \
+           ordinary `#` comment, or move the prose to the model's own header"
+        | _ ->
+          "a quantities file is a reporting vocabulary applied to a model \
+           that already exists — move the model declarations back into the \
+           model file")
       ();
     Error ()
   | None ->

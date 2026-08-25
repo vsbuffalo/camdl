@@ -619,6 +619,13 @@ type balance_decl = { bcomp: string; bexpr: expr }
 type declaration =
   | DTimeUnit    of unit_lit * loc
   | DDescription of string
+  (* The file-header `#'` block, which documents the MODEL rather than any one
+     declaration (gh#750): what it is, what it is fitted to, what it branches
+     from. Produced ONLY by the `file` rule, from the MODEL_DOC tokens the lexer
+     emits for `#'` lines that precede every declaration — so it can only ever
+     sit at the head of the list. Like every other doc it is non-semantic and
+     rides the IR envelope's `docs` dictionary, outside the hashed model. *)
+  | DModelDoc    of doc
   | DOrigin      of string
   | DDimensions  of dimensions_entry list
   | DCompartments of compartment_decl list

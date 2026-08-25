@@ -129,6 +129,46 @@
     match Hashtbl.find_opt kw_table s with
     | Some tok -> tok
     | None     -> IDENT s
+
+  (* gh#750. True when the lexeme being scanned sits in the file's leading
+     comment header — every line above it is blank or a `#` comment, so no
+     declaration has started yet. A `#'` line there documents the MODEL, and
+     lexes to MODEL_DOC instead of DOC.
+
+     Two tokens rather than one because a single DOC token makes `#'` followed
+     by `let` ambiguous between the model and the binding, which an LR(1)
+     grammar cannot resolve: the lexical split keeps `file` conflict-free.
+
+     The answer is read off the text rather than kept in a "have I emitted a
+     token yet" flag, because such a flag would have to be reset per
+     compilation unit and a process compiles several (a model plus its
+     `--quantities` vocabulary; the test suites parse many). Every lexbuf in
+     this compiler is `Lexing.from_string` over one whole file, so the bytes
+     before the lexeme are all in [lex_buffer] at their true offsets;
+     [lex_abs_pos <> 0] (a refilling channel buffer) falls back to DOC.
+
+     Cost is the length of the header, not of the file: the forward walk stops
+     at the first line that is neither blank nor a comment. *)
+  let in_file_header (lexbuf : Lexing.lexbuf) : bool =
+    lexbuf.Lexing.lex_abs_pos = 0 &&
+    let b    = lexbuf.Lexing.lex_buffer in
+    let stop = Lexing.lexeme_start lexbuf in
+    let rec eol j = if j >= stop then stop else if Bytes.get b j = '\n' then j + 1 else eol (j + 1) in
+    let rec line i =                       (* [i] is the first byte of a line *)
+      if i >= stop then true
+      else
+        let rec skip_ws j =
+          if j < stop && (match Bytes.get b j with ' ' | '\t' | '\r' -> true | _ -> false)
+          then skip_ws (j + 1) else j
+        in
+        let s = skip_ws i in
+        if s >= stop then true                          (* trailing blank run *)
+        else match Bytes.get b s with
+          | '\n' -> line (s + 1)                        (* blank line *)
+          | '#'  -> line (eol s)                        (* `#` or `#'` comment *)
+          | _    -> false                               (* a declaration began *)
+    in
+    line 0
 }
 
 let digit   = ['0'-'9']
@@ -156,12 +196,14 @@ rule token = parse
   | "#["              { HASH_LBRACKET }
   (* Doc comment: `#'` followed by the rest of the line is a roxygen-style
      documentation line that ATTACHES to the following declaration (it is not
-     discarded like an ordinary `#` comment). This rule MUST precede the comment
+     discarded like an ordinary `#` comment) — or, in the file's leading comment
+     header, to the model as a whole (see [in_file_header]). This rule MUST precede the comment
      rules below: a `#' …` line also matches the line-comment rule (its char
      class `[^'\n' '[']` includes `'`) to the same length, and ocamllex breaks a
      longest-match tie by source order — earliest wins. Placed after `#[` so the
      attribute opener still wins for `#[…]`. *)
-  | "#'" ([^'\n']* as body)   { DOC (String.trim body) }
+  | "#'" ([^'\n']* as body)   { let text = String.trim body in
+                                if in_file_header lexbuf then MODEL_DOC text else DOC text }
   | '#'                       { token lexbuf }   (* lone `#` (e.g. end of line) *)
   | '#' [^'\n' '['] [^'\n']*  { token lexbuf }   (* line comment, first char not `[` *)
 

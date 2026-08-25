@@ -1,4 +1,12 @@
-# Bare SIR: 3 compartments, 2 transitions (§23.1)
+#' Bare SIR: susceptible individuals become infectious on contact and recover
+#' to permanent immunity. Three compartments, two transitions, no demography
+#' and no observation model — the smallest model in the corpus, and the one
+#' every other golden is read against (§23.1).
+#' @base none — root model
+#' @adds nothing
+#' @changes nothing
+#' @ref Kermack and McKendrick 1927
+
 time_unit = 'days
 
 compartments { S, I, R }

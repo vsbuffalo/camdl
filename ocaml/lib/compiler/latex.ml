@@ -38,6 +38,24 @@ let split_cap_lower s =
 
 let escape s = String.concat "\\_" (String.split_on_char '_' s)
 
+(* LaTeX-escape free prose — the model's own `#'` block (gh#750), the only
+   author-written sentences the document emits. [escape] above covers names,
+   where `_` is the only hazard; prose can carry more.
+
+   `_ & % #` are escaped, because a model header names parameters
+   (`f_cfr_unret`) and cites papers (`Anderson & May 1991`) and an unescaped one
+   of those does not render badly, it fails the LaTeX run. `\ $ { }` pass
+   through, so a deliberate macro or a piece of inline math survives; the
+   casualty of that split is a subscript inside `$…$`, which comes out literal.
+   The header is prose, and that is the trade the prose case wants. *)
+let escape_prose s =
+  String.concat ""
+    (List.map
+       (fun c -> match c with
+          | '_' | '&' | '%' | '#' -> Printf.sprintf "\\%c" c
+          | c -> String.make 1 c)
+       (List.init (String.length s) (String.get s)))
+
 (* `@symbol` overrides, keyed by declared name (a compartment / parameter with a
    `#' @symbol …` block). Populated per render; empty means "auto only". *)
 let overrides : (string, string) Hashtbl.t = Hashtbl.create 16
@@ -332,6 +350,7 @@ type r_dynamics = { ry_state : string; ry_lhs : string; ry_rhs : string }
    `to_json` emits the web/display shape (`model.render.json`). *)
 type rendered_model = {
   rm_name : string;
+  rm_doc : doc option;                    (* the file-header `#'` block (gh#750) *)
   rm_mode : string;                       (* "indexed" | "expanded over …" *)
   rm_states : string list;                (* compartment names *)
   rm_dims : (string * string list) list;  (* dimension name, ordered levels *)
@@ -371,6 +390,8 @@ let render_model ?(name = "model") ?(expand = []) (decls : declaration list) : r
   let binder_var = function IBind (v, _) | IConsec (v, _, _) -> v | IComp v -> v in
   {
     rm_name = name;
+    rm_doc = List.fold_left
+        (fun acc d -> match d with DModelDoc doc -> Some doc | _ -> acc) None decls;
     rm_mode = mode;
     rm_states = List.map (fun (c : compartment_decl) -> c.cname) comps;
     rm_dims =
@@ -407,6 +428,21 @@ let to_document (rm : rendered_model) : string =
   p "\\usepackage[margin=1in]{geometry}\n\\pagestyle{empty}\n";
   p "\\begin{document}\n";
   p "\\begin{center}\\Large\\textbf{Model: \\texttt{%s}}\\end{center}\n\\vspace{0.5em}\n\n" (escape rm.rm_name);
+  (* The model's own `#'` block (gh#750): what this model IS, before any of its
+     mathematics. Each source line stays a line, so a `@base`/`@adds`/`@changes`
+     lineage header reads as the author laid it out. *)
+  (match rm.rm_doc with
+   | Some { d_text; d_ref; _ } ->
+     (match d_text with
+      | Some t ->
+        List.iter (fun line -> p "\\noindent %s\\par\n" (escape_prose line))
+          (String.split_on_char '\n' t);
+        p "\\medskip\n\n"
+      | None -> ());
+     (match d_ref with
+      | Some r -> p "\\noindent\\small %s\\normalsize\\par\\medskip\n\n" (escape_prose r)
+      | None -> ())
+   | None -> ());
   List.iter
     (fun (name, levels) ->
       p "\\noindent\\textbf{Dimension} $\\mathrm{%s} = \\{%s\\}$.\\par\\medskip\n" (escape name)
@@ -440,10 +476,21 @@ let to_document (rm : rendered_model) : string =
 let to_json (rm : rendered_model) : string =
   let str s : Yojson.Safe.t = `String s in
   let opt_desc = function Some d -> [ ("description", str d) ] | None -> [] in
+  (* The model's own `#'` block (gh#750), keyed exactly as in the IR envelope's
+     `docs.model` (`text` / `symbol` / `ref`) so a consumer reads one shape from
+     either source. Absent when the file opens with no `#'` block. *)
+  let doc_field = match rm.rm_doc with
+    | None -> []
+    | Some { d_text; d_symbol; d_ref } ->
+      let f k = function None -> [] | Some v -> [ (k, str v) ] in
+      match f "text" d_text @ f "symbol" d_symbol @ f "ref" d_ref with
+      | []  -> []
+      | kvs -> [ ("doc", `Assoc kvs) ]
+  in
   let j : Yojson.Safe.t =
     `Assoc
-      [ ("model", str rm.rm_name);
-        ("mode", str rm.rm_mode);
+      ([ ("model", str rm.rm_name) ] @ doc_field @
+      [ ("mode", str rm.rm_mode);
         ("states", `List (List.map str rm.rm_states));
         ( "dimensions",
           `List
@@ -475,7 +522,7 @@ let to_json (rm : rendered_model) : string =
             (List.map
                (fun d -> `Assoc [ ("state", str d.ry_state); ("tex", str (d.ry_lhs ^ " = " ^ d.ry_rhs)) ])
                rm.rm_dynamics) );
-      ]
+      ])
   in
   Yojson.Safe.pretty_to_string j
 

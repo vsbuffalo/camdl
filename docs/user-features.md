@@ -407,7 +407,10 @@ a fabricated time. Because they are derived reports, adding or changing a
 `quantities {}` block never re-keys a model's `run_id`. The same holds for `#'`
 documentation: it lands in the IR envelope's `docs` dictionary, outside the
 `model` object identity is computed from, so correcting a citation costs you no
-fits.
+fits. That includes the file-header `#'` block that documents the whole model —
+which is why a model's description belongs there rather than in
+`description = "…"`, a string inside the model that re-keys every fit when it
+changes.
 
 ---
 

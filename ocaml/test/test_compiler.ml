@@ -11578,6 +11578,153 @@ let test_doc_inspect_dimension () =
   Alcotest.(check bool) "dimension doc present in summary" true
     (contains_substring ~needle:"spatial patches under surveillance" out)
 
+(* ── Model-level doc comments (gh#750) ──────────────────────────────────────
+   A `#'` block in the file's leading comment header documents the MODEL — what
+   it is, what it is fitted to, what it branches from — rather than any one
+   declaration. Before this it was an E001 syntax error, so the most useful
+   metadata in a model file had nowhere to live but an ordinary `#` comment no
+   tool reads. *)
+
+let model_doc_src = {|
+# an ordinary comment above the block, which the header walk must see through
+#' Two-patch SEIR for cVDPV2, fitted to AFP and environmental surveillance.
+#' The second prose line joins the first into one paragraph.
+#' @base polio_national.camdl
+#' @adds a second patch
+#' @changes nothing else
+#' @ref Anderson & May 1991, ch. 6
+
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5] }
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+(* The same model with the header block deleted and NOTHING else changed — the
+   twin the IR-neutrality assertion below compares against. *)
+let model_doc_stripped_src = {|
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters { beta : rate in [0.001,1.0]  gamma : rate in [0.01,0.5] }
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 90 'days }
+|}
+
+let test_model_doc_reaches_ir () =
+  let m = compile_expect_ok model_doc_src in
+  match m.Ir.doc_index.Ir.di_model with
+  | None -> Alcotest.fail "the file-header #' block is missing from docs.model"
+  | Some (d : Ir.doc) ->
+    let text = match d.Ir.text with
+      | Some t -> t
+      | None -> Alcotest.fail "docs.model carries no prose" in
+    (* Prose lines join into one paragraph, as they do on a declaration. *)
+    Alcotest.(check bool) "prose is present and joined" true
+      (contains_substring ~needle:"Two-patch SEIR for cVDPV2, fitted to AFP and \
+                                   environmental surveillance. The second prose line" text);
+    (* @base/@adds/@changes are free text at model level — kept verbatim, each
+       on its own line, so a lineage header round-trips as written. They are
+       deliberately NOT validated: structured lineage is a separate change. *)
+    Alcotest.(check bool) "@base line kept verbatim" true
+      (List.mem "@base polio_national.camdl" (String.split_on_char '\n' text));
+    Alcotest.(check bool) "@adds line kept verbatim" true
+      (List.mem "@adds a second patch" (String.split_on_char '\n' text));
+    Alcotest.(check bool) "@changes line kept verbatim" true
+      (List.mem "@changes nothing else" (String.split_on_char '\n' text));
+    (* @ref keeps its slot, exactly as on a declaration. *)
+    Alcotest.(check (option string)) "@ref is split out of the prose"
+      (Some "Anderson & May 1991, ch. 6") d.Ir.reference
+
+let test_model_doc_absent_when_undocumented () =
+  (* Absent, not an empty block: a model that documents nothing must serialize
+     no `docs.model` key at all, or every undocumented golden gains noise. *)
+  let m = compile_expect_ok model_doc_stripped_src in
+  Alcotest.(check bool) "no docs.model on an undocumented model" true
+    (m.Ir.doc_index.Ir.di_model = None);
+  let json = Serde.model_to_string m in
+  Alcotest.(check bool) "and nothing named `docs` is emitted" false
+    (contains_substring ~needle:"\"docs\"" json)
+
+let test_model_doc_is_ir_neutral () =
+  (* THE property the slot rests on: the doc rides the envelope, so the hashed
+     model body is byte-identical to the undocumented twin's. If this fails,
+     correcting a typo in a model header orphans every fit of that model. *)
+  let documented = compile_expect_ok model_doc_src in
+  let stripped   = compile_expect_ok model_doc_stripped_src in
+  let body m = Yojson.Safe.to_string (Serde.model_to_json m) in
+  Alcotest.(check string) "model body is byte-identical with and without the header doc"
+    (body stripped) (body documented);
+  (* Non-vacuous: the envelope really did differ. *)
+  Alcotest.(check bool) "…while the envelope's docs did differ" true
+    (documented.Ir.doc_index.Ir.di_model <> None
+     && stripped.Ir.doc_index.Ir.di_model = None)
+
+let test_model_doc_round_trips_through_json () =
+  let m = compile_expect_ok model_doc_src in
+  let json = Serde.model_to_string m in
+  let back = match Serde.model_of_string json with
+    | Ok m2 -> m2
+    | Error e -> Alcotest.failf "envelope round-trip failed: %s" e in
+  Alcotest.(check (option string)) "prose survives compile → IR → parse"
+    (Option.bind m.Ir.doc_index.Ir.di_model (fun d -> d.Ir.text))
+    (Option.bind back.Ir.doc_index.Ir.di_model (fun d -> d.Ir.text));
+  Alcotest.(check (option string)) "@ref survives compile → IR → parse"
+    (Some "Anderson & May 1991, ch. 6")
+    (Option.bind back.Ir.doc_index.Ir.di_model (fun d -> d.Ir.reference))
+
+let test_model_doc_reaches_inspect () =
+  let out = doc_inspect_output ~src:model_doc_src `Summary in
+  Alcotest.(check bool) "model doc prose reaches inspect's summary" true
+    (contains_substring ~needle:"Two-patch SEIR for cVDPV2" out);
+  Alcotest.(check bool) "the lineage header reaches it too" true
+    (contains_substring ~needle:"@base polio_national.camdl" out);
+  Alcotest.(check bool) "@ref reaches it" true
+    (contains_substring ~needle:"Anderson & May 1991" out)
+
+let test_model_doc_only_in_the_header () =
+  (* The rule is positional: a `#'` block at top level AFTER a declaration has
+     started documents nothing and stays a hard error, exactly as before. It
+     must NOT be silently absorbed as a second model doc. *)
+  compile_expect_error_code ~code:"E001" ~contains:""
+    {|
+time_unit = 'days
+compartments { S, I, R }
+#' this block follows a declaration, so it documents nothing
+parameters { beta : rate in [0.001,1.0] }
+transitions { infection : S --> I @ beta * S }
+init { S = 1000  I = 10 }
+simulate { from = 0 'days to = 5 'days }
+|}
+
+let test_model_doc_tags_are_free_text_only_at_model_level () =
+  (* The open tag vocabulary is confined to the header. A `@base` on a
+     PARAMETER is still E111 — there the closed vocabulary earns its keep,
+     because a tag on a declaration reads as if it sets something. *)
+  compile_expect_error_code ~code:"E111" ~contains:"@symbol"
+    {|
+time_unit = 'days
+compartments { S, I }
+parameters {
+  #' transmission rate
+  #' @base something.camdl
+  beta : rate
+}
+transitions { infection : S --> I @ beta * S }
+init { S = 100 }
+simulate { from = 0 'days to = 5 'days }
+|}
+
 (* compartment / transition / observation docs reach the model's doc dictionary
    (the single envelope-level doc home), keyed by base declaration name. *)
 let test_doc_nonparam_reaches_ir () =
@@ -12560,6 +12707,22 @@ let () =
       Alcotest.test_case "inspect --let shows the let's doc prose"   `Quick test_doc_on_let_reaches_inspect;
       Alcotest.test_case "const let's doc reaches the parameter legend (gh#527)"
         `Quick test_const_let_doc_reaches_parameter_legend;
+    ];
+    "model_doc_comments_gh750", [
+      Alcotest.test_case "file-header #' block reaches docs.model"
+        `Quick test_model_doc_reaches_ir;
+      Alcotest.test_case "absent (not empty) when the file has no header block"
+        `Quick test_model_doc_absent_when_undocumented;
+      Alcotest.test_case "the hashed model body does not move"
+        `Quick test_model_doc_is_ir_neutral;
+      Alcotest.test_case "round-trips compile -> IR -> parse"
+        `Quick test_model_doc_round_trips_through_json;
+      Alcotest.test_case "inspect --summary shows it"
+        `Quick test_model_doc_reaches_inspect;
+      Alcotest.test_case "a #' block after a declaration is still E001"
+        `Quick test_model_doc_only_in_the_header;
+      Alcotest.test_case "an unknown @tag is still E111 on a declaration"
+        `Quick test_model_doc_tags_are_free_text_only_at_model_level;
     ];
     "quadratic_coupling_warning", [
       Alcotest.test_case "W104 on per-(p,q) transition" `Quick test_w104_perpair_warns;

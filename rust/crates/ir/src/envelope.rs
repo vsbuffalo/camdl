@@ -37,6 +37,17 @@ use crate::parameter::DocBlock;
 /// name against this index.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelDocs {
+    /// The model's own doc: the file-header `#'` block (gh#750) — what the
+    /// model is, what it is fitted to, what it branches from. Not a map, since
+    /// there is one model. `None` when the file opens with no `#'` block.
+    ///
+    /// This is the answer to "what is this model?" that does not require
+    /// opening the `.camdl`. It is deliberately envelope metadata rather than a
+    /// second `Model::description`: a description inside `Model` re-keys every
+    /// fit when corrected, and a description nobody dares correct is worse than
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<DocBlock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: BTreeMap<String, DocBlock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -53,7 +64,8 @@ pub struct ModelDocs {
 
 impl ModelDocs {
     pub fn is_empty(&self) -> bool {
-        self.parameters.is_empty()
+        self.model.is_none()
+            && self.parameters.is_empty()
             && self.compartments.is_empty()
             && self.transitions.is_empty()
             && self.observations.is_empty()
@@ -147,7 +159,101 @@ mod doc_dict_tests {
         assert!(json.contains("parameters"), "{json}");
         assert!(json.contains("quantities"), "{json}");
         assert!(!json.contains("compartments"), "{json}");
+        // The model's own slot is absent, not an empty block, when undocumented.
+        assert!(!json.contains("\"model\""), "{json}");
         let back: ModelDocs = serde_json::from_str(&json).unwrap();
         assert_eq!(docs, back);
+    }
+
+    /// gh#750: the model's own `#'` block. A multi-line header — prose plus the
+    /// `@base`/`@adds`/`@changes` lineage lines the compiler keeps as free text
+    /// — must survive the round trip with its line structure intact, because
+    /// that text IS the answer to "what is this model" for every consumer that
+    /// reads the sidecar instead of the `.camdl`.
+    #[test]
+    fn model_docs_carry_the_models_own_doc_block() {
+        let mut docs = ModelDocs::default();
+        assert!(docs.is_empty(), "a default dictionary documents nothing");
+        docs.model = Some(DocBlock {
+            text: Some(
+                "National SEIR with a facility-death delay.\n\
+                 @base bvd_national_twocfr.camdl\n\
+                 @adds nothing"
+                    .into(),
+            ),
+            symbol:    None,
+            reference: Some("Camacho et al. 2015".into()),
+        });
+        // A model doc alone makes the dictionary non-empty, so the envelope
+        // serializes `docs` for a model that documents only itself.
+        assert!(!docs.is_empty());
+        let json = serde_json::to_string(&docs).unwrap();
+        assert!(json.contains("\"model\""), "{json}");
+        assert!(!json.contains("parameters"), "{json}");
+        let back: ModelDocs = serde_json::from_str(&json).unwrap();
+        assert_eq!(docs, back);
+        let text = back.model.unwrap().text.unwrap();
+        assert_eq!(
+            text.lines().count(),
+            3,
+            "the lineage lines stay on their own lines: {text:?}"
+        );
+    }
+
+    /// The cross-language contract, on a committed golden the OCaml compiler
+    /// actually emitted: `ocaml/golden/sir_basic.camdl` opens with a `#'` header
+    /// block, so its golden IR must carry `docs.model` and Rust must read it
+    /// under that key. A key-name disagreement between the two sides is
+    /// otherwise silent — Rust would simply see `None` and every consumer would
+    /// show an undocumented model.
+    #[test]
+    fn the_ocaml_compiler_emits_the_model_doc_under_the_key_rust_reads() {
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../ocaml/golden/sir_basic.ir.json"
+        ))
+        .expect("read the sir_basic golden");
+        let env: IrEnvelope = serde_json::from_str(&json).expect("parse the golden envelope");
+        let doc = env.docs.model.expect("sir_basic's header block reached docs.model");
+        let text = doc.text.expect("the header block carries prose");
+        assert!(
+            text.contains("susceptible individuals become infectious"),
+            "prose survived the compile: {text:?}"
+        );
+        // The lineage lines are free text kept on their own lines (gh#750).
+        assert!(text.lines().any(|l| l.starts_with("@base ")), "{text:?}");
+        assert_eq!(doc.reference.as_deref(), Some("Kermack and McKendrick 1927"));
+        // The parameter docs of the same model are untouched by the new slot.
+        assert!(env.docs.parameters.contains_key("beta"));
+    }
+
+    /// A model-level doc is read off the envelope and leaves the model alone.
+    /// Run on a real committed model (`ir/golden/sir_basic.ir.json`) rather
+    /// than a stub, so it covers every field a model actually carries. The
+    /// run-identity half of the claim — that the hash does not move — is
+    /// asserted in `runid` (`ir_hash::tests`), which owns `model_ir_hash`.
+    #[test]
+    fn a_model_doc_parses_off_a_real_envelope_without_touching_the_model() {
+        let plain = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../ir/golden/sir_basic.ir.json"
+        ))
+        .expect("read sir_basic.ir.json");
+        // Splice a model-level doc into the envelope, leaving `model` untouched.
+        let documented = plain.replacen(
+            "\"model\":",
+            "\"docs\":{\"model\":{\"text\":\"what this model is\"}},\"model\":",
+            1,
+        );
+        assert_ne!(plain, documented, "the splice must actually change the JSON");
+        let a: IrEnvelope = serde_json::from_str(&plain).expect("parse plain");
+        let b: IrEnvelope = serde_json::from_str(&documented).expect("parse documented");
+        assert!(a.docs.model.is_none());
+        assert_eq!(
+            b.docs.model.and_then(|d| d.text).as_deref(),
+            Some("what this model is"),
+            "the doc parsed off the envelope"
+        );
+        assert_eq!(a.model, b.model, "the model itself is untouched");
     }
 }

@@ -681,6 +681,11 @@ type doc = {
    A downstream consumer (a sidecar, a plot, a report) labels any output column
    by joining its name against this index. *)
 type doc_index = {
+  (* The model's own doc — the file-header `#'` block (gh#750): what the model
+     is, what it is fitted to, what it branches from. [None] when the file has
+     no header block. Unlike [model.description], which sits in the hashed model
+     body, this is envelope metadata and can be corrected without re-keying. *)
+  di_model:        doc option;
   di_parameters:   (string * doc) list;
   di_compartments: (string * doc) list;
   di_transitions:  (string * doc) list;
@@ -690,6 +695,7 @@ type doc_index = {
 }
 
 let empty_doc_index = {
+  di_model = None;
   di_parameters = []; di_compartments = []; di_transitions = [];
   di_observations = []; di_dimensions = []; di_quantities = [];
 }

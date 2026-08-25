@@ -132,6 +132,13 @@
       oschedule = !sched; odoc = doc;
       oloc = Parser_errors.ast_loc_of ~sp ~ep }
 
+  (* A doc line whose first non-space character is `@` is a tag line; split it
+     into the tag word and the rest. `@ref` with nothing after it yields "". *)
+  let split_doc_tag (t : string) : string * string =
+    match String.index_opt t ' ' with
+    | Some i -> (String.sub t 0 i, String.trim (String.sub t i (String.length t - i)))
+    | None   -> (t, "")
+
   (* Split a `#'` doc block (the lines after each `#'`, trimmed) into prose
      description + recognized tags. A line whose first non-space character is
      `@` is a tag line: `@symbol <text>` / `@ref <text>`. Any other `@tag`
@@ -144,11 +151,7 @@
       let t = String.trim line in
       if t = "" then ()
       else if t.[0] = '@' then begin
-        let (tag, value) = match String.index_opt t ' ' with
-          | Some i -> (String.sub t 0 i,
-                       String.trim (String.sub t i (String.length t - i)))
-          | None   -> (t, "")
-        in
+        let (tag, value) = split_doc_tag t in
         match tag with
         | "@symbol" -> symbol := Some value
         | "@ref"    -> reference := Some value
@@ -163,6 +166,47 @@
     ) lines;
     { Ast.d_text = (match List.rev !texts with [] -> None
                                               | xs -> Some (String.concat " " xs));
+      d_symbol = !symbol;
+      d_ref = !reference }
+
+  (* The file-header block, which documents the model (gh#750). `@symbol` and
+     `@ref` behave exactly as they do on a declaration; every OTHER `@tag` line
+     is kept verbatim as free text instead of raising E111.
+
+     That is deliberate, and it is the one place the tag vocabulary is open. The
+     lineage header a model file opens with — `@base <parent>.camdl`, `@adds …`,
+     `@changes …` — is a house convention the compiler has no concept of: it
+     validates nothing about it and stores no structure for it (structured
+     lineage is deferred, gh#750), so it must not have an opinion about which
+     words may appear. E111's closed vocabulary stays where it earns its keep,
+     on a declaration, where `@default 0.3` reads as if it sets a value.
+
+     Consecutive prose lines join into one paragraph with a space, as everywhere
+     else; each free-tag line stays on its own line, so a lineage header
+     round-trips as the author laid it out. *)
+  let parse_model_doc_block (lines : string list) : Ast.doc =
+    let chunks = ref [] and prose = ref [] in
+    let symbol = ref None and reference = ref None in
+    let flush () =
+      match List.rev !prose with
+      | []  -> ()
+      | ws  -> chunks := String.concat " " ws :: !chunks; prose := []
+    in
+    List.iter (fun line ->
+      let t = String.trim line in
+      if t = "" then ()
+      else if t.[0] = '@' then begin
+        flush ();
+        match split_doc_tag t with
+        | ("@symbol", value) -> symbol := Some value
+        | ("@ref",    value) -> reference := Some value
+        | _                  -> chunks := t :: !chunks
+      end
+      else prose := t :: !prose
+    ) lines;
+    flush ();
+    { Ast.d_text = (match List.rev !chunks with [] -> None
+                                              | xs -> Some (String.concat "\n" xs));
       d_symbol = !symbol;
       d_ref = !reference }
 
@@ -236,6 +280,7 @@
 %token <string> STRING
 %token <string> UNIT_IDENT   (* 'days, 'per_day, etc. *)
 %token <string> DOC          (* #' doc-comment line (text after #', trimmed) *)
+%token <string> MODEL_DOC    (* #' line in the file header — documents the model (gh#750) *)
 
 (* ── Punctuation ────────────────────────────────────────────────────────── *)
 %token ARROW       (* --> *)
@@ -287,8 +332,16 @@
 
 (* ── Top-level ──────────────────────────────────────────────────────────── *)
 
+(* A file may open with a `#'` block that documents the model itself (gh#750):
+   the lexer marks those lines MODEL_DOC precisely when no declaration has
+   started yet, so this is the only rule that can produce a [DModelDoc], and it
+   always lands at the head of the list. A `#'` block anywhere else at top level
+   is still a stray doc and still an E001 — it documents nothing. *)
 file:
-  | ds = declaration* EOF { ds }
+  | md = list(MODEL_DOC) ds = declaration* EOF
+      { match md with
+        | []    -> ds
+        | lines -> Ast.DModelDoc (parse_model_doc_block lines) :: ds }
 
 declaration:
   | TIME_UNIT EQ u = unit_lit

@@ -1432,15 +1432,18 @@ let doc_of_json j =
   let s key = match member_opt key j with Some (`String v) -> Some v | _ -> None in
   { text = s "text"; symbol = s "symbol"; reference = s "ref" }
 
-(* The doc dictionary, serialized as `{ category: { name: doc, … }, … }`.
-   Empty categories are omitted; an entirely-empty index serializes to `{}`,
-   and the envelope omits the `docs` key altogether (see envelope_to_json). *)
+(* The doc dictionary, serialized as `{ model: doc, category: { name: doc, … }, … }`.
+   The model's own doc (the file-header block, gh#750) is a bare doc, not a
+   name-keyed map — there is one model. Empty categories are omitted; an
+   entirely-empty index serializes to `{}`, and the envelope omits the `docs`
+   key altogether (see envelope_to_json). *)
 let doc_index_to_json (di : doc_index) : Yojson.Safe.t =
   let category name entries =
     if entries = [] then []
     else [(name, obj (List.map (fun (k, d) -> (k, doc_to_json d)) entries))]
   in
   obj (
+    (match di.di_model with None -> [] | Some d -> [("model", doc_to_json d)]) @
     category "parameters"   di.di_parameters @
     category "compartments" di.di_compartments @
     category "transitions"  di.di_transitions @
@@ -1453,7 +1456,10 @@ let doc_index_of_json j : doc_index =
     | Some (`Assoc kvs) -> List.map (fun (k, v) -> (k, doc_of_json v)) kvs
     | _ -> []
   in
-  { di_parameters   = category "parameters";
+  { di_model        = (match member_opt "model" j with
+                       | Some (`Assoc _ as d) -> Some (doc_of_json d)
+                       | _ -> None);
+    di_parameters   = category "parameters";
     di_compartments = category "compartments";
     di_transitions  = category "transitions";
     di_observations = category "observations";
@@ -1461,7 +1467,8 @@ let doc_index_of_json j : doc_index =
     di_quantities   = category "quantities"; }
 
 let doc_index_is_empty (di : doc_index) : bool =
-  di.di_parameters = [] && di.di_compartments = [] && di.di_transitions = []
+  di.di_model = None
+  && di.di_parameters = [] && di.di_compartments = [] && di.di_transitions = []
   && di.di_observations = [] && di.di_dimensions = [] && di.di_quantities = []
 
 let parameter_to_json (p : parameter) : Yojson.Safe.t =

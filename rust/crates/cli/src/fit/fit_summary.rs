@@ -333,12 +333,16 @@ fn load_calendar_context(fit_dir: &Path) -> CalendarContext {
     }
 }
 
-/// Documented parameters (name + `#'` doc block) recovered from the fit's
-/// model IR, for the parameter legend at the top of the summary. Uses the same
-/// model-path recovery as [`load_calendar_context`]. Empty when the model can't
-/// be located or no parameter carries a `#'` doc — so undocumented fits show no
-/// legend.
-fn load_documented_params(fit_dir: &Path) -> Vec<(String, ir::parameter::DocBlock)> {
+/// The fit's model `#'` documentation dictionary — the model's own header block
+/// and its per-parameter docs, for the two legends at the top of the summary.
+/// Uses the same model-path recovery as [`load_calendar_context`]. Empty when
+/// the model can't be located or documents nothing, so an undocumented fit
+/// prints no legend at all.
+///
+/// One loader for both, because they come from one compile: asking twice would
+/// shell out to `camdlc` twice and let the two halves disagree about which
+/// model they describe.
+fn load_model_docs_for_fit(fit_dir: &Path) -> ir::ModelDocs {
     let model_path = FitView::read(fit_dir)
         .map(|v| v.model)
         .filter(|m| !m.is_empty())
@@ -347,14 +351,11 @@ fn load_documented_params(fit_dir: &Path) -> Vec<(String, ir::parameter::DocBloc
                 .into_iter()
                 .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
         });
-    let Some(model_path) = model_path else { return Vec::new() };
-    match crate::util::load_model_docs(&model_path) {
-        // The envelope dictionary keys by base parameter name (`R0`, not
-        // `R0_urban`), so a stratified family shows once — `BTreeMap` order is
-        // deterministic.
-        Ok(docs) => docs.parameters.into_iter().collect(),
-        Err(_) => Vec::new(),
-    }
+    let Some(model_path) = model_path else { return ir::ModelDocs::default() };
+    // The envelope dictionary keys by base parameter name (`R0`, not
+    // `R0_urban`), so a stratified family shows once — `BTreeMap` order is
+    // deterministic.
+    crate::util::load_model_docs(&model_path).unwrap_or_default()
 }
 
 /// One resolved fit-stage to render: stage name, on-disk directory,
@@ -454,10 +455,29 @@ fn format_text(
 
     print!("{}", fmt.fit_header(dir));
 
+    let docs = load_model_docs_for_fit(Path::new(dir));
+
+    // What this model IS, from its file-header `#'` block (gh#750) — so the
+    // first question a summary raises ("a fit of what?") is answered without
+    // opening the `.camdl`. One source line per output line, so a
+    // `@base`/`@adds`/`@changes` lineage header stays readable.
+    if let Some(d) = &docs.model {
+        if let Some(t) = &d.text {
+            println!();
+            for line in t.lines() {
+                println!("  {}", line);
+            }
+        }
+        if let Some(r) = &d.reference {
+            println!("  [{}]", r);
+        }
+    }
+
     // Parameter legend from the model's `#'` docs (symbol — description [ref]).
     // Shown only when the model documents at least one parameter, so it adds no
     // noise to undocumented fits.
-    let documented = load_documented_params(Path::new(dir));
+    let documented: Vec<(String, ir::parameter::DocBlock)> =
+        docs.parameters.into_iter().collect();
     if !documented.is_empty() {
         println!("\n  parameters");
         for (name, d) in &documented {

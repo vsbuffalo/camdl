@@ -26,6 +26,11 @@ type empty_reduction = {
 type context = {
   mutable time_unit       : unit_lit;
   mutable description     : string option;
+  (* The file-header `#'` block documenting the model (gh#750). Distinct from
+     [description]: that is a short string INSIDE the hashed model, so editing
+     it re-keys every fit; this rides the IR envelope's `docs` dictionary and is
+     free to correct. *)
+  mutable model_doc       : Ast.doc option;
   mutable comp_decls      : compartment_decl list;
   mutable param_decls     : param_decl list;
   mutable let_bindings    : let_binding list;
@@ -143,6 +148,7 @@ let is_indexed_leaf ~base name =
 let empty_context ?(source_dir = "") ?(filename = "<input>") () = {
   time_unit        = Days;
   description      = None;
+  model_doc        = None;
   comp_decls       = [];
   param_decls      = [];
   let_bindings     = [];
@@ -916,6 +922,7 @@ let collect_declarations ctx decls =
     | DTimeUnit (u, l)   ->
       ctx.time_unit <- checked_time_unit ctx ~loc:(diag_loc_of_ast_ctx ctx l) u
     | DDescription s     -> ctx.description <- Some s
+    | DModelDoc d        -> ctx.model_doc <- Some d
     | DOrigin s          -> ctx.origin <- Some s
     | DDimensions es     -> ctx.dim_decls <- List.rev_append es ctx.dim_decls
     | DCompartments cs   ->
@@ -5728,9 +5735,10 @@ let let_parameter_kind (lb : let_binding) : param_type option =
   | Some pk when is_const_expr lb.lbody -> Some pk
   | _ -> None
 
-(* Fold every source declaration's `#'` doc into the model's doc dictionary,
-   keyed by base declaration name (matching what an author wrote and the logical
-   names ObsSchema groups by). Only documented declarations appear. *)
+(* Fold the file-header `#'` block and every source declaration's `#'` doc into
+   the model's doc dictionary, keyed by base declaration name (matching what an
+   author wrote and the logical names ObsSchema groups by). Only documented
+   declarations appear; `di_model` is None for a file with no header block. *)
 let build_doc_index ctx : Ir.doc_index =
   let collect get_name get_doc decls =
     List.filter_map (fun d ->
@@ -5738,7 +5746,8 @@ let build_doc_index ctx : Ir.doc_index =
       | Some doc -> Some (get_name d, doc)
       | None     -> None) decls
   in
-  { Ir.di_parameters =
+  { Ir.di_model = ir_doc_of_ast ctx.model_doc;
+    Ir.di_parameters =
       collect (function Ast.PScalar s -> s.pname | Ast.PIndexed i -> i.pname)
               (function Ast.PScalar s -> s.pdoc  | Ast.PIndexed i -> i.pdoc)
               ctx.param_decls

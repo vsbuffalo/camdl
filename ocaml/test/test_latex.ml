@@ -360,6 +360,53 @@ let test_graph_json_shape () =
   (* birth's null endpoint is a JSON null, not the string "null". *)
   has ~doc:"null endpoint" "\"from\": null" out
 
+(* ── The model's own `#'` block (gh#750) ──────────────────────────────────
+   A file-header `#'` block says what the model IS. `camdlc render` is where a
+   reader meets the model, so both projections carry it — otherwise the
+   rendered document states what the model computes and never what it is. *)
+
+let sir_model_doc = {|
+#' Bare SIR, fitted to weekly reported cases.
+#' @base none — root model
+#' @ref Anderson & May 1991, ch. 6
+
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  beta  : rate in [0.001, 2.0]
+  gamma : rate in [0.001, 1.0]
+}
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days to = 60 'days }
+|}
+
+let test_model_doc_in_document () =
+  let out = render sir_model_doc in
+  has ~doc:"model doc prose" "Bare SIR, fitted to weekly reported cases." out;
+  (* Each source line stays a line, so a lineage header reads as written. *)
+  has ~doc:"lineage line on its own line" "\\noindent @base none" out;
+  (* `&` is fatal in LaTeX outside a table; prose is escaped for it. *)
+  has ~doc:"escaped ampersand in the citation" "Anderson \\& May 1991" out
+
+let test_model_doc_in_json () =
+  let out = render_json sir_model_doc in
+  has ~doc:"doc object" "\"doc\":" out;
+  has ~doc:"prose" "Bare SIR, fitted to weekly reported cases." out;
+  has ~doc:"ref field" "\"ref\": \"Anderson & May 1991, ch. 6\"" out
+
+let test_no_model_doc_key_when_undocumented () =
+  (* Negative control: an undocumented model gains no `doc` key at all — the
+     same absent-not-empty rule the IR envelope follows. `sir_symbol` carries
+     `#'` blocks on its PARAMETERS, so this also pins that a declaration doc is
+     not mistaken for the model's. *)
+  let out = render_json sir_symbol in
+  has_not ~doc:"doc object" "\"doc\":" out
+
 let () =
   Alcotest.run "latex"
     [ ( "scaffold",
@@ -385,6 +432,13 @@ let () =
       ( "json",
         [ Alcotest.test_case "to_json: split transitions + glossary + escaping"
             `Quick test_json_shape ] );
+      ( "model_doc",
+        [ Alcotest.test_case "to_document: model doc + escaped prose" `Quick
+            test_model_doc_in_document;
+          Alcotest.test_case "to_json: model doc under `doc`" `Quick
+            test_model_doc_in_json;
+          Alcotest.test_case "no `doc` key when undocumented" `Quick
+            test_no_model_doc_key_when_undocumented ] );
       ( "graph",
         [ Alcotest.test_case "flow graph: nodes/edges of a bare SIR" `Quick
             test_graph_basic;

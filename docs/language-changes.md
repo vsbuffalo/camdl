@@ -13,6 +13,50 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-08-25 — a `#'` block at the top of a file documents the MODEL
+
+**What.** A `#'` doc comment had to attach to a declaration; at file scope it
+was a syntax error (`E001`). A `#'` block in the file's leading comment header —
+every line above it blank or a comment, so no declaration has started — now
+documents the model itself:
+
+```
+#' National SEIR with a facility-death delay: cases and deaths come from one
+#' confirmation flow, deaths lagged through an isolation compartment.
+#' @base bvd_national_twocfr.camdl
+#' @adds nothing
+#' @changes f_cfr_unret becomes free with a beta(2,2) prior
+
+time_unit = 'days
+```
+
+It reaches `camdlc inspect`, both `camdl render` projections (`doc` in the JSON
+shape), the `fit.meta.json` sidecar, and `camdl fit summary`.
+
+Inside this block, and only here, the tag vocabulary is **open**: `@symbol` and
+`@ref` behave as they do on a declaration, and any other `@tag` line is kept
+verbatim as free text. `@base` / `@adds` / `@changes` are a convention for
+recording where a variant came from; nothing validates them, and no check is
+made that the parent file exists. On a declaration the vocabulary stays closed
+(`@default 0.3` is still `E111`).
+
+**Migration.** None required — this only accepts what used to be rejected. A
+model header written as ordinary `#` comments keeps working; promoting it to
+`#'` is what makes it readable by every tool. Two things to know:
+
+- A `#'` block anywhere else at top level is still `E001`. The rule is
+  positional, not "anywhere before the first declaration you like".
+- In a file whose first declaration is a top-level `let`, the header block
+  documents the model and that `let` is undocumented. Put the `let` after
+  another declaration if you want a doc on it.
+
+**Not `description`.** `description = "…"` is a string inside the model, so it
+is part of run identity and editing it re-keys every fit. The `#'` block rides
+the IR envelope, outside the hashed model, so correcting it costs no fits — it
+is where a model's real description belongs.
+
+---
+
 ## 2026-08-24 — `init { }` accepts `~`: an initial condition may be DRAWN
 
 **What.** `init { }` used to accept only `compartment = expr`. It now also
