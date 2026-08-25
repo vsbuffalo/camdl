@@ -83,13 +83,237 @@ fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
     x
 }
 
-/// Stateful RNG wrapping ChaCha8. Deterministic given seed.
+/// The Stirling-series tail correction `ln(k!) − ln(√(2πk)·(k/e)^k)`, used by
+/// [`btrs_binomial`]'s final acceptance test.
 ///
+/// Exact tabulated values below `k = 10`, where the asymptotic series has not
+/// yet converged; the series above. Transcribed from TensorFlow's
+/// `random_binomial_op.cc` (`stirling_approx_tail`), Apache-2.0 — the same
+/// license as this project. See [`btrs_binomial`] for the full attribution.
+fn stirling_approx_tail(k: f64) -> f64 {
+    debug_assert!(k >= 0.0 && k.fract() == 0.0, "tail wants a non-negative integer, got {k}");
+    /// `ln(k!) − Stirling(k)` for k = 0..=9.
+    const TAIL: [f64; 10] = [
+        0.081_061_466_795_327_2,
+        0.041_340_695_955_409_2,
+        0.027_677_925_684_998_3,
+        0.020_790_672_103_765_09,
+        0.016_644_691_189_821_1,
+        0.013_876_128_823_070_7,
+        0.011_896_709_945_891_7,
+        0.010_411_265_261_972_0,
+        0.009_255_462_182_712_73,
+        0.008_330_563_433_362_87,
+    ];
+    if k <= 9.0 {
+        return TAIL[k as usize];
+    }
+    let kp1sq = (k + 1.0) * (k + 1.0);
+    (1.0 / 12.0 - (1.0 / 360.0 - 1.0 / 1260.0 / kp1sq) / kp1sq) / (k + 1.0)
+}
+
+/// The BTRS hat: every constant derived from `(n, p)`, plus the three functions
+/// the sampler and its correctness proof must agree on.
+///
+/// This is a struct rather than inline arithmetic for one reason: the
+/// domination proof in `btrs_tests` has to evaluate **the shipped expressions**.
+/// A test that re-derived `log_bound` from the paper would be checking the
+/// transcription against itself and would pass on a typo in either copy.
+struct BtrsHat {
+    count: f64,
+    b: f64,
+    a: f64,
+    c: f64,
+    v_r: f64,
+    r: f64,
+    alpha: f64,
+    m: f64,
+}
+
+impl BtrsHat {
+    fn new(n: u64, p: f64) -> Self {
+        let count = n as f64;
+        let stddev = (count * p * (1.0 - p)).sqrt();
+        let b = 1.15 + 2.53 * stddev;
+        Self {
+            count,
+            b,
+            a: -0.0873 + 0.0248 * b + 0.01 * p,
+            c: count * p + 0.5,
+            v_r: 0.92 - 4.2 / b,
+            r: p / (1.0 - p),
+            alpha: (2.83 + 5.1 / b) * stddev,
+            m: ((count + 1.0) * p).floor(),
+        }
+    }
+
+    /// The candidate value for a given `u`, via the hat's inverse transform.
+    #[inline]
+    fn k_of(&self, u: f64, us: f64) -> f64 {
+        ((2.0 * self.a / us + self.b) * u + self.c).floor()
+    }
+
+    /// `log` of the density-to-hat ratio at `k`. The slow acceptance test.
+    #[inline]
+    fn log_bound(&self, k: f64) -> f64 {
+        (self.m + 0.5) * ((self.m + 1.0) / (self.r * (self.count - self.m + 1.0))).ln()
+            + (self.count + 1.0) * ((self.count - self.m + 1.0) / (self.count - k + 1.0)).ln()
+            + (k + 0.5) * (self.r * (self.count - k + 1.0) / (k + 1.0)).ln()
+            + stirling_approx_tail(self.m)
+            + stirling_approx_tail(self.count - self.m)
+            - stirling_approx_tail(k)
+            - stirling_approx_tail(self.count - k)
+    }
+
+    /// The slow test, in the reference's own algebraic arrangement: accept iff
+    /// `ln(v·α / (a/us² + b)) ≤ log_bound(k)`.
+    #[inline]
+    fn slow_accepts(&self, v: f64, us: f64, k: f64) -> bool {
+        (v * self.alpha / (self.a / (us * us) + self.b)).ln() <= self.log_bound(k)
+    }
+
+    /// The acceptance ratio `V(u)`: the slow test accepts exactly when
+    /// `v ≤ V(u)`. **This is what BTRS's exactness is.** The scheme is a valid
+    /// rejection sampler iff `V ≤ 1` everywhere (the hat dominates the pmf), and
+    /// the squeeze is valid iff `V ≥ v_r` wherever the squeeze can fire. Both are
+    /// asserted deterministically in `btrs_tests::hat_dominates_and_squeeze_is_valid`.
+    #[cfg(test)]
+    fn accept_ratio(&self, us: f64, k: f64) -> f64 {
+        self.log_bound(k).exp() * (self.a / (us * us) + self.b) / self.alpha
+    }
+}
+
+/// Binomial draw by **transformed rejection with squeeze** (BTRS) — Hörmann
+/// (1993), *The generation of binomial random variates*, J. Statist. Comput.
+/// Simul. 46(1–2):101–110.
+///
+/// A rejection sampler: the accepted values are distributed `Binomial(n, p)` up
+/// to the floating-point accuracy of the acceptance test, whose density is
+/// evaluated through [`stirling_approx_tail`]'s table-plus-truncated-series
+/// (~1e-15 here). That is the same class of approximation BTPE's own `stirling()`
+/// makes, so it is not a regression — but it is why this doc says "up to
+/// floating point" and not "exact". A rigorous `O(n·ε)` total-variation bound for
+/// transformed-rejection binomial samplers is given by *Assessing the Quality of
+/// Binomial Samplers* (arXiv 2506.12061, Thm 5.1); it is loose (~1e-5 at
+/// n = 6.3e6) and the measured error is at machine precision, but the shape —
+/// growing in `n` — is real, because `log_bound` is a cancellation-prone sum of
+/// `O(k−m)` terms.
+///
+/// **Why this exists.** The BTPE branch it is measured against (`rand_distr`
+/// 0.4.3, after Kachitvichyanukul & Schmeiser 1988) was profiled at **38.9% of a
+/// PGAS fit** on the province model — half the run once the RNG bytes it consumes
+/// are counted (`docs/dev/notes/2026-08-24-pgas-binomial-sampler-is-half-the-fit.md`).
+/// BTPE pays ~10 setup constants, two `Uniform` constructions, and — the real
+/// cost — a walk from the mode to the sampled value with one f64 division per
+/// step, which fires on almost every draw. BTRS uses a single transformed
+/// rejection hat, so its setup is ~6 constants and its dominant path is a
+/// squeeze that accepts with no logarithm and no division chain.
+///
+/// **Contract.** `p` must already be the flipped (`≤ 0.5`) probability and
+/// `n · p ≥ BINV_THRESHOLD`. Both matter for correctness, not just speed: the
+/// hat's domination margin is only ~1.6% at `n·p = 10` and goes NEGATIVE below
+/// `n·p ≈ 7`, so the routing predicate in [`StatefulRng::binomial`] is what keeps
+/// this sampler valid, and flipping first is what keeps `k > n` unreachable at
+/// `n > 2^53` (where `n as f64` rounds up and `n − k` could underflow `u64`).
+///
+/// **Source.** Transcribed from TensorFlow's `random_binomial_op.cc` (`btrs`),
+/// Apache-2.0 — the same license as this project. This is deliberately the
+/// **TensorFlow variant**, not the paper's: TensorFlow Probability's sibling
+/// implementation notes that it "deviates from Hormann's BTRS algorithm, as there
+/// is a log missing". The variant transcribed here is the one whose hat is
+/// verified to dominate by `hat_dominates_and_squeeze_is_valid`; the paper's is
+/// not verified here, so do not "restore" the missing log without re-running that
+/// proof.
+fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
+    debug_assert!(p > 0.0 && p <= 0.5, "btrs wants the flipped probability, got {p}");
+    debug_assert!((n as f64) * p >= BINV_THRESHOLD, "btrs called below its regime");
+
+    let h = BtrsHat::new(n, p);
+
+    loop {
+        // `u ∈ [−0.5, 0.5)`, so `us ∈ (0, 0.5]`. At `u == −0.5` exactly (one draw
+        // in 2^53) `us == 0`, `2a/us` is `+∞` and `k` is `−∞` — which the support
+        // check below rejects in f64, BEFORE any integer cast. That order is
+        // load-bearing: `(−∞) as u64` saturates to 0 in Rust, so casting first
+        // would silently return a zero count instead of redrawing.
+        let u: f64 = rng.gen::<f64>() - 0.5;
+        let v: f64 = rng.gen();
+        let us = 0.5 - u.abs();
+        let k = h.k_of(u, us);
+
+        // DELIBERATE DEVIATION from the reference, which does this check only
+        // AFTER the squeeze and so returns `k` from the squeeze unchecked, on the
+        // strength of the hat's in-support guarantee. Hoisting it is a no-op
+        // wherever that guarantee holds — `hat_dominates_and_squeeze_is_valid`
+        // asserts it holds across the routed domain — and where it might not, this
+        // redraws instead of handing the caller a `k > n` that the `p > 0.5`
+        // reflection would turn into a `u64` underflow of ~1.8e19.
+        if k < 0.0 || k > h.count {
+            continue;
+        }
+        let k_int = k as u64;
+        debug_assert!(k_int <= n, "k={k} escaped the f64 support check at n={n}");
+
+        // The squeeze: where the hat is tight enough to accept without touching
+        // the density. This is the branch BTRS wins on.
+        if us >= 0.07 && v <= h.v_r {
+            return k_int;
+        }
+        if h.slow_accepts(v, us, k) {
+            return k_int;
+        }
+    }
+}
+
+/// Stateful RNG wrapping ChaCha8. Deterministic given seed.
 /// `Clone` (ChaCha8Rng is `Clone`) is the start-from-state seam's RNG-capture
 /// mechanism (gh#322): a head run clones out its final RNG so a resumed tail can
 /// restore the exact stream position and reproduce a byte-identical continuation.
 #[derive(Clone)]
 pub struct StatefulRng(ChaCha8Rng);
+
+/// Which accept/reject scheme [`StatefulRng::binomial`] uses above
+/// `BINV_THRESHOLD`. Below it, BINV is used regardless — that branch is not
+/// part of this choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinomialAlgorithm {
+    /// `rand_distr` 0.4.3's BTPE (Kachitvichyanukul & Schmeiser 1988). The
+    /// production default, and the oracle the BTRS suite is calibrated against.
+    Btpe,
+    /// [`btrs_binomial`] — Hörmann (1993). Faster; not bit-compatible with
+    /// `Btpe` (a different rejection scheme accepts different draws from the
+    /// same stream), so selecting it changes results and is therefore a
+    /// deliberate, identity-bearing choice. gh#747.
+    Btrs,
+}
+
+thread_local! {
+    /// Per-thread test/bench override of the sampler. `None` → [`DEFAULT_BINOMIAL`].
+    static BINOMIAL_OVERRIDE: std::cell::Cell<Option<BinomialAlgorithm>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The production choice. BTRS is not selectable outside a test or bench yet:
+/// how the user-facing knob should be spelled — a typed CLI/TOML input versus an
+/// environment variable — is an open decision on gh#747, and an environment
+/// variable that changed draws without entering the run address would serve one
+/// sampler's posterior from the other's cache leaf. Until that lands, the
+/// thread-local override below is the only door, so no stored run can disagree
+/// with its own address.
+const DEFAULT_BINOMIAL: BinomialAlgorithm = BinomialAlgorithm::Btpe;
+
+fn binomial_algorithm() -> BinomialAlgorithm {
+    BINOMIAL_OVERRIDE.with(|c| c.get()).unwrap_or(DEFAULT_BINOMIAL)
+}
+
+/// Test/bench hook: force this thread's binomial sampler. Mirrors
+/// [`crate::resolved_expr::set_binding_cache_disabled`] — a per-thread override
+/// exists so both arms can be compared **in one process**, which is what makes
+/// an interleaved A/B possible and keeps a two-process timing comparison (and
+/// its between-process noise) out of the measurement.
+pub fn set_binomial_algorithm(algo: BinomialAlgorithm) {
+    BINOMIAL_OVERRIDE.with(|c| c.set(Some(algo)));
+}
 
 impl StatefulRng {
     /// Access the underlying RNG for use with rand_distr distributions.
@@ -298,12 +522,23 @@ impl StatefulRng {
         // BTPE branch (n*p >= 10): a bounded accept/reject scheme, delegated
         // unchanged. `Binomial::new` re-derives the flip internally, so this
         // is the same call the pre-gh#510 code made.
-        match Binomial::new(n, p.clamp(0.0, 1.0)) {
-            Ok(b) => b.sample(&mut self.0),
-            Err(_) => {
-                crate::eval_stats::inc_binomial_fallback();
-                if p > 0.5 { n } else { 0 }
+        match binomial_algorithm() {
+            // BTRS takes the FLIPPED probability and un-flips, so it only ever
+            // sees `p <= 0.5` with `n*p >= BINV_THRESHOLD` — the regime its hat
+            // is derived for. BTPE keeps the original `p`: `rand_distr` does its
+            // own flipping internally, and routing around that would change the
+            // draw on the production path.
+            BinomialAlgorithm::Btrs => {
+                let k = btrs_binomial(n, p_flipped, &mut self.0);
+                if p_flipped != p { n - k } else { k }
             }
+            BinomialAlgorithm::Btpe => match Binomial::new(n, p.clamp(0.0, 1.0)) {
+                Ok(b) => b.sample(&mut self.0),
+                Err(_) => {
+                    crate::eval_stats::inc_binomial_fallback();
+                    if p > 0.5 { n } else { 0 }
+                }
+            },
         }
     }
 
@@ -587,5 +822,387 @@ mod binomial_termination_tests {
         let hi_mean = hi.iter().sum::<u64>() as f64 / hi.len() as f64;
         assert!((hi_mean - 18.0).abs() < 0.5,
             "mean {hi_mean} is not near n*p = 18 — the p>0.5 flip is wrong");
+    }
+}
+
+#[cfg(test)]
+mod btrs_tests {
+    use super::*;
+    use rand_chacha::ChaCha8Rng;
+
+    /// Exact binomial pmf in log space, so a 6.3e6-trial cell is as safe as a
+    /// 20-trial one (`(1-p)^n` underflows long before `lgamma` does).
+    fn log_pmf(n: u64, k: u64, p: f64) -> f64 {
+        let (nf, kf) = (n as f64, k as f64);
+        numerics::lgamma(nf + 1.0) - numerics::lgamma(kf + 1.0) - numerics::lgamma(nf - kf + 1.0)
+            + kf * p.ln()
+            + (nf - kf) * (1.0 - p).ln()
+    }
+
+    /// Pearson χ² of `draws` against the exact `Binomial(n, p)` pmf, with the
+    /// low and high tails POOLED until every cell expects ≥ 5 — the standard
+    /// validity condition, without which the statistic is not χ²-distributed
+    /// and the test would be measuring its own binning.
+    ///
+    /// Returns `(chi2, degrees_of_freedom)`.
+    fn chi_square(draws: &[u64], n: u64, p: f64) -> (f64, usize) {
+        let total = draws.len() as f64;
+        let expected: Vec<f64> =
+            (0..=n).map(|k| total * log_pmf(n, k, p).exp()).collect();
+        let mut observed = vec![0.0f64; (n + 1) as usize];
+        for &d in draws {
+            observed[d as usize] += 1.0;
+        }
+        // Walk up from k=0 pooling into the first viable cell, and down from k=n
+        // likewise; the interior keeps its own cells.
+        let mut lo = 0usize;
+        let mut acc = 0.0;
+        while lo <= n as usize && acc + expected[lo] < 5.0 {
+            acc += expected[lo];
+            lo += 1;
+        }
+        let mut hi = n as usize;
+        let mut acc_hi = 0.0;
+        while hi > lo && acc_hi + expected[hi] < 5.0 {
+            acc_hi += expected[hi];
+            hi -= 1;
+        }
+        let mut cells: Vec<(f64, f64)> = Vec::new();
+        let (mut o_lo, mut e_lo) = (0.0, 0.0);
+        for k in 0..lo {
+            o_lo += observed[k];
+            e_lo += expected[k];
+        }
+        let (mut o_hi, mut e_hi) = (0.0, 0.0);
+        for k in (hi + 1)..=(n as usize) {
+            o_hi += observed[k];
+            e_hi += expected[k];
+        }
+        if e_lo > 0.0 { cells.push((o_lo + observed[lo], e_lo + expected[lo])); }
+        let start = if e_lo > 0.0 { lo + 1 } else { lo };
+        for k in start..=hi {
+            cells.push((observed[k], expected[k]));
+        }
+        if e_hi > 0.0 {
+            let last = cells.len() - 1;
+            cells[last].0 += o_hi;
+            cells[last].1 += e_hi;
+        }
+        let chi2: f64 = cells.iter().map(|&(o, e)| (o - e) * (o - e) / e).sum();
+        (chi2, cells.len().saturating_sub(1))
+    }
+
+    /// χ² critical value at ≈6σ on the `Normal(df, 2·df)` approximation. Loose
+    /// on purpose: every test here uses a FIXED seed, so a pass/fail is
+    /// deterministic and cannot flake, and the headroom means an unrelated
+    /// change to RNG consumption order does not turn into a red here. That the
+    /// looseness has NOT cost the suite its power is not asserted — it is
+    /// demonstrated by `chi_square_rejects_a_one_percent_bias` below.
+    fn critical(df: usize) -> f64 {
+        df as f64 + 6.0 * (2.0 * df as f64).sqrt()
+    }
+
+    /// The (n, p) grid. Every cell has `n·min(p, 1−p) ≥ BINV_THRESHOLD`, so
+    /// every cell actually reaches the branch under test rather than falling
+    /// through to BINV. `(20, 0.5)` and `(40, 0.25)` sit exactly ON the
+    /// threshold — the tightest regime for the squeeze's in-support guarantee.
+    /// `(500, 0.8)` exercises the `p > 0.5` reflection.
+    const GRID: &[(u64, f64)] = &[
+        (20, 0.5),
+        (40, 0.25),
+        (100, 0.1),
+        (100, 0.5),
+        (1000, 0.05),
+        (1000, 0.5),
+        (500, 0.8),
+    ];
+
+    /// Restores the previous selection on drop. Without this, a test that
+    /// selects BTRS leaks that choice to every later test sharing the thread —
+    /// which does not happen under the default one-thread-per-test, but does
+    /// under `--test-threads=1`, and would silently retarget
+    /// `binomial_termination_tests`' `rand_distr` oracle at BTRS.
+    struct AlgoGuard(Option<BinomialAlgorithm>);
+
+    impl AlgoGuard {
+        fn set(algo: BinomialAlgorithm) -> Self {
+            let prev = BINOMIAL_OVERRIDE.with(|c| c.get());
+            set_binomial_algorithm(algo);
+            AlgoGuard(prev)
+        }
+    }
+
+    impl Drop for AlgoGuard {
+        fn drop(&mut self) {
+            BINOMIAL_OVERRIDE.with(|c| c.set(self.0));
+        }
+    }
+
+    fn draw(algo: BinomialAlgorithm, n: u64, p: f64, count: usize, seed: u64) -> Vec<u64> {
+        let _guard = AlgoGuard::set(algo);
+        let mut rng = StatefulRng(ChaCha8Rng::seed_from_u64(seed));
+        (0..count).map(|_| rng.binomial(n, p)).collect()
+    }
+
+    /// `(n, p)` in the routed BTRS domain — `p` ALREADY FLIPPED (`≤ 0.5`) and
+    /// `n·p ≥ BINV_THRESHOLD`, i.e. exactly what `btrs_binomial` is ever handed.
+    /// Four groups: the `n·p = 10` boundary (thinnest domination margin); the
+    /// SPLIT-draw regime `n ≈ 20..200`, which is half of this model's draws and
+    /// which the note's `np ≈ 87..192` framing missed; the province total-exit
+    /// regimes; and the huge-`n` susceptible draws.
+    const DOMAIN: &[(u64, f64)] = &[
+        (20, 0.5), (40, 0.25), (100, 0.1), (200, 0.05),
+        (100, 0.5), (190, 0.5), (500, 0.2), (1000, 0.5),
+        (400, 0.476), (520, 0.295), (780, 0.111), (5000, 0.038),
+        (6_300_000, 3.05e-5), (8_750_000, 2.2e-5),
+    ];
+
+    /// The worst (largest) acceptance ratio over a deterministic lattice in `u`,
+    /// and the worst squeeze shortfall (`v_r − V`, positive means the squeeze
+    /// accepts where the slow test would reject).
+    fn worst_ratios(h: &BtrsHat) -> (f64, f64) {
+        const STEPS: usize = 100_000;
+        let (mut worst_v, mut worst_squeeze) = (0.0f64, f64::NEG_INFINITY);
+        for i in 0..STEPS {
+            let u = -0.5 + (i as f64 + 0.5) / STEPS as f64;
+            let us = 0.5 - u.abs();
+            let k = h.k_of(u, us);
+            if k < 0.0 || k > h.count {
+                continue;
+            }
+            let v = h.accept_ratio(us, k);
+            if v > worst_v {
+                worst_v = v;
+            }
+            if us >= 0.07 {
+                worst_squeeze = worst_squeeze.max(h.v_r - v);
+            }
+        }
+        (worst_v, worst_squeeze)
+    }
+
+    /// BTRS must fit the exact pmf — and so must BTPE, on the same grid with the
+    /// same statistic. BTPE is the POSITIVE CONTROL: it is the sampler we
+    /// already trust, so if it failed here the test would be miscalibrated
+    /// rather than the sampler broken, and this assertion is what tells the two
+    /// apart.
+    #[test]
+    fn both_samplers_fit_the_exact_pmf() {
+        const N: usize = 200_000;
+        for &(n, p) in GRID {
+            for algo in [BinomialAlgorithm::Btpe, BinomialAlgorithm::Btrs] {
+                let draws = draw(algo, n, p, N, 20_260_824);
+                let (chi2, df) = chi_square(&draws, n, p);
+                assert!(
+                    chi2 < critical(df),
+                    "{algo:?} n={n} p={p}: chi2={chi2:.1} exceeds critical={:.1} (df={df})",
+                    critical(df)
+                );
+            }
+        }
+    }
+
+    /// **The calibration proof — this is what makes the suite above non-vacuous.**
+    ///
+    /// A χ² test that passes everything is worthless. Feed the same statistic a
+    /// sampler biased by 1% in `p` and it must be REJECTED, on every grid cell.
+    /// If this test ever starts passing (i.e. the bias goes undetected), the
+    /// suite has lost its power and `both_samplers_fit_the_exact_pmf` no longer
+    /// means anything.
+    #[test]
+    fn chi_square_rejects_a_one_percent_bias() {
+        const N: usize = 200_000;
+        for &(n, p) in GRID {
+            // Draw from Binomial(n, 1.01p) but score against Binomial(n, p).
+            let draws = draw(BinomialAlgorithm::Btrs, n, (p * 1.01).min(1.0), N, 20_260_824);
+            let (chi2, df) = chi_square(&draws, n, p);
+            assert!(
+                chi2 > critical(df),
+                "n={n} p={p}: a 1% bias produced chi2={chi2:.1}, which the critical \
+                 value {:.1} (df={df}) FAILED to reject — the suite has lost its power",
+                critical(df)
+            );
+        }
+    }
+
+    /// Every draw must land in `[0, n]`. This is the assertion that covers the
+    /// squeeze's early return, which accepts `k` WITHOUT a range check on the
+    /// strength of the hat's in-support guarantee — a saturating `as u64` would
+    /// turn a violation into a silent 0 rather than a panic, so the guarantee is
+    /// tested rather than trusted. The on-threshold cells are the tight ones.
+    #[test]
+    fn draws_stay_in_support_including_the_squeeze_return() {
+        for &(n, p) in GRID {
+            for algo in [BinomialAlgorithm::Btpe, BinomialAlgorithm::Btrs] {
+                for (i, &d) in draw(algo, n, p, 100_000, 7).iter().enumerate() {
+                    assert!(d <= n, "{algo:?} n={n} p={p}: draw #{i} = {d} exceeds n");
+                }
+            }
+        }
+    }
+
+    /// The regimes the province model actually visits (`np ≈ 87..192` on `n`
+    /// from 1e2 to 6.3e6) are far too large for an exact-pmf χ², so they are
+    /// checked on the first two moments instead — against a tolerance derived
+    /// from the SAMPLING standard error, not an eyeballed epsilon. 5 SE on the
+    /// mean; the variance gets a relative band, its own SE being
+    /// `σ²·sqrt(2/N)` for a near-normal count.
+    #[test]
+    fn moments_agree_at_the_province_model_regimes() {
+        const N: usize = 200_000;
+        // (n, p) reconstructed from the fit: S≈6.3e6 with per-capita ~3e-5;
+        // E/I/C compartments in the hundreds with their exit hazards.
+        for &(n, p) in &[
+            (6_300_000u64, 3.05e-5f64),
+            (8_750_000, 2.2e-5),
+            (400, 0.476),
+            (520, 0.295),
+            (780, 0.111),
+        ] {
+            let (nf, mean_x, var_x) = (n as f64, n as f64 * p, n as f64 * p * (1.0 - p));
+            assert!(nf * p.min(1.0 - p) >= BINV_THRESHOLD, "cell must reach the branch");
+            let draws = draw(BinomialAlgorithm::Btrs, n, p, N, 99);
+            let m: f64 = draws.iter().map(|&d| d as f64).sum::<f64>() / N as f64;
+            let v: f64 =
+                draws.iter().map(|&d| (d as f64 - m) * (d as f64 - m)).sum::<f64>() / (N as f64 - 1.0);
+            let se_mean = (var_x / N as f64).sqrt();
+            assert!(
+                (m - mean_x).abs() < 5.0 * se_mean,
+                "n={n} p={p}: mean {m:.4} vs exact {mean_x:.4}, off by {:.2} SE",
+                (m - mean_x).abs() / se_mean
+            );
+            let se_var = var_x * (2.0 / N as f64).sqrt();
+            assert!(
+                (v - var_x).abs() < 6.0 * se_var,
+                "n={n} p={p}: var {v:.4} vs exact {var_x:.4}, off by {:.2} SE",
+                (v - var_x).abs() / se_var
+            );
+        }
+    }
+
+    /// The BINV↔BTRS seam must not be visible in the distribution. Sweep `n·p`
+    /// across `BINV_THRESHOLD` and require the mean to track `np` on both sides
+    /// — a sampler that was wrong on one side of the branch would show up as a
+    /// step here even though each side is individually plausible.
+    #[test]
+    fn no_discontinuity_across_the_binv_threshold() {
+        const N: usize = 100_000;
+        for np in [8.0f64, 9.5, 9.99, 10.0, 10.01, 12.0, 20.0] {
+            let p = 0.25;
+            let n = (np / p).round() as u64;
+            let exact = n as f64 * p;
+            let draws = draw(BinomialAlgorithm::Btrs, n, p, N, 4242);
+            let m: f64 = draws.iter().map(|&d| d as f64).sum::<f64>() / N as f64;
+            let se = (exact * (1.0 - p) / N as f64).sqrt();
+            assert!(
+                (m - exact).abs() < 5.0 * se,
+                "np={np} (n={n}): mean {m:.4} vs exact {exact:.4}, {:.2} SE — \
+                 a step here means one side of the threshold is wrong",
+                (m - exact).abs() / se
+            );
+        }
+    }
+
+    /// The gh#510 / gh#525 inputs — huge `n` with tiny `n·p`, and `p` at the top
+    /// of its range — must still terminate and stay in support with BTRS
+    /// selected. They route to BINV (`n·p < BINV_THRESHOLD`), so this is a
+    /// DISPATCH assertion: selecting BTRS must not drag them onto a hat that was
+    /// never derived for them, which is how those two defects presented.
+    #[test]
+    fn pathological_inputs_still_route_to_binv_under_btrs() {
+        set_binomial_algorithm(BinomialAlgorithm::Btrs);
+        let mut rng = StatefulRng(ChaCha8Rng::seed_from_u64(11));
+        for (n, p) in [(u64::MAX / 2, 1e-18f64), (2_147_483_648, 1e-12), (6_300_000, 1e-9)] {
+            assert!((n as f64) * p < BINV_THRESHOLD, "precondition: this is the BINV regime");
+            for _ in 0..500 {
+                let k = rng.binomial(n, p);
+                assert!(k <= n, "n={n} p={p}: draw {k} out of support");
+            }
+        }
+        // And the reflected top of the range, which flips to a tiny `p_flipped`.
+        assert_eq!(rng.binomial(1000, 1.0), 1000);
+        let hi = rng.binomial(1000, 1.0 - 1e-9);
+        assert!(hi >= 995, "p→1 should draw near n, got {hi}");
+    }
+
+    /// The two samplers are NOT bit-compatible, and that must be stated as a
+    /// test rather than left as an assumption: they are different rejection
+    /// schemes reading the same stream, so they accept different draws. If this
+    /// ever passes, one of them is not doing what its name says.
+    #[test]
+    fn the_two_samplers_are_not_bit_compatible() {
+        let a = draw(BinomialAlgorithm::Btpe, 1000, 0.5, 64, 5);
+        let b = draw(BinomialAlgorithm::Btrs, 1000, 0.5, 64, 5);
+        assert_ne!(a, b, "BTPE and BTRS returned identical streams — check the dispatch");
+    }
+
+    /// **This is the correctness proof, and it is the test the χ² suite cannot
+    /// replace.**
+    ///
+    /// BTRS is a rejection sampler, so it is exact iff its hat DOMINATES the pmf
+    /// (`V ≤ 1` everywhere) and its squeeze is VALID (`V ≥ v_r` wherever the
+    /// squeeze can fire — otherwise the fast path accepts draws the density
+    /// would have rejected). Both are deterministic properties of the eight
+    /// constants: no draws, no seed, nothing to flake.
+    ///
+    /// Why a distributional test is not enough: a one-digit transcription error
+    /// in `b` (`2.53 → 2.63`) distorts the tails symmetrically about the mode,
+    /// leaving the mean bias at **exactly zero** while the distribution is
+    /// wrong — so `moments_agree_at_the_province_model_regimes` is structurally
+    /// blind to it, and `both_samplers_fit_the_exact_pmf` would need ~10^8 draws
+    /// to notice. This sweep catches it, and every other single-constant typo,
+    /// in milliseconds. It evaluates `BtrsHat`'s own methods, so it checks the
+    /// SHIPPED arithmetic rather than a second copy of the formula.
+    #[test]
+    fn hat_dominates_and_squeeze_is_valid() {
+        for &(n, p) in DOMAIN {
+            assert!(
+                (n as f64) * p >= BINV_THRESHOLD && p <= 0.5,
+                "DOMAIN entry ({n}, {p}) is outside what btrs_binomial is handed"
+            );
+            let h = BtrsHat::new(n, p);
+            let (worst_v, worst_squeeze) = worst_ratios(&h);
+            assert!(
+                worst_v <= 1.0,
+                "n={n} p={p}: hat does NOT dominate (max V = {worst_v:.6} > 1) — \
+                 the sampler is not exact here"
+            );
+            assert!(
+                worst_squeeze <= 0.0,
+                "n={n} p={p}: the squeeze accepts where the slow test rejects \
+                 (v_r exceeds V by {worst_squeeze:.6}) — the fast path is biased"
+            );
+        }
+    }
+
+    /// The routing predicate is a CORRECTNESS boundary, not a speed knob, and
+    /// this test is what says so out loud.
+    ///
+    /// The domination margin above is thin — a few percent at `n·p = 10` — and it
+    /// goes NEGATIVE below `n·p ≈ 7`. So `BINV_THRESHOLD` is the only thing
+    /// keeping BTRS valid, and anyone who lowers it to buy speed breaks
+    /// exactness silently (a χ² would need ~10^12 draws to see the resulting
+    /// error). Asserting the hat FAILS here pins that reasoning to a red test.
+    #[test]
+    fn the_hat_stops_dominating_below_the_routing_threshold() {
+        let (worst, _) = worst_ratios(&BtrsHat::new(700, 0.01)); // n·p = 7
+        assert!(
+            worst > 1.0,
+            "expected the hat to FAIL below the threshold (n·p = 7), got max V = \
+             {worst:.6}. If this now passes, the domination region is wider than \
+             assumed — re-derive it before touching BINV_THRESHOLD."
+        );
+    }
+
+    /// The margin at the boundary is small enough to be worth pinning: if a
+    /// future edit erodes it, that shows up here before it shows up as a wrong
+    /// posterior.
+    #[test]
+    fn domination_margin_at_the_boundary_is_recorded() {
+        let (worst, _) = worst_ratios(&BtrsHat::new(20, 0.5)); // n·p = 10
+        assert!(
+            worst > 0.90 && worst <= 1.0,
+            "boundary margin moved: max V = {worst:.6}, expected just under 1"
+        );
     }
 }
