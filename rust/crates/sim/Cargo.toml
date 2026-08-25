@@ -71,3 +71,11 @@ harness = false
 [[bench]]
 name = "flat_eval"
 harness = false
+
+# gh#747: rand_distr BTPE vs the in-house BTRS, at the (n, p) regimes a real
+# PGAS fit visits -- including the competing-risk SPLIT draws at n ~ 20..200,
+# where BTRS's squeeze fires least often:
+#   cargo bench -p sim --bench binomial_ab
+[[bench]]
+name = "binomial_ab"
+harness = false
