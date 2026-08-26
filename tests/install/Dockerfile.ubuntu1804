@@ -1,11 +1,23 @@
 # End-to-end no-sudo install test on the exact environment from gh#205:
 # Ubuntu 18.04 — glibc 2.27, system cmake 3.10 (< the 3.13 nlopt needs).
-# The build runs as a non-root user with NO sudo in the image, so any attempt
+# The install runs as a non-root user with NO sudo in the image, so any attempt
 # by install.sh to escalate fails loudly ("sudo: command not found"). A green
-# build proves install.sh produced a working `camdl` with zero privilege.
+# run proves install.sh produced a working `camdl` with zero privilege.
 #
-# Build from the repo root:
-#   docker build -f tests/install/Dockerfile.ubuntu1804 -t camdl-install-test .
+# Build and run from the repo root via the harness, which grants the container
+# the user namespaces opam's bubblewrap sandbox needs:
+#   ./tests/install/run.sh
+#
+# The install deliberately does NOT run in this image BUILD. `opam init`
+# sandboxes with bubblewrap, which needs an unprivileged user namespace, and
+# `docker build` cannot grant one (buildkit gates that behind an `insecure`
+# entitlement requiring a custom builder). Verified directly: bwrap fails in a
+# RUN layer, and succeeds under `docker run` with seccomp/apparmor unconfined.
+# The install therefore moved to `docker run` (tests/install/run.sh); this
+# image is just the box it runs on.
+#
+# NOTE this was not what failed the job's first 65 runs — those died earlier, on
+# a missing `unzip` (gh#755). It is the next wall behind it.
 #
 # What it exercises that the unit tests can't:
 #   - the portable-CMake fetch (system cmake 3.10 is present but too old)
@@ -19,25 +31,30 @@
 
 FROM ubuntu:18.04
 
-# Genuine base prerequisites only — exactly what ensure_base_tools checks for —
-# plus ca-certificates (TLS), bubblewrap (so opam can sandbox), and the OLD
-# system cmake (3.10) to reproduce gh#205 friction #1. Installed as root *in
-# the image build*; this stands in for "an admin provisioned the box". The
-# camdl install below runs unprivileged and `sudo` is deliberately NOT present.
+# Genuine base prerequisites only — exactly what ensure_base_tools checks for
+# (make, git, curl, tar, unzip, a C compiler) — plus ca-certificates (TLS),
+# bubblewrap (so opam can sandbox), and the OLD system cmake (3.10) to
+# reproduce gh#205 friction #1. Installed as root *in the image build*; this
+# stands in for "an admin provisioned the box". The camdl install runs
+# unprivileged and `sudo` is deliberately NOT present.
+#
+# `unzip` and `build-essential` are not incidental: opam REFUSES to init
+# without unzip, and the OCaml switch is compiled from source so it needs cc.
+# Their absence is what actually failed every run of this job (gh#755) —
+# install.sh now checks for both up front instead of letting opam's "Missing
+# dependencies" surface as a bubblewrap hint.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      make git curl tar ca-certificates bubblewrap cmake \
+      make git curl tar unzip build-essential ca-certificates bubblewrap cmake \
  && rm -rf /var/lib/apt/lists/*
 
-# Non-root user, no sudo. If install.sh reaches for root, the build dies here.
+# Non-root user, no sudo. If install.sh reaches for root, the run dies on
+# "sudo: command not found".
 RUN useradd --create-home builder
 USER builder
 WORKDIR /home/builder/camdl
 COPY --chown=builder:builder . .
 
-# The test: a clean no-sudo install...
-RUN ./install.sh
-# ...then prove the binary actually runs (mirrors the rc lines install.sh prints).
-RUN export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" \
- && eval "$(opam env)" \
- && camdl --version
+# The test itself — a clean no-sudo install, then proof the binary runs. Invoked
+# by `docker run` (tests/install/run.sh), NOT by a RUN layer: see the header.
+CMD ["bash", "tests/install/in-container.sh"]
