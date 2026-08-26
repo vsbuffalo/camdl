@@ -139,8 +139,9 @@ fn a_competing_augment_inside_the_window_is_not_clobbered() {
     {
         let root2 = root.clone();
         let fired2 = fired.clone();
-        *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(std::sync::Arc::new(move |leaf: &std::path::Path| {
+        super::install_augment_gap_hook(
+            &dest,
+            std::sync::Arc::new(move |leaf: &std::path::Path| {
                 // Fire once — the competitor re-enters this same hook.
                 if fired2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
                     return;
@@ -148,13 +149,14 @@ fn a_competing_augment_inside_the_window_is_not_clobbered() {
                 let s2 = FsCasStore::new(&root2);
                 s2.augment(leaf, &LeafIdentity::new(id(0xaa)), "event_log.tsv", b"COMPETITOR")
                     .expect("the competing augment must succeed");
-            }));
+            }),
+        );
     }
 
     let err = store
         .augment(&dest, &LeafIdentity::new(a), "event_log.tsv", b"OURS")
         .expect_err("our augment must see the competitor's write, not clobber it");
-    *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    super::clear_augment_gap_hook();
 
     match &err {
         CasError::DivergentRecompute { file, .. } => assert_eq!(file, "event_log.tsv"),
@@ -184,21 +186,23 @@ fn a_competing_augment_of_another_name_keeps_both_entries() {
     {
         let root2 = root.clone();
         let fired2 = fired.clone();
-        *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(std::sync::Arc::new(move |leaf: &std::path::Path| {
+        super::install_augment_gap_hook(
+            &dest,
+            std::sync::Arc::new(move |leaf: &std::path::Path| {
                 if fired2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
                     return;
                 }
                 let s2 = FsCasStore::new(&root2);
                 s2.augment(leaf, &LeafIdentity::new(id(0xaa)), "reactive_log.tsv", b"REACTIVE")
                     .expect("the competing augment must succeed");
-            }));
+            }),
+        );
     }
 
     store
         .augment(&dest, &LeafIdentity::new(a), "event_log.tsv", b"EVENTS")
         .expect("our augment must succeed alongside the competitor's");
-    *super::AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    super::clear_augment_gap_hook();
 
     match store.lookup(&dest, &LeafIdentity::new(a)) {
         Lookup::Hit(r) => {
@@ -210,6 +214,54 @@ fn a_competing_augment_of_another_name_keeps_both_entries() {
         other => panic!("expected Hit, got {other:?} — a dropped manifest entry \
                          orphans a file and staleens the leaf"),
     }
+    cleanup(&root);
+}
+
+/// `AUGMENT_GAP_HOOK` is a process-global fired from `augment`, and the suite
+/// runs in parallel: seven other tests augment leaves of their own while a hook
+/// is installed. An unscoped hook fires in those too, which (a) burns the
+/// installer's fire-once slot so its competitor never runs — the race assertion
+/// then passes while testing nothing — and (b) re-enters `augment` on a foreign
+/// leaf, panicking or corrupting an unrelated test. Both were observed as CI
+/// reds. The registration is leaf-scoped; this pins that.
+#[test]
+fn an_installed_augment_hook_does_not_fire_for_another_leaf() {
+    let _serial = super::AUGMENT_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("augmenthookscope");
+    let store = FsCasStore::new(&root);
+    let a = id(0xaa);
+
+    // Two completed leaves of the same identity, at different paths.
+    let armed = store
+        .commit_atomic(&root.join("sims").join("sir-armed"), record(a), arts(b"traj"))
+        .unwrap();
+    let other = store
+        .commit_atomic(&root.join("sims").join("sir-other"), record(a), arts(b"traj"))
+        .unwrap();
+
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let fired2 = fired.clone();
+        super::install_augment_gap_hook(
+            &armed,
+            std::sync::Arc::new(move |_leaf: &std::path::Path| {
+                fired2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+    }
+
+    // Augmenting the OTHER leaf must not reach the hook.
+    store.augment(&other, &LeafIdentity::new(a), "event_log.tsv", b"x").unwrap();
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0,
+        "a hook armed for another leaf must not fire here — an unscoped hook \
+         steals the installer's fire and corrupts this leaf");
+
+    // ...and the armed leaf still fires, so the guard is a scope, not an off switch.
+    store.augment(&armed, &LeafIdentity::new(a), "event_log.tsv", b"x").unwrap();
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1,
+        "the hook must still fire for the leaf it was armed for");
+
+    super::clear_augment_gap_hook();
     cleanup(&root);
 }
 
