@@ -585,6 +585,293 @@ pub fn read_terminal_states(
     Ok(latest.into_values().collect())
 }
 
+/// One posterior draw's saved path as read back off disk: the latent
+/// [`Trajectory`] and, parallel to its snapshots, the `inc_<stream>` row per
+/// snapshot in `TrajColumnSpec::incidence` order. The read-side counterpart of
+/// [`PosteriorDraw`]'s `(path, incidence)` pair.
+pub type SavedPath = (Trajectory, Vec<Vec<f64>>);
+
+/// Reconstruct the whole saved path for `(chain, draw)` as a [`Trajectory`].
+///
+/// [`read_state_at`] answers "the state at one instant", which is what a
+/// counterfactual fork needs. A quantity anchored inside the data window needs
+/// the *series*: `value_at(N0 - S, last_obs)` has to be evaluated against the
+/// conditioned smoothing path, not against a fresh unconditioned replay that
+/// ignores every observation it is anchored inside (gh#722).
+///
+/// The `inc_<stream>` columns are returned alongside, one row per snapshot, in
+/// `columns.incidence` order. Per this file's own manifest they are the
+/// **conditioned** smoother `p(x | y)` — which is precisely why they are the
+/// right operand for an in-window quantity and the wrong one for a projection.
+///
+/// One key costs one whole scan of the file. A caller that wants many keys out
+/// of one file must use [`read_trajectories`], which is also the reason this
+/// one is kept: it is the deliberately simple reference that
+/// `read_trajectories_matches_the_single_key_reader_on_every_key` differences
+/// the one-pass reader against, so a bucketing bug in the fast path shows up as
+/// a red test rather than as a plausible band.
+///
+/// # Chain-binomial only, loudly
+///
+/// [`Flows`] keeps integer and real flows as distinct variants on purpose: a
+/// real (ODE) flow quantized through `u64` silently zeroes sub-unit flows. This
+/// reader therefore refuses a real-flow file rather than rounding it. PGAS and
+/// PMMH write integer flows, which is the whole of the smoothing-path use case
+/// today; an ODE smoother would need this to grow a variant, not a cast.
+pub fn read_trajectory(
+    path: &Path,
+    columns: &TrajColumnSpec,
+    chain: usize,
+    draw: usize,
+) -> Result<SavedPath, String> {
+    // Delegates rather than carrying a second row-selection loop. A duplicate
+    // implementation kept alive only to be a test's reference oracle is worse
+    // than no oracle: the two drift, and a differential test between them
+    // agrees happily on a shared wrong answer. The tests that carry weight
+    // here compare against what was WRITTEN.
+    //
+    // `read_trajectories` is total over its `keys` — an absent one is already
+    // the `no_saved_path` refusal — so the `ok_or_else` below is unreachable
+    // by that contract. It stays because a library returns an error rather
+    // than panicking if the contract is ever weakened.
+    read_trajectories(path, columns, &[(chain, draw)])?
+        .remove(&(chain, draw))
+        .ok_or_else(|| no_saved_path(path, chain, draw))
+}
+
+/// Reconstruct the saved paths for SEVERAL `(chain, draw)` keys in ONE pass
+/// over the file.
+///
+/// [`read_trajectory`] reads one key and scans the whole file to do it, so a
+/// caller that wants many keys out of one file pays `n_keys × file_size`. That
+/// is the reporting configuration for `fit predict`: a `value_at(…, last_obs)`
+/// quantity is read on every posterior draw's smoothing path (gh#722), and at
+/// national scale that is hundreds of draws against a substep-resolution
+/// `trajectories.tsv`. One pass instead of hundreds is the whole of the
+/// difference — the decode of a kept row is the shared [`RowLayout`] both
+/// readers use, so the two cannot disagree on what a row means.
+///
+/// The returned map is TOTAL over `keys`: a requested key with no rows in the
+/// file is an error naming that key (the same refusal [`read_trajectory`]
+/// gives), never a silently-absent entry or an empty path. A caller can
+/// therefore look a requested key up and treat a miss as an internal
+/// inconsistency rather than as data. Duplicate keys collapse; `keys` empty
+/// reads nothing and yields an empty map, matching zero calls of the
+/// single-key reader.
+///
+/// Peak memory is every requested path resident at once, which is what a
+/// caller holding the whole posterior ensemble wants; a caller that needs only
+/// one path at a time should ask for one key at a time.
+///
+/// Real flows are refused exactly as [`read_trajectory`] refuses them — see
+/// its "Chain-binomial only, loudly" note.
+pub fn read_trajectories(
+    path: &Path,
+    columns: &TrajColumnSpec,
+    keys: &[(usize, usize)],
+) -> Result<HashMap<(usize, usize), SavedPath>, String> {
+    let mut out: HashMap<(usize, usize), SavedPath> = HashMap::new();
+    if keys.is_empty() {
+        return Ok(out);
+    }
+    let wanted: HashSet<(usize, usize)> = keys.iter().copied().collect();
+
+    let txt = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
+    let layout = RowLayout::resolve(path, header_of(path, lines.next())?, columns)?;
+
+    let mut fields: Vec<&str> = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let key = layout.ids(line)?;
+        if !wanted.contains(&key) {
+            continue;
+        }
+        fields.clear();
+        fields.extend(line.split('\t'));
+        let (snap, inc_row) = layout.decode(&fields)?;
+        let entry = out.entry(key).or_insert_with(|| (Trajectory::new(), Vec::new()));
+        entry.0.push(snap);
+        entry.1.push(inc_row);
+    }
+
+    // Total over `keys`, in `keys` order so the refusal is deterministic.
+    for &(chain, draw) in keys {
+        if !out.contains_key(&(chain, draw)) {
+            return Err(no_saved_path(path, chain, draw));
+        }
+    }
+    Ok(out)
+}
+
+/// The refusal both path readers give for a `(chain, draw)` the file holds no
+/// rows for. One function so the two cannot word it differently — the caller
+/// surfaces this text to the researcher.
+fn no_saved_path(path: &Path, chain: usize, draw: usize) -> String {
+    format!(
+        "no saved path for (chain={chain}, draw={draw}) in {} — that draw is not in the \
+         forkable subset (the trajectory save stride and `thin` need not agree; gh#727)",
+        path.display()
+    )
+}
+
+/// The column-header line of a `trajectories.tsv`, split on tabs. `None` (no
+/// non-comment line at all) is the empty-file refusal.
+fn header_of<'a>(path: &Path, line: Option<&'a str>) -> Result<Vec<&'a str>, String> {
+    Ok(line
+        .ok_or_else(|| format!("empty trajectories file: {}", path.display()))?
+        .split('\t')
+        .collect())
+}
+
+/// The column indices one `trajectories.tsv` header implies for a given
+/// [`TrajColumnSpec`], resolved once per file.
+///
+/// Both path readers decode a kept row through this one layout, so the
+/// (integer, real, flow, incidence) split — and the real-flow refusal that
+/// rides with it — cannot drift between the single-key and the multi-key scan.
+/// What differs between them is only which rows they keep, which is the point:
+/// the shared substrate is the bug-prone part, the row-selection loop is the
+/// part that should stay distinct.
+struct RowLayout<'a> {
+    path: &'a Path,
+    chain: usize,
+    draw: usize,
+    time: usize,
+    /// One past the last id column. A scan splits only this prefix to read a
+    /// row's `(chain, draw)` key, and splits the whole row only for the rows it
+    /// keeps — on a national-scale file nearly every row belongs to some other
+    /// draw, and splitting its few hundred fields to throw them away is the
+    /// cost that made the per-draw read quadratic.
+    id_prefix: usize,
+    int_idx: Vec<usize>,
+    real_idx: Vec<usize>,
+    flow_idx: Vec<usize>,
+    inc_idx: Vec<usize>,
+}
+
+impl<'a> RowLayout<'a> {
+    /// Resolve every column BY NAME, in model order — the same discipline
+    /// [`read_state_at`] uses, so the optional `date` column and any column the
+    /// spec does not name are skipped without positional assumptions.
+    fn resolve(
+        path: &'a Path,
+        header: Vec<&str>,
+        columns: &TrajColumnSpec,
+    ) -> Result<Self, String> {
+        let col = |name: &str| -> Result<usize, String> {
+            header
+                .iter()
+                .position(|c| *c == name)
+                .ok_or_else(|| format!("trajectories file {} has no `{name}` column", path.display()))
+        };
+        let (chain, draw, time) = (col("chain")?, col("draw")?, col("time")?);
+        Ok(RowLayout {
+            path,
+            chain,
+            draw,
+            time,
+            id_prefix: chain.max(draw) + 1,
+            int_idx: columns.int_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
+            real_idx: columns.real_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
+            flow_idx: columns.flows.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
+            inc_idx: columns.incidence.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn bad(&self, what: &str) -> String {
+        format!("trajectories file {}: bad {what} field", self.path.display())
+    }
+
+    /// The `(chain, draw)` key of one data row, reading only the id prefix.
+    /// A malformed key is an error on EVERY row, including rows the caller is
+    /// about to skip — a file whose id columns do not parse is not a file we
+    /// read a posterior off.
+    fn ids(&self, line: &str) -> Result<(usize, usize), String> {
+        let (mut chain, mut draw) = (None, None);
+        for (i, fld) in line.split('\t').enumerate().take(self.id_prefix) {
+            if i == self.chain {
+                chain = Some(fld);
+            }
+            if i == self.draw {
+                draw = Some(fld);
+            }
+        }
+        Ok((
+            chain.and_then(|s| s.parse().ok()).ok_or_else(|| self.bad("chain"))?,
+            draw.and_then(|s| s.parse().ok()).ok_or_else(|| self.bad("draw"))?,
+        ))
+    }
+
+    /// Decode one kept row into its snapshot and its `inc_<stream>` row.
+    fn decode(&self, f: &[&str]) -> Result<(Snapshot, Vec<f64>), String> {
+        let t: f64 = f.get(self.time).and_then(|s| s.parse().ok()).ok_or_else(|| self.bad("time"))?;
+        let counts = self
+            .int_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<i64>().ok()).ok_or_else(|| {
+                    format!("trajectories file {}: bad integer compartment at column {i}",
+                        self.path.display())
+                })
+            })
+            .collect::<Result<Vec<i64>, _>>()?;
+        let values = self
+            .real_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<f64>().ok()).ok_or_else(|| {
+                    format!("trajectories file {}: bad real compartment at column {i}",
+                        self.path.display())
+                })
+            })
+            .collect::<Result<Vec<f64>, _>>()?;
+        let flows = self
+            .flow_idx
+            .iter()
+            .map(|&i| {
+                let raw = f.get(i).ok_or_else(|| self.bad("flow"))?;
+                if raw.contains('.') {
+                    return Err(format!(
+                        "trajectories file {}: flow column {i} holds `{raw}`, a real-valued \
+                         flow. This reader is chain-binomial only — rounding a real flow to \
+                         an integer silently zeroes sub-unit flows, so it refuses rather \
+                         than quantizing.",
+                        self.path.display()
+                    ));
+                }
+                raw.parse::<u64>().map_err(|_| {
+                    format!("trajectories file {}: bad integer flow at column {i}",
+                        self.path.display())
+                })
+            })
+            .collect::<Result<Vec<u64>, String>>()?;
+        let inc_row = self
+            .inc_idx
+            .iter()
+            .map(|&i| {
+                f.get(i).and_then(|s| s.parse::<f64>().ok()).ok_or_else(|| {
+                    format!("trajectories file {}: bad incidence at column {i}",
+                        self.path.display())
+                })
+            })
+            .collect::<Result<Vec<f64>, _>>()?;
+
+        Ok((
+            Snapshot {
+                t,
+                int_state: IntState::from_vec(counts),
+                real_state: RealState::from_vec(values),
+                flows: Flows::Int(flows),
+            },
+            inc_row,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1153,292 +1440,5 @@ mod tests {
         assert_eq!(json["time_unit"], serde_json::json!("days"));
         assert_eq!(json["origin"], serde_json::Value::Null);
         assert_eq!(json["days_per_unit"], serde_json::json!(1.0));
-    }
-}
-
-/// One posterior draw's saved path as read back off disk: the latent
-/// [`Trajectory`] and, parallel to its snapshots, the `inc_<stream>` row per
-/// snapshot in `TrajColumnSpec::incidence` order. The read-side counterpart of
-/// [`PosteriorDraw`]'s `(path, incidence)` pair.
-pub type SavedPath = (Trajectory, Vec<Vec<f64>>);
-
-/// Reconstruct the whole saved path for `(chain, draw)` as a [`Trajectory`].
-///
-/// [`read_state_at`] answers "the state at one instant", which is what a
-/// counterfactual fork needs. A quantity anchored inside the data window needs
-/// the *series*: `value_at(N0 - S, last_obs)` has to be evaluated against the
-/// conditioned smoothing path, not against a fresh unconditioned replay that
-/// ignores every observation it is anchored inside (gh#722).
-///
-/// The `inc_<stream>` columns are returned alongside, one row per snapshot, in
-/// `columns.incidence` order. Per this file's own manifest they are the
-/// **conditioned** smoother `p(x | y)` — which is precisely why they are the
-/// right operand for an in-window quantity and the wrong one for a projection.
-///
-/// One key costs one whole scan of the file. A caller that wants many keys out
-/// of one file must use [`read_trajectories`], which is also the reason this
-/// one is kept: it is the deliberately simple reference that
-/// `read_trajectories_matches_the_single_key_reader_on_every_key` differences
-/// the one-pass reader against, so a bucketing bug in the fast path shows up as
-/// a red test rather than as a plausible band.
-///
-/// # Chain-binomial only, loudly
-///
-/// [`Flows`] keeps integer and real flows as distinct variants on purpose: a
-/// real (ODE) flow quantized through `u64` silently zeroes sub-unit flows. This
-/// reader therefore refuses a real-flow file rather than rounding it. PGAS and
-/// PMMH write integer flows, which is the whole of the smoothing-path use case
-/// today; an ODE smoother would need this to grow a variant, not a cast.
-pub fn read_trajectory(
-    path: &Path,
-    columns: &TrajColumnSpec,
-    chain: usize,
-    draw: usize,
-) -> Result<SavedPath, String> {
-    // Delegates rather than carrying a second row-selection loop. A duplicate
-    // implementation kept alive only to be a test's reference oracle is worse
-    // than no oracle: the two drift, and a differential test between them
-    // agrees happily on a shared wrong answer. The tests that carry weight
-    // here compare against what was WRITTEN.
-    //
-    // `read_trajectories` is total over its `keys` — an absent one is already
-    // the `no_saved_path` refusal — so the `ok_or_else` below is unreachable
-    // by that contract. It stays because a library returns an error rather
-    // than panicking if the contract is ever weakened.
-    read_trajectories(path, columns, &[(chain, draw)])?
-        .remove(&(chain, draw))
-        .ok_or_else(|| no_saved_path(path, chain, draw))
-}
-
-/// Reconstruct the saved paths for SEVERAL `(chain, draw)` keys in ONE pass
-/// over the file.
-///
-/// [`read_trajectory`] reads one key and scans the whole file to do it, so a
-/// caller that wants many keys out of one file pays `n_keys × file_size`. That
-/// is the reporting configuration for `fit predict`: a `value_at(…, last_obs)`
-/// quantity is read on every posterior draw's smoothing path (gh#722), and at
-/// national scale that is hundreds of draws against a substep-resolution
-/// `trajectories.tsv`. One pass instead of hundreds is the whole of the
-/// difference — the decode of a kept row is the shared [`RowLayout`] both
-/// readers use, so the two cannot disagree on what a row means.
-///
-/// The returned map is TOTAL over `keys`: a requested key with no rows in the
-/// file is an error naming that key (the same refusal [`read_trajectory`]
-/// gives), never a silently-absent entry or an empty path. A caller can
-/// therefore look a requested key up and treat a miss as an internal
-/// inconsistency rather than as data. Duplicate keys collapse; `keys` empty
-/// reads nothing and yields an empty map, matching zero calls of the
-/// single-key reader.
-///
-/// Peak memory is every requested path resident at once, which is what a
-/// caller holding the whole posterior ensemble wants; a caller that needs only
-/// one path at a time should ask for one key at a time.
-///
-/// Real flows are refused exactly as [`read_trajectory`] refuses them — see
-/// its "Chain-binomial only, loudly" note.
-pub fn read_trajectories(
-    path: &Path,
-    columns: &TrajColumnSpec,
-    keys: &[(usize, usize)],
-) -> Result<HashMap<(usize, usize), SavedPath>, String> {
-    let mut out: HashMap<(usize, usize), SavedPath> = HashMap::new();
-    if keys.is_empty() {
-        return Ok(out);
-    }
-    let wanted: HashSet<(usize, usize)> = keys.iter().copied().collect();
-
-    let txt = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
-    let layout = RowLayout::resolve(path, header_of(path, lines.next())?, columns)?;
-
-    let mut fields: Vec<&str> = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let key = layout.ids(line)?;
-        if !wanted.contains(&key) {
-            continue;
-        }
-        fields.clear();
-        fields.extend(line.split('\t'));
-        let (snap, inc_row) = layout.decode(&fields)?;
-        let entry = out.entry(key).or_insert_with(|| (Trajectory::new(), Vec::new()));
-        entry.0.push(snap);
-        entry.1.push(inc_row);
-    }
-
-    // Total over `keys`, in `keys` order so the refusal is deterministic.
-    for &(chain, draw) in keys {
-        if !out.contains_key(&(chain, draw)) {
-            return Err(no_saved_path(path, chain, draw));
-        }
-    }
-    Ok(out)
-}
-
-/// The refusal both path readers give for a `(chain, draw)` the file holds no
-/// rows for. One function so the two cannot word it differently — the caller
-/// surfaces this text to the researcher.
-fn no_saved_path(path: &Path, chain: usize, draw: usize) -> String {
-    format!(
-        "no saved path for (chain={chain}, draw={draw}) in {} — that draw is not in the \
-         forkable subset (the trajectory save stride and `thin` need not agree; gh#727)",
-        path.display()
-    )
-}
-
-/// The column-header line of a `trajectories.tsv`, split on tabs. `None` (no
-/// non-comment line at all) is the empty-file refusal.
-fn header_of<'a>(path: &Path, line: Option<&'a str>) -> Result<Vec<&'a str>, String> {
-    Ok(line
-        .ok_or_else(|| format!("empty trajectories file: {}", path.display()))?
-        .split('\t')
-        .collect())
-}
-
-/// The column indices one `trajectories.tsv` header implies for a given
-/// [`TrajColumnSpec`], resolved once per file.
-///
-/// Both path readers decode a kept row through this one layout, so the
-/// (integer, real, flow, incidence) split — and the real-flow refusal that
-/// rides with it — cannot drift between the single-key and the multi-key scan.
-/// What differs between them is only which rows they keep, which is the point:
-/// the shared substrate is the bug-prone part, the row-selection loop is the
-/// part that should stay distinct.
-struct RowLayout<'a> {
-    path: &'a Path,
-    chain: usize,
-    draw: usize,
-    time: usize,
-    /// One past the last id column. A scan splits only this prefix to read a
-    /// row's `(chain, draw)` key, and splits the whole row only for the rows it
-    /// keeps — on a national-scale file nearly every row belongs to some other
-    /// draw, and splitting its few hundred fields to throw them away is the
-    /// cost that made the per-draw read quadratic.
-    id_prefix: usize,
-    int_idx: Vec<usize>,
-    real_idx: Vec<usize>,
-    flow_idx: Vec<usize>,
-    inc_idx: Vec<usize>,
-}
-
-impl<'a> RowLayout<'a> {
-    /// Resolve every column BY NAME, in model order — the same discipline
-    /// [`read_state_at`] uses, so the optional `date` column and any column the
-    /// spec does not name are skipped without positional assumptions.
-    fn resolve(
-        path: &'a Path,
-        header: Vec<&str>,
-        columns: &TrajColumnSpec,
-    ) -> Result<Self, String> {
-        let col = |name: &str| -> Result<usize, String> {
-            header
-                .iter()
-                .position(|c| *c == name)
-                .ok_or_else(|| format!("trajectories file {} has no `{name}` column", path.display()))
-        };
-        let (chain, draw, time) = (col("chain")?, col("draw")?, col("time")?);
-        Ok(RowLayout {
-            path,
-            chain,
-            draw,
-            time,
-            id_prefix: chain.max(draw) + 1,
-            int_idx: columns.int_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
-            real_idx: columns.real_comps.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
-            flow_idx: columns.flows.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
-            inc_idx: columns.incidence.iter().map(|n| col(n)).collect::<Result<_, _>>()?,
-        })
-    }
-
-    fn bad(&self, what: &str) -> String {
-        format!("trajectories file {}: bad {what} field", self.path.display())
-    }
-
-    /// The `(chain, draw)` key of one data row, reading only the id prefix.
-    /// A malformed key is an error on EVERY row, including rows the caller is
-    /// about to skip — a file whose id columns do not parse is not a file we
-    /// read a posterior off.
-    fn ids(&self, line: &str) -> Result<(usize, usize), String> {
-        let (mut chain, mut draw) = (None, None);
-        for (i, fld) in line.split('\t').enumerate().take(self.id_prefix) {
-            if i == self.chain {
-                chain = Some(fld);
-            }
-            if i == self.draw {
-                draw = Some(fld);
-            }
-        }
-        Ok((
-            chain.and_then(|s| s.parse().ok()).ok_or_else(|| self.bad("chain"))?,
-            draw.and_then(|s| s.parse().ok()).ok_or_else(|| self.bad("draw"))?,
-        ))
-    }
-
-    /// Decode one kept row into its snapshot and its `inc_<stream>` row.
-    fn decode(&self, f: &[&str]) -> Result<(Snapshot, Vec<f64>), String> {
-        let t: f64 = f.get(self.time).and_then(|s| s.parse().ok()).ok_or_else(|| self.bad("time"))?;
-        let counts = self
-            .int_idx
-            .iter()
-            .map(|&i| {
-                f.get(i).and_then(|s| s.parse::<i64>().ok()).ok_or_else(|| {
-                    format!("trajectories file {}: bad integer compartment at column {i}",
-                        self.path.display())
-                })
-            })
-            .collect::<Result<Vec<i64>, _>>()?;
-        let values = self
-            .real_idx
-            .iter()
-            .map(|&i| {
-                f.get(i).and_then(|s| s.parse::<f64>().ok()).ok_or_else(|| {
-                    format!("trajectories file {}: bad real compartment at column {i}",
-                        self.path.display())
-                })
-            })
-            .collect::<Result<Vec<f64>, _>>()?;
-        let flows = self
-            .flow_idx
-            .iter()
-            .map(|&i| {
-                let raw = f.get(i).ok_or_else(|| self.bad("flow"))?;
-                if raw.contains('.') {
-                    return Err(format!(
-                        "trajectories file {}: flow column {i} holds `{raw}`, a real-valued \
-                         flow. This reader is chain-binomial only — rounding a real flow to \
-                         an integer silently zeroes sub-unit flows, so it refuses rather \
-                         than quantizing.",
-                        self.path.display()
-                    ));
-                }
-                raw.parse::<u64>().map_err(|_| {
-                    format!("trajectories file {}: bad integer flow at column {i}",
-                        self.path.display())
-                })
-            })
-            .collect::<Result<Vec<u64>, String>>()?;
-        let inc_row = self
-            .inc_idx
-            .iter()
-            .map(|&i| {
-                f.get(i).and_then(|s| s.parse::<f64>().ok()).ok_or_else(|| {
-                    format!("trajectories file {}: bad incidence at column {i}",
-                        self.path.display())
-                })
-            })
-            .collect::<Result<Vec<f64>, _>>()?;
-
-        Ok((
-            Snapshot {
-                t,
-                int_state: IntState::from_vec(counts),
-                real_state: RealState::from_vec(values),
-                flows: Flows::Int(flows),
-            },
-            inc_row,
-        ))
     }
 }
