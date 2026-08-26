@@ -44,6 +44,7 @@
 //!   2. `fit.toml [fixed]` block (when present)
 //!   3. `--fixed-file <toml>` (each file layered in order; later
 //!      overrides earlier)
+//!
 //!   3.5. Draw row / sweep point (`point_overrides`) — automated
 //!      M-layer variation (a posterior/prior/uniform draw, an
 //!      explicit draws file, or a sweep grid point)

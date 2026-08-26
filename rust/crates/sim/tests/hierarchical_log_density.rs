@@ -94,12 +94,12 @@ fn test_log_normal_density_matches_oracle() {
     // via uv run --with scipy,numpy, committed inline so tests are
     // hermetic against scipy version drift.
     let cases = [
-        (0.1, -1.3166621086312951),
+        (0.1, -1.316_662_108_631_295),
         (0.2,  0.6408174215653049),
         (0.3,  0.8949716418720356),
         (0.5,  0.2790385223185965),
         (1.0, -2.2257913526447273),
-        (2.0, -6.6524332832808550),
+        (2.0, -6.652_433_283_280_855),
     ];
     for (x, expected) in cases {
         let got = hierarchical_log_density(&hp, x, x.ln(), &env);
@@ -179,7 +179,7 @@ fn test_gamma_density_matches_oracle() {
         (0.5, -1.0000000000000000),
         (1.0, -0.6137056388801093),
         (2.0, -1.2274112777602189),
-        (5.0, -5.3948298140119082),
+        (5.0, -5.394_829_814_011_908),
     ];
     for (x, expected) in cases {
         let got = hierarchical_log_density(&hp, x, x, &env);
@@ -189,6 +189,9 @@ fn test_gamma_density_matches_oracle() {
 }
 
 /// A1f. Exponential(rate).
+// The literals are scipy oracle outputs; -0.6931471805599453 happens to equal
+// -ln(2) because scale=2, but it is a reference value, not a use of LN_2.
+#[allow(clippy::approx_constant)]
 #[test]
 fn test_exponential_density_matches_oracle() {
     let hp = HierarchicalPrior {

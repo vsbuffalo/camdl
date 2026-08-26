@@ -119,11 +119,10 @@ impl TraceWriter {
             let n = self.row_count.fetch_add(1, Ordering::Relaxed);
             let count_due = (n + 1).is_multiple_of(self.flush_interval);
             let time_due = inner.last_flush.elapsed() >= FLUSH_AFTER;
-            if count_due || time_due {
-                if inner.writer.flush().is_ok() {
+            if (count_due || time_due)
+                && inner.writer.flush().is_ok() {
                     inner.last_flush = Instant::now();
                 }
-            }
         }
     }
 

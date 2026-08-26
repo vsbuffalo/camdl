@@ -273,7 +273,7 @@ pub fn run_stage(
                             it.iter, it.loglik, it.log_posterior, &[div, &depth],
                             &it.params_natural,
                         );
-                        if it.iter % sample_every == 0 || it.iter + 1 == it.total {
+                        if it.iter.is_multiple_of(sample_every) || it.iter + 1 == it.total {
                             log::info!(target: "nuts",
                                 "chain {} sampling {}/{} · depth={} · logpost={:.1}{}",
                                 chain_id + 1, it.iter + 1, it.total, it.tree_depth,
@@ -281,7 +281,7 @@ pub fn run_stage(
                         }
                     }
                     NutsPhase::Warmup => {
-                        if it.iter % warmup_every == 0 || it.iter + 1 == it.total {
+                        if it.iter.is_multiple_of(warmup_every) || it.iter + 1 == it.total {
                             log::info!(target: "nuts",
                                 "chain {} warmup {}/{} · depth={} · step={:.4}",
                                 chain_id + 1, it.iter + 1, it.total, it.tree_depth, it.step_size);

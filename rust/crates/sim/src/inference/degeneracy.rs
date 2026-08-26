@@ -459,11 +459,15 @@ mod tests {
         assert!(check_pf_degeneracy(&[], 0, 0).is_none());
     }
 
+    /// The K-window threshold this test is built around. Checked at compile
+    /// time so lowering the constant breaks the build rather than quietly
+    /// making the case below vacuous.
+    const _: () = assert!(ESS_COLLAPSE_WINDOWS >= 2);
+
     /// Exactly ESS_COLLAPSE_WINDOWS-1 windows of history at floor: not
     /// enough history yet, must NOT trigger.
     #[test]
     fn insufficient_history_does_not_trigger() {
-        assert!(ESS_COLLAPSE_WINDOWS >= 2, "test assumes K-window threshold >= 2");
         let short: Vec<f64> = (0..ESS_COLLAPSE_WINDOWS - 1).map(|_| 0.5).collect();
         assert!(check_pf_degeneracy(&short, 0, 1000).is_none());
     }

@@ -198,7 +198,7 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
     assert!(r2.status.success(), "resume run must succeed: {}", stderr);
     assert!(stderr.contains("resuming from sweep"), "must announce resumption: {}", stderr);
 
-    let (resumed_id, _, resumed_json) = post_leaf(&out, &[base_id.clone()]);
+    let (resumed_id, _, resumed_json) = post_leaf(&out, std::slice::from_ref(&base_id));
     assert_ne!(resumed_id, base_id, "resumed run must have a distinct run_id");
     assert_eq!(snapshot(&base_dir), base_before, "the base leaf must be untouched by resume");
     let deps = serde_json::to_string(&resumed_json["deps"]).unwrap();

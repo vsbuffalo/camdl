@@ -2034,7 +2034,7 @@ fn run_one_chain(
                     let _ = write!(w, "\t{}", v); // round-trippable; gh#266
                 }
                 let _ = writeln!(w);
-                if iter % 10 == 0 || iter + 1 == n_iter { let _ = w.flush(); }
+                if iter.is_multiple_of(10) || iter + 1 == n_iter { let _ = w.flush(); }
             }
         }
     };

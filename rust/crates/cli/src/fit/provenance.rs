@@ -118,7 +118,7 @@ pub fn write_mle_params(
         timestamp: metadata.timestamp.clone(),
         content_hash: content_hash.clone(),
         fit_hash: Some(metadata.input_hash.clone()),
-        backend: metadata.backend.clone(),
+        backend: metadata.backend,
         dt: metadata.dt,
         model: metadata.model_path.clone(),
         model_identity: metadata.model_identity.clone(),

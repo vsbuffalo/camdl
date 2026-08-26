@@ -50,6 +50,10 @@
 //! represented here at all — the reader refuses such a model by name rather
 //! than defaulting the reservoir to zero.
 
+// The tabs in the fenced block above are the FORMAT, not indentation: this
+// file documents a tab-separated layout, so spaces here would misdocument it.
+#![allow(clippy::tabs_in_doc_comments)]
+
 use std::io::Write;
 use std::path::Path;
 

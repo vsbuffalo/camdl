@@ -9,6 +9,7 @@
 //!     only), though run-spec §3.1.1 lists it (`ObsOutput::OnlyDir`).
 //!   - The multi-cadence single-file error (`main.rs:608-619`) names only
 //!     `--obs-dir`.
+//!
 //! Both assertions below are RED until Stage 3 lands `ObsOutput::OnlyDir`
 //! and updates the error text.
 

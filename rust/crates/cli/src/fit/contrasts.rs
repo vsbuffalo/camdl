@@ -440,7 +440,7 @@ pub fn emit_contrasts(
             let mut draw_results: HashMap<String, ArmDrawResult> = HashMap::new();
             for run in &runs_c {
                 let res = arms[run].replay(
-                    model, run, params_i, &col_spec, &stage_dir, *chain, *draw, dt, arm_seed,
+                    model, run, params_i, &col_spec, stage_dir, *chain, *draw, dt, arm_seed,
                     plan.fork_t, run_end,
                 )?;
                 draw_results.insert(run.clone(), res);
@@ -723,7 +723,7 @@ fn derive_fork(
             .ok_or_else(|| format!("internal: toggled intervention '{name}' not found in model"))?;
         match intervention_earliest_fire(iv) {
             FireTime::Const(t) => {
-                if earliest.as_ref().map_or(true, |(e, _)| t < *e) {
+                if earliest.as_ref().is_none_or(|(e, _)| t < *e) {
                     earliest = Some((t, name.clone()));
                 }
             }

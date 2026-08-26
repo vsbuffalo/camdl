@@ -67,7 +67,7 @@ fn int_comp(name: &str) -> Compartment {
 }
 
 fn param(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None }
+    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value }, param_kind: None, param_dim: None }
 }
 
 /// Build a ResolveCtx from a CompiledModel.
@@ -122,6 +122,8 @@ fn assert_resolved_matches(expr: &Expr, model: &CompiledModel, int_s: &IntState,
     );
 }
 
+// 3.14 is an arbitrary constant under test, not pi.
+#[allow(clippy::approx_constant)]
 #[test]
 fn test_const() {
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();

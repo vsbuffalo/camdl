@@ -75,8 +75,12 @@ jobs:
         with:
           components: clippy
 
+      # `--workspace` is load-bearing: rust/Cargo.toml declares the workspace root
+      # as a package (`camdl-tests`), so without it cargo lints ONLY that package
+      # and compiles sim/cli/io as dependencies, which are never linted. The gate
+      # passed for two years because it checked almost nothing (gh#743).
       - name: Clippy
-        run: cd rust && cargo clippy --all-targets -- -D warnings
+        run: cd rust && cargo clippy --workspace --all-targets -- -D warnings
 
       # make test-rust builds camdlc + the release binaries, symlinks camdlc onto
       # PATH (so spawned `camdl` finds it), and runs `cargo test --workspace

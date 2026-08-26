@@ -135,10 +135,7 @@ fn first_coalescent_interval(
                 cand = Some(a);
             }
         }
-        let cand = match cand {
-            Some(c) => c,
-            None => return None, // all at roots / t=0
-        };
+        let cand = cand?;
         tau = cb;
         let c_count = cnt.remove(&cand).unwrap();
         match parent.get(&cand) {

@@ -1458,7 +1458,9 @@ impl CompiledModel {
                     // order without sorting, so reject a non-monotone axis here — the
                     // one place every IR producer funnels through (gh#345).
                     for w in ts.windows(2) {
-                        if !(w[0] < w[1]) {
+                        // NaN arm explicit: a NaN knot must be rejected, not
+                        // read as ordered (a NaN comparison is false).
+                        if w[0].is_nan() || w[1].is_nan() || w[0] >= w[1] {
                             return Err(SimError::Validation(format!(
                                 "interpolated forcing '{}': knot times must be strictly \
                                  increasing, but {} is followed by {} — sort the \
@@ -2620,6 +2622,37 @@ mod tests {
         assert!(
             msg.contains("unsorted_forcing") && msg.contains("increasing"),
             "error must name the forcing and the ordering requirement, got: {msg}"
+        );
+    }
+
+    /// The monotonicity guard's NaN arm. `w[0] >= w[1]` alone is false for NaN,
+    /// so a NaN knot time would read as correctly ordered and reach
+    /// `interpolated_value`, which binary-searches against it — a silently
+    /// wrong forcing value rather than a rejected model.
+    #[test]
+    fn interpolated_nan_knot_time_rejected() {
+        use ir::expr::ConstExpr;
+        use ir::time_func::{InterpMethod, Interpolated, TimeFuncKind, TimeFunction};
+        let konst = |v: f64| Expr::Const(ConstExpr { value: v });
+        let mut model = load_with_params("sir_basic");
+        model.time_functions.push(TimeFunction {
+            name: "nan_forcing".to_string(),
+            kind: TimeFuncKind::Interpolated(Interpolated {
+                times: vec![konst(0.0), konst(f64::NAN), konst(20.0)],
+                values: vec![konst(1.0), konst(2.0), konst(3.0)],
+                method: InterpMethod::Linear,
+            }),
+            dim: (1, 0),
+            lag: None,
+            data_source: None,
+        });
+        let msg = match CompiledModel::new(model) {
+            Ok(_) => panic!("a NaN interpolation knot time must be rejected"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("nan_forcing"),
+            "error must name the forcing, got: {msg}"
         );
     }
 

@@ -78,10 +78,11 @@ pub fn beta_binomial_logpmf_grad(k: f64, n: f64, alpha: f64, beta: f64) -> (f64,
 ///
 /// Returns `(0.0, 0.0)` for any scale outside `(0, ∞)` — the gradient of the
 /// constant `NEG_INFINITY` floor the value function returns there, as in the
-/// other helpers. `!(sigma > 0.0)` rather than `sigma <= 0.0` so a NaN scale is
-/// caught too (gh#645; a NaN comparison is false, so `<=` let it through).
+/// other helpers. The NaN arm is explicit rather than folded into `<=`: a NaN
+/// comparison is false, so a bare `sigma <= 0.0` let a NaN scale through
+/// (gh#645). Pinned by `gh645_normal_logpdf_rejects_a_non_finite_scale`.
 pub fn normal_logpdf_grad(y: f64, mu: f64, sigma: f64) -> (f64, f64) {
-    if !(sigma > 0.0) { return (0.0, 0.0); }
+    if sigma.is_nan() || sigma <= 0.0 { return (0.0, 0.0); }
     let d_mu = (y - mu) / (sigma * sigma);
     let d_sigma = ((y - mu).powi(2) - sigma * sigma)
                 / (sigma * sigma * sigma);
@@ -322,13 +323,14 @@ pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64
 /// log p(y | mu, sigma) = -0.5·((y-mu)/sigma)² - log(sigma) - 0.5·log(2π)
 ///
 /// A scale outside `(0, ∞)` is a domain violation and returns `NEG_INFINITY`,
-/// as every other domain violation in this module does. `!(sigma > 0.0)` rather
-/// than `sigma <= 0.0` so a NaN scale is caught: a NaN comparison is false, so
-/// `<=` let NaN fall through to the arithmetic and returned a NaN log-density —
-/// not a score at all, and one that compares false against every threshold
-/// downstream instead of being rejected (gh#645).
+/// as every other domain violation in this module does. The NaN arm is explicit
+/// rather than folded into `<=`: a NaN comparison is false, so a bare
+/// `sigma <= 0.0` let NaN fall through to the arithmetic and returned a NaN
+/// log-density — not a score at all, and one that compares false against every
+/// threshold downstream instead of being rejected (gh#645). Pinned by
+/// `gh645_normal_logpdf_rejects_a_non_finite_scale`.
 pub fn normal_logpdf(y: f64, mu: f64, sigma: f64) -> f64 {
-    if !(sigma > 0.0) { return f64::NEG_INFINITY; }
+    if sigma.is_nan() || sigma <= 0.0 { return f64::NEG_INFINITY; }
     -0.5 * ((y - mu) / sigma).powi(2) - sigma.ln() - 0.5 * (2.0 * PI).ln()
 }
 

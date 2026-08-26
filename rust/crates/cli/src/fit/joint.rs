@@ -217,13 +217,11 @@ pub fn resolve_forecast_ensemble(
     columns: &io::trajectories::TrajColumnSpec,
 ) -> Result<ForecastEnsemble, String> {
     if pref.backend == Some(InferenceBackend::Ode) {
-        return Err(format!(
-            "--init-state fit: this fit ran on the ode backend, which stores no \
+        return Err("--init-state fit: this fit ran on the ode backend, which stores no \
              latent paths — X is recomputed from θ, and the re-integration seam a \
              forecast would need is not wired (gh#325).\n  \
              Fix: forecast from a chain_binomial (PGAS) fit, or run the ODE forward \
-             from the model's own t_start with --draws posterior."
-        ));
+             from the model's own t_start with --draws posterior.".to_string());
     }
     let (keyed, sel_info) = pref.load_keyed_with_info()?;
     let stage_dir = pref

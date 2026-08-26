@@ -13,6 +13,7 @@
 //!   - T_score fairness preflight (override: --allow-mismatched-horizon)
 //!   - formats: table (default), md, json
 //!   - compare.toml for reproducible multi-model specs
+//!
 //! Out of scope (Part II): betting mode, CAS ref resolution, data_hash /
 //!   obs-model / backend preflights, anti-pattern detection beyond T_score,
 //!   stacking, plotting.
@@ -824,7 +825,7 @@ enum Field { LogScore, Crps }
 fn fmt_e_value(e: f64) -> String {
     if !e.is_finite() { return "—".into(); }
     if e == 0.0 { return "0".into(); }
-    if e >= 1000.0 || e < 0.001 {
+    if !(0.001..1000.0).contains(&e) {
         format!("{:.2e}", e)
     } else {
         format!("{:.3}", e)

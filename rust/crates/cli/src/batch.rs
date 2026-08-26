@@ -2181,8 +2181,8 @@ fn print_batch_dry_run(
             "sweep override".to_string()
         } else if let Some(sn) = scenario {
             format!("scenario '{}' set", sn)
-        } else if params_file.is_some() && base_params.contains_key(name) {
-            format!("params file: {}", params_file.unwrap())
+        } else if let Some(pf) = params_file.filter(|_| base_params.contains_key(name)) {
+            format!("params file: {}", pf)
         } else if base_params.contains_key(name) {
             "TOML default".to_string()
         } else {

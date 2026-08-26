@@ -222,9 +222,9 @@ fn generate_one_dataset(
             // Find the tick in this stream matching t (within tolerance)
             let hit = all_times[si].iter()
                 .position(|&ot| (ot - t).abs() < 1e-9);
-            match hit {
-                Some(ti) => buf.push_str(&format_value(all_draws[si][ti])),
-                None     => {} // blank cell — fit-loader treats as missing
+            // No hit leaves a blank cell — the fit-loader treats it as missing.
+            if let Some(ti) = hit {
+                buf.push_str(&format_value(all_draws[si][ti]));
             }
         }
         buf.push('\n');
@@ -276,6 +276,9 @@ mod tests {
         assert_eq!(format_time(7.5), "7.5");
     }
 
+    // 3.14159 is the value being FORMATTED, not an approximation of pi;
+    // substituting the constant would change what the assertion checks.
+    #[allow(clippy::approx_constant)]
     #[test]
     fn format_value_keeps_count_data_clean() {
         // Counts should render as integers so the output looks like

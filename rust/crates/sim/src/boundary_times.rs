@@ -40,7 +40,9 @@ fn reject_non_finite(times: &[f64], axis: &str) -> Result<(), SimError> {
 
 fn reject_non_increasing(times: &[f64], axis: &str) -> Result<(), SimError> {
     for w in times.windows(2) {
-        if !(w[0] < w[1]) {
+        // NaN arm explicit: a NaN comparison is false, so a bare `>=` would let
+        // a NaN time slip through as "increasing".
+        if w[0].is_nan() || w[1].is_nan() || w[0] >= w[1] {
             return Err(SimError::Validation(format!(
                 "{axis} times must be strictly increasing; found {} followed by {}",
                 w[0], w[1]
@@ -52,7 +54,8 @@ fn reject_non_increasing(times: &[f64], axis: &str) -> Result<(), SimError> {
 
 fn reject_non_monotone(times: &[f64], axis: &str) -> Result<(), SimError> {
     for w in times.windows(2) {
-        if !(w[0] <= w[1]) {
+        // NaN arm explicit, as in `reject_non_increasing`.
+        if w[0].is_nan() || w[1].is_nan() || w[0] > w[1] {
             return Err(SimError::Validation(format!(
                 "{axis} times must be non-decreasing; found {} followed by {}",
                 w[0], w[1]
@@ -174,6 +177,23 @@ impl ObsTimes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The monotonicity guards carry their own NaN arm, behind the
+    /// `reject_non_finite` pass that normally catches NaN first. Pinned
+    /// directly because it is a second line of defence: any caller that
+    /// validates order without validating finiteness relies on it, and a
+    /// bare `>=` / `>` is false for NaN, which would read as "ordered".
+    #[test]
+    fn monotonicity_guards_reject_nan_on_their_own() {
+        assert!(reject_non_increasing(&[1.0, f64::NAN], "t").is_err(), "NaN as the later time");
+        assert!(reject_non_increasing(&[f64::NAN, 1.0], "t").is_err(), "NaN as the earlier time");
+        assert!(reject_non_monotone(&[1.0, f64::NAN], "t").is_err(), "NaN as the later time");
+        assert!(reject_non_monotone(&[f64::NAN, 1.0], "t").is_err(), "NaN as the earlier time");
+        // Negative control: the guards still accept what they should.
+        assert!(reject_non_increasing(&[1.0, 2.0, 3.0], "t").is_ok());
+        assert!(reject_non_monotone(&[1.0, 1.0, 2.0], "t").is_ok());
+        assert!(reject_non_increasing(&[1.0, 1.0], "t").is_err(), "strict: coincident rejected");
+    }
 
     #[test]
     fn sorted_finite_rejects_non_finite_and_sorts() {

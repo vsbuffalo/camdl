@@ -546,9 +546,9 @@ pub fn render_observed_tsv(index_dims: &[String], rows: &[ObservedRow]) -> Strin
             out.push_str(level_for(&row.stratum, dim));
         }
         out.push('\t');
-        match row.value {
-            Some(v) => out.push_str(&fmt_value(v)),
-            None => {} // hole → empty cell
+        // A hole leaves an empty cell.
+        if let Some(v) = row.value {
+            out.push_str(&fmt_value(v));
         }
         out.push('\n');
     }
@@ -1589,9 +1589,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 continue; // stream not bound to data (or filtered out)
             }
             let last_obs = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            // Negated `>`, not `<=`: an unresolved horizon arrives as NaN and
-            // must fall through to "no forecast window", never to "extend".
-            if !(model.simulation.t_end > last_obs) {
+            // NaN arm explicit: an unresolved horizon arrives as NaN and must
+            // fall through to "no forecast window", never to "extend" — and
+            // `t_end <= last_obs` alone is false for NaN.
+            let t_end = model.simulation.t_end;
+            if t_end.is_nan() || last_obs.is_nan() || t_end <= last_obs {
                 continue; // no forecast window — byte-identical to before
             }
             // A likelihood whose arguments read an observation data column
@@ -1684,7 +1686,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             .map(|e| e.eval_paths(quantity_obs_anchors))
             .unwrap_or_default();
         let any_smoothed =
-            quant_paths.iter().any(|p| *p == sim::quantity::QuantityPath::Smoothed);
+            quant_paths.contains(&sim::quantity::QuantityPath::Smoothed);
         // Named, not silent: an `observations.<stream>` reduction anchored
         // inside the record has the same defect, and no saved path carries a
         // y_sim draw to fix it with.
@@ -2461,10 +2463,11 @@ fn forecast_times(obs_times: &[f64], output_times: &[f64]) -> Vec<f64> {
     if gaps.is_empty() {
         return Vec::new();
     }
-    // Negated `>`, not `<=`: `modal_value` returns NaN when it finds no positive
+    // NaN arm explicit: `modal_value` returns NaN when it finds no positive
     // gap, and NaN must fall through to "no cadence", not to "cadence is fine".
+    // `cadence <= 0.0` alone is false for NaN.
     let cadence = crate::util::modal_value(&gaps);
-    if !(cadence > 0.0) {
+    if cadence.is_nan() || cadence <= 0.0 {
         return Vec::new();
     }
     let Some(&grid_end) = output_times.last() else {
@@ -3112,13 +3115,10 @@ mod tests {
                 "rhat_not_reported": {"tau": "constant_draws"}}"#,
         )
         .unwrap();
-        match read_convergence(&dir, Some(FitAlgorithm::Pgas)) {
-            ConvergenceStatus::Reported { rhat_max, .. } => panic!(
-                "a fit with a refused parameter must not report a band off the \
-                 parameters that survived; got max R̂ = {rhat_max}"
-            ),
-            _ => {}
-        }
+        if let ConvergenceStatus::Reported { rhat_max, .. } = read_convergence(&dir, Some(FitAlgorithm::Pgas)) { panic!(
+            "a fit with a refused parameter must not report a band off the \
+             parameters that survived; got max R̂ = {rhat_max}"
+        ) }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

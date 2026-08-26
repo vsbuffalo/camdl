@@ -644,7 +644,7 @@ pub fn write_fit_sidecar(
         merged.label = effective_label;
         serde_json::to_vec_pretty(&merged)
     }
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
     std::fs::write(fit_segment.join("fit.meta.json"), bytes)
 }
 
@@ -826,8 +826,7 @@ mod tests {
         };
         // Build one entry per `ValueSource` variant tag — exercises
         // every branch of `ValueSource::tag()` through the round-trip.
-        let resolved_entries = vec![
-            ResolvedParameter {
+        let resolved_entries = [ResolvedParameter {
                 name:  "beta".into(),
                 value: 0.42,
                 source: ValueSource::ModelDefault,
@@ -880,8 +879,7 @@ mod tests {
                     },
                 },
                 overrode_scenario: None,
-            },
-        ];
+            }];
         let parameters_provenance: HashMap<String, ParameterProvenance> =
             resolved_entries.iter().map(|rp| {
                 (rp.name.clone(), ParameterProvenance::from_resolved(rp))

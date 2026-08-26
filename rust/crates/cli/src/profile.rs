@@ -251,7 +251,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // disables CPM within pmmh.
     let is_pmmh = matches!(profile_algo, ProfileAlgo::Pmmh);
     let pmmh_rho_opt: Option<f64> = if is_pmmh && a.pmmh_rho > 0.0 {
-        if !(a.pmmh_rho < 1.0) {
+        // NaN arm explicit: `>= 1.0` alone is false for NaN.
+        if a.pmmh_rho.is_nan() || a.pmmh_rho >= 1.0 {
             eprintln!(
                 "error: --pmmh-rho = {} must be in [0, 1). Use 0.0 (or negative) \
                  to disable CPM and run vanilla PMMH.",
@@ -2030,7 +2031,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 /// helper only ever touches `model.parameters[i].value`. Narrower
 /// surface = simpler tests + less coupling to the rest of the IR.
 fn seed_params_from_init_method(
-    params: &mut Vec<ir::parameter::Parameter>,
+    params: &mut [ir::parameter::Parameter],
     init_method: &crate::fit::init::InitMethod,
 ) -> Result<(), String> {
     use crate::fit::init::{InitMethod, MleSource};

@@ -1193,7 +1193,7 @@ mod tests {
         }
     }
 
-    fn find_tip<'a>(n: &'a PrunedNode, id: IndividualId) -> Option<&'a PrunedNode> {
+    fn find_tip(n: &PrunedNode, id: IndividualId) -> Option<&PrunedNode> {
         if n.children.is_empty() {
             return if n.id == id { Some(n) } else { None };
         }

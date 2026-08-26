@@ -13,6 +13,7 @@
 //! 4-patch in-model gravity kernel with a guarded FOI):
 //!   - `licm_ab_off.ir.json` — `CAMDL_NO_LICM=1 camdlc` (kernel inlined)
 //!   - `licm_ab_on.ir.json`  — `camdlc` (kernel hoisted; LICM is default-on)
+//!
 //! See the source header for the exact regeneration commands. The fixtures are
 //! static IR (the test does not recompile), so the default-flag flip is
 //! decoupled from this gate.
@@ -68,7 +69,7 @@ fn count_per_eval_refs(m: &ir::Model) -> usize {
     let mut n = 0;
     for t in &m.transitions {
         n += in_expr(&t.rate);
-        for (_p, g) in &t.rate_grad {
+        for g in t.rate_grad.values() {
             if let ir::deriv::DerivEntry::Grad(e) = g {
                 n += in_expr(e);
             }
@@ -352,7 +353,7 @@ fn gate_licm_inference_producer_byte_identical() {
     let pe_on = sim::resolved_expr::stage_per_eval(&compiled_on, &params_on, t_start, dt);
     assert!(pe_off.is_none(), "OFF fixture unexpectedly has per_eval bindings");
     assert!(
-        pe_on.as_ref().map_or(false, |s| !s.is_empty()),
+        pe_on.as_ref().is_some_and(|s| !s.is_empty()),
         "ON fixture staged an empty scratch — the LICM pass did not fire"
     );
 

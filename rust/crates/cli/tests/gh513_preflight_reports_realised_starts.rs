@@ -11,6 +11,7 @@
 //! The assertion is a CONSISTENCY one rather than a hardcoded draw: the value
 //! the table prints must equal the value `chain_starts.tsv` records for chain
 //! 1. Pinning the literal LHS draw would break the day the sampler's stream
+//!
 //! changes for an unrelated reason, and would not actually state the invariant,
 //! which is that the two artifacts describe the same run. The declared start is
 //! asserted ABSENT separately, so a table that silently fell back to the config

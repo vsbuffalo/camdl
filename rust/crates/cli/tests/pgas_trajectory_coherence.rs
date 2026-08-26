@@ -191,7 +191,7 @@ n_trajectories = 4
     for r in &rows {
         by_draw.entry((r[ci] as i64, r[di] as i64)).or_default().push(r);
     }
-    assert!(by_draw.len() >= 1, "expected at least one (chain,draw) group");
+    assert!(!by_draw.is_empty(), "expected at least one (chain,draw) group");
 
     let mut total_rows = 0usize;
     let mut audited_seeded_draw = false;

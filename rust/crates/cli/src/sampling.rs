@@ -1,14 +1,14 @@
-/// Space-filling sampling schemes for experimental designs.
-///
-/// Supports:
-/// - `sobol`  — Saltelli's structured scheme for Sobol sensitivity indices.
-///              Generates N(2k+2) parameter points from two base matrices A, B
-///              and k "crossed" matrices A_Bi.
-/// - `lhs`    — Latin Hypercube Sampling (N points, stratified in each dimension).
-/// - `random` — Uniform random (N points, fully independent).
-///
-/// All methods produce samples in [0, 1]^k, then callers apply `transform` to
-/// map them to the desired parameter range.
+//! Space-filling sampling schemes for experimental designs.
+//!
+//! Supports:
+//! - `sobol` — Saltelli's structured scheme for Sobol sensitivity indices.
+//!   Generates N(2k+2) parameter points from two base matrices A, B and k
+//!   "crossed" matrices A_Bi.
+//! - `lhs` — Latin Hypercube Sampling (N points, stratified in each dimension).
+//! - `random` — Uniform random (N points, fully independent).
+//!
+//! All methods produce samples in [0, 1]^k, then callers apply `transform` to
+//! map them to the desired parameter range.
 
 use std::collections::HashMap;
 

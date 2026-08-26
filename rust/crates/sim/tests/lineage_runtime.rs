@@ -568,7 +568,7 @@ fn attribution_logprob_matches_analytic_sum() {
     //        → log(4 / 2 / 4) = log(1/2) = −ln 2.
     //   t=2: recovery, |I| = 3 (2 seeds + 1 born at t=1) → −ln 3.
     //   t=3: transmission, |I| = 2 (3 − 1 recovered) → log(10/2/10) = −ln 2.
-    let expected = vec![-(2f64.ln()), -(3f64.ln()), -(2f64.ln())];
+    let expected = [-(2f64.ln()), -(3f64.ln()), -(2f64.ln())];
     assert_eq!(entries.len(), 3, "one entry per event");
     for (e, &exp) in entries.iter().zip(expected.iter()) {
         assert!(

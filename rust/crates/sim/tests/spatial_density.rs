@@ -272,9 +272,15 @@ fn test_density_seir_spatial_5_vignette_regression() {
                 for &tr_idx in group {
                     let rate = propensities[tr_idx];
                     let flow = rec.flows[tr_idx];
-                    if (rate <= 0.0 && flow > 0) || (flow > 0) {
-                        eprintln!("    {} (idx={}): rate={:.6e}, flow={}, src_count={}",
-                            compiled.model.transitions[tr_idx].name, tr_idx,
+                    // `rate <= 0.0 && flow > 0` is THE pathology behind a -inf
+                    // density: flow out of a transition with no propensity. The
+                    // old condition `(rate <= 0.0 && flow > 0) || (flow > 0)`
+                    // collapsed to `flow > 0`, so that case was printed but never
+                    // distinguished. Same rows, now marked.
+                    if flow > 0 {
+                        let mark = if rate <= 0.0 { "!!" } else { "  " };
+                        eprintln!("    {} {} (idx={}): rate={:.6e}, flow={}, src_count={}",
+                            mark, compiled.model.transitions[tr_idx].name, tr_idx,
                             rate, flow, counts_before[src_local]);
                     }
                 }

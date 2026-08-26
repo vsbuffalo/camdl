@@ -541,7 +541,7 @@ cooling    = 0.70
         let changed = ARCHIVED.replace("particles = 10", "particles = 20");
         assert_ne!(changed, ARCHIVED);
         let (got, _seg, tmp) = resolve_live_against_archive("particles", ARCHIVED, &changed);
-        let err = got.err().expect("a changed particle count is a different fit").to_string();
+        let err = got.expect_err("a changed particle count is a different fit").to_string();
         assert!(err.contains("no completed fit found"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -552,7 +552,7 @@ cooling    = 0.70
         let changed = ARCHIVED.replace("streams/cases.tsv", "streams/cases_v2.tsv");
         assert_ne!(changed, ARCHIVED);
         let (got, _seg, tmp) = resolve_live_against_archive("datapath", ARCHIVED, &changed);
-        let err = got.err().expect("a changed data path is a different fit").to_string();
+        let err = got.expect_err("a changed data path is a different fit").to_string();
         assert!(err.contains("no completed fit found"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -583,8 +583,7 @@ cooling    = 0.70
         };
         let (got, _seg, tmp) = resolve_live_against_archive("stageorder", &two_stages, &swapped);
         let err = got
-            .err()
-            .expect("stage order is meaning, not formatting")
+            .expect_err("stage order is meaning, not formatting")
             .to_string();
         assert!(err.contains("no completed fit found"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -605,8 +604,7 @@ cooling    = 0.70
         std::fs::remove_file(seg.join("fit.toml.original")).unwrap();
 
         let err = resolve_fit_segment(&toml_path.to_string_lossy())
-            .err()
-            .expect("no archive, no match")
+            .expect_err("no archive, no match")
             .to_string();
         assert!(
             err.contains("could not be checked") && err.contains("sir-0000beef"),

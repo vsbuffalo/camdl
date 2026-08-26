@@ -197,6 +197,12 @@ pub struct Trajectory {
     pub reactive_log: Option<Vec<crate::reactive::ReactiveFiring>>,
 }
 
+impl Default for Trajectory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Trajectory {
     pub fn new() -> Self {
         Trajectory {

@@ -57,7 +57,7 @@ fn int_comp(name: &str) -> Compartment {
 }
 
 fn param(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: None }
+    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: None }
 }
 
 fn mk_transition(name: &str, src: &str, dst: &str, rate: Expr) -> Transition {

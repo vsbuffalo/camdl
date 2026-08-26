@@ -99,7 +99,8 @@ fn tier2a_chain_binomial_byte_identical_with_and_without_lineages() {
 fn batch_backends_produce_line_lists() {
     let mut m = load_fixture("sir_lineage");
     set_params(&mut m, &[("beta", 0.8), ("gamma", 0.2), ("N0", 500.0)]);
-    for backend in [Backend::ChainBinomial] {
+    {
+        let backend = Backend::ChainBinomial;
         let (_, entries, _, _) = run_with_lineage(&m, backend, 7, 0.25);
         assert!(!entries.is_empty(), "batch backend should emit line-list entries");
         let n_lineage = entries
@@ -250,7 +251,8 @@ fn sub_dt_fraction_grows_with_dt() {
 fn batch_line_list_reproducible_given_seed() {
     let mut m = load_fixture("sir_lineage");
     set_params(&mut m, &[("beta", 0.7), ("gamma", 0.2), ("N0", 500.0)]);
-    for backend in [Backend::ChainBinomial] {
+    {
+        let backend = Backend::ChainBinomial;
         let (_, e1, f1, _) = run_with_lineage(&m, backend, 55, 0.5);
         let (_, e2, f2, _) = run_with_lineage(&m, backend, 55, 0.5);
         assert_eq!(e1, e2, "same seed must yield identical batch line lists");

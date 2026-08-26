@@ -61,7 +61,7 @@ const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1
 /// (`sweep >= burn_in && (sweep − burn_in) % thin == 0` over one chain), so the
 /// expectation is correct even when `thin` does not divide `n_sweeps − burn_in`.
 fn expected_draws(n_sweeps: usize, burn_in: usize, thin: usize, n_chains: usize) -> usize {
-    (burn_in..n_sweeps).filter(|s| (s - burn_in) % thin == 0).count() * n_chains
+    (burn_in..n_sweeps).filter(|s| (s - burn_in).is_multiple_of(thin)).count() * n_chains
 }
 
 fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {

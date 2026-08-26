@@ -195,7 +195,7 @@ fn count_strict(s: &[f64], thr: f64, gt: bool) -> usize {
 fn argmax_first(s: &[f64]) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &v) in s.iter().enumerate() {
-        if v.is_finite() && best.map_or(true, |(_, b)| v > b) {
+        if v.is_finite() && best.is_none_or(|(_, b)| v > b) {
             best = Some((i, v));
         }
     }
@@ -204,7 +204,7 @@ fn argmax_first(s: &[f64]) -> Option<usize> {
 fn argmin_first(s: &[f64]) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &v) in s.iter().enumerate() {
-        if v.is_finite() && best.map_or(true, |(_, b)| v < b) {
+        if v.is_finite() && best.is_none_or(|(_, b)| v < b) {
             best = Some((i, v));
         }
     }

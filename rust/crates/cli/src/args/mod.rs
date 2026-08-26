@@ -2396,6 +2396,7 @@ pub struct LineageTreeArgs {
     ///     rates-as-parameters via a `lineage { sampling }` model block are a
     ///     future milestone; this is the projection-time path keyed on the deme
     ///     index.
+    ///
     /// Default: `flat:1.0` (sample everyone).
     #[arg(long, default_value = "flat:1.0")]
     pub scheme: String,

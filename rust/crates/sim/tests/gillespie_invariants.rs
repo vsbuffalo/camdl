@@ -151,6 +151,7 @@ fn test_propensity_non_negativity() {
 /// destination update is still atomic. For Ross-Macdonald:
 ///   - `bite`    : S_h + I_v --> I_h + I_v   net: {S_h:-1, I_h:+1}
 ///   - `infect_v`: S_v + I_h --> E_v + I_h   net: {S_v:-1, E_v:+1}
+///
 /// Host population H = S_h + I_h is conserved exactly at every snapshot
 /// (recovery is internal; no transition adds or removes a host net).
 #[test]

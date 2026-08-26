@@ -1615,7 +1615,7 @@ impl FeasibilityTally {
         else { self.n_non_finite() as f64 / self.n_points as f64 }
     }
 
-    fn to_json(&self) -> serde_json::Value {
+    fn to_json(self) -> serde_json::Value {
         serde_json::json!({
             "n_points":            self.n_points,
             "n_non_finite":        self.n_non_finite(),

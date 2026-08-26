@@ -545,9 +545,10 @@ unsafe fn run(
             Op::JumpIfFalse(t) => {
                 let pred = *buf.add(sp - 1);
                 sp -= 1;
-                // Jump to else on !(pred > 0.0) — NOT pred <= 0.0 (NaN takes the
-                // else branch, matching eval_resolved).
-                if !(pred > 0.0) {
+                // Take the else branch when the predicate is not strictly
+                // positive, NaN included — matching eval_resolved. The NaN arm
+                // is explicit because `pred <= 0.0` alone is false for NaN.
+                if pred.is_nan() || pred <= 0.0 {
                     pc = *t as usize;
                     continue;
                 }

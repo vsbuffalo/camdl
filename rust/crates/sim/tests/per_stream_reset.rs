@@ -251,14 +251,14 @@ fn blanket_reset_would_undercount_afp_mutation_guard() {
     let mut acc = vec![0u64; obs.n_interval_streams()];
     let mut prev = 0.0_f64;
     let mut afp_bins: Vec<u64> = Vec::new();
-    for (_ui, &ut) in union.iter().enumerate() {
+    for &ut in union.iter() {
         let inc = ((ut - prev) * k).round() as u64;
-        obs.fold_into_acc(&vec![inc; 1], &mut acc);
+        obs.fold_into_acc(&[inc; 1], &mut acc);
         if afp_times.contains(&ut) {
             afp_bins.push(acc[0]);
         }
         // BLANKET reset (the bug): zero EVERY acc bin at EVERY union index.
-        for a in &mut acc { *a = 0; }
+        acc.fill(0);
         prev = ut;
     }
 
@@ -294,7 +294,7 @@ fn homogeneous_acc_equals_blanket() {
     let mut bins: Vec<(u64, u64)> = Vec::new();
     for (ui, &ut) in union.iter().enumerate() {
         let inc = ((ut - prev) * k).round() as u64;
-        obs.fold_into_acc(&vec![inc; 1], &mut acc);
+        obs.fold_into_acc(&[inc; 1], &mut acc);
         bins.push((acc[0], acc[1]));
         obs.reset_due_acc(ui, &mut acc);
         prev = ut;

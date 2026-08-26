@@ -68,8 +68,8 @@ fn reference_total_logdensity(dt: f64) -> f64 {
 
 // (label, dt) -> total transition log-density, captured on the dev machine.
 const BASELINES: &[(&str, f64, f64)] = &[
-    ("seasonal_drift", 0.1, -1.47985724769508361e4),
-    ("seasonal_drift", 1.0, -7.68251471594024315e3),
+    ("seasonal_drift", 0.1, -1.479_857_247_695_083_6e4),
+    ("seasonal_drift", 1.0, -7.682_514_715_940_243e3),
 ];
 
 #[test]

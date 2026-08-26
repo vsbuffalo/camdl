@@ -417,6 +417,7 @@ fn build_holdout_digests(config: &FitConfigV2) -> Result<Vec<DataDigest>, String
 ///     is what lets editing the posterior leave the scout leaf untouched);
 ///   - `fit_seeds` — the seed level owns the seed;
 ///   - `output_dir` — pure write-location provenance.
+///
 /// model/data *paths* stay (a rename is a harmless over-invalidate; their
 /// *content* rides in `FitDigest.model`/`.data`).
 fn fit_config_blob_hash(config: &FitConfigV2) -> Result<ContentHash, String> {
@@ -864,6 +865,7 @@ mod tests {
     ///     different generated data) re-keys the dir;
     ///   - a seed-only `fit_seeds` change does NOT (the fit RNG seed is a lower
     ///     CAS level under the segment, not part of the segment name).
+    ///
     /// The legacy `fit_content_hash` hashed the whole fit.toml bytes, so it
     /// over-keyed on `fit_seeds`/`output_dir`/stage edits; routing synthetic
     /// through the runid blob fixes that, matching real fits.

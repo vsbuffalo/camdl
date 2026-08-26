@@ -485,7 +485,7 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
     let i_completed = col_index(&headers, "starts_n_completed");
     for row in &rows {
         let v = parse_cell(&row[i_completed]);
-        assert!(v.is_finite() && v >= 0.0 && v <= 3.0,
+        assert!(v.is_finite() && (0.0..=3.0).contains(&v),
             "starts_n_completed must be a finite count in [0, K=3], got {}", v);
     }
 }

@@ -257,6 +257,7 @@ pub struct Observation {
 /// * `project_fn` — extract projected quantity from particle state
 /// * `obs_loglik_fn` — observation log-likelihood (takes projected, observed, params)
 /// * `seed` — base RNG seed
+///
 /// Optional callback invoked after each IF2 iteration.
 /// Arguments: `(iteration_index, log_likelihood, param_means)`.
 ///
