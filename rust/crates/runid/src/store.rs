@@ -1267,22 +1267,53 @@ fn write_record_atomic(dir: &Path, record: &RunRecord) -> Result<(), CasError> {
 /// test drives a competing augment through this instant and asserts the
 /// resuming caller re-reads under the lock rather than clobbering. `None` for
 /// every test that does not opt in.
+///
+/// Registered **against the single leaf the installing test drives**, and
+/// fired only for that leaf. The suite runs in parallel and seven other tests
+/// augment leaves of their own; a hook that fired for those too would both
+/// steal the installer's fire-once slot — its competitor never runs, so the
+/// assertion it exists to make silently tests nothing — and re-enter `augment`
+/// on a foreign leaf, panicking or corrupting an unrelated test. Install with
+/// [`install_augment_gap_hook`], never by assigning to the static.
 #[cfg(test)]
 type AugmentGapHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 
 #[cfg(test)]
-static AUGMENT_GAP_HOOK: std::sync::Mutex<Option<AugmentGapHook>> = std::sync::Mutex::new(None);
+static AUGMENT_GAP_HOOK: std::sync::Mutex<Option<(PathBuf, AugmentGapHook)>> =
+    std::sync::Mutex::new(None);
 
-/// TEST-ONLY: serializes the tests that install [`AUGMENT_GAP_HOOK`], a
-/// process-global, so it never fires inside another test's augment.
+/// TEST-ONLY: serializes the tests that install [`AUGMENT_GAP_HOOK`]. The leaf
+/// scope keeps an installed hook out of *other* tests' augments; this lock is
+/// what keeps two installing tests from overwriting each other's registration
+/// in the single global slot.
 #[cfg(test)]
 static AUGMENT_HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// TEST-ONLY: arm [`AUGMENT_GAP_HOOK`] for `leaf` only. Callers must hold
+/// [`AUGMENT_HOOK_TEST_LOCK`] for the duration of the test.
+#[cfg(test)]
+fn install_augment_gap_hook(leaf: &Path, hook: AugmentGapHook) {
+    *AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((leaf.to_path_buf(), hook));
+}
+
+/// TEST-ONLY: disarm [`AUGMENT_GAP_HOOK`].
+#[cfg(test)]
+fn clear_augment_gap_hook() {
+    *AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 #[cfg(test)]
 fn augment_gap_hook(leaf: &Path) {
     // Cloned out and invoked with the mutex RELEASED: the driven competitor
     // re-enters `augment` and would self-deadlock on a held guard.
-    let hook = AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let hook = {
+        let guard = AUGMENT_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some((registered, h)) if registered.as_path() == leaf => Some(h.clone()),
+            _ => None,
+        }
+    };
     if let Some(h) = hook {
         h(leaf);
     }
