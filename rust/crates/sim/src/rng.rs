@@ -322,17 +322,31 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// The production choice. BTRS is not selectable outside a test or bench yet:
-/// how the user-facing knob should be spelled — a typed CLI/TOML input versus an
-/// environment variable — is an open decision on gh#747, and an environment
-/// variable that changed draws without entering the run address would serve one
-/// sampler's posterior from the other's cache leaf. Until that lands, the
-/// thread-local override below is the only door, so no stored run can disagree
-/// with its own address.
+/// The production choice. BTRS is not selectable from any user-facing input: the
+/// knob has been DECIDED — a typed `binomial` field on `Stage::PGAS`, riding
+/// `Stage::identity_payload`'s include-by-default subtraction, per
+/// `docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1 — but is not
+/// built yet. An environment variable was considered and rejected: one that
+/// changed draws without entering the run address would serve one sampler's
+/// posterior from the other's cache leaf.
+///
+/// Until the typed field lands, the thread-local below is the only door, so no
+/// stored run can disagree with its own address. Note what that door CANNOT be
+/// when the field does land: the draws happen on rayon workers inside
+/// `pgas.rs`'s nested `par_iter`, not on the thread that reads the config, so a
+/// thread-local set once per chain reaches almost none of them. The resolved
+/// value has to be threaded to `step_one` as a value.
 const DEFAULT_BINOMIAL: BinomialAlgorithm = BinomialAlgorithm::Btpe;
 
 fn binomial_algorithm() -> BinomialAlgorithm {
     BINOMIAL_OVERRIDE.with(|c| c.get()).unwrap_or(DEFAULT_BINOMIAL)
+}
+
+/// Which sampler this thread would use. Exists so the invariant "the sampler
+/// that ran equals the one that was hashed" is expressible from outside this
+/// module — without it the seam is write-only and unauditable.
+pub fn active_binomial_algorithm() -> BinomialAlgorithm {
+    binomial_algorithm()
 }
 
 /// Test/bench hook: force this thread's binomial sampler. Mirrors
@@ -340,6 +354,15 @@ fn binomial_algorithm() -> BinomialAlgorithm {
 /// exists so both arms can be compared **in one process**, which is what makes
 /// an interleaved A/B possible and keeps a two-process timing comparison (and
 /// its between-process noise) out of the measurement.
+///
+/// **Not a production input channel.** It cannot be `#[cfg(test)]` — the bench is
+/// a separate crate and could not see it — so containment rests on there being
+/// no production caller, which
+/// `nothing_outside_tests_and_benches_selects_a_sampler` asserts. If you are
+/// reaching for this from `cli` or from non-test `sim` code, you want the typed
+/// stage field instead; selecting a sampler changes results and must enter the
+/// run address.
+#[doc(hidden)]
 pub fn set_binomial_algorithm(algo: BinomialAlgorithm) {
     BINOMIAL_OVERRIDE.with(|c| c.set(Some(algo)));
 }
@@ -968,11 +991,17 @@ mod btrs_tests {
         (500, 0.8),
     ];
 
-    /// Restores the previous selection on drop. Without this, a test that
-    /// selects BTRS leaks that choice to every later test sharing the thread —
-    /// which does not happen under the default one-thread-per-test, but does
-    /// under `--test-threads=1`, and would silently retarget
-    /// `binomial_termination_tests`' `rand_distr` oracle at BTRS.
+    /// Restores the previous selection on drop, so a test that selects BTRS
+    /// cannot leak that choice to a later test sharing the thread and silently
+    /// retarget `binomial_termination_tests`' `rand_distr` oracle at BTRS.
+    ///
+    /// The leak is not reachable through libtest today — it spawns a fresh
+    /// thread per test even at `--test-threads=1`, so an earlier version of this
+    /// comment was wrong to name that flag as the trigger. Keep the guard
+    /// anyway: that is an implementation detail of the harness, not a guarantee,
+    /// and the exposure is one `#[test]` calling `rng.binomial` on a pool thread
+    /// away. Use it at EVERY call site — a bare `set_binomial_algorithm` in a
+    /// test is the bug this type exists to make impossible.
     struct AlgoGuard(Option<BinomialAlgorithm>);
 
     impl AlgoGuard {
@@ -1001,11 +1030,22 @@ mod btrs_tests {
     /// SPLIT-draw regime `n ≈ 20..200`, which is half of this model's draws and
     /// which the note's `np ≈ 87..192` framing missed; the province total-exit
     /// regimes; and the huge-`n` susceptible draws.
+    ///
+    /// The last group is ADVERSARIAL, not representative: three cells found by
+    /// searching for the tightest `sup V` rather than by reading the model. Each
+    /// is the sole witness to a single-constant typo that the other eleven miss
+    /// entirely — `m`'s `(n+1)p` losing its `+1` (`sup V = 1.0568` at `(22,
+    /// 0.4997)`), `v_r`'s `4.2 → 4.1` (squeeze invalid at `(752, 0.0135)`), and
+    /// `alpha`'s `5.1 → 5.0`. Without them the sweep's own docstring claim — that
+    /// it catches every single-constant typo — was false. Do not drop a cell
+    /// here for looking arbitrary: `(23, 0.4583)` carries the thinnest margin in
+    /// the whole routed domain (0.22%) and is why that figure is quotable.
     const DOMAIN: &[(u64, f64)] = &[
         (20, 0.5), (40, 0.25), (100, 0.1), (200, 0.05),
         (100, 0.5), (190, 0.5), (500, 0.2), (1000, 0.5),
         (400, 0.476), (520, 0.295), (780, 0.111), (5000, 0.038),
         (6_300_000, 3.05e-5), (8_750_000, 2.2e-5),
+        (22, 0.4997), (752, 0.0135), (23, 0.4583),
     ];
 
     /// The worst (largest) acceptance ratio over a deterministic lattice in `u`,
@@ -1161,7 +1201,7 @@ mod btrs_tests {
     /// never derived for them, which is how those two defects presented.
     #[test]
     fn pathological_inputs_still_route_to_binv_under_btrs() {
-        set_binomial_algorithm(BinomialAlgorithm::Btrs);
+        let _guard = AlgoGuard::set(BinomialAlgorithm::Btrs);
         let mut rng = StatefulRng(ChaCha8Rng::seed_from_u64(11));
         for (n, p) in [(u64::MAX / 2, 1e-18f64), (2_147_483_648, 1e-12), (6_300_000, 1e-9)] {
             assert!((n as f64) * p < BINV_THRESHOLD, "precondition: this is the BINV regime");
@@ -1174,6 +1214,62 @@ mod btrs_tests {
         assert_eq!(rng.binomial(1000, 1.0), 1000);
         let hi = rng.binomial(1000, 1.0 - 1e-9);
         assert!(hi >= 995, "p→1 should draw near n, got {hi}");
+    }
+
+    /// The seam's containment argument, as a test rather than a convention.
+    ///
+    /// `set_binomial_algorithm` is unconditionally `pub` on a `pub mod` (it
+    /// cannot be `#[cfg(test)]`: the bench is a separate crate), so "the
+    /// thread-local is the only door" rests entirely on no production code
+    /// calling it. That is exactly the kind of claim that rots silently — one
+    /// future perf experiment in `cli`, and a release binary draws from BTRS
+    /// under a BTPE run address, with nothing in the stored artifact recording
+    /// which sampler produced it.
+    ///
+    /// Asserted as a whitelist of FILES rather than by parsing `#[cfg(test)]`
+    /// regions, which is not something a textual scan can do reliably.
+    #[test]
+    fn nothing_outside_tests_and_benches_selects_a_sampler() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/sim has a parent")
+            .to_path_buf();
+        const ALLOWED: &[&str] = &["sim/src/rng.rs", "sim/benches/binomial_ab.rs"];
+
+        let mut offenders = Vec::new();
+        let mut stack = vec![crates.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("readable crate dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // `target/` under a crate would be build output, not source.
+                    if path.file_name().is_some_and(|n| n == "target") { continue; }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let rel = path.strip_prefix(&crates).unwrap_or(&path).to_string_lossy()
+                        .replace('\\', "/");
+                    if ALLOWED.contains(&rel.as_str()) { continue; }
+                    let src = std::fs::read_to_string(&path).unwrap_or_default();
+                    if src.contains("set_binomial_algorithm") {
+                        offenders.push(rel);
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "set_binomial_algorithm is reachable from non-test code: {offenders:?}. \
+             Selecting a sampler changes draws, so it must arrive through an input \
+             that enters the run address — see DEFAULT_BINOMIAL."
+        );
+
+        // The other half: the shipped default is BTPE. An accidental flip here
+        // would move every stored posterior without re-keying anything.
+        assert_eq!(
+            active_binomial_algorithm(),
+            BinomialAlgorithm::Btpe,
+            "a thread that set no override must see the production default"
+        );
     }
 
     /// A non-finite `p` must return, under either sampler.
@@ -1243,23 +1339,102 @@ mod btrs_tests {
         assert_ne!(a, b, "BTPE and BTRS returned identical streams — check the dispatch");
     }
 
-    /// **This is the correctness proof, and it is the test the χ² suite cannot
-    /// replace.**
+    /// The THIRD exactness condition, and the one the domination sweep is
+    /// structurally blind to.
     ///
-    /// BTRS is a rejection sampler, so it is exact iff its hat DOMINATES the pmf
-    /// (`V ≤ 1` everywhere) and its squeeze is VALID (`V ≥ v_r` wherever the
-    /// squeeze can fire — otherwise the fast path accepts draws the density
+    /// BTRS returns `k` with probability `exp(log_bound(k))/α` — the hat's
+    /// Jacobian cancels the proposal density exactly — so exactness requires
+    /// `exp(log_bound(k)) ∝ pmf(k)`, on top of domination and squeeze validity.
+    /// `hat_dominates_and_squeeze_is_valid` cannot see this: it forms `V` FROM
+    /// `log_bound`, so any k-dependent error that LOWERS `log_bound` keeps
+    /// `V ≤ 1` and leaves the sweep green while the distribution is wrong.
+    ///
+    /// This is not hypothetical. Before this test existed, deleting the
+    /// `- stirling_approx_tail(k)` term from `log_bound` — the exact shape of
+    /// the deviation TensorFlow Probability documents in its own BTRS ("there is
+    /// a log missing") — left the ENTIRE suite green, and so did scaling all ten
+    /// `TAIL` entries by 1.10, zeroing them, or a one-digit typo in any of them.
+    /// All 13 hand-transcribed constants in `stirling_approx_tail` were untested.
+    ///
+    /// The reference log-pmf is walked by its own recurrence,
+    /// `log f(k+1) − log f(k) = ln((n−k)/(k+1)) + ln(p/(1−p))`, rather than from
+    /// `lgamma`: at `n ≈ 9e6` the k-dependent `lgamma` terms are ~1e8, and their
+    /// rounding alone would swamp the ~1e-9 property under test.
+    #[test]
+    fn log_bound_is_proportional_to_the_exact_pmf() {
+        for &(n, p) in DOMAIN {
+            let h = BtrsHat::new(n, p);
+
+            // The `k` the hat can actually return — the only ones whose density
+            // matters — collected off the same lattice the sweep uses.
+            const STEPS: usize = 20_000;
+            let mut ks: Vec<u64> = (0..STEPS)
+                .filter_map(|i| {
+                    let u = -0.5 + (i as f64 + 0.5) / STEPS as f64;
+                    let k = h.k_of(u, 0.5 - u.abs());
+                    (k >= 0.0 && k <= h.count).then_some(k as u64)
+                })
+                .collect();
+            ks.sort_unstable();
+            ks.dedup();
+            assert!(
+                ks.len() >= 3,
+                "n={n} p={p}: only {} reachable k — the sweep would be vacuous",
+                ks.len()
+            );
+
+            let log_ratio = (p / (1.0 - p)).ln();
+            let mut log_f = 0.0f64; // exact log-pmf, up to a constant
+            let mut k_cur = ks[0];
+            let mut worst = (f64::INFINITY, f64::NEG_INFINITY);
+            for &k in &ks {
+                while k_cur < k {
+                    log_f += (((n - k_cur) as f64) / ((k_cur + 1) as f64)).ln() + log_ratio;
+                    k_cur += 1;
+                }
+                let d = h.log_bound(k as f64) - log_f;
+                worst = (worst.0.min(d), worst.1.max(d));
+            }
+
+            // Constant in `k` means the SPREAD is zero; the offset is the
+            // normalisation and carries no information.
+            let spread = worst.1 - worst.0;
+            assert!(
+                spread < 1e-7,
+                "n={n} p={p}: log_bound − log_pmf varies by {spread:.3e} over \
+                 {} reachable k — exp(log_bound) is not proportional to the pmf, \
+                 so BTRS samples the wrong distribution here",
+                ks.len()
+            );
+        }
+    }
+
+    /// **This is the correctness proof's first two conditions, and they are the
+    /// ones the χ² suite cannot replace.**
+    ///
+    /// BTRS is a rejection sampler, so exactness needs its hat to DOMINATE the
+    /// pmf (`V ≤ 1` everywhere) and its squeeze to be VALID (`V ≥ v_r` wherever
+    /// the squeeze can fire — otherwise the fast path accepts draws the density
     /// would have rejected). Both are deterministic properties of the eight
-    /// constants: no draws, no seed, nothing to flake.
+    /// constants: no draws, no seed, nothing to flake. Neither is sufficient
+    /// alone: see `log_bound_is_proportional_to_the_exact_pmf` for the third
+    /// condition, which this sweep cannot detect a violation of.
     ///
     /// Why a distributional test is not enough: a one-digit transcription error
     /// in `b` (`2.53 → 2.63`) distorts the tails symmetrically about the mode,
     /// leaving the mean bias at **exactly zero** while the distribution is
     /// wrong — so `moments_agree_at_the_province_model_regimes` is structurally
     /// blind to it, and `both_samplers_fit_the_exact_pmf` would need ~10^8 draws
-    /// to notice. This sweep catches it, and every other single-constant typo,
-    /// in milliseconds. It evaluates `BtrsHat`'s own methods, so it checks the
-    /// SHIPPED arithmetic rather than a second copy of the formula.
+    /// to notice. This sweep catches it in milliseconds, and it evaluates
+    /// `BtrsHat`'s own methods, so it checks the SHIPPED arithmetic rather than a
+    /// second copy of the formula.
+    ///
+    /// It catches a single-constant typo in `b`, `a`, `c`, `v_r`, `alpha`, `m`,
+    /// the squeeze threshold, and the three `log_bound` shifts — but ONLY with
+    /// the three adversarial `DOMAIN` cells present; the model-derived cells
+    /// alone miss `m`, `v_r` and `alpha`. It does not test
+    /// `stirling_approx_tail` at all. Do not restate this as "catches every
+    /// single-constant typo": that claim was made here once and was false.
     #[test]
     fn hat_dominates_and_squeeze_is_valid() {
         for &(n, p) in DOMAIN {
