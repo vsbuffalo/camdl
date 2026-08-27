@@ -353,6 +353,7 @@ Every camdl binary ships its own version-matched guides offline — run
 | [`docs/user-features.md`](docs/user-features.md)               | Feature catalog with pomp comparison             |
 | [`docs/examples.md`](docs/examples.md)                         | Catalogue of every model shipped with camdl      |
 | [`docs/inference.md`](docs/inference.md)                       | Inference guide (PF, IF2, PGAS, NUTS)            |
+| [`docs/camdl-alternatives.md`](docs/camdl-alternatives.md)     | How camdl compares to Stan, pomp and others      |
 | [`docs/commands.md`](docs/commands.md)                         | Command taxonomy and workflows                   |
 | [`docs/runtimes.md`](docs/runtimes.md)                         | Simulation backend details                       |
 | [`docs/camdl-data-spec.md`](docs/camdl-data-spec.md)           | IR schema and data model                         |

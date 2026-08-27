@@ -97,6 +97,12 @@ const TOPICS: &[Topic] = &[
         body: include_str!("../../../../docs/user-features.md"),
     },
     Topic {
+        slug: "alternatives",
+        aliases: &["compare", "comparison", "stan", "pomp", "vs"],
+        summary: "How camdl compares to Stan, pomp, odin/monty, Turing.jl and others — and which camdl models port elsewhere",
+        body: include_str!("../../../../docs/camdl-alternatives.md"),
+    },
+    Topic {
         slug: "backends",
         aliases: &["runtimes", "simulate"],
         summary: "Simulation backends: Gillespie, chain-binomial, ODE",
