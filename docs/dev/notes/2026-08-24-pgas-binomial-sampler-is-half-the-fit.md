@@ -424,10 +424,10 @@ for four reasons — the first decisive:
 correction term, `i64`/`u64` edges at large `n`, and `k` outside `[0, n]`
 rejection. Most of the calendar time is the equivalence suite, not the sampler.
 
-**PRNG swap: ~1 day of work, but a broad _verification_ surface, for ~1.06×.**
-Cheaper than it looks in one respect — `ChainResumeState` stores params,
-trajectory and NUTS adaptation but **not** RNG state, and PGAS re-derives
-per-particle streams from `(seed, particle_index)` each sweep
+**PRNG swap: ~1 day of work, but a broad _verification_ surface, for
+~1.06–1.09×.** Cheaper than it looks in one respect — `ChainResumeState` stores
+params, trajectory and NUTS adaptation but **not** RNG state, and PGAS
+re-derives per-particle streams from `(seed, particle_index)` each sweep
 (`init_particle_rngs`), so the resume format is not coupled to the generator.
 The costs are: `StatefulRng` is a newtype over `ChaCha8Rng` whose `inner_mut()`
 leaks the concrete type to 8 call sites (`cli/main.rs` prior sampling,
