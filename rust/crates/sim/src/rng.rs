@@ -9,6 +9,35 @@ use rand_distr::{Distribution, Poisson, Exp, Gamma, Binomial, StandardNormal};
 /// number of RNG words consumed.
 const BINV_THRESHOLD: f64 = 10.0;
 
+/// Upper bound on `n` for the BTRS route. Above it BTRS de-selects itself and
+/// the draw goes to BTPE.
+///
+/// This is a CORRECTNESS bound, like `BINV_THRESHOLD`, and for the same kind of
+/// reason: outside it the hat stops dominating and the sampler returns a wrong
+/// distribution silently. `log_bound`'s second term is
+/// `(n+1)·ln((n−m+1)/(n−k+1))`, whose argument is `1 + (k−m)/n`; the rounding
+/// error of that ratio (`≈ ε`) is multiplied by `n+1`, so the absolute error in
+/// the log-acceptance ratio grows as `n·ε`. Past `2^53` the ratio rounds to
+/// exactly `1.0`, the term vanishes, and the density is tilted by `e^−(k−m)`.
+///
+/// Measured `sup V` over the routed hat (must stay `≤ 1`): `0.975` at `n = 1e13`,
+/// `1.06` at `1e15`, `43.4` at `1e16`, `2.7e46` at `1e18` — at `n = u64::MAX`
+/// with `p = 2e-18` the mean comes out 8.6% low and a 130σ outlier appears.
+///
+/// `1e12` is set from the analysis, not the first failure: the worst domination
+/// margin anywhere in the routed domain is 0.22% (see
+/// `domination_margin_at_the_boundary_is_recorded`), so requiring `n·ε` to sit a
+/// decade inside it gives `n ≤ 2.2e-4/ε ≈ 1e12`. That is also three decades
+/// below the first measured violation. No epidemiological population reaches it
+/// — the binomial `n` is a compartment count or a data-column denominator — so
+/// nothing legitimate is routed away from BTRS by this bound.
+///
+/// The narrower repair (`ln_1p` for that term) would extend the valid range
+/// rather than fence it, but it changes arithmetic the domination sweep and
+/// `log_bound_is_proportional_to_the_exact_pmf` currently certify as correct;
+/// fencing first is the conservative order.
+const BTRS_MAX_N: u64 = 1_000_000_000_000;
+
 /// Inverse-transform binomial quantile: the smallest `x` with `CDF(x) >= u`,
 /// walked with the exact pmf recurrence. `p` must already be the flipped
 /// (`<= 0.5`) probability, and `u` the single uniform draw.
@@ -443,6 +472,19 @@ impl StatefulRng {
     pub fn binomial(&mut self, n: u64, p: f64) -> u64 {
         if n == 0 || p <= 0.0 { return 0; }
         if p >= 1.0 { return n; }
+        // A NaN `p` passes BOTH guards above — every NaN comparison is false —
+        // and then `p_flipped = 1 - NaN` is NaN, `(n as f64) * NaN < THRESHOLD`
+        // is false, so it reaches the accept/reject branch with a NaN hat. BTPE
+        // absorbs that (`Binomial::new` rejects it and the arm returns 0), but
+        // BTRS spins forever: `k` is NaN, the support check `k < 0.0 || k > count`
+        // is false for NaN so it does not redraw, and both the squeeze and
+        // `slow_accepts` compare against NaN and are false. That is the gh#510
+        // hang class — one thread at 100% CPU, no allocation, no progress, no
+        // error — which the comment below exists to explain the last instance of.
+        // Guard it HERE, with its siblings, rather than inside one sampler: the
+        // hazard is the input, not the algorithm, and a `debug_assert!` in
+        // `btrs_binomial` is compiled out of exactly the builds that run fits.
+        if !p.is_finite() { return 0; }
 
         // gh#510: own the BINV branch instead of delegating it.
         //
@@ -522,7 +564,16 @@ impl StatefulRng {
         // BTPE branch (n*p >= 10): a bounded accept/reject scheme, delegated
         // unchanged. `Binomial::new` re-derives the flip internally, so this
         // is the same call the pre-gh#510 code made.
-        match binomial_algorithm() {
+        // Above `BTRS_MAX_N` the hat stops dominating, so BTRS de-selects itself
+        // and the draw falls back to BTPE — the pre-BTRS behaviour, unchanged,
+        // including its own huge-`n` fallback. Resolved BEFORE the match so the
+        // match stays exhaustive over the enum: a third algorithm must not be
+        // able to reach the hot path through a `_` arm.
+        let algo = match binomial_algorithm() {
+            BinomialAlgorithm::Btrs if n > BTRS_MAX_N => BinomialAlgorithm::Btpe,
+            other => other,
+        };
+        match algo {
             // BTRS takes the FLIPPED probability and un-flips, so it only ever
             // sees `p <= 0.5` with `n*p >= BINV_THRESHOLD` — the regime its hat
             // is derived for. BTPE keeps the original `p`: `rand_distr` does its
@@ -1123,6 +1174,62 @@ mod btrs_tests {
         assert_eq!(rng.binomial(1000, 1.0), 1000);
         let hi = rng.binomial(1000, 1.0 - 1e-9);
         assert!(hi >= 995, "p→1 should draw near n, got {hi}");
+    }
+
+    /// A non-finite `p` must return, under either sampler.
+    ///
+    /// NaN passes both of `binomial`'s range guards — every NaN comparison is
+    /// false — and then fails to route to BINV for the same reason, so before
+    /// the `!p.is_finite()` guard it reached BTRS with a NaN hat and span
+    /// FOREVER: the support check `k < 0.0 || k > count` does not reject NaN, and
+    /// neither the squeeze nor `slow_accepts` can accept it. That is the gh#510
+    /// class — 100% CPU, no allocation, no progress, no error — and in release
+    /// the only thing in front of it was a `debug_assert!`, i.e. nothing.
+    ///
+    /// A hang cannot be asserted on directly; this test fails by never
+    /// finishing, which is why the guard is placed with its siblings in
+    /// `binomial` rather than inside one sampler.
+    #[test]
+    fn a_non_finite_p_returns_under_both_samplers() {
+        for algo in [BinomialAlgorithm::Btpe, BinomialAlgorithm::Btrs] {
+            let _guard = AlgoGuard::set(algo);
+            let mut rng = StatefulRng(ChaCha8Rng::seed_from_u64(7));
+            for p in [f64::NAN, -f64::NAN] {
+                assert_eq!(rng.binomial(1_000, p), 0, "{algo:?}: NaN p must return 0");
+            }
+            // ±∞ were already handled by the range guards; pin them so a future
+            // reshuffle of the guards cannot quietly drop one.
+            assert_eq!(rng.binomial(1_000, f64::INFINITY), 1_000, "{algo:?}: +inf");
+            assert_eq!(rng.binomial(1_000, f64::NEG_INFINITY), 0, "{algo:?}: -inf");
+        }
+    }
+
+    /// Above `BTRS_MAX_N`, selecting BTRS must yield BTPE's draws exactly —
+    /// `log_bound`'s `(n+1)·ln(…)` term loses its precision as `n·ε`, so the hat
+    /// stops dominating and BTRS would return a biased distribution with no
+    /// error (measured: mean 8.6% low at `n = u64::MAX`, with a 130σ outlier).
+    ///
+    /// Asserted as stream equality against BTPE rather than as a moment, because
+    /// the property is DISPATCH: the draw must come from the other sampler, not
+    /// merely be plausible. The companion assertion below the bound is what
+    /// keeps this from passing vacuously by disabling BTRS everywhere.
+    #[test]
+    fn btrs_de_selects_itself_above_its_max_n() {
+        let n_hi = BTRS_MAX_N + 1;
+        let p = 1e-6; // n·p well above BINV_THRESHOLD at both n
+        assert!((n_hi as f64) * p >= BINV_THRESHOLD, "precondition: not the BINV regime");
+        assert_eq!(
+            draw(BinomialAlgorithm::Btrs, n_hi, p, 32, 3),
+            draw(BinomialAlgorithm::Btpe, n_hi, p, 32, 3),
+            "above BTRS_MAX_N the BTRS selection must fall through to BTPE"
+        );
+        // NON-VACUITY: at the bound itself BTRS is still live, so the equality
+        // above is a routing decision and not a dead arm.
+        assert_ne!(
+            draw(BinomialAlgorithm::Btrs, BTRS_MAX_N, p, 32, 3),
+            draw(BinomialAlgorithm::Btpe, BTRS_MAX_N, p, 32, 3),
+            "at BTRS_MAX_N, BTRS must still be the sampler"
+        );
     }
 
     /// The two samplers are NOT bit-compatible, and that must be stated as a
