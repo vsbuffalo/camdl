@@ -1188,9 +1188,9 @@ let check_model (m : model) : result =
            ~msg:(Printf.sprintf
              "%s: zero-inflated NegBinomial `mean` must have the dimension of \
               a count (expected events over the reporting interval)" ctx)
-           zi.mean;
-         let disp_dim = infer st ~ctx zi.dispersion in
-         propagate st ~ctx zi.dispersion dimensionless;
+           zi.mean.expr;
+         let disp_dim = infer st ~ctx zi.dispersion.expr in
+         propagate st ~ctx zi.dispersion.expr dimensionless;
          constrain_known st ~code:"E304"
            ~message:(Printf.sprintf
              "%s: zero-inflated NegBinomial `dispersion` must be dimensionless" ctx)
@@ -1199,7 +1199,7 @@ let check_model (m : model) : result =
            ~msg:(Printf.sprintf
              "%s: zero-inflation `pi` must be dimensionless (a structural-zero \
               probability on [0, 1])" ctx)
-           zi.pi);
+           zi.pi.expr);
       st.projected_dim <- None;
       Hashtbl.reset st.obs_col_dims
     ) m.observations;

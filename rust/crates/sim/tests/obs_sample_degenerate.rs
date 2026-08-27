@@ -170,9 +170,9 @@ fn nb_mean_underflow_draws_zero_not_panic() {
 fn zinb_mean_underflow_draws_zero_not_panic() {
     // pi = 0 routes every draw into the NB base — same underflow, same abort.
     let lik = Likelihood::ZeroInflatedNegBinomial(ZeroInflatedNegBinomialLikelihood {
-        mean: projected(),
-        dispersion: const_expr(500.0),
-        pi: const_expr(0.0),
+        mean: Diffable::new(projected()),
+        dispersion: Diffable::new(const_expr(500.0)),
+        pi: Diffable::new(const_expr(0.0)),
     });
     let y = draw_one(lik, 5e-324, 42);
     assert_eq!(y, 0.0, "ZINB with underflowing mean must draw 0, got {y}");
@@ -229,9 +229,9 @@ fn nb_nan_dispersion_draws_zero_and_counts() {
 #[test]
 fn zinb_nan_pi_draws_zero_and_counts() {
     let lik = Likelihood::ZeroInflatedNegBinomial(ZeroInflatedNegBinomialLikelihood {
-        mean: const_expr(5.0),
-        dispersion: const_expr(500.0),
-        pi: projected(),
+        mean: Diffable::new(const_expr(5.0)),
+        dispersion: Diffable::new(const_expr(500.0)),
+        pi: Diffable::new(projected()),
     });
     // Pre-fix: uniform() < NaN is false → silently "never zero-inflated",
     // and the NB base draws as if pi were 0.

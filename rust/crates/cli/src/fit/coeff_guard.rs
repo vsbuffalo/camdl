@@ -113,9 +113,9 @@ fn collect_likelihood(lik: &Likelihood, out: &mut HashSet<String>) {
         }
         Likelihood::Bernoulli(b) => collect(&b.p.expr, out),
         Likelihood::ZeroInflatedNegBinomial(zi) => {
-            collect(&zi.mean, out);
-            collect(&zi.dispersion, out);
-            collect(&zi.pi, out);
+            collect(&zi.mean.expr, out);
+            collect(&zi.dispersion.expr, out);
+            collect(&zi.pi.expr, out);
         }
     }
 }
@@ -234,9 +234,9 @@ fn collect_likelihood_forcing_table_refs(
         }
         Likelihood::Bernoulli(b) => go(&b.p.expr),
         Likelihood::ZeroInflatedNegBinomial(zi) => {
-            go(&zi.mean);
-            go(&zi.dispersion);
-            go(&zi.pi);
+            go(&zi.mean.expr);
+            go(&zi.dispersion.expr);
+            go(&zi.pi.expr);
         }
     }
 }
@@ -273,9 +273,11 @@ fn obs_grad_keys(lik: &Likelihood) -> Vec<&str> {
             grads(&b.concentration.grad, &mut out);
         }
         Likelihood::Bernoulli(b) => grads(&b.p.grad, &mut out),
-        // Zero-inflated NB is scoring-only — bare exprs, no `Diffable`/grad
-        // positions — so it contributes no gradient-bearing params here.
-        Likelihood::ZeroInflatedNegBinomial(_) => {}
+        Likelihood::ZeroInflatedNegBinomial(zi) => {
+            grads(&zi.mean.grad, &mut out);
+            grads(&zi.dispersion.grad, &mut out);
+            grads(&zi.pi.grad, &mut out);
+        }
     }
     out
 }

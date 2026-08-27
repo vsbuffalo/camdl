@@ -125,20 +125,21 @@ pub struct BernoulliLikelihood {
 
 /// Zero-inflated negative binomial: a structural-zero mass `pi` mixed with a
 /// `NegBinomial(mean, dispersion)`. `P(Y=0) = pi + (1-pi)·f(0)`,
-/// `P(Y=k>0) = (1-pi)·f(k)`. **Scoring-only** — every field is a bare `Expr`
-/// (no `Diffable`), so the family carries no gradient at all; the fit-time
-/// gradient-capability gate refuses PGAS/NUTS on a model that uses it, while
-/// MH/PMMH/PF/IF2 score it. The surface is the `zero_inflated(base =
-/// neg_binomial(...), pi = ...)` wrapper, desugared to this flat variant by the
-/// OCaml parser.
+/// `P(Y=k>0) = (1-pi)·f(k)`.
+///
+/// All three arguments are `Diffable`. The mixture is differentiable in closed
+/// form: with `w` the posterior probability that an observed zero is
+/// structural, the `mean` and `dispersion` derivatives are `(1 - w)` times the
+/// NegBinomial ones and `d/d(pi)` is `(1 - f(0))/S` at zero, `-1/(1 - pi)`
+/// above it. See [`sim::inference::obs_loglik::zi_negbin_logpmf_grad`].
+///
+/// The surface is the `zero_inflated(base = neg_binomial(...), pi = ...)`
+/// wrapper, desugared to this flat variant by the OCaml parser.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]
 pub struct ZeroInflatedNegBinomialLikelihood {
-    #[differentiate(skip)]
-    pub mean: Expr,
-    #[differentiate(skip)]
-    pub dispersion: Expr,
-    #[differentiate(skip)]
-    pub pi: Expr,
+    pub mean:       Diffable,
+    pub dispersion: Diffable,
+    pub pi:         Diffable,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Differentiate)]

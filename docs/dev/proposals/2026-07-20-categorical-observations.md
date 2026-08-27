@@ -256,11 +256,14 @@ a future pickup is accurate:
 - `Likelihood::Multinomial { probs: Expr }` appended at **run-id index 8** (the
   hash is the hand-written positional match in `runid/src/ir_hash.rs`, decoupled
   from enum declaration order — a bare `probs` must be hashed _explicitly_
-  there, as ZINB is, or two models differing only in `probs` collide).
+  there, as Binomial/BetaBinomial `n` is, or two models differing only in
+  `probs` collide).
   Cross-language contract is the **name** `"multinomial"`, not declaration
   order. Bump `ir/VERSION` (now 0.30).
-- Scoring-only (mirror `ZeroInflatedNegBinomial`): bare `Expr`, model-level
-  refusal in `gradient_capability.rs`, `unreachable!()` grad arms.
+- Scoring-only, if it ships that way: bare `Expr` arguments, and a refusal in
+  `gradient_capability.rs`. There is no longer a family to copy this from —
+  `ZeroInflatedNegBinomial` was the last scoring-only likelihood and is now
+  differentiable, so the `unreachable!()` grad arms it used are gone.
 - **A vector obs cell + a category-aware loader.** `ObsCell` is
   `Scalar(f64)`-only (its doc comment already names `Vector` as the planned
   extension); ~12 match sites. The long-form loader currently rejects duplicate

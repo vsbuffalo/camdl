@@ -123,11 +123,6 @@ type unsupported_reason =
   | URNonsmoothState   (* gh#275: a nonsmooth function of state (floor/ceil/abs/
                           min/max of a compartment) in a WrtPop derivative — the
                           derivative is not smooth, so a gradient method is refused *)
-  | URZeroInflated     (* a param reaching a zero_inflated_neg_binomial likelihood,
-                          which is scoring-only (no emitted gradient). Detected at
-                          the Rust fit gate; never emitted into IR by the OCaml
-                          autodiff (ZI has no diffable field), so mirrored here only
-                          to keep the wire-name enum complete. *)
 
 type deriv_entry =
   | DEGrad of expr
@@ -143,7 +138,6 @@ let unsupported_reason_name = function
   | URMod                -> "mod"
   | URParametricN        -> "parametric_n"
   | URNonsmoothState     -> "nonsmooth_state"
-  | URZeroInflated       -> "zero_inflated"
 
 let unsupported_reason_of_name = function
   | "lag"                   -> Some URLag
@@ -153,7 +147,6 @@ let unsupported_reason_of_name = function
   | "mod"                   -> Some URMod
   | "parametric_n"          -> Some URParametricN
   | "nonsmooth_state"       -> Some URNonsmoothState
-  | "zero_inflated"         -> Some URZeroInflated
   | _                       -> None
 
 (* ── Compartment ─────────────────────────────────────────────────────────────── *)
@@ -459,13 +452,15 @@ type beta_likelihood         = { mean: diffable; concentration: diffable }
 type bernoulli_likelihood    = { p: diffable }
 (* Zero-inflated negative binomial: a structural-zero mass [pi] mixed with a
    NegBinomial count. `P(Y=0) = pi + (1-pi)·f(0)`, `P(Y=k>0) = (1-pi)·f(k)`,
-   with `f` the NegBinomial(mean, dispersion) pmf. Scoring-only: [mean],
-   [dispersion], and [pi] are bare exprs (NOT [diffable]), so the family carries
-   no gradient and gradient-based inference (PGAS/NUTS) refuses a model
-   containing one via the Rust capability gate; MH/PMMH/PF/IF2 score it. The
-   surface is the `zero_inflated(base = neg_binomial(...), pi = ...)` wrapper,
-   desugared to this flat variant at parse time. See §12.2. *)
-type zi_neg_binomial_likelihood = { mean: expr; dispersion: expr; pi: expr }
+   with `f` the NegBinomial(mean, dispersion) pmf. All three arguments are
+   [diffable]: the family is differentiable in closed form (the gradient
+   factors as `(1 - w)` times the NegBinomial gradient, with `w` the posterior
+   probability that an observed zero is structural), so it is usable under
+   gradient-based inference like every other family. The surface is the
+   `zero_inflated(base = neg_binomial(...), pi = ...)` wrapper, desugared to
+   this flat variant at parse time. See §12.2. *)
+type zi_neg_binomial_likelihood =
+  { mean: diffable; dispersion: diffable; pi: diffable }
 
 type likelihood =
   | Poisson              of poisson_likelihood
