@@ -8767,12 +8767,12 @@ let expand_observations ctx =
       | LikBernoulli kwargs ->
         Ir.Bernoulli { Ir.p = diff (resolve_kw kwargs "p") }
       | LikZeroInflatedNegBinomial kwargs ->
-        (* Scoring-only: bare exprs, no `diff` wrapper. `r` -> dispersion,
-           matching the NegBinomial base; `pi` is the structural-zero prob. *)
+        (* `r` -> dispersion, matching the NegBinomial base; `pi` is the
+           structural-zero probability. All three are differentiable. *)
         Ir.ZeroInflatedNegBinomial {
-          Ir.mean       = resolve_kw kwargs "mean";
-          Ir.dispersion = resolve_kw kwargs "r";
-          Ir.pi         = resolve_kw kwargs "pi";
+          Ir.mean       = diff (resolve_kw kwargs "mean");
+          Ir.dispersion = diff (resolve_kw kwargs "r");
+          Ir.pi         = diff (resolve_kw kwargs "pi");
         }
     in
     ctx.obs_aux_cols <- [];

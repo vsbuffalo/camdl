@@ -1310,7 +1310,7 @@ pub fn stream_aux_columns(obs: &ir::observation::ObservationModel) -> Vec<String
         L::BetaBinomial(bb) => vec![&bb.n, &bb.alpha.expr, &bb.beta.expr],
         L::Beta(b) => vec![&b.mean.expr, &b.concentration.expr],
         L::Bernoulli(b) => vec![&b.p.expr],
-        L::ZeroInflatedNegBinomial(zi) => vec![&zi.mean, &zi.dispersion, &zi.pi],
+        L::ZeroInflatedNegBinomial(zi) => vec![&zi.mean.expr, &zi.dispersion.expr, &zi.pi.expr],
     };
     let mut out = Vec::new();
     for e in args { walk(e, &mut out); }

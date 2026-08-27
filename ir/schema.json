@@ -831,7 +831,7 @@
           "properties": {
             "zero_inflated_neg_binomial": {
               "type": "object",
-              "comment": "Zero-inflated NegBinomial: structural-zero mass `pi` mixed with NegBinomial(mean, dispersion). Scoring-only — the fields are bare exprs (no `{expr, grad}` diffable), so the family carries no gradient and gradient-based inference refuses it.",
+              "comment": "Zero-inflated NegBinomial: structural-zero mass `pi` mixed with NegBinomial(mean, dispersion). P(Y=0) = pi + (1-pi)*f(0); P(Y=k>0) = (1-pi)*f(k). All three arguments are differentiable and carry the diffable shape, as the sibling likelihood arguments do.",
               "required": ["mean", "dispersion", "pi"],
               "properties": {
                 "mean": { "$ref": "#/definitions/expr" },

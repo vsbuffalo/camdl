@@ -303,8 +303,13 @@ fn obs_sd_for_likelihood(
             let p_val = eval_resolved(p, &ctx(projected)).clamp(0.0, 1.0);
             (p_val * (1.0 - p_val)).max(0.0).sqrt()
         }
-        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => {
-            unreachable!("zero-inflated NB is non-differentiable; the obs gradient check does not cover it")
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi, .. } => {
+            // Var = (1−pi)·mu·(1 + mu/k + pi·mu) — the same identity the R
+            // fixture generator checks the mixture against.
+            let m = eval_resolved(mean, &ctx(projected));
+            let k = eval_resolved(dispersion, &ctx(projected)).max(1e-30);
+            let p = eval_resolved(pi, &ctx(projected)).clamp(0.0, 1.0);
+            ((1.0 - p) * m * (1.0 + m / k + p * m)).max(0.0).sqrt()
         }
     }
 }
@@ -358,8 +363,11 @@ fn obs_mean_for_likelihood(
         }
         ResolvedLikelihood::Beta { mean, .. } => eval_resolved(mean, &ctx(projected)),
         ResolvedLikelihood::Bernoulli { p, .. } => eval_resolved(p, &ctx(projected)),
-        ResolvedLikelihood::ZeroInflatedNegBinomial { .. } => {
-            unreachable!("zero-inflated NB is non-differentiable; the obs gradient check does not cover it")
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, pi, .. } => {
+            // E[Y] = (1−pi)·mu.
+            let m = eval_resolved(mean, &ctx(projected));
+            let p = eval_resolved(pi, &ctx(projected)).clamp(0.0, 1.0);
+            (1.0 - p) * m
         }
     }
 }
@@ -582,6 +590,57 @@ fn build_poisson_seir() -> ir::Model {
         }
     }
     model
+}
+
+#[test]
+fn zinb_obs_grad_matches_fd() {
+    // The oracle test (`zinb_oracle.rs`) pins the ZINB kernel's (mu, k, pi)
+    // partials against base R + numDeriv. This pins the OTHER half: that those
+    // partials are chain-ruled onto the estimated parameters through the
+    // compiler-emitted gradient maps. `rho` and `pi_zero` reach the likelihood
+    // textually; `beta` reaches it only through the trajectory and the
+    // projection, which is the path that used to contribute a silent zero
+    // (gh#180) and the reason the old capability gate refused every parameter
+    // model-wide.
+    let mut model = load_model("../../../ocaml/golden/zinb_vector_catch.ir.json");
+    set_param_defaults(&mut model, &[
+        ("beta", 0.4), ("gamma", 0.15), ("rho", 0.3),
+        ("k", 2.0), ("pi_zero", 0.4), ("N0", 10000.0), ("I0", 10.0),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(42);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 7.0, 7.0, t_end,
+    );
+
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let rho_idx = compiled.param_index["rho"];
+    let k_idx = compiled.param_index["k"];
+    let pi_idx = compiled.param_index["pi_zero"];
+    let beta_idx = compiled.param_index["beta"];
+
+    fd_check(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices,
+        &[rho_idx, k_idx, pi_idx, beta_idx],
+        dt, 1e-4,
+        "zinb_obs",
+    );
 }
 
 #[test]

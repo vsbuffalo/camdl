@@ -80,7 +80,7 @@
       (* Zero-inflation wrapper: `zero_inflated(base = neg_binomial(mean=, r=),
          pi = )`. Desugar to the flat [LikZeroInflatedNegBinomial] by flattening
          the base's kwargs with `pi`. Base is restricted to neg_binomial for
-         now; scoring-only (no gradient). *)
+         now. *)
       (* Reject any kwarg other than base/pi so a stray or typo'd argument is not
          silently dropped (No loose semantics). *)
       List.iter (fun (k, _) ->

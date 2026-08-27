@@ -5,8 +5,8 @@
 # mass mixed over a NegBinomial base. Focal (patchy) vector surveillance
 # produces excess zeros: many site×time cells with no vectors caught, plus
 # over-dispersed positive counts where vectors are present. A single-component
-# NegBinomial cannot represent both. The family is scoring-only (no emitted
-# gradient), so it pairs with a gradient-free method (mh/pmmh/if2/pfilter).
+# NegBinomial cannot represent both. All three arguments are differentiable,
+# so the family is usable under gradient-based and gradient-free methods alike.
 
 time_unit = 'days
 

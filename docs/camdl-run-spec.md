@@ -5315,9 +5315,6 @@ Four facts about how they score that are not obvious from the names:
   (`obs_loglik.rs:353`). An observed proportion of exactly 0 or 1 — a common
   outcome for small denominators — scores `−∞` and takes the whole fit with it.
   Use `beta_binomial` with the denominator as `n` when the data is `k` of `n`.
-- **`zero_inflated_neg_binomial` is scoring-only.** It carries no gradient, so
-  the fit-time capability gate refuses `pgas` and `nuts` on a model that uses
-  it; `mh`, `pmmh`, `pfilter`, and `if2` score it.
 
 Pairing guidance:
 

@@ -577,32 +577,24 @@ impl ContentAddressed for Likelihood {
         });
         // The θ-independent `n` (Binomial/BetaBinomial) carries no gradient, so
         // it is not a `Diffable` and must be hashed explicitly, before the
-        // differentiable positions. The zero-inflated NB is entirely bare exprs
-        // (scoring-only, no `Diffable`), so all three of its arguments must be
-        // hashed explicitly too — otherwise `diffables()` sees nothing and two
-        // ZI models differing only in mean/dispersion/pi would collide.
+        // differentiable positions. It is the only such argument left.
         //
-        // EXHAUSTIVE, no `_` arm (gh#734). A wildcard here meant a new family
-        // whose argument is a bare `Expr` would be silently un-hashed and two
-        // models differing only in that argument would share a run_id. The
-        // ZI-NB arm is the proof the hazard is real, not hypothetical: it
-        // exists precisely because bare-`Expr` arguments need the explicit
-        // match. Adding a variant is now a compile error here.
+        // EXHAUSTIVE, no `_` arm (gh#734). A wildcard here would let a new
+        // family whose argument is a bare `Expr` go silently un-hashed, and two
+        // models differing only in that argument would share a run_id. `n` is
+        // the standing proof that the hazard is real rather than hypothetical.
+        // Adding a variant is a compile error here.
         match self {
             Likelihood::Binomial(l) => l.n.hash_into(h),
             Likelihood::BetaBinomial(l) => l.n.hash_into(h),
-            Likelihood::ZeroInflatedNegBinomial(l) => {
-                l.mean.hash_into(h);
-                l.dispersion.hash_into(h);
-                l.pi.hash_into(h);
-            }
             // Every argument is a `Diffable`; the derived traversal below hashes
             // them all, so there is nothing to add here.
             Likelihood::Poisson(_)
             | Likelihood::NegBinomial(_)
             | Likelihood::Normal(_)
             | Likelihood::Beta(_)
-            | Likelihood::Bernoulli(_) => {}
+            | Likelihood::Bernoulli(_)
+            | Likelihood::ZeroInflatedNegBinomial(_) => {}
         }
         // Every differentiable position (each `Diffable` = expr + classified grad
         // map), in declaration order, via the derived traversal — so a new

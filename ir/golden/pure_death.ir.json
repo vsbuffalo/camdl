@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.36",
+  "ir_version": "0.37",
   "validated_by": "hand-curated-ir-golden",
   "model": {
     "name": "pure_death",
