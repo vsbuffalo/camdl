@@ -219,14 +219,23 @@ impl BtrsHat {
 /// A rejection sampler: the accepted values are distributed `Binomial(n, p)` up
 /// to the floating-point accuracy of the acceptance test, whose density is
 /// evaluated through [`stirling_approx_tail`]'s table-plus-truncated-series
-/// (~1e-15 here). That is the same class of approximation BTPE's own `stirling()`
 /// makes, so it is not a regression — but it is why this doc says "up to
-/// floating point" and not "exact". A rigorous `O(n·ε)` total-variation bound for
-/// transformed-rejection binomial samplers is given by *Assessing the Quality of
-/// Binomial Samplers* (arXiv 2506.12061, Thm 5.1); it is loose (~1e-5 at
-/// n = 6.3e6) and the measured error is at machine precision, but the shape —
-/// growing in `n` — is real, because `log_bound` is a cancellation-prone sum of
-/// `O(k−m)` terms.
+/// floating point" and not "exact".
+///
+/// **Measured, against a 60-digit reference for `ln(k!)`** — an earlier version
+/// of this comment said "~1e-15" and "at machine precision", which were wrong by
+/// five to six orders of magnitude. The max log-density distortion is `5.4e-11`
+/// at `(20, 0.5)`, `3.0e-11` at `(200, 0.05)`, `7.2e-10` at `(6.3e6, 3.05e-5)`
+/// and `9.9e-10` at `(8.75e6, 2.2e-5)`; the implied total variation is `~2e-10`,
+/// so a χ² would need `1e13`–`1e16` draws to see it. Harmless, but say the real
+/// number.
+///
+/// Two sources, and the second is why `BTRS_MAX_N` exists: the truncated
+/// Stirling series is `4e-9` relative at `k = 10`, which floors the small-`n`
+/// accuracy; and `(n+1)·ln(ratio)` cancels, contributing `O(n·ε)`. A rigorous
+/// `O(n·ε)` total-variation bound is given by *Assessing the Quality of Binomial
+/// Samplers* (arXiv 2506.12061, Thm 5.1) — loose (~1e-5 at n = 6.3e6), but its
+/// shape, growing in `n`, is confirmed here with constant `≈ ε`.
 ///
 /// **Why this exists.** The BTPE branch it is measured against (`rand_distr`
 /// 0.4.3, after Kachitvichyanukul & Schmeiser 1988) was profiled at **38.9% of a
@@ -240,10 +249,16 @@ impl BtrsHat {
 ///
 /// **Contract.** `p` must already be the flipped (`≤ 0.5`) probability and
 /// `n · p ≥ BINV_THRESHOLD`. Both matter for correctness, not just speed: the
-/// hat's domination margin is only ~1.6% at `n·p = 10` and goes NEGATIVE below
-/// `n·p ≈ 7`, so the routing predicate in [`StatefulRng::binomial`] is what keeps
-/// this sampler valid, and flipping first is what keeps `k > n` unreachable at
-/// `n > 2^53` (where `n as f64` rounds up and `n − k` could underflow `u64`).
+/// hat's domination margin falls to **0.22%** near `n·p = 10` (at `(23, 0.4583)`,
+/// `n·p = 10.54`) and goes NEGATIVE by **`n·p ≈ 9.64`** — a gap of 3.6% in `n·p`,
+/// not the 30% an earlier version of this comment implied by naming 7. So the
+/// routing predicate in [`StatefulRng::binomial`] is what keeps this sampler
+/// valid at the bottom, and [`BTRS_MAX_N`] is what keeps it valid at the top.
+///
+/// Flipping first also keeps `k > n` unreachable at `n > 2^53`, where `n as f64`
+/// rounds up and `n − k` could underflow `u64`. Note that is a SEPARATE hazard
+/// from the `O(n·ε)` precision loss above, which is the one that actually bites
+/// at large `n` and which `BTRS_MAX_N` fences.
 ///
 /// **Source.** Transcribed from TensorFlow's `random_binomial_op.cc` (`btrs`),
 /// Apache-2.0 — the same license as this project. This is deliberately the
@@ -1460,8 +1475,12 @@ mod btrs_tests {
     /// The routing predicate is a CORRECTNESS boundary, not a speed knob, and
     /// this test is what says so out loud.
     ///
-    /// The domination margin above is thin — a few percent at `n·p = 10` — and it
-    /// goes NEGATIVE below `n·p ≈ 7`. So `BINV_THRESHOLD` is the only thing
+    /// The domination margin above is thin — **0.22%** at its worst, not the
+    /// "few percent" this comment used to claim — and it goes NEGATIVE by
+    /// `n·p ≈ 9.64`, only 3.6% below the threshold. The cell asserted below
+    /// (`n·p = 7`) exceeds 1 by just 0.29% on the shipped lattice, so it is a
+    /// deliberately marginal witness, not a comfortable one. `BINV_THRESHOLD` is
+    /// the only thing
     /// keeping BTRS valid, and anyone who lowers it to buy speed breaks
     /// exactness silently (a χ² would need ~10^12 draws to see the resulting
     /// error). Asserting the hat FAILS here pins that reasoning to a red test.
