@@ -3098,17 +3098,23 @@ per-time transition rate there is **E304**. `r` and `pi` are dimensionless.
 Declare `pi`'s parameter as `probability` so its `[0, 1]` domain is checked at
 compile time rather than only clamped at scoring time.
 
-**Scoring-only: it carries no gradient.** The compiler emits no derivative for
-this family, so the fit-time capability gate refuses the gradient-based methods
-`pgas` and `nuts` on any model that uses it, naming the refused parameters. The
-gradient-free methods — `mh`, `pmmh`, `pfilter`, and `if2` — score it normally.
-Choose the family and the method together: a model that needs zero-inflation
-cannot also use `nuts`.
+**Every method works, gradient-based included.** All three arguments are
+differentiable, so the compiler emits a gradient for each and no method is
+refused. Writing `f₀ = f_NB(0 | mean, r)` and `S = pi + (1 − pi)·f₀`, and letting
+`w = pi/S` be the posterior probability that an observed zero is structural
+(`w = 0` whenever the count is positive), the derivatives are `(1 − w)` times the
+NegBinomial ones in `mean` and `r`, and `(1 − f₀)/S` at zero — `−1/(1 − pi)`
+above it — in `pi`.
 
-**Simulation is unaffected.** The family has a sampler (draw a structural zero
-with probability `pi`, otherwise draw from the NegBinomial base), so `simulate`
-and posterior-predictive output work as they do for every other family. The
-restriction above is on gradients, not on drawing.
+**Declare `pi` as a `probability` and the boundary takes care of itself.** At
+`pi → 0` the derivative with respect to `pi` grows like `1/f₀`, which sounds
+alarming and is not: a `probability` parameter is sampled on the logit scale, so
+`pi = 0` sits at −∞ in the sampling space and is never evaluated. The chain rule
+multiplies that derivative by `pi·(1 − pi)`, which vanishes as the boundary is
+approached. This is the same mechanism Stan uses — it has no built-in
+zero-inflated family either, and its user-guide idiom leans on
+`real<lower=0, upper=1>` and the automatic constraint transform rather than on
+anything in the density.
 
 ### 12.3 Indexed Observations
 
