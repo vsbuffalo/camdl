@@ -227,6 +227,66 @@ pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
     }
 }
 
+/// Gradient of [`zi_negbin_logpmf`] w.r.t. `(mu, k, pi)`.
+///
+/// Write `f0 = f_NB(0 | mu, k)` and `S = pi + (1 - pi)*f0`, and let `w = pi/S`
+/// be the posterior probability that an observed zero is structural rather
+/// than drawn from the NegBinomial base. For `y > 0` no structural zero is
+/// possible, so `w = 0`. Then
+///
+/// ```text
+/// d/d(mu) = (1 - w) * d log f_NB(y | mu, k)/d(mu)
+/// d/d(k)  = (1 - w) * d log f_NB(y | mu, k)/d(k)
+/// d/d(pi) = (1 - f0)/S      for y = 0
+///           -1/(1 - pi)     for y > 0
+/// ```
+///
+/// The `(1 - w)` form is used rather than differentiating
+/// `log(pi + (1 - pi)*f0)` term by term because `1 - w` is recovered as
+/// `exp(log_rest - log_S)` from the same `log_add_exp` the scoring path
+/// computes, so the value and the gradient cannot disagree about `S`, and an
+/// underflowing `f0` never becomes the numerator and denominator of a ratio.
+///
+/// A domain violation returns zeros, matching [`negbin_logpmf_grad`]: the
+/// companion density already returns `-inf` there, and that is what drives
+/// rejection. At `pi -> 0` with a vanishing `f0`, `d/d(pi)` is genuinely large
+/// (it approaches `1/f0`) — that is the true derivative at the boundary, not a
+/// numerical artifact.
+///
+/// Validated against base R's `dnbinom` and `numDeriv` (Richardson) by
+/// `tests/zinb_oracle.rs`; regenerate the fixture with
+/// `scripts/gen_zinb_gradient_fixture.R`.
+pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64) {
+    if mu <= 0.0 || k <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let pi = pi.clamp(0.0, 1.0);
+    let y = y.round().max(0.0);
+    let (d_mu_nb, d_k_nb) = negbin_logpmf_grad(y, mu, k);
+
+    if y != 0.0 {
+        // pi == 1 puts all mass at zero, so a positive count has density zero
+        // and no finite gradient; the log-density is -inf and rejects.
+        if pi >= 1.0 {
+            return (0.0, 0.0, 0.0);
+        }
+        return (d_mu_nb, d_k_nb, -1.0 / (1.0 - pi));
+    }
+
+    let log_f0 = negbin_logpmf(0.0, mu, k);
+    let log_pi = if pi > 0.0 { pi.ln() } else { f64::NEG_INFINITY };
+    let log_rest = if pi < 1.0 { (1.0 - pi).ln() + log_f0 } else { f64::NEG_INFINITY };
+    let log_s = log_add_exp(log_pi, log_rest);
+    if !log_s.is_finite() {
+        return (0.0, 0.0, 0.0);
+    }
+    // 1 - w = (1 - pi)*f0 / S, formed in log space so it stays in [0, 1].
+    let one_minus_w = (log_rest - log_s).exp();
+    let f0 = log_f0.exp();
+    let d_pi = (1.0 - f0) / log_s.exp();
+    (one_minus_w * d_mu_nb, one_minus_w * d_k_nb, d_pi)
+}
+
 /// Normal log-PDF.
 ///
 /// log p(y | mu, sigma) = -0.5·((y-mu)/sigma)² - log(sigma) - 0.5·log(2π)
