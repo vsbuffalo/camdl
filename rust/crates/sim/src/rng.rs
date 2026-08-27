@@ -996,8 +996,15 @@ mod btrs_tests {
     /// through to BINV. `(20, 0.5)` and `(40, 0.25)` sit exactly ON the
     /// threshold — the tightest regime for the squeeze's in-support guarantee.
     /// `(500, 0.8)` exercises the `p > 0.5` reflection.
+    /// Note the `p` here are the CALLER's, not flipped, and
+    /// `chi_square_rejects_a_one_percent_bias` perturbs them by +1%. That
+    /// perturbation must not push a cell across `BINV_THRESHOLD`, or the canary
+    /// measures BINV instead of the arm under test — which `(20, 0.5)` did:
+    /// `p → 0.505` flips to 0.495 and `n·p_flip = 9.9 < 10`. Replaced with
+    /// `(24, 0.5)` (`n·p_flip = 11.88` after the bias), keeping a small-`n` cell
+    /// without the routing hazard.
     const GRID: &[(u64, f64)] = &[
-        (20, 0.5),
+        (24, 0.5),
         (40, 0.25),
         (100, 0.1),
         (100, 0.5),
@@ -1193,10 +1200,26 @@ mod btrs_tests {
     #[test]
     fn no_discontinuity_across_the_binv_threshold() {
         const N: usize = 100_000;
-        for np in [8.0f64, 9.5, 9.99, 10.0, 10.01, 12.0, 20.0] {
-            let p = 0.25;
-            let n = (np / p).round() as u64;
+        // `(n, p)` chosen so `n·p` really lands where the label says. Picking a
+        // fixed `p` and rounding `n = np/p` does NOT work: at `p = 0.25` the
+        // labels 9.99, 10.0 and 10.01 all round to `n = 40`, so the three cells
+        // that are supposed to straddle the seam at 0.01 resolution were one
+        // cell measured three times, and the sweep had nothing between 9.5 and
+        // 10.0 at all.
+        for &(n, p, np) in &[
+            (2_000u64, 0.004f64, 8.0f64),
+            (1_900, 0.005, 9.5),
+            (1_998, 0.005, 9.99),
+            (2_000, 0.005, 10.0),
+            (2_002, 0.005, 10.01),
+            (2_400, 0.005, 12.0),
+            (4_000, 0.005, 20.0),
+        ] {
             let exact = n as f64 * p;
+            assert!(
+                (exact - np).abs() < 1e-9,
+                "cell (n={n}, p={p}) has n·p = {exact}, not the labelled {np}"
+            );
             let draws = draw(BinomialAlgorithm::Btrs, n, p, N, 4242);
             let m: f64 = draws.iter().map(|&d| d as f64).sum::<f64>() / N as f64;
             let se = (exact * (1.0 - p) / N as f64).sqrt();

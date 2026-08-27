@@ -307,8 +307,9 @@ flip.
 
 ### 5. The PRNG is a separate question, and its measurement is contingent
 
-ChaCha8 block generation is 8.6% of the profile — worth ~1.08×, inferred, not
-measured. BTRS keeps two uniforms per attempt so Phase 2 does not subsume it.
+ChaCha8 block generation is 8.6% of the profile — worth ~1.06–1.09×, inferred,
+not measured. BTRS keeps two uniforms per attempt so Phase 2 does not subsume
+it.
 
 Cheaper than it looks in one respect: `ChainResumeState` stores params,
 trajectory and NUTS adaptation but **not** RNG state, and PGAS re-derives
@@ -348,10 +349,10 @@ as "PRNG swapped" the deletion has no surviving tracker, which is the orphan
 
 Only step 4 invalidates anything.
 
-Step 4 has **no issue of its own** — it currently shares gh#748 with step 3, so
-when that closes as "PRNG swapped" the deletion of the losing arm loses its
-tracker, which is the orphaned-dual-path case `rust-conventions.md` warns about.
-File it before step 3 lands.
+Step 4 is **gh#761**. It previously shared gh#748 with step 3, so when that
+closed as "PRNG swapped" the deletion of the losing arm would have lost its
+tracker — the orphaned-dual-path case `rust-conventions.md` warns about. Filed
+separately so the two-sampler seam has a terminal step on the board.
 
 Two prerequisites for step 4 that are not in the table because they are not
 re-keys:
