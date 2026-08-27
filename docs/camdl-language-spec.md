@@ -1324,8 +1324,10 @@ built-in types cover real-world needs:
   (`period`, `harmonics = [[a1, b1], [a2, b2], ...]` — each harmonic is a
   2-element list), for smooth periodic forcing richer than a single sinusoid
   (gh#59)
-- `periodic_spline` — periodic B-spline with uniform knots (`period`, `n_basis`,
-  optional `degree` = 3), for flexible smooth seasonality (gh#59)
+- `periodic_spline` — periodic B-spline with uniform knots (`period`,
+  `n_basis`, `coefs` — a list of exactly `n_basis` coefficients — plus optional
+  `degree`, default 3, which must be less than `n_basis`), for flexible smooth
+  seasonality (gh#59)
 
 <!-- camdl-doctest-preamble: forcing-demo
 compartments { S, I, R }
@@ -1384,6 +1386,22 @@ forcing {
     step   = 1 'days
     on     = [7 'days : 100 'days, 115 'days : 199 'days,
               252 'days : 300 'days, 308 'days : 356 'days]
+  }
+
+  # Smooth periodic shapes richer than one sinusoid. `harmonics` is a list of
+  # [cos, sin] coefficient pairs, one per harmonic of the base period.
+  seasonal_fourier : fourier 'ratio {
+    period    = 365.25 'days
+    harmonics = [[0.30, 0.10], [0.05, 0.02]]
+  }
+
+  # `coefs` is required and must have exactly n_basis entries; `degree`
+  # defaults to 3 and must be less than n_basis.
+  seasonal_spline : periodic_spline 'ratio {
+    period  = 365.25 'days
+    n_basis = 6
+    degree  = 3
+    coefs   = [1.0, 1.2, 1.4, 1.1, 0.9, 0.8]
   }
 }
 ```
@@ -1847,6 +1865,45 @@ transitions {
     @ import_rate * age_weights[a] * patch_weights[p]
 }
 ```
+
+**Transition attributes: `#[lineage]`.** An attribute may precede a
+transition's name, conventionally on its own line. `#[lineage]` is the only
+attribute the language defines; anything else is **E110**.
+
+<!-- camdl-doctest-preamble: lineage-sir
+compartments { S, I, R }
+parameters {
+  beta  : rate
+  gamma : rate
+}
+let N = S + I + R
+-->
+
+```camdl preamble=lineage-sir
+transitions {
+  #[lineage]
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+```
+
+The attribute marks the transition as a parent→child event, so the simulator can
+record *which* individual infected *which* — an identity layer on top of the
+compartment counts. It is for generating synthetic line lists and transmission
+trees (for example, to validate phylodynamic inference against a known true
+tree); it never changes the count dynamics, and the genealogy is a conditional
+sample given the counts rather than a function of them. The three-stage
+pipeline (`simulate --event-log`, `lineage realize`, `lineage tree`) is
+described in [`docs/lineages.md`](lineages.md).
+
+The rate must be **linear in the infector compartments**, because the per-parent
+sampling weights are read off the rate as linear coefficients. `beta * S * I / N`
+qualifies: `I` is a linear factor in the numerator, and its appearance in the
+denominator `N` is treated as a frozen normalizer. A genuinely nonlinear use of
+a parent compartment — `beta * S * (I + iota)^alpha / N` — is **E601**, which
+names the offending compartment and the subexpression it appears in. Wrapping
+the rate in `overdispersed(...)` (§9.8) is transparent to this analysis: the
+environmental noise changes the counts, not the attribution.
 
 ### 9.1.1 Multi-source transitions (`A + B --> …`)
 
@@ -2718,6 +2775,7 @@ parameters {
   N_tested : count
   rho_sens : probability
   rho_spec : probability
+  pi_zero  : probability
 }
 let Ntot = S + I + R
 transitions {
@@ -2899,6 +2957,8 @@ beta_binomial(n = EXPR, alpha = EXPR, beta = EXPR)          overdispersed preval
 beta_binomial(n = EXPR, mean = EXPR, concentration = EXPR)  overdispersed prevalence (mean/concentration)
 beta(mean = EXPR, concentration = EXPR)        continuous proportion in (0, 1)
 bernoulli(p = EXPR)                            binary outcome
+zero_inflated(base = neg_binomial(mean = EXPR, r = EXPR), pi = EXPR)
+                                               counts with excess zeros
 ```
 
 `neg_binomial(mean = μ, r = k)` is the **NB2** (mean–dispersion)
@@ -2989,6 +3049,66 @@ compiler checks domain.
 - `E253` — base must be `binomial(...)` or `bernoulli(...)`; other likelihood
   families rejected.
 - `E254` — missing one of the required keyword arguments `base`, `sens`, `spec`.
+
+### 12.2.2 Counts with excess zeros: `zero_inflated`
+
+Surveillance counts often contain more zeros than any single count distribution
+can produce. A vector-trapping site where the mosquito is simply absent, a
+health zone that reported nothing because no one was looking, a week with no
+sampling effort — these zeros come from a process *separate* from the
+transmission dynamics, so they are called **structural zeros**. Scoring them
+with a plain `neg_binomial` forces one dispersion parameter `r` to explain both
+the pile of zeros and the spread of the positive counts at once; `r` is pulled
+down to cover the zeros, which overstates the overdispersion of the positive
+counts and biases the fitted reporting rate.
+
+`zero_inflated` gives the structural zeros their own parameter. It mixes a point
+mass at zero over a NegBinomial base:
+
+```
+P(y = 0)  =  pi  +  (1 - pi) * f_NB(0 | mean, r)
+P(y = k)  =        (1 - pi) * f_NB(k | mean, r)      for k > 0
+```
+
+`pi` is the probability that a cell is a structural zero. At `pi = 0` the family
+reduces to the plain `neg_binomial` exactly, so `pi`'s posterior is directly
+readable as "how much of the zero mass the dynamics could not explain".
+
+```camdl preamble=obs-sir
+observations {
+  vector_catch {
+    columns       { time : time, vector_catch : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    vector_catch  ~ zero_inflated(
+      base = neg_binomial(mean = rho * projected, r = k),
+      pi   = pi_zero
+    )
+  }
+}
+```
+
+**Base and arguments.** `base` must be `neg_binomial(...)`; no other family is
+accepted (**E324**). Both `base` and `pi` are required (**E325**), and any other
+keyword is rejected rather than silently dropped (**E251**).
+
+**Dimensions.** `mean` carries the count dimension `[P]` — an expected count
+over the reporting interval, the same contract as the plain `neg_binomial`, so a
+per-time transition rate there is **E304**. `r` and `pi` are dimensionless.
+Declare `pi`'s parameter as `probability` so its `[0, 1]` domain is checked at
+compile time rather than only clamped at scoring time.
+
+**Scoring-only: it carries no gradient.** The compiler emits no derivative for
+this family, so the fit-time capability gate refuses the gradient-based methods
+`pgas` and `nuts` on any model that uses it, naming the refused parameters. The
+gradient-free methods — `mh`, `pmmh`, `pfilter`, and `if2` — score it normally.
+Choose the family and the method together: a model that needs zero-inflation
+cannot also use `nuts`.
+
+**Simulation is unaffected.** The family has a sampler (draw a structural zero
+with probability `pi`, otherwise draw from the NegBinomial base), so `simulate`
+and posterior-predictive output work as they do for every other family. The
+restriction above is on gradients, not on drawing.
 
 ### 12.3 Indexed Observations
 
@@ -4074,6 +4194,86 @@ formula in the model source has no effect on a fit that has already run. The
 vocabulary is compiled against the fit's model source and refused unless that
 source is still the same model the fit ran on — quantities are excluded from
 that comparison, so a reporting-only edit to the source is not a mismatch.
+
+### 16.5 Counterfactual contrasts (`contrasts {}`)
+
+A `quantities {}` recipe reduces **one** run. A `contrasts {}` entry compares
+**two**: it is the block that answers "how many deaths did the campaign avert?"
+Each entry is arithmetic over *run-rooted* operands of the form
+`<run>.<namespace>.<member>`, where `<run>` is a preset declared in
+`scenarios {}` (§17) or the reserved name `fitted` (the fitted model with no
+scenario overlay), and `<namespace>` is `quantities` or `observations`.
+
+<!-- camdl-doctest-preamble: contrast-sir
+compartments { S, I, R }
+parameters {
+  beta  : rate
+  gamma : rate
+  N0    : count
+  I0    : count
+}
+let N = S + I + R
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+}
+interventions {
+  sia_campaign : transfer(fraction = 0.3, from = S, to = R)
+    at [60 'days]
+}
+init { S = N0 - I0  I = I0 }
+simulate { from = 0 'days  to = 180 'days }
+scenarios {
+  no_sia   { set = { beta = 0.4  gamma = 0.15  N0 = 10000  I0 = 10 }
+             disable = [sia_campaign] }
+  with_sia { set = { beta = 0.4  gamma = 0.15  N0 = 10000  I0 = 10 }
+             enable  = [sia_campaign] }
+}
+-->
+
+```camdl preamble=contrast-sir
+quantities {
+  total_inf = final(R)
+}
+
+contrasts {
+  averted      = no_sia.quantities.total_inf - with_sia.quantities.total_inf
+  averted_frac = (no_sia.quantities.total_inf - with_sia.quantities.total_inf)
+                 / no_sia.quantities.total_inf
+}
+```
+
+**Why this is a language construct rather than two runs and a subtraction.**
+Differencing two independently-simulated arms by hand mixes the intervention
+effect with the Monte Carlo noise of two unrelated random draws. The reducer
+behind `contrasts {}` instead *forks* both arms from a shared trajectory: it
+diffs the two runs' live intervention sets, finds the toggled intervention, and
+branches at the last saved snapshot strictly before that intervention fires, so
+both arms share one history up to the intervention and one per-draw seed. The
+difference is then attributable to the intervention rather than to sampling.
+Results are banded over the forkable draws into `contrasts/<name>.tsv`. A
+contrast whose two arms differ only in a parameter — no intervention is toggled
+— has no fork point, and is skipped with a note rather than silently reported.
+
+**Diagnostics.**
+
+- **E292** — a run-rooted reference used outside `contrasts {}`. It is a
+  contrast operand and has no value in a rate, `let` binding, or other
+  per-instant expression.
+- **E293** — a run-rooted reference inside a `quantities {}` recipe. The run is
+  implicit there; drop the `<run>.` prefix.
+- **E294** — an operand names a run that is not a declared scenario nor
+  `fitted`, or a quantity/stream the model does not declare.
+- **E295** — the body is not run-rooted arithmetic (a bare constant, a
+  comparison, or an inline reducer appeared where `<run>.<ns>.<member>` operands
+  combined with `+ - * /` are required).
+- **E297** — the two arms have incompatible dimensions (`deaths - rate`).
+- **E298** — two entries share a name; each lowers to one
+  `contrasts/<name>.tsv`, so a duplicate would clobber its sibling.
+
+Like `quantities {}`, a `contrasts {}` block is a derived report rather than an
+input to the dynamics, so adding or changing one never re-keys a model's
+`run_id`.
 
 ---
 
