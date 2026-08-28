@@ -284,7 +284,11 @@ pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64
         return (0.0, 0.0, 0.0);
     }
     let pi = pi.clamp(0.0, 1.0);
-    let y = y.round().max(0.0);
+    // Round only — no clamp to zero — so the branch below matches the value
+    // function's `y.round() == 0.0` test: a negative y goes down the
+    // positive-count branch on both sides (where the NB base's internal clamp
+    // handles it identically for value and gradient).
+    let y = y.round();
     let (d_mu_nb, d_k_nb) = negbin_logpmf_grad(y, mu, k);
 
     if y != 0.0 {

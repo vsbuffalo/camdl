@@ -135,6 +135,31 @@ fn zinb_gradient_is_finite_at_the_s_underflow_corner() {
     }
 }
 
+/// Nothing upstream rejects a negative observed value — the house convention
+/// is to round to the nearest non-negative integer at scoring time — so the
+/// value and gradient functions must take the same branch for one. The value
+/// function sends y = -2 down the positive-count branch (where the NB base's
+/// internal clamp scores it as zero counts times `1 - pi`); the gradient must
+/// differentiate that same expression, not the y = 0 mixture.
+#[test]
+fn zinb_value_and_gradient_take_the_same_branch_for_negative_y() {
+    use sim::inference::obs_loglik::{negbin_logpmf, negbin_logpmf_grad};
+    let (mu, k, pi) = (5.0, 2.0, 0.4);
+    let v = zi_negbin_logpmf(-2.0, mu, k, pi);
+    assert_eq!(
+        v,
+        (1.0 - pi).ln() + negbin_logpmf(-2.0, mu, k),
+        "value scores y = -2 on the positive-count branch"
+    );
+    let (d_mu, d_k, d_pi) = zi_negbin_logpmf_grad(-2.0, mu, k, pi);
+    let (nb_mu, nb_k) = negbin_logpmf_grad(-2.0, mu, k);
+    assert_eq!(
+        (d_mu, d_k, d_pi),
+        (nb_mu, nb_k, -1.0 / (1.0 - pi)),
+        "gradient must differentiate the branch the value actually scored"
+    );
+}
+
 /// A NaN `pi` (e.g. a 0/0 parameter ratio) is a domain violation: the value
 /// function returns `-inf` for it in both branches, so per the module's
 /// convention (gh#645 — the gradient of the constant `-inf` floor is zero,
