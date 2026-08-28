@@ -251,12 +251,28 @@ pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
 /// companion density already returns `-inf` there, and that is what drives
 /// rejection. At `pi -> 0` with a vanishing `f0`, `d/d(pi)` is genuinely large
 /// (it approaches `1/f0`) — that is the true derivative at the boundary, not a
-/// numerical artifact.
+/// numerical artifact. When the ratio's true value exceeds what a double can
+/// carry (both `pi` and `f0` underflowing), it saturates at
+/// `exp(ZI_LOG_D_PI_CAP)` rather than `+inf` — see that constant's rationale.
 ///
 /// Validated against base R's `dnbinom` and `numDeriv` (Richardson) by
 /// `tests/zinb_oracle.rs`; regenerate the fixture with
 /// `scripts/gen_zinb_gradient_fixture.R`.
 pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64) {
+    // Cap on the log of the `d/d(pi)` ratio `(1 - f0)/S`. When both `pi` and
+    // `f0` underflow in linear space, `log S` stays finite but the ratio's
+    // true value exceeds `f64::MAX`; forming it uncapped yields `+inf`, and
+    // the chain-rule accumulator then produces `inf * 0.0 = NaN` for every
+    // estimated parameter absent from `pi`'s gradient map — a finite
+    // log-density paired with a NaN gradient. `exp(709)` ≈ 8.2e307 is the
+    // largest power of e below `f64::MAX`; saturating there keeps the
+    // restoring direction and only engages where `log S < -709`, i.e. logit
+    // positions the prior gradient dominates long before. (The reference
+    // implementations avoid the ratio by differentiating on the logit scale —
+    // pscl's `gradNegBin`, statsmodels' `GenericZeroInflated.score_obs` —
+    // which this kernel cannot: `pi` is an arbitrary expression behind the
+    // generic transform seam.)
+    const ZI_LOG_D_PI_CAP: f64 = 709.0;
     if mu <= 0.0 || k <= 0.0 {
         return (0.0, 0.0, 0.0);
     }
@@ -282,8 +298,11 @@ pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64
     }
     // 1 - w = (1 - pi)*f0 / S, formed in log space so it stays in [0, 1].
     let one_minus_w = (log_rest - log_s).exp();
-    let f0 = log_f0.exp();
-    let d_pi = (1.0 - f0) / log_s.exp();
+    // 1 - f0 = -expm1(log f0), exact even when f0 is within an ulp of 1; the
+    // ratio (1 - f0)/S is then formed in log space and capped, because its
+    // true value can exceed f64::MAX when S underflows (see ZI_LOG_D_PI_CAP).
+    let log_one_minus_f0 = (-log_f0.exp_m1()).ln();
+    let d_pi = (log_one_minus_f0 - log_s).min(ZI_LOG_D_PI_CAP).exp();
     (one_minus_w * d_mu_nb, one_minus_w * d_k_nb, d_pi)
 }
 
