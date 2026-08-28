@@ -142,6 +142,56 @@ pub struct PMMHResumeState {
 // adaptive MCMC", *Stat. Comput.* 18:343–373) and Roberts & Rosenthal (2009,
 // "Examples of Adaptive MCMC", *JCGS* 18(2):349–367).
 
+// Compact region for the Robbins–Monro global scale: log λ is projected onto
+// [`LOG_SCALE_MIN`, `LOG_SCALE_MAX`] after every update, so λ ∈ [4.5e-5, 1.5e2].
+//
+// Why a bound at all. Robbins–Monro converges to a *root* of
+// g(λ) = E[accept | λ] − a*. Under a noisy (pseudo-marginal) likelihood that
+// root need not exist, because acceptance does not go to 1 as the step goes to
+// 0. Take the standard model of particle-filter likelihood noise,
+// log L̂ − log L ~ N(−σ²/2, σ²) drawn independently at every evaluation (Pitt,
+// Silva, Giordani & Kohn 2012, *J. Econometrics* 171(2):134–151; Doucet, Pitt,
+// Deligiannidis & Kohn 2015, *Biometrika* 102(2):295–313). The chain's own
+// noise term is then stationary at N(+σ²/2, σ²), the proposal's is
+// N(−σ²/2, σ²), and in the λ → 0 limit (where the θ-move contributes nothing)
+// acceptance → E[min(1, e^X)] with X ~ N(−σ², 2σ²), which evaluates to
+// 2Φ(−σ/√2): a vanishing step cannot beat a current state whose likelihood
+// estimate came out high by chance. At σ = 2 that is 15.7% (direct Monte Carlo
+// of the noise-only chain: 15.6%), below the a* = 26.8% target at d = 6, and
+// the θ-move only lowers it further — the measured run-mean acceptance at
+// σ = 2 is ~16%. So g(λ) < 0 at every λ and the recursion has nothing to
+// converge to. Vanishing gain does not save it: γ_t → 0 but Σγ_t = ∞ is
+// exactly the Robbins–Monro condition, so the drift accumulates as
+// log λ ≈ −(a* − a)·T^0.4/0.4. At T = 200k and a = 15% that predicts
+// λ ≈ 1e-17; measured before this bound, λ = 5.9e-17.
+//
+// Projecting the adaptation onto a compact set is the standard truncation
+// device for stochastic approximation whose root may not exist or may lie
+// outside the region of interest (Andrieu & Thoms 2008, "A tutorial on adaptive
+// MCMC", *Stat. Comput.* 18:343–373, §3), and it is also the simplest way to
+// satisfy the *containment* condition that adaptive-MCMC ergodicity needs
+// alongside diminishing adaptation (Roberts & Rosenthal 2007, *J. Appl. Probab.*
+// 44:458–475). `pgas.rs` already does this for its own per-rung Robbins–Monro
+// scale (`log_proposal_sd.clamp(-20.0, 5.0)`).
+//
+// Why the floor is −10 here and −20 there: the two quantities have different
+// units. `pgas`'s `log_proposal_sd` is an *absolute* per-parameter proposal SD
+// on the transformed scale, so it must be free to reach genuinely tiny widths.
+// This `log_scale` is a *relative* multiplier on a proposal that is already
+// scaled to the estimated posterior covariance by the optimal 2.38²/d factor,
+// so λ = 1 is the optimum by construction. λ = 4.5e-5 proposes steps 2×10⁴
+// times narrower than that optimum — posterior traversal time scales as λ⁻², so
+// ~5×10⁸ times slower — which no legitimate tuning ever wants, while still
+// leaving room for the gh#347 rescue to correct an initial diagonal
+// `proposal_sd` that overshoots by up to four orders of magnitude.
+//
+// The bound also restores a floor on the *composite* proposal width. Haario's
+// εI term (`update_cholesky`) floors the shape term's SD at √ε = 1e-3, but λ
+// multiplies that term, so an unbounded λ voided the only floor the algorithm
+// had.
+const LOG_SCALE_MIN: f64 = -10.0;
+const LOG_SCALE_MAX: f64 = 5.0;
+
 /// Running mean + covariance via Welford's online algorithm, a Cholesky factor
 /// for sampling N(0, Σ) (the Haario *shape* term), and a Robbins–Monro global
 /// scale (the `log_scale` term — see [`AdaptiveProposal::adapt_scale`]).
@@ -227,7 +277,22 @@ impl AdaptiveProposal {
     fn adapt_scale(&mut self, accepted: bool, step: usize) {
         let gamma = ((step + 1) as f64).powf(-0.6);
         let accept_indicator = if accepted { 1.0 } else { 0.0 };
-        self.log_scale += gamma * (accept_indicator - self.target_accept());
+        // Projected onto the compact region — see `LOG_SCALE_MIN`. Projecting
+        // here rather than at read time keeps `log_scale` itself bounded, so a
+        // chain that later starts accepting climbs off the floor in a few
+        // steps instead of having to unwind an arbitrarily deep excursion.
+        // A checkpoint written before this bound existed may deserialize a
+        // `log_scale` outside the region; the first update brings it back in.
+        self.log_scale = (self.log_scale + gamma * (accept_indicator - self.target_accept()))
+            .clamp(LOG_SCALE_MIN, LOG_SCALE_MAX);
+    }
+
+    /// Whether the Robbins–Monro scale is pinned at the bottom of its compact
+    /// region. True means the adaptation is chasing an acceptance rate that no
+    /// scale attains — under a particle-filter likelihood, that the estimator
+    /// is too noisy for the target. Surfaced as an end-of-run warning.
+    fn at_scale_floor(&self) -> bool {
+        self.log_scale <= LOG_SCALE_MIN
     }
 
     /// Update running statistics with a new sample (on transformed scale).
@@ -522,6 +587,11 @@ pub fn run_pmmh(
         .sum();
 
     let mut steps = Vec::new();
+    // How often the Robbins–Monro scale sat at the bottom of its compact
+    // region (`LOG_SCALE_MIN`). Non-zero means the proposal was as narrow as
+    // the sampler is allowed to make it, which is a run-invalidating condition
+    // the user has to be told about — see the end-of-run warning.
+    let mut steps_at_scale_floor = 0usize;
 
     if start_step >= config.n_steps {
         eprintln!("  warning: chain already completed {} steps (requested {}). \
@@ -612,6 +682,9 @@ pub fn run_pmmh(
         if config.adapt {
             if let Some(ref mut ap) = adaptive {
                 ap.adapt_scale(accepted, step);
+                if ap.at_scale_floor() {
+                    steps_at_scale_floor += 1;
+                }
             }
         }
 
@@ -660,6 +733,34 @@ pub fn run_pmmh(
 
         if let Some(cb) = on_step {
             cb(step, current_ll, accepted, &current_params);
+        }
+    }
+
+    // The scale floor is a bound on the damage, not a repair: a chain that
+    // spent time pinned there did not explore its posterior, and the draws it
+    // produced must not be read as one. Say so, and name the knob that fixes
+    // it — for a particle-filter likelihood the cause is estimator noise, not
+    // proposal tuning, so a longer chain does not help.
+    if steps_at_scale_floor > 0 {
+        let ran = config.n_steps.saturating_sub(start_step).max(1);
+        let target_pct = adaptive.as_ref().map_or(0.0, |ap| ap.target_accept() * 100.0);
+        let lam = LOG_SCALE_MIN.exp();
+        let lines = [
+            format!("the adaptive proposal scale sat at its lower bound (lambda = {lam:.1e})"),
+            format!("for {steps_at_scale_floor} of {ran} steps: no scale reached the"),
+            format!("{target_pct:.1}% target acceptance, so the proposal ended far narrower"),
+            "than the posterior and these draws do not cover it. Under a".to_string(),
+            "particle-filter likelihood the attainable acceptance is capped by the".to_string(),
+            "spread of log L-hat, so raise the particle count (aim for a".to_string(),
+            "log-likelihood standard deviation near 1 at the mode). A longer chain".to_string(),
+            "will not help.".to_string(),
+        ];
+        for (i, text) in lines.iter().enumerate() {
+            if i == 0 {
+                eprintln!("  warning: {text}");
+            } else {
+                eprintln!("           {text}");
+            }
         }
     }
 
