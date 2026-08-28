@@ -276,6 +276,13 @@ pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64
     if mu <= 0.0 || k <= 0.0 {
         return (0.0, 0.0, 0.0);
     }
+    // A NaN pi survives `clamp` and fails every comparison below, which would
+    // send a NaN d/d(pi) into the accumulator at a point the value function
+    // scores -inf; the gradient of that constant floor is zero (gh#645, as in
+    // `normal_logpdf_grad`).
+    if pi.is_nan() {
+        return (0.0, 0.0, 0.0);
+    }
     let pi = pi.clamp(0.0, 1.0);
     let y = y.round().max(0.0);
     let (d_mu_nb, d_k_nb) = negbin_logpmf_grad(y, mu, k);
