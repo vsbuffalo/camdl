@@ -595,8 +595,8 @@ fn build_poisson_seir() -> ir::Model {
 #[test]
 fn zinb_obs_grad_matches_fd() {
     // The oracle test (`zinb_oracle.rs`) pins the ZINB kernel's (mu, k, pi)
-    // partials against base R + numDeriv. This pins the OTHER half: that those
-    // partials are chain-ruled onto the estimated parameters through the
+    // partials against base R + numDeriv. This pins the *other* half: that
+    // those partials are chain-ruled onto the estimated parameters through the
     // compiler-emitted gradient maps. `rho` and `pi_zero` reach the likelihood
     // textually; `beta` reaches it only through the trajectory and the
     // projection, which is the path that used to contribute a silent zero
