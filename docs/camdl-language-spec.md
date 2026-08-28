@@ -3112,9 +3112,12 @@ alarming and is not: a `probability` parameter is sampled on the logit scale, so
 `pi = 0` sits at −∞ in the sampling space and is never evaluated. The chain rule
 multiplies that derivative by `pi·(1 − pi)`, which vanishes as the boundary is
 approached. This is the same mechanism Stan uses — it has no built-in
-zero-inflated family either, and its user-guide idiom leans on
-`real<lower=0, upper=1>` and the automatic constraint transform rather than on
-anything in the density.
+zero-inflated family either, and its documented idiom declares the mixing
+probability `real<lower=0, upper=1>` and scores the zero case with
+`log_sum_exp`, leaning on the automatic constraint transform rather than on
+anything in the density (Stan Development Team, *Stan User's Guide* v2.39,
+["Zero-inflated and hurdle
+models"](https://mc-stan.org/docs/stan-users-guide/finite-mixtures.html#zero-inflated)).
 
 ### 12.3 Indexed Observations
 
