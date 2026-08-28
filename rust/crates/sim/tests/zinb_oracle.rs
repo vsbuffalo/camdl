@@ -135,6 +135,26 @@ fn zinb_gradient_is_finite_at_the_s_underflow_corner() {
     }
 }
 
+/// A NaN `pi` (e.g. a 0/0 parameter ratio) is a domain violation: the value
+/// function returns `-inf` for it in both branches, so per the module's
+/// convention (gh#645 — the gradient of the constant `-inf` floor is zero,
+/// as in `normal_logpdf_grad`) the gradient must be zeros, not a NaN that
+/// enters the momentum update at a point the value path rejects. NaN survives
+/// `clamp` and fails every comparison, so it needs its own guard.
+#[test]
+fn zinb_gradient_rejects_nan_pi_with_zeros() {
+    for &y in &[0.0, 3.0] {
+        let v = zi_negbin_logpmf(y, 5.0, 2.0, f64::NAN);
+        assert_eq!(
+            v,
+            f64::NEG_INFINITY,
+            "value must reject a NaN pi (y = {y})"
+        );
+        let g = zi_negbin_logpmf_grad(y, 5.0, 2.0, f64::NAN);
+        assert_eq!(g, (0.0, 0.0, 0.0), "gradient must be zeros where the value rejects (y = {y})");
+    }
+}
+
 /// At `pi = 0` the mixture is the plain NegBinomial, so the ZINB value and its
 /// (mu, k) gradient must reduce to the NB ones exactly. This is an internal
 /// consistency property rather than external evidence, and it is here because
