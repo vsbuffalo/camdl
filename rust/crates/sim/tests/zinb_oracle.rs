@@ -107,6 +107,34 @@ fn zinb_gradient_matches_external_reference() {
     }
 }
 
+/// When both `pi` and `f_NB(0)` underflow in linear space, `S = pi + (1-pi)·f0`
+/// underflows to 0.0 while `log S` stays finite, and a linear-space
+/// `(1 - f0)/S` overflows to `+inf` — which the chain-rule accumulator then
+/// turns into NaN via `inf * 0.0` for every estimated parameter absent from
+/// `pi`'s gradient map, pairing a *finite* log-density with a NaN gradient.
+/// The reference implementations bound the score analytically by
+/// differentiating on the logit scale (pscl's `gradNegBin`; statsmodels'
+/// `GenericZeroInflated.score_obs`); camdl's kernel is transform-agnostic, so
+/// it must stay finite on its own.
+#[test]
+fn zinb_gradient_is_finite_at_the_s_underflow_corner() {
+    // log f0 = k·ln(k/(k+mu)) ≈ -804.7, below ln(5e-324): f0 underflows to 0.
+    let (mu, k) = (2000.0, 500.0);
+    for &pi in &[0.0, 5e-324, 1e-310] {
+        let v = zi_negbin_logpmf(0.0, mu, k, pi);
+        let (d_mu, d_k, d_pi) = zi_negbin_logpmf_grad(0.0, mu, k, pi);
+        assert!(v.is_finite(), "value must be finite (pi = {pi:e}): {v}");
+        assert!(
+            d_mu.is_finite() && d_k.is_finite(),
+            "(mu, k) partials must be finite (pi = {pi:e}): ({d_mu}, {d_k})"
+        );
+        assert!(
+            d_pi.is_finite() && d_pi > 0.0,
+            "d/d(pi) must be finite and positive at the corner (pi = {pi:e}): {d_pi}"
+        );
+    }
+}
+
 /// At `pi = 0` the mixture is the plain NegBinomial, so the ZINB value and its
 /// (mu, k) gradient must reduce to the NB ones exactly. This is an internal
 /// consistency property rather than external evidence, and it is here because
