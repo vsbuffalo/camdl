@@ -38,6 +38,14 @@ const BINV_THRESHOLD: f64 = 10.0;
 /// fencing first is the conservative order.
 const BTRS_MAX_N: u64 = 1_000_000_000_000;
 
+/// Smallest `us` at which BTRS's squeeze may fire. Below it the hat is too far
+/// from the density for the fast accept to be sound, so the draw must go to the
+/// slow test. Named because the sampler and
+/// `btrs_tests::hat_dominates_and_squeeze_is_valid` must agree on it exactly: as
+/// two `0.07` literals they could drift, and the sweep would then certify a
+/// squeeze boundary the sampler does not use.
+const SQUEEZE_US_MIN: f64 = 0.07;
+
 /// Inverse-transform binomial quantile: the smallest `x` with `CDF(x) >= u`,
 /// walked with the exact pmf recurrence. `p` must already be the flipped
 /// (`<= 0.5`) probability, and `u` the single uniform draw.
@@ -182,6 +190,27 @@ impl BtrsHat {
         ((2.0 * self.a / us + self.b) * u + self.c).floor()
     }
 
+    /// `us`, the folded distance from the centre of the `u` interval. One
+    /// definition, used by the sampler and by the domination sweep — they were
+    /// separate copies, which is how a sweep can end up certifying a hat the
+    /// sampler does not actually use.
+    #[inline]
+    fn us_of(u: f64) -> f64 {
+        0.5 - u.abs()
+    }
+
+    /// Whether a candidate `k` is in `[0, n]`, tested in f64 BEFORE any integer
+    /// cast. Shared with the sweep for the same reason as [`Self::us_of`].
+    ///
+    /// Note this is deliberately NOT NaN-tolerant — for `k = NaN` both
+    /// comparisons are false and it answers "in support". The NaN case is
+    /// excluded upstream by `binomial`'s `!p.is_finite()` guard, which is where
+    /// it belongs; see the comment there.
+    #[inline]
+    fn in_support(&self, k: f64) -> bool {
+        !(k < 0.0 || k > self.count)
+    }
+
     /// `log` of the density-to-hat ratio at `k`. The slow acceptance test.
     #[inline]
     fn log_bound(&self, k: f64) -> f64 {
@@ -282,7 +311,7 @@ fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
         // would silently return a zero count instead of redrawing.
         let u: f64 = rng.gen::<f64>() - 0.5;
         let v: f64 = rng.gen();
-        let us = 0.5 - u.abs();
+        let us = BtrsHat::us_of(u);
         let k = h.k_of(u, us);
 
         // DELIBERATE DEVIATION from the reference, which does this check only
@@ -292,7 +321,7 @@ fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
         // asserts it holds across the routed domain — and where it might not, this
         // redraws instead of handing the caller a `k > n` that the `p > 0.5`
         // reflection would turn into a `u64` underflow of ~1.8e19.
-        if k < 0.0 || k > h.count {
+        if !h.in_support(k) {
             continue;
         }
         let k_int = k as u64;
@@ -300,7 +329,7 @@ fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
 
         // The squeeze: where the hat is tight enough to accept without touching
         // the density. This is the branch BTRS wins on.
-        if us >= 0.07 && v <= h.v_r {
+        if us >= SQUEEZE_US_MIN && v <= h.v_r {
             return k_int;
         }
         if h.slow_accepts(v, us, k) {
@@ -1078,16 +1107,16 @@ mod btrs_tests {
         let (mut worst_v, mut worst_squeeze) = (0.0f64, f64::NEG_INFINITY);
         for i in 0..STEPS {
             let u = -0.5 + (i as f64 + 0.5) / STEPS as f64;
-            let us = 0.5 - u.abs();
+            let us = BtrsHat::us_of(u);
             let k = h.k_of(u, us);
-            if k < 0.0 || k > h.count {
+            if !h.in_support(k) {
                 continue;
             }
             let v = h.accept_ratio(us, k);
             if v > worst_v {
                 worst_v = v;
             }
-            if us >= 0.07 {
+            if us >= SQUEEZE_US_MIN {
                 worst_squeeze = worst_squeeze.max(h.v_r - v);
             }
         }
@@ -1375,6 +1404,60 @@ mod btrs_tests {
         let a = draw(BinomialAlgorithm::Btpe, 1000, 0.5, 64, 5);
         let b = draw(BinomialAlgorithm::Btrs, 1000, 0.5, 64, 5);
         assert_ne!(a, b, "BTPE and BTRS returned identical streams — check the dispatch");
+    }
+
+    /// The sweep tests `accept_ratio`; production runs `slow_accepts`. This is
+    /// what keeps that from being a hole.
+    ///
+    /// They are two algebraic rearrangements of one inequality — `v ≤ V(u)` and
+    /// `ln(v·α/(a/us²+b)) ≤ log_bound(k)` — and they are NOT collapsible: the log
+    /// form is what production wants (no `exp` of a possibly-large number), and
+    /// the ratio form is what makes domination expressible as `V ≤ 1`. So the
+    /// duplication stays, and instead it gets checked. Without this, a typo in
+    /// the production expression alone — `a/us` for `a/us²`, `v/alpha` for
+    /// `v*alpha`, a dropped `.ln()` — would leave
+    /// `hat_dominates_and_squeeze_is_valid` perfectly green, because that sweep
+    /// never calls the expression the sampler actually uses.
+    #[test]
+    fn the_two_acceptance_forms_agree() {
+        const STEPS: usize = 2_000;
+        let mut compared = 0usize;
+        for &(n, p) in DOMAIN {
+            let h = BtrsHat::new(n, p);
+            for i in 0..STEPS {
+                let u = -0.5 + (i as f64 + 0.5) / STEPS as f64;
+                let us = BtrsHat::us_of(u);
+                let k = h.k_of(u, us);
+                if !h.in_support(k) {
+                    continue;
+                }
+                let ratio = h.accept_ratio(us, k);
+                // Probe both sides of the boundary, and skip a narrow band
+                // around it where the two forms may legitimately round apart.
+                for scale in [0.5f64, 0.9, 1.1, 2.0] {
+                    let v = ratio * scale;
+                    if !(v > 0.0 && v.is_finite()) {
+                        continue;
+                    }
+                    if (scale - 1.0).abs() < 1e-9 {
+                        continue;
+                    }
+                    assert_eq!(
+                        h.slow_accepts(v, us, k),
+                        v <= ratio,
+                        "n={n} p={p} u={u} k={k}: the log-form test and the ratio \
+                         form disagree at v={v} (V={ratio}) — one of the two \
+                         expressions is wrong, and the domination sweep only \
+                         checks the ratio form"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert!(
+            compared > 50_000,
+            "only {compared} comparisons — this test has gone vacuous"
+        );
     }
 
     /// The THIRD exactness condition, and the one the domination sweep is
