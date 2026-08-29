@@ -65,7 +65,8 @@ pub struct StreamScore {
     pub log_score: f64,
     /// Per-stream CRPS.
     pub crps: f64,
-    /// Per-stream PIT.
+    /// Per-stream randomized PIT (same construction as the joint `pit`,
+    /// with its own uniform draw).
     pub pit: f64,
     /// This stream's plot-ready predictive interval (median + 50%/90% bands)
     /// from its predictive samples. The canonical per-district forecast band.
@@ -93,8 +94,11 @@ pub struct PrequentialStep {
     pub log_score: f64,
     /// Continuous Ranked Probability Score (sample estimator).
     pub crps: f64,
-    /// Probability integral transform u_t = F̂(y_obs). Should be
-    /// Uniform(0, 1) under correct calibration.
+    /// Randomized probability integral transform
+    /// u_t = P̂(X < y_obs) + v·P̂(X = y_obs), v ~ Uniform(0, 1)
+    /// (`pit_sample_randomized`; seed in the trace's
+    /// `pit_randomization_seed`). Uniform(0, 1) under correct
+    /// calibration, including for count predictives.
     pub pit: f64,
     /// Effective sample size of the filter at this step.
     pub ess: f64,
@@ -155,6 +159,14 @@ pub struct PrequentialTrace {
     pub steps: Vec<PrequentialStep>,
     /// Warnings collected during trace construction.
     pub warnings: Vec<PrequentialWarning>,
+    /// Seed of the randomized-PIT uniform draws (`pit_sample_randomized`):
+    /// one `v` per scored value, drawn from
+    /// `StatefulRng::new_stream(seed, PIT_RNG_STREAM)` in step order (joint
+    /// first, then each present stream). Recording it makes the trace's PIT
+    /// values reproducible. `None` on traces written before the randomized
+    /// PIT (gh#629); `#[serde(default)]` so those still deserialize.
+    #[serde(default)]
+    pub pit_randomization_seed: Option<u64>,
 }
 
 impl PrequentialTrace {
@@ -297,6 +309,12 @@ pub fn crps_sample(samples: &[f64], y: f64) -> f64 {
 /// Under IC-free inference the first obs is used only to pin x_0;
 /// pass `t0 = 1`. Otherwise `t0 = 0`.
 ///
+/// `pit_seed` seeds the randomized-PIT uniform draws
+/// (`pit_sample_randomized`); callers pass their filter seed, and the
+/// trace records it (`pit_randomization_seed`). Draws are consumed in
+/// step order — one for the joint score, then one per present stream —
+/// so a trace is reproducible from (seed, data).
+///
 /// Bootstrap-PF-specific assumption: pre-obs weights are uniform
 /// (reset to zero at the end of the previous step), so log-score
 /// reduces to `logsumexp(log_liks) − log N`. If this filter ever
@@ -307,6 +325,7 @@ pub fn build_trace(
     per_stream_observed: &[Vec<f64>],
     ess_trace: &[f64],
     t0: usize,
+    pit_seed: u64,
 ) -> PrequentialTrace {
     assert_eq!(recorded.obs_times.len(), y_obs.len(),
         "y_obs must align 1:1 with recorded obs_times");
@@ -319,6 +338,7 @@ pub fn build_trace(
     let mut warnings: Vec<PrequentialWarning> = Vec::new();
     let mut ess_collapse_count = 0usize;
     const ESS_THRESHOLD: f64 = 10.0;
+    let mut pit_rng = crate::rng::StatefulRng::new_stream(pit_seed, PIT_RNG_STREAM);
 
     for idx in t0..recorded.obs_times.len() {
         let log_liks = &recorded.log_liks[idx];
@@ -360,7 +380,7 @@ pub fn build_trace(
         // Uniform-weight log-score (see docstring).
         let log_score = super::types::log_sum_exp(log_liks) - n.ln();
         let crps = crps_sample(&joint_samples, y);
-        let pit = pit_sample(&joint_samples, y);
+        let pit = pit_sample_randomized(&joint_samples, y, pit_rng.uniform());
         let ess = ess_trace[idx];
         if ess < ESS_THRESHOLD { ess_collapse_count += 1; }
 
@@ -381,7 +401,7 @@ pub fn build_trace(
                 y_pred_samples: samp_s.clone(),
                 log_score: super::types::log_sum_exp(ll_s) - n_s.ln(),
                 crps: crps_sample(samp_s, y_s),
-                pit: pit_sample(samp_s, y_s),
+                pit: pit_sample_randomized(samp_s, y_s, pit_rng.uniform()),
                 interval: PredInterval::from_samples(samp_s),
             });
         }
@@ -413,21 +433,50 @@ pub fn build_trace(
         conditioning: Conditioning::InSample,
         steps,
         warnings,
+        pit_randomization_seed: Some(pit_seed),
     }
 }
 
-/// Probability integral transform: empirical CDF of the predictive
-/// samples evaluated at the observation.
+/// RNG stream for the randomized-PIT draws. Disjoint from the filter's
+/// per-particle streams (low indices) and `RESAMPLE_RNG_STREAM` (1<<48),
+/// so passing the filter seed to `build_trace` cannot correlate the PIT
+/// randomization with the filter's own draws.
+pub const PIT_RNG_STREAM: u64 = 1u64 << 49;
+
+/// Randomized probability integral transform (PIT) of the predictive
+/// samples at the observation (Smith 1985; Brockwell 2007):
 ///
-/// For continuous predictives this should be Uniform(0, 1) under
-/// correct calibration (Dawid 1984; Gneiting-Balabdaoui-Raftery
-/// 2007). For discrete observations the point-estimate PIT has
-/// stair-step artifacts near integer values — see §12 of the
-/// 2026-04-20 proposal for the v2 randomized PIT.
-pub fn pit_sample(samples: &[f64], y: f64) -> f64 {
+///   u = P̂(X < y) + v · P̂(X = y),    v ~ Uniform(0, 1)
+///
+/// where P̂ is the empirical distribution of `samples` and the uniform
+/// draw `v` is supplied by the caller — one per scored value.
+/// `build_trace` draws them from a seeded stream and records the seed
+/// in the trace (`pit_randomization_seed`) for reproducibility.
+///
+/// Under calibration `u` is Uniform(0, 1) even for discrete
+/// predictives — camdl's dominant case (count observation models) —
+/// where the naive `P̂(X ≤ y)` form is biased at atoms: all probability
+/// mass AT the observed count is counted as "≤ y", shifting PIT upward
+/// wherever ties occur, which distorts coverage and uniformity
+/// diagnostics (gh#629). For a continuous predictive ties have
+/// probability zero and `u` reduces to the empirical CDF as before.
+///
+/// Czado, Gneiting & Held (2009) is the count-data assessment
+/// reference; their own *nonrandomized* PIT is the mean of this
+/// quantity over `v` (`v = 0.5` at a sample predictive). The
+/// randomized form is chosen so each scored value is itself uniform
+/// and every existing consumer (coverage, histogram) reads it
+/// unchanged; see §3.3 of the 2026-08-29 honest-predictive-evaluation
+/// proposal.
+///
+/// Tie detection is exact `f64` equality: count predictive draws are
+/// integers stored exactly, and for continuous draws equality is
+/// measure-zero.
+pub fn pit_sample_randomized(samples: &[f64], y: f64, v: f64) -> f64 {
     if samples.is_empty() { return f64::NAN; }
-    let n_leq = samples.iter().filter(|&&x| x <= y).count();
-    n_leq as f64 / samples.len() as f64
+    let n_lt = samples.iter().filter(|&&x| x < y).count();
+    let n_eq = samples.iter().filter(|&&x| x == y).count();
+    (n_lt as f64 + v * n_eq as f64) / samples.len() as f64
 }
 
 /// Equal-tailed empirical quantile of an ALREADY-SORTED ascending slice, by
@@ -506,7 +555,7 @@ mod tests {
         ];
         let y_obs = vec![14.0, 11.0, 0.0];
         let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
-                                &[100.0, 100.0, 100.0], 0);
+                                &[100.0, 100.0, 100.0], 0, 7);
 
         assert_eq!(trace.steps.len(), 2, "the all-hole step is omitted");
         // Hole-free step: recorded joint reused verbatim.
@@ -541,6 +590,8 @@ mod tests {
         let t: PrequentialTrace = serde_json::from_str(old).expect("old json must still parse");
         assert_eq!(t.conditioning, Conditioning::InSample);
         assert_eq!(t.provenance, Provenance::PlugIn);
+        assert_eq!(t.pit_randomization_seed, None,
+            "a pre-gh#629 trace has no recorded PIT seed");
     }
 
     #[test]
@@ -552,6 +603,7 @@ mod tests {
             provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample,
             steps: vec![], warnings: vec![],
+            pit_randomization_seed: None,
         };
         let caveat = t.optimism_caveat().expect("plug-in + in-sample must be flagged");
         assert!(caveat.contains("plug-in"), "names the treatment optimism: {caveat}");
@@ -644,13 +696,77 @@ mod tests {
     }
 
     #[test]
-    fn pit_is_uniform_under_correct_forecast() {
-        // If samples ~ true distribution and y is a draw from it,
-        // PIT at y should be ~ Uniform(0, 1). Use a deterministic
-        // large sample vs a middle y.
-        let samples: Vec<f64> = (0..1000).map(|i| i as f64).collect();
-        let p = pit_sample(&samples, 500.0);
-        assert!(approx_eq(p, 0.501, 0.01), "got {}", p);  // 501 samples ≤ 500 because 0..=500
+    fn randomized_pit_splits_the_atom() {
+        // u = P̂(X < y) + v·P̂(X = y). With samples [1, 2, 2, 3] and y = 2:
+        // P̂(X < 2) = 1/4, P̂(X = 2) = 1/2. v = 0 gives the lower CDF limit,
+        // v = 1 the naive P̂(X ≤ y) (the old, tie-biased value), v = 0.5 the
+        // CGH nonrandomized midpoint.
+        let s = [1.0, 2.0, 2.0, 3.0];
+        assert!(approx_eq(pit_sample_randomized(&s, 2.0, 0.0), 0.25, 1e-12));
+        assert!(approx_eq(pit_sample_randomized(&s, 2.0, 0.5), 0.50, 1e-12));
+        assert!(approx_eq(pit_sample_randomized(&s, 2.0, 1.0), 0.75, 1e-12));
+        // No tie: v is irrelevant and u is the empirical CDF.
+        assert!(approx_eq(pit_sample_randomized(&s, 2.5, 0.0), 0.75, 1e-12));
+        assert!(approx_eq(pit_sample_randomized(&s, 2.5, 0.9), 0.75, 1e-12));
+        // Empty predictive stays NaN.
+        assert!(pit_sample_randomized(&[], 1.0, 0.5).is_nan());
+    }
+
+    #[test]
+    fn randomized_pit_is_uniform_on_counts_where_naive_is_biased() {
+        // The gh#629 defect made observable: draw y and the predictive
+        // samples from the SAME count distribution (Poisson(3)), so the
+        // forecast is calibrated by construction. The randomized PIT must
+        // be uniform; the naive P̂(X ≤ y) (= v = 1) must sit visibly above
+        // 0.5 on average, by ~half the mean atom mass Σ p(k)²/2 ≈ 0.06.
+        let mut rng = crate::rng::StatefulRng::new_stream(42, 0);
+        let n_rep = 2000;
+        let s_size = 400;
+        let (mut sum_rand, mut sum_naive, mut below_q1) = (0.0, 0.0, 0usize);
+        for _ in 0..n_rep {
+            let samples: Vec<f64> =
+                (0..s_size).map(|_| rng.poisson(3.0) as f64).collect();
+            let y = rng.poisson(3.0) as f64;
+            let u = pit_sample_randomized(&samples, y, rng.uniform());
+            sum_rand += u;
+            sum_naive += pit_sample_randomized(&samples, y, 1.0);
+            if u < 0.25 { below_q1 += 1; }
+        }
+        let mean_rand = sum_rand / n_rep as f64;
+        let mean_naive = sum_naive / n_rep as f64;
+        assert!(approx_eq(mean_rand, 0.5, 0.02),
+            "randomized PIT mean should be 0.5, got {mean_rand}");
+        assert!(mean_naive - 0.5 > 0.03,
+            "naive P(X<=y) PIT should be biased above 0.5 at atoms, got {mean_naive}");
+        let frac_q1 = below_q1 as f64 / n_rep as f64;
+        assert!(approx_eq(frac_q1, 0.25, 0.03),
+            "randomized PIT should put ~25% of mass below 0.25, got {frac_q1}");
+    }
+
+    #[test]
+    fn build_trace_pit_seed_is_recorded_and_reproducible() {
+        // Same seed ⇒ identical PIT draws; a different seed moves the PIT at
+        // a tied step; and the seed used is recorded on the trace.
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![1.0],
+            log_liks: vec![vec![-1.0; 4]],
+            y_pred_samples: vec![vec![1.0, 2.0, 2.0, 3.0]],
+            stream_names: vec!["s0".to_string()],
+            per_stream_log_liks: vec![vec![vec![-1.0; 4]]],
+            per_stream_samples: vec![vec![vec![1.0, 2.0, 2.0, 3.0]]],
+        };
+        let y_obs = vec![2.0];  // ties with two samples → v matters
+        let per_stream_observed = vec![vec![2.0]];
+        let ess = vec![100.0];
+        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11);
+        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11);
+        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 12);
+        assert_eq!(a.pit_randomization_seed, Some(11));
+        assert_eq!(a.steps[0].pit, b.steps[0].pit, "same seed must reproduce");
+        assert_ne!(a.steps[0].pit, c.steps[0].pit,
+            "a different seed must move the PIT at a tied step");
+        // The randomized PIT stays inside the atom's interval.
+        assert!(a.steps[0].pit >= 0.25 && a.steps[0].pit <= 0.75);
     }
 
     #[test]
@@ -669,6 +785,7 @@ mod tests {
         let trace = PrequentialTrace {
             schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
+            pit_randomization_seed: None,
         };
         // 90% interval = PIT in [0.05, 0.95] — 90 of 100 PITs qualify.
         let cov = trace.pit_coverage(0.90);
@@ -709,7 +826,7 @@ mod tests {
         let per_stream_observed = vec![vec![2.5], vec![5.2]];
         let ess = vec![100.0, 4.0];  // second step below threshold
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 7);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 0);
 
@@ -720,8 +837,10 @@ mod tests {
         // CRPS/PIT agree with kernels.
         assert!(approx_eq(trace.steps[0].crps,
             crps_sample(&recorded.y_pred_samples[0], 2.5), 1e-12));
+        // y = 2.5 ties no sample, so the PIT is v-independent and must match
+        // the kernel at any v.
         assert!(approx_eq(trace.steps[0].pit,
-            pit_sample(&recorded.y_pred_samples[0], 2.5), 1e-12));
+            pit_sample_randomized(&recorded.y_pred_samples[0], 2.5, 0.0), 1e-12));
 
         // ESS warning fires for the low-ess second step.
         assert_eq!(trace.warnings.len(), 1);
@@ -754,7 +873,7 @@ mod tests {
         let per_stream_observed = vec![vec![1.25]; 3];
         let ess = vec![100.0; 3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 1);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 1, 7);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 1);
         assert_eq!(trace.steps[0].t, 2.0);
@@ -771,6 +890,7 @@ mod tests {
         let trace = PrequentialTrace {
             schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
+            pit_randomization_seed: None,
         };
         let hist = trace.pit_histogram(10);
         assert_eq!(hist.iter().sum::<usize>(), 50);

@@ -1947,7 +1947,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             // per-district score breakdown.
                             let per_stream_obs = obs_model.per_stream_observed();
                             preq_trace = Some(sim::inference::prequential::build_trace(
-                                recorded, &y_obs, &per_stream_obs, &result.ess_trace, 0));
+                                recorded, &y_obs, &per_stream_obs, &result.ess_trace, 0,
+                                pf_seed));
                         }
                     }
                     logliks.push(result.log_likelihood);
