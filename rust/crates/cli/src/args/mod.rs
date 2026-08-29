@@ -2835,6 +2835,15 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_data_mismatch: bool,
 
+    /// Force in-sample derivation even when every compared fit declares a
+    /// holdout (gh#585): the traces score the full series at θ̂ as before
+    /// this flag existed, stamped `in_sample` and carrying the in-sample
+    /// optimism caveat. Without it, holdout-declaring fits are scored
+    /// held-out (`--score-from` at the sealed training boundary) and
+    /// stamped `hold_out_tail` after the non-leakage verification.
+    #[arg(long)]
+    pub in_sample: bool,
+
     /// Particle count for any fit handle whose prequential is
     /// auto-derived. Applied uniformly to every derived fit so T_score
     /// and scores stay commensurable. Ignored for an explicit

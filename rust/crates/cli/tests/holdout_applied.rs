@@ -45,6 +45,134 @@ fn find_fit_meta(root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// gh#585 (Stages 3.4/3.5): `camdl compare` scores holdout-declaring fits
+/// out-of-sample — derives with `--score-from` at the sealed boundary,
+/// verifies non-leakage, stamps `hold_out_tail` — refuses a mixed
+/// comparison and a fit without the applied-window proof, and `--in-sample`
+/// forces the old mode.
+#[test]
+fn compare_scores_holdout_fits_out_of_sample() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    let write_fit = |name: &str, beta: f64, holdout_line: &str| {
+        let sub = dir.join(name);
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("obs.tsv"),
+            "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+        std::fs::write(sub.join("fit.toml"), format!(r#"
+output_dir = "results"
+
+[model]
+camdl = "{ir}"
+
+[data]
+{holdout_line}
+[data.observations]
+weekly_cases = "obs.tsv"
+
+[estimate.I0]
+bounds = [1, 1000]
+start  = 5
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+beta     = {beta}
+
+[stages.scout]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 1
+particles  = 50
+iterations = 1
+cooling    = 0.5
+
+[config]
+dt = 1.0
+"#, ir = golden_ir().canonicalize().unwrap().display())).unwrap();
+        sub
+    };
+
+    let fit_a = write_fit("a", 0.10, "holdout_after = 21.0");
+    let fit_b = write_fit("b", 0.15, "holdout_after = 21.0");
+    let fit_c = write_fit("c", 0.10, "");
+
+    for sub in [&fit_a, &fit_b, &fit_c] {
+        let out = Command::new(&bin)
+            .args(["fit", "run", "fit.toml", "--seed", "1"])
+            .current_dir(sub)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output().expect("spawn camdl");
+        assert!(out.status.success(), "fit run in {} failed:\nstderr={}",
+            sub.display(), String::from_utf8_lossy(&out.stderr));
+    }
+
+    let compare = |paths: &[&str], extra: &[&str]| {
+        let mut args = vec!["compare"];
+        args.extend_from_slice(paths);
+        args.extend_from_slice(&["--format", "json", "--particles", "100"]);
+        args.extend_from_slice(extra);
+        Command::new(&bin)
+            .args(&args)
+            .current_dir(dir)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output().expect("spawn camdl")
+    };
+
+    // Both fits sealed at t = 21 → held-out derivation, stamped and scored
+    // only past the boundary.
+    let out = compare(&["a/fit.toml", "b/fit.toml"], &[]);
+    assert!(out.status.success(), "holdout compare failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("json output");
+    for row in v["rows"].as_array().unwrap() {
+        assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"],
+            serde_json::json!(21.0),
+            "row must be stamped hold_out_tail: {row}");
+        assert_eq!(row["t_score"], serde_json::json!(2),
+            "only t = 28, 35 lie past the sealed boundary: {row}");
+    }
+
+    // Mixed conditioning is refused — no override.
+    let out = compare(&["a/fit.toml", "c/fit.toml"], &[]);
+    assert!(!out.status.success(), "mixed conditioning must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("mix conditioning modes"),
+        "must name the mixed modes:\n{stderr}");
+
+    // --in-sample forces the old mode: full series, in_sample stamp.
+    let out = compare(&["a/fit.toml", "b/fit.toml"], &["--in-sample"]);
+    assert!(out.status.success(), "--in-sample compare failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for row in v["rows"].as_array().unwrap() {
+        assert_eq!(row["conditioning"], serde_json::json!("in_sample"));
+        assert_eq!(row["t_score"], serde_json::json!(5));
+    }
+
+    // The §3.7.3(b) gate: strip the applied-window record from fit A's
+    // sidecar (what a pre-gh#585 fit looks like — it declares a holdout it
+    // never applied) and the hold_out_tail derivation must refuse.
+    let meta_path = find_fit_meta(&fit_a.join("results")).unwrap();
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+    meta.as_object_mut().unwrap().remove("training_window");
+    std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    let out = compare(&["a/fit.toml", "b/fit.toml"], &[]);
+    assert!(!out.status.success(),
+        "a fit without the applied-window proof must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no applied training window"),
+        "must name the missing proof and the fix:\n{stderr}");
+}
+
 /// gh#585 (Stage 3.2): `pfilter --score-from TIME` assimilates the full
 /// series but scores the trace only at t > TIME, recording the boundary
 /// (`score_from`, and `t0` as its index twin). The total log-likelihood is
