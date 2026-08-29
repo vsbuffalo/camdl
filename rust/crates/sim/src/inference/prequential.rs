@@ -92,7 +92,8 @@ pub struct PrequentialStep {
     pub y_pred_samples: Vec<f64>,
     /// log p̂(y_{t+1} | y_{1:t}) = log Σ w^(s) p(y | x^(s)).
     pub log_score: f64,
-    /// Continuous Ranked Probability Score (sample estimator).
+    /// Continuous Ranked Probability Score — the fair sample estimator
+    /// (`crps_sample_fair`; Ferro 2014), unbiased at finite ensemble size.
     pub crps: f64,
     /// Randomized probability integral transform
     /// u_t = P̂(X < y_obs) + v·P̂(X = y_obs), v ~ Uniform(0, 1)
@@ -271,14 +272,22 @@ pub fn log_score_plug_in(log_liks: &[f64], log_weights: &[f64]) -> f64 {
     super::types::log_sum_exp(&num) - super::types::log_sum_exp(log_weights)
 }
 
-/// Sample-based CRPS via the Hersbach / Laio–Tamea sorted-sample
-/// identity:
+/// Sample-based CRPS: the *plain empirical-CDF (edf)* estimator, via the
+/// Hersbach / Laio–Tamea sorted-sample identity:
 ///
 ///   ĈRPS = (2/S²) Σ (x_(s) − y) · [S · 1{y < x_(s)} − (s − 1/2)]
 ///
 /// where x_(s) are the samples sorted ascending and s is 1-indexed.
 /// O(S log S) via the sort. Equivalent to the naive O(S²) form
 ///   (1/S)Σ|x^(i) − y| − (1/(2S²))ΣΣ|x^(i) − x^(j)|.
+///
+/// Estimator identity, pinned (gh#628): this is exactly R
+/// `scoringRules::crps_sample(method = "edf")` — the CRPS of the
+/// empirical distribution of the ensemble, which is biased upward for
+/// the underlying predictive's CRPS at finite S (by `E|X−X'|/(2S)`).
+/// The trace builder scores with [`crps_sample_fair`] instead; this
+/// form is kept as the external-oracle anchor and for explicit
+/// finite-ensemble CDF use.
 pub fn crps_sample(samples: &[f64], y: f64) -> f64 {
     let s = samples.len();
     if s == 0 { return f64::NAN; }
@@ -295,6 +304,39 @@ pub fn crps_sample(samples: &[f64], y: f64) -> f64 {
         acc += (x - y) * (s_f * ind - (rank - 0.5));
     }
     2.0 * acc / (s_f * s_f)
+}
+
+/// Sample-based CRPS: the *fair* estimator (Ferro 2014, QJRMS 140(683);
+/// pairwise form as written in Zamo & Naveau 2018),
+///
+///   ĈRPS_fair = (1/S) Σ_s |x_s − y|
+///             − (1/(2S(S−1))) Σ_{s≠s'} |x_s − x_s'|,
+///
+/// which is unbiased for the underlying predictive's CRPS at finite
+/// ensemble size — the plain edf form ([`crps_sample`]) carries an
+/// `O(1/S)` upward bias that matters when compared traces carry unequal
+/// sample counts. This is the estimator the prequential trace scores
+/// with (2026-08-29 proposal, Stage 2.2).
+///
+/// Computed O(S log S): the pairwise sum over the ascending order
+/// statistics is `Σ_{s≠s'}|x_s − x_s'| = 2 Σ_k (2k − S − 1) x_(k)`
+/// (k 1-indexed). `S = 1` has no pairwise term; the degenerate
+/// predictive scores `|x − y|`, as in the edf form.
+pub fn crps_sample_fair(samples: &[f64], y: f64) -> f64 {
+    let s = samples.len();
+    if s == 0 { return f64::NAN; }
+    if s == 1 { return (samples[0] - y).abs(); }
+
+    let mut sorted: Vec<f64> = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let s_f = s as f64;
+    let term1 = sorted.iter().map(|x| (x - y).abs()).sum::<f64>() / s_f;
+    // Σ_{i<j} (x_(j) − x_(i)) over the sorted samples.
+    let gini: f64 = sorted.iter().enumerate()
+        .map(|(i, &x)| ((2 * (i + 1)) as f64 - s_f - 1.0) * x)
+        .sum();
+    term1 - gini / (s_f * (s_f - 1.0))
 }
 
 /// Build a `PrequentialTrace` from raw PF recordings and the
@@ -379,7 +421,7 @@ pub fn build_trace(
 
         // Uniform-weight log-score (see docstring).
         let log_score = super::types::log_sum_exp(log_liks) - n.ln();
-        let crps = crps_sample(&joint_samples, y);
+        let crps = crps_sample_fair(&joint_samples, y);
         let pit = pit_sample_randomized(&joint_samples, y, pit_rng.uniform());
         let ess = ess_trace[idx];
         if ess < ESS_THRESHOLD { ess_collapse_count += 1; }
@@ -400,7 +442,7 @@ pub fn build_trace(
                 y_obs: y_s,
                 y_pred_samples: samp_s.clone(),
                 log_score: super::types::log_sum_exp(ll_s) - n_s.ln(),
-                crps: crps_sample(samp_s, y_s),
+                crps: crps_sample_fair(samp_s, y_s),
                 pit: pit_sample_randomized(samp_s, y_s, pit_rng.uniform()),
                 interval: PredInterval::from_samples(samp_s),
             });
@@ -568,7 +610,7 @@ mod tests {
             "the hole stream has no per-stream score");
         assert_eq!(trace.steps[1].per_stream[0].stream, "a");
         // And the joint CRPS at that step is against the present-only sum.
-        let expect = crps_sample(&[10.0, 12.0], 11.0);
+        let expect = crps_sample_fair(&[10.0, 12.0], 11.0);
         assert!((trace.steps[1].crps - expect).abs() < 1e-12);
     }
     use super::*;
@@ -657,6 +699,83 @@ mod tests {
         let fast = crps_sample(&samples, y);
         assert!(approx_eq(naive, fast, 1e-10),
             "naive = {}, fast = {}", naive, fast);
+    }
+
+    #[test]
+    fn crps_fair_matches_naive_pairwise_formula() {
+        // The O(S log S) order-statistic form against the definitional
+        // O(S²) pairwise form.
+        let samples = vec![1.0, 2.0, 3.0, 4.0, 5.0, 2.5, 3.5, 0.5];
+        let y = 3.0;
+        let s_f = samples.len() as f64;
+        let term1: f64 = samples.iter().map(|x: &f64| (x - y).abs()).sum::<f64>() / s_f;
+        let term2: f64 = {
+            let mut acc = 0.0_f64;
+            for a in &samples {
+                for b in &samples {
+                    acc += (a - b).abs();
+                }
+            }
+            acc / (2.0 * s_f * (s_f - 1.0))
+        };
+        let naive = term1 - term2;
+        let fast = crps_sample_fair(&samples, y);
+        assert!(approx_eq(naive, fast, 1e-10), "naive = {naive}, fast = {fast}");
+        // Degenerate predictive: |x − y|, as in the edf form.
+        assert!(approx_eq(crps_sample_fair(&[3.0], 5.0), 2.0, 1e-12));
+        assert!(crps_sample_fair(&[], 5.0).is_nan());
+    }
+
+    #[test]
+    fn crps_fair_and_edf_differ_by_the_ensemble_size_factor() {
+        // fair = term1 − (S/(S−1))·(term1 − edf): the two estimators share
+        // term1 and differ only in the pairwise term's normalization.
+        let samples = vec![0.5, 1.0, 2.0, 2.0, 7.5];
+        let y = 1.5;
+        let s_f = samples.len() as f64;
+        let term1: f64 = samples.iter().map(|x: &f64| (x - y).abs()).sum::<f64>() / s_f;
+        let edf = crps_sample(&samples, y);
+        let fair = crps_sample_fair(&samples, y);
+        let expect = term1 - (s_f / (s_f - 1.0)) * (term1 - edf);
+        assert!(approx_eq(fair, expect, 1e-10), "fair = {fair}, expect = {expect}");
+        assert!(fair < edf, "fair subtracts the larger spread term");
+    }
+
+    #[test]
+    fn crps_fair_is_unbiased_in_ensemble_size_where_edf_is_not() {
+        // Ferro (2014): E[fair CRPS] does not depend on the ensemble size S,
+        // while the edf estimator is biased upward by E|X−X'|/(2S). Score a
+        // calibrated Poisson(5) forecast with S = 5 and S = 400 ensembles:
+        // the fair means must agree; the edf mean at S = 5 must sit visibly
+        // above (bias ≈ E|X−X'|/10 ≈ 0.25 here).
+        let mut rng = crate::rng::StatefulRng::new_stream(4242, 0);
+        let mut draw = |m: usize| -> (Vec<f64>, f64) {
+            let s: Vec<f64> = (0..m).map(|_| rng.poisson(5.0) as f64).collect();
+            let y = rng.poisson(5.0) as f64;
+            (s, y)
+        };
+        let n_small = 4000;
+        let (mut fair_small, mut edf_small) = (0.0, 0.0);
+        for _ in 0..n_small {
+            let (s, y) = draw(5);
+            fair_small += crps_sample_fair(&s, y);
+            edf_small += crps_sample(&s, y);
+        }
+        fair_small /= n_small as f64;
+        edf_small /= n_small as f64;
+        let n_big = 300;
+        let mut fair_big = 0.0;
+        for _ in 0..n_big {
+            let (s, y) = draw(400);
+            fair_big += crps_sample_fair(&s, y);
+        }
+        fair_big /= n_big as f64;
+        assert!(approx_eq(fair_small, fair_big, 0.09),
+            "fair estimator must not depend on ensemble size: \
+             S=5 mean {fair_small}, S=400 mean {fair_big}");
+        assert!(edf_small - fair_small > 0.15,
+            "edf at S=5 must show its O(1/S) upward bias: \
+             edf {edf_small}, fair {fair_small}");
     }
 
     #[test]
@@ -836,7 +955,7 @@ mod tests {
         assert!(approx_eq(trace.steps[0].log_score, expected_ls0, 1e-12));
         // CRPS/PIT agree with kernels.
         assert!(approx_eq(trace.steps[0].crps,
-            crps_sample(&recorded.y_pred_samples[0], 2.5), 1e-12));
+            crps_sample_fair(&recorded.y_pred_samples[0], 2.5), 1e-12));
         // y = 2.5 ties no sample, so the PIT is v-independent and must match
         // the kernel at any v.
         assert!(approx_eq(trace.steps[0].pit,
