@@ -19,7 +19,7 @@
 //!     Doucet, Pitt, Deligiannidis & Kohn 2015, *Biometrika* 102(2):295–313).
 //!
 //! Everything else — seed, dimension, initial proposal SD, `adapt_start`,
-//! iteration count — is identical between the arms.
+//! `adapt_stop`, iteration count — is identical between the arms.
 //!
 //! Reported statistic matches the field report: per 250-iteration block, the
 //! acceptance rate and the median absolute accepted step in the first
@@ -32,13 +32,20 @@ use std::cell::RefCell;
 use sim::error::SimError;
 use sim::inference::{
     if2::{EstimatedParam, Transform},
-    pmmh::{run_pmmh, PMMHConfig, Prior},
+    pmmh::{run_pmmh, scale_is_far_from_optimum, PMMHConfig, PMMHResumeState, Prior},
 };
 use sim::rng::StatefulRng;
 
 const D: usize = 6;
 const BLOCK: usize = 250;
 const N_STEPS: usize = 5000;
+/// End of the warm-up window: adaptation runs over the first half of the run
+/// and the transition kernel is frozen for the second. Half is a stand-in for
+/// the shipped policy, where the CLI sets `adapt_stop` to the burn-in it
+/// discards. A fixed absolute boundary keeps the prefix property `run` relies
+/// on: freezing changes no RNG draw, so a run of `n` steps is still a strict
+/// prefix of a longer one at the same seed.
+const ADAPT_STOP: usize = N_STEPS / 2;
 const SEED: u64 = 20260827;
 
 fn params() -> Vec<EstimatedParam> {
@@ -78,6 +85,10 @@ struct AdaptState {
     /// Steps the Robbins–Monro scale spent pinned at its lower bound, as
     /// `run_pmmh` counted them for its end-of-run warning.
     steps_at_scale_floor: usize,
+    /// The end-of-run scale as `run_pmmh` reports it on `PMMHResult`, read
+    /// back independently of `lambda` (which comes from the serialised
+    /// `AdaptiveProposal`) so the two can be checked against each other.
+    final_scale: f64,
 }
 
 /// Run `n_steps` of PMMH against the synthetic target and return the per-step
@@ -88,6 +99,19 @@ struct AdaptState {
 /// this at successive block boundaries therefore reads λ and L along one
 /// single chain, not across independent chains.
 fn run(n_steps: usize, sigma: f64, init_sd: f64) -> (Vec<Rec>, AdaptState) {
+    let (recs, adapt, _) = run_from(n_steps, sigma, init_sd, None);
+    (recs, adapt)
+}
+
+/// `run`, plus the chain state a continuation would be handed. `resume_from`
+/// starts the chain at the checkpoint's step count instead of at 0, which is
+/// how a `--resume` run reaches the sampling phase without re-walking warm-up.
+fn run_from(
+    n_steps: usize,
+    sigma: f64,
+    init_sd: f64,
+    resume_from: Option<PMMHResumeState>,
+) -> (Vec<Rec>, AdaptState, PMMHResumeState) {
     let if2_params = params();
     let priors: Vec<Prior> =
         (0..D).map(|_| Prior::Fixed(sim::inference::prior::Density::Flat)).collect();
@@ -114,6 +138,7 @@ fn run(n_steps: usize, sigma: f64, init_sd: f64) -> (Vec<Rec>, AdaptState) {
         proposal_sd: vec![init_sd; D],
         adapt: true,
         adapt_start: 300, // the shipped default (`default_pmmh_adapt_start`)
+        adapt_stop: ADAPT_STOP,
         thin: 1,
         burn_in: 0,
         rho: None,
@@ -136,7 +161,7 @@ fn run(n_steps: usize, sigma: f64, init_sd: f64) -> (Vec<Rec>, AdaptState) {
         None,
         SEED,
         Some(&on_step),
-        None,
+        resume_from,
         String::new(),
     )
     .unwrap();
@@ -149,9 +174,10 @@ fn run(n_steps: usize, sigma: f64, init_sd: f64) -> (Vec<Rec>, AdaptState) {
         chol00: v["chol"][0].as_f64().unwrap(),
         chol_valid: v["chol_valid"].as_bool().unwrap(),
         steps_at_scale_floor: result.steps_at_scale_floor,
+        final_scale: result.final_scale,
     };
 
-    (recs.into_inner(), adapt)
+    (recs.into_inner(), adapt, result.resume_state)
 }
 
 /// Acceptance rate and median absolute accepted step in coordinate 0 over
@@ -460,5 +486,125 @@ fn a_run_pinned_at_the_bound_reports_how_long_it_sat_there() {
         exact.steps_at_scale_floor, 0,
         "an exact likelihood reaches its target acceptance, so the bound must \
          never bind — this is the regime the deterministic `mh` sampler runs in",
+    );
+}
+
+// ── What freezing at the end of warm-up delivers ───────────────────────────
+//
+// `adapt_scale` used to run from step 0 to the last step of the chain, so the
+// drift it accumulated was bounded by the run length rather than by any
+// adaptation budget, and the draws a run kept were produced while the proposal
+// was still shrinking under them. Adaptation now stops at `adapt_stop`.
+
+/// Both adapting quantities stop at the boundary, exactly: the run's last
+/// 2,500 steps leave λ and the Haario factor bit-identical to what the first
+/// 2,500 produced.
+///
+/// σ = 2 is the arm that makes this visible. It sits below the noise level at
+/// which λ reaches its `LOG_SCALE_MIN` floor within the run (σ = 5 gets there
+/// by step ~1,400, after which λ cannot move anyway), so an unfrozen chain
+/// keeps driving λ down for the whole run: 4.788e-4 at step 2,500 against
+/// 1.364e-4 at step 5,000, measured before this change.
+#[test]
+fn lambda_and_the_shape_term_stop_moving_at_the_end_of_warm_up() {
+    let (_, at_boundary) = run(ADAPT_STOP, 2.0, 3.0);
+    let (_, at_end) = run(N_STEPS, 2.0, 3.0);
+    println!(
+        "sigma=2: lambda {:.6e} at step {ADAPT_STOP} -> {:.6e} at step \
+         {N_STEPS}; chol[0][0] {:.6e} -> {:.6e}",
+        at_boundary.lambda, at_end.lambda, at_boundary.chol00, at_end.chol00,
+    );
+    assert_eq!(
+        at_end.lambda.to_bits(),
+        at_boundary.lambda.to_bits(),
+        "the Robbins-Monro scale must not move after the warm-up boundary: \
+         {:.6e} at step {ADAPT_STOP} became {:.6e} by step {N_STEPS}",
+        at_boundary.lambda,
+        at_end.lambda,
+    );
+    assert_eq!(
+        at_end.chol00.to_bits(),
+        at_boundary.chol00.to_bits(),
+        "the Haario shape term must not move after the warm-up boundary: \
+         {:.6e} at step {ADAPT_STOP} became {:.6e} by step {N_STEPS}",
+        at_boundary.chol00,
+        at_end.chol00,
+    );
+}
+
+/// The boundary is an absolute step index, so a chain resumed from a
+/// checkpoint past it is already in its sampling phase and adapts no further.
+/// A resumed chain that kept adapting would be the same defect wearing a
+/// different hat, and would additionally make the kernel a run samples under
+/// depend on how many times the run was interrupted.
+#[test]
+fn a_chain_resumed_past_its_warm_up_does_not_adapt() {
+    let (_, at_boundary, checkpoint) = run_from(ADAPT_STOP, 2.0, 3.0, None);
+    let (_, after_resume, _) = run_from(N_STEPS, 2.0, 3.0, Some(checkpoint));
+    println!(
+        "resumed {ADAPT_STOP} -> {N_STEPS}: lambda {:.6e} -> {:.6e}, \
+         chol[0][0] {:.6e} -> {:.6e}",
+        at_boundary.lambda, after_resume.lambda, at_boundary.chol00, after_resume.chol00,
+    );
+    assert_eq!(
+        after_resume.lambda.to_bits(),
+        at_boundary.lambda.to_bits(),
+        "a chain resumed at step {ADAPT_STOP} is past its warm-up, so lambda \
+         must stay at {:.6e}; it moved to {:.6e}",
+        at_boundary.lambda,
+        after_resume.lambda,
+    );
+    assert_eq!(
+        after_resume.chol00.to_bits(),
+        at_boundary.chol00.to_bits(),
+        "the shape term must be frozen across a resume too: {:.6e} became {:.6e}",
+        at_boundary.chol00,
+        after_resume.chol00,
+    );
+}
+
+/// The scale a run finished with is carried on `PMMHResult` and flagged when
+/// it is far from λ = 1 — the case the floor warning cannot see.
+///
+/// σ = 2 ends nowhere near the `LOG_SCALE_MIN` floor, so `steps_at_scale_floor`
+/// is 0 and that warning stays silent, while the chain samples with a proposal
+/// orders of magnitude narrower than the covariance it scales. That is the
+/// silent failure: a run that completes, writes draws, and reports nothing
+/// worse than a poor R-hat.
+#[test]
+fn the_end_of_run_scale_is_reported_and_flagged_when_far_from_one() {
+    let (_, noisy) = run(N_STEPS, 2.0, 3.0);
+    println!(
+        "sigma=2: final_scale = {:.6e} (checkpointed lambda {:.6e}), steps at \
+         floor {}",
+        noisy.final_scale, noisy.lambda, noisy.steps_at_scale_floor,
+    );
+    assert_eq!(
+        noisy.final_scale.to_bits(),
+        noisy.lambda.to_bits(),
+        "the reported scale must be the sampler's own: the result says {:.6e}, \
+         the checkpointed AdaptiveProposal says {:.6e}",
+        noisy.final_scale,
+        noisy.lambda,
+    );
+    assert_eq!(
+        noisy.steps_at_scale_floor, 0,
+        "this arm never reaches the floor — that is what makes it the case the \
+         floor warning misses",
+    );
+    assert!(
+        scale_is_far_from_optimum(noisy.final_scale),
+        "a run that ends at lambda = {:.6e} sampled far more narrowly than its \
+         own covariance estimate and must be flagged",
+        noisy.final_scale,
+    );
+
+    let (_, exact) = run(N_STEPS, 0.0, 3.0);
+    println!("sigma=0: final_scale = {:.6e}", exact.final_scale);
+    assert!(
+        !scale_is_far_from_optimum(exact.final_scale),
+        "an exact likelihood reaches its target acceptance and ends near \
+         lambda = 1, so it must not be flagged; got {:.6e}",
+        exact.final_scale,
     );
 }

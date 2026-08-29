@@ -41,6 +41,27 @@ pub struct PMMHConfig {
     pub adapt: bool,
     /// Start adapting after this many steps.
     pub adapt_start: usize,
+    /// End of the warm-up window: the first step at which the transition
+    /// kernel is frozen. Adaptation — *both* the Robbins–Monro global scale λ
+    /// and the Haario shape term — runs while `step < adapt_stop` and stops
+    /// there; every later step proposes from the fixed kernel warm-up left
+    /// behind. Freezing is not a reversion to the initial diagonal: the
+    /// learned Cholesky factor and the learned λ keep being *used*, they stop
+    /// being *updated*.
+    ///
+    /// Counted in absolute steps, on the same axis as `adapt_start`,
+    /// `burn_in` and [`PMMHResumeState::completed_steps`], so a chain resumed
+    /// past the boundary never adapts again and one resumed inside it
+    /// continues to the same boundary.
+    ///
+    /// Why this is its own field rather than a second job for one of the
+    /// other two. `adapt_start` is where the *shape* term switches on, not an
+    /// end. `burn_in` selects which draws are discarded from the output — the
+    /// CLI does set `adapt_stop = burn_in` (warm-up is the discarded prefix,
+    /// as in Stan), but that is the caller's policy, and the sampler has to
+    /// be able to express "adapt for the whole run" (what the adaptation
+    /// tests need) without also changing which draws are kept.
+    pub adapt_stop: usize,
     /// Record every `thin`-th step.
     pub thin: usize,
     /// Discard first `burn_in` steps from output.
@@ -93,6 +114,21 @@ pub struct PMMHResult {
     /// so a caller can persist or gate on the condition rather than having to
     /// scrape stderr.
     pub steps_at_scale_floor: usize,
+    /// The Robbins–Monro global scale λ the run finished with — the λ every
+    /// kept draw was proposed under, since adaptation stops at
+    /// [`PMMHConfig::adapt_stop`].
+    ///
+    /// λ multiplies a proposal already scaled to the estimated posterior
+    /// covariance by the optimal 2.38²/d factor, so λ = 1 is the optimum by
+    /// construction and the distance from 1 is a statement about the run:
+    /// λ = 4.8e-4, where a σ = 2 run of the synthetic target in
+    /// `tests/pmmh_scale_collapse.rs` ends, means the chain sampled with a
+    /// proposal 2,000× narrower than the covariance it was scaling — and it
+    /// mixes as λ⁻². `run_pmmh` reports it and warns when
+    /// [`scale_is_far_from_optimum`] holds; carried here so a caller can read
+    /// the condition rather than scrape stderr. 1.0 when `adapt = false`,
+    /// where no scale multiplies the configured diagonal.
+    pub final_scale: f64,
 }
 
 /// Serializable chain state for `--resume`. Saved to `chain_N/resume_state.bin`
@@ -149,6 +185,21 @@ pub struct PMMHResumeState {
 // standard robust construction of Andrieu & Thoms (2008, "A tutorial on
 // adaptive MCMC", *Stat. Comput.* 18:343–373) and Roberts & Rosenthal (2009,
 // "Examples of Adaptive MCMC", *JCGS* 18(2):349–367).
+//
+// Both stop together at `PMMHConfig::adapt_stop`: adaptation is a warm-up
+// activity, and the draws a run keeps are produced by the one kernel warm-up
+// arrived at. Adapting into the sampling phase means the kept draws come from
+// a proposal that is still moving under them, and — because the Robbins–Monro
+// recursion may have no root under a pseudo-marginal likelihood, which is why
+// `LOG_SCALE_MIN` exists — moving in one direction for as long as the run is
+// allowed to continue, so the drift is bounded by the run length rather than
+// by the warm-up budget. Freezing also puts this sampler on the usual footing
+// — adapt over a warm-up period, then sample — as in Stan, where "when
+// adaptation is engaged … the warmup period is split into three stages"
+// (Stan Development Team, *Stan Reference Manual*, "HMC algorithm parameters:
+// automatic parameter tuning"), and it makes the adaptation finite, which is a
+// sufficient condition for ergodicity in its own right rather than one that
+// has to be argued from diminishing adaptation.
 
 // Compact region for the Robbins–Monro global scale: log λ is projected onto
 // [`LOG_SCALE_MIN`, `LOG_SCALE_MAX`] after every update, so λ ∈ [4.5e-5, 1.5e2].
@@ -199,6 +250,35 @@ pub struct PMMHResumeState {
 // had.
 pub const LOG_SCALE_MIN: f64 = -10.0;
 pub const LOG_SCALE_MAX: f64 = 5.0;
+
+/// How far λ may drift from 1 before a run is reported as badly scaled: a
+/// factor of [`SCALE_DEVIATION_FACTOR`] either way.
+///
+/// λ = 1 is the optimum by construction — it multiplies a proposal already
+/// scaled to the estimated posterior covariance by 2.38²/d — so the departure
+/// from 1 is what matters, in either direction. The factor is 3 because
+/// posterior traversal time scales as λ⁻² in the small-step diffusion limit
+/// (Roberts, Gelman & Gilks 1997, *Ann. Appl. Probab.* 7(1):110–120), so a
+/// factor of 3 already costs an order of magnitude in mixing, while a factor
+/// of 2 is inside the range a converging adaptation legitimately passes
+/// through.
+///
+/// This is the *silent* case the [`LOG_SCALE_MIN`] floor warning misses: that
+/// warning fires only when λ reaches the bound, and a run can finish far from
+/// 1 without ever touching it — 5,000 steps of the synthetic target in
+/// `tests/pmmh_scale_collapse.rs` at σ = 2, d = 6 end at λ = 1.4e-4 with zero
+/// steps on the floor.
+pub const SCALE_DEVIATION_FACTOR: f64 = 3.0;
+
+/// Whether the Robbins–Monro global scale sits more than
+/// [`SCALE_DEVIATION_FACTOR`] away from its λ = 1 optimum, in either
+/// direction. Below: the chain sampled far more narrowly than its own
+/// covariance estimate. Above: far more widely.
+pub fn scale_is_far_from_optimum(lambda: f64) -> bool {
+    // A non-finite λ is not near 1 either: no comparison against NaN holds, so
+    // the range does not contain it and the scale is reported.
+    !(1.0 / SCALE_DEVIATION_FACTOR..=SCALE_DEVIATION_FACTOR).contains(&lambda)
+}
 
 /// Running mean + covariance via Welford's online algorithm, a Cholesky factor
 /// for sampling N(0, Σ) (the Haario *shape* term), and a Robbins–Monro global
@@ -600,6 +680,11 @@ pub fn run_pmmh(
     // the sampler is allowed to make it, which is a run-invalidating condition
     // the user has to be told about — see the end-of-run warning.
     let mut steps_at_scale_floor = 0usize;
+    // Steps on which adaptation actually ran, i.e. the part of `adapt_stop`'s
+    // window this call covered. The denominator for the floor warning: a run
+    // that freezes at step 500 of 5,000 can only have sat on the floor for
+    // 500 steps, and reporting it against 5,000 would understate it fivefold.
+    let mut adapt_steps = 0usize;
 
     if start_step >= config.n_steps {
         eprintln!("  warning: chain already completed {} steps (requested {}). \
@@ -607,13 +692,21 @@ pub fn run_pmmh(
     }
 
     for step in start_step..config.n_steps {
+        // Inside the warm-up window? Both adapting quantities — λ and the
+        // Haario shape statistics — are updated while this holds and frozen
+        // once it does not, so the sampling phase runs one fixed transition
+        // kernel. Freezing stops the *updates*, not the *use*: the proposal
+        // below still draws through the learned Cholesky factor and still
+        // multiplies by the learned λ.
+        let adapting = config.adapt && step < config.adapt_stop;
+
         // Propose: θ' = θ + λ·Δ on transformed scale. Δ is the shape term
         // (Haario Cholesky once learned, else the diagonal proposal_sd); λ is
         // the Robbins–Monro global scale. gh#347: λ scales BOTH branches and
-        // adapts from step 0 (gated on `adapt`, not `adapt_start` — which gates
-        // only the covariance shape), so it can break a 0%-acceptance deadlock
-        // during the pre-`adapt_start` phase where the shape term is still the
-        // fixed, possibly-too-large diagonal.
+        // adapts from the first warm-up step (gated on `adapt`, not
+        // `adapt_start` — which gates only the covariance shape), so it can
+        // break a 0%-acceptance deadlock during the pre-`adapt_start` phase
+        // where the shape term is still the fixed, possibly-too-large diagonal.
         let mut delta = if let Some(ref ap) = adaptive {
             if config.adapt && step >= config.adapt_start {
                 ap.sample_perturbation(&mut rng, &config.proposal_sd)
@@ -684,11 +777,12 @@ pub fn run_pmmh(
         let accepted = super::mh_accept(log_alpha, rng.uniform().ln());
 
         // gh#347: Robbins–Monro update of the global proposal scale from this
-        // accept/reject outcome. Runs from step 0 (independent of `adapt_start`)
-        // so it can shrink an over-large initial scale before the covariance
-        // shape adaptation begins. Diminishing gain → diminishing adaptation.
-        if config.adapt {
+        // accept/reject outcome. Runs from the first warm-up step (independent
+        // of `adapt_start`) so it can shrink an over-large initial scale before
+        // the covariance shape adaptation begins, and stops at `adapt_stop`.
+        if adapting {
             if let Some(ref mut ap) = adaptive {
+                adapt_steps += 1;
                 ap.adapt_scale(accepted, step);
                 if ap.at_scale_floor() {
                     steps_at_scale_floor += 1;
@@ -722,10 +816,15 @@ pub fn run_pmmh(
             }
         }
 
-        // Update adaptive proposal with current position (whether accepted or not
-        // is debated — we include all steps, matching the original Haario algorithm)
-        if let Some(ref mut ap) = adaptive {
-            ap.update(&current_transformed);
+        // Update the Haario statistics with the current position (whether to
+        // include rejected steps is debated — we include all steps, matching
+        // the original Haario algorithm). Warm-up only: past `adapt_stop` the
+        // shape term is frozen alongside λ, so the kept draws come from one
+        // kernel rather than from a proposal that is still moving under them.
+        if adapting {
+            if let Some(ref mut ap) = adaptive {
+                ap.update(&current_transformed);
+            }
         }
 
         // Record step (respecting burn-in and thinning)
@@ -744,31 +843,65 @@ pub fn run_pmmh(
         }
     }
 
-    // The scale floor is a bound on the damage, not a repair: a chain that
-    // spent time pinned there did not explore its posterior, and the draws it
-    // produced must not be read as one. Say so, and name the knob that fixes
-    // it — for a particle-filter likelihood the cause is estimator noise, not
-    // proposal tuning, so a longer chain does not help.
-    if steps_at_scale_floor > 0 {
-        let ran = config.n_steps.saturating_sub(start_step).max(1);
-        let target_pct = adaptive.as_ref().map_or(0.0, |ap| ap.target_accept() * 100.0);
-        let lam = LOG_SCALE_MIN.exp();
-        let lines = [
-            format!("the adaptive proposal scale sat at its lower bound (lambda = {lam:.1e})"),
-            format!("for {steps_at_scale_floor} of {ran} steps: no scale reached the"),
-            format!("{target_pct:.1}% target acceptance, so the proposal ended far narrower"),
-            "than the posterior and these draws do not cover it. Under a".to_string(),
-            "particle-filter likelihood the attainable acceptance is capped by the".to_string(),
-            "spread of log L-hat, so raise the particle count (aim for a".to_string(),
-            "log-likelihood standard deviation near 1 at the mode). A longer chain".to_string(),
-            "will not help.".to_string(),
-        ];
+    // Shared layout for the end-of-run warnings: `warning:` on the first line,
+    // aligned continuation after it.
+    let warn = |lines: &[String]| {
         for (i, text) in lines.iter().enumerate() {
             if i == 0 {
                 eprintln!("  warning: {text}");
             } else {
                 eprintln!("           {text}");
             }
+        }
+    };
+
+    let final_scale = adaptive.as_ref().map_or(1.0, |ap| ap.scale());
+
+    // The scale floor is a bound on the damage, not a repair: a chain that
+    // spent time pinned there did not explore its posterior, and the draws it
+    // produced must not be read as one. Say so, and name the knob that fixes
+    // it — for a particle-filter likelihood the cause is estimator noise, not
+    // proposal tuning, so a longer chain does not help.
+    if steps_at_scale_floor > 0 {
+        let ran = adapt_steps.max(1);
+        let target_pct = adaptive.as_ref().map_or(0.0, |ap| ap.target_accept() * 100.0);
+        let lam = LOG_SCALE_MIN.exp();
+        warn(&[
+            format!("the adaptive proposal scale sat at its lower bound (lambda = {lam:.1e})"),
+            format!("for {steps_at_scale_floor} of {ran} warm-up steps: no scale reached the"),
+            format!("{target_pct:.1}% target acceptance, so the proposal is far narrower"),
+            "than the posterior and the draws taken under the frozen kernel do".to_string(),
+            "not cover it. Under a particle-filter likelihood the attainable".to_string(),
+            "acceptance is capped by the spread of log L-hat, so raise the".to_string(),
+            "particle count (aim for a log-likelihood standard deviation near 1".to_string(),
+            "at the mode). A longer chain will not help.".to_string(),
+        ]);
+    }
+
+    // The scale the sampling phase ran at, reported whether or not it is a
+    // problem. `steps_at_scale_floor` catches only the chains that hit
+    // `LOG_SCALE_MIN`; a chain can end orders of magnitude below the λ = 1
+    // optimum without ever reaching it, and that chain looks like an ordinary
+    // completed run with a poor R-hat. Skip the second warning when the floor
+    // warning already fired — it is the same condition, said more precisely.
+    if adaptive.is_some() {
+        eprintln!("  adaptive proposal scale at end of warm-up: lambda = {final_scale:.3e}");
+        if scale_is_far_from_optimum(final_scale) && steps_at_scale_floor == 0 {
+            let (factor, direction) = if final_scale < 1.0 {
+                (1.0 / final_scale, "narrower")
+            } else {
+                (final_scale, "wider")
+            };
+            warn(&[
+                format!("the chain sampled at lambda = {final_scale:.3e}, a proposal {factor:.0}x"),
+                format!("{direction} than the posterior covariance it scales (lambda = 1 is"),
+                "the optimum by construction, from the 2.38^2/d factor). Posterior".to_string(),
+                "traversal time scales as lambda^-2, so these draws are correlated".to_string(),
+                "far more strongly than the chain length suggests: check R-hat and".to_string(),
+                "ESS before reading them as a posterior. Under a particle-filter".to_string(),
+                "likelihood a scale far below 1 is estimator noise rather than".to_string(),
+                "proposal tuning — raise the particle count.".to_string(),
+            ]);
         }
     }
 
@@ -833,6 +966,7 @@ pub fn run_pmmh(
 
     Ok(PMMHResult {
         steps_at_scale_floor,
+        final_scale,
         steps,
         acceptance_rate,
         n_steps: config.n_steps,
@@ -894,7 +1028,34 @@ pub fn mcmc_ess(chain: &[f64]) -> f64 {
 
 #[cfg(test)]
 mod adaptive_scale_bound_tests {
-    use super::{AdaptiveProposal, LOG_SCALE_MIN};
+    use super::{
+        scale_is_far_from_optimum, AdaptiveProposal, LOG_SCALE_MIN, SCALE_DEVIATION_FACTOR,
+    };
+
+    /// The end-of-run report flags a departure from λ = 1 in either direction,
+    /// at the factor the constant names and not before. The band has to admit
+    /// the ordinary case — an adaptation that settles at 1.5 is doing its job —
+    /// while catching a chain that sampled at 1e-4, which is the failure the
+    /// `LOG_SCALE_MIN` floor warning cannot see because it never reaches the
+    /// floor.
+    #[test]
+    fn the_scale_report_flags_departures_beyond_the_named_factor() {
+        assert!(!scale_is_far_from_optimum(1.0), "λ = 1 is the optimum");
+        assert!(!scale_is_far_from_optimum(1.5));
+        assert!(!scale_is_far_from_optimum(0.5));
+        // The band is closed at the factor itself.
+        assert!(!scale_is_far_from_optimum(SCALE_DEVIATION_FACTOR));
+        assert!(!scale_is_far_from_optimum(1.0 / SCALE_DEVIATION_FACTOR));
+        assert!(scale_is_far_from_optimum(SCALE_DEVIATION_FACTOR * 1.01));
+        assert!(scale_is_far_from_optimum(1.0 / (SCALE_DEVIATION_FACTOR * 1.01)));
+        // The measured cases: a chain that ended 2,000× narrower than its own
+        // covariance estimate (σ = 2 on the synthetic target of
+        // `tests/pmmh_scale_collapse.rs`), and one pinned to the floor.
+        assert!(scale_is_far_from_optimum(4.788e-4));
+        assert!(scale_is_far_from_optimum(LOG_SCALE_MIN.exp()));
+        // A scale that is not a number is not a scale near 1.
+        assert!(scale_is_far_from_optimum(f64::NAN));
+    }
 
     /// The Robbins–Monro scalar λ multiplies the Haario shape term (`run_pmmh`,
     /// the `*dz *= lambda` loop). Haario et al.'s `εI` floors the *shape*
