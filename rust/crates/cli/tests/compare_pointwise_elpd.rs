@@ -141,7 +141,7 @@ fn pointwise_tsv_localizes_the_elpd_difference_to_one_step_and_one_stream() {
 /// Review blocker 3. `paired_delta` pairs steps BY INDEX and the preflight
 /// guards only `n_scored()`, so two traces scoring the same NUMBER of
 /// observations at different TIMES were differenced anyway — Δelpd, se(Δ), the
-/// e-value and the deciban verdict all computed across two different
+/// likelihood ratio and the deciban verdict all computed across two different
 /// observation axes, and rendered as a confident answer.
 ///
 /// The `--pointwise` path already refuses this. Guarding the opt-in path and
@@ -186,7 +186,7 @@ fn compare_refuses_traces_on_different_observation_axes() {
     assert!(err.contains("base.json") && err.contains("cand.json"),
         "and which two traces disagree: {err}");
 
-    // The scalar verdict must not appear on stdout — no e-value, no decibans.
+    // The scalar verdict must not appear on stdout — no ratio, no decibans.
     let out = String::from_utf8_lossy(&run.stdout);
     assert!(!out.contains("dB"),
         "no evidence verdict may be rendered for an uncomparable pair: {out}");
