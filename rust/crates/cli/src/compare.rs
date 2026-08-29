@@ -34,6 +34,29 @@ pub(crate) const DEFAULT_DERIVE_PARTICLES: usize = 1000;
 /// Default filter seed for auto-deriving a prequential from a fit handle.
 pub(crate) const DEFAULT_DERIVE_SEED: u64 = 1;
 
+/// Scored steps below which `se(Δ)`'s normal approximation is not to be leaned
+/// on. A round number, not a threshold with a derivation behind it — the
+/// approximation degrades continuously, and the caveat exists to stop a reader
+/// treating `Δ ± se` as a test at the window sizes an outbreak analysis
+/// actually has.
+const SE_NORMAL_APPROX_MIN_T: usize = 100;
+
+/// The caveat on `se(Δ)` at a short scoring window, or `None`.
+///
+/// `se(Δ) = √(T · Var_t(Δ_t))` is a normal approximation to the sampling
+/// distribution of the summed difference. Sivula, Magnusson & Vehtari
+/// (arXiv:2008.10296) show it is unreliable in two regimes that co-occur in
+/// practice: small T, and models making similar predictions — precisely the
+/// case where a reader most wants the SE to settle the question. Descriptive,
+/// not a test.
+fn se_caveat(n_scored: usize) -> Option<String> {
+    (n_scored < SE_NORMAL_APPROX_MIN_T).then(|| format!(
+        "se(Δ) is a normal approximation, unreliable at small T (here T = \
+         {n_scored}) and when the models predict alike (Sivula, Magnusson & \
+         Vehtari, arXiv:2008.10296) — read it as descriptive, not as a test."
+    ))
+}
+
 /// Printed once under any rendering that shows an evidence label.
 ///
 /// The tier names ("strong", "decisive") come from Jeffreys' scale for **Bayes
@@ -1204,6 +1227,10 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
     if any_evidence {
         out.push_str(JEFFREYS_SCALE_NOTE);
         out.push('\n');
+        if let Some(caveat) = se_caveat(base.n_scored()) {
+            out.push_str(&caveat);
+            out.push('\n');
+        }
     }
     for line in warning_lines(rows, t_mismatch) {
         out.push_str(&line);
@@ -1359,6 +1386,10 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
     if any_evidence {
         out.push('\n');
         out.push_str(&format!("_{JEFFREYS_SCALE_NOTE}_\n"));
+        if let Some(caveat) = se_caveat(base.n_scored()) {
+            out.push('\n');
+            out.push_str(&format!("_{caveat}_\n"));
+        }
     }
     // The same block the text table prints, as a markdown list so each warning
     // stays its own line when the document is rendered.
@@ -1433,6 +1464,8 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         // reading `evidence_label` out of the JSON must get the caveat that
         // travels with it.
         "evidence_scale_note": any_evidence.then_some(JEFFREYS_SCALE_NOTE),
+        // The `se_delta_elpd` column's own caveat at a short scoring window.
+        "se_caveat": se_caveat(base.n_scored()),
         // #295: the plug-in / in-sample caveat, `null` only when every compared
         // trace is honest on both axes.
         "optimism_caveat": optimism_caveat(rows),
@@ -1744,6 +1777,43 @@ mod tests {
             "and the one the derived score would come from: {err}");
         assert!(err.contains("gh#312"), "and where the fix is tracked: {err}");
         assert!(err.contains("sir-abc12345"), "and which fit: {err}");
+    }
+
+    /// `se(Δ)` is √(T·Var) of the per-observation differences — a normal
+    /// approximation whose accuracy depends on T and on how alike the two
+    /// models are. At a short scoring window it is not a quantity to read a
+    /// verdict from, and the table says so once, not once per row.
+    #[test]
+    fn a_short_scoring_window_carries_the_se_caveat() {
+        let metrics = vec!["elpd".to_string()];
+        let short = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+
+        let table = render_table(&short, 0, &metrics, false);
+        assert_eq!(table.matches("arXiv:2008.10296").count(), 1,
+            "the caveat fires once per render, not once per row:\n{table}");
+        let md = render_md(&short, 0, &metrics, false);
+        assert_eq!(md.matches("arXiv:2008.10296").count(), 1, "{md}");
+        let json = render_json(&short, 0, &metrics);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["se_caveat"].as_str().is_some_and(|s| s.contains("2008.10296")),
+            "the JSON carries it as a field:\n{json}");
+
+        // A long scoring window does not: the caveat must mean something when
+        // it appears.
+        let times: Vec<f64> = (1..=120).map(|i| i as f64).collect();
+        let long = vec![
+            row_at("a", &times, &vec![-6.0; 120]),
+            row_at("b", &times, &vec![-5.9; 120]),
+        ];
+        let table = render_table(&long, 0, &metrics, false);
+        assert!(!table.contains("2008.10296"),
+            "120 scored steps is not a small-T window:\n{table}");
+        let json = render_json(&long, 0, &metrics);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["se_caveat"].is_null(), "{json}");
     }
 
     fn digests(entries: &[(&str, &str)]) -> DataIdentity {
