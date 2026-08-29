@@ -706,22 +706,13 @@ pub fn step_one(
         let (p_total, _q) = crate::inference::numerics::prob_q_from_rate_dt(total_rate, dt);
         let p_total = p_total.clamp(0.0, 1.0);
         let mut n_events = if scratch.binomial_z_idx < scratch.binomial_z_values.len() {
-            // CPM: use pre-drawn z-value for correlated binomial
+            // CPM: use pre-drawn z-value for correlated binomial. The normal →
+            // count transform lives with the rest of the correlated-PF
+            // transforms so the transition kernel and the initial-state draw
+            // cannot disagree about which regime applies at a given (n, p).
             let z = scratch.binomial_z_values[scratch.binomial_z_idx];
             scratch.binomial_z_idx += 1;
-            let n = n_src as u64;
-            let np = n as f64 * p_total;
-            let nq = n as f64 * (1.0 - p_total);
-            if np > 20.0 && nq > 20.0 {
-                let sd = (np * (1.0 - p_total)).sqrt();
-                (np + sd * z).round().clamp(0.0, n as f64) as u64
-            } else if np > 0.0 {
-                // Small np: inverse CDF via Phi(z)
-                let u = crate::inference::correlated_pf::phi(z).clamp(1e-15, 1.0 - 1e-15);
-                crate::inference::correlated_pf::binomial_quantile(n, p_total, u)
-            } else {
-                0
-            }
+            crate::inference::correlated_pf::binomial_from_normal(n_src as u64, p_total, z)
         } else {
             rng.binomial(n_src as u64, p_total)
         };

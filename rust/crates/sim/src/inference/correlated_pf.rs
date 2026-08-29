@@ -165,6 +165,58 @@ pub fn binomial_quantile(n: u64, p: f64, u: f64) -> u64 {
     }
 }
 
+/// Smallest `n·p` (and `n·(1-p)`) at which the binomial normal approximation is
+/// used instead of the exact inverse CDF.
+///
+/// The textbook rule of thumb; at `np = nq = 20` the skewness of the binomial is
+/// `(1-2p)/√(npq) ≤ 0.16` and the approximation's error on a single count is
+/// well under one unit. Below it the exact walk is used, which is also the
+/// regime where the walk is cheap.
+const NORMAL_APPROX_MIN: f64 = 20.0;
+
+/// Slack keeping an inverse-CDF argument strictly inside `(0, 1)`.
+///
+/// `Φ(z)` saturates to exactly `0` or `1` around `|z| ≈ 8.3`, and a quantile
+/// asked for `u = 1` has no finite answer for an unbounded law. Clamping caps
+/// the reachable tail at `Φ⁻¹(1 − 1e-15) ≈ 7.94` standard deviations, which no
+/// pre-drawn normal exceeds often enough to matter and which keeps the
+/// transform monotone in `z` rather than flat at the ends.
+const QUANTILE_U_EPS: f64 = 1e-15;
+
+/// `Binomial(n, p)` draw from one standard normal `z`, monotone in `z`.
+///
+/// The single normal → binomial-count transform on the correlated-PF path: the
+/// chain-binomial transition kernel's total-exit draw
+/// ([`crate::chain_binomial::step_one`]) and a `x ~ binomial(n = .., p = ..)`
+/// entry in `init { }` both come through here, so neither can drift into a
+/// regime the other does not use.
+///
+/// Two regimes, because neither covers the range on its own:
+///
+/// * `np > 20` and `nq > 20` — the normal approximation `np + √(npq)·z`,
+///   rounded and clipped to `[0, n]`. This is the hot path (once per source
+///   group per substep per particle), and it is also the only branch that is
+///   safe at national scale: [`binomial_quantile`]'s walk would need `np`
+///   terms to reach the mode.
+/// * otherwise — the exact inverse CDF at `u = Φ(z)`.
+///
+/// `p ≤ 0` gives `0` and `p ≥ 1` gives `n`, matching
+/// [`crate::rng::StatefulRng::binomial`]'s guards, so switching a model between
+/// the correlated and the plain filter does not change the boundary behaviour.
+pub fn binomial_from_normal(n: u64, p: f64, z: f64) -> u64 {
+    let nf = n as f64;
+    let np = nf * p;
+    let nq = nf * (1.0 - p);
+    if np > NORMAL_APPROX_MIN && nq > NORMAL_APPROX_MIN {
+        let sd = (np * (1.0 - p)).sqrt();
+        (np + sd * z).round().clamp(0.0, nf) as u64
+    } else if np > 0.0 {
+        binomial_quantile(n, p, phi(z).clamp(QUANTILE_U_EPS, 1.0 - QUANTILE_U_EPS))
+    } else {
+        0
+    }
+}
+
 /// Transform a standard normal `z` to a `Gamma(shape, scale)` draw via the exact
 /// inverse CDF: `z → u = Φ(z) → scale · GammaQuantile(u; shape)`.
 ///
