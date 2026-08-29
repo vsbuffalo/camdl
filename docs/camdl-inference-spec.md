@@ -69,10 +69,12 @@ weekly_cases = "data/london_cases.tsv"
 # file = "data/all_streams.tsv"
 
 # Optional: holdout data. Keys must match [data] keys.
-# Not yet applied (gh#585): [data.holdout] and holdout_after parse, are
-# validated, and enter the fit's identity, but no stage reads them — every
-# stage trains on all of [data], and no held-out score is computed. A score
-# from such a fit is in-sample; do not report it as out-of-sample.
+# Applied at fit load (gh#585): [data.holdout] files bind as the held-out
+# tail (every held-out time strictly after the stream's last training
+# time), and holdout_after = <time> truncates training to t <= <time>.
+# The applied window is recorded in fit.meta.json, and `camdl compare`
+# scores such fits held-out by default (stamped hold_out_tail after a
+# non-leakage check; --in-sample opts out).
 # [data.holdout]
 # weekly_cases = "data/london_cases_holdout.tsv"
 

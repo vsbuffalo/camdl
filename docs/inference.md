@@ -1582,37 +1582,46 @@ RNG provides the spread" behaviour.
 
 ### Out-of-sample validation
 
-**The `fit.toml` holdout keys do not split anything yet (gh#585).** A
-`[data.holdout]` section, and `holdout_after = <time>` under `[data]`, parse,
-are validated against the model's declared streams, and are folded into the
-fit's identity — but no stage reads them. Every stage trains on all of
-`[data.observations]`, and no held-out score is computed. A loglik or elpd from
-such a fit is in-sample, whichever key is set; never report one as
-out-of-sample.
+**The `fit.toml` holdout keys are applied at fit load (gh#585).** Declaring
+`holdout_after = <time>` under `[data]` (a model-time number, a date under a
+calendar-anchored model, or `last_obs - 6 weeks`) truncates training to
+observations at `t ≤ <time>`; a `[data.holdout]` section binds explicit held-out
+files, which must lie strictly after each stream's last training time
+(tail-only; an interior holdout is refused). The fit banner prints the training
+window, and the applied window is recorded in the fit's `fit.meta.json` — the
+machine-checked proof `camdl compare` requires before labelling any score
+`hold_out_tail`.
 
 ```toml
-[data.observations]
-weekly_cases = "data/cases_train.tsv"
+[data]
+holdout_after = "2020-03-01"
 
-# Parsed, identity-bearing, and currently inert — see gh#585.
-[data.holdout]
-weekly_cases = "data/cases_holdout.tsv"
+[data.observations]
+weekly_cases = "data/cases.tsv"
 ```
 
-To get an honest held-out number today, split the data yourself, fit on the
-training file, then score the **full** series in one filter pass and read off
-the rows past the split:
+`camdl compare` then scores such fits held-out by default: it runs the filter
+over the full series at the sealed θ̂, scores only the observations past the
+training boundary (each held-out week one-step-ahead, with earlier observations
+assimilated), verifies no leakage into θ̂, and stamps the trace `hold_out_tail`.
+Pass `--in-sample` to force the old full-series in-sample scoring. Comparing a
+holdout fit against a non-holdout fit is refused — those scores answer different
+questions.
+
+The equivalent manual construction (also the fallback for a fit produced before
+the holdout was applied):
 
 ```bash
 camdl data split data/cases.tsv --at-time 5474
 camdl fit run fit_train.toml
 camdl fit summary @train --params-only
-camdl pfilter model.camdl --params theta.toml --data weekly_cases=data/cases.tsv --save-prequential preq
+camdl pfilter model.camdl --params theta.toml --data weekly_cases=data/cases.tsv --save-prequential preq --score-from 5474
 ```
 
 `camdl data split` writes the train and holdout TSVs; point the fit's
 `[data.observations]` at the training file, and write the fit's θ̂ (from
-`fit summary --params-only`) to `theta.toml`.
+`fit summary --params-only`) to `theta.toml`. `--score-from` windows the trace
+to the held-out rows while still assimilating the training window.
 
 Score the full series, not the holdout file alone. Binding only the held-out
 rows starts the filter from the model's prior at the first held-out observation,
