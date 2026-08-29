@@ -11,11 +11,12 @@
 //!   - baseline-centered Δelpd + paired SE
 //!   - Δcrps + PIT 90% coverage column
 //!   - T_score fairness preflight (override: --allow-mismatched-horizon)
+//!   - observation-axis and stream-set preflights (gh#570; not overridable —
+//!     a difference across unlike observations is meaningless however shown)
 //!   - formats: table (default), md, json
 //!   - compare.toml for reproducible multi-model specs
 //! Out of scope (Part II): betting mode, CAS ref resolution, data_hash /
-//!   obs-model / backend preflights, anti-pattern detection beyond T_score,
-//!   stacking, plotting.
+//!   obs-model / backend preflights, stacking, plotting.
 
 use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
@@ -257,7 +258,8 @@ impl PointwiseRow {
 }
 
 /// Every pair of traces that will be differenced must sit on the same
-/// observation axis — same count AND same times, step for step.
+/// observation axis — same count, same times, and the same STREAMS at each of
+/// those times.
 ///
 /// `paired_delta` zips by index. That is safe only if index `k` means the same
 /// observation on both sides, which `n_scored()` alone does not establish: a
@@ -265,9 +267,15 @@ impl PointwiseRow {
 /// different times. Differencing those is not a comparison at any level of
 /// display, so this runs in the preflight rather than in one renderer.
 ///
-/// The message names the traces AND the times that differ: this refuses pairs
-/// that previously rendered, and "not comparable" with no detail is not
-/// actionable for someone reading it against a live outbreak.
+/// Equal times are not enough either (gh#570). A step's `log_score` is the
+/// JOINT score across the streams scored there, so a trace covering two
+/// districts and one covering a single district can agree on every `t` and
+/// still be scoring different quantities; their difference then reads as
+/// evidence about the models when it is mostly the second district's absence.
+///
+/// The message names the traces AND what differs: this refuses pairs that
+/// previously rendered, and "not comparable" with no detail is not actionable
+/// for someone reading it against a live outbreak.
 fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
     let Some(first) = rows.first() else { return Ok(()) };
     for r in rows.iter().skip(1) {
@@ -283,9 +291,52 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
                     first.name, r.name, k + 1, a.t, first.name, b.t, r.name,
                 ));
             }
+            let (sa, sb) = (step_streams(a), step_streams(b));
+            if sa == sb {
+                continue;
+            }
+            // A v1 trace carries no `per_stream` at all. Two such traces have
+            // nothing to check and are allowed through; one of each cannot be
+            // checked, and an unverifiable stream set is not a verified one.
+            let detail = if sa.is_empty() || sb.is_empty() {
+                let (with, without) = if sa.is_empty() { (&r.name, &first.name) }
+                                      else { (&first.name, &r.name) };
+                format!(
+                    "'{without}' has no per-stream breakdown at that step, so its \
+                     joint score cannot be shown to cover the same streams as \
+                     '{with}' ({}).\n       \
+                     Re-derive the trace without one (a v1 `prequential.json` \
+                     predates the breakdown).",
+                    fmt_stream_set(if sa.is_empty() { &sb } else { &sa }),
+                )
+            } else {
+                format!(
+                    "'{}' scored {} there and '{}' scored {}.\n       \
+                     The step's log score is the JOINT score over those streams, \
+                     so differencing them compares unlike quantities.\n       \
+                     Re-score both models on the same set of observation streams.",
+                    first.name, fmt_stream_set(&sa), r.name, fmt_stream_set(&sb),
+                )
+            };
+            return Err(format!(
+                "'{}' and '{}' did not score the same streams at t={}: {detail}",
+                first.name, r.name, a.t,
+            ));
         }
     }
     Ok(())
+}
+
+/// The set of stream names scored at one step. Empty for a v1 trace, which has
+/// no per-stream breakdown at all.
+fn step_streams(s: &sim::inference::prequential::PrequentialStep)
+    -> std::collections::BTreeSet<&str>
+{
+    s.per_stream.iter().map(|x| x.stream.as_str()).collect()
+}
+
+fn fmt_stream_set(s: &std::collections::BTreeSet<&str>) -> String {
+    format!("{{{}}}", s.iter().copied().collect::<Vec<_>>().join(", "))
 }
 
 /// Project every candidate against the baseline, step by step and stream by
@@ -1391,6 +1442,51 @@ mod tests {
             "a well-calibrated row carries no flag:\n{json}");
     }
 
+    /// gh#570. Equal T_score and equal times still permit two traces to have
+    /// scored DIFFERENT streams at those times — a national fit scoring two
+    /// districts against one scoring a single district. The joint `log_score`
+    /// is a cross-stream quantity, so differencing them subtracts a 2-stream
+    /// joint from a 1-stream joint and calls the gap evidence about the model.
+    /// The preflight refuses the pair, naming what differs.
+    #[test]
+    fn refuses_traces_that_scored_different_stream_sets() {
+        let t = [7.0, 14.0, 21.0];
+
+        // Same streams at every step → the ordinary case still compares.
+        let a = row_with_streams("a", &t, &["north", "south"]);
+        let b = row_with_streams("b", &t, &["south", "north"]);
+        check_shared_observation_axis(&[a, b])
+            .expect("the same stream set in a different order is the same set");
+
+        // Different sets → refused, naming the step, both sets, both traces.
+        let a = row_with_streams("a", &t, &["north", "south"]);
+        let b = row_with_streams("b", &t, &["north"]);
+        let err = check_shared_observation_axis(&[a, b])
+            .expect_err("a 2-stream joint may not be differenced against a 1-stream one");
+        assert!(err.contains("south"), "names the stream that differs: {err}");
+        assert!(err.contains("'a'") && err.contains("'b'"),
+            "names both traces: {err}");
+        assert!(err.contains("t=7"), "and the step where they diverge: {err}");
+
+        // Two legacy v1 traces (no per-stream breakdown at all) carry no
+        // information to check, so they are allowed through.
+        let a = row_at("a", &t, &[-6.0, -6.0, -6.0]);
+        let b = row_at("b", &t, &[-6.0, -6.0, -6.0]);
+        check_shared_observation_axis(&[a, b])
+            .expect("two traces with no per-stream breakdown are not a mismatch");
+
+        // One with a breakdown and one without: the sets cannot be compared, so
+        // the difference cannot be shown to be like-for-like. Refused, and the
+        // message says which side is missing the breakdown rather than naming a
+        // phantom stream mismatch.
+        let a = row_with_streams("a", &t, &["north", "south"]);
+        let b = row_at("b", &t, &[-6.0, -6.0, -6.0]);
+        let err = check_shared_observation_axis(&[a, b])
+            .expect_err("an unverifiable stream set is not a verified one");
+        assert!(err.contains("no per-stream breakdown"),
+            "the message names the real problem: {err}");
+    }
+
     /// A trace with joint scores at the given times and no per-stream breakdown.
     fn row_at(name: &str, times: &[f64], log_scores: &[f64]) -> Row {
         use sim::inference::prequential::{Conditioning, PrequentialStep, Provenance};
@@ -1417,6 +1513,25 @@ mod tests {
                 warnings: Vec::new(),
             },
         }
+    }
+
+    /// A trace scoring the named streams at every one of `times`.
+    fn row_with_streams(name: &str, times: &[f64], streams: &[&str]) -> Row {
+        use sim::inference::prequential::StreamScore;
+        let log_scores = vec![-6.0; times.len()];
+        let mut row = row_at(name, times, &log_scores);
+        for step in &mut row.trace.steps {
+            step.per_stream = streams.iter().map(|s| StreamScore {
+                stream: (*s).to_string(),
+                y_obs: 5.0,
+                y_pred_samples: Vec::new(),
+                log_score: -3.0,
+                crps: 0.5,
+                pit: 0.5,
+                interval: Default::default(),
+            }).collect();
+        }
+        row
     }
 
     /// gh#241 G3: `deny_unknown_fields` — a typo'd compare.toml key must ERROR.
