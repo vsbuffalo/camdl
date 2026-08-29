@@ -206,12 +206,13 @@ pub fn run_stage(
         ode_dt
     };
 
-    // gh#193 preflight: correlated PMMH (CPM, rho > 0) pre-draws a fixed-size
-    // noise block per observation window and so requires a (near-)uniform obs
-    // grid. The check is θ-independent (obs grid only) — run it ONCE here and
+    // gh#193 preflight: correlated PMMH (CPM, rho > 0) pre-draws one noise
+    // block per observation window, sized at that window's own substeps, so an
+    // irregular grid is fine but one that does not walk forward from t_start is
+    // not. The check is θ-independent (obs grid only) — run it ONCE here and
     // surface the actionable message, instead of letting every per-step PF eval
-    // swallow the filter Err into -inf (a silent all-(-inf) chain). A leading
-    // window coinciding with t_start is fine; see validate_cpm_obs_grid.
+    // swallow the filter Err into -inf (a silent all-(-inf) chain). See
+    // validate_cpm_obs_grid.
     // Skipped for ODE-MH (rho is forced None: there is no correlated PF).
     if rho.is_some() {
         let obs_times: Vec<f64> = config.observations.iter().map(|o| o.time).collect();
@@ -635,6 +636,7 @@ pub fn run_stage(
                 n_steps,
                 n_particles,
                 dt,
+                t_start: config.smc_config().t_start,
                 proposal_sd: proposal_sd.clone(),
                 adapt,
                 adapt_start,

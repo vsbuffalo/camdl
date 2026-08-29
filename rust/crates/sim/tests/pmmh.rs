@@ -24,7 +24,7 @@ use sim::{
         particle_filter::bootstrap_filter,
         if2::{EstimatedParam, Transform},
         pmmh::{run_pmmh, Prior, PMMHConfig, mcmc_ess},
-        correlated_pf::{bootstrap_filter_correlated, PFRandomState},
+        correlated_pf::{bootstrap_filter_correlated, cpm_steps_per_obs, PFRandomState},
         ChainBinomialProcess,
         traits::{ObservationModel, SMCConfig},
         ParticleState,
@@ -180,6 +180,7 @@ fn test_pmmh_posterior_covers_truth() {
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 3000,
         n_particles,
         dt: 1.0,
@@ -224,6 +225,7 @@ fn test_pmmh_determinism() {
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 100,
         n_particles,
         dt: 1.0,
@@ -257,6 +259,7 @@ fn test_pmmh_acceptance_rate() {
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 1000,
         n_particles,
         dt: 1.0,
@@ -287,6 +290,7 @@ fn test_pmmh_flat_prior_finds_near_mle() {
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 2000,
         n_particles,
         dt: 1.0,
@@ -318,6 +322,7 @@ fn test_pmmh_adaptive_improves_acceptance() {
 
     // Deliberately bad initial proposal: 10× too wide
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 1500,
         n_particles,
         dt: 1.0,
@@ -377,6 +382,7 @@ fn test_pmmh_different_seeds_differ() {
     let base_params = compiled.default_params.clone();
 
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 50,
         n_particles,
         dt: 1.0,
@@ -396,23 +402,26 @@ fn test_pmmh_different_seeds_differ() {
     assert!(any_differ, "different seeds should produce different chains");
 }
 
-// ── Correlated PF (CPM) uniform-window gate (M6) ───────────────────────────
+// ── Correlated PF (CPM) observation-grid handling ──────────────────────────
 //
-// CPM pre-draws random numbers into per-window blocks of `steps_per_obs`
-// substeps and indexes them with `particle*steps_per_obs + substep`. That
-// indexing is sound ONLY if EVERY observation window — INCLUDING the first
-// window [t_start, obs(0)] — has exactly `steps_per_obs` substeps. The first
-// window is the reachable hole: `steps_per_obs` is sized from obs(1)-obs(0),
-// but the first window spans [t_start, obs(0)], which differs when data start
-// mid-period (e.g. t_start=0, obs at [5,12,19]). The old gate only ran for
-// n_obs > 2 and used a dt*0.5 time-gap slack, so it missed the first-window
-// offset entirely — the first window's substeps overran their noise block and
-// silently fell through to fresh per-particle RNG, decorrelating the estimator
-// the PMMH acceptance ratio depends on, with no diagnostic.
+// CPM pre-draws random numbers into one block per observation window, sized at
+// that window's own substep count, and indexes them with
+// `particle*window_steps + substep`. Windows are therefore independent: a
+// series that starts mid-period, or a daily series with a day of no reporting,
+// indexes correctly because each window carries its own stride. What the filter
+// still refuses is noise that was not drawn for the grid it is running on — a
+// row too short for its window would read past its block, and the fall-through
+// to fresh per-particle RNG would decorrelate the estimator the PMMH acceptance
+// ratio depends on, with no diagnostic.
 
 /// Build the smallest CPM harness: pure-death `ChainBinomialProcess` + a
-/// `PoissonPrevalenceObs` at the given obs times, run `bootstrap_filter_correlated`.
-fn run_cpm(obs_times: Vec<f64>, dt: f64) -> Result<f64, sim::error::SimError> {
+/// `PoissonPrevalenceObs` at the given obs times, run `bootstrap_filter_correlated`
+/// against `randoms`.
+fn run_cpm_with(
+    obs_times: Vec<f64>,
+    dt: f64,
+    randoms: &PFRandomState,
+) -> Result<f64, sim::error::SimError> {
     let (compiled, params) = pure_death_model();
     let process = ChainBinomialProcess::new(Arc::new(compiled));
     let n_obs = obs_times.len();
@@ -420,9 +429,8 @@ fn run_cpm(obs_times: Vec<f64>, dt: f64) -> Result<f64, sim::error::SimError> {
         observations: vec![50.0; n_obs],
         obs_times: obs_times.clone(),
     };
-    let n_particles = 64;
     let config = SMCConfig {
-        n_particles,
+        n_particles: CPM_PARTICLES,
         dt,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -430,65 +438,61 @@ fn run_cpm(obs_times: Vec<f64>, dt: f64) -> Result<f64, sim::error::SimError> {
         record_prequential: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
-    // Size the noise arrays the way bootstrap_filter_correlated computes
-    // steps_per_obs internally, so the harness matches the filter's own block
-    // size: obs(1)-obs(0) for n_obs>=2, else obs(0)-t_start for a single obs.
-    // (run_pmmh uses 1 for the single-obs case, but the filter's gate sizes from
-    // the actual first window — the harness mirrors the filter so the positive
-    // single-obs test exercises the gate, not a sizing mismatch.)
-    let steps_per_obs = if n_obs >= 2 {
-        sim::time::interval_steps(obs_times[0], obs_times[1], dt)
-    } else {
-        sim::time::interval_steps(0.0, obs_times[0], dt)
-    };
-    let n_source_groups = 1;
-    let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(
-        n_particles, n_obs, steps_per_obs, n_source_groups, &mut rng,
-    );
-    bootstrap_filter_correlated(&process, &obs_model, &params, &config, &randoms, 7)
+    bootstrap_filter_correlated(&process, &obs_model, &params, &config, randoms, 7)
         .map(|r| r.log_likelihood)
 }
 
-#[test]
-fn cpm_rejects_first_window_offset() {
-    // t_start=0, obs at [5,12,19], dt=1: uniform gap 7 (steps_per_obs=7) but the
-    // FIRST window [0,5] is only 5 substeps. Under the OLD gate (n_obs>2 + dt*0.5
-    // slack) this passed and ran to a finite loglik via silent decorrelation; the
-    // tightened gate must reject it.
-    let res = run_cpm(vec![5.0, 12.0, 19.0], 1.0);
-    let err = res.expect_err(
-        "CPM must reject a first-window offset (first window 5 substeps vs \
-         steps_per_obs=7) — running it silently decorrelates the estimator",
-    );
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("FIRST window"),
-        "rejection must name the first window; got: {msg}",
-    );
+const CPM_PARTICLES: usize = 64;
+const CPM_SOURCE_GROUPS: usize = 1;
+
+/// Noise drawn for exactly this grid, the way `run_pmmh` draws it.
+fn cpm_randoms(obs_times: &[f64], dt: f64, seed: u64) -> PFRandomState {
+    let steps_per_obs = cpm_steps_per_obs(obs_times, 0.0, dt);
+    let mut rng = StatefulRng::new(seed);
+    PFRandomState::draw_fresh(CPM_PARTICLES, &steps_per_obs, CPM_SOURCE_GROUPS, &mut rng)
+}
+
+fn run_cpm(obs_times: Vec<f64>, dt: f64) -> Result<f64, sim::error::SimError> {
+    let randoms = cpm_randoms(&obs_times, dt, 7);
+    run_cpm_with(obs_times, dt, &randoms)
 }
 
 #[test]
-fn cpm_rejects_two_obs_non_uniform_first_window() {
-    // n_obs <= 2 case (the old gate's `n_obs > 2` hole): two obs at [5,12],
-    // t_start=0. steps_per_obs sized from obs(1)-obs(0)=7, but the first window
-    // [0,5] is 5 substeps. Old gate never ran (n_obs not > 2) → silent
-    // decorrelation; tightened gate rejects.
-    let res = run_cpm(vec![5.0, 12.0], 1.0);
-    let err = res.expect_err(
-        "CPM must reject a non-uniform first window even with only 2 observations",
-    );
-    assert!(
-        format!("{err}").contains("FIRST window"),
-        "rejection must name the first window",
-    );
+fn cpm_accepts_a_mid_period_first_window() {
+    // t_start=0, obs at [5,12,19], dt=1: the first window [0,5] is 5 substeps
+    // where the rest are 7. Its noise block is sized at 5, so the run proceeds.
+    assert_eq!(cpm_steps_per_obs(&[5.0, 12.0, 19.0], 0.0, 1.0), vec![5, 7, 7]);
+    let ll = run_cpm(vec![5.0, 12.0, 19.0], 1.0)
+        .expect("a short first window must run, not be refused");
+    assert!(ll.is_finite(), "mid-period-start CPM run must be finite, got {ll}");
+}
+
+#[test]
+fn cpm_accepts_two_obs_with_a_short_first_window() {
+    // The n_obs == 2 case: obs at [5,12], t_start=0. First window 5 substeps,
+    // second 7.
+    assert_eq!(cpm_steps_per_obs(&[5.0, 12.0], 0.0, 1.0), vec![5, 7]);
+    let ll = run_cpm(vec![5.0, 12.0], 1.0).expect("two observations must run");
+    assert!(ll.is_finite(), "two-observation CPM run must be finite, got {ll}");
+}
+
+#[test]
+fn cpm_accepts_a_daily_grid_with_one_absent_day() {
+    // The reporting case this supports: daily observations, one interior day
+    // with no situation report. One window spans two substeps, the rest one.
+    let times: Vec<f64> = (1..=20).filter(|d| *d != 12).map(|d| d as f64).collect();
+    let sizes = cpm_steps_per_obs(&times, 0.0, 1.0);
+    assert_eq!(sizes.iter().filter(|&&k| k == 2).count(), 1, "exactly one two-substep window");
+    assert_eq!(sizes.iter().filter(|&&k| k == 1).count(), sizes.len() - 1);
+    let ll = run_cpm(times, 1.0)
+        .expect("a daily grid with one absent day must run");
+    assert!(ll.is_finite(), "irregular-grid CPM run must be finite, got {ll}");
 }
 
 #[test]
 fn cpm_accepts_genuinely_uniform_windows() {
     // Positive regression: first obs at exactly obs_dt from t_start=0, uniform
     // gaps. obs at [7,14,21], dt=1 → every window (first included) is 7 substeps.
-    // Must run and return a finite loglik.
     let ll = run_cpm(vec![7.0, 14.0, 21.0], 1.0)
         .expect("genuinely-uniform CPM windows must run");
     assert!(ll.is_finite(), "uniform CPM run must return a finite loglik, got {ll}");
@@ -496,15 +500,125 @@ fn cpm_accepts_genuinely_uniform_windows() {
 
 #[test]
 fn cpm_accepts_uniform_single_obs() {
-    // Single observation: first window [t_start=0, obs(0)=10] is the only window;
-    // steps_per_obs falls back to 1 in the sizing, but the window has 10 substeps.
-    // This is the degenerate n_obs==1 case — the gate must agree with how the
-    // noise is sized. With steps_per_obs sized at obs(0)-t_start, it is uniform.
-    // Here we use the matching sizing (single obs uses obs(0)-t_start in the gate
-    // via obs_dt fallback), so it must accept.
+    // Single observation: the first window [t_start=0, obs(0)=10] is the only
+    // window, and it is 10 substeps — which is what it is now sized at.
+    assert_eq!(cpm_steps_per_obs(&[10.0], 0.0, 1.0), vec![10]);
     let ll = run_cpm(vec![10.0], 1.0)
         .expect("single-observation CPM (window == whole run) must run");
     assert!(ll.is_finite(), "single-obs CPM run must return a finite loglik, got {ll}");
+}
+
+#[test]
+fn cpm_refuses_noise_drawn_for_a_different_grid() {
+    // Noise sized for a uniform daily grid, handed to a run whose grid skips a
+    // day: the two-substep window needs twice the block the uniform draw gave
+    // it. Reading past that block would fall through to fresh per-particle RNG
+    // and silently decorrelate the estimator, so the filter refuses instead.
+    let uniform: Vec<f64> = (1..=20).map(|d| d as f64).collect();
+    let with_hole: Vec<f64> = (1..=21).filter(|d| *d != 12).map(|d| d as f64).collect();
+    assert_eq!(uniform.len(), with_hole.len(), "same window count, different lengths");
+
+    let mismatched = cpm_randoms(&uniform, 1.0, 7);
+    let err = run_cpm_with(with_hole.clone(), 1.0, &mismatched)
+        .expect_err("noise drawn for a different grid must be refused");
+    let msg = format!("{err}");
+    assert!(msg.contains("pre-drawn noise"), "got: {msg}");
+
+    // The same run with noise drawn for its own grid proceeds.
+    let matched = cpm_randoms(&with_hole, 1.0, 7);
+    assert!(run_cpm_with(with_hole, 1.0, &matched).is_ok());
+}
+
+#[test]
+fn cpm_reuses_the_same_draws_across_evaluations_on_an_irregular_grid() {
+    // What makes CPM work: the same random is reused at the same
+    // (window, particle, substep) between MCMC iterations, so two evaluations
+    // at the same theta differ only by the fraction of noise the Crank-Nicolson
+    // update refreshed, and the likelihood RATIO in the acceptance step is far
+    // less noisy than either estimate. Measured on the irregular grid, where
+    // the strides differ between windows.
+    //
+    // Averaged over 8 pairs because a single pair is a poor estimate of either
+    // spread — one correlated pair can differ by as much as a typical
+    // independent pair. Every draw here is seeded, so the numbers below are
+    // reproducible, not sampled afresh each run.
+    let times: Vec<f64> = (1..=30).filter(|d| *d != 18).map(|d| d as f64).collect();
+    let dt = 1.0;
+
+    let mut correlated = Vec::new();
+    let mut independent = Vec::new();
+    for r in 0..8u64 {
+        let u = cpm_randoms(&times, dt, 100 + r);
+        let mut rng = StatefulRng::new(900 + r);
+        let u_next = u.correlate(0.999, &mut rng);
+        let ll_u = run_cpm_with(times.clone(), dt, &u).expect("CPM run");
+        let ll_u_next = run_cpm_with(times.clone(), dt, &u_next).expect("CPM run");
+        correlated.push((ll_u - ll_u_next).abs());
+
+        let v = cpm_randoms(&times, dt, 300 + r);
+        let w = cpm_randoms(&times, dt, 500 + r);
+        let ll_v = run_cpm_with(times.clone(), dt, &v).expect("CPM run");
+        let ll_w = run_cpm_with(times.clone(), dt, &w).expect("CPM run");
+        independent.push((ll_v - ll_w).abs());
+    }
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let (c, i) = (mean(&correlated), mean(&independent));
+    eprintln!("irregular-grid CPM: mean |dloglik| correlated {c:.4}, independent {i:.4}");
+    assert!(
+        c * 2.5 < i,
+        "two CPM evaluations at rho=0.999 must be much closer than two \
+         independent ones (mean gap correlated {c}, independent {i}) — \
+         otherwise the pre-drawn noise is not being reused at the same slots"
+    );
+}
+
+/// Every slot of every window's noise block must be read.
+///
+/// The filter reads `particle * window_steps + substep`, over `n_particles`
+/// particles and the substeps the window actually walks, out of a block sized
+/// `n_particles * window_steps`. If the stride were wrong, two (particle,
+/// substep) pairs would collide on one slot and some other slot would go
+/// unread — which does not fail, and does not even decorrelate: the estimator
+/// just draws two particles from one random and loses the independence a
+/// particle filter needs. An unread slot is the observable fingerprint, so
+/// perturbing each slot in turn and requiring the log-likelihood to move pins
+/// the read map as a bijection onto the block.
+#[test]
+fn cpm_reads_every_slot_of_every_window_block() {
+    // Four windows of sizes [1, 1, 2, 1] — the absent-day shape, small enough
+    // to perturb every slot exhaustively.
+    let times = vec![1.0, 2.0, 4.0, 5.0];
+    let dt = 1.0;
+    let steps_per_obs = cpm_steps_per_obs(&times, 0.0, dt);
+    assert_eq!(steps_per_obs, vec![1, 1, 2, 1]);
+
+    let zeroed = |times: &[f64]| PFRandomState {
+        gamma_noise: steps_per_obs.iter().map(|&k| vec![0.0; CPM_PARTICLES * k]).collect(),
+        resample_noise: vec![0.0; times.len()],
+        binomial_noise: steps_per_obs.iter()
+            .map(|&k| vec![0.0; CPM_PARTICLES * k * CPM_SOURCE_GROUPS])
+            .collect(),
+        n_source_groups: CPM_SOURCE_GROUPS,
+    };
+    let baseline = run_cpm_with(times.clone(), dt, &zeroed(&times)).expect("CPM run");
+
+    // A z this large sends the inverse-CDF draw to the far tail, so the
+    // perturbed particle's exit count differs from every other particle's.
+    const LARGE_Z: f64 = 8.0;
+    for (obs_idx, &k) in steps_per_obs.iter().enumerate() {
+        for slot in 0..CPM_PARTICLES * k * CPM_SOURCE_GROUPS {
+            let mut randoms = zeroed(&times);
+            randoms.binomial_noise[obs_idx][slot] = LARGE_Z;
+            let ll = run_cpm_with(times.clone(), dt, &randoms).expect("CPM run");
+            assert!(
+                ll != baseline,
+                "slot {slot} of window {obs_idx} (block of {}) is never read — \
+                 the read map is not onto its block, so two (particle, substep) \
+                 pairs share a draw",
+                CPM_PARTICLES * k * CPM_SOURCE_GROUPS,
+            );
+        }
+    }
 }
 
 /// gh#224. A structural (non-recoverable) error from the likelihood
@@ -518,6 +632,7 @@ fn pmmh_surfaces_structural_eval_error() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Normal { mean: 0.01, sd: 0.01 })];
     let base_params = vec![0.01];
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],
         adapt: false, adapt_start: 0, thin: 1, burn_in: 0,
         rho: None, n_source_groups: 0,
@@ -546,6 +661,7 @@ fn pmmh_tolerates_ruled_out_neg_inf() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Normal { mean: 0.01, sd: 0.01 })];
     let base_params = vec![0.01];
     let config = PMMHConfig {
+        t_start: 0.0,
         n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],
         adapt: false, adapt_start: 0, thin: 1, burn_in: 0,
         rho: None, n_source_groups: 0,

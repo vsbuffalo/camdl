@@ -30,6 +30,11 @@ pub struct PMMHConfig {
     pub n_steps: usize,
     pub n_particles: usize,
     pub dt: f64,
+    /// Start of the inference window — the left edge of the first observation
+    /// window `[t_start, obs(0)]`. Only correlated PMMH reads it, to size that
+    /// window's block of pre-drawn noise; it must match the `t_start` the
+    /// particle filter runs at (`SMCConfig::t_start`).
+    pub t_start: f64,
     /// Initial proposal SD on the transformed scale (diagonal: one per estimated param).
     pub proposal_sd: Vec<f64>,
     /// Enable adaptive Metropolis (Haario et al. 2001).
@@ -408,13 +413,15 @@ pub fn run_pmmh(
 
     use super::correlated_pf::PFRandomState;
 
-    // CPM sizing: derived from observation times and dt rather than config fields.
-    let n_obs = observations.len();
-    let steps_per_obs = if observations.len() >= 2 {
-        crate::time::interval_steps(observations[0].time, observations[1].time, config.dt)
-    } else {
-        1
-    };
+    // CPM sizing: one noise block per observation window, sized at that
+    // window's own substep count, derived from the observation times, t_start
+    // and dt rather than from config fields. The same function the correlated
+    // filter strides its rows with, so the two cannot disagree about where a
+    // given (window, particle, substep) draw lives — which is the whole basis
+    // of the method: the same random reused at the same slot across iterations.
+    let obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
+    let steps_per_obs =
+        super::correlated_pf::cpm_steps_per_obs(&obs_times, config.t_start, config.dt);
 
     let start_step;
     let mut current_params: Vec<f64>;
@@ -468,7 +475,7 @@ pub fn run_pmmh(
         // CPM random state (if correlated mode)
         current_randoms = config.rho.map(|_| {
             PFRandomState::draw_fresh(
-                config.n_particles, n_obs, steps_per_obs,
+                config.n_particles, &steps_per_obs,
                 config.n_source_groups, &mut rng,
             )
         });
