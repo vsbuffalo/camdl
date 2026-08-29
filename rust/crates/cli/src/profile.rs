@@ -1592,6 +1592,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     proposal_sd,
                     adapt: true,
                     adapt_start: 50,
+                    // Same policy as `fit/pmmh.rs`: adapt over the discarded
+                    // prefix, sample from the kernel that leaves.
+                    adapt_stop: PROFILE_PMMH_BURN_IN,
                     thin: 1,
                     burn_in: PROFILE_PMMH_BURN_IN,
                     rho: pmmh_rho_opt,

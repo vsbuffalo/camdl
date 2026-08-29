@@ -49,6 +49,7 @@ fn small_config() -> PMMHConfig {
         proposal_sd: vec![0.2],
         adapt: false,
         adapt_start: 0,
+        adapt_stop: 0,
         thin: 1,
         burn_in: 0,
         rho: None,

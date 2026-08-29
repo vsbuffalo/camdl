@@ -640,6 +640,25 @@ pub fn run_stage(
                 proposal_sd: proposal_sd.clone(),
                 adapt,
                 adapt_start,
+                // Warm-up is the discarded prefix: adaptation runs over the
+                // burn-in and the kernel is frozen for the draws the fit
+                // keeps. This is the Stan arrangement, and it is a policy of
+                // this driver rather than a fact about the sampler, which
+                // takes the boundary as its own `adapt_stop`. No new
+                // configuration key, so no new run-identity input — the
+                // boundary moves only when `burn_in` does, and `burn_in` is
+                // already part of a stage's identity payload.
+                //
+                // How much of a run this actually freezes is therefore set by
+                // `burn_in`, whose default is `DEFAULT_BURN_IN` = 5000 while
+                // config validation requires `burn_in < iterations`. A stage
+                // that leaves it unset and asks for 5,001 iterations adapts
+                // over 5,000 of them and freezes for one; the same default at
+                // 20,000 iterations freezes three quarters of the run. The
+                // freeze is only as useful as the warm-up budget is honest,
+                // and whether 5,000 is the right default is a separate
+                // question from whether adaptation should stop.
+                adapt_stop: burn_in,
                 thin,
                 burn_in,
                 rho,

@@ -187,6 +187,9 @@ fn test_pmmh_posterior_covers_truth() {
         proposal_sd: vec![0.2], // on log scale
         adapt: true,
         adapt_start: 200,
+        // The whole run is warm-up: these tests are about the adaptation
+        // itself, so freezing it partway would only shorten what they measure.
+        adapt_stop: 3000,
         thin: 1,
         burn_in: 500, rho: None, n_source_groups: 0,
     };
@@ -232,6 +235,7 @@ fn test_pmmh_determinism() {
         proposal_sd: vec![0.2],
         adapt: false,
         adapt_start: 50,
+        adapt_stop: 0,
         thin: 1,
         burn_in: 0, rho: None, n_source_groups: 0,
     };
@@ -266,6 +270,9 @@ fn test_pmmh_acceptance_rate() {
         proposal_sd: vec![0.2],
         adapt: true,
         adapt_start: 200,
+        // The whole run is warm-up: these tests are about the adaptation
+        // itself, so freezing it partway would only shorten what they measure.
+        adapt_stop: 1000,
         thin: 1,
         burn_in: 0, rho: None, n_source_groups: 0,
     };
@@ -297,6 +304,9 @@ fn test_pmmh_flat_prior_finds_near_mle() {
         proposal_sd: vec![0.2],
         adapt: true,
         adapt_start: 200,
+        // The whole run is warm-up: these tests are about the adaptation
+        // itself, so freezing it partway would only shorten what they measure.
+        adapt_stop: 2000,
         thin: 1,
         burn_in: 500, rho: None, n_source_groups: 0,
     };
@@ -329,6 +339,9 @@ fn test_pmmh_adaptive_improves_acceptance() {
         proposal_sd: vec![2.0], // way too wide on log scale
         adapt: true,
         adapt_start: 200,
+        // The whole run is warm-up: these tests are about the adaptation
+        // itself, so freezing it partway would only shorten what they measure.
+        adapt_stop: 1500,
         thin: 1,
         burn_in: 0, rho: None, n_source_groups: 0,
     };
@@ -389,6 +402,7 @@ fn test_pmmh_different_seeds_differ() {
         proposal_sd: vec![0.2],
         adapt: false,
         adapt_start: 50,
+        adapt_stop: 0,
         thin: 1,
         burn_in: 0, rho: None, n_source_groups: 0,
     };
@@ -634,7 +648,7 @@ fn pmmh_surfaces_structural_eval_error() {
     let config = PMMHConfig {
         t_start: 0.0,
         n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],
-        adapt: false, adapt_start: 0, thin: 1, burn_in: 0,
+        adapt: false, adapt_start: 0, adapt_stop: 0, thin: 1, burn_in: 0,
         rho: None, n_source_groups: 0,
     };
     // Evaluator that always fails with a non-recoverable error.
@@ -663,7 +677,7 @@ fn pmmh_tolerates_ruled_out_neg_inf() {
     let config = PMMHConfig {
         t_start: 0.0,
         n_steps: 50, n_particles: 10, dt: 1.0, proposal_sd: vec![0.2],
-        adapt: false, adapt_start: 0, thin: 1, burn_in: 0,
+        adapt: false, adapt_start: 0, adapt_stop: 0, thin: 1, burn_in: 0,
         rho: None, n_source_groups: 0,
     };
     // A recoverable per-particle excursion legitimately yields −∞; the
