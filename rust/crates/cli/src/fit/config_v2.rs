@@ -412,15 +412,41 @@ pub struct DataSpec {
     pub observations: IndexMap<String, String>,
 
     /// Time threshold for temporal holdout: observations at t > this value
-    /// are withheld from training. In model time units.
+    /// are withheld from training; `camdl compare` scores them out-of-sample
+    /// (gh#585, Stage 3 of the 2026-08-29 honest-predictive-evaluation
+    /// proposal). Accepts a bare model-time number or the shared time-spec
+    /// grammar `condition_from` uses (a date under a calendar-anchored
+    /// model, or `last_obs - N weeks`), resolved at fit load.
     /// Mutually exclusive with `holdout`.
     #[serde(default)]
-    pub holdout_after: Option<f64>,
+    pub holdout_after: Option<TimeSpecToml>,
 
     /// Explicit holdout data files. Keys match observation stream names.
     /// Mutually exclusive with `holdout_after`.
     #[serde(default)]
     pub holdout: Option<IndexMap<String, String>>,
+}
+
+/// A time value in `fit.toml` that feeds the shared time-spec grammar
+/// (`parse_time_spec`, gh#626): TOML lets the user write either a bare
+/// number (`holdout_after = 120.0`) or a string spec
+/// (`holdout_after = "2020-03-01"`, `"last_obs - 6 weeks"`). Both arms
+/// canonicalize to the raw string the parser consumes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TimeSpecToml {
+    Num(f64),
+    Spec(String),
+}
+
+impl TimeSpecToml {
+    /// The raw text handed to `parse_time_spec`.
+    pub fn raw(&self) -> String {
+        match self {
+            TimeSpecToml::Num(v) => format!("{v}"),
+            TimeSpecToml::Spec(s) => s.clone(),
+        }
+    }
 }
 
 impl DataSpec {
@@ -3905,7 +3931,7 @@ cooling = 0.70
         "#).unwrap();
 
         let data = config.data.as_ref().expect("[data] section required in test fixture");
-        assert_eq!(data.holdout_after, Some(5474.0));
+        assert_eq!(data.holdout_after, Some(TimeSpecToml::Num(5474.0)));
         assert!(data.holdout.is_none());
     }
 
