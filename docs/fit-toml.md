@@ -53,8 +53,19 @@ init_mle  = "scout"               # take this stage's base point from the scout 
 **`[model]`** — `camdl = "path/to/model.camdl"`.
 
 **`[data.observations]`** — one key per observation stream declared in the
-model, each mapped to a TSV path. For out-of-sample validation, add
-`[data.holdout]` (same shape) or `holdout_after = <time>` (under `[data]`).
+model, each mapped to a TSV path.
+
+`[data.holdout]` (same shape) and `holdout_after = <time>` (under `[data]`)
+parse, are validated, and are folded into the fit's identity — but **the split
+is not yet applied** (gh#585). Every fit trains on all the bound observations,
+and no held-out score is computed, so a score from such a fit is in-sample no
+matter which of these keys is set. Do not report one as out-of-sample. For an
+honest held-out number today, fit on a truncated data file and then score the
+**full** series with `camdl pfilter --save-prequential`, summing the `log_score`
+of the `joint` rows past the split time — scoring the held-out file on its own
+starts the filter from the prior with nothing assimilated from the training
+window, which is a different (and unfairly harsh) quantity. The recipe is
+spelled out under "Out-of-sample validation" in `camdl docs inference`.
 
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
 
