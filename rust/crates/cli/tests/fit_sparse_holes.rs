@@ -117,6 +117,49 @@ fn write_dense_data(dir: &Path) -> PathBuf {
     p
 }
 
+/// The third encoding: the t=2 row is ABSENT rather than `NA`. t=2 is then not
+/// on this stream's axis at all, so the observation grid is
+/// [1, 3, 4, 5, 6] — one two-substep window among one-substep windows.
+fn write_absent_row_data(dir: &Path) -> PathBuf {
+    let p = dir.join("cases_absent.tsv");
+    std::fs::write(&p, "time\tcases\n1\t2\n3\t8\n4\t6\n5\t4\n6\t2\n").unwrap();
+    p
+}
+
+/// A correlated-PMMH (`rho` set) fit.toml against `data`. Tiny counts — the
+/// question is whether the observation grid is admitted and the pre-drawn noise
+/// indexes correctly, not whether the chain converges.
+fn write_correlated_pmmh_toml(dir: &Path, ir: &Path, data: &Path, tag: &str) -> (PathBuf, PathBuf) {
+    let out_root = dir.join(format!("results_cpm_{tag}"));
+    let toml = format!(r#"
+output_dir = "{out}"
+[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[config]
+dt = 1.0
+[estimate]
+beta  = {{ bounds = [0.01, 5.0], start = 0.3, prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }} }}
+[fixed]
+gamma = 0.1
+N0 = 1000
+[stages.posterior]
+algorithm = "pmmh"
+backend = "chain_binomial"
+chains = 1
+particles = 60
+iterations = 12
+burn_in = 2
+init = "single"
+rho = 0.99
+"#,
+        out = out_root.display(), ir = ir.display(), data = data.display());
+    let p = dir.join(format!("fit_cpm_{tag}.toml"));
+    std::fs::write(&p, toml).unwrap();
+    (p, out_root)
+}
+
 /// Write an IF2 fit.toml against `data`. Tiny particle / iteration counts so it
 /// finishes fast; the assertion is "loads + finite", not convergence.
 fn write_if2_toml(dir: &Path, ir: &Path, data: &Path) -> (PathBuf, PathBuf) {
@@ -332,4 +375,43 @@ fn dense_fit_pfilter_stage_matches_standalone_pfilter() {
     assert!((fit_ll - standalone_ll).abs() < 1e-3,
         "dense parity: fit PFilter-stage loglik ({fit_ll}) must equal standalone \
          pfilter ({standalone_ll}). diff = {}", (fit_ll - standalone_ll).abs());
+}
+
+/// Correlated PMMH on a series whose interior row is ABSENT.
+///
+/// The pre-drawn noise CPM reuses across MCMC iterations is one block per
+/// observation window, so the block sizes have to follow the grid. An absent
+/// row merges two windows into one of twice the substeps, and `NA` is not a
+/// substitute: an `NA` row keeps its time on the axis and resets the incidence
+/// accumulator there, an absent row does neither
+/// (`long_form_absent_row_is_not_scheduled`, `cli/src/pfilter.rs`). A daily
+/// reporting series with one day of no reporting therefore has to reach the
+/// filter as an irregular grid or not at all.
+///
+/// The dense arm runs alongside it so a failure here is attributable to the
+/// grid rather than to anything else in the correlated path.
+#[test]
+fn fit_correlated_pmmh_runs_on_an_absent_row_series() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("cpm_absent");
+    let ir = write_model(tmp.path());
+
+    let dense = write_dense_data(tmp.path());
+    let (dense_toml, _) = write_correlated_pmmh_toml(tmp.path(), &ir, &dense, "dense");
+    let dense_out = run_fit(&camdl, &dense_toml, "3");
+    assert!(
+        dense_out.status.success(),
+        "correlated PMMH on the dense series must run. stderr:\n{}",
+        String::from_utf8_lossy(&dense_out.stderr)
+    );
+
+    let absent = write_absent_row_data(tmp.path());
+    let (absent_toml, _) = write_correlated_pmmh_toml(tmp.path(), &ir, &absent, "absent");
+    let absent_out = run_fit(&camdl, &absent_toml, "3");
+    assert!(
+        absent_out.status.success(),
+        "correlated PMMH must run on a grid with one merged window \
+         (observations at 1, 3, 4, 5, 6). stderr:\n{}",
+        String::from_utf8_lossy(&absent_out.stderr)
+    );
 }
