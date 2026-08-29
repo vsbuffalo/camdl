@@ -236,17 +236,13 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // to say which. Overridable, unlike the axis checks: comparing a fit on
     // revised counts against the fit on the original ones is a real thing to
     // want, as long as the reader knows the Δ is confounded.
+    // The note naming what the check covered, and the confound when it is
+    // overridden, are emitted by the renderers (`warning_lines`) so they travel
+    // with the artifact; only the refusal is a terminal-side error.
     let data_entries: Vec<(&str, &DataIdentity)> =
         rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
-    if let Some(note) = unchecked_data_note(&data_entries) {
-        eprintln!("note: {note}");
-    }
     if let Err(e) = check_shared_data(&data_entries) {
-        if a.allow_data_mismatch {
-            eprintln!("warning: {e}");
-            eprintln!("warning: --allow-data-mismatch was given — Δelpd below mixes \
-                       the model difference with the data difference.");
-        } else {
+        if !a.allow_data_mismatch {
             eprintln!("error: {e}");
             std::process::exit(2);
         }
@@ -1253,6 +1249,17 @@ fn warning_lines(rows: &[Row], t_mismatch: bool) -> Vec<String> {
         lines.push("⚠ T_score differs across models — Δ columns suppressed \
             (--allow-mismatched-horizon was set).".to_string());
     }
+    // A comparison that reaches a renderer with a failed data check was
+    // rendered under `--allow-data-mismatch`; the confound belongs in the
+    // artifact, not only in the terminal session that asked for it.
+    let data_entries: Vec<(&str, &DataIdentity)> =
+        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
+    if let Err(e) = check_shared_data(&data_entries) {
+        lines.push(format!("⚠ {e}"));
+    }
+    if let Some(note) = unchecked_data_note(&data_entries) {
+        lines.push(format!("ⓘ {note}"));
+    }
     // PIT warnings — flag clear miscalibration.
     for r in rows {
         if let Some(w) = pit_coverage_warning(r) {
@@ -1457,6 +1464,8 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
     let any_evidence = rows.iter().enumerate().any(|(i, r)| {
         i != base_idx && paired_delta(&r.trace, base, Field::LogScore).0.is_finite()
     });
+    let data_entries: Vec<(&str, &DataIdentity)> =
+        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
     let out = json!({
         "baseline": rows[base_idx].name,
         "metrics": metrics,
@@ -1466,6 +1475,11 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         "evidence_scale_note": any_evidence.then_some(JEFFREYS_SCALE_NOTE),
         // The `se_delta_elpd` column's own caveat at a short scoring window.
         "se_caveat": se_caveat(base.n_scored()),
+        // The bound-data check (gh#713), as the renderers state it: a document
+        // present here at all was rendered under --allow-data-mismatch, and the
+        // note says which rows the check could not cover.
+        "data_mismatch": check_shared_data(&data_entries).err(),
+        "data_unchecked": unchecked_data_note(&data_entries),
         // #295: the plug-in / in-sample caveat, `null` only when every compared
         // trace is honest on both axes.
         "optimism_caveat": optimism_caveat(rows),
@@ -1814,6 +1828,42 @@ mod tests {
         let json = render_json(&long, 0, &metrics);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["se_caveat"].is_null(), "{json}");
+    }
+
+    /// A comparison rendered in spite of a data mismatch (the reader passed
+    /// `--allow-data-mismatch`) must carry the confound in the artifact. The
+    /// terminal session that granted the override is not where the table is
+    /// read a week later.
+    #[test]
+    fn an_overridden_data_mismatch_is_stated_in_every_format() {
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        rows[0].data = digests(&[("cases", "aaaaaaaa11")]);
+        rows[1].data = digests(&[("cases", "bbbbbbbb22")]);
+        let metrics = vec!["elpd".to_string()];
+
+        let table = render_table(&rows, 0, &metrics, false);
+        assert!(table.contains("different observed data") && table.contains("cases"),
+            "the text table states the confound:\n{table}");
+        let md = render_md(&rows, 0, &metrics, false);
+        assert!(md.contains("different observed data"), "and the markdown:\n{md}");
+
+        let json = render_json(&rows, 0, &metrics);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["data_mismatch"].as_str().is_some_and(|s| s.contains("cases")),
+            "and the JSON, as a field:\n{json}");
+        assert!(v["data_unchecked"].is_null(),
+            "both rows carried digests, so nothing was skipped:\n{json}");
+
+        // Matching data: no confound line anywhere.
+        rows[1].data = digests(&[("cases", "aaaaaaaa11")]);
+        let table = render_table(&rows, 0, &metrics, false);
+        assert!(!table.contains("different observed data"), "{table}");
+        let json = render_json(&rows, 0, &metrics);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["data_mismatch"].is_null(), "{json}");
     }
 
     fn digests(entries: &[(&str, &str)]) -> DataIdentity {
