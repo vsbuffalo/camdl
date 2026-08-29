@@ -176,13 +176,14 @@ failure mode has no coverage, which is how this defect survived gh#347.
 
 ## Decisions for the maintainer
 
-1. **What the four blocked tests should assert.** The reproduction branch
-   carries tests demanding the scale hold at sigma 2 to 5. No bound can satisfy
-   them, because the target acceptance is itself unreachable there.
-   Recommendation: rewrite them to assert the floor holds and the warning fires,
-   and drop the Haario-ratchet test, which asserts both `1/sqrt(n)` decay and
-   less than a 2x fall over a 32-fold range of n — no implementation satisfies
-   both.
+1. **What the four blocked tests should assert.** _Settled._ They are kept as
+   the acceptance criteria for fix 2 rather than rewritten: renamed to state the
+   property they demand, marked `#[ignore]` with the reason, and joined by new
+   tests for what the bound does deliver (the scale rests on the floor instead
+   of running to zero; the run reports how many steps it spent there). The
+   Haario-ratchet unit test is dropped as recommended — it asserts both
+   `1/sqrt(n)` decay and less than a 2x fall over a 32-fold range of n, and no
+   implementation satisfies both.
 2. **Whether fix 2 ships with fix 1 or separately.** Recommendation: separately.
    Fix 1 is a bound with no behavioural subtlety; fix 2 changes the target
    acceptance and therefore every pseudo-marginal fit's trajectory.

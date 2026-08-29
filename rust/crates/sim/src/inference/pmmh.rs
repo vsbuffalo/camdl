@@ -85,6 +85,14 @@ pub struct PMMHResult {
     pub map_log_posterior: f64,
     /// Resume state for chain continuation. Populated at end of every run.
     pub resume_state: PMMHResumeState,
+    /// Steps on which the Robbins–Monro scale sat at `LOG_SCALE_MIN`.
+    ///
+    /// Non-zero means the adaptation was chasing an acceptance rate no scale
+    /// attains, so the proposal was as narrow as the sampler permits and those
+    /// draws do not cover the posterior. `run_pmmh` warns on it; carried here
+    /// so a caller can persist or gate on the condition rather than having to
+    /// scrape stderr.
+    pub steps_at_scale_floor: usize,
 }
 
 /// Serializable chain state for `--resume`. Saved to `chain_N/resume_state.bin`
@@ -189,8 +197,8 @@ pub struct PMMHResumeState {
 // εI term (`update_cholesky`) floors the shape term's SD at √ε = 1e-3, but λ
 // multiplies that term, so an unbounded λ voided the only floor the algorithm
 // had.
-const LOG_SCALE_MIN: f64 = -10.0;
-const LOG_SCALE_MAX: f64 = 5.0;
+pub const LOG_SCALE_MIN: f64 = -10.0;
+pub const LOG_SCALE_MAX: f64 = 5.0;
 
 /// Running mean + covariance via Welford's online algorithm, a Cholesky factor
 /// for sampling N(0, Σ) (the Haario *shape* term), and a Robbins–Monro global
@@ -824,6 +832,7 @@ pub fn run_pmmh(
     let honest_map_log_posterior = honest_map_loglik + (map_log_posterior - map_loglik);
 
     Ok(PMMHResult {
+        steps_at_scale_floor,
         steps,
         acceptance_rate,
         n_steps: config.n_steps,
@@ -884,106 +893,72 @@ pub fn mcmc_ess(chain: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
-mod haario_shape_ratchet_tests {
-    use super::AdaptiveProposal;
+mod adaptive_scale_bound_tests {
+    use super::{AdaptiveProposal, LOG_SCALE_MIN};
 
-    /// Deterministic stand-in for a chain that explores, then stops.
-    fn wide_state(k: usize) -> [f64; 2] {
-        let t = k as f64 * 0.37;
-        [t.sin(), (t * 1.7).cos()]
-    }
-
-    /// The proposal SD contributed by the Haario *shape* term in coordinate 0,
-    /// i.e. `L[0][0]` where `L Lᵀ = (2.38²/d)·Cov + εI`.
-    fn shape_sd0(ap: &AdaptiveProposal) -> f64 {
-        assert!(ap.chol_valid, "Cholesky not computed yet");
-        ap.chol[0]
-    }
-
-    /// `update()` accumulates `m2` over the whole visited history and divides by
-    /// `n − 1`. When the chain stops moving, `m2` stops growing while `n` keeps
-    /// growing, so the estimated covariance decays as 1/n and the shape term's
-    /// SD as 1/√n — without bound, down to the `ε = 1e-6` floor
-    /// (`update_cholesky`), i.e. an SD floor of 1e-3.
+    /// The Robbins–Monro scalar λ multiplies the Haario shape term (`run_pmmh`,
+    /// the `*dz *= lambda` loop). Haario et al.'s `εI` floors the *shape*
+    /// term's SD at 1e-3, but λ multiplies that term, so an unbounded λ voided
+    /// the only floor the composite proposal had — and a pseudo-marginal chain
+    /// drives λ down without bound, because the target acceptance it is chasing
+    /// is unattainable and the recursion therefore has no root.
     ///
-    /// This is the ratchet: the shape term shrinks purely because time passes,
-    /// with no reference to the acceptance rate, so a chain whose steps have
-    /// become small relative to its own history can never grow the shape term
-    /// back.
+    /// The projection onto `[LOG_SCALE_MIN, LOG_SCALE_MAX]` restores that
+    /// floor. Before it, this chain reached λ = 5.888e-17.
     #[test]
-    fn shape_term_decays_as_one_over_sqrt_n_when_the_chain_stops_moving() {
-        let mut ap = AdaptiveProposal::new(2);
-
-        // Phase 1: the chain explores.
-        for k in 0..300 {
-            ap.update(&wide_state(k));
-        }
-        let sd_at_300 = shape_sd0(&ap);
-
-        // Phase 2: the chain is frozen. Nothing else changes — no proposals,
-        // no accept/reject, no scale adaptation.
-        let frozen = wide_state(299);
-        let mut samples = vec![(300usize, sd_at_300)];
-        for n in 301..=9600 {
-            ap.update(&frozen);
-            if n % 1200 == 0 {
-                samples.push((n, shape_sd0(&ap)));
-            }
-        }
-
-        for (n, sd) in &samples {
-            println!("n = {n:>5}   shape SD = {sd:.6}   sd·√n = {:.4}", sd * (*n as f64).sqrt());
-        }
-
-        let (n_last, sd_last) = *samples.last().unwrap();
-        assert!(
-            sd_last < sd_at_300,
-            "shape term must not grow while frozen (it did: {sd_at_300} -> {sd_last})"
-        );
-
-        // The decay follows 1/√n: sd·√n is asymptotically constant.
-        let (n_mid, sd_mid) = samples[samples.len() / 2];
-        let ratio_observed = sd_last / sd_mid;
-        let ratio_one_over_sqrt_n = (n_mid as f64 / n_last as f64).sqrt();
-        println!(
-            "observed {ratio_observed:.4} vs 1/√n law {ratio_one_over_sqrt_n:.4}"
-        );
-        assert!(
-            (ratio_observed / ratio_one_over_sqrt_n - 1.0).abs() < 0.15,
-            "decay should follow 1/√n: observed {ratio_observed:.4}, \
-             1/√n predicts {ratio_one_over_sqrt_n:.4}"
-        );
-
-        // Bug statement: the shape term is a one-way ratchet, so the proposal
-        // shrinks by a large factor with no acceptance-rate signal involved.
-        assert!(
-            sd_last > 0.5 * sd_at_300,
-            "RATCHET: the Haario shape term fell from {sd_at_300:.6} to \
-             {sd_last:.6} ({:.1}x) with the chain frozen and no accept/reject \
-             signal consulted",
-            sd_at_300 / sd_last
-        );
-    }
-
-    /// The Robbins–Monro scalar λ multiplies the shape term (`run_pmmh`, the
-    /// `*dz *= lambda` loop), and has no lower bound — contrast
-    /// `pgas.rs`'s `log_proposal_sd.clamp(-20.0, 5.0)`. Haario et al.'s `εI`
-    /// floors the *shape* term at SD 1e-3, but multiplying by an unbounded λ
-    /// voids that guarantee: the composite proposal SD has no floor at all.
-    #[test]
-    fn robbins_monro_scale_has_no_lower_bound() {
+    fn robbins_monro_scale_stops_at_its_lower_bound() {
         let mut ap = AdaptiveProposal::new(6);
         // A chain whose attainable acceptance sits below the target: 15% here,
-        // versus target 0.234 + 0.206/6 = 0.2683.
+        // versus target 0.234 + 0.206/6 = 0.2683. With no bound, log λ drifts
+        // as −(a* − a)·T^0.4/0.4 and never settles.
         for step in 0..200_000 {
             ap.adapt_scale(step % 20 < 3, step); // exactly 15%
         }
         println!("lambda after 200k steps at 15% acceptance = {:.3e}", ap.scale());
         assert!(
-            ap.scale() > 1e-6,
-            "NO FLOOR: lambda reached {:.3e}; the εI regularisation floors the \
-             shape term at SD 1e-3 but lambda multiplies it without bound",
+            (ap.scale() - LOG_SCALE_MIN.exp()).abs() < 1e-12,
+            "lambda must come to rest exactly on the bound, got {:.3e} against \
+             a bound of {:.3e}",
+            ap.scale(),
+            LOG_SCALE_MIN.exp(),
+        );
+        assert!(
+            ap.at_scale_floor(),
+            "a chain pinned at the bound must report itself at the floor, so \
+             the run can be flagged as one that did not explore",
+        );
+    }
+
+    /// The bound must not bind on a chain that can reach its target. An exact
+    /// likelihood at the optimal acceptance leaves λ near 1, six orders of
+    /// magnitude clear of the floor — the deterministic `mh` sampler's regime,
+    /// which this change must not perturb.
+    #[test]
+    fn a_chain_meeting_its_target_never_reaches_the_bound() {
+        let mut ap = AdaptiveProposal::new(6);
+        let target = ap.target_accept();
+        // Accept at exactly the target rate, spread evenly (Bresenham). Evenly
+        // matters: γ_t decreases within any repeating block, so a pattern that
+        // clusters acceptances early in each block weights them by a larger γ
+        // and drifts λ upward even at the right average rate.
+        let accepts_at = |step: usize| {
+            ((step + 1) as f64 * target).floor() > (step as f64 * target).floor()
+        };
+        for step in 0..200_000 {
+            ap.adapt_scale(accepts_at(step), step);
+        }
+        println!(
+            "lambda after 200k steps at 27% acceptance (target {target:.4}) = {:.3e}",
             ap.scale()
+        );
+        assert!(
+            !ap.at_scale_floor(),
+            "a chain accepting at its target must not be reported at the floor",
+        );
+        assert!(
+            ap.scale() > 0.1 && ap.scale() < 10.0,
+            "lambda should stay near 1 for a chain at its target, got {:.3e}",
+            ap.scale(),
         );
     }
 }
