@@ -13,10 +13,11 @@
 //!   - T_score fairness preflight (override: --allow-mismatched-horizon)
 //!   - observation-axis and stream-set preflights (gh#570; not overridable —
 //!     a difference across unlike observations is meaningless however shown)
+//!   - bound-data preflight (gh#713; override: --allow-data-mismatch)
 //!   - formats: table (default), md, json
 //!   - compare.toml for reproducible multi-model specs
-//! Out of scope (Part II): betting mode, CAS ref resolution, data_hash /
-//!   obs-model / backend preflights, stacking, plotting.
+//! Out of scope (Part II): betting mode, CAS ref resolution, obs-model /
+//!   backend preflights, stacking, plotting.
 
 use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
@@ -80,6 +81,28 @@ struct Row {
     name: String,
     path: String,
     trace: PrequentialTrace,
+    data: DataIdentity,
+}
+
+/// What a compared row can say about the observations it was scored against
+/// (gh#713).
+///
+/// Two fits bound to different data produce a Δelpd that mixes a model
+/// difference with a data difference, and neither the table nor the trace says
+/// so — the trace records scores and times, never which bytes it scored. The
+/// fit's own provenance sidecar (`fit.meta.json`, [`crate::run_meta::FitSidecar`])
+/// does: `data_hashes` is stream name → SHA-256 of that stream's file, recorded
+/// when the fit ran. Read from there rather than re-hashing, so the check
+/// answers "were these fits bound to the same bytes?" using the same record the
+/// fit's own identity was built from.
+enum DataIdentity {
+    /// Stream name → SHA-256 hex of the file's bytes, from the fit's sidecar.
+    Digests(std::collections::BTreeMap<String, String>),
+    /// Nothing to check, and why — an explicit `prequential.json` (a trace
+    /// records no data identity), or a fit whose sidecar is absent. The reason
+    /// is printed, because a check that silently covers half the cohort is
+    /// worse than one the reader knows the scope of.
+    Unknown(String),
 }
 
 pub fn cmd_compare(a: &crate::args::CompareArgs) {
@@ -150,11 +173,11 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // Load traces, each filtered by its own fit's selection (if any).
     let rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
-        let trace = load_trace(&m.path, derive, selection).unwrap_or_else(|e| {
+        let (trace, data) = load_trace(&m.path, derive, selection).unwrap_or_else(|e| {
             eprintln!("error loading trace for '{}' at '{}': {}", m.name, m.path, e);
             std::process::exit(1);
         });
-        Row { name: m.name, path: m.path, trace }
+        Row { name: m.name, path: m.path, trace, data }
     }).collect();
 
     // Fairness: T_score (n_scored) must agree across rows unless overridden.
@@ -178,6 +201,28 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // that is meaningless however it is displayed.
     if !t_mismatch {
         if let Err(e) = check_shared_observation_axis(&rows) {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    }
+
+    // Fairness, part three (gh#713): the compared fits must have been bound to
+    // the same observations. Two fits on different data produce a Δelpd that is
+    // part model difference and part data difference, with nothing in the table
+    // to say which. Overridable, unlike the axis checks: comparing a fit on
+    // revised counts against the fit on the original ones is a real thing to
+    // want, as long as the reader knows the Δ is confounded.
+    let data_entries: Vec<(&str, &DataIdentity)> =
+        rows.iter().map(|r| (r.name.as_str(), &r.data)).collect();
+    if let Some(note) = unchecked_data_note(&data_entries) {
+        eprintln!("note: {note}");
+    }
+    if let Err(e) = check_shared_data(&data_entries) {
+        if a.allow_data_mismatch {
+            eprintln!("warning: {e}");
+            eprintln!("warning: --allow-data-mismatch was given — Δelpd below mixes \
+                       the model difference with the data difference.");
+        } else {
             eprintln!("error: {e}");
             std::process::exit(2);
         }
@@ -327,6 +372,83 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse a comparison whose fits were bound to different observed data
+/// (gh#713).
+///
+/// `compare @a @b` re-filters each fit at its own θ̂ and differences the
+/// scores. If the two fits read different data — a corrected case series, a
+/// stream added between runs, a file edited in place — the difference carries
+/// both effects and the table attributes all of it to the models. Nothing else
+/// in the pipeline catches this: each fit is internally consistent, and the
+/// derived traces agree on T_score, times and stream names, because those come
+/// from the same model.
+///
+/// Rows with no data identity ([`DataIdentity::Unknown`]) are not evidence
+/// either way and are skipped; [`unchecked_data_note`] names them.
+fn check_shared_data(entries: &[(&str, &DataIdentity)]) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    let known: Vec<(&str, &std::collections::BTreeMap<String, String>)> = entries
+        .iter()
+        .filter_map(|(name, d)| match d {
+            DataIdentity::Digests(m) => Some((*name, m)),
+            DataIdentity::Unknown(_) => None,
+        })
+        .collect();
+    // Equality is transitive, so every row is checked against the first that
+    // carries digests.
+    let Some(&(ref_name, ref_map)) = known.first() else { return Ok(()) };
+    for &(name, map) in known.iter().skip(1) {
+        let mut streams: BTreeSet<&str> = ref_map.keys().map(|s| s.as_str()).collect();
+        streams.extend(map.keys().map(|s| s.as_str()));
+        let differing: Vec<String> = streams.iter().filter_map(|s| {
+            match (ref_map.get(*s), map.get(*s)) {
+                (Some(a), Some(b)) if a == b => None,
+                (Some(a), Some(b)) => Some(format!(
+                    "'{s}' ({} in '{ref_name}', {} in '{name}')",
+                    short_digest(a), short_digest(b))),
+                (Some(_), None) => Some(format!("'{s}' (bound by '{ref_name}' only)")),
+                (None, Some(_)) => Some(format!("'{s}' (bound by '{name}' only)")),
+                (None, None) => None,
+            }
+        }).collect();
+        if !differing.is_empty() {
+            return Err(format!(
+                "'{ref_name}' and '{name}' were fit to different observed data: \
+                 {}.\n       \
+                 Δelpd across them is part model difference and part data \
+                 difference, and the table cannot separate the two.\n       \
+                 Re-fit both on the same observations, or pass \
+                 --allow-data-mismatch to render the comparison as confounded.",
+                differing.join("; "),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A content hash abbreviated for a message: enough to tell two apart, short
+/// enough to read. Character-wise, so a short test or hand-written digest does
+/// not panic on a byte slice.
+fn short_digest(hex: &str) -> String {
+    hex.chars().take(8).collect()
+}
+
+/// The note naming the rows excluded from the data check and why, or `None`
+/// when every row carried digests. Separate from [`check_shared_data`] so the
+/// scope of the check is stated even when the check itself refuses.
+fn unchecked_data_note(entries: &[(&str, &DataIdentity)]) -> Option<String> {
+    let skipped: Vec<String> = entries.iter().filter_map(|(name, d)| match d {
+        DataIdentity::Digests(_) => None,
+        DataIdentity::Unknown(why) => Some(format!("'{name}' ({why})")),
+    }).collect();
+    (!skipped.is_empty()).then(|| format!(
+        "not checked for a shared observation set: {}. \
+         A difference against such a row may be a data difference, not a model \
+         difference.",
+        skipped.join("; "),
+    ))
+}
+
 /// The set of stream names scored at one step. Empty for a v1 trace, which has
 /// no per-stream breakdown at all.
 fn step_streams(s: &sim::inference::prequential::PrequentialStep)
@@ -463,13 +585,19 @@ fn load_trace(
     path: &str,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
-) -> Result<PrequentialTrace, String> {
+) -> Result<(PrequentialTrace, DataIdentity), String> {
     if let Some(trace) = try_load_explicit_prequential(path)? {
-        return Ok(trace);
+        // A trace records scores and times, never which observations produced
+        // them — so this row cannot take part in the data-identity check.
+        return Ok((trace, DataIdentity::Unknown(
+            "read as an explicit prequential.json, which records no bound data".into())));
     }
     // Not an explicit prequential → treat as a fit handle and derive.
     match crate::fit::handle::resolve_fit(path) {
-        Ok(resolved) => derive_prequential(&resolved, derive, selection),
+        Ok(resolved) => {
+            let data = fit_data_identity(&resolved);
+            derive_prequential(&resolved, derive, selection).map(|t| (t, data))
+        }
         Err(resolve_err) => Err(format!(
             "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
              - as a fit handle: {resolve_err}\n  \
@@ -477,6 +605,24 @@ fn load_trace(
              '{path}/prequential.json') — run `camdl pfilter --save-prequential` \
              or `camdl fit run` with a pfilter stage to generate one."
         )),
+    }
+}
+
+/// The per-stream data digests a resolved fit recorded when it ran, read from
+/// its provenance sidecar (`fit.meta.json`). Not re-hashed here: the files may
+/// have moved or changed since, and the question is what the FIT was bound to.
+///
+/// The sidecar is derived provenance rather than a source of truth, which is
+/// the right strength for a preflight — it is a faithful projection of inputs
+/// already hashed into the fit's identity. A fit without one (an older run, a
+/// hand-assembled directory) is reported as unchecked rather than refused.
+fn fit_data_identity(resolved: &ResolvedFit) -> DataIdentity {
+    match crate::run_meta::read_fit_sidecar(&resolved.segment) {
+        Some(s) if !s.data_hashes.is_empty() => DataIdentity::Digests(s.data_hashes),
+        Some(_) => DataIdentity::Unknown(
+            "its fit.meta.json records no data hashes".into()),
+        None => DataIdentity::Unknown(format!(
+            "no fit.meta.json under {}", resolved.segment.display())),
     }
 }
 
@@ -1487,6 +1633,54 @@ mod tests {
             "the message names the real problem: {err}");
     }
 
+    /// gh#713: `compare @a @b` says nothing about whether the two fits read the
+    /// same observations. They are separately consistent, and their derived
+    /// traces agree on T_score, times and stream names — those come from the
+    /// model, not the data — so a comparison against a revised case series
+    /// renders as a clean model verdict. The fits' recorded data hashes are the
+    /// only place the difference shows.
+    #[test]
+    fn refuses_fits_bound_to_different_observed_data() {
+        let same_a = digests(&[("north", "aaa"), ("south", "bbb")]);
+        let same_b = digests(&[("north", "aaa"), ("south", "bbb")]);
+        check_shared_data(&[("a", &same_a), ("b", &same_b)])
+            .expect("fits bound to the same bytes compare");
+
+        // One stream's file differs → refused, naming the stream and both fits.
+        let revised = digests(&[("north", "aaa"), ("south", "ccc")]);
+        let err = check_shared_data(&[("a", &same_a), ("b", &revised)])
+            .expect_err("a differing data file must be refused");
+        assert!(err.contains("south"), "names the stream that differs: {err}");
+        assert!(!err.contains("north"), "and not the one that agrees: {err}");
+        assert!(err.contains("'a'") && err.contains("'b'"), "names both fits: {err}");
+        assert!(err.contains("--allow-data-mismatch"),
+            "and how to proceed deliberately: {err}");
+
+        // A stream one fit bound and the other did not is the same failure.
+        let extra = digests(&[("north", "aaa"), ("south", "bbb"), ("east", "ddd")]);
+        let err = check_shared_data(&[("a", &same_a), ("b", &extra)])
+            .expect_err("an extra bound stream must be refused");
+        assert!(err.contains("east"), "{err}");
+
+        // Rows with no data identity are not evidence either way: they neither
+        // refuse the comparison nor pass silently.
+        let unknown = DataIdentity::Unknown("read as an explicit prequential.json".into());
+        check_shared_data(&[("a", &same_a), ("t", &unknown)])
+            .expect("a row with no data identity cannot contradict anything");
+        let note = unchecked_data_note(&[("a", &same_a), ("t", &unknown)])
+            .expect("but it is named");
+        assert!(note.contains("'t'") && note.contains("prequential.json"), "{note}");
+        assert!(!note.contains("'a'"), "the checked row is not in the note: {note}");
+        assert!(unchecked_data_note(&[("a", &same_a), ("b", &same_b)]).is_none(),
+            "no note when every row was checked");
+    }
+
+    fn digests(entries: &[(&str, &str)]) -> DataIdentity {
+        DataIdentity::Digests(entries.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect())
+    }
+
     /// A trace with joint scores at the given times and no per-stream breakdown.
     fn row_at(name: &str, times: &[f64], log_scores: &[f64]) -> Row {
         use sim::inference::prequential::{Conditioning, PrequentialStep, Provenance};
@@ -1504,6 +1698,7 @@ mod tests {
         Row {
             name: name.to_string(),
             path: name.to_string(),
+            data: DataIdentity::Unknown("a test fixture, built from scores alone".into()),
             trace: PrequentialTrace {
                 schema_version: 1,
                 t0: 1,
