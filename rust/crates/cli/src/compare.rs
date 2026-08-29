@@ -24,7 +24,7 @@ use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
-use sim::inference::prequential::PrequentialTrace;
+use sim::inference::prequential::{Conditioning, PrequentialTrace};
 use std::path::{Path, PathBuf};
 
 /// Default particle count for auto-deriving a prequential from a fit handle.
@@ -78,6 +78,9 @@ const JEFFREYS_SCALE_NOTE: &str =
 struct DeriveSettings {
     particles: usize,
     seed: u64,
+    /// `--in-sample` (gh#585): score the full series at θ̂ even for a fit
+    /// that declares a holdout, stamped `in_sample` with its caveat.
+    force_in_sample: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,7 +137,11 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     let baseline: Option<String> = a.baseline.clone();
     let allow_mismatched_horizon = a.allow_mismatched_horizon;
     let positional: Vec<String> = a.paths.clone();
-    let derive = DeriveSettings { particles: a.particles, seed: a.seed };
+    let derive = DeriveSettings {
+        particles: a.particles,
+        seed: a.seed,
+        force_in_sample: a.in_sample,
+    };
     let metrics_cli: Option<Vec<String>> = a.metrics.as_ref().map(|s|
         s.split(',').map(|t| t.trim().to_string()).collect());
     let format = match a.format.as_str() {
@@ -203,6 +210,49 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         });
         Row { name: m.name, path: m.path, trace, data }
     }).collect();
+
+    // Fairness, part zero (gh#585, Stage 3.4): rows with different
+    // conditioning modes are never differenced. An in-sample score (θ saw
+    // the scored window) and a held-out score (θ sealed before it) answer
+    // different questions; their Δ is meaningless however displayed, so
+    // there is no override — the fix is to make the modes agree.
+    {
+        use sim::inference::prequential::Conditioning;
+        use std::mem::discriminant;
+        let mixed = rows.windows(2).any(|w|
+            discriminant(&w[0].trace.conditioning)
+                != discriminant(&w[1].trace.conditioning));
+        if mixed {
+            eprintln!("error: the compared traces mix conditioning modes:");
+            for r in &rows {
+                let kind = match &r.trace.conditioning {
+                    Conditioning::InSample =>
+                        "in_sample (θ saw the scored window)".to_string(),
+                    Conditioning::HoldOutTail { train_end, .. } =>
+                        format!("hold_out_tail (θ sealed at t = {train_end})"),
+                };
+                eprintln!("       {}: {}", r.name, kind);
+            }
+            eprintln!("       Declare the same holdout in every compared fit, or pass \
+                       --in-sample to score all of them in-sample.");
+            std::process::exit(2);
+        }
+        // All held-out: the sealed boundaries must also agree, or the rows
+        // score different windows (the axis check would refuse anyway, but
+        // this names the actual cause).
+        let ends: Vec<f64> = rows.iter().filter_map(|r| match &r.trace.conditioning {
+            Conditioning::HoldOutTail { train_end, .. } => Some(*train_end),
+            _ => None,
+        }).collect();
+        if ends.windows(2).any(|w| w[0] != w[1]) {
+            eprintln!("error: the compared fits seal training at different \
+                       boundaries: {ends:?}");
+            eprintln!("       Held-out scores over different windows are not \
+                       commensurable; declare the same holdout_after in every \
+                       compared fit.");
+            std::process::exit(2);
+        }
+    }
 
     // Fairness: T_score (n_scored) must agree across rows unless overridden.
     let t_scores: Vec<usize> = rows.iter().map(|r| r.trace.n_scored()).collect();
@@ -665,6 +715,58 @@ fn check_derivable_backend(
     }
 }
 
+/// A resolved fit's sealed holdout, checked for the `HoldOutTail` stamp
+/// (gh#585; §3.7.3 of the 2026-08-29 honest-predictive-evaluation
+/// proposal). Detection enforces (a) and (b) of the non-leakage gate:
+///
+/// - (a) the fit's sealed config — hashed into its identity — declares a
+///   holdout (`holdout_after` or `[data.holdout]`);
+/// - (b) `fit.meta.json` carries the *applied* training window, the
+///   positive proof written by the engine that actually truncated
+///   training. A version predicate cannot serve here (the recorded
+///   `camdl_version`'s git-hash suffix is unordered); the record can —
+///   a pre-gh#585 fit parsed the declaration without applying it, so it
+///   can never carry the record, and is refused with the re-run fix.
+///
+/// (c) — every scored time strictly after `train_end` — is checked on the
+/// derived trace before stamping ([`derive_prequential`]).
+struct SealedHoldout {
+    train_end: f64,
+    /// stream → holdout file path for explicit `[data.holdout]` fits; the
+    /// scored series is training ∪ holdout, merged per stream. Empty for
+    /// temporal `holdout_after` fits, whose training files already carry
+    /// the full series (truncation happened at fit load, not in the file).
+    holdout_files: Vec<(String, String)>,
+}
+
+fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>, String> {
+    let data = resolved.config.data.as_ref();
+    let declares = data
+        .map(|d| d.holdout_after.is_some() || d.holdout.is_some())
+        .unwrap_or(false);
+    if !declares {
+        return Ok(None);
+    }
+    let window = crate::run_meta::read_fit_sidecar(&resolved.segment)
+        .and_then(|s| s.training_window);
+    let Some(window) = window else {
+        return Err(format!(
+            "the fit at {} declares a holdout but its fit.meta.json carries \
+             no applied training window — it was produced before the holdout \
+             declaration was actually applied (gh#585), so its θ̂ saw the \
+             full series and a \"held-out\" score would be a leak presented \
+             as honest.\n  Re-run the fit (its identity re-keys; the new run \
+             trains on the truncated series and records the window), or pass \
+             --in-sample to score it as the in-sample trace it is.",
+            resolved.segment.display()));
+    };
+    let holdout_files = data
+        .and_then(|d| d.holdout.as_ref())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    Ok(Some(SealedHoldout { train_end: window.train_end, holdout_files }))
+}
+
 /// The per-stream data digests a resolved fit recorded when it ran, read from
 /// its provenance sidecar (`fit.meta.json`). Not re-hashed here: the files may
 /// have moved or changed since, and the question is what the FIT was bound to.
@@ -763,12 +865,21 @@ fn derive_prequential(
          prequential trace cannot be derived.\n  Provide an explicit \
          prequential.json, or compare fits that bind data.",
         segment.display()))?;
-    let streams = resolve_streams(data, &model_path)?;
+    let mut streams = resolve_streams(data, &model_path)?;
     if streams.is_empty() {
         return Err(format!(
             "fit at {} has a [data] block with no observation streams.",
             segment.display()));
     }
+
+    // gh#585 (Stage 3.4): a fit that declares a holdout is scored held-out
+    // by default — the filter runs over the FULL series at the sealed θ̂
+    // and scores only past the training boundary. `--in-sample` opts out.
+    let holdout = if derive.force_in_sample {
+        None
+    } else {
+        detect_sealed_holdout(resolved)?
+    };
 
     // Temp files: unique per process + fit segment so concurrent compares don't
     // collide. STEM has no `.` so pfilter's `{stem}.json` / `{stem}.tsv` are
@@ -779,6 +890,26 @@ fn derive_prequential(
         .unwrap_or_else(|| "fit".into());
     let base = std::env::temp_dir()
         .join(format!("camdl_compare_{}_{}", std::process::id(), seg_slug));
+
+    // Explicit `[data.holdout]` fits: the scored series is training ∪
+    // holdout, merged per stream into a temp file (temporal `holdout_after`
+    // fits need no merge — their training files already carry the full
+    // series; the fit truncated at load, not in the file).
+    let mut merged_paths: Vec<PathBuf> = Vec::new();
+    if let Some(h) = &holdout {
+        for (stream, holdout_path) in &h.holdout_files {
+            let Some(train_path) = streams.get(stream).cloned() else {
+                return Err(format!(
+                    "[data.holdout] names stream '{stream}', which is not \
+                     among the fit's bound observation streams."));
+            };
+            let merged = base.with_extension(format!("{stream}.merged.tsv"));
+            merge_holdout_file(&train_path, holdout_path, &merged)?;
+            streams.insert(stream.clone(), merged.to_string_lossy().into_owned());
+            merged_paths.push(merged);
+        }
+    }
+
     let theta_path = base.with_extension("theta.toml");
     let preq_stem = base.to_string_lossy().into_owned() + "_preq";
     let preq_json = format!("{preq_stem}.json");
@@ -787,6 +918,9 @@ fn derive_prequential(
         let _ = std::fs::remove_file(&theta_path);
         let _ = std::fs::remove_file(&preq_json);
         let _ = std::fs::remove_file(&preq_tsv);
+        for p in &merged_paths {
+            let _ = std::fs::remove_file(p);
+        }
     };
 
     if let Err(e) = std::fs::write(&theta_path, &params_toml) {
@@ -831,6 +965,10 @@ fn derive_prequential(
             }
         }
     }
+    // gh#585 (Stage 3.4): score only past the sealed training boundary.
+    if let Some(h) = &holdout {
+        cmd.arg("--score-from").arg(h.train_end.to_string());
+    }
     let output = match cmd.output() {
         Ok(o) => o,
         Err(e) => { cleanup(); return Err(format!("spawning `camdl pfilter`: {e}")); }
@@ -856,7 +994,66 @@ fn derive_prequential(
     let trace = serde_json::from_str::<PrequentialTrace>(&text)
         .map_err(|e| format!("parsing derived prequential {preq_json}: {e}"));
     cleanup();
-    trace
+    let mut trace = trace?;
+
+    // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted
+    // only after checking, on the derived trace itself, that every scored
+    // time lies strictly after the sealed training window. (a) and (b)
+    // were established by `detect_sealed_holdout`. The guarantee is
+    // precisely "no data leakage into θ": it cannot certify that the
+    // modeler chose the model family without seeing the full curve.
+    if let Some(h) = holdout {
+        if trace.steps.is_empty() {
+            return Err(format!(
+                "fit at {}: the held-out window (t > {}) contains no scored \
+                 observations — nothing lies past the training boundary in \
+                 the bound data.",
+                segment.display(), h.train_end));
+        }
+        if let Some(bad) = trace.steps.iter().find(|s| s.t <= h.train_end) {
+            return Err(format!(
+                "fit at {}: refusing the hold_out_tail stamp — scored \
+                 observation at t = {} does not lie strictly after the \
+                 sealed training window (train_end = {}).",
+                segment.display(), bad.t, h.train_end));
+        }
+        trace.conditioning = Conditioning::HoldOutTail {
+            train_end: h.train_end,
+            theta_source: segment.file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| segment.display().to_string()),
+        };
+    }
+    Ok(trace)
+}
+
+/// Merge a training file and its held-out tail into one scored series
+/// (gh#585): compare's held-out derivation filters over training ∪
+/// holdout. The two files must share a header line (the holdout file is
+/// the same schema by declaration); holdout rows are strictly after the
+/// training tail (validated when the fit ran), so appending preserves
+/// time order.
+fn merge_holdout_file(train: &str, holdout: &str, out: &Path) -> Result<(), String> {
+    let t = std::fs::read_to_string(train)
+        .map_err(|e| format!("reading training data {train}: {e}"))?;
+    let h = std::fs::read_to_string(holdout)
+        .map_err(|e| format!("reading holdout data {holdout}: {e}"))?;
+    let t_header = t.lines().next().unwrap_or("");
+    let h_header = h.lines().next().unwrap_or("");
+    if t_header != h_header {
+        return Err(format!(
+            "[data.holdout] file {holdout} has a different header than its \
+             training file {train}:\n  training: {t_header}\n  holdout:  {h_header}"));
+    }
+    let mut merged = String::with_capacity(t.len() + h.len());
+    merged.push_str(t.trim_end());
+    merged.push('\n');
+    for line in h.lines().skip(1) {
+        merged.push_str(line);
+        merged.push('\n');
+    }
+    std::fs::write(out, merged)
+        .map_err(|e| format!("writing merged series {}: {e}", out.display()))
 }
 
 /// Chain exclusion for the compared cohort, resolved per fit by name. A fit
