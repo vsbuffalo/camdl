@@ -1,7 +1,8 @@
 # PMMH proposal adaptation: a floor, a noise-aware target, and one shared Robbins-Monro
 
-Status: proposed Related: gh#347 (the deterministic-MH deadlock this shares
-machinery with)
+Status: fix 1 implemented (a9a6355d); fixes 3 and 4 pending; fix 2 deferred to
+gh#767 Related: gh#347 (the deterministic-MH deadlock this shares machinery
+with), gh#764 (persisting the measured spread)
 
 ## The problem
 
@@ -13,6 +14,22 @@ Observed on a national Ebola fit: six chains, 19,200 particles, 5,000
 iterations. Two chains reached sustained 0.0% acceptance with no accepted move
 at all; one saw its per-parameter step fall by a factor of 1,157 over the run
 and was still falling at the last block.
+
+## Terms
+
+- **`d`** — the number of estimated parameters, i.e. the dimension of the vector
+  being sampled.
+- **`sigma`** — the standard deviation of a single estimated log-likelihood
+  `log L-hat` at a fixed parameter vector. This is what the PF-variance
+  preflight measures and what "aim for a log-likelihood standard deviation near
+  1" refers to.
+- **`s`** — the standard deviation of the _difference_ between two evaluations,
+  `log L-hat(theta') - log L-hat(theta)`. This is the quantity that enters the
+  Metropolis ratio, so it is the one that governs acceptance. For independent
+  evaluations `s = sigma * sqrt(2)`; under correlated pseudo-marginal (`rho`
+  set) the two evaluations share most of their randomness and `s` is smaller.
+- **`lambda`** — the Robbins-Monro global proposal scale, `exp(log_scale)`.
+- **`a*`** — the target acceptance rate the adaptation drives toward.
 
 ## Mechanism
 
@@ -33,19 +50,40 @@ where the particle filter happened to return a high `log L-hat`, and every
 subsequent proposal is compared against that inflated value and rejected. In the
 small-step limit the acceptance rate tends to
 
-    a(sigma) = 2 * Phi(-sigma / sqrt(2))
+    a_ceiling = 2 * Phi(-sigma / sqrt(2))  =  2 * Phi(-s / 2)
 
-with `sigma` the standard deviation of the estimated log-likelihood and `Phi`
-the standard normal CDF. Verified by direct Monte Carlo of the noise-only chain
-(sigma=1: 0.4805 measured against 0.4795 predicted; sigma=2: 0.1561 against
-0.1573).
+with `Phi` the standard normal CDF. The two forms are the same number written in
+the two spreads defined above; the `s` form is the one to implement against,
+because it is scheme-agnostic (see fix 3). Verified by direct Monte Carlo of the
+noise-only chain, twice independently:
+
+| sigma | formula | run 1  | run 2  |
+| ----- | ------- | ------ | ------ |
+| 1.0   | 0.4795  | 0.4805 | 0.4807 |
+| 2.0   | 0.1573  | 0.1561 | 0.1555 |
 
 If `a(sigma)` sits below the target, **no step size reaches the target**, the
 Robbins-Monro recursion has no root, and `log lambda` decreases without bound.
 Measured: lambda = 5.9e-17 after 200k steps at 15% acceptance.
 
-The target is `0.234 + 0.206/d`. The crossover is therefore d-dependent — at d =
-17 the target is 0.2461 and the crossover is sigma = 1.640.
+The target is `0.234 + 0.206/d`, the optimal-scaling result for random-walk
+Metropolis with an _exact_ likelihood. The crossover — the `sigma` at which the
+ceiling falls below it — is nearly flat in `d`:
+
+| d  | target `a*` | crossover sigma |
+| -- | ----------- | --------------- |
+| 1  | 44.0%       | 1.09            |
+| 6  | 26.8%       | 1.57            |
+| 17 | 24.6%       | 1.64            |
+| 50 | 23.8%       | 1.67            |
+
+It asymptotes to 1.687, so for any realistic model collapse begins around
+`sigma ~ 1.6`. Sherlock, Thiery, Roberts & Rosenthal (2015, _Ann. Statist._
+43(1):238-275) prove the pseudo-marginal random-walk Metropolis is optimally
+efficient at noise variance 3.283 — `sigma = 1.812`, where the ceiling is 20.0%.
+**The theoretically optimal operating point is past the crossover**, so tuning
+the particle count to the literature optimum guarantees the adaptation has no
+root.
 
 Because `lambda` multiplies the whole factor including `eps*I`, an unbounded
 `lambda` also voids the only floor Haario's algorithm has. The covariance
@@ -64,57 +102,131 @@ acceptance rate that is itself a function of likelihood noise — was never
 exercised. The regime where the recursion loses its root is exactly the regime
 no test covered.
 
-## Fix 1: bound the scale
+## Fix 1: bound the scale — implemented (a9a6355d)
 
-Project `log_scale` onto `[-10, 5]` after every update, and emit an end-of-run
-warning counting steps spent on the floor.
+Project `log_scale` onto `[-10, 5]` after every update, count the steps spent on
+the floor, and emit an end-of-run warning naming the knob that helps.
 
 The bound is not the same number as `pgas`'s `[-20, 5]` because the quantities
 differ: `pgas`'s `log_proposal_sd` is an absolute per-parameter SD, while
 `pmmh`'s `log_scale` is a relative multiplier on a proposal already scaled by
 `2.38^2/d`, so `lambda = 1` is the optimum by construction. At -20 the floor is
 too low to bind before the chain is dead; at -10 gh#347's deadlock test still
-recovers to lambda = 4.5e-5, well inside its bar.
+recovers to `lambda = 4.5e-5`, well inside its bar.
 
 The warning is load-bearing rather than decorative. A floor bounds the damage
 without repairing the chain: a run that sat on it did not explore its posterior,
 and the output must say so rather than presenting a stalled chain as a fit.
+`PMMHResult.steps_at_scale_floor` carries the count so a caller can gate on the
+condition instead of scraping stderr.
 
-This does not rescue a chain in a high-noise region. At sigma = 6 the limiting
-acceptance is 4e-5 at every step size; flooring the scale stops it reaching zero
-and does not make the chain move.
+**What it does not cover.** The warning fires only if the floor is _reached_.
+`log lambda` drifts as `-(a* - a) * T^0.4 / 0.4` over `T` steps, so at the
+literature-optimal `sigma = 1.812` (a gap of 4.6 percentage points):
 
-## Fix 2: a noise-aware target acceptance
+- `T = 5,000`: drift -3.5, `lambda` ends at 0.031 — a proposal 32x narrower than
+  the covariance-optimal scale, expected squared jump distance down about a
+  thousandfold — and the floor is never touched, so nothing warns.
+- `T = 200,000`: drift -15.2, the floor is reached and the warning fires.
 
-The target `0.234 + 0.206/d` is the optimal-scaling result for random-walk
-Metropolis with an exact likelihood. It is the wrong target for a
-pseudo-marginal chain, and demanding it is what removes the recursion's root.
+A normal-length run at the recommended noise level therefore under-mixes
+silently. Fixes 3 and 4 close that gap without needing a new target.
 
-Measured: forcing the target to 0.07 at sigma=2 removes the collapse entirely
-(lambda ends at 1.18, Haario diagonal 0.99, against 1.4e-4 and 0.11 today). But
-at sigma=0 and sigma=1 the same target overshoots to lambda 1.9 and 1.6, so 0.07
-cannot simply become the default.
+## Fix 2: a noise-aware target acceptance — deferred to gh#767
 
-The target must therefore be a function of the estimated likelihood noise:
-deterministic `mh` keeps `0.234 + 0.206/d`; pseudo-marginal PMMH derives its
-target from a measured `sigma`. Sherlock, Thiery, Roberts and Rosenthal (2015),
-_Annals of Statistics_ 43(1):238-275, give the optimal pseudo-marginal
-configuration as sigma = 1.8 with an acceptance rate substantially below the
-exact-likelihood 23.4%.
+The target `0.234 + 0.206/d` is the exact-likelihood optimum and is the wrong
+target for a pseudo-marginal chain; demanding it is what removes the recursion's
+root. Measured on the synthetic harness, forcing the target to 0.07 at
+`sigma = 2` removes the collapse entirely (`lambda` ends at 1.18, Haario
+diagonal 0.99, against 1.4e-4 and 0.11), but the same target overshoots at
+`sigma = 0` and `sigma = 1` to `lambda` 1.9 and 1.6, so 0.07 cannot become the
+default.
 
-camdl already measures `sigma` in the PF-variance preflight
-(`cli/src/fit/pmmh.rs`), so the input exists. Two gaps: it is measured only at
-the base parameter vector, and `sigma` varies strongly over parameter space —
-measured at 1.13 at a posterior median and 6.04 at a chain five posterior
-standard deviations out, a factor of 5.3. A target set once from a base-point
-`sigma` will be wrong for a chain that wanders.
+**Deferred, with the reason.** What target maximises efficiency when `sigma` is
+_given_ by the particle count and only `lambda` can be tuned is not settled by
+the literature we have: Sherlock et al. optimise jointly over the scaling and
+the noise, and we can only tune one. The measurement that would settle it — a
+sweep of `target_accept` against `sigma` on the existing synthetic harness,
+scored on expected squared jump distance — is an afternoon, but it would not
+establish transfer to a real posterior whose `sigma` varies fivefold across the
+space (1.13 at a posterior median, 6.04 five posterior standard deviations out).
 
-## Fix 3: the preflight blesses runs that collapse
+A target rule changes the trajectory of every pseudo-marginal fit. Shipping one
+fitted on a 6-dimensional Gaussian would trade a diagnosable failure for an
+undiagnosable one. gh#767 carries the evidence and the acceptance criteria; the
+four `#[ignore]`d tests in `pmmh_scale_collapse.rs` are its specification.
+
+## Fix 3: a preflight that computes the ceiling instead of guessing a band
 
 `cli/src/fit/pmmh.rs` prints a green `PF variance OK (target: 1-3)` for any
-`sigma` in [0.5, 5.0]. Collapse begins near the d-dependent crossover, which is
-1.64 at d=17. The band should be derived from the crossover rather than fixed,
-and the check should say which side of it the run sits on.
+`sigma` in `[0.5, 5.0]`. Collapse begins around 1.6, so the check says "OK"
+across a range that is mostly past the point where the adaptation loses its
+root. That is worse than silence.
+
+**Measure `s`, not `sigma`.** The preflight currently takes 20 replicates of a
+single `log L-hat` and reports their standard deviation. Two changes:
+
+1. Report the acceptance ceiling `2 * Phi(-s / 2)` against this run's own target
+   `0.234 + 0.206/d`, and say which side of it the run sits on. No tuned band,
+   no magic constants — the computation is the message.
+2. Measure `s` under the scheme the run actually uses. This matters most for
+   correlated pseudo-marginal: the preflight calls `run_quick_pfilter`, the
+   _plain_ bootstrap filter, for all 20 replicates regardless of whether `rho`
+   is set. But CPM exists precisely to shrink the log-ratio spread by reusing
+   randomness between evaluations, so the plain-filter number overstates the
+   noise that governs a CPM run's acceptance — at `sigma = 2` with an induced
+   correlation of 0.9 between successive estimates, the true ceiling is 65%
+   rather than the 15.7% the plain measurement implies. Evaluate with the
+   pre-drawn randoms, then with their Crank-Nicolson update, and take the spread
+   of the _differences_; for plain PMMH the same procedure gives
+   `s = sigma * sqrt(2)` and nothing changes.
+
+**Warn and proceed** when the ceiling is below the target. A user may be running
+a deliberately cheap exploratory fit, and refusing an expensive run at preflight
+is a stronger action than the diagnosis warrants. The message states the
+ceiling, the target, and that `lambda` will fall for the whole run.
+
+**Report the spread's own uncertainty.** Twenty replicates gives the standard
+deviation an error of roughly `sigma / sqrt(2 * 19)`, about 16%. Near a
+crossover of 1.64 that is +/- 0.26 — enough to flip the verdict — so the check
+reports an interval rather than a point, and says so when the interval straddles
+the crossover.
+
+`sigma`, `s`, the particle count and the replicate count are persisted with the
+stage artifact (gh#764); a spread without its particle count is meaningless,
+since `sigma` scales as `1/sqrt(N)`.
+
+## Fix 4: adaptation stops at the end of warm-up
+
+`adapt_scale` runs from step 0 to the last step of the chain. `adapt_start`
+gates only the covariance shape term, not `lambda`. So the draws that are kept
+are produced while the proposal is still shrinking, and the drift is bounded by
+the _run length_ rather than by the warm-up budget.
+
+Freeze `lambda` and the Haario shape term at the end of warm-up. Two things
+follow:
+
+- The drift is capped by the warm-up length. At the same `sigma = 1.812` and
+  `burn_in = 500`, `lambda` bottoms at 0.25 instead of 0.031 — still narrow, but
+  bounded, stable, and diagnosable at a single point.
+- The sampling phase becomes a fixed transition kernel, so the kept draws are
+  exactly invariant for the posterior rather than relying on the
+  diminishing-adaptation and containment conditions (Roberts & Rosenthal 2007)
+  that a continuously-adapting chain needs. This is what Stan and most
+  production samplers do.
+
+**The tradeoff, stated.** The current design is theoretically valid —
+diminishing gain plus fix 1's bound is exactly containment — and gh#347's
+deadlock rescue depends on `lambda` adapting early, which a warm-up window
+preserves. But this changes the trajectory of every PMMH run, including healthy
+ones, so it is a behaviour change rather than a bug fix and lands with that
+stated.
+
+Alongside it: report the end-of-run `lambda` and flag when it has moved far from
+
+1. `lambda = 0.031` means the proposal ended 32x narrower than the estimated
+   covariance, which is the silent case fix 1's floor warning misses. This is a
+   diagnostic, changes no trajectory, and closes the blind spot on its own.
 
 ## The refactor, and where the seam actually is
 
@@ -168,31 +280,45 @@ What the refactor must preserve:
 
 ## Sequencing
 
-Fixes first, refactor second. The fixes are small, urgent and reviewable in
-isolation; the refactor touches two samplers across roughly 2,100 lines and
-would bury them. More importantly, landing the fixes first gives the refactor a
-test suite to refactor _against_ — the reverse order restructures code whose
-failure mode has no coverage, which is how this defect survived gh#347.
+1. **gh#764** — persist the measured spread with its particle and replicate
+   counts. Everything below reads it, and a spread without its particle count is
+   not a number anyone can act on.
+2. **Fix 3** — the preflight. Small, no design tension, and it stops the check
+   from blessing runs that provably cannot sample.
+3. **Fix 4** — freeze adaptation at the end of warm-up, and report the
+   end-of-run `lambda`. A behaviour change, so it lands on its own.
+4. **gh#767** — the noise-aware target, once the efficiency sweep exists.
+5. **The refactor**, last.
 
-## Decisions for the maintainer
+Fixes before refactor. The fixes are small, urgent and reviewable in isolation;
+the refactor touches two samplers across roughly 2,100 lines and would bury
+them. More importantly, landing the fixes first gives the refactor a test suite
+to refactor _against_ — the reverse order restructures code whose failure mode
+has no coverage, which is how this defect survived gh#347.
 
-1. **What the four blocked tests should assert.** _Settled._ They are kept as
-   the acceptance criteria for fix 2 rather than rewritten: renamed to state the
+## Decisions, settled
+
+1. **What the four blocked tests should assert.** They are kept as the
+   acceptance criteria for fix 2 rather than rewritten: renamed to state the
    property they demand, marked `#[ignore]` with the reason, and joined by new
-   tests for what the bound does deliver (the scale rests on the floor instead
-   of running to zero; the run reports how many steps it spent there). The
-   Haario-ratchet unit test is dropped as recommended — it asserts both
-   `1/sqrt(n)` decay and less than a 2x fall over a 32-fold range of n, and no
-   implementation satisfies both.
-2. **Whether fix 2 ships with fix 1 or separately.** Recommendation: separately.
-   Fix 1 is a bound with no behavioural subtlety; fix 2 changes the target
-   acceptance and therefore every pseudo-marginal fit's trajectory.
-3. **Whether `sigma` is re-measured during the run.** A target set once from a
-   base-point `sigma` is wrong for a chain that wanders into the tail, which is
-   the case that motivated this. Recommendation: measure per chain at the
-   adaptation-window boundary, and report it.
-4. **Scope of the refactor.** Recommendation: items 1 to 4 above, deferring the
-   CLI driver split (item 5) until the sampler side has settled.
+   tests for what the bound does deliver. The Haario-ratchet unit test is
+   dropped — it asserts both `1/sqrt(n)` decay and less than a 2x fall over a
+   32-fold range of n, and no implementation satisfies both.
+2. **Whether fix 2 ships with fix 1.** Separately, and in the event fix 2 is
+   deferred entirely to gh#767: it needs an efficiency sweep that does not exist
+   yet, and a target rule fitted on a Gaussian toy would trade a diagnosable
+   failure for an undiagnosable one.
+3. **Whether `sigma` is re-measured during the run.** Not in fix 3. The
+   preflight measures at the base point, reports that scope explicitly, and
+   reports its own uncertainty. Re-measuring per chain at each adaptation-window
+   boundary costs 20 extra filter evaluations per chain per window — real money
+   at 19,200 particles — and it is only worth paying once a target actually
+   consumes the number, which is gh#767's problem.
+4. **What happens when the ceiling is below the target.** Warn and proceed. The
+   user may be running a deliberately cheap exploratory fit, and refusing an
+   expensive run at preflight is a stronger action than the diagnosis warrants.
+5. **Scope of the refactor.** Items 1 to 4 below, deferring the CLI driver split
+   (item 5) until the sampler side has settled.
 
 ## What this does not address
 
