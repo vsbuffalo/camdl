@@ -71,6 +71,9 @@ pub use fit_table::cmd_fit_table;
 pub mod fit_summary;
 pub use fit_summary::cmd_fit_summary;
 pub mod pmmh;
+// Likelihood-noise preflight shared by the pseudo-marginal stages: the
+// measured log L-hat spread and the acceptance ceiling it implies (gh#764).
+pub mod pf_noise;
 pub mod pgas;
 pub mod nuts;  // gh#275 Phase 2: nuts on ode
 pub mod trace_writer;
@@ -1611,6 +1614,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     } else {
                         Some(dt_check_result.clone())
                     },
+                    // gh#764: IF2 maximises, it does not accept on a likelihood
+                    // ratio, so the acceptance ceiling does not apply to it.
+                    pf_noise: None,
                 };
                 fit_state.save(&stage_dir.to_string_lossy()).unwrap_or_else(|e| {
                     eprintln!("warning: could not save fit_state: {}", e);

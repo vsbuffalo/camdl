@@ -4452,6 +4452,7 @@ dt = 1.0
             resolved_loglik_eval: None,
             chain_init_source: None,
             dt_check: None,
+            pf_noise: None,
         };
 
         let config = FitRunConfig::build(
@@ -4689,6 +4690,7 @@ dt = 1.0
             resolved_loglik_eval: None,
             chain_init_source: None,
             dt_check: None,
+            pf_noise: None,
         };
         let gate = super::super::config_v2::GateConfig::default();
         match check_scout_convergence(&mk_state(names.clone()), &gate) {

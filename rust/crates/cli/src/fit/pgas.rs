@@ -1386,6 +1386,10 @@ pub fn run_stage(
         // v1 (the inference math is shared but the dispatch site
         // refactor across PGAS/PMMH/NLopt is out of scope here).
         dt_check: None,
+        // gh#764: PGAS conditions on a latent path rather than accepting on a
+        // marginal likelihood estimate, so it runs no PF-variance preflight and
+        // has no spread to record.
+        pf_noise: None,
     };
     state.save(&stage_dir.to_string_lossy())?;
 

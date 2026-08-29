@@ -133,6 +133,25 @@ pub struct FitState {
     /// renders the verdict line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dt_check: Option<crate::fit::dt_check::DtCheckResult>,
+
+    /// Measured likelihood noise at the base θ for a pseudo-marginal stage
+    /// (gh#764): the spread of a single `log L̂`, the spread of the difference
+    /// that enters the Metropolis ratio, and the particle and pair counts they
+    /// were measured at. `σ` scales as `1/√N`, so a spread stored without its
+    /// particle count is not a number anyone can act on.
+    ///
+    /// This is the one number that decides whether a pseudo-marginal chain can
+    /// reach its target acceptance rate at all. It was computed at preflight,
+    /// printed to stderr and dropped, so diagnosing a stuck chain meant
+    /// re-running an expensive fit to read a value the first run had already
+    /// produced.
+    ///
+    /// `None` on IF2/PGAS/NUTS stages, on the deterministic `mh` stage (an ODE
+    /// likelihood has no filter noise), on any stage whose base θ or proposed
+    /// θ' the filter ruled out, and on `fit_state.toml` files written before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pf_noise: Option<crate::fit::pf_noise::PfNoiseCheck>,
 }
 
 impl FitState {
@@ -225,6 +244,7 @@ mod tests {
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
             chain_init_source: Some("lhs".into()),
             dt_check: None,
+            pf_noise: None,
         }
     }
 

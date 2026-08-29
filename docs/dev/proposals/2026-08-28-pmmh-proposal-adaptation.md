@@ -1,8 +1,10 @@
 # PMMH proposal adaptation: a floor, a noise-aware target, and one shared Robbins-Monro
 
-Status: fix 1 implemented (a9a6355d); fixes 3 and 4 pending; fix 2 deferred to
-gh#767 Related: gh#347 (the deterministic-MH deadlock this shares machinery
-with), gh#764 (persisting the measured spread)
+Status: fix 1 (a9a6355d), fix 4 (63dd20c2) and fix 3 implemented; fix 2 deferred
+to gh#767.
+
+Related: gh#347 (the deterministic-MH deadlock this shares machinery with),
+gh#764 (persisting the measured spread — landed with fix 3).
 
 ## The problem
 
@@ -191,7 +193,10 @@ carries the evidence and the acceptance criteria; the four `#[ignore]`d tests in
 
 ## Fix 3: a preflight that computes the ceiling instead of guessing a band
 
-`cli/src/fit/pmmh.rs` prints a green `PF variance OK (target: 1-3)` for any
+Implemented in `cli/src/fit/pf_noise.rs`; the two points the spec below left
+open are settled at the end of this section.
+
+`cli/src/fit/pmmh.rs` printed a green `PF variance OK (target: 1-3)` for any
 `sigma` in `[0.5, 5.0]`. Collapse begins around 1.6, so the check says "OK"
 across a range that is mostly past the point where the adaptation loses its
 root. That is worse than silence.
@@ -256,6 +261,27 @@ straddles the crossover rather than picking a side.
 `sigma`, `s`, the particle count and the replicate count are persisted with the
 stage artifact (gh#764); a spread without its particle count is meaningless,
 since `sigma` scales as `1/sqrt(N)`.
+
+**One `theta'`, reused across the pairs.** The constraint above says the second
+evaluation is taken at a `theta'` drawn from the initial proposal; it does not
+say whether that draw is repeated. It is not. The pair difference is
+`log L-hat(theta') - log L-hat(theta)`, so with `theta'` fixed the true
+log-likelihood difference is a constant offset and the spread of the differences
+is estimator noise alone — the quantity the ceiling is a function of. Redrawing
+`theta'` per pair would fold the curvature of the log-likelihood surface into
+`s`, and the ceiling would then be a statement about the posterior rather than
+about the filter. The cost is that the measurement is conditional on the one
+`theta'` drawn, and the reported standard error does not cover that
+conditioning.
+
+**A consequence worth stating: `s` is not `sigma*sqrt(2)`, even for plain
+PMMH.** The two evaluations sit at different `theta`, and the filter's noise
+level varies across the parameter space, so `s^2` is the _sum_ of the two
+points' variances. Measured on a two-parameter SIR with 20 daily observations at
+200 particles: `sigma` 4.07 at the base point, `s` 9.40 across the step,
+implying a `sigma` of 8.5 where the proposal lands. A ceiling computed from that
+errs toward saying the chain cannot accept, which is the safe direction for this
+check.
 
 ## Fix 4: adaptation stops at the end of warm-up
 

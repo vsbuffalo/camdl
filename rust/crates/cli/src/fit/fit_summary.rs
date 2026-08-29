@@ -2725,6 +2725,7 @@ mod tests {
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
             chain_init_source: Some("lhs".into()),
             dt_check: None,
+            pf_noise: None,
         }
     }
 
