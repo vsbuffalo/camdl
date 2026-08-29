@@ -158,12 +158,12 @@ impl std::fmt::Display for ForwardBackend {
 /// Controls how long-running subcommands (`fit run`, `simulate`, `pfilter`,
 /// ...) report progress. Rationale and semantics: see GH #14.
 ///
-/// - `auto`   — pretty indicatif bars if stderr is a TTY, otherwise plain
-///              timestamped log lines. The default.
+/// - `auto` — pretty indicatif bars if stderr is a TTY, otherwise plain
+///   timestamped log lines. The default.
 /// - `pretty` — force indicatif bars regardless of TTY detection.
-/// - `plain`  — force plain text lines (no `\r`, no ANSI). The mode to use
-///              under `tee`, `&> log`, `ssh`, CI, or any non-interactive
-///              driver that wants to tail/grep progress.
+/// - `plain` — force plain text lines (no `\r`, no ANSI). The mode to use
+///   under `tee`, `&> log`, `ssh`, CI, or any non-interactive driver that
+///   wants to tail/grep progress.
 /// - `none`   — suppress progress output entirely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ProgressMode {
@@ -308,7 +308,8 @@ impl FromStr for SweepSpec {
 fn parse_grid(spec: &str, name: &str) -> Result<Grid, String> {
     if let Some(args) = strip_call(spec, "lin") {
         let (min, max, n) = parse_min_max_n(args, "lin", name)?;
-        if !(min < max) {
+        // NaN arm explicit: `min >= max` alone is false for NaN.
+        if min.is_nan() || max.is_nan() || min >= max {
             return Err(format!(
                 "lin(min, max, n) requires min < max for --sweep {} (got min={}, max={})",
                 name, min, max));
@@ -317,12 +318,13 @@ fn parse_grid(spec: &str, name: &str) -> Result<Grid, String> {
     }
     if let Some(args) = strip_call(spec, "log10") {
         let (min, max, n) = parse_min_max_n(args, "log10", name)?;
-        if !(min > 0.0) {
+        // NaN arm explicit: `min <= 0.0` alone is false for NaN.
+        if min.is_nan() || min <= 0.0 {
             return Err(format!(
                 "log10(min, max, n) requires min > 0 for --sweep {} (got min={})",
                 name, min));
         }
-        if !(min < max) {
+        if min.is_nan() || max.is_nan() || min >= max {
             return Err(format!(
                 "log10(min, max, n) requires min < max for --sweep {} (got min={}, max={})",
                 name, min, max));

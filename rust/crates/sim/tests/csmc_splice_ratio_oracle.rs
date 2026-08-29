@@ -215,7 +215,7 @@ fn cdl(f: &Fixture, traj: &PGASTrajectory) -> f64 {
 fn substep_inside_a_bin(f: &Fixture) -> usize {
     let s = 10;
     assert!(
-        f.obs_at_substep.get(&(s - 1)).is_none() && f.obs_at_substep.get(&s).is_none(),
+        !f.obs_at_substep.contains_key(&(s - 1)) && !f.obs_at_substep.contains_key(&s),
         "substep {s} must sit strictly inside a bin for this test to pin the seed"
     );
     let (cum, _) = accumulation_entering(f, s);

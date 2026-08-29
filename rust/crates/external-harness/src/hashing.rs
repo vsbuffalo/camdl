@@ -47,7 +47,7 @@ pub fn sha256_dir(root: &Path) -> anyhow::Result<String> {
     for (path, bytes) in entries {
         hasher.update(path.as_bytes());
         hasher.update(b"\0");
-        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
     Ok(hex::encode(hasher.finalize()))
@@ -98,7 +98,7 @@ pub fn sha256_files(paths: &[&Path]) -> anyhow::Result<String> {
             .unwrap_or("");
         hasher.update(basename.as_bytes());
         hasher.update(b"\0");
-        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
     Ok(hex::encode(hasher.finalize()))

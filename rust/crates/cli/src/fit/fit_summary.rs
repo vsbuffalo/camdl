@@ -1150,11 +1150,10 @@ impl Formatter {
                         if !matches!(p.rhat(), Stat::Value(x) if x >= RHAT_CONVERGED_THRESHOLD) {
                             continue;
                         }
-                        match p.rhat_decomposition() {
-                            Some(d) => s.push_str(&format!("      {name} — {d}\n")),
-                            // A fit written before the two halves were stored
-                            // has the headline and nothing to decompose.
-                            None => {}
+                        // A fit written before the two halves were stored
+                        // has the headline and nothing to decompose.
+                        if let Some(d) = p.rhat_decomposition() {
+                            s.push_str(&format!("      {name} — {d}\n"));
                         }
                         if let Some(e) = p.per_chain_ess() {
                             s.push_str(&format!("        {e}\n"));
@@ -1572,8 +1571,7 @@ impl Formatter {
         }
 
         // fit_state winner ↔ final_params
-        if !state.start_values.is_empty() && final_params.is_some() {
-            let f = final_params.as_ref().unwrap();
+        if let Some(f) = final_params.as_ref().filter(|_| !state.start_values.is_empty()) {
             let mut state_matches = true;
             for (k, fv) in f {
                 if let Some(sv) = state.start_values.get(k) {
@@ -1635,7 +1633,7 @@ fn ci_env_set() -> bool {
 /// Resolve color preference with the standard Unix precedence:
 /// `--no-color` flag > `NO_COLOR` env (forces off; see no-color.org)
 /// > `CLICOLOR_FORCE` env (forces on regardless of TTY; common
-/// convention used by ls / grep / git when piped through `less -R`)
+/// > convention used by ls / grep / git when piped through `less -R`)
 /// > TTY auto-detect.
 ///
 /// Default behavior (no flag, no env): colored when stdout is a TTY,
@@ -3201,7 +3199,7 @@ mod tests {
         let flagged: Vec<&str> = table
             .lines()
             .filter(|l| l.contains("← outlier"))
-            .map(|l| l.trim_start().split_whitespace().next().unwrap_or(""))
+            .map(|l| l.split_whitespace().next().unwrap_or(""))
             .collect();
         assert_eq!(flagged, vec!["6"],
             "only chain 6 (the bad DATA fit) may be flagged:\n{table}");

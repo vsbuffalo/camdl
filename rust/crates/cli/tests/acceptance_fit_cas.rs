@@ -387,7 +387,7 @@ fn fit_run_announces_the_real_leaf_directory() {
     );
 
     // And the segment really contains the stage tree (a NN-stage-* child).
-    let has_stage_child = std::fs::read_dir(&fit_segment)
+    let has_stage_child = std::fs::read_dir(fit_segment)
         .unwrap()
         .flatten()
         .any(|e| {

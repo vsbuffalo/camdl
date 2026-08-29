@@ -503,7 +503,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     if a.resume.is_some() {
         if let Some(ref name) = stage_filter {
             match config.stages.get(name.as_str()) {
-                Some(s) if matches!(s, Stage::PGAS { .. } | Stage::PMMH { .. }) => {}
+                Some(Stage::PGAS { .. } | Stage::PMMH { .. }) => {}
                 Some(s) => {
                     eprintln!("error: --resume is only supported for PGAS and PMMH stages; \
                                '{}' is method '{}'.", name, s.method_name());
@@ -1047,7 +1047,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             engine_version: crate::version::VERSION_SHORT,
             config: &sweep_config,
             data_paths: &effective_obs,
-            stage_name: *stage_name,
+            stage_name,
             stage,
             ordinal,
             seed,
@@ -1554,7 +1554,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // threshold_nats unset it selects the stored threshold, an
                 // identity gap tracked in gh#730.
                 let effective_dt_check = dt_check.clone();
-                let dt_check_seed = seed.wrapping_add(0xd7c4ec_5eed); // "dtchec seed"
+                let dt_check_seed = seed.wrapping_add(0xd7c4ec5eed); // "dtchec seed"
                 let dt_check_result = dt_check::run_richardson_ladder(
                     &run_config,
                     winner_theta,
@@ -2455,7 +2455,7 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
     // The exact stage-leaf path (`{NN-stage}-{h8}/seed_N-{h8}`) needs the
     // stage + seed hashes, so we name the segment and defer the leaf to
     // `camdl list`.
-    if let Some(cfg) = config_v2::FitConfigV2::load(&from).ok() {
+    if let Ok(cfg) = config_v2::FitConfigV2::load(&from) {
         let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(m, _)| {
             let ir_version = ir::IR_VERSION.trim().to_string();
             let data_paths = cfg.data_spec().ok()
@@ -2490,12 +2490,6 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
     eprintln!("created {}", to);
 }
 
-/// Accept either a directory path or a git-style short hash for
-/// `--starts-from`. The heuristic: contains `/` or `\\` → path;
-/// else → resolve as a leaf `run_id` prefix via
-/// `browse::resolve_stage_by_hash` against the default output
-/// root. Errors on zero or multiple matches.
-///
 // ─── Labels (proposal §5) ─────────────────────────────────────────────
 
 /// Validate a user-supplied label string against the proposal's

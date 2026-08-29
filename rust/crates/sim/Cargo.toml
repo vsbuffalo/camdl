@@ -71,3 +71,6 @@ harness = false
 [[bench]]
 name = "flat_eval"
 harness = false
+
+[lints]
+workspace = true

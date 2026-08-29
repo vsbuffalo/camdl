@@ -406,7 +406,7 @@ fn read_scalar_quantity_q50(tsv: &std::path::Path) -> Option<f64> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next()?.split('\t').collect();
     // A `time` column means this is a series, not a scalar.
-    if header.iter().any(|c| *c == "time") {
+    if header.contains(&"time") {
         return None;
     }
     let scen_i = header.iter().position(|c| *c == "scenario")?;

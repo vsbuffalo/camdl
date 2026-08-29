@@ -64,7 +64,7 @@ fn int_comp(name: &str) -> Compartment {
 }
 
 fn param(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None }
+    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value }, param_kind: None, param_dim: None }
 }
 
 // ── gh#127 (#12): runtime out-of-range table lookup returns Err, never panics ──
@@ -156,6 +156,9 @@ fn test_runtime_oob_table_lookup_returns_err_not_panic() {
     );
 }
 
+// 3.14 is an arbitrary constant under test, not pi — swapping in PI would
+// change the value the evaluator is asserted to return.
+#[allow(clippy::approx_constant)]
 #[test]
 fn test_const() {
     let model = CompiledModel::new(minimal_model(vec![int_comp("S")], vec![])).unwrap();

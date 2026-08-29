@@ -18,6 +18,7 @@
 //! guarded separately, where its `SubstepRecord → Snapshot` adapter lives:
 //!   * unit: `sim::inference::pgas::grid_tests::gh270_seed_stratum_flow_reconciles_with_s_depletion`
 //!   * end-to-end: `cli/tests/pgas_trajectory_coherence.rs` (aggregate check).
+//!
 //! Together these cover all four flow-emitting writers.
 
 use std::path::Path;

@@ -692,7 +692,7 @@ fn draw_from_posterior(
         }
         parsed.push(vals);
     }
-    let mut rng = StatefulRng::new(seed ^ 0xb05_e_05u64);
+    let mut rng = StatefulRng::new(seed ^ 0xb05e05u64);
     let starts: Vec<ChainStart> = (0..n_chains).map(|chain_id| {
         let row_idx = (rng.uniform() * rows.len() as f64).floor() as usize;
         let row_idx = row_idx.min(rows.len() - 1);
@@ -1335,8 +1335,8 @@ mod tests {
             // Both within their bounds.
             let b = cs.values["beta"];
             let g = cs.values["gamma"];
-            assert!(b >= 0.0 && b <= 1.0);
-            assert!(g >= 0.0 && g <= 1.0);
+            assert!((0.0..=1.0).contains(&b));
+            assert!((0.0..=1.0).contains(&g));
             // Source = PriorDraw with a chain-specific seed.
             match &cs.source {
                 InitSource::PriorDraw { .. } => {}
@@ -1363,7 +1363,7 @@ mod tests {
         ).unwrap();
         for cs in &starts.starts {
             let v = cs.values["beta"];
-            assert!(v >= 0.4 - 1e-9 && v <= 0.5 + 1e-9,
+            assert!((0.4 - 1e-9..=0.5 + 1e-9).contains(&v),
                 "draw {} outside declared prior [0.4, 0.5]", v);
         }
     }

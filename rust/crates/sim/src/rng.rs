@@ -175,8 +175,10 @@ impl StatefulRng {
     pub fn neg_binomial_dispersion(&mut self, mean: f64, k: f64) -> u64 {
         if mean <= 0.0 { return 0; }
         // k <= 0 is outside the family; the density returns -inf there, so the
-        // nearest well-defined draw is the k → ∞ limit.
-        if !(k > 0.0) || !k.is_finite() { return self.poisson(mean); }
+        // nearest well-defined draw is the k → ∞ limit. Non-finite k (NaN or
+        // ±inf) takes the same limit — tested for explicitly because `k <= 0.0`
+        // is false for NaN, which would otherwise reach `Gamma::new`.
+        if !k.is_finite() || k <= 0.0 { return self.poisson(mean); }
         // Unit-mean Gamma(k, 1/k) mixed into a Poisson: E[G] = 1,
         // Var[G] = 1/k, so Var[count] = mu + mu²/k.
         let g = match Gamma::new(k, 1.0 / k) {
@@ -336,6 +338,34 @@ pub(crate) fn expand_u64_to_seed(v: u64) -> [u8; 32] {
     seed[16..24].copy_from_slice(&b3);
     seed[24..32].copy_from_slice(&b4);
     seed
+}
+
+#[cfg(test)]
+mod dispersion_domain_tests {
+    use super::*;
+
+    /// `k <= 0.0` is false for NaN, so without the explicit non-finite arm a
+    /// NaN dispersion reached `Gamma::new`. The k -> inf limit (a plain
+    /// Poisson) is the nearest well-defined draw, and it must be finite —
+    /// a NaN here becomes a NaN initial state, which is not a diagnosable
+    /// failure downstream.
+    #[test]
+    fn non_finite_dispersion_falls_back_to_the_poisson_limit() {
+        let mut rng = StatefulRng::new(42);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            let draws: Vec<u64> = (0..64).map(|_| rng.neg_binomial_dispersion(10.0, bad)).collect();
+            assert!(draws.iter().any(|&d| d > 0), "k={bad}: all-zero draws suggest the guard bailed");
+        }
+        // Negative control: a valid k still overdisperses relative to Poisson.
+        let var = |xs: &[u64]| {
+            let m = xs.iter().sum::<u64>() as f64 / xs.len() as f64;
+            xs.iter().map(|&x| (x as f64 - m).powi(2)).sum::<f64>() / xs.len() as f64
+        };
+        let tight: Vec<u64> = (0..4000).map(|_| rng.neg_binomial_dispersion(10.0, f64::NAN)).collect();
+        let loose: Vec<u64> = (0..4000).map(|_| rng.neg_binomial_dispersion(10.0, 0.5)).collect();
+        assert!(var(&loose) > var(&tight),
+            "k=0.5 must be more dispersed than the Poisson limit: {} vs {}", var(&loose), var(&tight));
+    }
 }
 
 #[cfg(test)]

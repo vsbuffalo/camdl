@@ -16,3 +16,6 @@ thiserror = "1"
 # Process-liveness check (kill(pid, 0)) for reclaiming a Mode B `.lock` whose
 # holder PID is dead (a fit killed before finalize).
 libc = "0.2"
+
+[lints]
+workspace = true

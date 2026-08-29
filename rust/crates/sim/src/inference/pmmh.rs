@@ -310,51 +310,6 @@ impl AdaptiveProposal {
     }
 }
 
-#[cfg(test)]
-mod adaptive_scale_tests {
-    use super::AdaptiveProposal;
-
-    /// gh#347: the Robbins–Monro global scale must SHRINK under a persistent
-    /// 0%-acceptance deadlock — this is the property that rescues a chain stuck
-    /// at a too-large initial proposal, which the Haario covariance term alone
-    /// (learned only from *movement*) cannot. Each all-reject step contributes
-    /// `γ_t·(0 − a*) < 0`, so log_scale is monotonically non-increasing and λ
-    /// collapses toward 0.
-    #[test]
-    fn rm_scale_shrinks_under_zero_acceptance_deadlock() {
-        let mut ap = AdaptiveProposal::new(2);
-        assert_eq!(ap.scale(), 1.0, "λ starts at 1");
-        let mut prev = ap.log_scale;
-        for step in 0..500 {
-            ap.adapt_scale(false, step);
-            assert!(ap.log_scale <= prev, "log_scale must be non-increasing under all-reject");
-            prev = ap.log_scale;
-        }
-        assert!(ap.scale() < 0.05,
-            "λ must collapse under a 0%-acceptance deadlock, got {}", ap.scale());
-    }
-
-    /// The mirror: accepting far above target means the steps are too timid, so
-    /// λ must GROW to explore faster.
-    #[test]
-    fn rm_scale_grows_when_accepting_above_target() {
-        let mut ap = AdaptiveProposal::new(2);
-        for step in 0..200 {
-            ap.adapt_scale(true, step);
-        }
-        assert!(ap.scale() > 1.0, "λ must grow when accepting above target, got {}", ap.scale());
-    }
-
-    /// Target acceptance is dimension-aware: 0.234 as d → ∞ (Roberts, Gelman &
-    /// Gilks 1997), ≈0.44 for d = 1.
-    #[test]
-    fn target_accept_is_dimension_aware() {
-        assert!((AdaptiveProposal::new(1).target_accept() - 0.44).abs() < 1e-9);
-        assert!(AdaptiveProposal::new(2).target_accept() > 0.30);
-        assert!(AdaptiveProposal::new(1000).target_accept() < 0.24);
-    }
-}
-
 // ── Core PMMH algorithm ────────────────────────────────────────────
 
 /// Run PMMH.
@@ -780,4 +735,49 @@ pub fn mcmc_ess(chain: &[f64]) -> f64 {
         k += 1;
     }
     (n as f64 / (1.0 + 2.0 * sum_rho)).max(1.0)
+}
+
+#[cfg(test)]
+mod adaptive_scale_tests {
+    use super::AdaptiveProposal;
+
+    /// gh#347: the Robbins–Monro global scale must SHRINK under a persistent
+    /// 0%-acceptance deadlock — this is the property that rescues a chain stuck
+    /// at a too-large initial proposal, which the Haario covariance term alone
+    /// (learned only from *movement*) cannot. Each all-reject step contributes
+    /// `γ_t·(0 − a*) < 0`, so log_scale is monotonically non-increasing and λ
+    /// collapses toward 0.
+    #[test]
+    fn rm_scale_shrinks_under_zero_acceptance_deadlock() {
+        let mut ap = AdaptiveProposal::new(2);
+        assert_eq!(ap.scale(), 1.0, "λ starts at 1");
+        let mut prev = ap.log_scale;
+        for step in 0..500 {
+            ap.adapt_scale(false, step);
+            assert!(ap.log_scale <= prev, "log_scale must be non-increasing under all-reject");
+            prev = ap.log_scale;
+        }
+        assert!(ap.scale() < 0.05,
+            "λ must collapse under a 0%-acceptance deadlock, got {}", ap.scale());
+    }
+
+    /// The mirror: accepting far above target means the steps are too timid, so
+    /// λ must GROW to explore faster.
+    #[test]
+    fn rm_scale_grows_when_accepting_above_target() {
+        let mut ap = AdaptiveProposal::new(2);
+        for step in 0..200 {
+            ap.adapt_scale(true, step);
+        }
+        assert!(ap.scale() > 1.0, "λ must grow when accepting above target, got {}", ap.scale());
+    }
+
+    /// Target acceptance is dimension-aware: 0.234 as d → ∞ (Roberts, Gelman &
+    /// Gilks 1997), ≈0.44 for d = 1.
+    #[test]
+    fn target_accept_is_dimension_aware() {
+        assert!((AdaptiveProposal::new(1).target_accept() - 0.44).abs() < 1e-9);
+        assert!(AdaptiveProposal::new(2).target_accept() > 0.30);
+        assert!(AdaptiveProposal::new(1000).target_accept() < 0.24);
+    }
 }

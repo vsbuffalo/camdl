@@ -127,6 +127,7 @@ pub fn references_state(expr: &ResolvedExpr) -> bool {
 ///   - loop-invariant — a function of parameters, tables, and constants only; and
 ///   - topologically ordered — any `PerEvalRef` it contains must point to a
 ///     STRICTLY EARLIER slot (`< slot`).
+///
 /// Returns `Some(kind)` naming the first node that breaks the contract, or `None`
 /// if the body is well-formed.
 ///

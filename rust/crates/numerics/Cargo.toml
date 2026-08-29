@@ -9,3 +9,6 @@ edition = "2021"
 # `external-harness` without pulling either into the other.
 [dependencies]
 libm = "0.2"
+
+[lints]
+workspace = true

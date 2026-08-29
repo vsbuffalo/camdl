@@ -1434,7 +1434,7 @@ mod tests {
         // LHS guarantees exactly one sample per stratum at the dim level.
         // With 100 chains and 10 bins, each stratum aligns 10:1 with bins.
         for &c in &bin_counts {
-            assert!(c >= 8 && c <= 12,
+            assert!((8..=12).contains(&c),
                 "LHS strata uneven: counts = {:?}", bin_counts);
         }
     }
@@ -2164,10 +2164,8 @@ beta\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
     fn chain_starts_to_param_vecs_overwrites_estimated_indices() {
         // Verify the spec→f64 conversion that PMMH/PGAS will perform on
         // resolve_per_chain_starts_from_method's output.
-        let base_specs = vec![
-            ep_with_idx("beta",  0, 0.0, 1.0, Transform::None, 0.5),
-            ep_with_idx("gamma", 2, 0.0, 1.0, Transform::None, 0.3),
-        ];
+        let base_specs = [ep_with_idx("beta",  0, 0.0, 1.0, Transform::None, 0.5),
+            ep_with_idx("gamma", 2, 0.0, 1.0, Transform::None, 0.3)];
         // Two chains, two estimated indices (0 and 2 of a 4-slot vector).
         let chains = vec![
             vec![

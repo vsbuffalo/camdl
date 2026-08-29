@@ -4,10 +4,9 @@
 //! `pmmh::run_stage`. We construct a two-chain PMMH fit whose
 //! `survey_top_k` init feeds:
 //!
-//!   - rank-1: pathological β=4.8, γ=0.05 → R0 ≈ 96 against a
-//!             flat-low data series. PF reweights kill all but ~1
-//!             particle within a handful of obs windows → ESS
-//!             collapse → `Err(SimError::PFDegenerate)`.
+//!   - rank-1: pathological β=4.8, γ=0.05 → R0 ≈ 96 against a flat-low data
+//!     series. PF reweights kill all but ~1 particle within a handful of obs
+//!     windows → ESS collapse → `Err(SimError::PFDegenerate)`.
 //!   - rank-2: sane β=0.30, γ=0.10 → R0 = 3, fits the data.
 //!
 //! Acceptance:

@@ -196,8 +196,7 @@ fn a_reflowed_config_still_finds_its_completed_fit() {
     assert_ne!(more_particles, REFLOWED);
     std::fs::write(tmp.join("a.toml"), &more_particles).unwrap();
     let err = resolve_theta(&bin, &tmp)
-        .err()
-        .expect("a changed particle count must not resolve to the old fit");
+        .expect_err("a changed particle count must not resolve to the old fit");
     assert!(
         err.contains("no completed fit found"),
         "the miss is reported plainly; got: {err}"
@@ -208,8 +207,7 @@ fn a_reflowed_config_still_finds_its_completed_fit() {
     assert_ne!(other_data, REFLOWED);
     std::fs::write(tmp.join("a.toml"), &other_data).unwrap();
     let err = resolve_theta(&bin, &tmp)
-        .err()
-        .expect("a changed data path must not resolve to the old fit");
+        .expect_err("a changed data path must not resolve to the old fit");
     assert!(
         err.contains("no completed fit found"),
         "the miss is reported plainly; got: {err}"

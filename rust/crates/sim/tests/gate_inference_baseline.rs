@@ -70,7 +70,7 @@ fn div(a: Expr, b: Expr) -> Expr {
     Expr::BinOp(BinOpWrap { bin_op: BinOpExpr { op: BinOp::Div, left: Box::new(a), right: Box::new(b) } })
 }
 fn param(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None }
+    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value }, param_kind: None, param_dim: None }
 }
 fn transition(name: &str, sto: Vec<StoichiometryEntry>, rate: Expr) -> Transition {
     Transition {
@@ -201,8 +201,8 @@ const REFERENCES: &[(&str, RefBuilder)] = &[
 /// Committed baselines: (name) -> PF marginal log-likelihood, captured on the dev
 /// machine. Re-capture with CAMDL_CAPTURE_BASELINE=1 (see the module header).
 const BASELINES: &[(&str, f64)] = &[
-    ("sir_incidence_truth", -5.94512991469047165e1),
-    ("sir_incidence_offgrid", -5.97885420281019435e1),
+    ("sir_incidence_truth", -5.945_129_914_690_472e1),
+    ("sir_incidence_offgrid", -5.978_854_202_810_194e1),
 ];
 
 fn run(builder: RefBuilder) -> f64 {

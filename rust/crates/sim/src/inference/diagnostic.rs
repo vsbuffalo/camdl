@@ -83,7 +83,7 @@ pub fn acceptance_diagnostic(
 ) -> Option<DiagnosticKind> {
     let (lo, hi) = kernel.healthy_band();
     (!(lo..=hi).contains(&rate))
-        .then(|| DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel })
+        .then_some(DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel })
 }
 
 /// Machine-readable diagnostic classification.

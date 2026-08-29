@@ -92,7 +92,7 @@ fn simulate_terminal_s(
 
     // traj.tsv: columns `t`, `S`. Final row = t=20. Return S.
     let content = std::fs::read_to_string(&out_path).unwrap();
-    let last_line = content.lines().filter(|l| !l.trim().is_empty()).last().unwrap();
+    let last_line = content.lines().rfind(|l| !l.trim().is_empty()).unwrap();
     let fields: Vec<&str> = last_line.split('\t').collect();
     fields[1].parse::<f64>().unwrap()
 }

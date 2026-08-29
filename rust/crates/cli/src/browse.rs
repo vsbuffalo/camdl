@@ -359,8 +359,8 @@ fn list_profile_children(
     }
 
     eprintln!("{}", "profile-point leaves".bold());
-    eprintln!("  {:<16} {:<8} {:<8} {:>14}  {}",
-        "point", "seed", "start", "best_loglik", "path");
+    eprintln!("  {:<16} {:<8} {:<8} {:>14}  path",
+        "point", "seed", "start", "best_loglik");
     for leaf in matches.iter().take(limit) {
         let ll = leaf.record.inputs.as_object()
             .and_then(|o| o.get("best_loglik"))
@@ -820,7 +820,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 })
             };
             let _ = std::io::stdout().write_all(&bytes);
-            return;
         }
         // New-format fit stage: default to the θ̂ summary; `--stream NAME`
         // cats a named file from the leaf (e.g. `draws.tsv`,
@@ -833,7 +832,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 std::process::exit(1);
             });
             let _ = std::io::stdout().write_all(&bytes);
-            return;
         }
         // New-format profile point: default to the per-(point, seed, start)
         // `mle.toml`; `--stream NAME` cats a named file from the leaf.
@@ -845,7 +843,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 std::process::exit(1);
             });
             let _ = std::io::stdout().write_all(&bytes);
-            return;
         }
         // New-format pfilter eval: default to the `loglik.toml` summary;
         // `--stream NAME` cats a named saved artifact from the leaf.
@@ -857,7 +854,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 std::process::exit(1);
             });
             let _ = std::io::stdout().write_all(&bytes);
-            return;
         }
         // New-format survey: default to `landscape.tsv`; `--stream NAME`
         // cats a named file from the leaf (e.g. `summary.json`,
@@ -870,7 +866,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 std::process::exit(1);
             });
             let _ = std::io::stdout().write_all(&bytes);
-            return;
         }
         // New-format ensemble: default to `ensemble.tsv` (the combined
         // wide-format trajectory — byte-identical to the `-o` mirror).
@@ -882,7 +877,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 std::process::exit(1);
             });
             let _ = std::io::stdout().write_all(&bytes);
-            return;
         }
         // Fit ENVELOPE: `--stream <rel>` cats an output file under the segment
         // (e.g. `predictive/weekly_cases.tsv`); no `--stream` defaults to the
@@ -907,7 +901,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 std::process::exit(1);
             });
             let _ = std::io::stdout().write_all(&bytes);
-            return;
         }
     }
 }

@@ -1384,7 +1384,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             // obs axis must be validated at it — not the raw model's.
             let h = match t_end_override {
                 Some(v) => v,
-                None => crate::params_resolver::effective_horizon(&model_check, s.as_deref())
+                None => crate::params_resolver::effective_horizon(model_check, s.as_deref())
                     .unwrap_or_else(|e| {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
@@ -3882,13 +3882,11 @@ fn sample_with_bounds(
         Some(b) => b,
         None => return Ok((sample_from_prior_raw(pd, rng), 0)),
     };
-    let mut rejected = 0u64;
-    for _ in 0..MAX_ATTEMPTS {
+    for (rejected, _) in (0..MAX_ATTEMPTS).enumerate() {
         let v = sample_from_prior_raw(pd, rng);
         if v >= lo && v <= hi {
-            return Ok((v, rejected));
+            return Ok((v, rejected as u64));
         }
-        rejected += 1;
     }
     Err(format!(
         "prior for parameter '{}' failed to produce a value within bounds [{}, {}] \

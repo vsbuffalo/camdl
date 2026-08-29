@@ -61,7 +61,7 @@ fn camdlc_bin() -> PathBuf {
 fn compile_model(dir: &Path) -> PathBuf {
     let ir = dir.join("polio_afp_es_2patch.ir.json");
     let out = Command::new(camdlc_bin())
-        .arg(&fixture("polio_afp_es_2patch.camdl"))
+        .arg(fixture("polio_afp_es_2patch.camdl"))
         .output()
         .expect("spawn camdlc");
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));

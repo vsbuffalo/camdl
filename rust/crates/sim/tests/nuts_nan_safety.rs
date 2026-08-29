@@ -64,6 +64,7 @@ fn neg_inf_when_extreme(z: &[f64]) -> (f64, Vec<f64>) {
 ///     which evaluates to `false` (IEEE 754 NaN compares unordered).
 ///   - top-level nuts_step's `accepted = z_proposal != current_z` is
 ///     `true` (NaN != anything), so the NaN params are returned.
+///
 /// Downstream, the next call to log_prob_and_grad(NaN params) returns
 /// (-Inf, zeros), and the chain reports a NumericalCollapse far from
 /// the actual NUTS fault.

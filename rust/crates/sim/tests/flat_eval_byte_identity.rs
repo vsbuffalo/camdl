@@ -179,6 +179,18 @@ fn flat_matches_eval_resolved_on_latent_edge_cases() {
             "mixed int+real grouping",
             ResolvedExpr::MixedPopSum { int_indices: vec![0], real_indices: vec![0, 1] },
         ),
+        // A NaN predicate must take the ELSE branch in both evaluators.
+        // `eval_resolved` tests `pred > 0.0`, which is false for NaN; the VM's
+        // JumpIfFalse has to agree, and `pred <= 0.0` alone would not — it is
+        // false for NaN too, so the NaN would fall through to THEN.
+        (
+            "Cond with a NaN predicate",
+            ResolvedExpr::Cond {
+                pred: Box::new(ResolvedExpr::Const(f64::NAN)),
+                then_: Box::new(ResolvedExpr::Const(1.0)),
+                else_: Box::new(ResolvedExpr::Const(2.0)),
+            },
+        ),
     ];
 
     let rates: Vec<ResolvedExpr> = synthetic.iter().map(|(_, e)| e.clone()).collect();
@@ -223,5 +235,17 @@ fn flat_matches_eval_resolved_on_latent_edge_cases() {
     assert_eq!(
         grouping, 1.0,
         "grouped MixedPopSum keeps the int term (1.0); a continuous fold gives 0.0"
+    );
+    let nan_cond = eval_resolved(
+        &ResolvedExpr::Cond {
+            pred: Box::new(ResolvedExpr::Const(f64::NAN)),
+            then_: Box::new(ResolvedExpr::Const(1.0)),
+            else_: Box::new(ResolvedExpr::Const(2.0)),
+        },
+        &ctx,
+    );
+    assert_eq!(
+        nan_cond, 2.0,
+        "a NaN predicate must select the else branch, not then"
     );
 }

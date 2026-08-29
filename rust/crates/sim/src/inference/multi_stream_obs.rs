@@ -7,10 +7,10 @@
 //!
 //! A stream's `projection` is one of:
 //! - `FlowSum(flow_indices)`    — incidence projections (`Projection::CumulativeFlow`)
-//! - `IntCompSum(comp_indices)` — prevalence projections (`Projection::CurrentPop` /
-//!                                 `Projection::CurrentPopSum`)
-//! - `Expr(resolved)`           — arbitrary state expressions
-//!                                 (`Projection::DerivedExpr`)
+//! - `IntCompSum(comp_indices)` — prevalence projections
+//!   (`Projection::CurrentPop` / `Projection::CurrentPopSum`)
+//! - `Expr(resolved)` — arbitrary state expressions
+//!   (`Projection::DerivedExpr`)
 //!
 //! Incidence streams read and reset a per-stream counter; prevalence and
 //! expression streams read current compartment counts and do not reset.
@@ -32,9 +32,6 @@ thread_local! {
     static SCRATCH_INT: RefCell<IntState> = RefCell::new(IntState::from_vec(Vec::new()));
 }
 
-/// Run `f` with a mutable reference to this thread's scratch IntState,
-/// resized (zero-filled) to `n`. Avoids heap allocation in the obs
-/// hot path on steady-state calls.
 // The zero-scratch helper `with_scratch_int` was deleted as part of
 // the GH #6 fix series. It was the footgun at the centre of four
 // independent bug sites — each caller had a real `counts` slice in
@@ -734,7 +731,8 @@ impl BoundObs {
                 // n > 0 and value ≤ n for a binomial denominator (§3.2).
                 if let Some(dn) = denom {
                     if let Some((_, n)) = aux_row.iter().find(|(k, _)| k == dn) {
-                        if !(*n > 0.0) {
+                        // NaN arm explicit: `*n <= 0.0` is false for NaN.
+                        if n.is_nan() || *n <= 0.0 {
                             findings.push(Finding {
                                 severity: Severity::Error,
                                 message: format!(
