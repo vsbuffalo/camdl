@@ -142,7 +142,7 @@ fn run_from(
         thin: 1,
         burn_in: 0,
         rho: None,
-        n_source_groups: 0,
+        n_source_groups: 0, init_noise_width: 0,
     };
 
     let recs: RefCell<Vec<Rec>> = RefCell::new(Vec::with_capacity(n_steps));

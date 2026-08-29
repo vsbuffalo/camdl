@@ -727,8 +727,128 @@ pub struct CompiledModel {
     /// gradient to zeros.
     pub has_init_law: bool,
 
+    /// Where each `init {}` entry's standard normals sit in one particle's
+    /// block of the correlated PF's pre-drawn init noise — `None` for a
+    /// deterministic entry, which draws nothing.
+    ///
+    /// Indexed by position in `model.initial_conditions` (the same index
+    /// [`Self::init_order`] carries), and **fixed here at build**. That is the
+    /// point of the field. Correlated PMMH works because the same random lands
+    /// at the same (particle, compartment) on every MCMC iteration, and
+    /// [`Self::initial_state_draw`] walks a mixed sequence of laws and
+    /// expressions whose *values* change from iteration to iteration. A counter
+    /// incremented as that walk consumed a law would be stable only for as long
+    /// as no branch in the walk ever skipped one; an offset table computed from
+    /// the IR cannot drift with the walk at all.
+    ///
+    /// Offsets are assigned in [`Self::init_order`] — evaluation order — so the
+    /// block reads front to back as the draw proceeds. Widths are
+    /// [`init_noise_normals`]: one normal per law, except NegBinomial, which is
+    /// a Gamma mixed into a Poisson and needs two.
+    pub init_noise_offsets: Vec<Option<usize>>,
+
+    /// Standard normals one particle's initial-state draw consumes: the sum of
+    /// the widths in [`Self::init_noise_offsets`], and the stride the
+    /// correlated PF reads its init-noise row with. `0` for a deterministic
+    /// `init {}`, where the row is empty and every particle starts at the same
+    /// state.
+    pub init_noise_width: usize,
+
     /// Pre-resolved expression trees for all hot-path evaluations.
     pub resolved: ResolvedModel,
+}
+
+/// Standard normals one `init {}` entry consumes on the correlated-PF path.
+///
+/// Zero for a deterministic entry — it is a function of θ and of the entries
+/// before it, not a draw. One for each law that inverts a single CDF. **Two**
+/// for NegBinomial, which is generated the way it is everywhere else in this
+/// codebase ([`crate::rng::StatefulRng::neg_binomial_dispersion`]): a unit-mean
+/// `Gamma(k, 1/k)` multiplier mixed into a Poisson. Those are two independent
+/// draws, so they need two independent normals — one cannot produce a
+/// NegBinomial variate, and reusing the same normal for both would make the
+/// multiplier and the count perfectly dependent, which is a different law.
+fn init_noise_normals(spec: &ir::model::InitSpec) -> usize {
+    use ir::model::{InitCountLaw, InitSpec};
+    match spec {
+        InitSpec::Deterministic(_) => 0,
+        InitSpec::Count(InitCountLaw::NegBinomial(_)) => 2,
+        InitSpec::Count(_) | InitSpec::Real(_) => 1,
+    }
+}
+
+/// Where a drawn `init { }` entry gets its randomness.
+///
+/// The two forward paths differ only here: an ordinary run consumes a live
+/// per-particle ChaCha stream, and the correlated PF reads standard normals
+/// that were drawn once for the whole MCMC iteration and are reused at the same
+/// slot on the next one. Both variants sample the SAME law — the `match spec`
+/// in [`CompiledModel::initial_state_draw_from`] is written once, so a law
+/// cannot be added to one path and forgotten in the other.
+///
+/// Every method takes the entry's slot offset. `Stream` ignores it (a stream
+/// has no addresses); `Normals` reads `z[off]`, and `z[off + 1]` for the one
+/// law that needs two.
+enum InitDraws<'a> {
+    /// A live RNG stream — every path except the correlated PF.
+    Stream(&'a mut crate::rng::StatefulRng),
+    /// One particle's block of the correlated PF's pre-drawn normals, exactly
+    /// [`CompiledModel::init_noise_width`] long.
+    Normals(&'a [f64]),
+}
+
+impl InitDraws<'_> {
+    fn poisson(&mut self, off: usize, rate: f64) -> u64 {
+        match self {
+            InitDraws::Stream(rng) => rng.poisson(rate),
+            InitDraws::Normals(z) => {
+                crate::inference::correlated_pf::poisson_from_normal(rate, z[off])
+            }
+        }
+    }
+
+    fn binomial(&mut self, off: usize, n: u64, p: f64) -> u64 {
+        match self {
+            InitDraws::Stream(rng) => rng.binomial(n, p),
+            InitDraws::Normals(z) => {
+                crate::inference::correlated_pf::binomial_from_normal(n, p, z[off])
+            }
+        }
+    }
+
+    /// NB2 with mean `mu` and dispersion `k`: `Var = mu + mu²/k`.
+    ///
+    /// The correlated arm reproduces the stream arm's construction — a
+    /// unit-mean `Gamma(k, 1/k)` multiplier mixed into a Poisson — from two
+    /// normals rather than two stream draws, so the law is the same one and
+    /// not an approximation of it. `k` outside `(0, ∞)` is outside the family;
+    /// both arms take the `k → ∞` (Poisson) limit there, and the `off + 1` slot
+    /// carries the Poisson on either branch so the count's random is at a fixed
+    /// address whichever way `k` goes.
+    fn neg_binomial(&mut self, off: usize, mean: f64, k: f64) -> u64 {
+        match self {
+            InitDraws::Stream(rng) => rng.neg_binomial_dispersion(mean, k),
+            InitDraws::Normals(z) => {
+                if mean <= 0.0 {
+                    return 0;
+                }
+                let g = if k > 0.0 && k.is_finite() {
+                    crate::inference::correlated_pf::normal_to_gamma(z[off], k, 1.0 / k)
+                } else {
+                    1.0
+                };
+                crate::inference::correlated_pf::poisson_from_normal(mean * g, z[off + 1])
+            }
+        }
+    }
+
+    fn normal(&mut self, off: usize, mean: f64, sd: f64) -> f64 {
+        let z = match self {
+            InitDraws::Stream(rng) => rng.normal(),
+            InitDraws::Normals(z) => z[off],
+        };
+        mean + sd.max(0.0) * z
+    }
 }
 
 /// Pre-resolved balance constraint.
@@ -1844,6 +1964,23 @@ impl CompiledModel {
 
         let has_init_law = model.initial_conditions.iter().any(|(_, s)| s.is_law());
 
+        // The correlated PF's init-noise layout, fixed once here so it cannot
+        // depend on anything the per-iteration draw does. Offsets follow
+        // `init_order` (evaluation order) so a particle's block is read front
+        // to back as the draw walks.
+        let mut init_noise_offsets: Vec<Option<usize>> =
+            vec![None; model.initial_conditions.len()];
+        let mut init_noise_width = 0usize;
+        for &i in &init_order {
+            let (_, spec) = model.initial_conditions.0.get_index(i)
+                .expect("init_order indexes initial_conditions");
+            let w = init_noise_normals(spec);
+            if w > 0 {
+                init_noise_offsets[i] = Some(init_noise_width);
+                init_noise_width += w;
+            }
+        }
+
         let resolved = ResolvedModel {
             rates,
             bindings: resolved_bindings,
@@ -1885,6 +2022,8 @@ impl CompiledModel {
             fire_times,
             init_order,
             has_init_law,
+            init_noise_offsets,
+            init_noise_width,
             resolved,
         })
     }
@@ -2037,6 +2176,54 @@ impl CompiledModel {
         params: &[f64],
         rng: &mut crate::rng::StatefulRng,
     ) -> Result<(IntState, RealState), SimError> {
+        self.initial_state_draw_from(params, &mut InitDraws::Stream(rng))
+    }
+
+    /// One draw of the initial state from **pre-drawn standard normals** rather
+    /// than from a live RNG stream — the correlated-PF (correlated PMMH) form
+    /// of [`Self::initial_state_draw`], sampling the same laws.
+    ///
+    /// `z` is one particle's block of the pre-drawn correlated vector and must
+    /// be exactly [`Self::init_noise_width`] long; each law reads it at the
+    /// offset [`Self::init_noise_offsets`] fixed at build. Requiring the exact
+    /// length here, once per particle, is what makes every read below provably
+    /// in range — the offsets were summed to that same width.
+    ///
+    /// Why this exists at all: correlated PMMH's efficiency comes from the
+    /// whole particle system being a deterministic function of one pre-drawn
+    /// correlated random vector, so that the current and proposed θ share most
+    /// of their noise and the likelihood RATIO in the acceptance step is far
+    /// less noisy than either estimate. Drawing x₀ from a separate ChaCha
+    /// stream would inject uncorrelated noise into exactly that quantity
+    /// (gh#772).
+    pub fn initial_state_draw_correlated(
+        &self,
+        params: &[f64],
+        z: &[f64],
+    ) -> Result<(IntState, RealState), SimError> {
+        if z.len() != self.init_noise_width {
+            return Err(SimError::Validation(format!(
+                "correlated initial-state draw: this particle was handed {} \
+                 pre-drawn normals but this model's `init {{ }}` consumes {} \
+                 (`CompiledModel::init_noise_width`). The pre-drawn noise must \
+                 be drawn for the model it is run against.",
+                z.len(), self.init_noise_width,
+            )));
+        }
+        self.initial_state_draw_from(params, &mut InitDraws::Normals(z))
+    }
+
+    /// The one initial-state draw walk, over either randomness source.
+    ///
+    /// Kept single so a law cannot be sampled one way from a live stream and
+    /// another way from the pre-drawn vector: the `match spec` below is the
+    /// only place the four laws are named, and [`InitDraws`] carries the
+    /// difference.
+    fn initial_state_draw_from(
+        &self,
+        params: &[f64],
+        draws: &mut InitDraws<'_>,
+    ) -> Result<(IntState, RealState), SimError> {
         use ir::model::{InitCountLaw, InitRealLaw, InitSpec};
         use crate::propensity::{eval_expr, EvalCtx};
 
@@ -2064,24 +2251,27 @@ impl CompiledModel {
                 let ctx = EvalCtx { model: self, int_s: &int_s, real_s: &real_s, params, t: 0.0, dt: 0.0, projected: None, aux: None, int_float_override: None, per_eval: None };
                 eval_expr(e, &ctx)
             };
+            // Where this entry's normals sit in the pre-drawn block. Fixed at
+            // build, read here — never counted as the walk goes.
+            let off = self.init_noise_offsets[i].unwrap_or(0);
             let v: f64 = match spec {
                 InitSpec::Deterministic(e) => arg(e)?,
                 InitSpec::Count(InitCountLaw::Poisson(l)) => {
-                    rng.poisson(arg(&l.rate.expr)?) as f64
+                    draws.poisson(off, arg(&l.rate.expr)?) as f64
                 }
                 InitSpec::Count(InitCountLaw::Binomial(l)) => {
                     let n = arg(&l.n)?;
                     let p = arg(&l.p.expr)?;
-                    rng.binomial(n.round().max(0.0) as u64, p) as f64
+                    draws.binomial(off, n.round().max(0.0) as u64, p) as f64
                 }
                 InitSpec::Count(InitCountLaw::NegBinomial(l)) => {
-                    rng.neg_binomial_dispersion(
-                        arg(&l.mean.expr)?, arg(&l.dispersion.expr)?) as f64
+                    draws.neg_binomial(
+                        off, arg(&l.mean.expr)?, arg(&l.dispersion.expr)?) as f64
                 }
                 InitSpec::Real(InitRealLaw::Normal(l)) => {
                     let mean = arg(&l.mean.expr)?;
                     let sd = arg(&l.sd.expr)?;
-                    mean + sd.max(0.0) * rng.normal()
+                    draws.normal(off, mean, sd)
                 }
             };
             if let Some(local) = self.global_to_int[global] {

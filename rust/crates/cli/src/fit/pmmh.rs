@@ -663,6 +663,7 @@ pub fn run_stage(
                 burn_in,
                 rho,
                 n_source_groups: config.compiled.source_groups.len(),
+                init_noise_width: config.compiled.init_noise_width,
             };
 
             // Build the loglik evaluator closure for this chain. Both branches

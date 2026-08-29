@@ -218,6 +218,10 @@ fn crafted_randoms(n_groups: usize, n_obs: usize) -> PFRandomState {
         resample_noise: vec![0.0; n_obs],
         binomial_noise,
         n_source_groups: n_groups,
+        // This fixture's `init { }` is deterministic, so the initial-state
+        // block is empty and every particle starts at the same state.
+        init_noise: Vec::new(),
+        init_width: 0,
     }
 }
 

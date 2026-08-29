@@ -1599,6 +1599,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     burn_in: PROFILE_PMMH_BURN_IN,
                     rho: pmmh_rho_opt,
                     n_source_groups: compiled.source_groups.len(),
+                    init_noise_width: compiled.init_noise_width,
                 };
 
                 // PF process kernel + obs model for this cell. PMMH on

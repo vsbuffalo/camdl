@@ -415,3 +415,102 @@ fn fit_correlated_pmmh_runs_on_an_absent_row_series() {
         String::from_utf8_lossy(&absent_out.stderr)
     );
 }
+
+/// The same SIR, but its introduction is DRAWN rather than assumed:
+/// `I ~ poisson(rate = I0)`, with `S` reading what it drew so the population
+/// budget holds on every draw.
+fn write_law_init_model(dir: &Path) -> PathBuf {
+    let camdlc = camdlc_bin();
+    let src = r#"
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  beta  : rate  in [0.001, 5.0]
+  gamma : rate  in [0.01, 1.0]
+  N0    : count in [100, 10000]
+  #' EXPECTED infectious people at t_start; the realized number is a draw
+  I0    : count in [1.0, 100.0]
+}
+transitions {
+  infection : S --> I @ beta * S * I / N0
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    projected  = prevalence(I)
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = projected)
+  }
+}
+scenarios { baseline { set = { beta = 0.3  gamma = 0.1  N0 = 1000  I0 = 5 } } }
+init {
+  I ~ poisson(rate = I0)
+  S = N0 - I
+}
+simulate { from = 0 'days  to = 6 'days }
+"#;
+    let model_path = dir.join("sir_law_init.camdl");
+    std::fs::write(&model_path, src).unwrap();
+    let ir_path = dir.join("sir_law_init.ir.json");
+    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    assert!(out.status.success(),
+        "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(&ir_path, &out.stdout).unwrap();
+    ir_path
+}
+
+/// gh#772, end to end: `camdl fit` with a `pmmh` stage at `rho = 0.99` on a
+/// model whose `init { }` DRAWS a compartment from a law.
+///
+/// Correlated PMMH refused every such model — its pre-drawn correlated vector
+/// covered the transition kernel only, so an initial-state draw would have been
+/// uncorrelated noise added to the one quantity the method needs correlated
+/// between the current and proposed θ. The vector now carries an initial-state
+/// block, one row per particle.
+///
+/// This is the wiring the sim-level tests cannot see: the CLI has to hand
+/// `PMMHConfig` the model's own `init_noise_width`, and the filter refuses a
+/// width that disagrees with the model rather than striding on. A run that
+/// exits 0 here is a run whose noise was sized by the model it ran against.
+#[test]
+fn fit_correlated_pmmh_runs_on_a_drawn_initial_state() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("cpm_init_law");
+    let ir = write_law_init_model(tmp.path());
+    let dense = write_dense_data(tmp.path());
+    let out_root = tmp.path().join("results_cpm_initlaw");
+    let toml_src = format!(r#"
+output_dir = "{out}"
+[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[config]
+dt = 1.0
+[estimate]
+beta  = {{ bounds = [0.01, 5.0], start = 0.3, prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }} }}
+[fixed]
+gamma = 0.1
+N0 = 1000
+I0 = 5
+[stages.posterior]
+algorithm = "pmmh"
+backend = "chain_binomial"
+chains = 1
+particles = 60
+iterations = 12
+burn_in = 2
+init = "single"
+rho = 0.99
+"#, out = out_root.display(), ir = ir.display(), data = dense.display());
+    let toml = tmp.path().join("fit_cpm_initlaw.toml");
+    std::fs::write(&toml, toml_src).unwrap();
+    let out = run_fit(&camdl, &toml, "3");
+    assert!(
+        out.status.success(),
+        "correlated PMMH must run on a model that draws its initial state \
+         (gh#772). stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

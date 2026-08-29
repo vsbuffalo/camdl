@@ -53,7 +53,7 @@ fn small_config() -> PMMHConfig {
         thin: 1,
         burn_in: 0,
         rho: None,
-        n_source_groups: 0,
+        n_source_groups: 0, init_noise_width: 0,
     }
 }
 
