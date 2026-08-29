@@ -14,10 +14,11 @@
 //!   - observation-axis and stream-set preflights (gh#570; not overridable —
 //!     a difference across unlike observations is meaningless however shown)
 //!   - bound-data preflight (gh#713; override: --allow-data-mismatch)
+//!   - backend preflight on the derive path (gh#729; no override — gh#312)
 //!   - formats: table (default), md, json
 //!   - compare.toml for reproducible multi-model specs
-//! Out of scope (Part II): betting mode, CAS ref resolution, obs-model /
-//!   backend preflights, stacking, plotting.
+//! Out of scope (Part II): betting mode, CAS ref resolution, obs-model
+//!   preflight, stacking, plotting.
 
 use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
@@ -608,6 +609,43 @@ fn load_trace(
     }
 }
 
+/// Refuse to derive a prequential for a fit that did not run on the backend the
+/// derive path filters with (gh#729).
+///
+/// [`derive_prequential`] invokes `camdl pfilter`, a bootstrap particle filter
+/// over the chain-binomial forward process. That is the right filter for a
+/// chain-binomial fit and the wrong one for any other: an ODE fit's θ̂ describes
+/// a deterministic trajectory, and scoring it through a stochastic
+/// chain-binomial predictive produces a number that is neither the fit's own
+/// likelihood nor a like-for-like predictive score — while the table presents
+/// it as that fit's prequential. A label would not fix it; a reader told to
+/// discount a column will forget to.
+///
+/// No override: the honest ODE prequential is gh#312. Until then an ODE fit can
+/// still be compared by supplying an explicit `prequential.json` scored under
+/// its own backend.
+fn check_derivable_backend(
+    backend: crate::run_meta::InferenceBackend,
+    segment: &Path,
+) -> Result<(), String> {
+    use crate::run_meta::InferenceBackend;
+    match backend {
+        InferenceBackend::ChainBinomial => Ok(()),
+        other => Err(format!(
+            "the fit at {} ran its terminal stage on the `{}` backend, but \
+             `compare` derives a prequential by invoking `camdl pfilter`, a \
+             bootstrap particle filter over the `chain_binomial` process.\n  \
+             The derived scores would come from a different forward process \
+             than the one the fit used, and the table would present them as \
+             this fit's own.\n  \
+             Score it under its own backend and pass the resulting \
+             prequential.json instead. The derived path for `{}` fits is \
+             tracked in gh#312 (ODE prequential).",
+            segment.display(), other.as_str(), other.as_str(),
+        )),
+    }
+}
+
 /// The per-stream data digests a resolved fit recorded when it ran, read from
 /// its provenance sidecar (`fit.meta.json`). Not re-hashed here: the files may
 /// have moved or changed since, and the question is what the FIT was bound to.
@@ -671,6 +709,14 @@ fn derive_prequential(
 ) -> Result<PrequentialTrace, String> {
     let segment = &resolved.segment;
     let config = &resolved.config;
+
+    // gh#729: the filter this shells out to is chain-binomial. The θ̂ below
+    // comes from the TERMINAL stage (both `resolve_posterior_draws` and
+    // `winner_params_toml` pick it), so that stage's backend is the one the
+    // derived score must match.
+    if let Some(terminal) = config.stages.values().last() {
+        check_derivable_backend(terminal.backend(), segment)?;
+    }
 
     // (a) θ̂ — the plug-in point the prequential is scored at. Routed through
     // the draws-cloud authority (`resolve_posterior_draws`), NOT a per-method
@@ -1673,6 +1719,31 @@ mod tests {
         assert!(!note.contains("'a'"), "the checked row is not in the note: {note}");
         assert!(unchecked_data_note(&[("a", &same_a), ("b", &same_b)]).is_none(),
             "no note when every row was checked");
+    }
+
+    /// gh#729: the derive path shells out to `camdl pfilter`, which runs a
+    /// chain-binomial bootstrap particle filter whatever the fit ran on. For an
+    /// ODE fit that means the "prequential" is produced by a different forward
+    /// process than the one whose θ̂ it plugs in — a stochastic filter scoring a
+    /// deterministic model's parameters — and the table labels it as that fit's
+    /// score. Refused rather than labelled, since a comparison the reader must
+    /// know to discount is one they will forget to discount.
+    #[test]
+    fn refuses_to_derive_a_prequential_under_a_backend_the_fit_did_not_use() {
+        use crate::run_meta::InferenceBackend;
+        let seg = Path::new("results/fits/sir-abc12345");
+
+        check_derivable_backend(InferenceBackend::ChainBinomial, seg)
+            .expect("the filter and the fit agree — this is the ordinary path");
+
+        let err = check_derivable_backend(InferenceBackend::Ode, seg)
+            .expect_err("an ODE fit's prequential may not be derived by a \
+                         chain-binomial filter");
+        assert!(err.contains("ode"), "names the backend the fit ran on: {err}");
+        assert!(err.contains("chain_binomial"),
+            "and the one the derived score would come from: {err}");
+        assert!(err.contains("gh#312"), "and where the fix is tracked: {err}");
+        assert!(err.contains("sir-abc12345"), "and which fit: {err}");
     }
 
     fn digests(entries: &[(&str, &str)]) -> DataIdentity {
