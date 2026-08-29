@@ -134,6 +134,85 @@ pub fn jeffreys_label(db: f64) -> &'static str {
     else             { "overwhelming"   }
 }
 
+/// The Newey–West bandwidth used for the HAC `se(Δ)`:
+/// `L = floor(4·(T/100)^(2/9))` — the default of R's `sandwich` package
+/// (Zeileis 2004, J. Stat. Software 11(10)), from the Newey–West (1994)
+/// lag-selection family. Pinned as a constant rule, and pinned in the
+/// committed oracle fixture, so a future "improvement" cannot silently
+/// change reported SEs.
+pub fn newey_west_lag(t: usize) -> usize {
+    if t == 0 {
+        return 0;
+    }
+    (4.0 * (t as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize
+}
+
+/// Newey–West (Bartlett-kernel) long-run standard error of the SUM of a
+/// loss-differential series (Diebold & Mariano 1995; Newey & West 1987):
+///
+///   σ²_NW = γ̂₀ + 2 Σ_{k=1..L} (1 − k/(L+1)) γ̂_k,   se(Σd) = √(T·σ²_NW)
+///
+/// with the biased (1/T) sample autocovariances `γ̂_k` and the lag from
+/// [`newey_west_lag`]. Loss differentials are autocorrelated exactly when
+/// a model is misspecified — the interesting case — which makes the iid
+/// paired SE anti-conservative; the Bartlett weights keep the estimate
+/// positive semi-definite. At `L = 0` this reduces to the iid SE with the
+/// biased variance. Matches `sandwich::lrvar(type = "Newey-West",
+/// prewhite = FALSE, adjust = FALSE)` up to the mean-vs-sum scaling
+/// (lrvar returns σ²_NW/T, the variance of the mean).
+pub fn newey_west_se_of_sum(d: &[f64]) -> f64 {
+    let t = d.len();
+    if t < 2 {
+        return 0.0;
+    }
+    let tf = t as f64;
+    let mean = d.iter().sum::<f64>() / tf;
+    let centered: Vec<f64> = d.iter().map(|x| x - mean).collect();
+    let gamma = |k: usize| -> f64 {
+        centered[..t - k].iter().zip(&centered[k..])
+            .map(|(a, b)| a * b).sum::<f64>() / tf
+    };
+    let lag = newey_west_lag(t).min(t - 1);
+    let mut var = gamma(0);
+    for k in 1..=lag {
+        let w = 1.0 - k as f64 / (lag as f64 + 1.0);
+        var += 2.0 * w * gamma(k);
+    }
+    // The Bartlett kernel guarantees σ²_NW ≥ 0 for the full-lag window,
+    // but truncation can leave float dust below zero; clamp.
+    (tf * var.max(0.0)).sqrt()
+}
+
+/// The Harvey–Leybourne–Newbold (1997) small-sample factor for the
+/// Diebold–Mariano statistic at forecast horizon `h = 1`:
+/// `c = √((T + 1 − 2h + h(h−1)/T)/T) = √((T−1)/T)`. The corrected
+/// statistic is `DM·c` — equivalently, divide the SE by `c` — and the
+/// reference distribution is `t_{T−1}` rather than the normal.
+pub fn hln_factor(t: usize) -> f64 {
+    if t < 2 {
+        return 1.0;
+    }
+    ((t as f64 - 1.0) / t as f64).sqrt()
+}
+
+/// Sample lag-1 autocorrelation of `d` (mean-centred, denominator
+/// `Σ(d−d̄)²`) — the printed serial-dependence diagnostic beside the HAC
+/// `se(Δ)`. NaN for fewer than 3 points or a constant series.
+pub fn lag1_autocorrelation(d: &[f64]) -> f64 {
+    let t = d.len();
+    if t < 3 {
+        return f64::NAN;
+    }
+    let mean = d.iter().sum::<f64>() / t as f64;
+    let centered: Vec<f64> = d.iter().map(|x| x - mean).collect();
+    let denom: f64 = centered.iter().map(|x| x * x).sum();
+    if denom == 0.0 {
+        return f64::NAN;
+    }
+    centered[..t - 1].iter().zip(&centered[1..])
+        .map(|(a, b)| a * b).sum::<f64>() / denom
+}
+
 /// Is a paired difference inside its own noise band, `|Δ| < 2·se(Δ)`?
 ///
 /// `Δelpd` is a sum over the scored observations and `se(Δ)` is the paired
@@ -266,6 +345,71 @@ mod tests {
             assert_eq!(jeffreys_label(db), jeffreys_label(-db),
                 "label must be sign-symmetric at {} dB", db);
         }
+    }
+
+    /// Stage 4.3: the Newey–West HAC SE, HLN factor, and lag-1
+    /// autocorrelation against the committed external oracle
+    /// (`sandwich::lrvar`, Zeileis 2004; definitional HLN/lag-1 forms
+    /// computed in R). Regenerate with
+    /// `Rscript scripts/gen_newey_west_fixture.R`. `lrvar` returns the
+    /// variance of the MEAN, so `se_sum = T · se_mean`. Machine-precision
+    /// agreement: same estimator, independent implementation.
+    #[test]
+    fn newey_west_matches_the_sandwich_oracle() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/newey_west_ref.tsv");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let mut n_rows = 0;
+        for line in text.lines() {
+            if line.starts_with('#') || line.starts_with("case\t") || line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split('\t').collect();
+            assert_eq!(f.len(), 7, "malformed fixture row: {line}");
+            let case = f[0];
+            let t: usize = f[1].parse().unwrap();
+            let lag: usize = f[2].parse().unwrap();
+            let se_mean: f64 = f[3].parse().unwrap();
+            let hln: f64 = f[4].parse().unwrap();
+            let lag1: f64 = f[5].parse().unwrap();
+            let d: Vec<f64> = f[6].split(',').map(|v| v.parse().unwrap()).collect();
+            assert_eq!(d.len(), t, "{case}: series length");
+
+            assert_eq!(newey_west_lag(t), lag,
+                "{case}: the pinned bandwidth rule must match sandwich's default");
+            let se_sum = newey_west_se_of_sum(&d);
+            let want = t as f64 * se_mean;
+            assert!((se_sum - want).abs() <= 1e-10 * want.max(1.0),
+                "{case}: NW se of sum {se_sum} vs sandwich {want}");
+            assert!((hln_factor(t) - hln).abs() < 1e-12,
+                "{case}: HLN factor");
+            assert!((lag1_autocorrelation(&d) - lag1).abs() < 1e-12,
+                "{case}: lag-1 autocorrelation");
+            n_rows += 1;
+        }
+        assert!(n_rows >= 5, "fixture unexpectedly short: {n_rows} rows");
+    }
+
+    /// The HAC SE's design properties, independent of the oracle: it
+    /// exceeds the iid SE under positive autocorrelation (the
+    /// anti-conservative case the estimator exists for) and reduces to the
+    /// biased-variance iid SE at lag 0.
+    #[test]
+    fn newey_west_inflates_under_positive_autocorrelation() {
+        // A strongly positively autocorrelated series (slow sine drift).
+        let d: Vec<f64> = (0..80).map(|i| (i as f64 / 8.0).sin()).collect();
+        let t = d.len() as f64;
+        let mean = d.iter().sum::<f64>() / t;
+        let iid_var = d.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (t - 1.0);
+        let iid_se = (t * iid_var).sqrt();
+        let nw_se = newey_west_se_of_sum(&d);
+        assert!(nw_se > 1.5 * iid_se,
+            "positive autocorrelation must inflate the HAC SE: nw = {nw_se}, iid = {iid_se}");
+        // Tiny series, hand-computed: T = 2 → lag min(bw, T−1) = 1;
+        // centered [−½, ½] gives γ̂₀ = ¼, γ̂₁ = −⅛, Bartlett weight ½:
+        // σ² = ¼ + 2·½·(−⅛) = ⅛, se(Σd) = √(2·⅛) = ½.
+        assert!((newey_west_se_of_sum(&[1.0, 2.0]) - 0.5).abs() < 1e-12);
     }
 
     /// Stage 4.2: the filter-noise gate. A Δ inside twice the pair's
