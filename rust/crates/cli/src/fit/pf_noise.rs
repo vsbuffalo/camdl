@@ -27,9 +27,18 @@
 //! `s = sqrt(sigma_θ² + sigma_θ'²)`. Measured on a two-parameter SIR with 20
 //! daily observations at 200 particles: `sigma` 4.07 at the base θ, `s` 9.40
 //! across the step, implying `sigma_θ'` of 8.5 — the initial proposal is a
-//! large move and the filter is about twice as noisy where it lands. That is a
-//! fact about the run, and a ceiling computed from it errs toward saying the
-//! chain cannot accept, which is the safe direction.
+//! large move and the filter is about twice as noisy where it lands.
+//!
+//! It follows that what the preflight reports is a *bound* on the ceiling, not
+//! the ceiling. `2·Φ(−s/2)` is derived at `λ → 0`, where both evaluations sit
+//! at θ and the spread is `sigma_θ·sqrt(2)`. A full-size step gives a larger
+//! `s` whenever the filter is noisier at θ', so the reported number lands below
+//! the true `λ → 0` ceiling and the check can warn where a root does exist —
+//! a false alarm, which is why the disposition is warn-and-proceed rather than
+//! refuse. The direction is the usual one and not a guarantee: a θ' that lands
+//! somewhere quieter than the base point pushes the reported number above the
+//! limit instead. [`report`] says this in the output rather than leaving the
+//! number to read as the limit itself.
 //!
 //! # The check
 //!
@@ -136,11 +145,15 @@ impl PfNoiseCheck {
 /// The acceptance rate a pseudo-marginal random-walk Metropolis tends to as
 /// the proposal scale goes to zero: `2·Φ(−s/2)`.
 ///
-/// Equivalently `2·Φ(−sigma/sqrt(2))` for two independent evaluations; the `s`
-/// form is the one implemented against because it is scheme-agnostic. Verified
-/// by direct Monte Carlo of the noise-only chain (proposal, "Mechanism"):
-/// 0.4795 against 0.4805/0.4807 at `sigma = 1`, 0.1573 against 0.1561/0.1555
-/// at `sigma = 2`.
+/// Equivalently `2·Φ(−sigma/sqrt(2))` in that limit, where both evaluations see
+/// the same noise level; the `s` form is the one implemented against because it
+/// is scheme-agnostic. Verified by direct Monte Carlo of the noise-only chain
+/// (proposal, "Mechanism"): 0.4795 against 0.4805/0.4807 at `sigma = 1`,
+/// 0.1573 against 0.1561/0.1555 at `sigma = 2`.
+///
+/// Exact in its argument. What makes the *reported* figure a bound rather than
+/// the limit is which `s` [`measure`] feeds it — one taken across a full
+/// proposal step. See the module docs.
 pub fn acceptance_ceiling(s: f64) -> f64 {
     if !s.is_finite() || s < 0.0 {
         return f64::NAN;
@@ -401,6 +414,10 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
     out.push_str(&format!(
         "  acceptance ceiling 2·Φ(-s/2) = {}   target 0.234 + 0.206/d = {:.1}% (d = {})\n",
         percent(ceiling), target * 100.0, d));
+    out.push_str(
+        "    s spans a full proposal step, not the λ→0 limit the formula derives, and \
+         the\n    filter is usually noisier at θ' than at θ — so read the ceiling as a \
+         conservative\n    bound on that limit rather than as the limit itself.\n");
 
     match verdict {
         CeilingVerdict::Unreachable => {
@@ -411,7 +428,8 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
                  under-mixes\n    \
                  however long it runs; s would have to fall below {:.2} to clear the \
                  target.\n    {}\n    \
-                 Proceeding anyway — this is a diagnosis, not a refusal.\n",
+                 Proceeding anyway — a diagnosis, not a refusal, and a conservative \
+                 one: a\n    bound below the limit can warn where a root does exist.\n",
                 target * 100.0, cross, remedy(check)));
         }
         CeilingVerdict::Reachable => {
@@ -716,6 +734,26 @@ mod tests {
         let cpm = report(&check_at(9.4, 4.07, Some(0.9)), -72.6, 2, 20);
         assert!(cpm.contains("raise rho above 0.90"), "{cpm}");
         assert!(!cpm.contains("set `rho`"), "{cpm}");
+    }
+
+    /// The reported figure is not the `λ → 0` ceiling the formula derives —
+    /// `s` is measured across a full proposal step — so the report has to say
+    /// so on every branch, and the warning has to own that it can fire where a
+    /// root does exist. Naming it a ceiling without that is a precision the
+    /// measurement does not have.
+    #[test]
+    fn the_ceiling_is_reported_as_a_bound_not_as_the_limit() {
+        let below = report(&check_at(2.0 * std::f64::consts::SQRT_2, 2.0, None), -1.0, 17, 84);
+        let above = report(&check_at(0.5 * std::f64::consts::SQRT_2, 0.5, None), -1.0, 17, 84);
+        let s = crossover_s(17);
+        let at = report(&check_at(s, s / std::f64::consts::SQRT_2, None), -1.0, 17, 84);
+        for (label, out) in [("below", &below), ("above", &above), ("at", &at)] {
+            assert!(out.contains("not the λ→0 limit the formula derives"),
+                "{label}: the scope of s must be stated:\n{out}");
+            assert!(out.contains("conservative"), "{label}: {out}");
+        }
+        assert!(below.contains("can warn where a root does exist"),
+            "the below-target branch must own its false-alarm mode:\n{below}");
     }
 
     /// The report names the scheme, because `s` is a property of the scheme
