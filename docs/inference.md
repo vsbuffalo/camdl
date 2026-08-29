@@ -1108,9 +1108,9 @@ init { I ~ poisson(rate = I0)
 With it, PGAS's CSMC draws each particle's own $x_0$ and
 $\log p(x_0 \mid \theta)$ enters the complete-data likelihood as its own term —
 reported per sweep in the `initial_state_ll` column of the chain trace — so the
-MH ratio constrains `I0`. IF2, `pfilter` and plain `pmmh` use the same
-declaration for the draw alone. Without it the term is exactly zero, on every
-chain and from every start.
+MH ratio constrains `I0`. IF2, `pfilter` and `pmmh` — with `rho` or without —
+use the same declaration for the draw alone. Without it the term is exactly
+zero, on every chain and from every start.
 
 Nothing auto-detects initial-value parameters. PGAS used to: it finite-
 differenced a rounded initial count from the chain's own starting draw and
