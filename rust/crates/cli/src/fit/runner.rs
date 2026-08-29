@@ -87,6 +87,10 @@ pub struct FitRunConfig {
     /// §Proposal 3). Same per-stage override semantics as `loglik_eval`.
     /// Consumed by Step 8.
     pub gate: super::config_v2::GateConfig,
+    /// The applied training window (gh#585): `Some` iff the fit declared a
+    /// holdout and `build` actually truncated/validated training against
+    /// it. Recorded into `fit.meta.json` as the §3.7.3(b) proof.
+    pub applied_training_window: Option<TrainingWindow>,
 }
 
 /// Result of running multiple IF2 chains.
@@ -343,6 +347,19 @@ impl FitRunConfig {
         let mut streams =
             resolve_and_load_obs_streams(&model, &compiled, &effective, dt, &time_opts)?;
 
+        // gh#585 / Stage 3.1: the declared holdout, applied. Training
+        // truncation happens HERE — the fit-only callsite — never inside
+        // `resolve_and_load_obs_streams`, whose other callers (pfilter,
+        // profile, compare's holdout scoring) must see the full series.
+        let applied_training_window = apply_holdout_declaration(
+            &mut streams,
+            fit.data.as_ref(),
+            &model,
+            compiled.model.simulation.t_start,
+            dt,
+            &time_opts,
+        )?;
+
         // Canonical observations: the sorted-unique UNION of every stream's
         // observation times (multi-cadence, proposal 2026-06-10 §3.3). This is
         // what feeds the filter's substep grid, `n_observations`, the W329
@@ -530,6 +547,7 @@ impl FitRunConfig {
             ic_free,
             loglik_eval: super::config_v2::LoglikEvalConfig::default(),
             gate: super::config_v2::GateConfig::default(),
+            applied_training_window,
         })
     }
 
@@ -1737,6 +1755,139 @@ pub(crate) fn stream_specs_from_obs_streams(
 /// `dt`-grid alignment is checked here so a mis-specified boundary fails at
 /// build time rather than tripping the chain-binomial step-boundary invariant
 /// downstream.
+pub use crate::run_meta::TrainingWindow;
+
+/// Resolve the fit's holdout declaration and apply it to the loaded
+/// training streams (gh#585, Stage 3.1).
+///
+/// - `holdout_after = τ` (bare model time, a date, or `last_obs - N unit`
+///   through the shared gh#626 grammar; anchors resolve over the union of
+///   the bound streams' times): every loaded observation row with
+///   `t > τ` is removed from training — data, cells, and aux stay
+///   parallel. τ must cut strictly inside the observed range: at or
+///   before the first observation there is nothing to train on, at or
+///   after the last there is nothing withheld and the declaration would
+///   be inert again — both hard errors.
+/// - `[data.holdout]` explicit files: the training streams are left
+///   whole; each holdout file is loaded (same loader, same checks) and
+///   must lie strictly after its stream's last training time — tail-only
+///   in v1 (decision 6); an interleaved holdout names the h-block
+///   follow-up (§3.9.2). `train_end` is the latest training time across
+///   streams.
+///
+/// Called from the fit-only path (`FitRunConfig::build`) — never from the
+/// shared loading seam, which `pfilter`/`profile`/compare's holdout
+/// scoring also use and which must see the full series.
+pub(crate) fn apply_holdout_declaration(
+    streams: &mut [ObsStream],
+    data: Option<&super::config_v2::DataSpec>,
+    model: &ir::Model,
+    t_start: f64,
+    dt: f64,
+    time_opts: &crate::caltime_load::TimeOpts,
+) -> Result<Option<TrainingWindow>, String> {
+    let Some(data) = data else { return Ok(None) };
+
+    if let Some(spec) = &data.holdout_after {
+        let raw = spec.raw();
+        let all_times = || streams.iter().flat_map(|s| s.data.iter().map(|o| o.time));
+        let first_obs = all_times().fold(f64::INFINITY, f64::min);
+        let last_obs = all_times().fold(f64::NEG_INFINITY, f64::max);
+        let tau = match parse_time_spec(
+            "holdout_after", &raw, model.origin.as_deref(), &model.time_unit)? {
+            TimeSpec::Absolute(v) => v,
+            TimeSpec::Anchored(a) => {
+                let anchor_time = match a.anchor {
+                    ObsAnchor::First => first_obs,
+                    ObsAnchor::Last => last_obs,
+                };
+                a.resolve(anchor_time)
+            }
+        };
+        if tau <= first_obs + TIME_TIE_EPS {
+            return Err(format!(
+                "holdout_after = \"{raw}\" resolves to t = {tau}, at or before \
+                 the first observation (t = {first_obs}) — no training data \
+                 would remain. The boundary must cut strictly inside the \
+                 observed range: first_obs < holdout_after < last_obs."));
+        }
+        if tau >= last_obs - TIME_TIE_EPS {
+            return Err(format!(
+                "holdout_after = \"{raw}\" resolves to t = {tau}, at or after \
+                 the last observation (t = {last_obs}) — nothing would be \
+                 withheld and the declaration would be inert. The boundary \
+                 must cut strictly inside the observed range: \
+                 first_obs < holdout_after < last_obs."));
+        }
+        let mut withheld = 0usize;
+        for s in streams.iter_mut() {
+            let keep: Vec<bool> =
+                s.data.iter().map(|o| o.time <= tau + TIME_TIE_EPS).collect();
+            withheld += keep.iter().filter(|k| !**k).count();
+            let mut ki = keep.iter();
+            s.data.retain(|_| *ki.next().unwrap());
+            let mut ki = keep.iter();
+            s.cells.retain(|_| *ki.next().unwrap());
+            let mut ki = keep.iter();
+            s.aux.retain(|_| *ki.next().unwrap());
+        }
+        eprintln!(
+            "  \x1b[36mholdout:\x1b[0m training window [{t_start}, {tau}]; \
+             {withheld} observation row(s) at t > {tau} withheld from \
+             training (scored out-of-sample by `camdl compare`)");
+        return Ok(Some(TrainingWindow { train_end: tau }));
+    }
+
+    if let Some(holdout_files) = &data.holdout {
+        let sources: Vec<&str> =
+            streams.iter().map(|s| s.obs_model_ir.source.as_str()).collect();
+        let mut train_end = f64::NEG_INFINITY;
+        let mut n_holdout = 0usize;
+        for (source, path) in holdout_files {
+            let Some(s) = streams.iter()
+                .find(|s| s.obs_model_ir.source == *source) else {
+                return Err(format!(
+                    "[data.holdout] names stream '{source}', which is not a \
+                     bound observation stream (bound: {}).",
+                    sources.join(", ")));
+            };
+            let last_train = s.data.iter()
+                .map(|o| o.time).fold(f64::NEG_INFINITY, f64::max);
+            let siblings: Vec<&ir::observation::ObservationModel> =
+                model.observations.iter()
+                    .filter(|o| o.source == *source)
+                    .collect();
+            let (hold_obs, _cells, _aux) =
+                load_observations(path, &s.obs_model_ir, &siblings, dt, time_opts)?;
+            let first_hold = hold_obs.iter()
+                .map(|o| o.time).fold(f64::INFINITY, f64::min);
+            if first_hold <= last_train + TIME_TIE_EPS {
+                return Err(format!(
+                    "[data.holdout] for stream '{source}': held-out time \
+                     t = {first_hold} does not lie strictly after the last \
+                     training time t = {last_train}. v1 supports tail-only \
+                     holdouts (decision 6 of the 2026-08-29 proposal); an \
+                     interior/interleaved holdout is the h-block follow-up \
+                     (§3.9.2)."));
+            }
+            n_holdout += hold_obs.len();
+            train_end = train_end.max(last_train);
+        }
+        eprintln!(
+            "  \x1b[36mholdout:\x1b[0m training window [{t_start}, {train_end}]; \
+             {n_holdout} held-out observation row(s) bound as the tail \
+             (scored out-of-sample by `camdl compare`)");
+        return Ok(Some(TrainingWindow { train_end }));
+    }
+
+    Ok(None)
+}
+
+/// Tolerance for "the same observation time" comparisons at the holdout
+/// boundary — float noise from a date→time conversion must not move a row
+/// across the training/held-out cut.
+const TIME_TIE_EPS: f64 = 1e-9;
+
 pub fn resolve_condition_from(
     spec: &str,
     first_obs_time: f64,
@@ -6309,6 +6460,189 @@ dt = 1.0
             assert!(c.validate_labels(&["afp".to_string()]).is_ok());
             // And `default` as a stream label is fine under `All` (no table).
             assert!(c.validate_labels(&["default".to_string()]).is_ok());
+        }
+    }
+
+    /// gh#585 (Stage 3.1): the declared holdout is APPLIED at fit load —
+    /// `holdout_after` truncates training, `[data.holdout]` files are
+    /// tail-only validated, and the applied window rides on the run config
+    /// for the fit.meta.json proof.
+    mod holdout_build {
+        use crate::fit::config_v2::FitConfigV2;
+        use crate::fit::runner::{FitRunConfig, TrainingWindow};
+
+        /// Minimal v2 fit.toml against the seir_observations golden IR:
+        /// weekly_cases at t = 7, 14, 21, 28, 35; dt = 1; optional
+        /// `holdout_after` value (verbatim TOML) and optional
+        /// `[data.holdout]` file for the stream.
+        fn fixture(
+            dir: &std::path::Path,
+            holdout_after: Option<&str>,
+            holdout_tsv: Option<&str>,
+        ) -> FitConfigV2 {
+            let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+            let ir_path = format!(
+                "{}/../../../ocaml/golden/seir_observations.ir.json", manifest);
+            let data_path = dir.join("obs.tsv");
+            std::fs::write(&data_path,
+                "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+            let holdout_after_line = holdout_after
+                .map(|h| format!("holdout_after = {h}\n"))
+                .unwrap_or_default();
+            let holdout_table = match holdout_tsv {
+                Some(tsv) => {
+                    let hp = dir.join("holdout.tsv");
+                    std::fs::write(&hp, tsv).unwrap();
+                    format!("[data.holdout]\nweekly_cases = \"{}\"\n", hp.display())
+                }
+                None => String::new(),
+            };
+            let fit_toml_path = dir.join("fit.toml");
+            let toml_src = format!(r#"
+output_dir = "{}"
+
+[model]
+camdl = "{ir_path}"
+
+[data]
+{holdout_after_line}
+[data.observations]
+weekly_cases = "{}"
+
+{holdout_table}
+[estimate.I0]
+bounds = [1, 1000]
+start  = 5
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+beta     = 0.1
+
+[stages.scout]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 1
+particles  = 100
+iterations = 1
+cooling    = 0.5
+
+[config]
+dt = 1.0
+"#, dir.display(), data_path.display());
+            std::fs::write(&fit_toml_path, toml_src).unwrap();
+            FitConfigV2::load(&fit_toml_path.to_string_lossy()).expect("fit.toml parse")
+        }
+
+        fn test_dir(tag: &str) -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!(
+                "camdl_holdout_{}_{}_{}", tag, std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        fn build(fit: &FitConfigV2) -> Result<FitRunConfig, String> {
+            FitRunConfig::build(fit, None, 1, 100, 1, 0.5, 50, 1, false)
+        }
+
+        #[test]
+        fn holdout_after_truncates_training() {
+            let dir = test_dir("truncate");
+            let fit = fixture(&dir, Some("21.0"), None);
+            let config = build(&fit).expect("holdout_after must build");
+            // Training excludes t > 21: union grid and every stream cut.
+            let max_t = config.observations.iter()
+                .map(|o| o.time).fold(f64::NEG_INFINITY, f64::max);
+            assert_eq!(max_t, 21.0, "union grid must end at the training window");
+            for s in &config.streams {
+                assert!(s.data.iter().all(|o| o.time <= 21.0),
+                    "stream '{}' retains a withheld observation", s.name);
+                assert_eq!(s.data.len(), 3, "t = 7, 14, 21 remain");
+                assert_eq!(s.cells.len(), 3, "cells stay parallel to data");
+                assert_eq!(s.aux.len(), 3, "aux stays parallel to data");
+            }
+            assert_eq!(config.applied_training_window,
+                Some(TrainingWindow { train_end: 21.0 }),
+                "the applied window must ride on the run config");
+        }
+
+        #[test]
+        fn no_declaration_applies_no_window() {
+            let dir = test_dir("none");
+            let fit = fixture(&dir, None, None);
+            let config = build(&fit).expect("plain fit must build");
+            assert_eq!(config.applied_training_window, None);
+            assert_eq!(config.observations.len(), 5, "nothing truncated");
+        }
+
+        #[test]
+        fn holdout_after_outside_observed_range_errors() {
+            // At/after the last observation: nothing withheld — the inert
+            // declaration gh#585 exists to kill. Hard error.
+            let dir = test_dir("late");
+            let fit = fixture(&dir, Some("35.0"), None);
+            let err = match build(&fit) { Err(e) => e, Ok(_) => panic!("inert holdout_after must error") };
+            assert!(err.contains("inert") || err.contains("withheld"),
+                "must say nothing would be withheld: {err}");
+            // At/before the first observation: no training data.
+            let dir = test_dir("early");
+            let fit = fixture(&dir, Some("7.0"), None);
+            let err = match build(&fit) { Err(e) => e, Ok(_) => panic!("empty-training holdout_after must error") };
+            assert!(err.contains("no training data"),
+                "must say no training data would remain: {err}");
+        }
+
+        #[test]
+        fn holdout_after_accepts_anchored_spec() {
+            // The shared gh#626 grammar: `last_obs - 1 week` = 35 − 7 = 28.
+            let dir = test_dir("anchored");
+            let fit = fixture(&dir, Some("\"last_obs - 1 week\""), None);
+            let config = build(&fit).expect("anchored holdout_after must build");
+            assert_eq!(config.applied_training_window,
+                Some(TrainingWindow { train_end: 28.0 }));
+            assert_eq!(config.observations.len(), 4, "t = 7..28 remain");
+        }
+
+        #[test]
+        fn explicit_holdout_must_be_tail_only() {
+            // A holdout file strictly after the training tail binds; the
+            // window records the last TRAINING time.
+            let dir = test_dir("tail");
+            let fit = fixture(&dir, None,
+                Some("time\tweekly_cases\n42\t6\n49\t7\n"));
+            let config = build(&fit).expect("tail holdout files must build");
+            assert_eq!(config.applied_training_window,
+                Some(TrainingWindow { train_end: 35.0 }));
+            assert_eq!(config.observations.len(), 5,
+                "training streams are left whole");
+
+            // An interleaved holdout is h-block territory (decision 6).
+            let dir = test_dir("interleaved");
+            let fit = fixture(&dir, None,
+                Some("time\tweekly_cases\n21\t9\n42\t6\n"));
+            let err = match build(&fit) { Err(e) => e, Ok(_) => panic!("interleaved holdout must error") };
+            assert!(err.contains("h-block"),
+                "must name the h-block follow-up: {err}");
+        }
+
+        #[test]
+        fn unknown_holdout_stream_errors() {
+            let dir = test_dir("unknown");
+            let mut fit = fixture(&dir, None,
+                Some("time\tweekly_cases\n42\t6\n"));
+            let data = fit.data.as_mut().unwrap();
+            let map = data.holdout.as_mut().unwrap();
+            let path = map.shift_remove("weekly_cases").unwrap();
+            map.insert("no_such_stream".into(), path);
+            let err = match build(&fit) { Err(e) => e, Ok(_) => panic!("unknown holdout stream must error") };
+            assert!(err.contains("no_such_stream") && err.contains("bound"),
+                "must name the unknown stream and the bound set: {err}");
         }
     }
 
