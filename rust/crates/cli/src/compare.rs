@@ -31,6 +31,19 @@ pub(crate) const DEFAULT_DERIVE_PARTICLES: usize = 1000;
 /// Default filter seed for auto-deriving a prequential from a fit handle.
 pub(crate) const DEFAULT_DERIVE_SEED: u64 = 1;
 
+/// Printed once under any rendering that shows an evidence label.
+///
+/// The tier names ("strong", "decisive") come from Jeffreys' scale for **Bayes
+/// factors** — marginal likelihoods with the parameters integrated out. What
+/// the evidence column holds is a plug-in predictive likelihood ratio at a
+/// single θ̂ fit to the same observations, which is a different quantity: it
+/// carries no parameter-uncertainty penalty and no Occam factor. The tier is a
+/// reading aid for magnitude, and the reader is told so rather than left to
+/// infer a Bayes-factor interpretation from the vocabulary.
+const JEFFREYS_SCALE_NOTE: &str =
+    "The Jeffreys tiers calibrate Bayes factors; these are in-sample \
+     likelihood ratios, not Bayes factors.";
+
 /// Settings applied uniformly to every fit handle whose prequential is
 /// auto-derived, so T_score and the scores stay commensurable across the
 /// compared fits. An explicit `prequential.json` input ignores these (it is
@@ -881,6 +894,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         idx
     };
     let mut body: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+    let mut any_evidence = false;
     for &i in &order {
         let r = &rows[i];
         let elpd = r.trace.elpd();
@@ -904,8 +918,8 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
             row.push(format!("{:+.2}", d));
             row.push(fmt_lr(d.exp()));
             row.push(format!("{:.2}", se));
-            let (_, evidence) = crate::evidence::evidence_cells(d);
-            row.push(evidence);
+            row.push(crate::evidence::evidence_cell(d, se));
+            any_evidence |= d.is_finite();
         }
         if want_crps {
             row.push(format!("{:.3}", r.trace.mean_crps()));
@@ -946,6 +960,10 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         base.n_scored(), base.t0, rows[base_idx].name));
     if !t_mismatch {
         out.push_str("Sorted by Δelpd ascending — best-supported model at the bottom.\n");
+    }
+    if any_evidence {
+        out.push_str(JEFFREYS_SCALE_NOTE);
+        out.push('\n');
     }
     if t_mismatch {
         out.push_str("⚠ T_score differs across models — Δ columns suppressed \
@@ -1032,6 +1050,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
         });
         idx
     };
+    let mut any_evidence = false;
     for &i in &order {
         let r = &rows[i];
         let mut cells: Vec<String> = vec![
@@ -1049,8 +1068,8 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
             cells.push(format!("{:+.2}", d));
             cells.push(fmt_lr(d.exp()));
             cells.push(format!("{:.2}", se));
-            let (_, evidence) = crate::evidence::evidence_cells(d);
-            cells.push(evidence);
+            cells.push(crate::evidence::evidence_cell(d, se));
+            any_evidence |= d.is_finite();
         }
         if want_crps {
             cells.push(format!("{:.3}", r.trace.mean_crps()));
@@ -1069,6 +1088,10 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
         out.push('\n');
         out.push_str("_Sorted by Δelpd ascending — best-supported model at the bottom._\n");
     }
+    if any_evidence {
+        out.push('\n');
+        out.push_str(&format!("_{JEFFREYS_SCALE_NOTE}_\n"));
+    }
     out
 }
 
@@ -1084,13 +1107,17 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         let mean_dcrps = if r.trace.n_scored() == 0 { f64::NAN }
             else { d_crps / r.trace.n_scored() as f64 };
         let lr = if d_elpd.is_finite() { d_elpd.exp() } else { f64::NAN };
-        // Evidence: Δelpd (nats) → decibans + Jeffreys label. Derived
-        // field for human-interpretable consumption; nats remain the
-        // primary machine-readable quantity (delta_elpd). See
+        // Evidence: Δelpd (nats) → decibans + a label. Derived field for
+        // human-interpretable consumption; nats remain the primary
+        // machine-readable quantity (delta_elpd). The label is
+        // `within_noise` when |Δ| < 2·se(Δ), else the Jeffreys tier —
+        // consumers reading the tier without the SE get the same gate the
+        // table shows. See
         // docs/dev/proposals/2026-04-23-evidence-in-decibans.md.
         let (d_elpd_db, evidence_label) = if d_elpd.is_finite() {
             let db = d_elpd * crate::evidence::NATS_TO_DB;
-            (option_finite(db), serde_json::json!(crate::evidence::jeffreys_label(db)))
+            (option_finite(db),
+             serde_json::json!(crate::evidence::evidence_label(d_elpd, se_elpd)))
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
         };
@@ -1109,9 +1136,16 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             "pit_cov90": r.trace.pit_coverage(0.90),
         })
     }).collect();
+    let any_evidence = rows.iter().enumerate().any(|(i, r)| {
+        i != base_idx && paired_delta(&r.trace, base, Field::LogScore).0.is_finite()
+    });
     let out = json!({
         "baseline": rows[base_idx].name,
         "metrics": metrics,
+        // The same footnote the table and markdown renderers print: a consumer
+        // reading `evidence_label` out of the JSON must get the caveat that
+        // travels with it.
+        "evidence_scale_note": any_evidence.then_some(JEFFREYS_SCALE_NOTE),
         "rows": entries,
     });
     format!("{}\n", serde_json::to_string_pretty(&out).unwrap())
@@ -1150,6 +1184,60 @@ mod tests {
         let json = render_json(&rows, 0, &metrics);
         assert!(json.contains("\"lr\""), "the JSON key is `lr`:\n{json}");
         assert!(!json.contains("\"e_t\""), "and never `e_t`:\n{json}");
+    }
+
+    /// A Δelpd smaller than twice its own paired standard error is not evidence
+    /// of anything, and a Jeffreys word attached to it reads as a finding. Here
+    /// Δ = +1.00 nats with se(Δ) = 1.00: the tier would have been
+    /// "indeterminate" at ±4.3 dB, but even "indeterminate" is a claim about a
+    /// quantity we cannot resolve. Every format says so instead.
+    #[test]
+    fn a_delta_inside_the_paired_se_band_prints_within_noise() {
+        // diffs = [+1, 0, 0] → Δ = 1.00, se = √(3·Var) = 1.00, so |Δ| < 2·se.
+        let rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        let metrics = vec!["elpd".to_string()];
+
+        let table = render_table(&rows, 0, &metrics, false);
+        assert!(table.contains("within noise"),
+            "a Δ inside the noise band is labelled `within noise`:\n{table}");
+        assert!(!table.contains("indeterminate"),
+            "and carries no Jeffreys tier:\n{table}");
+        assert!(table.contains("not Bayes factors"),
+            "a table showing evidence labels states what the Jeffreys scale \
+             calibrates:\n{table}");
+
+        let md = render_md(&rows, 0, &metrics, false);
+        assert!(md.contains("within noise"), "the md table agrees:\n{md}");
+        assert!(!md.contains("indeterminate"), "{md}");
+        assert!(md.contains("not Bayes factors"), "{md}");
+
+        let json = render_json(&rows, 0, &metrics);
+        assert!(json.contains("\"evidence_label\": \"within_noise\""),
+            "the JSON label is `within_noise`, not a tier:\n{json}");
+    }
+
+    /// The negative control: a Δ well outside the noise band keeps its tier, so
+    /// the gate cannot be satisfied by silencing every label. diffs = [3, 3, 4]
+    /// → Δ = 10 nats, se = 1.00.
+    #[test]
+    fn a_delta_beyond_the_paired_se_band_keeps_its_tier() {
+        let rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-3.0, -3.0, -2.0]),
+        ];
+        let metrics = vec!["elpd".to_string()];
+
+        let table = render_table(&rows, 0, &metrics, false);
+        assert!(table.contains("overwhelming for"),
+            "10 nats ≈ 43 dB against se = 1.00 keeps its tier:\n{table}");
+        assert!(!table.contains("within noise"), "{table}");
+
+        let json = render_json(&rows, 0, &metrics);
+        assert!(json.contains("\"evidence_label\": \"overwhelming\""),
+            "the JSON label is the tier:\n{json}");
     }
 
     /// gh#706. `paired_delta` pairs steps BY INDEX, which is safe for the
