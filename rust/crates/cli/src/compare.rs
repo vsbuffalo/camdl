@@ -182,13 +182,10 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         }
     }
 
-    // #295 Ask 1: surface the optimism so an in-sample / plug-in score is never
-    // silently read as an honest out-of-sample forecast score. Today every trace
-    // is plug-in + in-sample, so this always fires; when posterior / LFO traces
-    // exist, the per-trace tag drives it.
-    if let Some(caveat) = rows.iter().find_map(|r| r.trace.optimism_caveat()) {
-        eprintln!("note: {caveat}");
-    }
+    // #295 Ask 1 — the optimism caveat, the miscalibration flags and the trace
+    // warnings are emitted by the RENDERERS (`warning_lines`), not here, so they
+    // travel with the artifact: a markdown table pasted into a report and a JSON
+    // document read by a script carry the same caveats the terminal shows.
 
     // Baseline: explicit > cfg > argmax elpd.
     let baseline_name = baseline.or(cfg_baseline).unwrap_or_else(|| {
@@ -965,23 +962,51 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         out.push_str(JEFFREYS_SCALE_NOTE);
         out.push('\n');
     }
+    for line in warning_lines(rows, t_mismatch) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Everything below the table that the reader must not miss: the suppressed-Δ
+/// notice, the miscalibration flags, each trace's own warnings, and the
+/// optimism caveat.
+///
+/// One function, called by every renderer, because the failure this guards is
+/// asymmetry: the table warned about a miscalibrated model and the markdown
+/// someone pasted into a report did not. A new warning added here appears in
+/// every format by construction.
+fn warning_lines(rows: &[Row], t_mismatch: bool) -> Vec<String> {
+    let mut lines = Vec::new();
     if t_mismatch {
-        out.push_str("⚠ T_score differs across models — Δ columns suppressed \
-            (--allow-mismatched-horizon was set).\n");
+        lines.push("⚠ T_score differs across models — Δ columns suppressed \
+            (--allow-mismatched-horizon was set).".to_string());
     }
     // PIT warnings — flag clear miscalibration.
     for r in rows {
         if let Some(w) = pit_coverage_warning(r) {
-            out.push_str(&format!("⚠ {w}\n"));
+            lines.push(format!("⚠ {w}"));
         }
     }
     // Propagate trace-level warnings.
     for r in rows {
         for w in &r.trace.warnings {
-            out.push_str(&format!("ⓘ {}: {:?}\n", r.name, w));
+            lines.push(format!("ⓘ {}: {:?}", r.name, w));
         }
     }
-    out
+    if let Some(caveat) = optimism_caveat(rows) {
+        lines.push(format!("note: {caveat}"));
+    }
+    lines
+}
+
+/// The optimism caveat carried by the compared traces (#295) — plug-in and/or
+/// in-sample, and what that does to the level and to the differences. Today
+/// every trace is both, so this always fires; when posterior / LFO traces
+/// exist, the per-trace tag drives it.
+fn optimism_caveat(rows: &[Row]) -> Option<String> {
+    rows.iter().find_map(|r| r.trace.optimism_caveat())
 }
 
 /// The `⚠` line for a row whose 90% predictive interval covers far less than
@@ -1092,6 +1117,15 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
         out.push('\n');
         out.push_str(&format!("_{JEFFREYS_SCALE_NOTE}_\n"));
     }
+    // The same block the text table prints, as a markdown list so each warning
+    // stays its own line when the document is rendered.
+    let warnings = warning_lines(rows, t_mismatch);
+    if !warnings.is_empty() {
+        out.push('\n');
+        for line in warnings {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
     out
 }
 
@@ -1134,6 +1168,16 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             "mean_crps": r.trace.mean_crps(),
             "delta_mean_crps": option_finite(mean_dcrps),
             "pit_cov90": r.trace.pit_coverage(0.90),
+            // How this row's score was built and what it saw: the two optimism
+            // axes (#295), per row because a cohort may mix them once posterior
+            // / LFO traces exist.
+            "provenance": r.trace.provenance,
+            "conditioning": r.trace.conditioning,
+            // The trace's own warnings and the miscalibration flag, verbatim
+            // from the same source the table prints — a script reading the JSON
+            // must not have to re-derive them from `pit_cov90`.
+            "warnings": r.trace.warnings,
+            "pit_cov90_warning": pit_coverage_warning(r),
         })
     }).collect();
     let any_evidence = rows.iter().enumerate().any(|(i, r)| {
@@ -1146,6 +1190,9 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         // reading `evidence_label` out of the JSON must get the caveat that
         // travels with it.
         "evidence_scale_note": any_evidence.then_some(JEFFREYS_SCALE_NOTE),
+        // #295: the plug-in / in-sample caveat, `null` only when every compared
+        // trace is honest on both axes.
+        "optimism_caveat": optimism_caveat(rows),
         "rows": entries,
     });
     format!("{}\n", serde_json::to_string_pretty(&out).unwrap())
@@ -1292,6 +1339,56 @@ mod tests {
         assert_eq!(cells[6], "", "the absent baseline score is empty: {cells:?}");
         assert_eq!(cells[7], "", "the absent difference is empty: {cells:?}");
         assert!(!tsv.contains("NaN"), "never NaN: {tsv}");
+    }
+
+    /// gh#295 / the "one format, one warning" rule: a warning or caveat that
+    /// the table prints and another format drops is a silent-wrong answer for
+    /// whoever reads that other format. The markdown table is what goes into a
+    /// report and the JSON is what a script reads — a miscalibration flag, a
+    /// trace warning, and the optimism caveat must reach all three.
+    #[test]
+    fn no_output_format_drops_a_warning_or_the_optimism_caveat() {
+        use sim::inference::prequential::PrequentialWarning;
+        let mut rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        // Row `b`: every observation lands outside its own 90% predictive
+        // interval (PIT 0.99), and the filter saved no predictive samples.
+        for s in &mut rows[1].trace.steps {
+            s.pit = 0.99;
+        }
+        rows[1].trace.warnings.push(PrequentialWarning::SamplesNotSaved);
+        let metrics = vec!["elpd".to_string(), "pit_cov90".to_string()];
+
+        let table = render_table(&rows, 0, &metrics, false);
+        let md = render_md(&rows, 0, &metrics, false);
+        let json = render_json(&rows, 0, &metrics);
+
+        for (fmt, text) in [("table", &table), ("md", &md)] {
+            assert!(text.contains("PIT 90%-coverage"),
+                "the {fmt} rendering carries the miscalibration flag:\n{text}");
+            assert!(text.contains("SamplesNotSaved"),
+                "the {fmt} rendering carries the trace warning:\n{text}");
+            assert!(text.contains("not a leave-future-out forecast score"),
+                "the {fmt} rendering carries the optimism caveat:\n{text}");
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["rows"][0]["conditioning"], "in_sample",
+            "each row states how θ was conditioned:\n{json}");
+        assert_eq!(v["rows"][0]["provenance"], "plug_in",
+            "and how the predictive was built:\n{json}");
+        assert!(v["optimism_caveat"].as_str()
+                .is_some_and(|s| s.contains("not a leave-future-out forecast score")),
+            "the caveat is a top-level field:\n{json}");
+        assert_eq!(v["rows"][1]["warnings"][0]["kind"], "samples_not_saved",
+            "the trace's own warnings ride with its row:\n{json}");
+        assert!(v["rows"][1]["pit_cov90_warning"].as_str()
+                .is_some_and(|s| s.contains("PIT 90%-coverage")),
+            "and the miscalibration flag the table prints:\n{json}");
+        assert!(v["rows"][0]["pit_cov90_warning"].is_null(),
+            "a well-calibrated row carries no flag:\n{json}");
     }
 
     /// A trace with joint scores at the given times and no per-stream breakdown.
