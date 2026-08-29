@@ -9,10 +9,10 @@
 //! scores finitely is a bug in the CPM draw machinery, not a property of the
 //! likelihood.
 //!
-//! The existing CPM tests (tests/pmmh.rs) only exercise the uniform-window
-//! GATE on a gentle pure-death + Poisson model; they never compare the CPM
-//! loglik against the plain PF on a sharp, high-count likelihood — which is
-//! the regime that trips gh#193.
+//! The CPM tests in tests/pmmh.rs only exercise the observation-grid handling
+//! on a gentle pure-death + Poisson model; they never compare the CPM loglik
+//! against the plain PF on a sharp, high-count likelihood — which is the regime
+//! that trips gh#193.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use sim::{
     config::ChainBinomialConfig,
     compiled_model::CompiledModel,
     inference::{
-        correlated_pf::{bootstrap_filter_correlated, validate_cpm_obs_grid, PFRandomState},
+        correlated_pf::{bootstrap_filter_correlated, cpm_steps_per_obs, validate_cpm_obs_grid, PFRandomState},
         obs_loglik::negbin_logpmf,
         particle_filter::bootstrap_filter,
         traits::{ObservationModel, SMCConfig},
@@ -233,11 +233,10 @@ fn compare_filters(compiled: CompiledModel, params: &[f64], inf_idx: usize, n_pa
     };
 
     let plain = bootstrap_filter(&process, &obs_model, params, &config, 7).unwrap();
-    let n_obs = obs_times.len();
-    let steps_per_obs = sim::time::interval_steps(obs_times[0], obs_times[1], dt);
+    let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
     let n_source_groups = compiled.source_groups.len();
     let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(n_particles, n_obs, steps_per_obs, n_source_groups, &mut rng);
+    let randoms = PFRandomState::draw_fresh(n_particles, &steps_per_obs, n_source_groups, &mut rng);
     let corr = bootstrap_filter_correlated(&process, &obs_model, params, &config, &randoms, 7).unwrap();
 
     eprintln!("  plain PF loglik = {}   corr PF loglik = {}", plain.log_likelihood, corr.log_likelihood);
@@ -271,8 +270,8 @@ fn golden_seir_correlated_pf_finite_where_plain_pf_is() {
 /// is unaffected. CPM on this grid must therefore be finite and within MC
 /// distance of the plain PF.
 ///
-/// (Before the fix the uniform-window gate rejected the t=0 first window with a
-/// `SimError::Validation`, which profile/fit then swallowed into -inf — a
+/// (Before the gh#193 fix the obs-grid gate rejected the t=0 first window with
+/// a `SimError::Validation`, which profile/fit then swallowed into -inf — a
 /// silent all-(-inf) profile on every standard `start=0` model.)
 #[test]
 fn correlated_pf_finite_on_t0_starting_grid() {
@@ -306,13 +305,13 @@ fn correlated_pf_finite_on_t0_starting_grid() {
         "plain PF must handle an obs at t=0 (scores it at the initial state)");
 
     // Correlated PF with FRESH noise (== the first PMMH eval). Must be finite.
-    let n_obs = times.len();
-    // steps_per_obs is sized from obs(1)-obs(0), exactly as run_pmmh and the
-    // filter compute it (the leading t=0 window contributes no substeps).
-    let steps_per_obs = sim::time::interval_steps(times[0], times[1], dt);
+    // The block sizes come from the same function run_pmmh and the filter use;
+    // the leading t=0 window is empty and gets a block of zero.
+    let steps_per_obs = cpm_steps_per_obs(&times, config.t_start, dt);
+    assert_eq!(steps_per_obs[0], 0, "the leading t=0 window consumes no noise");
     let n_source_groups = compiled.source_groups.len();
     let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(200, n_obs, steps_per_obs, n_source_groups, &mut rng);
+    let randoms = PFRandomState::draw_fresh(200, &steps_per_obs, n_source_groups, &mut rng);
     let corr = bootstrap_filter_correlated(&process, &obs_model, &params, &config, &randoms, 7)
         .expect("CPM must accept a leading t=0 (zero-width) window (gh#193)");
     eprintln!("corr  PF on t=0-starting grid: loglik = {}", corr.log_likelihood);
@@ -366,11 +365,10 @@ fn correlated_pf_finite_where_plain_pf_is() {
     eprintln!("plain PF  loglik = {}", plain.log_likelihood);
 
     // ── Correlated PF with FRESH noise (== the first PMMH eval) ──
-    let n_obs = obs_times.len();
-    let steps_per_obs = sim::time::interval_steps(obs_times[0], obs_times[1], dt);
+    let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
     let n_source_groups = compiled.source_groups.len();
     let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(n_particles, n_obs, steps_per_obs, n_source_groups, &mut rng);
+    let randoms = PFRandomState::draw_fresh(n_particles, &steps_per_obs, n_source_groups, &mut rng);
     let corr = bootstrap_filter_correlated(&process, &obs_model, &params, &config, &randoms, 7).unwrap();
     eprintln!("corr  PF  loglik = {}", corr.log_likelihood);
 
@@ -395,8 +393,63 @@ fn correlated_pf_finite_where_plain_pf_is() {
     );
 }
 
-// ── validate_cpm_obs_grid unit coverage (the seam shared by the filter gate
-//    and the profile/fit preflight, gh#193) ──────────────────────────────────
+// ── Observation-grid unit coverage (the seam shared by the filter gate and
+//    the profile/fit preflight, gh#193) ──────────────────────────────────────
+//
+// The pre-drawn noise is one block per observation window, each sized at that
+// window's own substep count, so an irregular grid indexes correctly: a daily
+// reporting series that skips a day, or a series that starts mid-period, is
+// accepted and each window reads its own block. What `validate_cpm_obs_grid`
+// still rejects is a grid that does not describe a forward walk from t_start.
+
+/// The block sizes must be what the schedule's substep walk actually yields:
+/// the sizing runs before any `Schedule` exists (the noise is drawn in
+/// `run_pmmh`), so a divergence between the two would be a wrong stride, which
+/// reads a valid float from the wrong slot rather than failing.
+#[test]
+fn cpm_block_sizes_match_the_schedule_walk() {
+    use sim::boundary_times::{EffectTimes, ObsTimes};
+    use sim::intervention::TimelineEffects;
+    use sim::schedule::{Cursor, Schedule};
+
+    let cases: Vec<(Vec<f64>, f64, f64)> = vec![
+        // (obs times, t_start, dt)
+        (vec![0.0, 7.0, 14.0, 21.0], 0.0, 1.0),   // leading t0 window, weekly
+        (vec![7.0, 14.0, 21.0], 0.0, 1.0),        // no t0 obs
+        (vec![5.0, 12.0, 19.0], 0.0, 1.0),        // mid-period start
+        (vec![0.0, 7.0, 14.0, 18.0, 25.0], 0.0, 1.0), // short interior window
+        (vec![1.0, 2.0, 4.0, 5.0], 0.0, 1.0),     // daily with day 3 absent
+        (vec![3.5, 7.0], 0.0, 1.0),               // off-grid obs (gh#216)
+        (vec![0.3, 7.3, 14.3], 0.0, 1.0),         // sub-dt leading offset
+        (vec![1.0, 2.0], 0.0, 0.25),              // several substeps per window
+        (vec![10.0], 0.0, 1.0),                   // single observation
+    ];
+
+    for (times, t_start, dt) in cases {
+        let sized = cpm_steps_per_obs(&times, t_start, dt);
+        let schedule = Schedule::exact_inference(
+            dt,
+            *times.last().unwrap(),
+            EffectTimes::from_timeline(&TimelineEffects::default()).unwrap(),
+            ObsTimes::new(times.clone()).unwrap(),
+        );
+        let mut t = t_start;
+        for obs_idx in 0..times.len() {
+            let cur = Cursor { obs_idx, effect_idx: 0, ..Default::default() };
+            let mut walked = 0usize;
+            for (t0, step_dt, _) in schedule.substeps(cur, t) {
+                walked += 1;
+                t = t0 + step_dt;
+            }
+            assert_eq!(
+                sized[obs_idx], walked,
+                "block size disagrees with the walk for window {obs_idx} of \
+                 {times:?} at t_start={t_start}, dt={dt}: sized {}, walked {walked}",
+                sized[obs_idx],
+            );
+        }
+    }
+}
 
 #[test]
 fn cpm_grid_accepts_leading_t0_window() {
@@ -405,33 +458,44 @@ fn cpm_grid_accepts_leading_t0_window() {
     let grid = vec![0.0, 7.0, 14.0, 21.0];
     assert!(validate_cpm_obs_grid(&grid, 0.0, 1.0).is_ok(),
         "a leading window coinciding with t_start must be allowed");
+    assert_eq!(cpm_steps_per_obs(&grid, 0.0, 1.0), vec![0, 7, 7, 7]);
 }
 
 #[test]
 fn cpm_grid_accepts_first_obs_at_obs_dt() {
-    // No t=0 obs: first obs at exactly one window from t_start → uniform.
+    // No t=0 obs: first obs at exactly one window from t_start.
     assert!(validate_cpm_obs_grid(&[7.0, 14.0, 21.0], 0.0, 1.0).is_ok());
+    assert_eq!(cpm_steps_per_obs(&[7.0, 14.0, 21.0], 0.0, 1.0), vec![7, 7, 7]);
 }
 
 #[test]
-fn cpm_grid_rejects_mid_period_start() {
-    // Data starting mid-period: obs at [5,12,19], t_start=0. First window [0,5]
-    // is 5 substeps but steps_per_obs=7 — NOT a leading-t0 window, so reject.
-    let err = validate_cpm_obs_grid(&[5.0, 12.0, 19.0], 0.0, 1.0)
-        .expect_err("mid-period start must be rejected");
-    assert!(format!("{err}").contains("FIRST window"),
-        "rejection must name the first window; got {err}");
+fn cpm_grid_accepts_mid_period_start() {
+    // Data starting mid-period: obs at [5,12,19], t_start=0. The first window
+    // [0,5] is 5 substeps where the rest are 7 — its noise block is sized at 5,
+    // so the indexing is sound and the run is accepted.
+    assert!(validate_cpm_obs_grid(&[5.0, 12.0, 19.0], 0.0, 1.0).is_ok(),
+        "a short first window is now sized for, not rejected");
+    assert_eq!(cpm_steps_per_obs(&[5.0, 12.0, 19.0], 0.0, 1.0), vec![5, 7, 7]);
 }
 
 #[test]
-fn cpm_grid_rejects_nonuniform_interior() {
-    // Uniform start but a short interior window: [0,7,14,18,25]. Window [14,18]
-    // is 4 substeps ≠ 7.
-    let err = validate_cpm_obs_grid(&[0.0, 7.0, 14.0, 18.0, 25.0], 0.0, 1.0)
-        .expect_err("non-uniform interior window must be rejected");
-    let msg = format!("{err}");
-    assert!(msg.contains("the window [obs(2)") || msg.contains("obs(3)"),
-        "rejection must name the offending interior window; got {msg}");
+fn cpm_grid_accepts_nonuniform_interior() {
+    // Uniform start but a short interior window: [0,7,14,18,25]. Window
+    // [14,18] is 4 substeps; it gets a 4-substep block.
+    let grid = [0.0, 7.0, 14.0, 18.0, 25.0];
+    assert!(validate_cpm_obs_grid(&grid, 0.0, 1.0).is_ok(),
+        "an interior window of its own length is now sized for, not rejected");
+    assert_eq!(cpm_steps_per_obs(&grid, 0.0, 1.0), vec![0, 7, 7, 4, 7]);
+}
+
+#[test]
+fn cpm_grid_accepts_a_daily_series_missing_one_day() {
+    // The reporting case this supports: daily observations from day 1, with no
+    // situation report on day 3. Every window is one substep except the one
+    // spanning the absent day, which is two.
+    let grid: Vec<f64> = vec![1.0, 2.0, 4.0, 5.0, 6.0];
+    assert!(validate_cpm_obs_grid(&grid, 0.0, 1.0).is_ok());
+    assert_eq!(cpm_steps_per_obs(&grid, 0.0, 1.0), vec![1, 1, 2, 1, 1]);
 }
 
 #[test]
@@ -439,15 +503,43 @@ fn cpm_grid_accepts_single_obs() {
     // Degenerate single-observation cases: at t_start and away from it.
     assert!(validate_cpm_obs_grid(&[0.0], 0.0, 1.0).is_ok(), "single obs at t_start");
     assert!(validate_cpm_obs_grid(&[10.0], 0.0, 1.0).is_ok(), "single obs away from t_start");
+    assert_eq!(cpm_steps_per_obs(&[0.0], 0.0, 1.0), vec![0]);
+    assert_eq!(cpm_steps_per_obs(&[10.0], 0.0, 1.0), vec![10],
+        "the whole run is one window — the old scalar sizing called this 1");
 }
 
 #[test]
-fn cpm_grid_rejects_subdt_leading_offset() {
-    // A sub-dt leading offset (obs(0)=0.3, dt=1) is NOT a coincident-with-t_start
-    // window: interval_steps rounds it to 0, but the Exact iterator would take a
-    // clipped 0.3-substep. It must be rejected (keyed on obs(0)==t_start, not on
-    // interval_steps==0), else the noise indexing silently mis-sizes.
-    let err = validate_cpm_obs_grid(&[0.3, 7.3, 14.3], 0.0, 1.0)
-        .expect_err("a sub-dt leading offset must be rejected, not treated as empty");
-    assert!(format!("{err}").contains("FIRST window"), "got {err}");
+fn cpm_grid_accepts_subdt_leading_offset() {
+    // A sub-dt leading offset (obs(0)=0.3, dt=1): the Exact walk takes one
+    // clipped 0.3-substep, and the block is sized at 1 to match. Rounding
+    // `(obs(0) - t_start)/dt` would have sized it at 0 and overrun.
+    let grid = [0.3, 7.3, 14.3];
+    assert!(validate_cpm_obs_grid(&grid, 0.0, 1.0).is_ok());
+    assert_eq!(cpm_steps_per_obs(&grid, 0.0, 1.0), vec![1, 7, 7]);
+}
+
+#[test]
+fn cpm_grid_rejects_an_observation_before_t_start() {
+    // obs(0) < t_start: the window is backwards, so no substep is due and the
+    // observation would be scored at the initial state with no warning.
+    let err = validate_cpm_obs_grid(&[-2.0, 5.0, 12.0], 0.0, 1.0)
+        .expect_err("an observation before t_start must be rejected");
+    let msg = format!("{err}");
+    assert!(msg.contains("obs(0)") && msg.contains("t_start"),
+        "rejection must name the first observation and t_start; got {msg}");
+}
+
+#[test]
+fn cpm_grid_rejects_a_backwards_interior_step() {
+    let err = validate_cpm_obs_grid(&[1.0, 5.0, 3.0], 0.0, 1.0)
+        .expect_err("a grid that goes backwards must be rejected");
+    assert!(format!("{err}").contains("obs(2)"),
+        "rejection must name the offending observation; got {err}");
+}
+
+#[test]
+fn cpm_grid_rejects_a_non_finite_observation_time() {
+    let err = validate_cpm_obs_grid(&[1.0, f64::NAN, 3.0], 0.0, 1.0)
+        .expect_err("a non-finite observation time must be rejected");
+    assert!(format!("{err}").contains("not finite"), "got {err}");
 }

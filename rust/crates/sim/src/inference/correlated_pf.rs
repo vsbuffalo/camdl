@@ -27,17 +27,26 @@ use super::traits::{ObservationModel, SMCConfig};
 /// (Gamma, Uniform) at consumption time.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PFRandomState {
-    /// Gamma multiplier draws: gamma_noise[obs_idx][particle_idx * steps_per_obs + step]
-    /// One normal per overdispersed transition per substep per particle.
-    /// Transformed to Gamma(shape, scale) via inverse CDF.
+    /// Gamma multiplier draws, one row per observation window:
+    /// `gamma_noise[obs_idx][particle * k_i + substep]`, where `k_i =
+    /// cpm_steps_per_obs(..)[obs_idx]` is *that* window's substep count.
+    /// One normal per overdispersed transition per substep per particle,
+    /// transformed to Gamma(shape, scale) via inverse CDF.
+    ///
+    /// The stride is per-window, not global: windows may differ in length (one
+    /// missing report day makes a single window two substeps where every other
+    /// is one), and reading a row with any other stride lands on a valid float
+    /// from the wrong slot — the estimator then merely samples badly, with no
+    /// error to see.
     pub gamma_noise: Vec<Vec<f64>>,
 
     /// Resampling draws: one normal per observation.
     /// Transformed to Uniform(0,1) via Phi(·) for systematic resampling.
     pub resample_noise: Vec<f64>,
 
-    /// Binomial total-exit draws per source group per substep per particle.
-    /// binomial_noise[obs_idx][particle * steps_per_obs * n_groups + step * n_groups + group]
+    /// Binomial total-exit draws per source group per substep per particle:
+    /// `binomial_noise[obs_idx][(particle * k_i + substep) * n_groups + group]`,
+    /// with `k_i` that window's substep count (see `gamma_noise`).
     /// Transformed to binomial counts via normal approximation (large np)
     /// or inverse CDF (small np). This is the dominant variance source
     /// that the broken to_bits() seeding failed to correlate.
@@ -49,23 +58,29 @@ pub struct PFRandomState {
 
 impl PFRandomState {
     /// Draw a fresh random state for one PF evaluation.
+    ///
+    /// `steps_per_obs` carries one substep count per observation window, in
+    /// window order — [`cpm_steps_per_obs`] builds it, and the number of
+    /// windows is its length. A window of `k` substeps gets a block of
+    /// `n_particles * k` gamma normals and `n_particles * k * n_source_groups`
+    /// binomial normals, so an empty window (the usual leading
+    /// `[t_start, obs(0)]` when `obs(0) == t_start`) consumes nothing.
     pub fn draw_fresh(
         n_particles: usize,
-        n_obs: usize,
-        steps_per_obs: usize,
+        steps_per_obs: &[usize],
         n_source_groups: usize,
         rng: &mut StatefulRng,
     ) -> Self {
-        let gamma_noise = (0..n_obs)
-            .map(|_| (0..n_particles * steps_per_obs)
+        let gamma_noise = steps_per_obs.iter()
+            .map(|&k| (0..n_particles * k)
                 .map(|_| rng.normal())
                 .collect())
             .collect();
-        let resample_noise = (0..n_obs)
+        let resample_noise = (0..steps_per_obs.len())
             .map(|_| rng.normal())
             .collect();
-        let binomial_noise = (0..n_obs)
-            .map(|_| (0..n_particles * steps_per_obs * n_source_groups)
+        let binomial_noise = steps_per_obs.iter()
+            .map(|&k| (0..n_particles * k * n_source_groups)
                 .map(|_| rng.normal())
                 .collect())
             .collect();
@@ -172,75 +187,115 @@ pub fn phi(x: f64) -> f64 {
     super::obs_loglik::normal_cdf(x)
 }
 
-/// Tolerance for "the first observation coincides with `t_start`". Matches the
-/// `Substeps` iterator's own termination slack (`schedule::EFFECT_EPS`, 1e-10):
-/// the iterator yields zero substeps for a window `[t_start, obs(0)]` exactly
-/// when `obs(0) <= t_start + EFFECT_EPS`, so keying the gate on the same slack
-/// keeps the "empty leading window" judgement bit-consistent with the walk.
-const LEADING_WINDOW_EPS: f64 = 1e-10;
+/// Slack on "this observation time is not behind the previous boundary".
+/// Matches `schedule::EFFECT_EPS` (1e-10), the scale at which the schedule
+/// treats two boundary times as coincident, so an observation sitting exactly
+/// on `t_start` (or on its predecessor) up to float noise reads as an empty
+/// window rather than as a grid that walks backwards.
+const BACKWARD_OBS_EPS: f64 = 1e-10;
 
 /// Interior clamp on the correlated base uniform so resampling thresholds stay
 /// strictly inside (0, 1). Distinct in concept from `PROB_FRACTION_EPS` (a
 /// probability clamp) despite the shared magnitude.
 const BASE_UNIFORM_EPS: f64 = 1e-10;
 
-/// Substeps-per-window the CPM pre-drawn-noise arrays are sized for, derived
-/// from the first non-trivial spacing `obs(1) - obs(0)` (or `obs(0) - t_start`
-/// for a single observation).
-pub fn cpm_steps_per_obs(obs_times: &[f64], t_start: f64, dt: f64) -> usize {
-    let obs_dt = if obs_times.len() > 1 {
-        obs_times[1] - obs_times[0]
-    } else if obs_times.len() == 1 {
-        obs_times[0] - t_start
-    } else {
-        1.0
-    };
-    crate::time::interval_steps(0.0, obs_dt, dt)
+/// Substeps in each observation window, in window order — the sizes the CPM
+/// pre-drawn-noise rows are allocated at and the strides they are indexed with.
+///
+/// Window `0` is `[t_start, obs(0)]` and window `i` is `[obs(i-1), obs(i)]`, so
+/// the returned vector is exactly as long as `obs_times`. Windows need not be
+/// the same length: a daily reporting series missing one interior day gives one
+/// two-substep window among one-substep windows, and each gets its own block.
+/// The usual `obs(0) == t_start` leading window is empty and gets a block of
+/// zero — the observation is scored at the initial state, as in the plain
+/// bootstrap PF.
+///
+/// Each count is what [`crate::schedule::Schedule::substeps`] will actually
+/// yield for that window in the absence of a scheduled effect *strictly inside*
+/// it; `bootstrap_filter_correlated` re-derives the counts from the built
+/// schedule and refuses the run if an effect boundary makes the walk longer
+/// than the block it was sized for.
+pub fn cpm_steps_per_obs(obs_times: &[f64], t_start: f64, dt: f64) -> Vec<usize> {
+    let mut out = Vec::with_capacity(obs_times.len());
+    let mut window_start = t_start;
+    for &obs_t in obs_times {
+        out.push(window_substeps(window_start, obs_t, dt));
+        window_start = obs_t;
+    }
+    out
+}
+
+/// Substeps the walk takes across `[window_start, obs_t]` at step `dt`.
+///
+/// Mirrors [`crate::schedule::Substeps`]'s own termination rule rather than
+/// re-deriving one: substep `s` begins at the drift-free `window_start + s*dt`
+/// and is emitted while the clipped step `obs_t - (window_start + s*dt)`
+/// exceeds [`crate::schedule::MIN_STEP_EPS`]. Computing it that way — instead
+/// of rounding `(obs_t - window_start)/dt` — is what makes the block sizing
+/// agree with the walk for a window whose span is not a whole number of
+/// substeps (the off-grid observation times gh#216 supports). Pinned against
+/// the real iterator by `cpm_block_sizes_match_the_schedule_walk`.
+fn window_substeps(window_start: f64, obs_t: f64, dt: f64) -> usize {
+    debug_assert!(dt > 0.0, "window_substeps: non-positive dt = {dt}");
+    let span = obs_t - window_start;
+    // Empty (or reversed) window: no substep is due. `is_nan` first so a
+    // non-finite observation time — which `validate_cpm_obs_grid` refuses —
+    // lands here rather than in the search below.
+    if span.is_nan() || span <= crate::schedule::MIN_STEP_EPS {
+        return 0;
+    }
+    let mut n = (span / dt).floor().max(0.0) as usize;
+    while obs_t - (window_start + n as f64 * dt) > crate::schedule::MIN_STEP_EPS {
+        n += 1;
+    }
+    while n > 0 && obs_t - (window_start + (n - 1) as f64 * dt) <= crate::schedule::MIN_STEP_EPS {
+        n -= 1;
+    }
+    n
 }
 
 /// Validate that the CPM pre-drawn-noise indexing is sound for this obs grid.
 ///
-/// The indexing (`noise_idx = particle*steps_per_obs + substep`) is a flat block
-/// of `steps_per_obs` substeps per particle per window, so it is sound only if
-/// EVERY window has exactly `steps_per_obs` substeps — with ONE exception: a
-/// leading window `[t_start, obs(0)]` that coincides with `t_start` (the
-/// universal `regular start=0` case). That window is empty — the `Substeps`
-/// iterator yields zero substeps — so it consumes no noise block, the indexing
-/// for windows `1..` is unaffected, and `obs(0)` is scored at the initial state
-/// exactly as the plain bootstrap PF does. Any OTHER non-uniformity (a genuine
-/// mid-period start, e.g. obs at `[5,12,19]` with `t_start=0`, or an interior
-/// window of the wrong width) is rejected with an actionable message.
+/// The noise rows are sized and strided per window ([`cpm_steps_per_obs`]), so
+/// an irregular grid is fine: a reporting series that skips a day, or starts
+/// mid-period, indexes correctly because window `i` carries its own substep
+/// count. What is left to reject is a grid that does not describe a forward
+/// walk at all — a non-finite observation time, an observation before
+/// `t_start`, or a grid that goes backwards — each of which would otherwise
+/// size a window at zero substeps and silently score that observation at the
+/// previous window's state.
 ///
 /// This is the single source of truth for CPM obs-grid validity: the filter
 /// calls it defensively, and profile/fit call it once at preflight (gh#193) so
-/// a genuine non-uniform grid surfaces this message instead of a swallowed
-/// all-(-inf) profile.
+/// a bad grid surfaces this message instead of a swallowed all-(-inf) profile.
 pub fn validate_cpm_obs_grid(obs_times: &[f64], t_start: f64, dt: f64) -> Result<(), SimError> {
-    let steps_per_obs = cpm_steps_per_obs(obs_times, t_start, dt);
     let mut window_start = t_start;
     for (i, &obs_t) in obs_times.iter().enumerate() {
-        // Empty leading window (obs(0) == t_start): allowed, consumes no noise.
-        if i == 0 && obs_t - t_start <= LEADING_WINDOW_EPS {
-            window_start = obs_t;
-            continue;
+        if !obs_t.is_finite() {
+            return Err(SimError::Validation(format!(
+                "correlated PF: observation time obs({i}) = {obs_t} is not finite, \
+                 so its substep window is undefined. Fix the observation times, \
+                 or drop to vanilla PMMH (rho = None)."
+            )));
         }
-        let window_steps = crate::time::interval_steps(window_start, obs_t, dt);
-        if window_steps != steps_per_obs {
+        if obs_t < window_start - BACKWARD_OBS_EPS {
             let which = if i == 0 {
-                format!("the FIRST window [t_start={window_start:.4}, obs(0)={obs_t:.4}]")
+                format!(
+                    "the first observation obs(0) = {obs_t:.4} precedes t_start = \
+                     {t_start:.4}"
+                )
             } else {
-                format!("the window [obs({})={window_start:.4}, obs({i})={obs_t:.4}]", i - 1)
+                format!(
+                    "obs({i}) = {obs_t:.4} precedes obs({}) = {window_start:.4}",
+                    i - 1
+                )
             };
             return Err(SimError::Validation(format!(
-                "correlated PF requires every observation window to have the same \
-                 number of dt-substeps (the pre-drawn-noise arrays are sized at \
-                 {steps_per_obs} substeps/window from obs(1)-obs(0)), but {which} \
-                 has {window_steps} substep(s) at dt={dt:.4}. CPM tolerates a \
-                 leading window only when the first observation coincides with \
-                 t_start (it is then scored at the initial state); a mid-period \
-                 start or a mis-sized interior window breaks the indexing. Drop \
-                 to vanilla PMMH (rho = None), or align the observation grid so \
-                 every window spans the same number of substeps."
+                "correlated PF requires observation times that walk forward from \
+                 t_start (each window [previous, obs(i)] is one block of pre-drawn \
+                 noise, sized at that window's dt-substeps), but {which} at \
+                 dt={dt:.4}. Sort the observation times and set t_start no later \
+                 than the first of them, or drop to vanilla PMMH (rho = None)."
             )));
         }
         window_start = obs_t;
@@ -331,39 +386,40 @@ pub fn bootstrap_filter_correlated(
     let mut ll_increments = Vec::with_capacity(n_obs);
     let mut t = config.t_start;
 
-    // Substeps per window the pre-drawn-noise arrays are sized for. CPM requires
-    // (near-)uniform observation spacing because that block size is fixed.
+    // The observation grid this run walks; the pre-drawn-noise block sizes are
+    // derived from it below, one block per window.
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
 
     // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
     // boundaries (registered as `effect_times` below), so an off-grid observation
     // re-tiling the Exact substep grid no longer moves the firing instant. The two
     // unsupported Exact cases are refused loudly (parametric `at [<param>]`; a
-    // scheduled fire time off the dt grid — which would also add a substep and
-    // break the CPM fixed-`steps_per_obs` noise indexing); events are out of scope.
+    // scheduled fire time off the dt grid — which would also add a substep the
+    // per-window noise blocks are not sized for); events are out of scope.
     crate::intervention::guard_attimesexpr_exact(model, StepPolicy::Exact)?;
     crate::intervention::guard_exact_offgrid_effect_time(
         model, params, config.t_start, dt, StepPolicy::Exact,
     )?;
     let scheduled = crate::intervention::timeline_effects(model, params);
 
+    // Per-window substep counts: the sizes the caller drew the noise rows at
+    // (`PFRandomState::draw_fresh`) and the strides this filter indexes them
+    // with. One entry per observation window, windows independent of each other.
     let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
 
-    // Validate the obs grid against the pre-drawn-noise indexing. A leading
-    // window coinciding with t_start (obs(0) == t_start) is allowed — it is
-    // empty (zero substeps), consumes no noise block, and obs(0) is scored at
-    // the initial state, exactly as the plain bootstrap PF does. Every other
-    // window must be exactly `steps_per_obs` substeps. Single source of truth in
-    // `validate_cpm_obs_grid`; profile/fit also preflight it (gh#193) so a
-    // genuine non-uniform grid surfaces this message instead of a swallowed
-    // all-(-inf) profile.
+    // Validate the obs grid. Irregular spacing is supported — each window
+    // carries its own noise block — so what is rejected here is a grid that
+    // does not walk forward from t_start at all. Single source of truth in
+    // `validate_cpm_obs_grid`; profile/fit also preflight it (gh#193) so a bad
+    // grid surfaces this message instead of a swallowed all-(-inf) profile.
     validate_cpm_obs_grid(&obs_times, config.t_start, dt)?;
 
     // Merged timeline spine: the EXACT policy clips each substep to the next
     // observation boundary (same as the bootstrap PF). The Schedule reproduces
     // dt.min(obs_time - t) exactly, so the per-window substep COUNT is preserved
-    // and the pre-drawn-noise indexing (noise_idx = i*steps_per_obs + substep)
-    // is unaffected. Substep TIME stays accumulated (s*dt deferred, task #14).
+    // and the pre-drawn-noise indexing (noise_idx = i*steps_per_obs[obs] +
+    // substep) is unaffected. Substep TIME stays accumulated (s*dt deferred,
+    // task #14).
     // CPM keeps its guards + cpm_steps_per_obs + validate_cpm_obs_grid above
     // (the noise-block grid check must run before the schedule), so it does NOT
     // route through `ExactInferenceTimeline::build` (which would bundle the guards
@@ -378,6 +434,84 @@ pub fn bootstrap_filter_correlated(
         crate::boundary_times::EffectTimes::from_timeline(&scheduled)?,
         crate::boundary_times::ObsTimes::new(obs_times)?,
     );
+
+    // Reconcile the pre-drawn noise with the walk this filter is about to
+    // perform, once, before any particle moves.
+    //
+    // `steps_per_obs` was derived from the observation grid alone, before this
+    // schedule existed, and `randoms` was drawn by the caller — possibly for a
+    // different grid (a resumed chain, a hand-built harness). Two things can
+    // make them disagree: a scheduled-effect boundary strictly inside a window
+    // re-anchors the drift-free substep clock and can add a substep (reachable
+    // only when the window start is itself off the dt grid, which gh#216
+    // permits), or the noise rows are simply too short.
+    //
+    // Establishing `walked <= k` and `row.len() >= n_particles * k` here is what
+    // makes every `particle * k + substep` read below both in range and injective
+    // — a stride that overruns its row reads a valid float from another
+    // particle's slot, which does not fail, it just decorrelates the estimator
+    // the PMMH acceptance ratio depends on.
+    if randoms.gamma_noise.len() < n_obs
+        || randoms.binomial_noise.len() < n_obs
+        || randoms.resample_noise.len() < n_obs
+    {
+        return Err(SimError::Validation(format!(
+            "correlated PF: the pre-drawn noise covers {} gamma / {} binomial / \
+             {} resample windows, but this run has {n_obs} observation windows. \
+             The noise must be drawn for the same observation grid the filter \
+             runs on (`PFRandomState::draw_fresh` with \
+             `cpm_steps_per_obs(obs_times, t_start, dt)`).",
+            randoms.gamma_noise.len(), randoms.binomial_noise.len(),
+            randoms.resample_noise.len(),
+        )));
+    }
+    {
+        let mut t_probe = config.t_start;
+        for (obs_idx, &k) in steps_per_obs.iter().enumerate() {
+            let cur = Cursor {
+                obs_idx,
+                effect_idx: schedule.effect_idx_at(t_probe),
+                ..Default::default()
+            };
+            let (mut walked, mut window_end) = (0usize, t_probe);
+            for (t0, step_dt, _) in schedule.substeps(cur, t_probe) {
+                walked += 1;
+                window_end = t0 + step_dt;
+            }
+            if walked > k {
+                return Err(SimError::Validation(format!(
+                    "correlated PF: observation window {obs_idx} (ending at \
+                     t={:.4}) takes {walked} substeps at dt={dt:.4}, but its \
+                     pre-drawn noise block is sized for {k}. This happens when a \
+                     scheduled intervention fires strictly inside a window whose \
+                     start is off the dt grid: the substep clock re-anchors at \
+                     the intervention and the window gains a substep. Align the \
+                     observation times to the dt grid (t_start + an integer \
+                     multiple of dt), or drop to vanilla PMMH (rho = None).",
+                    obs_model.obs_time(obs_idx),
+                )));
+            }
+            let need_gamma = n_particles * k;
+            let need_binom = n_particles * k * randoms.n_source_groups;
+            if randoms.gamma_noise[obs_idx].len() < need_gamma
+                || randoms.binomial_noise[obs_idx].len() < need_binom
+            {
+                return Err(SimError::Validation(format!(
+                    "correlated PF: the pre-drawn noise for observation window \
+                     {obs_idx} holds {} gamma / {} binomial normals, but the \
+                     window needs {need_gamma} / {need_binom} ({n_particles} \
+                     particles x {k} substeps x {} source groups). The noise must \
+                     be drawn for the same observation grid the filter runs on \
+                     (`PFRandomState::draw_fresh` with \
+                     `cpm_steps_per_obs(obs_times, t_start, dt)`).",
+                    randoms.gamma_noise[obs_idx].len(),
+                    randoms.binomial_noise[obs_idx].len(),
+                    randoms.n_source_groups,
+                )));
+            }
+            t_probe = window_end;
+        }
+    }
 
     // Gamma shape/scale for the overdispersed transition (precompute).
     //
@@ -499,7 +633,12 @@ pub fn bootstrap_filter_correlated(
     // ran). Never gates anything — the bail is a pure function of the mask.
     let t0_call = Instant::now();
 
-    for obs_idx in 0..n_obs {
+    // `steps_per_obs` is built from `obs_times`, so it has exactly `n_obs`
+    // entries; iterating it pairs each window with THIS window's substep count —
+    // the stride into its noise rows. Windows differ in length on an irregular
+    // grid, so a stride borrowed from any other window reads another particle's
+    // slot.
+    for (obs_idx, &window_steps) in steps_per_obs.iter().enumerate() {
         // The substep walk terminates at this obs via Schedule::substeps (cursor
         // points at obs_idx); no explicit obs_time needed. The effect cursor is
         // positioned at the first scheduled-effect boundary not yet fired by `t`.
@@ -528,27 +667,28 @@ pub fn bootstrap_filter_correlated(
                 for (substep, (t_local, step_dt, fired)) in schedule.substeps(cur, t_start).enumerate() {
                     // Inject pre-drawn Gamma multiplier.
                     //
-                    // After the uniform-window gate above, every window has exactly
-                    // `steps_per_obs` substeps, so noise_idx is always in range. A
-                    // miss here would mean the gate regressed and we are about to
+                    // The reconciliation above established `walked <= window_steps`
+                    // and a row long enough for `n_particles * window_steps`, so
+                    // noise_idx is in range and hits this particle's own slot. A
+                    // miss here would mean that check regressed and we are about to
                     // silently fall through to fresh per-particle RNG, decorrelating
-                    // the estimator with no diagnostic — fail LOUDLY instead.
-                    let noise_idx = i * steps_per_obs + substep;
+                    // the estimator with no diagnostic — fail loudly instead.
+                    let noise_idx = i * window_steps + substep;
                     debug_assert!(
                         noise_idx < gamma_row.len(),
                         "CPM gamma noise overrun: noise_idx {noise_idx} >= {} \
-                         (particle {i}, substep {substep}, steps_per_obs \
-                         {steps_per_obs})",
+                         (particle {i}, substep {substep}, window_steps \
+                         {window_steps})",
                         gamma_row.len(),
                     );
                     if noise_idx >= gamma_row.len() {
                         return Err(SimError::Validation(format!(
                             "correlated PF gamma-noise overrun: index {noise_idx} \
                              out of {} (particle {i}, substep {substep}, \
-                             steps_per_obs {steps_per_obs}, obs window {obs_idx}). \
-                             This means a window had more substeps than the noise \
-                             array was sized for — the uniform-window gate should \
-                             have rejected this run. Report as a bug.",
+                             window_steps {window_steps}, obs window {obs_idx}). \
+                             The window took more substeps than its noise block was \
+                             sized for, which the pre-run reconciliation should have \
+                             rejected. Report as a bug.",
                             gamma_row.len(),
                         )));
                     }
@@ -561,7 +701,8 @@ pub fn bootstrap_filter_correlated(
                     scratch.binomial_z_values.clear();
                     scratch.binomial_z_idx = 0;
                     for group in 0..n_groups {
-                        let binom_idx = i * steps_per_obs * n_groups + substep * n_groups + group;
+                        let binom_idx =
+                            i * window_steps * n_groups + substep * n_groups + group;
                         debug_assert!(
                             binom_idx < binom_row.len(),
                             "CPM binomial noise overrun: binom_idx {binom_idx} >= \
@@ -573,9 +714,9 @@ pub fn bootstrap_filter_correlated(
                                 "correlated PF binomial-noise overrun: index \
                                  {binom_idx} out of {} (particle {i}, substep \
                                  {substep}, group {group}, obs window {obs_idx}). \
-                                 A window had more substeps than the noise array \
-                                 was sized for — the uniform-window gate should \
-                                 have rejected this run. Report as a bug.",
+                                 The window took more substeps than its noise block \
+                                 was sized for, which the pre-run reconciliation \
+                                 should have rejected. Report as a bug.",
                                 binom_row.len(),
                             )));
                         }
