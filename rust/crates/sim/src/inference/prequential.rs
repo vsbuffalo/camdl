@@ -15,16 +15,24 @@
 
 use serde::{Serialize, Deserialize};
 
-/// Provenance of the predictive used to compute scores.
-///
-/// v1 only uses `PlugIn`. The enum is already stable so Part II can
-/// add variants without a schema migration.
+/// Provenance of the predictive used to compute scores — the
+/// parameter-treatment optimism axis (#295), orthogonal to
+/// [`Conditioning`]. Externally tagged like `Conditioning`, so `plug_in`
+/// stays the bare string existing traces wrote and the struct variant
+/// nests under its tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
     /// Point-estimate (MLE / posterior mean) plug-in predictive.
     /// Proper only when θ is assumed known; overconfident at small n.
     PlugIn,
+    /// Mixture over `n_draws` thinned posterior draws (§3.6 of the
+    /// 2026-08-29 proposal): per-step predictive *densities* averaged
+    /// over the draws (`logsumexp_m − log M` — averaging per-draw log
+    /// scores instead is a different, strictly lower number by Jensen),
+    /// and predictive samples pooled across the draws' filters, so
+    /// intervals widen to carry parameter uncertainty.
+    Posterior { n_draws: usize },
 }
 
 /// How the parameters were conditioned on the data when scoring — the **second**
@@ -744,6 +752,42 @@ mod tests {
             r#"{"hold_out_tail":{"train_end":21.0,"theta_source":"fits/sir-ab12cd34"}}"#);
         let back: Conditioning = serde_json::from_str(&json).unwrap();
         assert_eq!(back, hot);
+    }
+
+    #[test]
+    fn provenance_serializes_snake_case() {
+        // `plug_in` stays the bare string existing traces wrote; the
+        // mixture variant nests under its external tag.
+        assert_eq!(serde_json::to_string(&Provenance::PlugIn).unwrap(), r#""plug_in""#);
+        let post = Provenance::Posterior { n_draws: 64 };
+        let json = serde_json::to_string(&post).unwrap();
+        assert_eq!(json, r#"{"posterior":{"n_draws":64}}"#);
+        let back: Provenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, post);
+    }
+
+    #[test]
+    fn posterior_holdout_trace_has_no_optimism_caveat() {
+        // Honest on both axes (mixture over the posterior, sealed θ):
+        // nothing left to caveat — the #295 endpoint.
+        let t = PrequentialTrace {
+            schema_version: 3, t0: 3,
+            provenance: Provenance::Posterior { n_draws: 64 },
+            conditioning: Conditioning::HoldOutTail {
+                train_end: 21.0, theta_source: "fits/sir-ab12cd34".into() },
+            steps: vec![], warnings: vec![],
+            score_from: Some(21.0),
+            pit_randomization_seed: None,
+        };
+        assert_eq!(t.optimism_caveat(), None,
+            "posterior + held-out is honest on both axes");
+        // Posterior but in-sample: only the conditioning axis is flagged.
+        let t2 = PrequentialTrace {
+            conditioning: Conditioning::InSample, ..t
+        };
+        let caveat = t2.optimism_caveat().expect("in-sample axis still flagged");
+        assert!(!caveat.contains("plug-in"), "{caveat}");
+        assert!(caveat.contains("in-sample"), "{caveat}");
     }
 
     #[test]

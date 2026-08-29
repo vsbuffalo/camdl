@@ -2835,6 +2835,25 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_data_mismatch: bool,
 
+    /// Mixture size for a Bayesian fit's derived predictive (§3.6 of the
+    /// 2026-08-29 proposal): one filter pass per thinned posterior draw;
+    /// per-step predictive densities are averaged over the draws and the
+    /// predictive samples pooled, so scores and intervals carry parameter
+    /// uncertainty (provenance `posterior`). `--draws 1` is the documented
+    /// cheap mode — the plug-in predictive at the posterior mean, as
+    /// before. An optimizer fit (no posterior cloud) always scores
+    /// plug-in at its winner. Applied uniformly across derived fits.
+    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_DRAWS)]
+    pub draws: usize,
+
+    /// Render rows whose provenance kinds differ (plug-in vs posterior
+    /// mixture) instead of refusing: the Δ then compares an
+    /// under-dispersed single-θ predictive against a mixture, and the
+    /// reader owns that confound. The usual cause is comparing an
+    /// optimizer fit (no posterior cloud) against a Bayesian one.
+    #[arg(long)]
+    pub allow_mixed_provenance: bool,
+
     /// Force in-sample derivation even when every compared fit declares a
     /// holdout (gh#585): the traces score the full series at θ̂ as before
     /// this flag existed, stamped `in_sample` and carrying the in-sample

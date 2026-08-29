@@ -34,6 +34,11 @@ pub(crate) const DEFAULT_DERIVE_PARTICLES: usize = 1000;
 /// Default filter seed for auto-deriving a prequential from a fit handle.
 pub(crate) const DEFAULT_DERIVE_SEED: u64 = 1;
 
+/// Default mixture size for the posterior predictive (§3.6, decision 9 of
+/// the 2026-08-29 proposal): one filter pass per thinned draw. `--draws 1`
+/// is the documented cheap mode (plug-in at the posterior mean).
+pub(crate) const DEFAULT_DERIVE_DRAWS: usize = 64;
+
 /// Scored steps below which `se(Δ)`'s normal approximation is not to be leaned
 /// on. A round number, not a threshold with a derivation behind it — the
 /// approximation degrades continuously, and the caveat exists to stop a reader
@@ -81,6 +86,9 @@ struct DeriveSettings {
     /// `--in-sample` (gh#585): score the full series at θ̂ even for a fit
     /// that declares a holdout, stamped `in_sample` with its caveat.
     force_in_sample: bool,
+    /// `--draws` (§3.6): mixture size for a Bayesian fit's predictive;
+    /// 1 = plug-in at the posterior mean.
+    draws: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +149,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         particles: a.particles,
         seed: a.seed,
         force_in_sample: a.in_sample,
+        draws: a.draws.max(1),
     };
     let metrics_cli: Option<Vec<String>> = a.metrics.as_ref().map(|s|
         s.split(',').map(|t| t.trim().to_string()).collect());
@@ -250,6 +259,36 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
             eprintln!("       Held-out scores over different windows are not \
                        commensurable; declare the same holdout_after in every \
                        compared fit.");
+            std::process::exit(2);
+        }
+    }
+
+    // Provenance preflight (Stage 4.1): a plug-in trace (under-dispersed —
+    // one θ) against a posterior mixture is a Δ between predictives of
+    // different dispersion. Overridable, unlike conditioning: an optimizer
+    // fit has no posterior and comparing it against a Bayesian fit is a
+    // legitimate ask — as long as the reader chose it.
+    {
+        use sim::inference::prequential::Provenance;
+        use std::mem::discriminant;
+        let mixed = rows.windows(2).any(|w|
+            discriminant(&w[0].trace.provenance)
+                != discriminant(&w[1].trace.provenance));
+        if mixed && !a.allow_mixed_provenance {
+            eprintln!("error: the compared traces mix provenance kinds:");
+            for r in &rows {
+                let kind = match &r.trace.provenance {
+                    Provenance::PlugIn => "plug_in (a single θ)".to_string(),
+                    Provenance::Posterior { n_draws } =>
+                        format!("posterior (mixture over {n_draws} draws)"),
+                };
+                eprintln!("       {}: {}", r.name, kind);
+            }
+            eprintln!("       A plug-in predictive is under-dispersed relative to a \
+                       posterior mixture, so the Δ confounds model difference with \
+                       dispersion treatment.");
+            eprintln!("       Pass --draws 1 to score every fit plug-in, or \
+                       --allow-mixed-provenance to render anyway.");
             std::process::exit(2);
         }
     }
@@ -839,13 +878,24 @@ fn derive_prequential(
         check_derivable_backend(terminal.backend(), segment)?;
     }
 
-    // (a) θ̂ — the plug-in point the prequential is scored at. Routed through
-    // the draws-cloud authority (`resolve_posterior_draws`), NOT a per-method
-    // point-estimate file: a Bayesian fit (PGAS/PMMH/MH) writes no
-    // `final_params.toml` — its θ̂ is the posterior MEAN over `draws.tsv`; only
-    // an optimizer fit (IF2/NLopt) has a single winner file. The headline
-    // `compare @pgas_a @pgas_b` workflow used to dead-end on the missing file.
-    let params_toml = point_estimate_params_toml(segment, selection)?;
+    // (a) θ — what the prequential is scored at. With `--draws M ≥ 2` and a
+    // posterior cloud, the honest choice: M thinned draws, one filter pass
+    // each, densities mixed and samples pooled downstream (§3.6, Stage 4.1).
+    // `--draws 1`, or an optimizer fit (no cloud), falls back to the plug-in
+    // point — routed through the draws-cloud authority
+    // (`resolve_posterior_draws`), NOT a per-method point-estimate file: a
+    // Bayesian fit (PGAS/PMMH/MH) writes no `final_params.toml` — its θ̂ is
+    // the posterior MEAN over `draws.tsv`; only an optimizer fit (IF2/NLopt)
+    // has a single winner file.
+    let theta_tomls: Vec<String> = if derive.draws >= 2 {
+        match thinned_draws_params_tomls(segment, selection, derive.draws)? {
+            Some(tomls) => tomls,
+            None => vec![point_estimate_params_toml(segment, selection)?],
+        }
+    } else {
+        vec![point_estimate_params_toml(segment, selection)?]
+    };
+    let is_mixture = theta_tomls.len() >= 2;
 
     // (b) model — prefer the self-contained archived IR (Phase 1a), else the
     // loose source the config names (recompiled by pfilter). config.model.camdl
@@ -910,91 +960,127 @@ fn derive_prequential(
         }
     }
 
-    let theta_path = base.with_extension("theta.toml");
-    let preq_stem = base.to_string_lossy().into_owned() + "_preq";
-    let preq_json = format!("{preq_stem}.json");
-    let preq_tsv = format!("{preq_stem}.tsv");
-    let cleanup = || {
-        let _ = std::fs::remove_file(&theta_path);
-        let _ = std::fs::remove_file(&preq_json);
-        let _ = std::fs::remove_file(&preq_tsv);
-        for p in &merged_paths {
-            let _ = std::fs::remove_file(p);
-        }
-    };
-
-    if let Err(e) = std::fs::write(&theta_path, &params_toml) {
-        cleanup();
-        return Err(format!("writing temp params {}: {}", theta_path.display(), e));
-    }
-
-    // (d) run the canonical filter.
+    // (d) run the canonical filter — once per θ. Every pass shares the
+    // filter seed and the score window, so mixture components differ ONLY
+    // in θ (common random numbers across draws and across compared fits).
     let exe = std::env::current_exe()
-        .map_err(|e| { cleanup(); format!("cannot locate the running camdl binary: {e}") })?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("pfilter")
-        .arg(&model_path)
-        .arg("--params").arg(&theta_path)
-        .arg("--save-prequential").arg(&preq_stem)
-        .arg("--particles").arg(derive.particles.to_string())
-        .arg("--seed").arg(derive.seed.to_string())
-        .env("CAMDL_SKIP_VERSION_CHECK", "1");
-    for (name, abs_path) in &streams {
-        cmd.arg("--data").arg(format!("{name}={abs_path}"));
-    }
-    // gh#634: forward the fit's conditioning window, or the derived
-    // prequential scores a window the fit never scored (and pfilter's W329
-    // guard then recommends setting condition_from — which the fit toml
-    // already sets, sending the user to the wrong layer). The CLI flag
-    // grammar is the transport (gh#621): a bare spec is the all-streams
-    // default, LABEL=SPEC a per-stream shadow.
-    if let Some(cond) = &config.condition_from {
-        use crate::fit::config_v2::{ConditionFrom, CONDITION_FROM_DEFAULT_KEY};
-        match cond {
-            ConditionFrom::All(spec) => {
-                cmd.arg("--condition-from").arg(spec);
-            }
-            ConditionFrom::PerStream(map) => {
-                for (label, spec) in map {
-                    if label == CONDITION_FROM_DEFAULT_KEY {
-                        cmd.arg("--condition-from").arg(spec);
-                    } else {
-                        cmd.arg("--condition-from").arg(format!("{label}={spec}"));
+        .map_err(|e| format!("cannot locate the running camdl binary: {e}"))?;
+    let run_pass = |pass: usize, params_toml: &str| -> Result<PrequentialTrace, String> {
+        let theta_path = base.with_extension(format!("theta{pass}.toml"));
+        let preq_stem = format!("{}_preq{pass}", base.to_string_lossy());
+        let preq_json = format!("{preq_stem}.json");
+        let preq_tsv = format!("{preq_stem}.tsv");
+        let cleanup = || {
+            let _ = std::fs::remove_file(&theta_path);
+            let _ = std::fs::remove_file(&preq_json);
+            let _ = std::fs::remove_file(&preq_tsv);
+        };
+        if let Err(e) = std::fs::write(&theta_path, params_toml) {
+            cleanup();
+            return Err(format!("writing temp params {}: {}", theta_path.display(), e));
+        }
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("pfilter")
+            .arg(&model_path)
+            .arg("--params").arg(&theta_path)
+            .arg("--save-prequential").arg(&preq_stem)
+            .arg("--particles").arg(derive.particles.to_string())
+            .arg("--seed").arg(derive.seed.to_string())
+            .env("CAMDL_SKIP_VERSION_CHECK", "1");
+        for (name, abs_path) in &streams {
+            cmd.arg("--data").arg(format!("{name}={abs_path}"));
+        }
+        // gh#634: forward the fit's conditioning window, or the derived
+        // prequential scores a window the fit never scored (and pfilter's W329
+        // guard then recommends setting condition_from — which the fit toml
+        // already sets, sending the user to the wrong layer). The CLI flag
+        // grammar is the transport (gh#621): a bare spec is the all-streams
+        // default, LABEL=SPEC a per-stream shadow.
+        if let Some(cond) = &config.condition_from {
+            use crate::fit::config_v2::{ConditionFrom, CONDITION_FROM_DEFAULT_KEY};
+            match cond {
+                ConditionFrom::All(spec) => {
+                    cmd.arg("--condition-from").arg(spec);
+                }
+                ConditionFrom::PerStream(map) => {
+                    for (label, spec) in map {
+                        if label == CONDITION_FROM_DEFAULT_KEY {
+                            cmd.arg("--condition-from").arg(spec);
+                        } else {
+                            cmd.arg("--condition-from").arg(format!("{label}={spec}"));
+                        }
                     }
                 }
             }
         }
-    }
-    // gh#585 (Stage 3.4): score only past the sealed training boundary.
-    if let Some(h) = &holdout {
-        cmd.arg("--score-from").arg(h.train_end.to_string());
-    }
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => { cleanup(); return Err(format!("spawning `camdl pfilter`: {e}")); }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let code = output.status.code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "signal".into());
+        // gh#585 (Stage 3.4): score only past the sealed training boundary.
+        if let Some(h) = &holdout {
+            cmd.arg("--score-from").arg(h.train_end.to_string());
+        }
+        let output = match cmd.output() {
+            Ok(o) => o,
+            Err(e) => { cleanup(); return Err(format!("spawning `camdl pfilter`: {e}")); }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let code = output.status.code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into());
+            cleanup();
+            return Err(format!(
+                "deriving prequential via `camdl pfilter` failed (exit {code}) for fit {}:\n{}",
+                segment.display(),
+                stderr.trim()));
+        }
+        // (e) read back the trace.
+        let text = match std::fs::read_to_string(&preq_json) {
+            Ok(t) => t,
+            Err(e) => { cleanup(); return Err(format!(
+                "`camdl pfilter` succeeded but its prequential output {preq_json} could not be read: {e}")); }
+        };
+        let trace = serde_json::from_str::<PrequentialTrace>(&text)
+            .map_err(|e| format!("parsing derived prequential {preq_json}: {e}"));
         cleanup();
-        return Err(format!(
-            "deriving prequential via `camdl pfilter` failed (exit {code}) for fit {}:\n{}",
-            segment.display(),
-            stderr.trim()));
-    }
-
-    // (e) read back the trace.
-    let text = match std::fs::read_to_string(&preq_json) {
-        Ok(t) => t,
-        Err(e) => { cleanup(); return Err(format!(
-            "`camdl pfilter` succeeded but its prequential output {preq_json} could not be read: {e}")); }
+        trace
     };
-    let trace = serde_json::from_str::<PrequentialTrace>(&text)
-        .map_err(|e| format!("parsing derived prequential {preq_json}: {e}"));
-    cleanup();
-    let mut trace = trace?;
+
+    if is_mixture {
+        eprintln!(
+            "compare: {}: posterior-mixture predictive — {} filter passes \
+             ({} particles each; --draws 1 for the cheap plug-in mode)",
+            seg_slug, theta_tomls.len(), derive.particles);
+    }
+    let mut component_traces = Vec::with_capacity(theta_tomls.len());
+    for (i, params_toml) in theta_tomls.iter().enumerate() {
+        let r = run_pass(i, params_toml).map_err(|e| {
+            if is_mixture {
+                // A degenerate mixture component is informative, not
+                // repairable: dropping it would bias the mixture toward
+                // well-behaved θ, misrepresenting the predictive.
+                format!(
+                    "mixture component {} of {} (a retained posterior draw) \
+                     could not be scored — the posterior holds θ the filter \
+                     cannot track through this data.\n  If a stuck/divergent \
+                     chain put it there, drop that chain with \
+                     --exclude-chains; --draws 1 scores the plug-in posterior \
+                     mean instead.\n  {}",
+                    i + 1, theta_tomls.len(), e)
+            } else {
+                e
+            }
+        });
+        if r.is_err() {
+            for p in &merged_paths { let _ = std::fs::remove_file(p); }
+        }
+        component_traces.push(r?);
+    }
+    for p in &merged_paths { let _ = std::fs::remove_file(p); }
+
+    let mut trace = if is_mixture {
+        combine_mixture(component_traces, derive.seed)?
+    } else {
+        component_traces.into_iter().next().expect("one pass ran")
+    };
 
     // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted
     // only after checking, on the derived trace itself, that every scored
@@ -1025,6 +1111,164 @@ fn derive_prequential(
         };
     }
     Ok(trace)
+}
+
+/// Combine per-draw filter traces into the posterior-mixture predictive
+/// (§3.6 of the 2026-08-29 proposal; Stage 4.1).
+///
+/// The honest Bayesian predictive is the mixture over draws
+/// `p̂(y_t|·) = (1/M) Σ_m p̂(y_t|·,θ_m)`, so per-step log scores combine
+/// as `logsumexp_m − log M` over the per-draw *densities* — averaging the
+/// per-draw log scores instead is a different, strictly lower number
+/// (Jensen) that scores each θ separately rather than the model's actual
+/// predictive. The per-draw predictive samples are pooled — the pooled
+/// cloud IS a draw from the mixture — so CRPS, the randomized PIT, and
+/// the intervals widen to carry parameter uncertainty. ESS is the MIN
+/// across components (the weakest effective support under any retained
+/// θ); warnings are deduplicated by kind.
+///
+/// Every component ran with the same data, filter seed, and scoring
+/// boundary, so the step axes must be identical — anything else is a
+/// derive bug, not a user error.
+fn combine_mixture(
+    traces: Vec<PrequentialTrace>,
+    pit_seed: u64,
+) -> Result<PrequentialTrace, String> {
+    use sim::inference::prequential::{
+        crps_sample_fair, pit_sample_randomized, PredInterval, PrequentialStep,
+        Provenance, StreamScore, PIT_RNG_STREAM,
+    };
+    let m = traces.len();
+    assert!(m >= 2, "combine_mixture needs >= 2 components");
+    let first = &traces[0];
+    for t in &traces[1..] {
+        let same_axis = t.steps.len() == first.steps.len()
+            && t.steps.iter().zip(&first.steps).all(|(a, b)| {
+                a.t == b.t
+                    && a.per_stream.len() == b.per_stream.len()
+                    && a.per_stream.iter().zip(&b.per_stream)
+                        .all(|(x, y)| x.stream == y.stream)
+            });
+        if !same_axis {
+            return Err(
+                "internal error: mixture components scored different \
+                 observation axes — same data, seed and boundary must give \
+                 identical steps".into());
+        }
+    }
+
+    // Fresh randomized-PIT draws for the pooled predictive, consumed in
+    // build_trace's order (joint first, then each stream) for consistency.
+    let mut pit_rng = sim::rng::StatefulRng::new_stream(pit_seed, PIT_RNG_STREAM);
+
+    let mut steps = Vec::with_capacity(first.steps.len());
+    for si in 0..first.steps.len() {
+        let y = first.steps[si].y_obs;
+        let ls: Vec<f64> = traces.iter().map(|t| t.steps[si].log_score).collect();
+        let (log_score, _) = crate::evidence::logmeanexp_with_se(&ls);
+        let mut pooled: Vec<f64> = Vec::new();
+        for t in &traces {
+            pooled.extend_from_slice(&t.steps[si].y_pred_samples);
+        }
+        let ess = traces.iter().map(|t| t.steps[si].ess)
+            .fold(f64::INFINITY, f64::min);
+        let crps = crps_sample_fair(&pooled, y);
+        let pit = pit_sample_randomized(&pooled, y, pit_rng.uniform());
+        let interval = PredInterval::from_samples(&pooled);
+
+        let mut per_stream = Vec::with_capacity(first.steps[si].per_stream.len());
+        for pi in 0..first.steps[si].per_stream.len() {
+            let ss0 = &first.steps[si].per_stream[pi];
+            let ls_s: Vec<f64> = traces.iter()
+                .map(|t| t.steps[si].per_stream[pi].log_score).collect();
+            let (log_score_s, _) = crate::evidence::logmeanexp_with_se(&ls_s);
+            let mut pooled_s: Vec<f64> = Vec::new();
+            for t in &traces {
+                pooled_s.extend_from_slice(&t.steps[si].per_stream[pi].y_pred_samples);
+            }
+            per_stream.push(StreamScore {
+                stream: ss0.stream.clone(),
+                y_obs: ss0.y_obs,
+                log_score: log_score_s,
+                crps: crps_sample_fair(&pooled_s, ss0.y_obs),
+                pit: pit_sample_randomized(&pooled_s, ss0.y_obs, pit_rng.uniform()),
+                interval: PredInterval::from_samples(&pooled_s),
+                y_pred_samples: pooled_s,
+            });
+        }
+
+        steps.push(PrequentialStep {
+            t: first.steps[si].t,
+            y_obs: y,
+            y_pred_samples: pooled,
+            log_score, crps, pit, ess,
+            interval,
+            per_stream,
+        });
+    }
+
+    // Union of warnings, one per kind (the counts differ per component;
+    // the first instance is representative).
+    let mut warnings = Vec::new();
+    for t in &traces {
+        for w in &t.warnings {
+            if !warnings.iter().any(|have|
+                std::mem::discriminant(have) == std::mem::discriminant(w)) {
+                warnings.push(w.clone());
+            }
+        }
+    }
+
+    Ok(PrequentialTrace {
+        schema_version: first.schema_version,
+        t0: first.t0,
+        provenance: Provenance::Posterior { n_draws: m },
+        conditioning: first.conditioning.clone(),
+        steps,
+        warnings,
+        score_from: first.score_from,
+        pit_randomization_seed: Some(pit_seed),
+    })
+}
+
+/// Up to `m` evenly thinned posterior draws as flat params TOMLs — the
+/// mixture components of §3.6. `Ok(None)` when the fit has no posterior
+/// cloud (an optimizer fit: a mixture is impossible, the plug-in winner
+/// is the fallback). Thinning is an even stride over the retained
+/// (chain-filtered) rows in file order; fewer rows than `m` uses them
+/// all. Reads through the shared draws authority so `--exclude-chains`
+/// applies once, at the same seam every other consumer uses.
+fn thinned_draws_params_tomls(
+    segment: &Path,
+    selection: Option<&ChainSelection>,
+    m: usize,
+) -> Result<Option<Vec<String>>, String> {
+    let pdraws = match crate::posterior_draws::resolve_posterior_draws(
+        &segment.to_string_lossy(), None,
+    ) {
+        Ok(p) => p.with_selection(selection.cloned()),
+        Err(_) => return Ok(None),
+    };
+    let (rows, _info) = pdraws.load_params_with_info()?;
+    let n = rows.len();
+    if n == 0 {
+        return Err(format!("no posterior draws in {}", pdraws.draws_path.display()));
+    }
+    let m_eff = m.min(n);
+    let mut out = Vec::with_capacity(m_eff);
+    for i in 0..m_eff {
+        let row = &rows[i * n / m_eff];
+        let sorted: std::collections::BTreeMap<&String, &f64> = row.iter().collect();
+        let mut s = String::new();
+        s.push_str("# camdl compare: thinned posterior draw (mixture component)\n\n");
+        for (name, v) in sorted {
+            s.push_str(&format!(
+                "{} = {}\n", name,
+                crate::fit::runner::format_param_value(*v)));
+        }
+        out.push(s);
+    }
+    Ok(Some(out))
 }
 
 /// Merge a training file and its held-out tail into one scored series
@@ -1693,6 +1937,90 @@ fn option_finite(x: f64) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §3.6 (Stage 4.1): the mixture combines per-draw *densities*, pools
+    /// samples, takes the min ESS, and stamps `Posterior { n_draws }`.
+    #[test]
+    fn combine_mixture_averages_densities_and_pools_samples() {
+        use sim::inference::prequential::{
+            crps_sample_fair, PredInterval, PrequentialStep, PrequentialTrace,
+            PrequentialWarning, Provenance,
+        };
+        let component = |ls: f64, samples: Vec<f64>, ess: f64| PrequentialTrace {
+            schema_version: 3,
+            t0: 0,
+            provenance: Provenance::PlugIn,
+            conditioning: Conditioning::InSample,
+            steps: vec![PrequentialStep {
+                t: 7.0,
+                y_obs: 3.0,
+                interval: PredInterval::from_samples(&samples),
+                y_pred_samples: samples,
+                log_score: ls,
+                crps: 0.0,
+                pit: 0.0,
+                ess,
+                per_stream: vec![],
+            }],
+            warnings: vec![PrequentialWarning::StartsAtPrior],
+            score_from: None,
+            pit_randomization_seed: Some(1),
+        };
+        let a = component(0.2_f64.ln(), vec![1.0, 2.0], 40.0);
+        let b = component(0.4_f64.ln(), vec![3.0, 4.0], 25.0);
+        let mixed = combine_mixture(vec![a, b], 9).expect("same axis combines");
+
+        // Density average, NOT mean of logs: log((0.2 + 0.4)/2) = log(0.3).
+        let got = mixed.steps[0].log_score;
+        let want = 0.3_f64.ln();
+        assert!((got - want).abs() < 1e-12,
+            "mixture log score must be log-mean-density: {got} vs {want}");
+        let mean_of_logs = (0.2_f64.ln() + 0.4_f64.ln()) / 2.0;
+        assert!(got > mean_of_logs,
+            "Jensen: the mixture score is strictly above the mean of logs");
+
+        // Pooled cloud, min ESS, CRPS over the pool.
+        assert_eq!(mixed.steps[0].y_pred_samples, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(mixed.steps[0].ess, 25.0);
+        let want_crps = crps_sample_fair(&[1.0, 2.0, 3.0, 4.0], 3.0);
+        assert!((mixed.steps[0].crps - want_crps).abs() < 1e-12);
+
+        // Stamps and carried metadata.
+        assert_eq!(mixed.provenance, Provenance::Posterior { n_draws: 2 });
+        assert_eq!(mixed.conditioning, Conditioning::InSample);
+        assert_eq!(mixed.pit_randomization_seed, Some(9));
+        assert_eq!(mixed.warnings.len(), 1, "duplicate warnings deduped by kind");
+    }
+
+    #[test]
+    fn combine_mixture_refuses_mismatched_axes() {
+        use sim::inference::prequential::{
+            PredInterval, PrequentialStep, PrequentialTrace, Provenance,
+        };
+        let trace_at = |t: f64| PrequentialTrace {
+            schema_version: 3,
+            t0: 0,
+            provenance: Provenance::PlugIn,
+            conditioning: Conditioning::InSample,
+            steps: vec![PrequentialStep {
+                t,
+                y_obs: 3.0,
+                y_pred_samples: vec![1.0],
+                log_score: -1.0,
+                crps: 0.0,
+                pit: 0.0,
+                ess: 10.0,
+                interval: PredInterval::default(),
+                per_stream: vec![],
+            }],
+            warnings: vec![],
+            score_from: None,
+            pit_randomization_seed: None,
+        };
+        let err = combine_mixture(vec![trace_at(7.0), trace_at(14.0)], 1)
+            .expect_err("different step times must refuse");
+        assert!(err.contains("different observation axes"), "{err}");
+    }
 
     /// The exponentiated Δelpd column reports an in-sample likelihood ratio
     /// against the baseline. It is not an e-value: an e-value is a non-negative
