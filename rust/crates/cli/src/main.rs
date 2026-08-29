@@ -3539,6 +3539,12 @@ fn generate_uniform_draws(
     for _ in 0..n {
         let mut row = HashMap::new();
         for p in &model.parameters {
+            // Declared bounds only, deliberately — NOT
+            // `params_resolver::resolved_bounds` (gh#763). This sweep varies
+            // what the modeller gave a range and holds everything else at its
+            // default; enrolling every `probability` in the sweep because its
+            // type carries [0, 1] would silently change what `--draws uniform`
+            // means for existing models.
             let val = if let Some((lo, hi)) = p.bounds() {
                 lo + (hi - lo) * rng.uniform()
             } else if let Some(v) = p.value.resolved_value() {
@@ -3692,7 +3698,8 @@ fn generate_prior_draws(
                     // the model's `in [lo, hi]`.
                     let (lo, hi) = spec.bounds
                         .or_else(|| model.parameters.iter()
-                            .find(|p| &p.name == name).and_then(|p| p.bounds()))
+                            .find(|p| &p.name == name)
+                            .and_then(crate::params_resolver::resolved_bounds))
                         .ok_or_else(|| format!(
                             "parameter '{}': prior = {{ uniform = {{}} }} requires bounds — \
                              add `in [lo, hi]` in the model or `bounds = [lo, hi]` to \
@@ -3829,7 +3836,13 @@ fn generate_prior_draws_from_ir(
             let value = match p.prior_dist() {
                 Some(pd) => {
                     if i == 0 { n_sampled += 1; }
-                    let (v, rejected) = sample_with_bounds(pd, p.bounds(), &mut rng, &p.name)?;
+                    // Truncate to the range the parameter is valid on, which
+                    // includes the one its type carries (gh#763) — otherwise
+                    // this emits a `probability` outside [0, 1] that every
+                    // downstream command then rejects. A no-op unless the
+                    // prior actually places mass outside that range.
+                    let bounds = crate::params_resolver::resolved_bounds(p);
+                    let (v, rejected) = sample_with_bounds(pd, bounds, &mut rng, &p.name)?;
                     if rejected > 0 {
                         *reject_counts.entry(p.name.as_str()).or_insert(0) += rejected;
                     }

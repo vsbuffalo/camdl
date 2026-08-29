@@ -500,3 +500,196 @@ fn fit_run_priors_cache_invalidates_on_model_ir_prior_change() {
         "changing the model's `~` prior must produce a different fit dir \
          (CAS cache must invalidate). A={:?} B={:?}", name_a, name_b);
 }
+
+// ─── gh#763: `probability` carries [0, 1] into the fit ───────────────────────
+//
+// `docs/camdl-language-spec.md` §4.1 states `probability : ∈ [0, 1]`, and §4.2
+// calls a written-out `in [0.0, 1.0]` "redundant but explicit". It was not
+// redundant: an undeclared `probability` resolved to the inference bounds
+// `[0, ∞)`, which broke the fit two ways at once —
+//
+//   * a `beta` prior was refused, "requires bounds [0, 1], got [0, inf]";
+//   * with no prior, the transform table read `logit [0, inf]`, the auto
+//     `rw_sd` `(hi − lo)/6` was `inf`, and chain 1 died with
+//     `NonFiniteParameter { name: "rho", value: NaN }`.
+//
+// Three layers decide this cell — `derive_transform`, the IF2 search box in
+// `build_if2_params_from_specs`, and `validate_prior_transform_compat` — so it
+// is pinned end to end: a disagreement between them shows up as a refused
+// config or a NaN chain, and no single unit test sees both.
+
+/// A closed SIR reporting cases through `rho`. `rho_bounds` is spliced in as
+/// `rho`'s range clause and is the ONLY thing that varies between arms: `""`
+/// is the gh#763 shape (the type alone), `"in [0, 1]"` is the control that
+/// always worked.
+fn write_probability_fixture(dir: &Path, rho_bounds: &str) -> (PathBuf, PathBuf) {
+    let camdlc = camdlc_bin().expect("camdlc.exe present");
+    let src = format!(r#"
+time_unit = 'days
+compartments {{ S, I, R }}
+parameters {{
+  beta  : rate         in [0.05, 1.0]
+  gamma : rate         in [0.01, 0.5]
+  N0    : count        in [100, 100000]
+  rho   : probability  {rho_bounds}
+  k     : positive     in [1.0, 100.0]
+}}
+transitions {{
+  infection : S --> I @ beta * S * I / N0
+  recovery  : I --> R @ gamma * I
+}}
+observations {{
+  cases {{
+    columns       {{ time : time, cases : count }}
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }}
+}}
+init {{ S = 999  I = 1 }}
+simulate {{ from = 0 'days  to = 6 'days }}
+"#);
+    let model_path = dir.join("prob.camdl");
+    std::fs::write(&model_path, src).unwrap();
+    let ir_path = dir.join("prob.ir.json");
+    let out = Command::new(&camdlc).arg(&model_path).output().unwrap();
+    assert!(out.status.success(),
+        "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(&ir_path, &out.stdout).unwrap();
+
+    let data_path = dir.join("cases.tsv");
+    std::fs::write(&data_path,
+        "time\tcases\n1\t2\n2\t4\n3\t8\n4\t6\n5\t4\n6\t2\n").unwrap();
+    (ir_path, data_path)
+}
+
+/// A fit toml estimating only `rho`, everything else pinned. `stage` is
+/// spliced in whole so one helper serves both the beta-prior (PMMH) arm and
+/// the no-prior (IF2) arm.
+fn write_probability_fit_toml(
+    dir: &Path, ir: &Path, data: &Path, rho_spec: &str, stage: &str, tag: &str,
+) -> PathBuf {
+    let toml = format!(r#"
+output_dir = "{out}"
+[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[config]
+dt = 1.0
+[estimate]
+rho = {rho_spec}
+[fixed]
+beta = 0.3
+gamma = 0.1
+N0 = 1000
+k = 10.0
+{stage}
+"#,
+        out  = dir.join("results").display(),
+        ir   = ir.display(),
+        data = data.display(),
+    );
+    let p = dir.join(format!("fit_{}.toml", tag));
+    std::fs::write(&p, toml).unwrap();
+    p
+}
+
+const PMMH_STAGE: &str = r#"[stages.posterior]
+algorithm = "pmmh"
+backend = "chain_binomial"
+chains = 1
+particles = 20
+iterations = 20
+burn_in = 2"#;
+
+const IF2_STAGE: &str = r#"[stages.point]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 20
+iterations = 5
+cooling = 0.9"#;
+
+fn combined(out: &std::process::Output) -> String {
+    format!("{}{}",
+        String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+}
+
+/// Arm 1 of gh#763: a `beta` prior on a `probability` that declared no range
+/// is accepted, because the type supplies the `[0, 1]` the prior needs.
+#[test]
+fn beta_prior_on_an_undeclared_probability_is_accepted() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("gh763_beta");
+    let (ir, data) = write_probability_fixture(tmp.path(), "");
+    let fit = write_probability_fit_toml(
+        tmp.path(), &ir, &data,
+        "{ start = 0.5, prior = { beta = { alpha = 2.0, beta = 5.0 } } }",
+        PMMH_STAGE, "beta");
+    let out = run_fit(&bin, &fit);
+    let log = combined(&out);
+    assert!(out.status.success(),
+        "a beta prior on `rho : probability` (no `in [...]`) must be accepted \
+         (gh#763); output:\n{log}");
+    assert!(!log.contains("beta prior requires bounds"),
+        "the pre-fix refusal must be gone; output:\n{log}");
+}
+
+/// Arm 2 of gh#763: with no prior at all, IF2 searches the unit interval. The
+/// transform row is the observable — it printed `logit [0, inf]` with
+/// `rw_sd=inf` before, and the chain then died on a NaN.
+#[test]
+fn if2_on_an_undeclared_probability_searches_the_unit_interval() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("gh763_if2");
+    let (ir, data) = write_probability_fixture(tmp.path(), "");
+    let fit = write_probability_fit_toml(
+        tmp.path(), &ir, &data, "{ start = 0.5 }", IF2_STAGE, "if2");
+    let out = run_fit(&bin, &fit);
+    let log = combined(&out);
+    assert!(out.status.success(),
+        "IF2 over `rho : probability` (no `in [...]`) must run (gh#763); \
+         output:\n{log}");
+    assert!(log.contains("logit") && log.contains("[0, 1]"),
+        "the transform table must report a logit over [0, 1]; output:\n{log}");
+    assert!(!log.contains("[0, inf]"),
+        "no search box may be reported as [0, inf]; output:\n{log}");
+    assert!(!log.contains("rw_sd=inf"),
+        "an infinite rw_sd is a NaN on the first perturbation; output:\n{log}");
+    assert!(!log.contains("NonFiniteParameter"),
+        "the chain must not die on a NaN parameter; output:\n{log}");
+}
+
+/// The control the issue names: writing the "redundant but explicit"
+/// `in [0, 1]` must land on exactly the same transform row as omitting it, so
+/// the spec's claim that the clause is redundant is now true.
+#[test]
+fn declaring_the_unit_interval_explicitly_changes_nothing() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("gh763_control");
+
+    let mut rows: Vec<(&str, String)> = Vec::new();
+    for (tag, clause) in [("implicit", ""), ("explicit", "in [0, 1]")] {
+        let dir = tmp.path().join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ir, data) = write_probability_fixture(&dir, clause);
+        let fit = write_probability_fit_toml(
+            &dir, &ir, &data, "{ start = 0.5 }", IF2_STAGE, tag);
+        let out = run_fit(&bin, &fit);
+        let log = combined(&out);
+        assert!(out.status.success(), "{tag} arm must run; output:\n{log}");
+        let row = log.lines()
+            .find(|l| l.trim_start().starts_with("rho "))
+            .unwrap_or_else(|| panic!("no `rho` transform row in {tag} output:\n{log}"))
+            .to_string();
+        rows.push((tag, row));
+    }
+    assert_eq!(rows[0].1, rows[1].1,
+        "`in [0, 1]` is documented as redundant, so the transform row must be \
+         identical with and without it (gh#763).\n  implicit: {}\n  explicit: {}",
+        rows[0].1, rows[1].1);
+}

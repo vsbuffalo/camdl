@@ -773,8 +773,9 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         for (name, spec) in &config.estimate {
             if let Some(p) = model.parameters.iter_mut().find(|p| p.name == *name) {
                 if p.value.resolved_value().is_none() {
-                    let resolved_bounds = spec.bounds.or(p.bounds());
-                    let v = spec.start.or_else(|| resolved_bounds.map(|(lo, hi)| {
+                    let bounds = spec.bounds
+                        .or_else(|| crate::params_resolver::resolved_bounds(p));
+                    let v = spec.start.or_else(|| bounds.map(|(lo, hi)| {
                         let transform = crate::fit::runner::derive_transform_with_bounds(
                             p,
                             spec.transform.as_ref().map(|t| t.as_str()),
