@@ -1350,6 +1350,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 run_config.loglik_eval = effective_loglik_eval.clone();
                 run_config.gate = effective_gate.clone();
 
+                // gh#585: the applied training window is the §3.7.3(b)
+                // proof — recorded from the build that actually truncated,
+                // into the fit-level sidecar written above.
+                if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
+                    crate::run_meta::record_training_window(
+                        seg, run_config.applied_training_window);
+                }
+
                 std::fs::create_dir_all(&stage_dir).unwrap_or_else(|e| {
                     eprintln!("error creating {}: {}", stage_dir.display(), e);
                     std::process::exit(1);
@@ -1897,6 +1905,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     std::process::exit(1);
                 });
 
+                // gh#585: same §3.7.3(b) proof recording as the IF2/Bayesian
+                // stages — a fit may run a PFilter stage first (or alone).
+                if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
+                    crate::run_meta::record_training_window(
+                        seg, run_config.applied_training_window);
+                }
+
                 std::fs::create_dir_all(&stage_dir).unwrap_or_else(|e| {
                     eprintln!("error creating {}: {}", stage_dir.display(), e);
                     std::process::exit(1);
@@ -2282,6 +2297,10 @@ fn build_fit_sidecar(
         // expanded observation leaves; emitted for every fit (not gated on
         // Bayesian-ness — an IF2 fit's streams/dims are just as describable).
         schema: model.map(crate::run_meta::ObsSchema::from_model),
+        // gh#585: recorded post-load by `record_training_window` (the proof
+        // must come from the code path that applied the declaration); sticky
+        // across cache-hit reruns in `write_fit_sidecar`.
+        training_window: None,
         // The `#'` doc dictionary (presentation metadata), loaded from the same
         // compiled IR. Empty when the model documents nothing.
         docs: crate::util::load_model_docs(model_src).unwrap_or_default(),

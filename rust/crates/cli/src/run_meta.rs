@@ -512,6 +512,17 @@ impl ObsSchema {
 /// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
 /// It is **derived provenance, not a source of truth**: a faithful readable
+/// The applied training window (gh#585): training excluded every
+/// observation with `t > train_end`. Value type for
+/// [`FitSidecar::training_window`]; produced by
+/// `fit::runner::apply_holdout_declaration`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrainingWindow {
+    /// Last model time included in training; observations strictly after
+    /// it were withheld.
+    pub train_end: f64,
+}
+
 /// projection of inputs already hashed into the leaf identity (the `FitDigest`
 /// — different priors already produce a different fit identity). It is written
 /// post-identity and is never fed back into any hash. The producing `fit.toml`
@@ -577,6 +588,17 @@ pub struct FitSidecar {
     /// `fixed` above are the single source of truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<ObsSchema>,
+    /// The applied training window (gh#585, Stage 3.1 of the 2026-08-29
+    /// honest-predictive-evaluation proposal): present iff the fit's
+    /// holdout declaration was actually applied at load — training
+    /// truncated at `holdout_after`, or `[data.holdout]` files validated
+    /// tail-only. Its *presence* is the §3.7.3(b) positive proof `camdl
+    /// compare`'s non-leakage gate reads; a fit produced by an engine that
+    /// parsed a holdout declaration without applying it (pre-gh#585) can
+    /// never carry it. Sticky like `label`: recorded after the data load,
+    /// and a rerun that skips the load (all-cache-hit) must not erase it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_window: Option<TrainingWindow>,
     /// The model's `#'` documentation dictionary ([`ir::ModelDocs`]): the
     /// model's own header block (`docs.model`, gh#750) plus params /
     /// compartments / transitions / observations / dimensions / quantities →
@@ -632,20 +654,68 @@ pub fn write_fit_sidecar(
             }
         }
     }
-    // gh#29: keep the label sticky. The `.or_else` reads the on-disk sidecar
-    // only when this write carries no label, and we clone only when a prior
-    // label actually differs — the common override/fresh paths pay nothing.
+    // gh#29: keep the label sticky. gh#585: the applied training window is
+    // sticky the same way — it is recorded after the data load, and a rerun
+    // that never loads (all-cache-hit short-circuit) writes the sidecar with
+    // `None`, which must not erase the recorded proof. The on-disk sidecar is
+    // read only when a sticky field is absent from this write; we clone only
+    // when a merge actually changes something.
+    let on_disk = if sidecar.label.is_none() || sidecar.training_window.is_none() {
+        read_fit_sidecar(fit_segment)
+    } else {
+        None
+    };
     let effective_label = sidecar.label.clone()
-        .or_else(|| read_fit_sidecar(fit_segment).and_then(|s| s.label));
-    let bytes = if effective_label == sidecar.label {
+        .or_else(|| on_disk.as_ref().and_then(|s| s.label.clone()));
+    let effective_window = sidecar.training_window
+        .or(on_disk.as_ref().and_then(|s| s.training_window));
+    let bytes = if effective_label == sidecar.label
+        && effective_window == sidecar.training_window
+    {
         serde_json::to_vec_pretty(sidecar)
     } else {
         let mut merged = sidecar.clone();
         merged.label = effective_label;
+        merged.training_window = effective_window;
         serde_json::to_vec_pretty(&merged)
     }
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(fit_segment.join("fit.meta.json"), bytes)
+}
+
+/// gh#585: record the applied training window into an existing fit
+/// sidecar. Called after `FitRunConfig::build` applied the fit's holdout
+/// declaration — the per-segment sidecar write happens before the data
+/// load, so the §3.7.3(b) proof lands as this update. No-op when `window`
+/// is `None` or the sidecar already carries the same value; a missing
+/// sidecar or failed write is surfaced as a warning (the fit itself must
+/// not die for it — `compare` will simply refuse the `HoldOutTail` label
+/// without the record).
+pub fn record_training_window(
+    fit_segment: &std::path::Path,
+    window: Option<TrainingWindow>,
+) {
+    let Some(window) = window else { return };
+    let Some(mut sidecar) = read_fit_sidecar(fit_segment) else {
+        eprintln!(
+            "warning: cannot record training window: no fit.meta.json under {}",
+            fit_segment.display());
+        return;
+    };
+    if sidecar.training_window == Some(window) {
+        return;
+    }
+    sidecar.training_window = Some(window);
+    let bytes = match serde_json::to_vec_pretty(&sidecar) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("warning: cannot record training window: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(fit_segment.join("fit.meta.json"), bytes) {
+        eprintln!("warning: cannot record training window: {e}");
+    }
 }
 
 /// Read the fit-level sidecar; `None` when absent (an incomplete segment —
@@ -691,6 +761,48 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Option<FitSidecar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#585: the recorded training window is the §3.7.3(b) proof, and a
+    /// rerun that skips the data load (all-cache-hit) rewrites the sidecar
+    /// with `training_window: None` — the sticky merge must preserve the
+    /// recorded value, exactly as `label` is preserved (gh#29).
+    #[test]
+    fn training_window_is_sticky_across_sidecar_rewrites() {
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_trainwin_{}_{}", std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bare = FitSidecar::default();
+        write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), &bare)
+            .unwrap();
+        assert_eq!(read_fit_sidecar(&dir).unwrap().training_window, None);
+
+        // The post-load recording (from the build that applied the window).
+        record_training_window(&dir, Some(TrainingWindow { train_end: 21.0 }));
+        assert_eq!(
+            read_fit_sidecar(&dir).unwrap().training_window,
+            Some(TrainingWindow { train_end: 21.0 }));
+
+        // A cache-hit rerun's sidecar write carries no window — the recorded
+        // proof must survive.
+        write_fit_sidecar(&dir, std::path::Path::new("nonexistent.toml"), &bare)
+            .unwrap();
+        assert_eq!(
+            read_fit_sidecar(&dir).unwrap().training_window,
+            Some(TrainingWindow { train_end: 21.0 }),
+            "a windowless rewrite must not erase the recorded training window");
+
+        // Idempotent re-record is a no-op; a changed window overwrites.
+        record_training_window(&dir, Some(TrainingWindow { train_end: 21.0 }));
+        record_training_window(&dir, None);
+        assert_eq!(
+            read_fit_sidecar(&dir).unwrap().training_window,
+            Some(TrainingWindow { train_end: 21.0 }));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn summary_filename_matches_algorithm_name() {
