@@ -31,18 +31,31 @@ pub enum Provenance {
 /// optimism axis (#295), orthogonal to [`Provenance`] (the plug-in-vs-posterior
 /// parameter treatment).
 ///
-/// v1 only uses `InSample`: θ is fit to the *full* series, so every
-/// "one-step-ahead" score has already seen the future through θ. The score is
-/// then one-step-ahead in `y` but in-sample in `θ` — optimistic in absolute
-/// level, not a true out-of-sample forecast score. Honest out-of-sample
-/// (`Lfo` / `RollingOrigin`) is #295 Part II; those variants append here without
-/// a schema migration when they land.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Externally tagged (serde's default) — deliberately NOT `tag = "kind"`:
+/// v2 traces wrote `"conditioning": "in_sample"` as a bare string
+/// (asserted by `conditioning_serializes_snake_case`), and internal
+/// tagging would fail to parse a present field of that shape. Externally
+/// tagged, `InSample` stays the bare string and the struct variants
+/// serialize as `{"hold_out_tail": {...}}`, so v1 (absent field, serde
+/// default) and v2 (bare string) traces both keep reading.
+///
+/// The `Forecast` (no assimilation past the origin) and `Lfo` variants
+/// are Stage-5 / follow-up additions (2026-08-29 proposal §3.2); they
+/// append here without a schema migration.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Conditioning {
-    /// θ fit to all of `y_{1:T}` → one-step-ahead in `y` but not in `θ`.
+    /// θ fit to all of `y_{1:T}` → one-step-ahead in `y` but not in `θ` —
+    /// optimistic in absolute level, and biased toward the more flexible
+    /// model in differences.
     #[default]
     InSample,
+    /// θ from a fit sealed at `train_end` (gh#585): every scored step
+    /// satisfies `t > train_end`, and the filter assimilates held-out
+    /// observations as it scores them (one-step-ahead mode, §3.7.1).
+    /// Honest in θ — the only leak channel the stamp certifies.
+    /// `theta_source` names the sealed fit the parameters came from.
+    HoldOutTail { train_end: f64, theta_source: String },
 }
 
 /// One stream's (district's) score at a single step (gh#269).
@@ -500,7 +513,11 @@ pub fn build_trace(
     }
 
     PrequentialTrace {
-        schema_version: 2,
+        // v3 (gh#585): score_from + pit_randomization_seed + the
+        // Conditioning struct variants. All additions serde-defaulted, so
+        // v1/v2 traces still read; they read as InSample/PlugIn, which is
+        // factually what they are.
+        schema_version: 3,
         t0,
         // This builder scores a single filter pass at one θ over the full data:
         // plug-in + in-sample. The posterior / LFO producers (#295) stamp their
@@ -711,7 +728,39 @@ mod tests {
 
     #[test]
     fn conditioning_serializes_snake_case() {
+        // The v2 shape: InSample is a BARE string — the reason the enum is
+        // externally tagged (a `tag = "kind"` change would fail to parse
+        // every existing trace).
         assert_eq!(serde_json::to_string(&Conditioning::InSample).unwrap(), r#""in_sample""#);
+        let back: Conditioning = serde_json::from_str(r#""in_sample""#).unwrap();
+        assert_eq!(back, Conditioning::InSample);
+        // The v3 struct variant (gh#585) nests under its external tag.
+        let hot = Conditioning::HoldOutTail {
+            train_end: 21.0, theta_source: "fits/sir-ab12cd34".into() };
+        let json = serde_json::to_string(&hot).unwrap();
+        assert_eq!(json,
+            r#"{"hold_out_tail":{"train_end":21.0,"theta_source":"fits/sir-ab12cd34"}}"#);
+        let back: Conditioning = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, hot);
+    }
+
+    #[test]
+    fn hold_out_tail_clears_the_in_sample_caveat_axis() {
+        // A sealed-θ trace is honest in conditioning; the caveat must name
+        // only the remaining plug-in axis.
+        let t = PrequentialTrace {
+            schema_version: 3, t0: 3,
+            provenance: Provenance::PlugIn,
+            conditioning: Conditioning::HoldOutTail {
+                train_end: 21.0, theta_source: "fits/sir-ab12cd34".into() },
+            steps: vec![], warnings: vec![],
+            score_from: Some(21.0),
+            pit_randomization_seed: None,
+        };
+        let caveat = t.optimism_caveat().expect("plug-in axis still flagged");
+        assert!(caveat.contains("plug-in"));
+        assert!(!caveat.contains("in-sample"),
+            "held-out conditioning must not be called in-sample: {caveat}");
     }
 
     #[test]
@@ -1016,7 +1065,7 @@ mod tests {
 
         // gh#269: one stream, so the single per-stream score equals the joint
         // (same per-particle log-liks + samples + observed value).
-        assert_eq!(trace.schema_version, 2);
+        assert_eq!(trace.schema_version, 3);
         assert_eq!(trace.steps[0].per_stream.len(), 1);
         assert_eq!(trace.steps[0].per_stream[0].stream, "s0");
         assert!(approx_eq(trace.steps[0].per_stream[0].log_score,
