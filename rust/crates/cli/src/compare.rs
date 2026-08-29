@@ -1579,28 +1579,47 @@ fn resolve_streams(
     Err("the fit's [data] block has neither `observations` nor `file`".to_string())
 }
 
-/// Paired Δ = sum_t (a_t − b_t); paired SE = sqrt(T · Var_t(a_t − b_t)).
-/// Returns (delta, se) or (NaN, NaN) if horizons mismatch.
+/// Paired Δ = sum_t (a_t − b_t); paired SE = the Newey–West HAC standard
+/// error of that sum with the Harvey–Leybourne–Newbold small-sample
+/// inflation (Stage 4.3 of the 2026-08-29 proposal, §3.4 remedy 2).
+///
+/// Loss differentials are autocorrelated exactly when a model is
+/// misspecified — the interesting case — so the iid `√(T·Var_t(d_t))` is
+/// anti-conservative there. The Diebold–Mariano standard: a Bartlett
+/// long-run variance at the pinned `sandwich`-default lag
+/// (`evidence::newey_west_lag`), the SE divided by the HLN factor
+/// `√((T−1)/T)`, with `t_{T−1}` as the reference distribution (stated in
+/// the footnote; the evidence gate stays the descriptive 2·se band).
+/// At lag 0 / no autocorrelation this is the iid SE with the biased
+/// variance. Returns (delta, se) or (NaN, NaN) if horizons mismatch.
 fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace, field: Field)
     -> (f64, f64)
 {
+    let diffs = match paired_diffs(a, b, field) {
+        Some(d) => d,
+        None => return (f64::NAN, f64::NAN),
+    };
+    let delta: f64 = diffs.iter().sum();
+    let se = crate::evidence::newey_west_se_of_sum(&diffs)
+        / crate::evidence::hln_factor(diffs.len());
+    (delta, se)
+}
+
+/// The per-step loss differentials `d_t = a_t − b_t`, or `None` on a
+/// horizon mismatch — the shared input of the paired SE and the lag-1
+/// serial-dependence diagnostic.
+fn paired_diffs(a: &PrequentialTrace, b: &PrequentialTrace, field: Field)
+    -> Option<Vec<f64>>
+{
     if a.n_scored() != b.n_scored() || a.n_scored() == 0 {
-        return (f64::NAN, f64::NAN);
+        return None;
     }
-    let diffs: Vec<f64> = a.steps.iter().zip(&b.steps)
+    Some(a.steps.iter().zip(&b.steps)
         .map(|(x, y)| match field {
             Field::LogScore => x.log_score - y.log_score,
             Field::Crps     => x.crps - y.crps,
         })
-        .collect();
-    let t = diffs.len() as f64;
-    let delta: f64 = diffs.iter().sum();
-    let mean = delta / t;
-    let var = if t > 1.0 {
-        diffs.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (t - 1.0)
-    } else { 0.0 };
-    let se = (t * var).sqrt();
-    (delta, se)
+        .collect())
 }
 
 #[derive(Copy, Clone)]
@@ -1745,7 +1764,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
             out.push('\n');
         }
     }
-    for line in warning_lines(rows, t_mismatch) {
+    for line in warning_lines(rows, base_idx, t_mismatch) {
         out.push_str(&line);
         out.push('\n');
     }
@@ -1761,7 +1780,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
 /// asymmetry: the table warned about a miscalibrated model and the markdown
 /// someone pasted into a report did not. A new warning added here appears in
 /// every format by construction.
-fn warning_lines(rows: &[Row], t_mismatch: bool) -> Vec<String> {
+fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String> {
     let mut lines = Vec::new();
     if t_mismatch {
         lines.push("⚠ T_score differs across models — Δ columns suppressed \
@@ -1799,6 +1818,24 @@ fn warning_lines(rows: &[Row], t_mismatch: bool) -> Vec<String> {
         lines.push(format!(
             "note: filter-noise MC SE of elpd (replicate derives): {}",
             with_mc.join(", ")));
+    }
+    // Stage 4.3 (§3.4 remedy 2): the serial dependence the HAC se(Δ)
+    // exists for — printed so the reader sees how far from iid the
+    // per-step differentials are.
+    let lag1: Vec<String> = rows.iter().enumerate()
+        .filter(|(i, _)| *i != base_idx)
+        .filter_map(|(_, r)| {
+            let d = paired_diffs(&r.trace, &rows[base_idx].trace, Field::LogScore)?;
+            let a1 = crate::evidence::lag1_autocorrelation(&d);
+            a1.is_finite().then(|| format!("{} {:+.2}", r.name, a1))
+        })
+        .collect();
+    if !lag1.is_empty() {
+        lines.push(format!(
+            "note: se(Δ) is a Newey–West HAC SE with the Harvey–Leybourne–\
+             Newbold small-sample correction (reference: t with T−1 df); \
+             lag-1 autocorrelation of the per-step Δelpd vs baseline: {}",
+            lag1.join(", ")));
     }
     if let Some(caveat) = optimism_caveat(rows) {
         lines.push(format!("note: {caveat}"));
@@ -1928,7 +1965,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
     }
     // The same block the text table prints, as a markdown list so each warning
     // stays its own line when the document is rendered.
-    let warnings = warning_lines(rows, t_mismatch);
+    let warnings = warning_lines(rows, base_idx, t_mismatch);
     if !warnings.is_empty() {
         out.push('\n');
         for line in warnings {
@@ -1982,6 +2019,16 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
                 |v| option_finite(v)),
             "mc_se_delta_elpd": mc_se_delta(r, &rows[base_idx])
                 .map_or(serde_json::Value::Null, |v| option_finite(v)),
+            // Stage 4.3: serial dependence of the per-step Δelpd — the
+            // reason se_delta_elpd is a Newey–West HAC SE (HLN-corrected,
+            // t_{T−1} reference). Null for the baseline row.
+            "lag1_autocorr_delta_elpd": if i == base_idx {
+                serde_json::Value::Null
+            } else {
+                paired_diffs(&r.trace, base, Field::LogScore)
+                    .map_or(serde_json::Value::Null, |d| option_finite(
+                        crate::evidence::lag1_autocorrelation(&d)))
+            },
             "mean_crps": r.trace.mean_crps(),
             "delta_mean_crps": option_finite(mean_dcrps),
             "pit_cov90": r.trace.pit_coverage(0.90),
