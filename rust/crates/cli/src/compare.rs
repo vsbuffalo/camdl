@@ -817,18 +817,25 @@ fn paired_delta(a: &PrequentialTrace, b: &PrequentialTrace, field: Field)
 #[derive(Copy, Clone)]
 enum Field { LogScore, Crps }
 
-/// Format an e-value for display. exp(Δelpd) ranges over many orders of
-/// magnitude — compact decimal for the "interesting" band [0.001, 1000]
-/// and scientific notation outside. E_T = 1 means "tied with baseline";
-/// E_T = 100 means "100× more likely than baseline under its own predictive";
-/// E_T = 0.01 means "1/100× as likely."
-fn fmt_e_value(e: f64) -> String {
-    if !e.is_finite() { return "—".into(); }
-    if e == 0.0 { return "0".into(); }
-    if e >= 1000.0 || e < 0.001 {
-        format!("{:.2e}", e)
+/// Format the likelihood ratio `exp(Δelpd)` for display: the candidate's
+/// in-sample plug-in predictive likelihood over the baseline's, on the same
+/// scored observations. `LR = 1` means "tied with the baseline"; `LR = 100`
+/// means the candidate assigned the observed series 100× the predictive
+/// likelihood the baseline did; `LR = 0.01`, one hundredth of it.
+///
+/// The ratio is computed at a θ̂ fit to the very observations it scores, so it
+/// is optimistic in level and biased toward the more flexible model — read it
+/// with `se(Δ)` and the caveats under the table, not on its own.
+///
+/// The value ranges over many orders of magnitude: compact decimal inside the
+/// readable band [0.001, 1000], scientific notation outside it.
+fn fmt_lr(lr: f64) -> String {
+    if !lr.is_finite() { return "—".into(); }
+    if lr == 0.0 { return "0".into(); }
+    if lr >= 1000.0 || lr < 0.001 {
+        format!("{:.2e}", lr)
     } else {
-        format!("{:.3}", e)
+        format!("{:.3}", lr)
     }
 }
 
@@ -843,7 +850,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
     // (decibans + Jeffreys label) is the human-interpretable alongside —
     // see docs/dev/proposals/2026-04-23-evidence-in-decibans.md §Scope.
     let mut header = vec!["Model".to_string(), "T_score".into(), "elpd".into(),
-        "Δelpd".into(), "E_T".into(), "se(Δ)".into(), "evidence".into()];
+        "Δelpd".into(), "LR".into(), "se(Δ)".into(), "evidence".into()];
     if want_crps { header.push("crps".into()); header.push("Δcrps".into()); }
     if want_pit  { header.push("PIT_cov90".into()); }
 
@@ -884,7 +891,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         ];
         if i == base_idx {
             row.push("—".into());   // Δelpd
-            row.push("—".into());   // E_T
+            row.push("—".into());   // LR
             row.push("—".into());   // se(Δ)
             row.push("—".into());   // evidence (dB + Jeffreys label)
         } else if t_mismatch {
@@ -895,7 +902,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         } else {
             let (d, se) = paired_delta(&r.trace, base, Field::LogScore);
             row.push(format!("{:+.2}", d));
-            row.push(fmt_e_value(d.exp()));
+            row.push(fmt_lr(d.exp()));
             row.push(format!("{:.2}", se));
             let (_, evidence) = crate::evidence::evidence_cells(d);
             row.push(evidence);
@@ -995,7 +1002,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
     let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
 
     let mut out = String::new();
-    let mut header = vec!["Model", "T_score", "elpd", "Δelpd", "E_T", "se(Δ)", "evidence"];
+    let mut header = vec!["Model", "T_score", "elpd", "Δelpd", "LR", "se(Δ)", "evidence"];
     if want_crps { header.push("crps"); header.push("Δcrps"); }
     if want_pit  { header.push("PIT_cov90"); }
     out.push_str(&format!("| {} |\n", header.join(" | ")));
@@ -1034,13 +1041,13 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
         ];
         if i == base_idx || t_mismatch {
             cells.push("—".into());  // Δelpd
-            cells.push("—".into());  // E_T
+            cells.push("—".into());  // LR
             cells.push("—".into());  // se(Δ)
             cells.push("—".into());  // evidence
         } else {
             let (d, se) = paired_delta(&r.trace, base, Field::LogScore);
             cells.push(format!("{:+.2}", d));
-            cells.push(fmt_e_value(d.exp()));
+            cells.push(fmt_lr(d.exp()));
             cells.push(format!("{:.2}", se));
             let (_, evidence) = crate::evidence::evidence_cells(d);
             cells.push(evidence);
@@ -1076,7 +1083,7 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             else { paired_delta(&r.trace, base, Field::Crps) };
         let mean_dcrps = if r.trace.n_scored() == 0 { f64::NAN }
             else { d_crps / r.trace.n_scored() as f64 };
-        let e_t = if d_elpd.is_finite() { d_elpd.exp() } else { f64::NAN };
+        let lr = if d_elpd.is_finite() { d_elpd.exp() } else { f64::NAN };
         // Evidence: Δelpd (nats) → decibans + Jeffreys label. Derived
         // field for human-interpretable consumption; nats remain the
         // primary machine-readable quantity (delta_elpd). See
@@ -1095,7 +1102,7 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             "delta_elpd": option_finite(d_elpd),
             "delta_elpd_db": d_elpd_db,
             "evidence_label": evidence_label,
-            "e_t": option_finite(e_t),
+            "lr": option_finite(lr),
             "se_delta_elpd": option_finite(se_elpd),
             "mean_crps": r.trace.mean_crps(),
             "delta_mean_crps": option_finite(mean_dcrps),
@@ -1117,6 +1124,33 @@ fn option_finite(x: f64) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exponentiated Δelpd column reports an in-sample likelihood ratio
+    /// against the baseline. It is not an e-value: an e-value is a non-negative
+    /// statistic whose expectation under the null is at most 1, which licenses
+    /// an anytime-valid reading ("1/E is a p-value bound"). Nothing here
+    /// establishes that — θ is fit to the same data the ratio is computed on —
+    /// so the name is `LR` in every format, and the word appears nowhere.
+    #[test]
+    fn the_ratio_column_is_named_lr_in_every_format() {
+        let rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        let metrics = vec!["elpd".to_string()];
+
+        let table = render_table(&rows, 0, &metrics, false);
+        assert!(table.contains("LR"), "the table names the column LR:\n{table}");
+        assert!(!table.contains("E_T"), "and never E_T:\n{table}");
+
+        let md = render_md(&rows, 0, &metrics, false);
+        assert!(md.contains("| LR |"), "the md header names the column LR:\n{md}");
+        assert!(!md.contains("E_T"), "and never E_T:\n{md}");
+
+        let json = render_json(&rows, 0, &metrics);
+        assert!(json.contains("\"lr\""), "the JSON key is `lr`:\n{json}");
+        assert!(!json.contains("\"e_t\""), "and never `e_t`:\n{json}");
+    }
 
     /// gh#706. `paired_delta` pairs steps BY INDEX, which is safe for the
     /// scalar only because the T_score preflight refuses mismatched horizons.
