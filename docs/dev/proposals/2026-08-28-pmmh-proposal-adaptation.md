@@ -77,13 +77,17 @@ ceiling falls below it — is nearly flat in `d`:
 | 17 | 24.6%       | 1.64            |
 | 50 | 23.8%       | 1.67            |
 
-It asymptotes to 1.687, so for any realistic model collapse begins around
-`sigma ~ 1.6`. Sherlock, Thiery, Roberts & Rosenthal (2015, _Ann. Statist._
-43(1):238-275) prove the pseudo-marginal random-walk Metropolis is optimally
-efficient at noise variance 3.283 — `sigma = 1.812`, where the ceiling is 20.0%.
-**The theoretically optimal operating point is past the crossover**, so tuning
-the particle count to the literature optimum guarantees the adaptation has no
-root.
+It asymptotes to 1.683, so for any realistic model collapse begins around
+`sigma ~ 1.6`.
+
+**The defect is the target, not the noise level.** Sherlock, Thiery, Roberts &
+Rosenthal (2015, _Ann. Statist._ 43(1):238-275) prove the pseudo-marginal
+random-walk Metropolis is optimally efficient at noise variance 3.283 —
+`sigma = 1.812` — with an optimal acceptance rate of 7.001%. At that `sigma` the
+ceiling is 20.0%, so the literature's own operating point is comfortably
+_attainable_. What is unattainable there is camdl's 24.6% target at d = 17.
+Running at the recommended noise level is fine; demanding the exact-likelihood
+acceptance rate while doing so is not.
 
 Because `lambda` multiplies the whole factor including `eps*I`, an unbounded
 `lambda` also voids the only floor Haario's algorithm has. The covariance
@@ -124,13 +128,22 @@ condition instead of scraping stderr.
 `log lambda` drifts as `-(a* - a) * T^0.4 / 0.4` over `T` steps, so at the
 literature-optimal `sigma = 1.812` (a gap of 4.6 percentage points):
 
-- `T = 5,000`: drift -3.5, `lambda` ends at 0.031 — a proposal 32x narrower than
-  the covariance-optimal scale, expected squared jump distance down about a
-  thousandfold — and the floor is never touched, so nothing warns.
-- `T = 200,000`: drift -15.2, the floor is reached and the warning fires.
+- `T = 5,000`: the closed form gives `lambda = 0.031`, but that holds `a` at the
+  `lambda -> 0` ceiling; at `lambda = 1` acceptance is 8.0%, not 20.0%, so the
+  early gap is 16.6 points and the real drift is faster. A coupled d = 17 run of
+  the actual recursion measures `lambda = 0.020` (median of 9 seeds). Treat
+  0.031 as an upper bound, and note `sd(log lambda) ~ 0.87` from the
+  stochastic-approximation noise alone — a factor of 2.4 either way across
+  seeds, so no point value here is meaningful without its spread.
+- The floor is first reached at a median of **~61,000 steps** (12 runs, range
+  40,067-91,003).
 
-A normal-length run at the recommended noise level therefore under-mixes
-silently. Fixes 3 and 4 close that gap without needing a new target.
+So a proposal 30-50x narrower than the covariance-optimal scale, with expected
+squared jump distance down about **400x** — not the `lambda^-2` factor of 1000x,
+because acceptance _rises_ from 8.0% to 20.0% as `lambda` falls and partly
+offsets it. The floor is never touched below ~40,000 steps, so a normal-length
+run at the recommended noise level under-mixes with nothing warning. Fixes 3 and
+4 close that gap without needing a new target.
 
 ## Fix 2: a noise-aware target acceptance — deferred to gh#767
 
@@ -142,19 +155,39 @@ diagonal 0.99, against 1.4e-4 and 0.11), but the same target overshoots at
 `sigma = 0` and `sigma = 1` to `lambda` 1.9 and 1.6, so 0.07 cannot become the
 default.
 
-**Deferred, with the reason.** What target maximises efficiency when `sigma` is
-_given_ by the particle count and only `lambda` can be tuned is not settled by
-the literature we have: Sherlock et al. optimise jointly over the scaling and
-the noise, and we can only tune one. The measurement that would settle it — a
-sweep of `target_accept` against `sigma` on the existing synthetic harness,
-scored on expected squared jump distance — is an afternoon, but it would not
-establish transfer to a real posterior whose `sigma` varies fivefold across the
-space (1.13 at a posterior median, 6.04 five posterior standard deviations out).
+**The rule is available in closed form.** Sherlock et al.'s limiting model has
+the log-ratio distributed `N(-v/2, v)` with `v = l^2 + 2*sigma^2` for scaling
+`l`; maximising expected squared jump distance over `l` at _fixed_ `sigma` is
+the same optimisation with one argument frozen, and the paper's own finding that
+"the optimal scaling is insensitive to the noise" is the statement that this
+conditional optimum is well-defined. Reconstructing the model reproduces the
+published joint optimum (variance 3.2833 against the paper's 3.283, acceptance
+6.9996% against 7.001%) and the classical exact-likelihood limit (`l* = 2.3812`,
+`a* = 23.38%`), which is the check that it is the right model:
 
-A target rule changes the trajectory of every pseudo-marginal fit. Shipping one
-fitted on a 6-dimensional Gaussian would trade a diagnosable failure for an
-undiagnosable one. gh#767 carries the evidence and the acceptance criteria; the
-four `#[ignore]`d tests in `pmmh_scale_collapse.rs` are its specification.
+| sigma | optimal `l` | optimal target `a*(sigma)` | ceiling `2*Phi(-s/2)` |
+| ----- | ----------- | -------------------------- | --------------------- |
+| 0.0   | 2.381       | 23.38%                     | 100%                  |
+| 1.0   | 2.464       | 15.54%                     | 47.95%                |
+| 1.812 | 2.562       | 7.00%                      | 20.01%                |
+| 2.0   | 2.582       | 5.55%                      | 15.73%                |
+| 3.0   | 2.662       | 1.23%                      | 3.39%                 |
+
+`a*(sigma)` sits below the ceiling at every `sigma` by construction, so the
+recursion always has a root. This is a one-line optimisation, not a research
+programme.
+
+**Deferred anyway, and for one reason only: transfer.** The table above is a
+limiting result for a target with i.i.d. components and Gaussian estimator
+noise. A real posterior's `sigma` varies fivefold across the space — 1.13 at a
+posterior median, 6.04 five posterior standard deviations out — so a target set
+from a base-point `sigma` is wrong for exactly the chain that wanders, which is
+the case that motivated this. That is a design question about _which_ `sigma`
+the target should track, not about what the target should be given one.
+
+A target rule changes the trajectory of every pseudo-marginal fit. gh#767
+carries the evidence and the acceptance criteria; the four `#[ignore]`d tests in
+`pmmh_scale_collapse.rs` are its specification.
 
 ## Fix 3: a preflight that computes the ceiling instead of guessing a band
 
@@ -181,16 +214,44 @@ single `log L-hat` and reports their standard deviation. Two changes:
    of the _differences_; for plain PMMH the same procedure gives
    `s = sigma * sqrt(2)` and nothing changes.
 
+**Three constraints on that measurement, each of which came out of review.**
+
+- **Never derive `s` from `rho`.** The identity `Var = 2*sigma^2*(1-rho_ll)`
+  holds for `rho_ll`, the correlation of the log-likelihood _estimates_, which
+  is not the Crank-Nicolson parameter unless the estimator is a linear Gaussian
+  functional of the auxiliary variables. Measured on a realistic skewed unbiased
+  estimator, a CN parameter of 0.90 induced `rho_ll = 0.81`, and substituting
+  the CN parameter understated `s` by 36%. Measure `sd(difference)` directly.
+- **The ceiling assumes `log L-hat` is approximately Gaussian, and the error is
+  one-sided.** Under skew the predicted ceiling is _optimistic_ — the wrong
+  direction for a check whose job is to catch collapse. The assumption is safe
+  once the noise is a sum over many observation times (measured relative error:
+  54% at 1 observation, 9% at 5, under 1% at 20), so state it rather than
+  presenting the ceiling as unconditional.
+- **Measured at the base point, this is a best case.** The correlation the run
+  realises also depends on `theta` moving, and the achievable CPM correlation
+  degrades with the dimension of the auxiliary variable (Deligiannidis, Doucet &
+  Pitt 2018, _JRSS-B_ 80(5):839-870). Take the second evaluation at a `theta'`
+  drawn from the initial proposal rather than at fixed `theta`, so the number
+  reflects the scheme _and_ the step.
+
+**Cost.** Spreads of differences need pairs: 20 pairs is 40 filter evaluations,
+double the current preflight. At 19,200 particles that is not free, and it is
+the same order of cost this proposal declines to pay for per-window `sigma`
+re-measurement (decision 3). Twenty pairs is the recommendation; fewer trades
+directly against the interval below.
+
 **Warn and proceed** when the ceiling is below the target. A user may be running
 a deliberately cheap exploratory fit, and refusing an expensive run at preflight
 is a stronger action than the diagnosis warrants. The message states the
 ceiling, the target, and that `lambda` will fall for the whole run.
 
-**Report the spread's own uncertainty.** Twenty replicates gives the standard
-deviation an error of roughly `sigma / sqrt(2 * 19)`, about 16%. Near a
-crossover of 1.64 that is +/- 0.26 — enough to flip the verdict — so the check
-reports an interval rather than a point, and says so when the interval straddles
-the crossover.
+**Report the spread's own uncertainty.** Twenty pairs gives the standard
+deviation a standard error of roughly `s / sqrt(2 * 19)`, about 16% — one
+standard error, so roughly 68% coverage. Near a crossover of 1.64 that is +/-
+0.26 at one SE and +/- 0.52 for a 95% read. The check reports the interval,
+labels which it is, and says the verdict is unresolved when the interval
+straddles the crossover rather than picking a side.
 
 `sigma`, `s`, the particle count and the replicate count are persisted with the
 stage artifact (gh#764); a spread without its particle count is meaningless,
@@ -206,14 +267,23 @@ the _run length_ rather than by the warm-up budget.
 Freeze `lambda` and the Haario shape term at the end of warm-up. Two things
 follow:
 
-- The drift is capped by the warm-up length. At the same `sigma = 1.812` and
-  `burn_in = 500`, `lambda` bottoms at 0.25 instead of 0.031 — still narrow, but
-  bounded, stable, and diagnosable at a single point.
+- The drift is capped by the warm-up length rather than the run length. At
+  `sigma = 1.812` with a 500-step window, `lambda` bottoms at 0.25 instead of
+  0.02 — still narrow, but bounded, stable, and diagnosable at a single point.
 - The sampling phase becomes a fixed transition kernel, so the kept draws are
   exactly invariant for the posterior rather than relying on the
   diminishing-adaptation and containment conditions (Roberts & Rosenthal 2007)
   that a continuously-adapting chain needs. This is what Stan and most
   production samplers do.
+
+**This is a no-op under the shipped defaults, and that has to be fixed with
+it.** `DEFAULT_BURN_IN` is 5,000 (`cli/src/fit/pmmh.rs`) and the motivating
+Ebola run was 5,000 iterations, so `burn_in == n_steps` and freezing "at the end
+of warm-up" freezes at the last step — no change at all for exactly the run this
+proposal is about. Two consequences: the warm-up boundary should be an explicit
+field rather than an overload of `burn_in`, whose default is already the whole
+run; and whatever `DEFAULT_BURN_IN` becomes is a separate decision that moves
+every PMMH run's output and must not ride along silently.
 
 **The tradeoff, stated.** The current design is theoretically valid —
 diminishing gain plus fix 1's bound is exactly containment — and gh#347's
@@ -223,10 +293,10 @@ ones, so it is a behaviour change rather than a bug fix and lands with that
 stated.
 
 Alongside it: report the end-of-run `lambda` and flag when it has moved far from
-
-1. `lambda = 0.031` means the proposal ended 32x narrower than the estimated
-   covariance, which is the silent case fix 1's floor warning misses. This is a
-   diagnostic, changes no trajectory, and closes the blind spot on its own.
+unity. A `lambda` of 0.02 means the proposal ended 50x narrower than the
+estimated covariance, which is the silent case fix 1's floor warning misses.
+This is a diagnostic, changes no trajectory, and closes the blind spot on its
+own.
 
 ## The refactor, and where the seam actually is
 
