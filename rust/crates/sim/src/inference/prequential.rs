@@ -123,6 +123,8 @@ pub struct PrequentialStep {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrequentialWarning {
     /// ESS dropped below `threshold` at `step_count` scored steps.
+    /// `threshold` is the absolute ESS cut applied, derived as
+    /// [`ESS_COLLAPSE_FRACTION`] of the particle count.
     EssCollapse { step_count: usize, threshold: f64 },
     /// `t0` appears lower than the model-class heuristic — scores
     /// may be dominated by initialization variance.
@@ -379,7 +381,7 @@ pub fn build_trace(
     let mut steps = Vec::with_capacity(recorded.obs_times.len().saturating_sub(t0));
     let mut warnings: Vec<PrequentialWarning> = Vec::new();
     let mut ess_collapse_count = 0usize;
-    const ESS_THRESHOLD: f64 = 10.0;
+    let mut ess_threshold_used = 0.0_f64;
     let mut pit_rng = crate::rng::StatefulRng::new_stream(pit_seed, PIT_RNG_STREAM);
 
     for idx in t0..recorded.obs_times.len() {
@@ -424,7 +426,13 @@ pub fn build_trace(
         let crps = crps_sample_fair(&joint_samples, y);
         let pit = pit_sample_randomized(&joint_samples, y, pit_rng.uniform());
         let ess = ess_trace[idx];
-        if ess < ESS_THRESHOLD { ess_collapse_count += 1; }
+        // The collapse cue scales with the swarm: an absolute floor (the old
+        // 10.0) read N = 10_000 with ESS 50 — a 0.5% survival — as healthy.
+        // `n` is this step's particle count, constant across steps in
+        // practice, so the recorded threshold is well-defined.
+        let ess_threshold = ESS_COLLAPSE_FRACTION * n;
+        ess_threshold_used = ess_threshold;
+        if ess < ess_threshold { ess_collapse_count += 1; }
 
         // gh#269: per-stream breakdown. Skip a stream whose observed value is
         // non-finite (not scheduled at this union index, or a hole) — it has
@@ -461,7 +469,7 @@ pub fn build_trace(
     if ess_collapse_count > 0 {
         warnings.push(PrequentialWarning::EssCollapse {
             step_count: ess_collapse_count,
-            threshold: ESS_THRESHOLD,
+            threshold: ess_threshold_used,
         });
     }
 
@@ -484,6 +492,15 @@ pub fn build_trace(
 /// so passing the filter seed to `build_trace` cannot correlate the PIT
 /// randomization with the filter's own draws.
 pub const PIT_RNG_STREAM: u64 = 1u64 << 49;
+
+/// A scored step's ESS below this fraction of the particle count counts
+/// toward the trace's `EssCollapse` warning. A fraction, not an absolute
+/// count: at N = 10_000 the old absolute floor of 10 read a 0.5%-survival
+/// step (ESS 50) as healthy. 10% is an advisory "the predictive at this
+/// step rests on few effective particles" cue — well above the degeneracy
+/// watchdog's hard-bail floor (`degeneracy.rs`, ESS ≤ 2 sustained), and
+/// below the ~50% rule-of-thumb at which resampling is merely *warranted*.
+pub const ESS_COLLAPSE_FRACTION: f64 = 0.1;
 
 /// Randomized probability integral transform (PIT) of the predictive
 /// samples at the observation (Smith 1985; Brockwell 2007):
@@ -943,7 +960,8 @@ mod tests {
         };
         let y_obs = vec![2.5, 5.2];
         let per_stream_observed = vec![vec![2.5], vec![5.2]];
-        let ess = vec![100.0, 4.0];  // second step below threshold
+        // 4 particles ⇒ collapse threshold 0.1·4 = 0.4; second step below it.
+        let ess = vec![100.0, 0.3];
 
         let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 7);
         assert_eq!(trace.steps.len(), 2);
@@ -976,6 +994,40 @@ mod tests {
             trace.steps[0].crps, 1e-12));
         assert!(approx_eq(trace.steps[0].per_stream[0].pit,
             trace.steps[0].pit, 1e-12));
+    }
+
+    #[test]
+    fn ess_collapse_threshold_scales_with_particle_count() {
+        // The cue is a FRACTION of N (10%), not the old absolute 10: with 4
+        // particles, ESS 4.0 (full survival) must not warn — under the old
+        // absolute floor it did — while ESS below 0.4 must, and the warning
+        // records the absolute threshold that was applied.
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![1.0, 2.0],
+            log_liks: vec![vec![-1.0; 4]; 2],
+            y_pred_samples: vec![vec![0.5, 1.0, 1.5, 2.0]; 2],
+            stream_names: vec!["s0".to_string()],
+            per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 2],
+            per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 2],
+        };
+        let y_obs = vec![1.25; 2];
+        let per_stream_observed = vec![vec![1.25]; 2];
+
+        let healthy = build_trace(&recorded, &y_obs, &per_stream_observed,
+                                  &[4.0, 4.0], 0, 7);
+        assert!(healthy.warnings.is_empty(),
+            "full survival at small N must not warn: {:?}", healthy.warnings);
+
+        let collapsed = build_trace(&recorded, &y_obs, &per_stream_observed,
+                                    &[4.0, 0.3], 0, 7);
+        match collapsed.warnings.as_slice() {
+            [PrequentialWarning::EssCollapse { step_count, threshold }] => {
+                assert_eq!(*step_count, 1);
+                assert!(approx_eq(*threshold, 0.4, 1e-12),
+                    "threshold must be ESS_COLLAPSE_FRACTION · N, got {threshold}");
+            }
+            other => panic!("expected one EssCollapse warning, got {other:?}"),
+        }
     }
 
     #[test]
