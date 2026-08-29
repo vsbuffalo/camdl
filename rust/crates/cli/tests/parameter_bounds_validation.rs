@@ -318,3 +318,101 @@ fn multiple_oob_params_reported_in_one_error() {
     assert!(stderr.contains("beta") && stderr.contains("gamma"),
         "both violating parameters must appear in the error; got:\n{}", stderr);
 }
+
+// ─── `probability` is bounded by its type, not only by `in [...]` (gh#763) ───
+//
+// The value check and the fit's search box must be the SAME interval. While
+// they disagreed, a `probability` outside [0, 1] passed validation and was
+// then silently clamped by the logit — a plausible-looking wrong answer
+// rather than an error. `real` has no such support and must stay unbounded,
+// which `finite_value_on_unbounded_param_accepted` above pins on `vacc_eff`.
+
+/// Same shape as `write_bounded_model`, but `report : probability` declares
+/// no `in [...]` — its only constraint is the type.
+fn write_untyped_probability_model(path: &Path) {
+    let src = r#"
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta   : rate         in [0.01, 2.0]
+  gamma  : rate         in [0.01, 1.0]
+  report : probability
+  N0     : count
+}
+
+init { S = 990  I = 10  R = 0 }
+
+transitions {
+  infect  : S --> I  @ beta * report * S * I / N0
+  recover : I --> R  @ gamma * I
+}
+
+simulate { from = 0 'days  to = 5 'days }
+"#;
+    std::fs::write(path, src).unwrap();
+}
+
+fn write_probability_params(path: &Path) {
+    std::fs::write(path,
+        "beta = 0.3\ngamma = 0.1\nreport = 0.5\nN0 = 1000\n").unwrap();
+}
+
+#[test]
+fn probability_above_one_errors_without_a_declared_range() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_untyped_probability_model(&model);
+    write_probability_params(&params);
+
+    let (status, stderr) = run_simulate(
+        &bin, &model, &params, &["--param", "report=1.5"]);
+    assert!(!status.success(),
+        "a `probability` of 1.5 must be rejected on the type alone (gh#763); \
+         stderr was:\n{}", stderr);
+    assert!(stderr.contains("report"),
+        "error must name the parameter; got:\n{}", stderr);
+    assert!(stderr.contains("0") && stderr.contains("1"),
+        "error must show the [0, 1] support; got:\n{}", stderr);
+}
+
+#[test]
+fn probability_below_zero_errors_without_a_declared_range() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_untyped_probability_model(&model);
+    write_probability_params(&params);
+
+    let (status, stderr) = run_simulate(
+        &bin, &model, &params, &["--param", "report=-0.2"]);
+    assert!(!status.success(),
+        "a negative `probability` must be rejected on the type alone (gh#763); \
+         stderr was:\n{}", stderr);
+    assert!(stderr.contains("report"),
+        "error must name the parameter; got:\n{}", stderr);
+}
+
+#[test]
+fn probability_inside_the_unit_interval_is_accepted() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_untyped_probability_model(&model);
+    write_probability_params(&params);
+
+    // Non-vacuity: the new rejection must not swallow legitimate values,
+    // including both endpoints.
+    for v in ["0", "0.25", "1"] {
+        let (status, stderr) = run_simulate(
+            &bin, &model, &params, &["--param", &format!("report={}", v)]);
+        assert!(status.success(),
+            "report={} is inside [0, 1] and must be accepted; stderr:\n{}",
+            v, stderr);
+    }
+}

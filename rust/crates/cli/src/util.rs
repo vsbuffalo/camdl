@@ -2465,7 +2465,10 @@ pub fn validate_parameter_values(model: &ir::Model) -> Result<(), String> {
                 p.name, v));
             continue;
         }
-        if let Some((lo, hi)) = p.bounds() {
+        // The declared `in [lo, hi]`, else the support the declared kind
+        // carries — the same interval `params_resolver` and the fit's
+        // transform use (gh#763).
+        if let Some((lo, hi)) = crate::params_resolver::resolved_bounds(p) {
             if v < lo || v > hi {
                 errs.push(format!(
                     "parameter '{}' = {} is outside declared bounds [{}, {}].\n  \

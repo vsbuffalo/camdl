@@ -5,6 +5,7 @@
 //! chain-agreement (Â) computation, and MAD-based auto rw_sd calibration.
 
 use crate::fit::loglik_eval;
+use crate::params_resolver::resolved_bounds;
 use crate::fit::state::FitState;
 use rayon::prelude::*;
 use sim::{
@@ -200,8 +201,8 @@ impl FitRunConfig {
         for (name, spec) in &fit.estimate {
             if let Some(p) = model_pre.parameters.iter_mut().find(|p| p.name == *name) {
                 if p.value.resolved_value().is_none() {
-                    let resolved_bounds = spec.bounds.or(p.bounds());
-                    let value = spec.start.or_else(|| resolved_bounds.map(|(lo, hi)| {
+                    let bounds = spec.bounds.or_else(|| resolved_bounds(p));
+                    let value = spec.start.or_else(|| bounds.map(|(lo, hi)| {
                         let transform = derive_transform_with_bounds(
                             p,
                             spec.transform.as_ref().map(|t| t.as_str()),
@@ -916,11 +917,15 @@ pub fn print_preflight(
 /// the param_kind field. The hi <= 1.0 probability-detector heuristic
 /// was deliberately removed — it caused R0 on [1, 100] to get logit
 /// instead of log, which is wrong.
+///
+/// The bounds the transform clamps to are [`resolved_bounds`], so a
+/// `probability` that declared no range is a logit over `[0, 1]` rather than
+/// over `[0, ∞)` (gh#763).
 pub fn derive_transform(
     ir_param: &ir::parameter::Parameter,
     transform_override: Option<&str>,
 ) -> Transform {
-    let bounds = ir_param.bounds().unwrap_or((0.0, f64::INFINITY));
+    let bounds = resolved_bounds(ir_param).unwrap_or((0.0, f64::INFINITY));
     derive_transform_with_bounds(ir_param, transform_override, bounds)
 }
 
@@ -1039,6 +1044,13 @@ pub fn build_if2_params_from_specs(
         // Without this propagation, fit.toml's bounds are advisory only —
         // IF2 happily walks particles out to model bounds even when the
         // user tightened.
+        //
+        // The match keys on the *declared* `ir_param.bounds()`, not
+        // `resolved_bounds`: the loosen check is about the range a model
+        // author wrote down ("widen the model bounds" is its remedy), so a
+        // kind's implicit range must not silently constrain an explicit
+        // fit.toml box. The kind is consulted only where nothing is declared
+        // anywhere (gh#763).
         let (lo, hi) = match (spec.bounds, ir_param.bounds()) {
             (Some((flo, fhi)), Some((mlo, mhi))) => {
                 if flo < mlo || fhi > mhi {
@@ -1054,7 +1066,9 @@ pub fn build_if2_params_from_specs(
             }
             (Some(b), None)  => b,
             (None, Some(b))  => b,
-            (None, None)     => (0.0, f64::INFINITY),
+            // Nothing declared anywhere: fall back to the kind's own support
+            // (gh#763 — `probability` is `[0, 1]`), then to `[0, ∞)`.
+            (None, None)     => resolved_bounds(ir_param).unwrap_or((0.0, f64::INFINITY)),
         };
 
         // Transform: spec override > param_kind > fallback. Built with
@@ -3380,7 +3394,7 @@ pub fn resolve_prior(
                     // validator (validate_prior_transform_compat) reports the
                     // missing bounds precisely.
                     let resolved = est.bounds.or_else(|| model.parameters.iter()
-                        .find(|p| p.name == name).and_then(|p| p.bounds()));
+                        .find(|p| p.name == name).and_then(resolved_bounds));
                     if let Some((lower, upper)) = resolved {
                         return (Prior::Fixed(Density::Uniform { lower, upper }), "fit.toml");
                     }
@@ -3440,7 +3454,7 @@ pub fn validate_prior_transform_compat(
         if matches!(estimate.get(name).and_then(|e| e.prior.as_ref()),
                     Some(super::config_v2::EstimatePriorSpec::UniformOverBounds { .. }))
             && estimate.get(name).and_then(|e| e.bounds).is_none()
-            && ir_param.bounds().is_none()
+            && resolved_bounds(ir_param).is_none()
         {
             return Err(format!(
                 "parameter '{}': prior = {{ uniform = {{}} }} is uniform over the \
@@ -3509,7 +3523,7 @@ pub fn validate_prior_transform_compat(
         if let Prior::Fixed(Density::TruncatedNormal { lower, upper, .. }) = &prior {
             let resolved = estimate.get(name)
                 .and_then(|e| e.bounds)
-                .or_else(|| ir_param.bounds());
+                .or_else(|| resolved_bounds(ir_param));
             match resolved {
                 None => return Err(format!(
                     "parameter '{}': truncated_normal prior requires bounds, but none \
@@ -5169,6 +5183,152 @@ dt = 1.0
             "unbounded real must stay None, got {:?}", t_real);
         assert!(matches!(t_instant, Transform::None),
             "unbounded instant must stay None, got {:?}", t_instant);
+    }
+
+    // ── `probability` carries [0, 1] with no `in [...]` (gh#763) ─────
+    //
+    // `docs/camdl-language-spec.md` §4.1 states `probability : ∈ [0, 1]`.
+    // Before this fix the support was documented on the type and carried
+    // nowhere: an undeclared `probability` resolved to `[0, ∞)`, which made
+    // `Transform::Logit` degenerate — every finite value mapped to
+    // logit(ε) = −23.03, the auto `rw_sd` `(hi − lo)/6` was `∞`, and a beta
+    // prior was refused with "requires bounds [0, 1], got [0, inf]".
+
+    /// The one-parameter model with the `in [lo, hi]` clause REMOVED: the
+    /// parameter keeps its kind and a start value but declares no bounds,
+    /// which is the gh#763 shape.
+    fn make_unbounded_param_model(name: &str, init: f64, kind: ir::parameter::ParamKind)
+        -> (ir::Model, sim::CompiledModel)
+    {
+        let (mut model, _) = make_one_param_model(name, 0.0, 1.0, Some(kind));
+        model.parameters[0].value = ir::parameter::ParamValue::Estimated {
+            init: Some(init),
+            bounds: None,
+            prior: ir::parameter::PriorSpec::Flat,
+            transform: ir::parameter::Transform::Identity,
+        };
+        let compiled = sim::CompiledModel::new(model.clone()).expect("compile");
+        (model, compiled)
+    }
+
+    fn unbounded_spec(name: &str, bounds: Option<(f64, f64)>) -> ParamSpec {
+        ParamSpec {
+            name: name.into(), rw_sd: None, transform: None,
+            perturb_only_at_t0: false, bounds,
+        }
+    }
+
+    /// Consumer 1 — the transform. This is what
+    /// `validate_prior_transform_compat` reads to decide whether a beta
+    /// prior is admissible, so `hi` reaching it as `∞` is the refusal in
+    /// the issue.
+    #[test]
+    fn undeclared_probability_gets_a_logit_over_the_unit_interval() {
+        let (model, _) = make_unbounded_param_model(
+            "rho", 0.5, ir::parameter::ParamKind::Probability);
+        match derive_transform(&model.parameters[0], None) {
+            Transform::Logit { lo, hi } => {
+                assert_eq!((lo, hi), (0.0, 1.0),
+                    "an undeclared `probability` must be a logit over [0, 1]");
+            }
+            other => panic!("expected Logit, got {other:?}"),
+        }
+    }
+
+    /// Consumer 2 — the IF2 search box, and the auto `rw_sd` computed from
+    /// it. `(hi − lo)/6` over `[0, ∞)` is `∞`, whose first perturbation is
+    /// the `NonFiniteParameter { value: NaN }` chain error in the issue.
+    #[test]
+    fn undeclared_probability_if2_box_is_finite_and_so_is_its_rw_sd() {
+        let (model, compiled) = make_unbounded_param_model(
+            "rho", 0.5, ir::parameter::ParamKind::Probability);
+        let base = compiled.default_params.clone();
+        let out = build_if2_params_from_specs(
+            &model, &compiled, &base, &[unbounded_spec("rho", None)]).expect("ok");
+        assert_eq!((out[0].lower, out[0].upper), (0.0, 1.0),
+            "the IF2 search box must be the unit interval");
+        assert!(matches!(out[0].transform, Transform::Logit { lo, hi } if lo == 0.0 && hi == 1.0),
+            "search box and transform clamp must agree, got {:?}", out[0].transform);
+        assert!(out[0].rw_sd.is_finite(),
+            "auto rw_sd over an infinite box is inf → NaN on the first \
+             perturbation; got {}", out[0].rw_sd);
+        assert!((out[0].rw_sd - 1.0 / 6.0).abs() < 1e-12,
+            "logit auto rw_sd is (hi − lo)/6, got {}", out[0].rw_sd);
+    }
+
+    /// Consumer 3 — the fit.toml `[estimate].bounds` override path. An
+    /// explicit fit-toml box still wins outright: the kind's support is a
+    /// fallback for "nothing declared anywhere", not a second constraint
+    /// layered on top.
+    #[test]
+    fn fit_toml_bounds_still_win_over_the_kind_support() {
+        let (model, compiled) = make_unbounded_param_model(
+            "rho", 0.2, ir::parameter::ParamKind::Probability);
+        let base = compiled.default_params.clone();
+        let out = build_if2_params_from_specs(
+            &model, &compiled, &base, &[unbounded_spec("rho", Some((0.1, 0.4)))]).expect("ok");
+        assert_eq!((out[0].lower, out[0].upper), (0.1, 0.4),
+            "fit.toml bounds must win over the type's [0, 1]");
+        assert!(matches!(out[0].transform, Transform::Logit { lo, hi } if lo == 0.1 && hi == 0.4),
+            "the transform must clamp to the fit.toml box, got {:?}", out[0].transform);
+    }
+
+    /// The other half of the fix: no kind gains a support it did not have.
+    /// A `rate` with no `in [...]` keeps `Log` over `[0, ∞)`; `real` and
+    /// `instant` keep `Transform::None`.
+    #[test]
+    fn other_kinds_keep_their_existing_unbounded_fallback() {
+        use ir::parameter::ParamKind::*;
+        for kind in [Rate, Positive, Count, Duration] {
+            let (model, compiled) = make_unbounded_param_model("p", 0.5, kind);
+            let base = compiled.default_params.clone();
+            let out = build_if2_params_from_specs(
+                &model, &compiled, &base, &[unbounded_spec("p", None)]).expect("ok");
+            assert_eq!((out[0].lower, out[0].upper), (0.0, f64::INFINITY),
+                "{kind} must keep the [0, ∞) fallback");
+            assert!(matches!(out[0].transform, Transform::Log { .. }),
+                "{kind} must stay on Log, got {:?}", out[0].transform);
+            assert!(out[0].rw_sd.is_finite(),
+                "{kind} auto rw_sd must stay finite (Log handles hi = ∞), got {}",
+                out[0].rw_sd);
+        }
+        for kind in [Real, Instant] {
+            let (model, compiled) = make_unbounded_param_model("p", 0.5, kind);
+            let base = compiled.default_params.clone();
+            let out = build_if2_params_from_specs(
+                &model, &compiled, &base, &[unbounded_spec("p", None)]).expect("ok");
+            assert!(matches!(out[0].transform, Transform::None),
+                "{kind} with no finite box must stay None, got {:?}", out[0].transform);
+        }
+    }
+
+    /// Consumer 4 — the prior-compatibility check. The beta refusal in the
+    /// issue was `derive_transform` handing it `Logit { hi: ∞ }`; the same
+    /// check must still refuse a beta prior on a kind that is genuinely not
+    /// on `[0, 1]`, so the test is not vacuous.
+    #[test]
+    fn beta_prior_is_admitted_on_an_undeclared_probability_but_not_on_a_rate() {
+        use super::super::config_v2::{EstimatePriorSpec, EstimateSpecV2};
+        let beta_spec = || EstimateSpecV2 {
+            bounds: None, transform: None,
+            prior: Some(EstimatePriorSpec::Dist(ir::parameter::PriorDist::Beta(
+                ir::parameter::BetaPrior { alpha: 2.0, beta: 5.0 }))),
+            perturb_only_at_t0: false, rw_sd: None, start: Some(0.5),
+        };
+        let mut estimate = indexmap::IndexMap::new();
+        estimate.insert("rho".to_string(), beta_spec());
+
+        let (prob_model, _) = make_unbounded_param_model(
+            "rho", 0.5, ir::parameter::ParamKind::Probability);
+        validate_prior_transform_compat(&estimate, &prob_model).expect(
+            "a beta prior on an undeclared `probability` must be admitted — the \
+             type carries the [0, 1] the prior needs (gh#763)");
+
+        let (rate_model, _) = make_unbounded_param_model(
+            "rho", 0.5, ir::parameter::ParamKind::Rate);
+        let err = validate_prior_transform_compat(&estimate, &rate_model).expect_err(
+            "a beta prior on a `rate` must still be refused");
+        assert!(err.contains("beta"), "the refusal must name the prior: {err}");
     }
 
     // ── Cold-cooling Â suppression (gh#45) ───────────────────────────

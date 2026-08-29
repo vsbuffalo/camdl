@@ -81,6 +81,51 @@ use std::path::PathBuf;
 use indexmap::{IndexMap, IndexSet};
 use ir::table::TableSource;
 
+// ─── The range a parameter is valid on ───────────────────────────────────────
+
+/// The interval a parameter *kind* carries on its own — the range the declared
+/// type promises when the model wrote no `in [lo, hi]`.
+///
+/// `probability` is the only kind whose type pins a finite interval
+/// (`docs/camdl-language-spec.md` §4.1: `probability : ∈ [0, 1]`), and it is
+/// also the only kind that selects `Transform::Logit`, the one transform that
+/// needs a finite *upper* bound to have a scale at all: with `hi = ∞`,
+/// `(x − lo)/(hi − lo)` is 0 for every finite `x` and `(hi − lo)/6` — the auto
+/// `rw_sd` — is `∞` (gh#763).
+///
+/// Every other kind's range is either half-open (`rate`, `positive`, `count`,
+/// `duration` → `[0, ∞)`) or unbounded (`real`, `instant`), which is exactly
+/// what each consumer's existing `[0, ∞)`-or-unconstrained fallback already
+/// expresses. They return `None` and keep their behaviour unchanged —
+/// `Transform::Log` documents `hi = +∞` as well-formed, and `instant`/`real`
+/// fall to `Transform::None` when a bound is infinite.
+pub fn kind_support(kind: ir::parameter::ParamKind) -> Option<(f64, f64)> {
+    use ir::parameter::ParamKind::*;
+    // Exhaustive over ParamKind (no `_`): a new kind is a compile error here,
+    // forcing an explicit range decision — the same gh#191 payoff
+    // `fit::runner::derive_transform_with_bounds` takes.
+    match kind {
+        Probability => Some((0.0, 1.0)),
+        Rate | Positive | Count | Duration | Real | Instant => None,
+    }
+}
+
+/// The range a parameter is valid on: the model's declared `in [lo, hi]` when
+/// present, else the range its declared kind carries ([`kind_support`]).
+///
+/// This is the interval the value check below and the fit's search box and
+/// transform clamp must all agree on — a `probability` whose start is checked
+/// against `[0, ∞)` but searched over `[0, 1]` gets silently clamped rather
+/// than rejected.
+///
+/// The kind fallback does not change precedence: an explicit `in [...]` in the
+/// model still wins over the type's range, and a fit.toml `[estimate].bounds`
+/// (which `fit::runner::build_if2_params_from_specs` consults first) still
+/// wins over both.
+pub fn resolved_bounds(p: &ir::parameter::Parameter) -> Option<(f64, f64)> {
+    p.bounds().or_else(|| p.param_kind.and_then(kind_support))
+}
+
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 /// Inputs gathered from the CLI + model. Every subcommand assembles
@@ -976,7 +1021,12 @@ pub fn resolve_parameters<'a>(
             });
             continue;
         }
-        if let Some((lo, hi)) = p.bounds() {
+        // The declared `in [lo, hi]`, else the support the declared kind
+        // carries (gh#763: `probability` is `[0, 1]` whether or not the model
+        // wrote it). This must be the SAME interval the fit's transform
+        // clamps to — with the two apart, a `probability` start of 1.5 passed
+        // validation and was then silently clamped to 1.0 by the logit.
+        if let Some((lo, hi)) = resolved_bounds(p) {
             if value < lo || value > hi {
                 violations.push(ResolveError::BoundsViolation {
                     name: p.name.clone(),
@@ -1189,6 +1239,61 @@ mod tests {
             param_kind: None,
             param_dim: None,
         }
+    }
+
+    // ── The range a parameter is valid on (gh#763) ────────────────────
+
+    fn mk_param_kinded(
+        name: &str, value: f64,
+        bounds: Option<(f64, f64)>, kind: ir::parameter::ParamKind,
+    ) -> Parameter {
+        Parameter {
+            name: name.into(),
+            value: ir::parameter::ParamValue::Estimated {
+                init: Some(value),
+                bounds,
+                prior: ir::parameter::PriorSpec::Flat,
+                transform: ir::parameter::Transform::Identity,
+            },
+            param_kind: Some(kind),
+            param_dim: None,
+        }
+    }
+
+    /// `probability` is the only kind whose type pins a finite interval. Every
+    /// other kind returns `None` and keeps whatever fallback its consumer
+    /// already had — `Transform::Log` is well-formed with `hi = ∞`, and
+    /// `instant`/`real` fall to `Transform::None` when a bound is infinite, so
+    /// none of them has the gh#763 hole.
+    #[test]
+    fn only_probability_carries_a_range_of_its_own() {
+        use ir::parameter::ParamKind::*;
+        assert_eq!(kind_support(Probability), Some((0.0, 1.0)),
+            "`probability` must carry the [0, 1] the language spec §4.1 promises");
+        for kind in [Rate, Positive, Count, Duration, Real, Instant] {
+            assert_eq!(kind_support(kind), None,
+                "{kind} must keep its consumer's existing fallback, not gain one here");
+        }
+    }
+
+    /// Precedence: an explicit `in [...]` still wins over the type's range,
+    /// and a kind-less parameter still has no range at all.
+    #[test]
+    fn declared_bounds_win_over_the_kind_range() {
+        use ir::parameter::ParamKind::Probability;
+        let declared = mk_param_kinded("rho", 0.5, Some((0.1, 0.9)), Probability);
+        assert_eq!(resolved_bounds(&declared), Some((0.1, 0.9)),
+            "`in [0.1, 0.9]` must not be widened to the type's [0, 1]");
+
+        let undeclared = mk_param_kinded("rho", 0.5, None, Probability);
+        assert_eq!(resolved_bounds(&undeclared), Some((0.0, 1.0)),
+            "an undeclared `probability` must resolve to the type's [0, 1]");
+
+        let untyped = mk_param_bounded("x", Some(0.5), (0.0, 2.0));
+        assert_eq!(resolved_bounds(&untyped), Some((0.0, 2.0)),
+            "a kind-less parameter must still report its declared bounds");
+        assert_eq!(resolved_bounds(&mk_param("y", Some(0.5))), None,
+            "a kind-less parameter with no bounds must still have no range");
     }
 
     fn empty_inputs<'a>(model: &'a ir::Model,

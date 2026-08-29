@@ -893,10 +893,15 @@ pub fn load_mle_toml(path: &Path) -> Result<HashMap<String, f64>, InitError> {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Bounds map restricted to `estimate_set`. Missing bounds → omitted.
+///
+/// Reads the same search box the transform clamps to
+/// (`params_resolver::resolved_bounds`), so a `probability` that declared no `in
+/// [lo, hi]` gets random / LHS starts drawn from `[0, 1]` rather than being
+/// omitted from the map entirely (gh#763).
 fn bounds_map_for_estimate(resolved: &ResolvedParameters) -> HashMap<String, (f64, f64)> {
     resolved.model.parameters.iter()
         .filter(|p| resolved.estimate_set.contains(&p.name))
-        .filter_map(|p| p.bounds().map(|b| (p.name.clone(), b)))
+        .filter_map(|p| crate::params_resolver::resolved_bounds(p).map(|b| (p.name.clone(), b)))
         .collect()
 }
 

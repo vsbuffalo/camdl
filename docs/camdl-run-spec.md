@@ -2227,8 +2227,8 @@ Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
 An entry with no fields at all (`beta = {}`) is legal: it means "estimate this,
 take everything from the model."
 
-**Transform defaults** (`runner.rs:1007`, `derive_transform_with_bounds`), keyed
-on the parameter's declared type in the `.camdl`:
+**Transform defaults** (`runner.rs`, `derive_transform_with_bounds`), keyed on
+the parameter's declared type in the `.camdl`:
 
 | declared type                           | derived transform                                    |
 | --------------------------------------- | ---------------------------------------------------- |
@@ -2238,7 +2238,11 @@ on the parameter's declared type in the `.camdl`:
 | (no declared type)                      | `log` when `lo >= 0`, else `identity`                |
 
 The clamp uses the _resolved_ bounds, so narrowing in `fit.toml` genuinely
-narrows the IF2 search rather than leaving it advisory.
+narrows the IF2 search rather than leaving it advisory. Resolution order is
+`fit.toml [estimate].bounds` → the model's `in [lo, hi]` → the range the
+declared type carries → `[0, ∞)`. Only `probability` carries a range (`[0, 1]`),
+which is what makes its `logit` well-formed without an `in [lo, hi]` clause;
+every other type falls through to `[0, ∞)` as before.
 
 **Prior wire format.** Externally tagged inline tables, matching what the OCaml
 compiler emits for in-model `~` priors (`PriorDist`,
