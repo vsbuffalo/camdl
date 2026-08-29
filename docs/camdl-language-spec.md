@@ -630,7 +630,11 @@ via CLI flags, a `--params` TOML, or inference engines (§4.2).
 
 ```
 rate        : ≥ 0, dimension 1/time. Default transform: log.
-probability : ∈ [0, 1], dimensionless. Default transform: logit.
+probability : ∈ [0, 1], dimensionless. Default transform: logit. The [0, 1] is
+              carried by the type: a `probability` that declares no `in [lo, hi]`
+              is searched over [0, 1] by inference, and a supplied value outside
+              [0, 1] is rejected. It is the only kind whose type pins a finite
+              interval — see §4.4.
 positive    : > 0, dimensionless. Default transform: log.
 count       : dimension P (a population count). Integrality is not enforced —
               `let iota : count = 1e-6` compiles; the type carries the [P]
@@ -864,10 +868,17 @@ declarations. They are stored in the IR:
 { "name": "R0", "value": null, "bounds": [1.0, 20.0], ... }
 ```
 
-Bounds are used by inference engines to constrain sampling or optimization; the
-forward simulator does not enforce them at runtime. The compiler does not
-validate that supplied values lie within bounds — that is the inference engine's
-responsibility.
+Bounds are used by inference engines to constrain sampling or optimization, and
+a supplied value outside them is rejected when parameter values are resolved.
+`camdlc` never sees parameter values (§4.2), so it cannot check them — the check
+belongs to the runtime, and the forward simulator does not re-clamp mid-run.
+
+**A parameter with no `in [lo, hi]` still gets whatever range its type carries.**
+`probability` is `[0, 1]` (§4.1), so the `rho` line above really is redundant —
+declaring it and omitting it give the same search box and the same logit
+transform. Every other kind's type constraint is one-sided (`rate`, `positive`,
+`count`) or absent (`real`, `instant`), so for those the `in [lo, hi]` clause is
+the only way to hand inference a finite search box.
 
 Type constraints still apply independently of bounds: a `positive` parameter
 with `in [1.0, 20.0]` is implicitly also constrained to `> 0`.
@@ -3098,8 +3109,9 @@ keyword is rejected rather than silently dropped (**E251**).
 **Dimensions.** `mean` carries the count dimension `[P]` — an expected count
 over the reporting interval, the same contract as the plain `neg_binomial`, so a
 per-time transition rate there is **E304**. `r` and `pi` are dimensionless.
-Declare `pi`'s parameter as `probability` so its `[0, 1]` domain is checked at
-compile time rather than only clamped at scoring time.
+Declare `pi`'s parameter as `probability` so its `[0, 1]` domain is checked when
+parameter values are resolved — and so inference searches `[0, 1]` (§4.4) —
+rather than only being clamped at scoring time.
 
 **Every method works, gradient-based included.** All three arguments are
 differentiable, so the compiler emits a gradient for each and no method is

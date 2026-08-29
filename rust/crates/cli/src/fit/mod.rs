@@ -548,7 +548,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         for p in &mut cap_model.parameters {
             if p.value.resolved_value().is_none() {
                 let placeholder = p.initial_value()
-                    .or_else(|| p.bounds().map(|(lo, hi)| 0.5 * (lo + hi)))
+                    .or_else(|| crate::params_resolver::resolved_bounds(p)
+                        .map(|(lo, hi)| 0.5 * (lo + hi)))
                     .unwrap_or(1.0);
                 p.value = p.value.with_value(placeholder);
             }
