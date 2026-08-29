@@ -785,9 +785,46 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         let y_obs: Vec<f64> = obs_model.joint_observed();
         // gh#269: per-stream observed values for the per-district breakdown.
         let per_stream_obs = obs_model.per_stream_observed();
+        // gh#585 / Stage 3.2: `--score-from TIME` windows the trace. The
+        // boundary maps to the union-grid index t0 — observations at
+        // t <= TIME are assimilated but not scored; the trace records the
+        // time-axis boundary alongside.
+        let (t0, score_from_time) = match &a.score_from {
+            None => (0usize, None),
+            Some(raw) => {
+                let first = recorded.obs_times.first().copied().unwrap_or(0.0);
+                let last = recorded.obs_times.last().copied().unwrap_or(0.0);
+                let spec = crate::fit::runner::parse_time_spec(
+                    "--score-from", raw, model.origin.as_deref(), &model.time_unit,
+                ).unwrap_or_else(|e| {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                });
+                let t = match spec {
+                    crate::fit::runner::TimeSpec::Absolute(v) => v,
+                    crate::fit::runner::TimeSpec::Anchored(at) => {
+                        let anchor = match at.anchor {
+                            crate::fit::runner::ObsAnchor::First => first,
+                            crate::fit::runner::ObsAnchor::Last => last,
+                        };
+                        at.resolve(anchor)
+                    }
+                };
+                if t >= last - 1e-9 {
+                    eprintln!(
+                        "error: --score-from {raw} resolves to t = {t}, at or \
+                         after the last observation (t = {last}) — nothing \
+                         would be scored.");
+                    std::process::exit(1);
+                }
+                let t0 = recorded.obs_times.iter()
+                    .filter(|&&ot| ot <= t + 1e-9).count();
+                (t0, Some(t))
+            }
+        };
         let mut trace = sim::inference::prequential::build_trace(
-            recorded, &y_obs, &per_stream_obs, &result.ess_trace, 0, seed,
-            condition_from.is_some());
+            recorded, &y_obs, &per_stream_obs, &result.ess_trace, t0, seed,
+            condition_from.is_some(), score_from_time);
         if !save_samples {
             for step in &mut trace.steps {
                 step.y_pred_samples.clear();

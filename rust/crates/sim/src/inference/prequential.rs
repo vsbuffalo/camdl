@@ -167,6 +167,16 @@ pub struct PrequentialTrace {
     pub steps: Vec<PrequentialStep>,
     /// Warnings collected during trace construction.
     pub warnings: Vec<PrequentialWarning>,
+    /// The scoring boundary as a model TIME (gh#585, Stage 3.2): scored
+    /// steps all satisfy `t > score_from`; observations at or before it
+    /// were assimilated (the filter reweighted on them) but not scored.
+    /// The human-readable time-axis twin of the index `t0` — `t0` remains
+    /// the mechanism, this records where the boundary sits on the time
+    /// axis. `None` when scoring was not windowed by time (`t0` may still
+    /// be nonzero, e.g. IC-free's first-obs pin). `#[serde(default)]` so
+    /// older traces deserialize.
+    #[serde(default)]
+    pub score_from: Option<f64>,
     /// Seed of the randomized-PIT uniform draws (`pit_sample_randomized`):
     /// one `v` per scored value, drawn from
     /// `StatefulRng::new_stream(seed, PIT_RNG_STREAM)` in step order (joint
@@ -382,6 +392,7 @@ pub fn build_trace(
     t0: usize,
     pit_seed: u64,
     has_conditioning_window: bool,
+    score_from: Option<f64>,
 ) -> PrequentialTrace {
     assert_eq!(recorded.obs_times.len(), y_obs.len(),
         "y_obs must align 1:1 with recorded obs_times");
@@ -498,6 +509,7 @@ pub fn build_trace(
         conditioning: Conditioning::InSample,
         steps,
         warnings,
+        score_from,
         pit_randomization_seed: Some(pit_seed),
     }
 }
@@ -629,7 +641,7 @@ mod tests {
         ];
         let y_obs = vec![14.0, 11.0, 0.0];
         let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
-                                &[100.0, 100.0, 100.0], 0, 7, true);
+                                &[100.0, 100.0, 100.0], 0, 7, true, None);
 
         assert_eq!(trace.steps.len(), 2, "the all-hole step is omitted");
         // Hole-free step: recorded joint reused verbatim.
@@ -666,6 +678,8 @@ mod tests {
         assert_eq!(t.provenance, Provenance::PlugIn);
         assert_eq!(t.pit_randomization_seed, None,
             "a pre-gh#629 trace has no recorded PIT seed");
+        assert_eq!(t.score_from, None,
+            "a pre-gh#585 trace has no recorded scoring boundary");
     }
 
     #[test]
@@ -677,6 +691,7 @@ mod tests {
             provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample,
             steps: vec![], warnings: vec![],
+            score_from: None,
             pit_randomization_seed: None,
         };
         let caveat = t.optimism_caveat().expect("plug-in + in-sample must be flagged");
@@ -909,9 +924,9 @@ mod tests {
         let y_obs = vec![2.0];  // ties with two samples → v matters
         let per_stream_observed = vec![vec![2.0]];
         let ess = vec![100.0];
-        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true);
-        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true);
-        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 12, true);
+        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true, None);
+        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true, None);
+        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 12, true, None);
         assert_eq!(a.pit_randomization_seed, Some(11));
         assert_eq!(a.steps[0].pit, b.steps[0].pit, "same seed must reproduce");
         assert_ne!(a.steps[0].pit, c.steps[0].pit,
@@ -936,6 +951,7 @@ mod tests {
         let trace = PrequentialTrace {
             schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
+            score_from: None,
             pit_randomization_seed: None,
         };
         // 90% interval = PIT in [0.05, 0.95] — 90 of 100 PITs qualify.
@@ -978,7 +994,7 @@ mod tests {
         // 4 particles ⇒ collapse threshold 0.1·4 = 0.4; second step below it.
         let ess = vec![100.0, 0.3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 7, true);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 7, true, None);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 0);
 
@@ -1029,12 +1045,12 @@ mod tests {
         let per_stream_observed = vec![vec![1.25]; 2];
 
         let healthy = build_trace(&recorded, &y_obs, &per_stream_observed,
-                                  &[4.0, 4.0], 0, 7, true);
+                                  &[4.0, 4.0], 0, 7, true, None);
         assert!(healthy.warnings.is_empty(),
             "full survival at small N must not warn: {:?}", healthy.warnings);
 
         let collapsed = build_trace(&recorded, &y_obs, &per_stream_observed,
-                                    &[4.0, 0.3], 0, 7, true);
+                                    &[4.0, 0.3], 0, 7, true, None);
         match collapsed.warnings.as_slice() {
             [PrequentialWarning::EssCollapse { step_count, threshold }] => {
                 assert_eq!(*step_count, 1);
@@ -1062,17 +1078,17 @@ mod tests {
         let obs = vec![vec![1.25]; 2];
         let ess = vec![100.0; 2];
 
-        let bare = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, false);
+        let bare = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, false, None);
         assert!(bare.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "t0=0 without a warm-up must warn: {:?}", bare.warnings);
 
-        let warmed = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, true);
+        let warmed = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, true, None);
         assert!(!warmed.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "a conditioning window places the boundary deliberately");
 
-        let skipped = build_trace(&recorded, &y_obs, &obs, &ess, 1, 7, false);
+        let skipped = build_trace(&recorded, &y_obs, &obs, &ess, 1, 7, false, None);
         assert!(!skipped.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "t0 >= 1 assimilates before scoring");
@@ -1096,7 +1112,7 @@ mod tests {
         let per_stream_observed = vec![vec![1.25]; 3];
         let ess = vec![100.0; 3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 1, 7, true);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 1, 7, true, None);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 1);
         assert_eq!(trace.steps[0].t, 2.0);
@@ -1113,6 +1129,7 @@ mod tests {
         let trace = PrequentialTrace {
             schema_version: 1, t0: 0, provenance: Provenance::PlugIn,
             conditioning: Conditioning::InSample, steps, warnings: vec![],
+            score_from: None,
             pit_randomization_seed: None,
         };
         let hist = trace.pit_histogram(10);

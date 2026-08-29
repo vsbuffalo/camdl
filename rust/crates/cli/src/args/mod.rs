@@ -1821,6 +1821,19 @@ pub struct PfilterArgs {
     #[arg(long)]
     pub save_prequential: Option<String>,
 
+    /// With --save-prequential, score the trace only at observations
+    /// strictly after TIME (gh#585 / the 2026-08-29 proposal, Stage 3.2):
+    /// earlier observations are still assimilated — the filter reweights
+    /// on them — but excluded from the trace. This is the held-out-tail
+    /// scoring mode `camdl compare` derives with (TIME = the fit's
+    /// `holdout_after`). Accepts the shared time grammar: a model-time
+    /// number, a date under a calendar-anchored model, or
+    /// `last_obs - N weeks`. The total log-likelihood output is
+    /// unchanged; only the trace is windowed, and it records the
+    /// boundary (`score_from`).
+    #[arg(long, value_name = "TIME", requires = "save_prequential")]
+    pub score_from: Option<String>,
+
     /// With --save-prequential, drop per-particle predictive samples
     /// from {STEM}.json. Keeps scalar scores, shrinks the file.
     #[arg(long)]
