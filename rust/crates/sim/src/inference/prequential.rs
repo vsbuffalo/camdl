@@ -126,9 +126,14 @@ pub enum PrequentialWarning {
     /// `threshold` is the absolute ESS cut applied, derived as
     /// [`ESS_COLLAPSE_FRACTION`] of the particle count.
     EssCollapse { step_count: usize, threshold: f64 },
-    /// `t0` appears lower than the model-class heuristic — scores
-    /// may be dominated by initialization variance.
-    UnderIdentifiedT0 { t0: usize, heuristic: usize },
+    /// Scoring starts at the prior: `t0 = 0` and no conditioning window
+    /// precedes the first observation, so the first scored one-step-ahead
+    /// predictive is issued from the initial-state distribution with no
+    /// data assimilated — it scores the initializer as much as the model,
+    /// and can dominate a short trace's elpd. Declare `condition_from`
+    /// (simulate-but-don't-score warm-up) to place the scoring boundary
+    /// deliberately.
+    StartsAtPrior,
     /// The predictive sample array is empty for ≥1 step
     /// (user passed `--no-save-samples`); CRPS recomputed from
     /// log_score+pit cannot be done on these traces.
@@ -359,6 +364,12 @@ pub fn crps_sample_fair(samples: &[f64], y: f64) -> f64 {
 /// step order — one for the joint score, then one per present stream —
 /// so a trace is reproducible from (seed, data).
 ///
+/// `has_conditioning_window` says whether a `condition_from` warm-up
+/// precedes the first observation. When it does not and `t0 = 0`, the
+/// first scored predictive is issued from the initial-state
+/// distribution with no data assimilated, and the trace carries a
+/// [`PrequentialWarning::StartsAtPrior`].
+///
 /// Bootstrap-PF-specific assumption: pre-obs weights are uniform
 /// (reset to zero at the end of the previous step), so log-score
 /// reduces to `logsumexp(log_liks) − log N`. If this filter ever
@@ -370,6 +381,7 @@ pub fn build_trace(
     ess_trace: &[f64],
     t0: usize,
     pit_seed: u64,
+    has_conditioning_window: bool,
 ) -> PrequentialTrace {
     assert_eq!(recorded.obs_times.len(), y_obs.len(),
         "y_obs must align 1:1 with recorded obs_times");
@@ -471,6 +483,9 @@ pub fn build_trace(
             step_count: ess_collapse_count,
             threshold: ess_threshold_used,
         });
+    }
+    if t0 == 0 && !has_conditioning_window && !steps.is_empty() {
+        warnings.push(PrequentialWarning::StartsAtPrior);
     }
 
     PrequentialTrace {
@@ -614,7 +629,7 @@ mod tests {
         ];
         let y_obs = vec![14.0, 11.0, 0.0];
         let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
-                                &[100.0, 100.0, 100.0], 0, 7);
+                                &[100.0, 100.0, 100.0], 0, 7, true);
 
         assert_eq!(trace.steps.len(), 2, "the all-hole step is omitted");
         // Hole-free step: recorded joint reused verbatim.
@@ -894,9 +909,9 @@ mod tests {
         let y_obs = vec![2.0];  // ties with two samples → v matters
         let per_stream_observed = vec![vec![2.0]];
         let ess = vec![100.0];
-        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11);
-        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11);
-        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 12);
+        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true);
+        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true);
+        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 12, true);
         assert_eq!(a.pit_randomization_seed, Some(11));
         assert_eq!(a.steps[0].pit, b.steps[0].pit, "same seed must reproduce");
         assert_ne!(a.steps[0].pit, c.steps[0].pit,
@@ -963,7 +978,7 @@ mod tests {
         // 4 particles ⇒ collapse threshold 0.1·4 = 0.4; second step below it.
         let ess = vec![100.0, 0.3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 7);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 7, true);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 0);
 
@@ -1014,12 +1029,12 @@ mod tests {
         let per_stream_observed = vec![vec![1.25]; 2];
 
         let healthy = build_trace(&recorded, &y_obs, &per_stream_observed,
-                                  &[4.0, 4.0], 0, 7);
+                                  &[4.0, 4.0], 0, 7, true);
         assert!(healthy.warnings.is_empty(),
             "full survival at small N must not warn: {:?}", healthy.warnings);
 
         let collapsed = build_trace(&recorded, &y_obs, &per_stream_observed,
-                                    &[4.0, 0.3], 0, 7);
+                                    &[4.0, 0.3], 0, 7, true);
         match collapsed.warnings.as_slice() {
             [PrequentialWarning::EssCollapse { step_count, threshold }] => {
                 assert_eq!(*step_count, 1);
@@ -1028,6 +1043,43 @@ mod tests {
             }
             other => panic!("expected one EssCollapse warning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn starts_at_prior_warns_unless_warmup_or_t0() {
+        // t0 = 0 with no conditioning window: the first scored predictive is
+        // issued from the initial-state distribution — warn. Either a
+        // conditioning warm-up or a t0 skip clears it.
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![1.0, 2.0],
+            log_liks: vec![vec![-1.0; 4]; 2],
+            y_pred_samples: vec![vec![0.5, 1.0, 1.5, 2.0]; 2],
+            stream_names: vec!["s0".to_string()],
+            per_stream_log_liks: vec![vec![vec![-1.0; 4]]; 2],
+            per_stream_samples: vec![vec![vec![0.5, 1.0, 1.5, 2.0]]; 2],
+        };
+        let y_obs = vec![1.25; 2];
+        let obs = vec![vec![1.25]; 2];
+        let ess = vec![100.0; 2];
+
+        let bare = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, false);
+        assert!(bare.warnings.iter()
+            .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
+            "t0=0 without a warm-up must warn: {:?}", bare.warnings);
+
+        let warmed = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, true);
+        assert!(!warmed.warnings.iter()
+            .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
+            "a conditioning window places the boundary deliberately");
+
+        let skipped = build_trace(&recorded, &y_obs, &obs, &ess, 1, 7, false);
+        assert!(!skipped.warnings.iter()
+            .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
+            "t0 >= 1 assimilates before scoring");
+
+        // Serialization: the tagged form downstream renderers read.
+        let json = serde_json::to_string(&PrequentialWarning::StartsAtPrior).unwrap();
+        assert_eq!(json, r#"{"kind":"starts_at_prior"}"#);
     }
 
     #[test]
@@ -1044,7 +1096,7 @@ mod tests {
         let per_stream_observed = vec![vec![1.25]; 3];
         let ess = vec![100.0; 3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 1, 7);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 1, 7, true);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 1);
         assert_eq!(trace.steps[0].t, 2.0);
