@@ -217,6 +217,138 @@ pub fn binomial_from_normal(n: u64, p: f64, z: f64) -> u64 {
     }
 }
 
+/// Largest count [`poisson_quantile`] will return. `2^53` is the last integer
+/// `f64` represents exactly, so beyond it `k as f64` stops being a faithful
+/// argument to the CDF. A safety stop only: with `u` clamped by
+/// [`QUANTILE_U_EPS`] the answer never exceeds `λ + 8√λ + O(1)`.
+const POISSON_K_CAP: u64 = 1u64 << 53;
+
+/// Largest `λ` at which [`poisson_quantile`] inverts the exact CDF rather than
+/// returning the Cornish–Fisher expansion.
+///
+/// Set by where [`numerics::gammp`] is still converged. Around `k ≈ λ` — the
+/// body of the distribution — `gammp` takes its power-series branch, which
+/// needs about `√(2a·ln(1/ε))` terms and stops at 1000, so it is converged for
+/// `a ≲ 13,600`. Measured against R's `ppois` at the median, the agreement is
+/// 1.3e-12 at `λ = 10,000`, 4.6e-9 at 30,000 and only 4.1e-6 at 50,000 — enough
+/// at 50,000 to move the returned median by one count. 10,000 keeps a margin
+/// below the point where that starts.
+///
+/// The far tails do not constrain the choice: there `k + 1` is far from `λ`,
+/// `gammp` takes its continued-fraction branch, and the agreement stays at
+/// 1e-5 *relative* on a probability of 1e-13 — which, on a CDF that changes by
+/// a factor of ~1.3 per count out there, is 1e-4 of a count.
+const POISSON_EXACT_CDF_MAX: f64 = 10_000.0;
+
+/// Inverse Poisson CDF: smallest `k` such that `P(X ≤ k) ≥ u`, `X ~ Poisson(λ)`.
+///
+/// **The CDF is never accumulated term by term.** That implementation — walk
+/// from `k = 0`, seeded at `P(X=0) = e^{−λ}` — is the gh#362 shape: the seed
+/// underflows to exactly `0` at `λ > 745`, the walk then never accumulates, the
+/// `cdf ≥ u` test never fires, and the function returns whatever its fallback
+/// is for *every* `u`. `binomial_quantile` shipped with that failure and
+/// silently over-drained a compartment on this same code path, with no error to
+/// see. National-scale initial states (`I ~ poisson(rate = I0)` with `I0` in the
+/// thousands) sit in exactly that regime.
+///
+/// Two branches instead, split at [`POISSON_EXACT_CDF_MAX`]:
+///
+/// * **`λ ≤ 10,000` — the exact CDF, inverted.** `P(X ≤ k)` is the regularized
+///   *upper* incomplete gamma `Q(k+1, λ)` (Abramowitz & Stegun 1964, 26.4.21),
+///   which [`numerics::gammp`] computes in log space and which therefore has no
+///   underflow regime at all. The search starts at the Cornish–Fisher point
+///   below, but the start is only a start: the bracket is widened by doubling
+///   until it provably contains the answer and then bisected on the exact CDF,
+///   so a poor start costs `O(log)` evaluations rather than a wrong count.
+/// * **`λ > 10,000` — the Cornish–Fisher expansion** `λ + z√λ + (z²−1)/6`,
+///   `z = Φ⁻¹(u)` (Johnson, Kotz & Kemp 1992, *Univariate Discrete
+///   Distributions*, §4.5), because `gammp` is no longer converged there and an
+///   answer from a diverged CDF is worse than an answer from a quantified
+///   approximation. Checked against R's `qpois` in
+///   `tests/gh772_poisson_quantile.rs`: exact over the body of the
+///   distribution, at most one count out to `u = 1 − 1e-6`, and 8 counts in
+///   `10⁹` at the `u = 1 − 1e-15` clamp — 2.5e-4 of a standard deviation.
+///
+/// Monotone non-decreasing in `u` at fixed `λ`, which is what the
+/// correlated-PF common-random-numbers coupling needs: a small perturbation of
+/// the pre-drawn normal moves the drawn count a little, in one direction.
+/// `λ ≤ 0` (or NaN) draws `0`, matching [`crate::rng::StatefulRng::poisson`].
+pub fn poisson_quantile(lambda: f64, u: f64) -> u64 {
+    // NaN is tested first: no comparison against it holds, so a NaN rate would
+    // otherwise fall through `λ <= 0` into the search.
+    if lambda.is_nan() || lambda <= 0.0 {
+        return 0;
+    }
+    let u = u.clamp(QUANTILE_U_EPS, 1.0 - QUANTILE_U_EPS);
+    let z = numerics::normal_quantile(u);
+    let start = (lambda + z * lambda.sqrt() + (z * z - 1.0) / 6.0)
+        .round()
+        .clamp(0.0, POISSON_K_CAP as f64) as u64;
+    if lambda > POISSON_EXACT_CDF_MAX {
+        return start;
+    }
+
+    // F(k) = P(X ≤ k) = Q(k+1, λ) = 1 − P(k+1, λ).
+    let cdf = |k: u64| 1.0 - numerics::gammp(k as f64 + 1.0, lambda);
+
+    // Bracket `(lo, hi]` with `F(lo) < u ≤ F(hi)`, doubling outward from the
+    // start. Both loops terminate: downward at `k = 0`, upward at the cap,
+    // whose CDF is 1 for any finite λ the clamp admits.
+    let (mut lo, mut hi);
+    if cdf(start) >= u {
+        if start == 0 {
+            return 0;
+        }
+        hi = start;
+        let mut step = 1u64;
+        loop {
+            let cand = start.saturating_sub(step);
+            if cdf(cand) < u {
+                lo = cand;
+                break;
+            }
+            if cand == 0 {
+                return 0;
+            }
+            hi = cand;
+            step = step.saturating_mul(2);
+        }
+    } else {
+        lo = start;
+        let mut step = 1u64;
+        loop {
+            let cand = start.saturating_add(step).min(POISSON_K_CAP);
+            if cdf(cand) >= u {
+                hi = cand;
+                break;
+            }
+            if cand == POISSON_K_CAP {
+                return POISSON_K_CAP;
+            }
+            lo = cand;
+            step = step.saturating_mul(2);
+        }
+    }
+
+    // Bisect for the smallest k in `(lo, hi]` with `F(k) ≥ u`.
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if cdf(mid) >= u {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
+/// `Poisson(λ)` draw from one standard normal `z`, monotone in `z`: the
+/// correlated-PF path's Poisson sampler, `z → u = Φ(z) → `
+/// [`poisson_quantile`]`(λ, u)`.
+pub fn poisson_from_normal(lambda: f64, z: f64) -> u64 {
+    poisson_quantile(lambda, phi(z).clamp(QUANTILE_U_EPS, 1.0 - QUANTILE_U_EPS))
+}
+
 /// Transform a standard normal `z` to a `Gamma(shape, scale)` draw via the exact
 /// inverse CDF: `z → u = Φ(z) → scale · GammaQuantile(u; shape)`.
 ///
