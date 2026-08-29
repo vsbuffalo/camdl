@@ -796,7 +796,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             trace.warnings.push(
                 sim::inference::prequential::PrequentialWarning::SamplesNotSaved);
         }
-        write_prequential_outputs(stem, &trace).unwrap_or_else(|e| {
+        crate::prequential_out::write_prequential_outputs(stem, &trace).unwrap_or_else(|e| {
             eprintln!("error writing prequential: {}", e);
             std::process::exit(1);
         });
@@ -1408,55 +1408,6 @@ fn finalize_observations(
 }
 
 use std::io::Write;
-
-/// Write a `PrequentialTrace` to `{stem}.tsv` + `{stem}.json`.
-/// Per-step scalar scores (t, y_obs, log_score, crps, pit, ess) go to
-/// TSV; full typed trace (incl. predictive samples when retained) to
-/// JSON. Downstream tools join on `stem` to avoid re-running the PF.
-/// Write the prequential trace to `{STEM}.tsv` (tidy/long) + `{STEM}.json`
-/// (full trace, serde).
-///
-/// gh#269: the TSV is tidy/long with a `stream` column. Each step writes a
-/// `joint` row (the cross-stream summary scores, `stream="joint"`) FOLLOWED by
-/// one row per scheduled, non-hole stream (`stream=<district>`, its own
-/// `y_obs`/`log_score`/`crps`/`pit`). The `ess` column repeats the step's joint
-/// ESS on every row (ESS is a filter-wide quantity, not per stream). The JSON
-/// carries the full nested structure (per-step `per_stream` array) for tooling.
-///
-/// Columns: `t  stream  y_obs  log_score  crps  pit  ess`.
-fn write_prequential_outputs(
-    stem: &str,
-    trace: &sim::inference::prequential::PrequentialTrace,
-) -> std::io::Result<()> {
-    use std::io::Write;
-    let tsv_path = format!("{}.tsv", stem);
-    let json_path = format!("{}.json", stem);
-    let mut tsv = std::io::BufWriter::new(std::fs::File::create(&tsv_path)?);
-    // Tidy/long: one `joint` row per step then one row per scheduled stream.
-    // The y_pred_q* columns are the plot-ready predictive interval (median +
-    // 50%/90% bands) for the forecast-vs-observed panel; they survive
-    // --no-save-samples (computed in build_trace before the samples are cleared).
-    writeln!(tsv, "t\tstream\ty_obs\ty_pred_q05\ty_pred_q25\ty_pred_q50\ty_pred_q75\ty_pred_q95\tlog_score\tcrps\tpit\tess")?;
-    for s in &trace.steps {
-        let iv = &s.interval;
-        // Joint summary row.
-        writeln!(tsv, "{}\tjoint\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.2}",
-            s.t, s.y_obs, iv.q05, iv.q25, iv.q50, iv.q75, iv.q95,
-            s.log_score, s.crps, s.pit, s.ess)?;
-        // Per-stream rows (ess repeats the joint ESS — filter-wide quantity).
-        for ss in &s.per_stream {
-            let iv = &ss.interval;
-            writeln!(tsv, "{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.2}",
-                s.t, ss.stream, ss.y_obs, iv.q05, iv.q25, iv.q50, iv.q75, iv.q95,
-                ss.log_score, ss.crps, ss.pit, s.ess)?;
-        }
-    }
-    drop(tsv);
-    let json = serde_json::to_string_pretty(trace)
-        .map_err(std::io::Error::other)?;
-    std::fs::write(&json_path, json)?;
-    Ok(())
-}
 
 /// Write ancestor-traced smoothing paths as a long-format TSV.
 /// Schema matches `camdl simulate --replicates N` for pipeline reuse:

@@ -26,6 +26,7 @@ mod engine;        // run_job: the single engine behind simulate + batch run (ru
 mod batch;
 mod eval;
 mod pfilter;        // used internally by fit runner for data loading
+mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_cas;    // gh#147 (M3.3): pfilter-eval CAS identity (model/config/params/seed)
 mod caltime_load;   // dated-data loader: column detection + date→internal-time (2026-05-22)
 mod data;

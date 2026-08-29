@@ -1980,18 +1980,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
                 // Write prequential trace (plug-in predictive at MLE).
                 // Scoring is a point-estimate property — rep 0 only.
+                // Routed through the shared writer so the fit-stage TSV
+                // carries the same tidy/long schema as `camdl pfilter
+                // --save-prequential` (gh#650).
                 if let Some(ref trace) = preq_trace {
-                    use std::io::Write;
-                    let tsv_path = format!("{}/prequential.tsv", stage_dir.display());
-                    let mut f = std::fs::File::create(&tsv_path).unwrap();
-                    writeln!(f, "t\ty_obs\tlog_score\tcrps\tpit\tess").unwrap();
-                    for s in &trace.steps {
-                        writeln!(f, "{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.2}",
-                            s.t, s.y_obs, s.log_score, s.crps, s.pit, s.ess).unwrap();
-                    }
-                    let json_path = format!("{}/prequential.json", stage_dir.display());
-                    let json = serde_json::to_string_pretty(trace).unwrap();
-                    std::fs::write(&json_path, json).unwrap();
+                    let stem = format!("{}/prequential", stage_dir.display());
+                    crate::prequential_out::write_prequential_outputs(&stem, trace)
+                        .unwrap_or_else(|e| {
+                            eprintln!("error writing prequential: {}", e);
+                            std::process::exit(1);
+                        });
                     eprintln!("  prequential: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
                         trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
                 }
