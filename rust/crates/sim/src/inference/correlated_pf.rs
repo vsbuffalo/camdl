@@ -615,6 +615,12 @@ pub fn bootstrap_filter_correlated(
     let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
     for (i, p) in swarm.states.iter_mut().enumerate() {
         let z = &randoms.init_noise[i * init_width..(i + 1) * init_width];
+        // The real half is dropped, as it is in the bootstrap PF: no particle
+        // filter advances a real compartment (`ParticleState` holds integer
+        // counts only; see the KNOWN LIMITATION on the substep walk below). A
+        // real-valued `init { }` law is therefore drawn and discarded here —
+        // it still consumes its slot, because the offsets are a property of
+        // the model rather than of what this filter happens to use.
         let (x0, _x0_real) = model.initial_state_draw_correlated(params, z)?;
         p.counts.copy_from_slice(&x0.counts);
     }
