@@ -246,8 +246,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let pmmh_particles = a.pmmh_particles;
     // The CPM correlated-noise machinery belongs to `--algorithm pmmh` only.
     // For if2 / nl-* the knob is inert — a deterministic (nl-*) or bootstrap-PF
-    // (if2) profile must NOT be dragged through the CPM uniform-window preflight
-    // by a default rho. Per spec, `--pmmh-rho 0.0` (or non-positive) also
+    // (if2) profile must NOT be dragged through the CPM obs-grid preflight by a
+    // default rho. Per spec, `--pmmh-rho 0.0` (or non-positive) also
     // disables CPM within pmmh.
     let is_pmmh = matches!(profile_algo, ProfileAlgo::Pmmh);
     let pmmh_rho_opt: Option<f64> = if is_pmmh && a.pmmh_rho > 0.0 {
@@ -885,13 +885,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `log_likelihood_from_flows_and_counts` directly).
     let obs_times_vec: Vec<f64> = observations.iter().map(|o| o.time).collect();
 
-    // gh#193 preflight: correlated PMMH (CPM, rho > 0) pre-draws a fixed-size
-    // noise block per observation window, so it requires a (near-)uniform obs
-    // grid. The check is θ-independent (obs grid only), so run it ONCE here and
-    // fail with the actionable message — otherwise a genuine non-uniform grid
-    // surfaces as a silently-swallowed all-(-inf) profile (every per-cell PF
-    // eval maps the filter Err to -inf). A leading window coinciding with
-    // t_start is fine (scored at the initial state); see validate_cpm_obs_grid.
+    // gh#193 preflight: correlated PMMH (CPM, rho > 0) pre-draws one noise
+    // block per observation window, sized at that window's own substeps, so an
+    // irregular grid is fine but one that does not walk forward from t_start is
+    // not. The check is θ-independent (obs grid only), so run it ONCE here and
+    // fail with the actionable message — otherwise a bad grid surfaces as a
+    // silently-swallowed all-(-inf) profile (every per-cell PF eval maps the
+    // filter Err to -inf). See validate_cpm_obs_grid.
     if pmmh_rho_opt.is_some() {
         if let Err(e) = sim::inference::correlated_pf::validate_cpm_obs_grid(
             &obs_times_vec, compiled.model.simulation.t_start, dt,
@@ -1588,6 +1588,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     n_steps: pmmh_steps,
                     n_particles: pmmh_particles,
                     dt,
+                    t_start: compiled.model.simulation.t_start,
                     proposal_sd,
                     adapt: true,
                     adapt_start: 50,

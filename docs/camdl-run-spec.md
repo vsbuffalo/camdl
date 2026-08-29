@@ -2415,7 +2415,10 @@ same point.
 **Observation alignment.** `[config] obs_alignment` is resolved per algorithm
 (`methods.rs:495`). `if2` and `pfilter` step exactly to observation times and
 reject `"snap"`. `pgas` uses a uniform grid and rejects `"exact"`. Plain `pmmh`
-is exact; correlated `pmmh` (`rho` set) requires on-grid observations. The ODE
+is exact; correlated `pmmh` (`rho` set) pre-draws one block of random numbers
+per observation window, each sized at that window's own substeps, so an
+irregular grid is fine — a daily reporting series with a day of no reporting
+included — but the observation times must walk forward from `t_start`. The ODE
 algorithms score on the integrator grid and reject the key entirely.
 
 **IC-free support.** `ic_free = true` is honored by `if2`, and by `pfilter` /

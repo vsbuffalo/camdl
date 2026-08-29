@@ -42,6 +42,7 @@ fn mu_param() -> EstimatedParam {
 /// surface is supplied by the closure, so particle count / step count are tiny.
 fn small_config() -> PMMHConfig {
     PMMHConfig {
+        t_start: 0.0,
         n_steps: 20,
         n_particles: 10,
         dt: 1.0,
