@@ -447,4 +447,19 @@ fn fit_run_prequential_equals_pfilter_prequential() {
     let b: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("manual.json")).unwrap()).unwrap();
     assert_eq!(a, b, "the two prequential traces must be identical");
+
+    // gh#650: the two paths must also write ONE prequential.tsv schema.
+    // `fit run` used to emit a narrow v1 header (`t y_obs log_score crps pit
+    // ess`) while pfilter wrote the gh#269 tidy/long schema under the same
+    // filename; both now route through the shared writer, and with identical
+    // traces the files must be byte-identical.
+    let fit_tsv = fit_json.with_extension("tsv");
+    let tsv_a = std::fs::read_to_string(&fit_tsv)
+        .expect("fit run wrote prequential.tsv beside prequential.json");
+    let tsv_b = std::fs::read_to_string(dir.join("manual.tsv")).unwrap();
+    assert_eq!(
+        tsv_a.lines().next(), tsv_b.lines().next(),
+        "fit run and pfilter must write the same prequential.tsv header"
+    );
+    assert_eq!(tsv_a, tsv_b, "the two prequential.tsv files must be identical");
 }

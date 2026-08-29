@@ -3436,8 +3436,8 @@ Rhat / ESS:
 
 R̂ of 2.07 at 200 sweeps is a not-converged posterior, reported as errors rather
 than buried — a real run needs thousands of sweeps. The `pfilter` stage writes
-`prequential.tsv`, which is what `camdl compare` reads to score fits against
-each other.
+`prequential.tsv` and `prequential.json`; the JSON is what `camdl compare`
+reads to score fits against each other.
 
 Once a Bayesian stage exists, `fit predict` replays the posterior forward and
 writes the predicted-vs-observed pair:
