@@ -187,16 +187,18 @@ pub struct PrequentialTrace {
     /// the mechanism, this records where the boundary sits on the time
     /// axis. `None` when scoring was not windowed by time (`t0` may still
     /// be nonzero, e.g. IC-free's first-obs pin). `#[serde(default)]` so
-    /// older traces deserialize.
-    #[serde(default)]
+    /// older traces deserialize; omitted when absent so a `null` in the
+    /// artifact stays what it always meant — a non-finite score leak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_from: Option<f64>,
     /// Seed of the randomized-PIT uniform draws (`pit_sample_randomized`):
     /// one `v` per scored value, drawn from
     /// `StatefulRng::new_stream(seed, PIT_RNG_STREAM)` in step order (joint
     /// first, then each present stream). Recording it makes the trace's PIT
     /// values reproducible. `None` on traces written before the randomized
-    /// PIT (gh#629); `#[serde(default)]` so those still deserialize.
-    #[serde(default)]
+    /// PIT (gh#629); `#[serde(default)]` so those still deserialize, and
+    /// omitted when absent (see `score_from`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pit_randomization_seed: Option<u64>,
 }
 
