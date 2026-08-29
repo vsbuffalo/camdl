@@ -1,5 +1,5 @@
 ---
-status: proposal
+status: superseded 2026-08-29 by 2026-08-29-honest-predictive-evaluation.md
 date: 2026-05-31
 ---
 
