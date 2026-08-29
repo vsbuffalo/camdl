@@ -193,10 +193,16 @@ same backend by another**. Representative confirmed cases:
   give "silently biased posteriors." Blocked with a hint to fix the parameter or
   switch to IF2/PMMH. This is a top-severity _silent-wrong-answer_ guard, caught
   correctly.
-- **The correlated-PMMH family** (`correlated_pf.rs`) rejects unequal obs-window
-  substep counts, state-dependent overdispersion σ², >1 overdispersed transition
-  per source group, etc. — all keyed on the correlated-PMMH _algorithm variant_
-  (rho ≠ None), not the backend.
+- **The correlated-PMMH family** (`correlated_pf.rs`) rejects state-dependent
+  overdispersion σ², more than one overdispersed transition per source group,
+  and distinct σ² values across overdispersed transitions — all keyed on the
+  correlated-PMMH _algorithm variant_ (rho ≠ None), not the backend. Unequal
+  obs-window substep counts are **not** among them: each window carries its own
+  block of pre-drawn noise, sized at its own substep count
+  (`cpm_steps_per_obs`), so a reporting series that skips a day runs. What
+  `validate_cpm_obs_grid` still rejects is a grid that does not describe a
+  forward walk at all — a non-finite observation time, or times that go
+  backwards.
 - **`ic_free` requires `if2`, or a model that DRAWS its initial state**
   (`methods.rs::validate_ic_free`, called per stage from
   `FitConfigV2::validate`). Two properties are needed, not one: the algorithm
