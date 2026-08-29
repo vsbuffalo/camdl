@@ -1898,6 +1898,7 @@ mod tests {
                 conditioning: Conditioning::InSample,
                 steps,
                 warnings: Vec::new(),
+                score_from: None,
                 pit_randomization_seed: None,
             },
         }
