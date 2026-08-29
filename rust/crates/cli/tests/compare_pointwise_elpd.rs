@@ -219,11 +219,18 @@ fn compare_still_renders_when_the_observation_axes_agree() {
 }
 
 /// gh#570: two models scoring different stream sets produce an elpd difference
-/// that is not a like-for-like comparison, and the scalar hides it. In the
-/// pointwise view the stream that only one side scored has an empty cell on the
-/// other, and an empty difference — visible rather than silently summed.
+/// that is not a like-for-like comparison, and the scalar hides it. Each step's
+/// `log_score` is the JOINT score over the streams scored there, so a candidate
+/// covering three districts differenced against a baseline covering two yields
+/// a gap that is mostly the third district's presence, rendered as evidence
+/// about the models.
+///
+/// The preflight refuses the pair outright — before the table, before the
+/// pointwise file — and names the streams that differ. (The pointwise emitter's
+/// own handling of a one-sided stream, an empty cell rather than a fabricated
+/// zero, is covered by the unit tests in `compare.rs`.)
 #[test]
-fn a_stream_only_one_model_scored_shows_as_an_empty_difference() {
+fn compare_refuses_two_models_that_scored_different_stream_sets() {
     let bin = binary();
     assert!(bin.exists(), "release camdl binary missing: {}", bin.display());
 
@@ -251,20 +258,22 @@ fn a_stream_only_one_model_scored_shows_as_an_empty_difference() {
         .args(["--baseline", "base.json"])
         .arg("--pointwise").arg(&out)
         .output().expect("running camdl compare");
-    assert!(run.status.success(), "stderr:\n{}", String::from_utf8_lossy(&run.stderr));
 
-    let (header, rows) = read_tsv(&out);
-    let col = |name: &str| header.iter().position(|h| h == name).unwrap();
-    let east: Vec<&Vec<String>> = rows.iter()
-        .filter(|r| r[col("stream")] == "east").collect();
-    assert_eq!(east.len(), 3, "the unmatched stream still gets its rows: {rows:?}");
-    for r in &east {
-        assert_eq!(r[col("baseline_log_score")], "",
-            "the baseline never scored `east`, so its cell is empty: {r:?}");
-        assert_eq!(r[col("delta_log_score")], "",
-            "a difference against a stream the baseline never scored is not a \
-             number: {r:?}");
-        assert_ne!(r[col("log_score")], "",
-            "the candidate's own score is still reported: {r:?}");
-    }
+    assert!(!run.status.success(),
+        "a comparison across two different stream sets must be refused, not \
+         rendered.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(err.contains("east"),
+        "the refusal must name the stream only one model scored: {err}");
+    assert!(err.contains("base.json") && err.contains("cand.json"),
+        "and which two traces disagree: {err}");
+
+    // Nothing is rendered and nothing is written: neither the table's verdict
+    // nor a pointwise file that would plot as if the pair were comparable.
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(!stdout.contains("dB"),
+        "no evidence verdict may be rendered for an uncomparable pair: {stdout}");
+    assert!(!out.exists(), "and no pointwise file is written: {}", out.display());
 }
