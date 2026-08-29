@@ -222,7 +222,10 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
         );
     }
 
-    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300", "--seed", "1"]);
+    // --draws 4 keeps the mixture path exercised without the default-64
+    // pass count; the resolution path under test is unchanged.
+    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
+        "--seed", "1", "--draws", "4"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -236,6 +239,53 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
             && stdout.lines().any(|l| l.trim_start().starts_with("@b")),
         "both PGAS fits appear as rows:\n{stdout}"
     );
+
+    // Stage 4.1 (§3.6): a Bayesian fit's derived predictive is the
+    // posterior mixture — provenance says so, with the mixture size.
+    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
+        "--seed", "1", "--draws", "3", "--format", "json"]);
+    assert!(out.status.success(), "mixture compare failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for row in v["rows"].as_array().unwrap() {
+        assert_eq!(row["provenance"]["posterior"]["n_draws"],
+            serde_json::json!(3),
+            "a Bayesian fit's row must be stamped posterior: {row}");
+    }
+
+    // --draws 1 is the documented cheap mode: plug-in at the posterior mean.
+    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
+        "--seed", "1", "--draws", "1", "--format", "json"]);
+    assert!(out.status.success(), "--draws 1 compare failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for row in v["rows"].as_array().unwrap() {
+        assert_eq!(row["provenance"], serde_json::json!("plug_in"),
+            "--draws 1 must fall back to the plug-in point: {row}");
+    }
+
+    // Provenance preflight: a posterior-mixture row against a plug-in row
+    // (here an explicit prequential.json, which records a plug-in trace) is
+    // refused; --allow-mixed-provenance lifts exactly that refusal.
+    std::fs::write(tmp.join("explicit.json"), r#"{
+        "schema_version": 3, "t0": 0, "provenance": "plug_in",
+        "conditioning": "in_sample",
+        "steps": [{"t": 7.0, "y_obs": 1.0, "y_pred_samples": [],
+                   "log_score": -1.0, "crps": 0.5, "pit": 0.5, "ess": 100.0}],
+        "warnings": []
+    }"#).unwrap();
+    let out = run(&bin, &tmp, &["compare", "@a", "explicit.json",
+        "--particles", "300", "--seed", "1", "--draws", "3"]);
+    assert!(!out.status.success(), "mixed provenance must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("mix provenance kinds"),
+        "must name the mixed provenance:\n{stderr}");
+    let out = run(&bin, &tmp, &["compare", "@a", "explicit.json",
+        "--particles", "300", "--seed", "1", "--draws", "3",
+        "--allow-mixed-provenance"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("mix provenance kinds"),
+        "--allow-mixed-provenance must lift the provenance refusal:\n{stderr}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -454,9 +504,12 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     std::fs::write(&draws_a, cloud).unwrap();
 
     // Baseline pinned to @b so neither row's absolute elpd depends on which is
-    // baseline; JSON reports each row's own elpd.
+    // baseline; JSON reports each row's own elpd. `--draws 1` (plug-in):
+    // this test is about chain EXCLUSION moving θ̂; under the mixture
+    // default, the deliberately stuck chain's draws are mixture components
+    // whose filter degenerates, which is its own (tested) refusal.
     let common = ["compare", "@a", "@b", "--baseline", "@b", "--format", "json",
-                  "--particles", "300", "--seed", "1"];
+                  "--particles", "300", "--seed", "1", "--draws", "1"];
     let all = run(&bin, &tmp, &common);
     assert!(
         all.status.success(),
@@ -497,6 +550,26 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
         sub_err.contains("--exclude-chains") && sub_err.contains("fit '@a'"),
         "compare --exclude-chains @a:2 must warn, naming fit @a:\nstderr={sub_err}"
     );
+
+    // Stage 4.1: under the MIXTURE, the stuck chain's draws are components
+    // whose filter degenerates — refused with guidance, not repaired
+    // (dropping degenerate components would bias the mixture toward
+    // well-behaved θ). Excluding the sick chain makes the mixture derivable.
+    let mixed = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
+        "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4"]);
+    assert!(!mixed.status.success(),
+        "a degenerate mixture component must fail the derive");
+    let mixed_err = String::from_utf8_lossy(&mixed.stderr);
+    assert!(
+        mixed_err.contains("mixture component") && mixed_err.contains("--exclude-chains"),
+        "the refusal names the component and the fix:\n{mixed_err}"
+    );
+    let healthy = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
+        "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4",
+        "--exclude-chains", "@a:2"]);
+    assert!(healthy.status.success(),
+        "dropping the sick chain must make the mixture derivable:\nstderr={}",
+        String::from_utf8_lossy(&healthy.stderr));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
