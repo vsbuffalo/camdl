@@ -2826,13 +2826,16 @@ marginalizes.** Every declared dimension must be given, positionally or by name
 write instead. On a `[patch, age]` family, `infection[patch = north]` names no
 cell; `infection[patch = north, age = child]` names `infection_north_child`.
 
-`incidence(...)` takes **exactly one** transition. Several arguments is `E203`
-and none is `E250`; `incidence(a, b)` does not sum, and neither does
-`incidence(a) + incidence(b)`, because these heads are sugar rather than
-expression functions (see "head-position sugar" below). To observe two flows
-as one column, pool strata of a single family with
-`sum(a in dim, incidence(tr[a]))`, or route distinct flows through one junction
-transition. `prevalence(...)` differs: several arguments desugar to their sum
+`incidence(...)` takes **exactly one** transition: several arguments is `E203`
+and none is `E250`. To observe two flows as one column, **add the terms** —
+`incidence(a) + incidence(b)` lowers to a single `CumulativeFlowSum` over both
+— or pool strata of a single family with `sum(a in dim, incidence(tr[a]))`. The
+two spellings compose and flatten into one flow list; see "Projections" in §16
+for the lowering. Addition is the only arithmetic a projection admits over
+incidence terms: weighting a term, subtracting one, or mixing one with an
+instant state read is `E341`, and a per-stream reporting rate belongs in the
+likelihood (`cases ~ poisson(rate = rho * projected)`). `prevalence(...)`
+differs on arity: several arguments desugar to their sum
 (`prevalence(X1, X2)` is `prevalence(X1 + X2)`), because a compartment
 population is an expression leaf and a flow is not.
 
@@ -2897,11 +2900,11 @@ family resolves to a single expanded transition and fails if none matches
 projection across a dimension, write the sum out:
 
 `incidence(...)` and `prevalence(...)` are **head-position sugar**: they are
-valid as the whole of a `projected = …` right-hand side, or under `sum(...)`,
-but they are not expression functions and cannot be wrapped in arithmetic
-(`rho * sum(p in patch, incidence(infection[p]))` is `E100`, undeclared
-function). The reporting rate therefore goes in the *likelihood*, not the
-projection:
+valid as the whole of a `projected = …` right-hand side, under `sum(...)`, and
+as terms added together, but they are not expression functions and cannot be
+weighted or otherwise wrapped in arithmetic
+(`rho * sum(p in patch, incidence(infection[p]))` is `E341`). The reporting rate
+therefore goes in the *likelihood*, not the projection:
 
 - one pooled column, one reporting rate:
 
