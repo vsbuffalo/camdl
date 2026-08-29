@@ -12,6 +12,12 @@
 //! Jacobian cancels and the value is a scale-free log-likelihood ratio), not
 //! for raw absolute log-likelihoods (whose additive constant is arbitrary).
 //!
+//! Second rule: a tier is attached only to a difference that exceeds twice its
+//! paired standard error ([`within_noise`]). The scale calibrates *magnitude*
+//! and knows nothing about *resolution*, so an ungated tier can name a
+//! magnitude the data cannot resolve — the same 6 nats reads "strong" whether
+//! its se(Δ) is 0.3 or 30.
+//!
 //! Evidence scale (labels and thresholds). Attribution is split, and the
 //! split matters — do not move labels without updating the citations:
 //!

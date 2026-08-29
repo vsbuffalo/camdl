@@ -370,8 +370,8 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
                     "'{without}' has no per-stream breakdown at that step, so its \
                      joint score cannot be shown to cover the same streams as \
                      '{with}' ({}).\n       \
-                     Re-derive the trace without one (a v1 `prequential.json` \
-                     predates the breakdown).",
+                     Re-derive '{without}' — a v1 `prequential.json` predates \
+                     the per-stream breakdown.",
                     fmt_stream_set(if sa.is_empty() { &sb } else { &sa }),
                 )
             } else {
@@ -1236,8 +1236,9 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
 }
 
 /// Everything below the table that the reader must not miss: the suppressed-Δ
-/// notice, the miscalibration flags, each trace's own warnings, and the
-/// optimism caveat.
+/// notice, an overridden data mismatch and what the data check could not cover,
+/// the miscalibration flags, each trace's own warnings, and the optimism
+/// caveat.
 ///
 /// One function, called by every renderer, because the failure this guards is
 /// asymmetry: the table warned about a miscalibrated model and the markdown
