@@ -786,7 +786,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // gh#269: per-stream observed values for the per-district breakdown.
         let per_stream_obs = obs_model.per_stream_observed();
         let mut trace = sim::inference::prequential::build_trace(
-            recorded, &y_obs, &per_stream_obs, &result.ess_trace, 0, seed);
+            recorded, &y_obs, &per_stream_obs, &result.ess_trace, 0, seed,
+            condition_from.is_some());
         if !save_samples {
             for step in &mut trace.steps {
                 step.y_pred_samples.clear();
