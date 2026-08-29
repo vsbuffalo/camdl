@@ -45,6 +45,90 @@ fn find_fit_meta(root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// gh#585 (Stage 3.2): `pfilter --score-from TIME` assimilates the full
+/// series but scores the trace only at t > TIME, recording the boundary
+/// (`score_from`, and `t0` as its index twin). The total log-likelihood is
+/// unchanged — only the trace is windowed.
+#[test]
+fn pfilter_score_from_windows_the_trace_not_the_likelihood() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    std::fs::write(dir.join("obs.tsv"),
+        "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+    std::fs::write(dir.join("theta.toml"),
+        "sigma = 0.25\ngamma = 0.3\nrho = 0.5\nk = 10.0\np_detect = 0.5\n\
+         N0 = 1000\nbeta = 0.1\nI0 = 5\n").unwrap();
+
+    let run = |extra: &[&str], stem: &str| {
+        let mut args = vec![
+            "pfilter",
+            golden_path(),
+            "--data", "weekly_cases=obs.tsv",
+            "--params", "theta.toml",
+            "--particles", "200",
+            "--dt", "1",
+            "--seed", "1",
+            "--save-prequential", stem,
+        ];
+        args.extend_from_slice(extra);
+        Command::new(&bin)
+            .args(&args)
+            .current_dir(dir)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .output()
+            .expect("spawn camdl")
+    };
+
+    let full = run(&[], "full");
+    assert!(full.status.success(), "plain pfilter failed:\nstderr={}",
+        String::from_utf8_lossy(&full.stderr));
+    let windowed = run(&["--score-from", "21"], "tail");
+    assert!(windowed.status.success(), "--score-from pfilter failed:\nstderr={}",
+        String::from_utf8_lossy(&windowed.stderr));
+
+    // Same filter pass: identical total log-likelihood on stdout.
+    assert_eq!(
+        String::from_utf8_lossy(&full.stdout).trim(),
+        String::from_utf8_lossy(&windowed.stdout).trim(),
+        "--score-from must not change the total log-likelihood");
+
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(dir.join(name)).unwrap()).unwrap()
+    };
+    let full_trace = read("full.json");
+    let tail_trace = read("tail.json");
+    assert_eq!(full_trace["steps"].as_array().unwrap().len(), 5);
+    assert_eq!(full_trace["score_from"], serde_json::Value::Null);
+
+    // t = 7, 14, 21 assimilated but not scored; t = 28, 35 scored.
+    assert_eq!(tail_trace["t0"], serde_json::json!(3));
+    assert_eq!(tail_trace["score_from"], serde_json::json!(21.0));
+    let steps = tail_trace["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2, "only the two post-boundary steps are scored");
+    assert_eq!(steps[0]["t"], serde_json::json!(28.0));
+    // Assimilation makes the windowed scores CONDITIONAL on the earlier
+    // observations: the scored step must be identical to the same step of
+    // the full trace (same filter, same seed, same draws).
+    assert_eq!(steps[0]["log_score"],
+        full_trace["steps"][3]["log_score"],
+        "the scored tail must be the same filter pass, windowed");
+
+    // A boundary at/after the last observation scores nothing — refused.
+    let bad = run(&["--score-from", "35"], "none");
+    assert!(!bad.status.success(), "--score-from at last obs must be refused");
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("nothing"),
+        "must say nothing would be scored");
+}
+
+fn golden_path() -> &'static str {
+    // Leaked once per test binary: Command::args wants &str lifetimes.
+    Box::leak(golden_ir().canonicalize().unwrap()
+        .to_string_lossy().into_owned().into_boxed_str())
+}
+
 #[test]
 fn fit_run_applies_holdout_and_records_the_training_window() {
     let bin = skip_if_missing_binary();
