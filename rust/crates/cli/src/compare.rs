@@ -207,11 +207,12 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         }
     }
 
-    match fmt_final {
+    let out = match fmt_final {
         Format::Json  => render_json(&rows, base_idx, &metrics_chosen),
         Format::Md    => render_md(&rows, base_idx, &metrics_chosen, t_mismatch),
         Format::Table => render_table(&rows, base_idx, &metrics_chosen, t_mismatch),
-    }
+    };
+    print!("{out}");
 }
 
 // ── the pointwise Δelpd vector (gh#706) ──────────────────────────────────
@@ -831,7 +832,10 @@ fn fmt_e_value(e: f64) -> String {
     }
 }
 
-fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool) {
+/// Render the comparison as an aligned text table. Returns the whole rendering
+/// (including its trailing newline) rather than printing, so every line the
+/// reader sees — footers, caveats, warnings — is assertable in a unit test.
+fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool) -> String {
     let want_crps = metrics.iter().any(|m| m == "crps");
     let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
 
@@ -923,39 +927,50 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         "─".repeat(total)
     };
 
-    print_row(&header, &widths);
-    println!("{}", sep(&widths));
+    let mut out = String::new();
+    out.push_str(&fmt_table_row(&header, &widths));
+    out.push_str(&format!("{}\n", sep(&widths)));
     for row in &body {
-        print_row(row, &widths);
+        out.push_str(&fmt_table_row(row, &widths));
     }
 
-    println!();
-    println!("Scored steps: {} (t0={}).  Baseline: {}.",
-        base.n_scored(), base.t0, rows[base_idx].name);
+    out.push('\n');
+    out.push_str(&format!("Scored steps: {} (t0={}).  Baseline: {}.\n",
+        base.n_scored(), base.t0, rows[base_idx].name));
     if !t_mismatch {
-        println!("Sorted by Δelpd ascending — best-supported model at the bottom.");
+        out.push_str("Sorted by Δelpd ascending — best-supported model at the bottom.\n");
     }
     if t_mismatch {
-        println!("⚠ T_score differs across models — Δ columns suppressed \
-            (--allow-mismatched-horizon was set).");
+        out.push_str("⚠ T_score differs across models — Δ columns suppressed \
+            (--allow-mismatched-horizon was set).\n");
     }
     // PIT warnings — flag clear miscalibration.
     for r in rows {
-        let cov = r.trace.pit_coverage(0.90);
-        if cov < 0.70 {
-            println!("⚠ {}: PIT 90%-coverage {:.2} (nominal 0.90) — likely overconfident.",
-                r.name, cov);
+        if let Some(w) = pit_coverage_warning(r) {
+            out.push_str(&format!("⚠ {w}\n"));
         }
     }
     // Propagate trace-level warnings.
     for r in rows {
         for w in &r.trace.warnings {
-            println!("ⓘ {}: {:?}", r.name, w);
+            out.push_str(&format!("ⓘ {}: {:?}\n", r.name, w));
         }
     }
+    out
 }
 
-fn print_row(cells: &[String], widths: &[usize]) {
+/// The `⚠` line for a row whose 90% predictive interval covers far less than
+/// nominal — the plug-in overconfidence tell. `None` when coverage is fine.
+/// Shared by every renderer: a warning one format prints and another drops is
+/// the failure mode this exists to prevent.
+fn pit_coverage_warning(r: &Row) -> Option<String> {
+    let cov = r.trace.pit_coverage(0.90);
+    (cov < 0.70).then(|| format!(
+        "{}: PIT 90%-coverage {:.2} (nominal 0.90) — likely overconfident.",
+        r.name, cov))
+}
+
+fn fmt_table_row(cells: &[String], widths: &[usize]) -> String {
     let parts: Vec<String> = cells.iter().zip(widths)
         .map(|(c, w)| format!("{:>width$}", c, width = w))
         .collect();
@@ -969,18 +984,23 @@ fn print_row(cells: &[String], widths: &[usize]) {
             out.push_str(&parts[i]);
         }
     }
-    println!("{}", out);
+    out.push('\n');
+    out
 }
 
-fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool) {
+/// Render the comparison as a markdown table. Returns the rendering rather than
+/// printing it, for the same reason [`render_table`] does.
+fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool) -> String {
     let want_crps = metrics.iter().any(|m| m == "crps");
     let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
 
+    let mut out = String::new();
     let mut header = vec!["Model", "T_score", "elpd", "Δelpd", "E_T", "se(Δ)", "evidence"];
     if want_crps { header.push("crps"); header.push("Δcrps"); }
     if want_pit  { header.push("PIT_cov90"); }
-    println!("| {} |", header.join(" | "));
-    println!("|{}|", header.iter().map(|_| "---").collect::<Vec<_>>().join("|"));
+    out.push_str(&format!("| {} |\n", header.join(" | ")));
+    out.push_str(&format!("|{}|\n",
+        header.iter().map(|_| "---").collect::<Vec<_>>().join("|")));
 
     let base = &rows[base_idx].trace;
     // Same render order as the table renderer: ascending Δelpd
@@ -1036,15 +1056,17 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
             }
         }
         if want_pit { cells.push(format!("{:.2}", r.trace.pit_coverage(0.90))); }
-        println!("| {} |", cells.join(" | "));
+        out.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
     if !t_mismatch {
-        println!();
-        println!("_Sorted by Δelpd ascending — best-supported model at the bottom._");
+        out.push('\n');
+        out.push_str("_Sorted by Δelpd ascending — best-supported model at the bottom._\n");
     }
+    out
 }
 
-fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) {
+/// Render the comparison as JSON. Returns the document rather than printing it.
+fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
     use serde_json::json;
     let base = &rows[base_idx].trace;
     let entries: Vec<serde_json::Value> = rows.iter().enumerate().map(|(i, r)| {
@@ -1085,7 +1107,7 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) {
         "metrics": metrics,
         "rows": entries,
     });
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    format!("{}\n", serde_json::to_string_pretty(&out).unwrap())
 }
 
 fn option_finite(x: f64) -> serde_json::Value {
