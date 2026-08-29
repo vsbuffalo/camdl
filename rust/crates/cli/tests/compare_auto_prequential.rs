@@ -253,6 +253,32 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
             "a Bayesian fit's row must be stamped posterior: {row}");
     }
 
+    // Stage 4.2: replicate derives attach a filter-noise MC SE per row and
+    // the pair's combined SE; --replicates 1 attaches none.
+    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
+        "--seed", "1", "--draws", "1", "--replicates", "2", "--format", "json"]);
+    assert!(out.status.success(), "replicate compare failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for row in v["rows"].as_array().unwrap() {
+        let mc = row["mc_se_elpd"].as_f64()
+            .unwrap_or_else(|| panic!("replicates must attach mc_se_elpd: {row}"));
+        assert!(mc.is_finite() && mc >= 0.0, "mc_se_elpd must be finite: {row}");
+    }
+    let out_table = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
+        "--seed", "1", "--draws", "1", "--replicates", "2"]);
+    assert!(out_table.status.success());
+    assert!(String::from_utf8_lossy(&out_table.stdout)
+        .contains("filter-noise MC SE"),
+        "the MC SE note is printed with the table:\n{}",
+        String::from_utf8_lossy(&out_table.stdout));
+
+    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
+        "--seed", "1", "--draws", "1", "--replicates", "1", "--format", "json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["rows"][0]["mc_se_elpd"].is_null(),
+        "--replicates 1 must attach no MC SE");
+
     // --draws 1 is the documented cheap mode: plug-in at the posterior mean.
     let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
         "--seed", "1", "--draws", "1", "--format", "json"]);
@@ -396,7 +422,9 @@ fn compare_derived_trace_equals_manual_pfilter() {
     let out = run(
         &bin,
         &tmp,
-        &["compare", "@a", "@b", "--particles", PARTICLES, "--seed", SEED, "--format", "json"],
+        &["compare", "@a", "@b", "--particles", PARTICLES, "--seed", SEED,
+          // the cheap modes: this test pins single-pass path equivalence
+          "--replicates", "1", "--draws", "1", "--format", "json"],
     );
     assert!(
         out.status.success(),
@@ -509,7 +537,7 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     // default, the deliberately stuck chain's draws are mixture components
     // whose filter degenerates, which is its own (tested) refusal.
     let common = ["compare", "@a", "@b", "--baseline", "@b", "--format", "json",
-                  "--particles", "300", "--seed", "1", "--draws", "1"];
+                  "--particles", "300", "--seed", "1", "--draws", "1", "--replicates", "1"];
     let all = run(&bin, &tmp, &common);
     assert!(
         all.status.success(),
@@ -556,7 +584,8 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     // (dropping degenerate components would bias the mixture toward
     // well-behaved θ). Excluding the sick chain makes the mixture derivable.
     let mixed = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
-        "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4"]);
+        "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4",
+        "--replicates", "1"]);
     assert!(!mixed.status.success(),
         "a degenerate mixture component must fail the derive");
     let mixed_err = String::from_utf8_lossy(&mixed.stderr);
@@ -564,8 +593,11 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
         mixed_err.contains("mixture component") && mixed_err.contains("--exclude-chains"),
         "the refusal names the component and the fix:\n{mixed_err}"
     );
+    // @b is an IF2 fit (no posterior cloud → plug-in), so the healthy
+    // mixture comparison is deliberately mixed-provenance.
     let healthy = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
         "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4",
+        "--replicates", "1", "--allow-mixed-provenance",
         "--exclude-chains", "@a:2"]);
     assert!(healthy.status.success(),
         "dropping the sick chain must make the mixture derivable:\nstderr={}",

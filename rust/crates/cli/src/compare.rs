@@ -39,6 +39,11 @@ pub(crate) const DEFAULT_DERIVE_SEED: u64 = 1;
 /// is the documented cheap mode (plug-in at the posterior mean).
 pub(crate) const DEFAULT_DERIVE_DRAWS: usize = 64;
 
+/// Default replicate count for the filter-noise Monte-Carlo SE (§3.4
+/// remedy 4, decision 9). `--replicates 1` is the documented cheap mode
+/// (no replication, no MC SE).
+pub(crate) const DEFAULT_DERIVE_REPLICATES: usize = 5;
+
 /// Scored steps below which `se(Δ)`'s normal approximation is not to be leaned
 /// on. A round number, not a threshold with a derivation behind it — the
 /// approximation degrades continuously, and the caveat exists to stop a reader
@@ -89,6 +94,10 @@ struct DeriveSettings {
     /// `--draws` (§3.6): mixture size for a Bayesian fit's predictive;
     /// 1 = plug-in at the posterior mean.
     draws: usize,
+    /// `--replicates` (§3.4 remedy 4): filter replicates per fit at seeds
+    /// `seed..seed+R`, combined per step by log-mean-exp; the replicate
+    /// totals give the Monte-Carlo (filter-noise) SE. 1 = no replication.
+    replicates: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +126,10 @@ struct Row {
     path: String,
     trace: PrequentialTrace,
     data: DataIdentity,
+    /// Filter-noise Monte-Carlo SE of this row's elpd, from replicate
+    /// derives (§3.4 remedy 4); `None` without replication (an explicit
+    /// prequential.json, or `--replicates 1`).
+    mc_se: Option<f64>,
 }
 
 /// What a compared row can say about the observations it was scored against
@@ -150,6 +163,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         seed: a.seed,
         force_in_sample: a.in_sample,
         draws: a.draws.max(1),
+        replicates: a.replicates.max(1),
     };
     let metrics_cli: Option<Vec<String>> = a.metrics.as_ref().map(|s|
         s.split(',').map(|t| t.trim().to_string()).collect());
@@ -213,11 +227,11 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // Load traces, each filtered by its own fit's selection (if any).
     let rows: Vec<Row> = models.into_iter().map(|m| {
         let selection = cohort.for_fit(&m.name);
-        let (trace, data) = load_trace(&m.path, derive, selection).unwrap_or_else(|e| {
+        let (trace, data, mc_se) = load_trace(&m.path, derive, selection).unwrap_or_else(|e| {
             eprintln!("error loading trace for '{}' at '{}': {}", m.name, m.path, e);
             std::process::exit(1);
         });
-        Row { name: m.name, path: m.path, trace, data }
+        Row { name: m.name, path: m.path, trace, data, mc_se }
     }).collect();
 
     // Fairness, part zero (gh#585, Stage 3.4): rows with different
@@ -694,18 +708,21 @@ fn load_trace(
     path: &str,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
-) -> Result<(PrequentialTrace, DataIdentity), String> {
+) -> Result<(PrequentialTrace, DataIdentity, Option<f64>), String> {
     if let Some(trace) = try_load_explicit_prequential(path)? {
         // A trace records scores and times, never which observations produced
-        // them — so this row cannot take part in the data-identity check.
+        // them — so this row cannot take part in the data-identity check, and
+        // carries no replicate-derived filter-noise SE.
         return Ok((trace, DataIdentity::Unknown(
-            "read as an explicit prequential.json, which records no bound data".into())));
+            "read as an explicit prequential.json, which records no bound data".into()),
+            None));
     }
     // Not an explicit prequential → treat as a fit handle and derive.
     match crate::fit::handle::resolve_fit(path) {
         Ok(resolved) => {
             let data = fit_data_identity(&resolved);
-            derive_prequential(&resolved, derive, selection).map(|t| (t, data))
+            derive_prequential(&resolved, derive, selection)
+                .map(|(t, mc)| (t, data, mc))
         }
         Err(resolve_err) => Err(format!(
             "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
@@ -814,6 +831,16 @@ fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>
 /// the right strength for a preflight — it is a faithful projection of inputs
 /// already hashed into the fit's identity. A fit without one (an older run, a
 /// hand-assembled directory) is reported as unchecked rather than refused.
+/// The pair's combined filter-noise SE for a Δ against the baseline,
+/// `√(mc_a² + mc_b²)` (§3.4 remedy 4); `None` unless both rows carry a
+/// replicate-derived MC SE. Conservative under common random numbers.
+fn mc_se_delta(row: &Row, base: &Row) -> Option<f64> {
+    match (row.mc_se, base.mc_se) {
+        (Some(a), Some(b)) => Some((a * a + b * b).sqrt()),
+        _ => None,
+    }
+}
+
 fn fit_data_identity(resolved: &ResolvedFit) -> DataIdentity {
     match crate::run_meta::read_fit_sidecar(&resolved.segment) {
         Some(s) if !s.data_hashes.is_empty() => DataIdentity::Digests(s.data_hashes),
@@ -866,7 +893,7 @@ fn derive_prequential(
     resolved: &ResolvedFit,
     derive: DeriveSettings,
     selection: Option<&ChainSelection>,
-) -> Result<PrequentialTrace, String> {
+) -> Result<(PrequentialTrace, Option<f64>), String> {
     let segment = &resolved.segment;
     let config = &resolved.config;
 
@@ -960,12 +987,13 @@ fn derive_prequential(
         }
     }
 
-    // (d) run the canonical filter — once per θ. Every pass shares the
-    // filter seed and the score window, so mixture components differ ONLY
-    // in θ (common random numbers across draws and across compared fits).
+    // (d) run the canonical filter — once per θ per replicate. Within a
+    // replicate every pass shares the filter seed and score window, so
+    // mixture components differ ONLY in θ; replicates differ ONLY in seed
+    // (common random numbers across draws and across compared fits).
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot locate the running camdl binary: {e}"))?;
-    let run_pass = |pass: usize, params_toml: &str| -> Result<PrequentialTrace, String> {
+    let run_pass = |pass: usize, params_toml: &str, seed: u64| -> Result<PrequentialTrace, String> {
         let theta_path = base.with_extension(format!("theta{pass}.toml"));
         let preq_stem = format!("{}_preq{pass}", base.to_string_lossy());
         let preq_json = format!("{preq_stem}.json");
@@ -985,7 +1013,7 @@ fn derive_prequential(
             .arg("--params").arg(&theta_path)
             .arg("--save-prequential").arg(&preq_stem)
             .arg("--particles").arg(derive.particles.to_string())
-            .arg("--seed").arg(derive.seed.to_string())
+            .arg("--seed").arg(seed.to_string())
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         for (name, abs_path) in &streams {
             cmd.arg("--data").arg(format!("{name}={abs_path}"));
@@ -1044,42 +1072,70 @@ fn derive_prequential(
         trace
     };
 
-    if is_mixture {
+    let n_theta = theta_tomls.len();
+    if is_mixture || derive.replicates >= 2 {
         eprintln!(
-            "compare: {}: posterior-mixture predictive — {} filter passes \
-             ({} particles each; --draws 1 for the cheap plug-in mode)",
-            seg_slug, theta_tomls.len(), derive.particles);
+            "compare: {}: {} filter passes ({} draw(s) × {} replicate(s), \
+             {} particles each; --draws 1 / --replicates 1 for the cheap modes)",
+            seg_slug, n_theta * derive.replicates, n_theta, derive.replicates,
+            derive.particles);
     }
-    let mut component_traces = Vec::with_capacity(theta_tomls.len());
-    for (i, params_toml) in theta_tomls.iter().enumerate() {
-        let r = run_pass(i, params_toml).map_err(|e| {
-            if is_mixture {
-                // A degenerate mixture component is informative, not
-                // repairable: dropping it would bias the mixture toward
-                // well-behaved θ, misrepresenting the predictive.
-                format!(
-                    "mixture component {} of {} (a retained posterior draw) \
-                     could not be scored — the posterior holds θ the filter \
-                     cannot track through this data.\n  If a stuck/divergent \
-                     chain put it there, drop that chain with \
-                     --exclude-chains; --draws 1 scores the plug-in posterior \
-                     mean instead.\n  {}",
-                    i + 1, theta_tomls.len(), e)
-            } else {
-                e
+    let mut replicate_traces: Vec<PrequentialTrace> =
+        Vec::with_capacity(derive.replicates);
+    for rep in 0..derive.replicates {
+        // §3.4 remedy 4: replicate r reruns everything at seed + r.
+        let seed_r = derive.seed + rep as u64;
+        let mut component_traces = Vec::with_capacity(n_theta);
+        for (i, params_toml) in theta_tomls.iter().enumerate() {
+            let r = run_pass(rep * n_theta + i, params_toml, seed_r).map_err(|e| {
+                if is_mixture {
+                    // A degenerate mixture component is informative, not
+                    // repairable: dropping it would bias the mixture toward
+                    // well-behaved θ, misrepresenting the predictive.
+                    format!(
+                        "mixture component {} of {} (a retained posterior draw) \
+                         could not be scored — the posterior holds θ the filter \
+                         cannot track through this data.\n  If a stuck/divergent \
+                         chain put it there, drop that chain with \
+                         --exclude-chains; --draws 1 scores the plug-in posterior \
+                         mean instead.\n  {}",
+                        i + 1, n_theta, e)
+                } else {
+                    e
+                }
+            });
+            if r.is_err() {
+                for p in &merged_paths { let _ = std::fs::remove_file(p); }
             }
-        });
-        if r.is_err() {
-            for p in &merged_paths { let _ = std::fs::remove_file(p); }
+            component_traces.push(r?);
         }
-        component_traces.push(r?);
+        let t = if is_mixture {
+            combine_mixture(component_traces, seed_r)?
+        } else {
+            component_traces.into_iter().next().expect("one pass ran")
+        };
+        replicate_traces.push(t);
     }
     for p in &merged_paths { let _ = std::fs::remove_file(p); }
 
-    let mut trace = if is_mixture {
-        combine_mixture(component_traces, derive.seed)?
+    // The filter-noise MC SE, from the replicate TOTAL elpds combined by
+    // log-mean-exp with its delta-method SE (pomp practice; the PF
+    // likelihood estimator is unbiased on the natural scale). The headline
+    // elpd below is the SUM of per-step log-mean-exp values — the
+    // pointwise-consistent aggregate (its steps sum to it, and the paired
+    // Δ machinery reads the steps); the two aggregates agree in
+    // expectation to O(per-step variance), and the SE measures the same
+    // filter-noise scale either way.
+    let mc_se = if replicate_traces.len() >= 2 {
+        let totals: Vec<f64> = replicate_traces.iter().map(|t| t.elpd()).collect();
+        Some(crate::evidence::logmeanexp_with_se(&totals).1)
     } else {
-        component_traces.into_iter().next().expect("one pass ran")
+        None
+    };
+    let mut trace = if replicate_traces.len() >= 2 {
+        combine_scored_traces(replicate_traces, derive.seed)?
+    } else {
+        replicate_traces.into_iter().next().expect("one replicate ran")
     };
 
     // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted
@@ -1110,7 +1166,7 @@ fn derive_prequential(
                 .unwrap_or_else(|| segment.display().to_string()),
         };
     }
-    Ok(trace)
+    Ok((trace, mc_se))
 }
 
 /// Combine per-draw filter traces into the posterior-mixture predictive
@@ -1121,25 +1177,45 @@ fn derive_prequential(
 /// as `logsumexp_m − log M` over the per-draw *densities* — averaging the
 /// per-draw log scores instead is a different, strictly lower number
 /// (Jensen) that scores each θ separately rather than the model's actual
-/// predictive. The per-draw predictive samples are pooled — the pooled
-/// cloud IS a draw from the mixture — so CRPS, the randomized PIT, and
-/// the intervals widen to carry parameter uncertainty. ESS is the MIN
-/// across components (the weakest effective support under any retained
-/// θ); warnings are deduplicated by kind.
-///
-/// Every component ran with the same data, filter seed, and scoring
-/// boundary, so the step axes must be identical — anything else is a
-/// derive bug, not a user error.
+/// predictive. Stamped `Provenance::Posterior { n_draws }`.
 fn combine_mixture(
+    traces: Vec<PrequentialTrace>,
+    pit_seed: u64,
+) -> Result<PrequentialTrace, String> {
+    use sim::inference::prequential::Provenance;
+    let m = traces.len();
+    let mut trace = combine_scored_traces(traces, pit_seed)?;
+    trace.provenance = Provenance::Posterior { n_draws: m };
+    Ok(trace)
+}
+
+/// The shared per-step combination behind [`combine_mixture`] (per-draw
+/// predictives, Stage 4.1) and replicate derives (per-seed re-estimates
+/// of ONE predictive, Stage 4.2). The arithmetic is the same log-mean-exp
+/// either way; the meaning differs — a mixture density over draws vs the
+/// unbiased-on-the-natural-scale combination of replicate PF density
+/// estimates (pomp practice) — and the caller stamps the provenance
+/// accordingly.
+///
+/// Per step: log score = log-mean-exp over components; predictive samples
+/// pooled (the pooled cloud is a draw from the combined predictive), so
+/// fair CRPS, the randomized PIT (fresh seeded draws), and the intervals
+/// are computed on the pool; ESS is the MIN across components (the
+/// weakest effective support); warnings deduplicated by kind.
+///
+/// Every component ran with the same data and scoring boundary, so the
+/// step axes must be identical — anything else is a derive bug, not a
+/// user error.
+fn combine_scored_traces(
     traces: Vec<PrequentialTrace>,
     pit_seed: u64,
 ) -> Result<PrequentialTrace, String> {
     use sim::inference::prequential::{
         crps_sample_fair, pit_sample_randomized, PredInterval, PrequentialStep,
-        Provenance, StreamScore, PIT_RNG_STREAM,
+        StreamScore, PIT_RNG_STREAM,
     };
     let m = traces.len();
-    assert!(m >= 2, "combine_mixture needs >= 2 components");
+    assert!(m >= 2, "combine_scored_traces needs >= 2 components");
     let first = &traces[0];
     for t in &traces[1..] {
         let same_axis = t.steps.len() == first.steps.len()
@@ -1222,7 +1298,7 @@ fn combine_mixture(
     Ok(PrequentialTrace {
         schema_version: first.schema_version,
         t0: first.t0,
-        provenance: Provenance::Posterior { n_draws: m },
+        provenance: first.provenance,
         conditioning: first.conditioning.clone(),
         steps,
         warnings,
@@ -1618,7 +1694,7 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
             row.push(format!("{:+.2}", d));
             row.push(fmt_lr(d.exp()));
             row.push(format!("{:.2}", se));
-            row.push(crate::evidence::evidence_cell(d, se));
+            row.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
             any_evidence |= d.is_finite();
         }
         if want_crps {
@@ -1713,6 +1789,16 @@ fn warning_lines(rows: &[Row], t_mismatch: bool) -> Vec<String> {
         for w in &r.trace.warnings {
             lines.push(format!("ⓘ {}: {:?}", r.name, w));
         }
+    }
+    // §3.4 remedy 4: print each row's filter-noise MC SE so the reader
+    // sees the scale the "within filter noise" gate reads.
+    let with_mc: Vec<String> = rows.iter()
+        .filter_map(|r| r.mc_se.map(|se| format!("{} ±{:.2}", r.name, se)))
+        .collect();
+    if !with_mc.is_empty() {
+        lines.push(format!(
+            "note: filter-noise MC SE of elpd (replicate derives): {}",
+            with_mc.join(", ")));
     }
     if let Some(caveat) = optimism_caveat(rows) {
         lines.push(format!("note: {caveat}"));
@@ -1812,7 +1898,7 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
             cells.push(format!("{:+.2}", d));
             cells.push(fmt_lr(d.exp()));
             cells.push(format!("{:.2}", se));
-            cells.push(crate::evidence::evidence_cell(d, se));
+            cells.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
             any_evidence |= d.is_finite();
         }
         if want_crps {
@@ -1874,7 +1960,8 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
         let (d_elpd_db, evidence_label) = if d_elpd.is_finite() {
             let db = d_elpd * crate::evidence::NATS_TO_DB;
             (option_finite(db),
-             serde_json::json!(crate::evidence::evidence_label(d_elpd, se_elpd)))
+             serde_json::json!(crate::evidence::evidence_label(d_elpd, se_elpd,
+                 mc_se_delta(r, &rows[base_idx]))))
         } else {
             (serde_json::Value::Null, serde_json::Value::Null)
         };
@@ -1888,6 +1975,13 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             "evidence_label": evidence_label,
             "lr": option_finite(lr),
             "se_delta_elpd": option_finite(se_elpd),
+            // Filter-noise Monte-Carlo SE from replicate derives (§3.4
+            // remedy 4): this row's own, and the pair's combined SE the
+            // evidence gate reads. Null without replication.
+            "mc_se_elpd": r.mc_se.map_or(serde_json::Value::Null,
+                |v| option_finite(v)),
+            "mc_se_delta_elpd": mc_se_delta(r, &rows[base_idx])
+                .map_or(serde_json::Value::Null, |v| option_finite(v)),
             "mean_crps": r.trace.mean_crps(),
             "delta_mean_crps": option_finite(mean_dcrps),
             "pit_cov90": r.trace.pit_coverage(0.90),
@@ -2415,6 +2509,7 @@ mod tests {
         Row {
             name: name.to_string(),
             path: name.to_string(),
+            mc_se: None,
             data: DataIdentity::Unknown("a test fixture, built from scores alone".into()),
             trace: PrequentialTrace {
                 schema_version: 1,
