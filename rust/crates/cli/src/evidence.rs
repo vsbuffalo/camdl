@@ -154,13 +154,34 @@ pub fn within_noise(delta_nats: f64, se_nats: f64) -> bool {
     se_nats.is_finite() && se_nats > 0.0 && delta_nats.abs() < 2.0 * se_nats
 }
 
-/// The machine-readable evidence label for a Δlog-lik (nats) and its paired
-/// standard error: `within_noise` when [`within_noise`] holds, else the
-/// magnitude tier from [`jeffreys_label`] (direction is carried by the sign of
+/// The filter-noise gate on the evidence verdict (Stage 4.2 of the
+/// 2026-08-29 proposal): with replicate derives, each row's elpd carries a
+/// Monte-Carlo SE from the particle filter's own randomness, and a `Δ`
+/// within twice the pair's combined MC SE is evidence about the filters,
+/// not the models — the PF log-likelihood estimator's noise (and its
+/// model-dependent bias, Bérard–Del Moral–Doucet 2014) lives at exactly
+/// this scale. `mc_se_delta` is `√(mc_a² + mc_b²)`; conservative under
+/// common random numbers (shared seeds correlate the two errors, which
+/// shrinks the true SE of the difference). `None` (no replicates) does
+/// not gate.
+pub fn within_filter_noise(delta_nats: f64, mc_se_delta: Option<f64>) -> bool {
+    match mc_se_delta {
+        Some(mc) => mc.is_finite() && mc > 0.0 && delta_nats.abs() < 2.0 * mc,
+        None => false,
+    }
+}
+
+/// The machine-readable evidence label for a Δlog-lik (nats), its paired
+/// standard error, and (with replicate derives) the pair's combined
+/// Monte-Carlo SE: `within_noise` when [`within_noise`] holds,
+/// `within_filter_noise` when only the MC gate trips, else the magnitude
+/// tier from [`jeffreys_label`] (direction is carried by the sign of
 /// `delta_elpd`, which is reported alongside).
-pub fn evidence_label(delta_nats: f64, se_nats: f64) -> &'static str {
+pub fn evidence_label(delta_nats: f64, se_nats: f64, mc_se_delta: Option<f64>) -> &'static str {
     if within_noise(delta_nats, se_nats) {
         "within_noise"
+    } else if within_filter_noise(delta_nats, mc_se_delta) {
+        "within_filter_noise"
     } else {
         jeffreys_label(delta_nats * NATS_TO_DB)
     }
@@ -183,15 +204,18 @@ pub fn evidence_label(delta_nats: f64, se_nats: f64) -> &'static str {
 ///
 /// Examples:
 /// - `evidence_cell(+27.3, 1.0)` → `"+118.6 dB, decisive for"`
-/// - `evidence_cell(-7.45, 0.5)` → `"-32.4 dB, decisive against"`
+/// - `evidence_cell(-7.45, 0.5, None)` → `"-32.4 dB, decisive against"`
 /// - `evidence_cell(+0.5, 1.0)`  → `"+2.2 dB, within noise"`
-pub fn evidence_cell(delta_nats: f64, se_nats: f64) -> String {
+pub fn evidence_cell(delta_nats: f64, se_nats: f64, mc_se_delta: Option<f64>) -> String {
     if !delta_nats.is_finite() {
         return "—".into();
     }
     let db = delta_nats * NATS_TO_DB;
     if within_noise(delta_nats, se_nats) {
         return format!("{:+.1} dB, within noise", db);
+    }
+    if within_filter_noise(delta_nats, mc_se_delta) {
+        return format!("{:+.1} dB, within filter noise", db);
     }
     let tag = jeffreys_label(db);
     let labeled = if tag == "indeterminate" {
@@ -244,11 +268,33 @@ mod tests {
         }
     }
 
+    /// Stage 4.2: the filter-noise gate. A Δ inside twice the pair's
+    /// combined MC SE gets `within filter noise` — after the pairwise-SE
+    /// gate (which wins when both trip), and only when replicates supplied
+    /// an MC SE at all.
+    #[test]
+    fn filter_noise_gate_suppresses_the_verdict() {
+        // Δ = 3 nats, tight pairwise se, but MC SE of 2 → filter noise.
+        assert!(within_filter_noise(3.0, Some(2.0)));
+        assert_eq!(evidence_label(3.0, 0.5, Some(2.0)), "within_filter_noise");
+        assert!(evidence_cell(3.0, 0.5, Some(2.0)).contains("within filter noise"));
+        // Small MC SE does not gate a large Δ.
+        assert_eq!(evidence_label(3.0, 0.5, Some(0.1)), "strong");
+        // No replication → no gate.
+        assert!(!within_filter_noise(3.0, None));
+        assert_eq!(evidence_label(3.0, 0.5, None), "strong");
+        // The pairwise gate takes precedence when both trip.
+        assert_eq!(evidence_label(3.0, 2.0, Some(2.0)), "within_noise");
+        // Degenerate MC SE (NaN/0) does not gate.
+        assert!(!within_filter_noise(3.0, Some(f64::NAN)));
+        assert!(!within_filter_noise(3.0, Some(0.0)));
+    }
+
     #[test]
     fn evidence_cell_positive_carries_for() {
         // Positive Δ → candidate model beats the baseline → "for".
         // se = 0.5 ⇒ the band is ±1.0 nats and 5.5 is well outside it.
-        assert_eq!(evidence_cell(5.5, 0.5), "+23.9 dB, decisive for");
+        assert_eq!(evidence_cell(5.5, 0.5, None), "+23.9 dB, decisive for");
     }
 
     #[test]
@@ -257,7 +303,7 @@ mod tests {
         // The motivating bug: pre-fix this read "−32.3 dB, decisive"
         // and a reader could miss the sign and conclude the model
         // was preferred.
-        let cell = evidence_cell(-7.45, 0.5);
+        let cell = evidence_cell(-7.45, 0.5, None);
         // -7.45 nats × 4.342944819 ≈ -32.35 dB → rounds to -32.4.
         assert!(cell.starts_with("-32.4 dB"), "expected -32.4 dB prefix, got {}", cell);
         assert!(cell.ends_with("decisive against"),
@@ -270,12 +316,12 @@ mod tests {
         // "indeterminate" — we explicitly refuse to commit to a
         // direction, so adding for/against would dress up noise as
         // a finding.
-        let cell = evidence_cell(0.5, 0.1);  // ≈ 2.2 dB, band ±0.2
+        let cell = evidence_cell(0.5, 0.1, None);  // ≈ 2.2 dB, band ±0.2
         assert!(cell.contains("indeterminate"), "{cell}");
         assert!(!cell.contains("for"));
         assert!(!cell.contains("against"));
         // Same for negative-but-still-indeterminate.
-        let cell = evidence_cell(-0.5, 0.1);
+        let cell = evidence_cell(-0.5, 0.1, None);
         assert!(cell.contains("indeterminate"), "{cell}");
         assert!(!cell.contains("for"));
         assert!(!cell.contains("against"));
@@ -286,24 +332,24 @@ mod tests {
     /// about it changes.
     #[test]
     fn evidence_cell_is_gated_by_the_paired_se() {
-        assert_eq!(evidence_cell(3.0, 0.5), "+13.0 dB, strong for");
-        assert_eq!(evidence_cell(3.0, 2.0), "+13.0 dB, within noise");
-        assert_eq!(evidence_label(3.0, 0.5), "strong");
-        assert_eq!(evidence_label(3.0, 2.0), "within_noise");
+        assert_eq!(evidence_cell(3.0, 0.5, None), "+13.0 dB, strong for");
+        assert_eq!(evidence_cell(3.0, 2.0, None), "+13.0 dB, within noise");
+        assert_eq!(evidence_label(3.0, 0.5, None), "strong");
+        assert_eq!(evidence_label(3.0, 2.0, None), "within_noise");
         // The boundary is closed on the tier side: |Δ| = 2·se is not "within".
         assert!(!within_noise(3.0, 1.5));
         assert!(within_noise(3.0, 1.500001));
         // An SE that cannot describe a band does not gate.
         assert!(!within_noise(0.0, 0.0));
         assert!(!within_noise(0.1, f64::NAN));
-        assert_eq!(evidence_label(0.1, f64::NAN), "indeterminate");
+        assert_eq!(evidence_label(0.1, f64::NAN, None), "indeterminate");
     }
 
     #[test]
     fn evidence_cell_handles_non_finite() {
         // NaN / ±∞ → "—" in the dB column, not a panic.
-        assert_eq!(evidence_cell(f64::NAN, 1.0), "—");
-        assert_eq!(evidence_cell(f64::INFINITY, 1.0), "—");
+        assert_eq!(evidence_cell(f64::NAN, 1.0, None), "—");
+        assert_eq!(evidence_cell(f64::INFINITY, 1.0, None), "—");
     }
 
     #[test]
@@ -425,11 +471,11 @@ mod tests {
         // Spot-check the Jeffreys table against the proposal's worked values,
         // each against an SE small enough that the noise gate does not fire.
         // 20 nats × 4.343 ≈ 86.9 dB, "overwhelming" (above 40 dB).
-        assert!(evidence_cell(20.0, 1.0).contains("overwhelming"));
+        assert!(evidence_cell(20.0, 1.0, None).contains("overwhelming"));
         // Small gap (0.5 nats ≈ 2.2 dB) should be indeterminate — noise floor.
-        assert!(evidence_cell(0.5, 0.1).contains("indeterminate"));
+        assert!(evidence_cell(0.5, 0.1, None).contains("indeterminate"));
         // 3-nat gap (~13 dB) should be "strong" — a few nats of difference
         // on a weekly-obs fit is already beyond anecdotal.
-        assert!(evidence_cell(3.0, 0.5).contains("strong"));
+        assert!(evidence_cell(3.0, 0.5, None).contains("strong"));
     }
 }

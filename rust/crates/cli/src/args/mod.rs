@@ -2846,6 +2846,17 @@ pub struct CompareArgs {
     #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_DRAWS)]
     pub draws: usize,
 
+    /// Filter replicates per derived fit (§3.4 of the 2026-08-29
+    /// proposal): the whole derivation reruns at seeds seed..seed+R,
+    /// per-step scores combine by log-mean-exp, and the replicate totals
+    /// give each row a filter-noise Monte-Carlo SE (`mc_se_elpd`). The
+    /// evidence verdict is suppressed ("within filter noise") when |Δelpd|
+    /// sits inside twice the pair's combined MC SE — at that scale the Δ
+    /// measures the particle filters, not the models. `--replicates 1` is
+    /// the documented cheap mode (no replication, no MC SE).
+    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_REPLICATES)]
+    pub replicates: usize,
+
     /// Render rows whose provenance kinds differ (plug-in vs posterior
     /// mixture) instead of refusing: the Δ then compares an
     /// under-dispersed single-θ predictive against a mixture, and the
