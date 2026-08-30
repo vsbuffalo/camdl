@@ -73,6 +73,11 @@ pub struct PMMHConfig {
     /// Number of source groups in the model (for sizing binomial noise).
     /// Set by the CLI from model.source_groups.len().
     pub n_source_groups: usize,
+    /// Standard normals one particle's initial-state draw consumes (for sizing
+    /// the correlated vector's init block). Set by the CLI from
+    /// `CompiledModel::init_noise_width`; `0` for a model whose `init { }` is
+    /// entirely deterministic, which is every model that has no law to draw.
+    pub init_noise_width: usize,
 }
 
 impl super::traits::InferenceConfig for PMMHConfig {
@@ -629,7 +634,7 @@ pub fn run_pmmh(
         current_randoms = config.rho.map(|_| {
             PFRandomState::draw_fresh(
                 config.n_particles, &steps_per_obs,
-                config.n_source_groups, &mut rng,
+                config.n_source_groups, config.init_noise_width, &mut rng,
             )
         });
 

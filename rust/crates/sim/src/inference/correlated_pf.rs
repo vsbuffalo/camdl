@@ -54,6 +54,27 @@ pub struct PFRandomState {
 
     /// Number of source groups (for indexing into binomial_noise).
     pub n_source_groups: usize,
+
+    /// Initial-state draws, one block of [`Self::init_width`] normals per
+    /// particle: `init_noise[particle * init_width + slot]`, where `slot` is
+    /// the entry's [`crate::compiled_model::CompiledModel::init_noise_offsets`]
+    /// offset.
+    ///
+    /// This is what makes `x₀` part of the correlated vector rather than fresh
+    /// noise added to it (gh#772). An `init { }` that declares a law
+    /// (`I ~ poisson(rate = I0)`) makes `x₀` a random variable the filter must
+    /// integrate over; drawing it from a per-particle ChaCha stream would give
+    /// the current and proposed θ independent initial states, which is
+    /// uncorrelated noise injected into the one quantity the method needs
+    /// correlated. Empty for a deterministic `init { }`, where every particle
+    /// starts at the same state and there is nothing to correlate.
+    pub init_noise: Vec<f64>,
+
+    /// Normals per particle in [`Self::init_noise`] — the stride, and the model
+    /// fact the filter reconciles against
+    /// [`crate::compiled_model::CompiledModel::init_noise_width`] before any
+    /// particle moves. `0` for a deterministic `init { }`.
+    pub init_width: usize,
 }
 
 impl PFRandomState {
@@ -65,10 +86,16 @@ impl PFRandomState {
     /// `n_particles * k` gamma normals and `n_particles * k * n_source_groups`
     /// binomial normals, so an empty window (the usual leading
     /// `[t_start, obs(0)]` when `obs(0) == t_start`) consumes nothing.
+    ///
+    /// `init_width` is the model's
+    /// [`crate::compiled_model::CompiledModel::init_noise_width`]: every
+    /// particle gets its own block of that many normals for the initial-state
+    /// draw, and a deterministic `init { }` asks for none.
     pub fn draw_fresh(
         n_particles: usize,
         steps_per_obs: &[usize],
         n_source_groups: usize,
+        init_width: usize,
         rng: &mut StatefulRng,
     ) -> Self {
         let gamma_noise = steps_per_obs.iter()
@@ -84,11 +111,21 @@ impl PFRandomState {
                 .map(|_| rng.normal())
                 .collect())
             .collect();
-        PFRandomState { gamma_noise, resample_noise, binomial_noise, n_source_groups }
+        let init_noise = (0..n_particles * init_width)
+            .map(|_| rng.normal())
+            .collect();
+        PFRandomState {
+            gamma_noise, resample_noise, binomial_noise, n_source_groups,
+            init_noise, init_width,
+        }
     }
 
     /// Crank-Nicolson update: u' = ρu + √(1-ρ²)z, z ~ N(0,1).
     /// Returns a new PFRandomState correlated with self.
+    ///
+    /// Elementwise over every block, the initial-state one included: `x₀` is
+    /// correlated between the current and proposed θ on exactly the same terms
+    /// as the transition kernel.
     pub fn correlate(&self, rho: f64, rng: &mut StatefulRng) -> Self {
         let scale = (1.0 - rho * rho).sqrt();
         let gamma_noise = self.gamma_noise.iter()
@@ -104,8 +141,14 @@ impl PFRandomState {
                 .map(|&x| rho * x + scale * rng.normal())
                 .collect())
             .collect();
-        PFRandomState { gamma_noise, resample_noise, binomial_noise,
-                        n_source_groups: self.n_source_groups }
+        let init_noise = self.init_noise.iter()
+            .map(|&x| rho * x + scale * rng.normal())
+            .collect();
+        PFRandomState {
+            gamma_noise, resample_noise, binomial_noise,
+            n_source_groups: self.n_source_groups,
+            init_noise, init_width: self.init_width,
+        }
     }
 }
 
@@ -163,6 +206,190 @@ pub fn binomial_quantile(n: u64, p: f64, u: f64) -> u64 {
         }
         n // fallback
     }
+}
+
+/// Smallest `n·p` (and `n·(1-p)`) at which the binomial normal approximation is
+/// used instead of the exact inverse CDF.
+///
+/// The textbook rule of thumb; at `np = nq = 20` the skewness of the binomial is
+/// `(1-2p)/√(npq) ≤ 0.16` and the approximation's error on a single count is
+/// well under one unit. Below it the exact walk is used, which is also the
+/// regime where the walk is cheap.
+const NORMAL_APPROX_MIN: f64 = 20.0;
+
+/// Slack keeping an inverse-CDF argument strictly inside `(0, 1)`.
+///
+/// `Φ(z)` saturates to exactly `0` or `1` around `|z| ≈ 8.3`, and a quantile
+/// asked for `u = 1` has no finite answer for an unbounded law. Clamping caps
+/// the reachable tail at `Φ⁻¹(1 − 1e-15) ≈ 7.94` standard deviations, which no
+/// pre-drawn normal exceeds often enough to matter and which keeps the
+/// transform monotone in `z` rather than flat at the ends.
+const QUANTILE_U_EPS: f64 = 1e-15;
+
+/// `Binomial(n, p)` draw from one standard normal `z`, monotone in `z`.
+///
+/// The single normal → binomial-count transform on the correlated-PF path: the
+/// chain-binomial transition kernel's total-exit draw
+/// ([`crate::chain_binomial::step_one`]) and a `x ~ binomial(n = .., p = ..)`
+/// entry in `init { }` both come through here, so neither can drift into a
+/// regime the other does not use.
+///
+/// Two regimes, because neither covers the range on its own:
+///
+/// * `np > 20` and `nq > 20` — the normal approximation `np + √(npq)·z`,
+///   rounded and clipped to `[0, n]`. This is the hot path (once per source
+///   group per substep per particle), and it is also the only branch that is
+///   safe at national scale: [`binomial_quantile`]'s walk would need `np`
+///   terms to reach the mode.
+/// * otherwise — the exact inverse CDF at `u = Φ(z)`.
+///
+/// `p ≤ 0` gives `0` and `p ≥ 1` gives `n`, matching
+/// [`crate::rng::StatefulRng::binomial`]'s guards, so switching a model between
+/// the correlated and the plain filter does not change the boundary behaviour.
+pub fn binomial_from_normal(n: u64, p: f64, z: f64) -> u64 {
+    let nf = n as f64;
+    let np = nf * p;
+    let nq = nf * (1.0 - p);
+    if np > NORMAL_APPROX_MIN && nq > NORMAL_APPROX_MIN {
+        let sd = (np * (1.0 - p)).sqrt();
+        (np + sd * z).round().clamp(0.0, nf) as u64
+    } else if np > 0.0 {
+        binomial_quantile(n, p, phi(z).clamp(QUANTILE_U_EPS, 1.0 - QUANTILE_U_EPS))
+    } else {
+        0
+    }
+}
+
+/// Largest count [`poisson_quantile`] will return. `2^53` is the last integer
+/// `f64` represents exactly, so beyond it `k as f64` stops being a faithful
+/// argument to the CDF. A safety stop only: with `u` clamped by
+/// [`QUANTILE_U_EPS`] the answer never exceeds `λ + 8√λ + O(1)`.
+const POISSON_K_CAP: u64 = 1u64 << 53;
+
+/// Largest `λ` at which [`poisson_quantile`] inverts the exact CDF rather than
+/// returning the Cornish–Fisher expansion.
+///
+/// Set by where [`numerics::gammp`] is still converged. Around `k ≈ λ` — the
+/// body of the distribution — `gammp` takes its power-series branch, which
+/// needs about `√(2a·ln(1/ε))` terms and stops at 1000, so it is converged for
+/// `a ≲ 13,600`. Measured against R's `ppois` at the median, the agreement is
+/// 1.3e-12 at `λ = 10,000`, 4.6e-9 at 30,000 and only 4.1e-6 at 50,000 — enough
+/// at 50,000 to move the returned median by one count. 10,000 keeps a margin
+/// below the point where that starts.
+///
+/// The far tails do not constrain the choice: there `k + 1` is far from `λ`,
+/// `gammp` takes its continued-fraction branch, and the agreement stays at
+/// 1e-5 *relative* on a probability of 1e-13 — which, on a CDF that changes by
+/// a factor of ~1.3 per count out there, is 1e-4 of a count.
+const POISSON_EXACT_CDF_MAX: f64 = 10_000.0;
+
+/// Inverse Poisson CDF: smallest `k` such that `P(X ≤ k) ≥ u`, `X ~ Poisson(λ)`.
+///
+/// **The CDF is never accumulated term by term.** That implementation — walk
+/// from `k = 0`, seeded at `P(X=0) = e^{−λ}` — is the gh#362 shape: the seed
+/// underflows to exactly `0` at `λ > 745`, the walk then never accumulates, the
+/// `cdf ≥ u` test never fires, and the function returns whatever its fallback
+/// is for *every* `u`. `binomial_quantile` shipped with that failure and
+/// silently over-drained a compartment on this same code path, with no error to
+/// see. National-scale initial states (`I ~ poisson(rate = I0)` with `I0` in the
+/// thousands) sit in exactly that regime.
+///
+/// Two branches instead, split at [`POISSON_EXACT_CDF_MAX`]:
+///
+/// * **`λ ≤ 10,000` — the exact CDF, inverted.** `P(X ≤ k)` is the regularized
+///   *upper* incomplete gamma `Q(k+1, λ)` (Abramowitz & Stegun 1964, 26.4.21),
+///   which [`numerics::gammp`] computes in log space and which therefore has no
+///   underflow regime at all. The search starts at the Cornish–Fisher point
+///   below, but the start is only a start: the bracket is widened by doubling
+///   until it provably contains the answer and then bisected on the exact CDF,
+///   so a poor start costs `O(log)` evaluations rather than a wrong count.
+/// * **`λ > 10,000` — the Cornish–Fisher expansion** `λ + z√λ + (z²−1)/6`,
+///   `z = Φ⁻¹(u)` (Johnson, Kotz & Kemp 1992, *Univariate Discrete
+///   Distributions*, §4.5), because `gammp` is no longer converged there and an
+///   answer from a diverged CDF is worse than an answer from a quantified
+///   approximation. Checked against R's `qpois` in
+///   `tests/gh772_poisson_quantile.rs`: exact over the body of the
+///   distribution, at most one count out to `u = 1 − 1e-6`, and 8 counts in
+///   `10⁹` at the `u = 1 − 1e-15` clamp — 2.5e-4 of a standard deviation.
+///
+/// Monotone non-decreasing in `u` at fixed `λ`, which is what the
+/// correlated-PF common-random-numbers coupling needs: a small perturbation of
+/// the pre-drawn normal moves the drawn count a little, in one direction.
+/// `λ ≤ 0` (or NaN) draws `0`, matching [`crate::rng::StatefulRng::poisson`].
+pub fn poisson_quantile(lambda: f64, u: f64) -> u64 {
+    // NaN is tested first: no comparison against it holds, so a NaN rate would
+    // otherwise fall through `λ <= 0` into the search.
+    if lambda.is_nan() || lambda <= 0.0 {
+        return 0;
+    }
+    let u = u.clamp(QUANTILE_U_EPS, 1.0 - QUANTILE_U_EPS);
+    let z = numerics::normal_quantile(u);
+    let start = (lambda + z * lambda.sqrt() + (z * z - 1.0) / 6.0)
+        .round()
+        .clamp(0.0, POISSON_K_CAP as f64) as u64;
+    if lambda > POISSON_EXACT_CDF_MAX {
+        return start;
+    }
+
+    // F(k) = P(X ≤ k) = Q(k+1, λ) = 1 − P(k+1, λ).
+    let cdf = |k: u64| 1.0 - numerics::gammp(k as f64 + 1.0, lambda);
+
+    // Bracket `(lo, hi]` with `F(lo) < u ≤ F(hi)`, doubling outward from the
+    // start. Both loops terminate: downward at `k = 0`, upward at the cap,
+    // whose CDF is 1 for any finite λ the clamp admits.
+    let (mut lo, mut hi);
+    if cdf(start) >= u {
+        if start == 0 {
+            return 0;
+        }
+        hi = start;
+        let mut step = 1u64;
+        loop {
+            let cand = start.saturating_sub(step);
+            if cdf(cand) < u {
+                lo = cand;
+                break;
+            }
+            if cand == 0 {
+                return 0;
+            }
+            hi = cand;
+            step = step.saturating_mul(2);
+        }
+    } else {
+        lo = start;
+        let mut step = 1u64;
+        loop {
+            let cand = start.saturating_add(step).min(POISSON_K_CAP);
+            if cdf(cand) >= u {
+                hi = cand;
+                break;
+            }
+            if cand == POISSON_K_CAP {
+                return POISSON_K_CAP;
+            }
+            lo = cand;
+            step = step.saturating_mul(2);
+        }
+    }
+
+    // Bisect for the smallest k in `(lo, hi]` with `F(k) ≥ u`.
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if cdf(mid) >= u {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
+/// `Poisson(λ)` draw from one standard normal `z`, monotone in `z`: the
+/// correlated-PF path's Poisson sampler, `z → u = Φ(z) → `
+/// [`poisson_quantile`]`(λ, u)`.
+pub fn poisson_from_normal(lambda: f64, z: f64) -> u64 {
+    poisson_quantile(lambda, phi(z).clamp(QUANTILE_U_EPS, 1.0 - QUANTILE_U_EPS))
 }
 
 /// Transform a standard normal `z` to a `Gamma(shape, scale)` draw via the exact
@@ -328,47 +555,74 @@ pub fn bootstrap_filter_correlated(
     // obs model (the process does not know `n_interval_streams`).
     let n_acc = obs_model.n_interval_streams();
 
-    // Per-particle RNGs via ChaCha8 stream counter (IM1 fix 2026-04-19).
-    // Built before the initial state because drawing x₀ is a draw from a
-    // particle's own stream; `new_stream` consumes nothing, so the streams the
-    // propagation loop sees below are unchanged.
+    // Per-particle RNGs via ChaCha8 stream counter (IM1 fix 2026-04-19). The
+    // initial state does NOT come from these: x₀ is part of the correlated
+    // vector (see below), so these streams carry the transition kernel's
+    // non-pre-drawn draws only.
     let mut rngs: Vec<StatefulRng> = (0..n_particles)
         .map(|i| StatefulRng::new_stream(seed, i as u64))
         .collect();
 
-    // A declared `init { }` law is refused here, and for a reason of its own —
-    // not the bootstrap filter's.
+    // x₀ is drawn PER PARTICLE, from that particle's block of the pre-drawn
+    // correlated vector (gh#772).
     //
-    // Correlated PMMH works because the WHOLE particle system is a
-    // deterministic function of the pre-drawn correlated random vector
-    // (`randoms`), so a small perturbation of that vector gives a small
-    // perturbation of the likelihood estimate, and the two estimates in the MH
-    // ratio share most of their noise. `randoms` covers the transition kernel
-    // only. Drawing x0 from a ChaCha stream here would add randomness that is
-    // NOT part of the correlated vector — uncorrelated noise injected into the
-    // one place the method's efficiency depends on it being correlated. Making
-    // x0 part of the correlated vector is a design change to CPM, not a wiring
-    // fix, so it is refused rather than guessed at.
-    if model.has_init_law {
-        return Err(SimError::Validation(
-            "this model's `init { }` DRAWS a compartment from a law              (`I ~ poisson(...)`), which correlated PMMH (a `pmmh` stage with              `rho` set) cannot represent: its pre-drawn correlated randoms              cover the transition kernel only, so an initial-state draw would              be uncorrelated noise added to the one quantity the method needs              correlated between the current and proposed theta.\n\n               Drop `rho` to run plain PMMH, or use `algorithm = pgas` /              `algorithm = if2`, or write the initial condition as an expression              (`I = I0`) instead of a law."
-                .to_string(),
-        ));
+    // Two things are load-bearing and they pull in the same direction. The
+    // swarm has to integrate over p(x₀ | θ) rather than condition on one
+    // realization of it — one draw copied across every particle is a wrong
+    // likelihood rather than a noisy one (gh#732, `particle_filter.rs`) — and
+    // correlated PMMH needs that draw to come from the pre-drawn vector, since
+    // its efficiency rests on the whole particle system being a deterministic
+    // function of one correlated random vector shared between the current and
+    // proposed θ. A ChaCha stream here would satisfy the first and break the
+    // second.
+    //
+    // No density term accompanies it: in a bootstrap filter the initial-state
+    // law is both the proposal and the prior (Gordon, Salmond & Smith 1993), so
+    // the two cancel in the weight.
+    //
+    // For a deterministic `init { }` — `init_noise_width == 0` — every slice is
+    // empty, the draw short-circuits to `initial_state_mean`, and every
+    // particle gets the same state: byte-identical to the single draw this
+    // replaces, and consuming nothing from `rngs`, which is where that byte
+    // identity comes from.
+    //
+    // Reconciled against the model before the first slice is taken, so the
+    // per-particle blocks below are in range and disjoint by construction. Both
+    // halves matter: a stride that disagrees with the model reads a valid float
+    // from another compartment's slot, and a row too short reads past its
+    // block. Neither errors on its own — they just decorrelate the estimator
+    // the acceptance ratio depends on.
+    let init_width = randoms.init_width;
+    if init_width != model.init_noise_width {
+        return Err(SimError::Validation(format!(
+            "correlated PF: the pre-drawn noise carries {init_width} \
+             initial-state normals per particle, but this model's `init {{ }}` \
+             consumes {}. The noise must be drawn for the model the filter runs \
+             on (`PFRandomState::draw_fresh` with \
+             `CompiledModel::init_noise_width`).",
+            model.init_noise_width,
+        )));
     }
-
-    // ONE draw, copied to every particle. Exact for a deterministic `init { }`:
-    // `initial_state_draw` consumes nothing from `rngs[0]` and every particle
-    // would get the same state anyway. `rngs` is empty when `n_particles == 0`;
-    // see the same guard in `particle_filter.rs::bootstrap_filter`.
-    let (init_int, _init_real) = match rngs.first_mut() {
-        Some(rng0) => model.initial_state_draw(params, rng0)?,
-        None => model.initial_state_draw(
-            params, &mut StatefulRng::new_stream(seed, 0),
-        )?,
-    };
+    if randoms.init_noise.len() < n_particles * init_width {
+        return Err(SimError::Validation(format!(
+            "correlated PF: the pre-drawn initial-state noise holds {} normals, \
+             but the swarm needs {} ({n_particles} particles x {init_width} \
+             normals). The noise must be drawn for the same swarm the filter \
+             runs (`PFRandomState::draw_fresh`).",
+            randoms.init_noise.len(), n_particles * init_width,
+        )));
+    }
     let mut swarm = ParticleSwarm::new(n_particles, n_int, n_tr, n_acc);
-    for p in &mut swarm.states {
-        p.counts.copy_from_slice(&init_int.counts);
+    for (i, p) in swarm.states.iter_mut().enumerate() {
+        let z = &randoms.init_noise[i * init_width..(i + 1) * init_width];
+        // The real half is dropped, as it is in the bootstrap PF: no particle
+        // filter advances a real compartment (`ParticleState` holds integer
+        // counts only; see the KNOWN LIMITATION on the substep walk below). A
+        // real-valued `init { }` law is therefore drawn and discarded here —
+        // it still consumes its slot, because the offsets are a property of
+        // the model rather than of what this filter happens to use.
+        let (x0, _x0_real) = model.initial_state_draw_correlated(params, z)?;
+        p.counts.copy_from_slice(&x0.counts);
     }
 
     let mut states_buf: Vec<ParticleState> = (0..n_particles)
@@ -451,6 +705,15 @@ pub fn bootstrap_filter_correlated(
     // — a stride that overruns its row reads a valid float from another
     // particle's slot, which does not fail, it just decorrelates the estimator
     // the PMMH acceptance ratio depends on.
+    if randoms.n_source_groups != model.source_groups.len() {
+        return Err(SimError::Validation(format!(
+            "correlated PF: the pre-drawn noise is strided for {} source \
+             groups, but this model has {}. The binomial row is read at \
+             `(particle * k + substep) * n_groups + group`, so a stride from a \
+             different model lands on another particle's slot without erroring.",
+            randoms.n_source_groups, model.source_groups.len(),
+        )));
+    }
     if randoms.gamma_noise.len() < n_obs
         || randoms.binomial_noise.len() < n_obs
         || randoms.resample_noise.len() < n_obs

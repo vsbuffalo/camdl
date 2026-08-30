@@ -606,9 +606,10 @@ pub enum InitLaw {
 ///     skip.
 ///   * `pmmh` **with** `rho` (correlated PMMH) — routes to
 ///     `correlated_pf::bootstrap_filter_correlated`, which adds every
-///     increment unconditionally. (That filter also refuses a declared
-///     `init { }` law outright, for a reason of its own: its pre-drawn
-///     correlated randoms cover the transition kernel only.)
+///     increment unconditionally. It has property 2 for a law-bearing model
+///     (each particle draws its own x₀ from its own block of the pre-drawn
+///     correlated vector, gh#772), but property 1 is what decides here and it
+///     does not have it.
 ///
 /// Each is a hard error at config-load time naming its own reason —
 /// converting a silent wrong answer into a loud failure. `correlated` is
