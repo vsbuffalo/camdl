@@ -166,6 +166,22 @@ pub enum DiagnosticKind {
     LowTrajectoryRenewal {
         renewal: f64,
     },
+    /// gh#783. Sweeps in which every particle scored zero observation density
+    /// at some observation window, so the filter weight vector there could not
+    /// be sampled. Distinct from `DegenerateAncestorSampling`, which is about
+    /// the ANCESTOR weights: that one says no particle could reach the
+    /// reference, this one says no particle could explain the data.
+    ///
+    /// Reported rather than fatal — `pgas::WeightCollapse` carries the argument
+    /// — so this is the only place a run says the sweeps happened.
+    FilterWeightCollapse {
+        /// Sweeps with at least one collapsed observation window.
+        n_sweeps: usize,
+        /// Sweeps examined, so the rate is readable.
+        n_total_sweeps: usize,
+        /// Collapsed observation windows summed over those sweeps.
+        n_windows: usize,
+    },
     GammaDensityDisabled {
         reason: String,
     },
@@ -346,6 +362,12 @@ impl DiagnosticKind {
             Self::LowTrajectoryRenewal { renewal } =>
                 format!("Trajectory renewal is {:.1}% — CSMC may not be mixing.",
                     renewal * 100.0),
+            Self::FilterWeightCollapse { n_sweeps, n_total_sweeps, n_windows } =>
+                format!("{}/{} sweeps had an observation window where every particle \
+                         scored zero density ({} windows in total). The filter found no \
+                         trajectory explaining the data at those parameters, and the \
+                         sweep returned the reference.",
+                    n_sweeps, n_total_sweeps, n_windows),
             Self::GammaDensityDisabled { reason } =>
                 format!("Gamma density disabled: {}", reason),
             Self::AcceptanceRateUnhealthy { rate, param, kernel } => {
@@ -430,6 +452,14 @@ impl DiagnosticKind {
             Self::CompressedLogitPosition { .. } => vec![
                 "Widen parameter bounds if scientifically justified",
                 "Use a different transform (e.g., log instead of logit)",
+            ],
+            Self::FilterWeightCollapse { .. } => vec![
+                "Read collapsed_windows and min_alive in the chain's trace.tsv \
+                 to see which sweeps searched and which did not",
+                "A zero-density window is usually an observation the model \
+                 cannot reach: check for a projection of exactly 0 scored \
+                 against a positive count",
+                "Increase particles so the swarm can reach the observation",
             ],
             _ => vec![],
         }
