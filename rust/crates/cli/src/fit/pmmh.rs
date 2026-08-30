@@ -5,6 +5,7 @@
 //! convergence diagnostics (R̂, ESS), and a summary JSON.
 
 use crate::fit::state::FitState;
+use crate::fit::pf_noise;
 use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{self, FitRunConfig, StageConvergence};
 use crate::cas::iso8601_utc;
@@ -224,11 +225,14 @@ pub fn run_stage(
     // Build proposal SDs
     let proposal_sd = build_proposal_sd(&config, starts_from)?;
 
-    // Preflight: PF variance check (skipped for ODE-MH — deterministic, no PF).
+    // Preflight: likelihood-noise check (skipped for ODE-MH — deterministic,
+    // no PF). Measures the spread that governs acceptance and reports it
+    // against this run's own target; see `pf_noise`.
     if is_ode_mh {
         eprintln!("\nODE marginal-likelihood check at base θ (deterministic)...");
     } else {
-        eprintln!("\npfilter variance check ({} particles, 20 replicates)...", n_particles);
+        eprintln!("\npfilter noise check ({} particles, {} evaluation pairs)...",
+            n_particles, pf_noise::NOISE_PAIRS);
     }
     let base = prior_state.as_ref().map(|s| {
         let mut p = config.base_params.clone();
@@ -330,6 +334,10 @@ pub fn run_stage(
     };
 
     let ll_mean: f64;
+    // gh#764: the measured spread, carried to the stage artifact instead of
+    // being printed and dropped. `None` on the ODE-MH path (no filter) and
+    // when an evaluation is ruled out (no spread to report).
+    let mut pf_noise_check: Option<pf_noise::PfNoiseCheck> = None;
     if is_ode_mh {
         // Deterministic ODE marginal likelihood: a single eval at base θ — no
         // replicates, no variance (the ODE skeleton is deterministic). A
@@ -348,24 +356,50 @@ pub fn run_stage(
         };
         eprintln!("  ODE log L = {:.1} (deterministic; no PF variance)", ll_mean);
     } else {
-        let logliks: Vec<f64> = (0..20)
-            .map(|i| runner::run_quick_pfilter(&config, &base, n_particles, seed + i))
-            .collect::<Result<Vec<f64>, _>>()
-            .map_err(|e| format!("pmmh: structural error during PF-variance check at base θ: {}", e))?;
-        let mean = logliks.iter().sum::<f64>() / logliks.len() as f64;
-        let ll_var = logliks.iter().map(|&l| (l - mean).powi(2)).sum::<f64>() / (logliks.len() - 1) as f64;
-        let ll_sd = ll_var.sqrt();
-        ll_mean = mean;
+        // What governs acceptance is the spread of the log-likelihood
+        // *difference* between the two θ a Metropolis step compares, so the
+        // preflight evaluates pairs: once at the base θ, once at a θ' drawn
+        // from the initial proposal, sharing whatever randomness this stage's
+        // scheme shares. One θ' is drawn and reused across the pairs so the
+        // spread is estimator noise and not the curvature of the likelihood
+        // surface — see `pf_noise::draw_proposed_theta`.
+        let proposed = pf_noise::draw_proposed_theta(
+            &base, &config.estimated_params, &proposal_sd, seed);
+        let (base_lls, proposed_lls) = pf_noise::measure(
+            &config, &base, &proposed, n_particles, pf_noise::NOISE_PAIRS, rho, seed,
+        ).map_err(|e| format!(
+            "pmmh: structural error during PF-noise check at base θ: {}", e))?;
+        ll_mean = base_lls.iter().sum::<f64>() / base_lls.len() as f64;
 
-        eprintln!("  log L̂ mean = {:.1}, sd = {:.2}", ll_mean, ll_sd);
-        if ll_sd > 5.0 {
-            eprintln!("  \x1b[33m⚠ PF variance high (sd={:.1} > 5). Consider doubling particles to {}.\x1b[0m",
-                ll_sd, n_particles * 2);
-        } else if ll_sd < 0.5 && n_particles > 200 {
-            eprintln!("  \x1b[32m✓ PF variance low (sd={:.2}). Could halve particles to {} for 2× speed.\x1b[0m",
-                ll_sd, n_particles / 2);
-        } else {
-            eprintln!("  \x1b[32m✓ PF variance OK (target: 1-3)\x1b[0m");
+        match pf_noise::summarize(&base_lls, &proposed_lls, n_particles, rho) {
+            Some(check) => {
+                eprint!("{}", pf_noise::report(
+                    &check, ll_mean,
+                    config.estimated_params.len(),
+                    config.observations.len(),
+                ));
+                pf_noise_check = Some(check);
+            }
+            None => {
+                // A -inf evaluation is a θ the filter ruled out, not a noise
+                // level: there is no spread to take and no ceiling to compute.
+                // Say which side it came from, since the two have different
+                // fixes — a bad start, versus a proposal whose first move
+                // leaves the region the data supports.
+                let base_bad = base_lls.iter().any(|l| !l.is_finite());
+                let proposed_bad = proposed_lls.iter().any(|l| !l.is_finite());
+                let which = match (base_bad, proposed_bad) {
+                    (true, true)  => "both the base θ and the proposed θ'",
+                    (true, false) => "the base θ",
+                    _             => "the proposed θ'",
+                };
+                eprintln!("  log L̂ mean = {:.1}", ll_mean);
+                eprintln!("  \x1b[33m⚠ no noise measurement\x1b[0m — the filter ruled out {} \
+                    (log L̂ = -inf),\n    so there is no spread to take and no acceptance \
+                    ceiling to report. The chain\n    still runs; its acceptance rate is then \
+                    the only evidence on whether it moves.",
+                    which);
+            }
         }
     }
 
@@ -1003,6 +1037,10 @@ pub fn run_stage(
         // gh#52, gh#227: deterministic ODE dt-check at the MAP (above); `None`
         // on the PMMH path (PF dt-check is wired on the IF2 path).
         dt_check: dt_check_result,
+        // gh#764: the preflight's measured spread, with the particle and pair
+        // counts it was measured at. Without this the one number that explains
+        // a stuck pseudo-marginal chain exists only in the run's stderr.
+        pf_noise: pf_noise_check,
     };
     state.save(&stage_dir.to_string_lossy())?;
 

@@ -447,6 +447,9 @@ pub fn run_stage(
         resolved_loglik_eval: None,
         chain_init_source: None,
         dt_check: None,
+        // gh#764: NUTS scores a deterministic ODE likelihood — no filter, no
+        // noise, nothing to measure.
+        pf_noise: None,
     };
     let _ = best_params; // point-estimate is derivable from the trace draws
     state

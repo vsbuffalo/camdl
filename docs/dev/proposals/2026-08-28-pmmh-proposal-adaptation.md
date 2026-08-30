@@ -1,8 +1,10 @@
 # PMMH proposal adaptation: a floor, a noise-aware target, and one shared Robbins-Monro
 
-Status: fix 1 implemented (a9a6355d); fixes 3 and 4 pending; fix 2 deferred to
-gh#767 Related: gh#347 (the deterministic-MH deadlock this shares machinery
-with), gh#764 (persisting the measured spread)
+Status: fix 1 (a9a6355d), fix 4 (63dd20c2) and fix 3 implemented; fix 2 deferred
+to gh#767.
+
+Related: gh#347 (the deterministic-MH deadlock this shares machinery with),
+gh#764 (persisting the measured spread — landed with fix 3).
 
 ## The problem
 
@@ -26,8 +28,14 @@ and was still falling at the last block.
 - **`s`** — the standard deviation of the _difference_ between two evaluations,
   `log L-hat(theta') - log L-hat(theta)`. This is the quantity that enters the
   Metropolis ratio, so it is the one that governs acceptance. For independent
-  evaluations `s = sigma * sqrt(2)`; under correlated pseudo-marginal (`rho`
-  set) the two evaluations share most of their randomness and `s` is smaller.
+  evaluations `s = sigma * sqrt(2)` **in the small-step limit `theta' -> theta`
+  only** — the regime the ceiling below is derived in, where both evaluations
+  see the same noise level. At a finite step the two evaluations sit at
+  different `theta`, the filter's noise level differs between them, and `s^2` is
+  the sum of the two points' variances; fix 3 measures that case and records
+  what follows. Under correlated pseudo-marginal (`rho` set) the two evaluations
+  share most of their randomness and `s` is smaller than the independent value
+  at the same two points.
 - **`lambda`** — the Robbins-Monro global proposal scale, `exp(log_scale)`.
 - **`a*`** — the target acceptance rate the adaptation drives toward.
 
@@ -52,8 +60,10 @@ small-step limit the acceptance rate tends to
 
     a_ceiling = 2 * Phi(-sigma / sqrt(2))  =  2 * Phi(-s / 2)
 
-with `Phi` the standard normal CDF. The two forms are the same number written in
-the two spreads defined above; the `s` form is the one to implement against,
+with `Phi` the standard normal CDF. The two forms are the same number _in this
+limit_, where both evaluations sit at the same `theta` and so see the same noise
+level; away from it they part company, and fix 3 records which one the preflight
+measures and what that costs. The `s` form is the one to implement against,
 because it is scheme-agnostic (see fix 3). Verified by direct Monte Carlo of the
 noise-only chain, twice independently:
 
@@ -191,7 +201,10 @@ carries the evidence and the acceptance criteria; the four `#[ignore]`d tests in
 
 ## Fix 3: a preflight that computes the ceiling instead of guessing a band
 
-`cli/src/fit/pmmh.rs` prints a green `PF variance OK (target: 1-3)` for any
+Implemented in `cli/src/fit/pf_noise.rs`; the two points the spec below left
+open are settled at the end of this section.
+
+`cli/src/fit/pmmh.rs` printed a green `PF variance OK (target: 1-3)` for any
 `sigma` in `[0.5, 5.0]`. Collapse begins around 1.6, so the check says "OK"
 across a range that is mostly past the point where the adaptation loses its
 root. That is worse than silence.
@@ -211,8 +224,10 @@ single `log L-hat` and reports their standard deviation. Two changes:
    correlation of 0.9 between successive estimates, the true ceiling is 65%
    rather than the 15.7% the plain measurement implies. Evaluate with the
    pre-drawn randoms, then with their Crank-Nicolson update, and take the spread
-   of the _differences_; for plain PMMH the same procedure gives
-   `s = sigma * sqrt(2)` and nothing changes.
+   of the _differences_. For plain PMMH the same procedure is two independent
+   filters per pair, which reduces to `s = sigma * sqrt(2)` in the small-step
+   limit `theta' -> theta` and not at the finite step this preflight actually
+   takes — see "a consequence worth stating" below.
 
 **Three constraints on that measurement, each of which came out of review.**
 
@@ -256,6 +271,57 @@ straddles the crossover rather than picking a side.
 `sigma`, `s`, the particle count and the replicate count are persisted with the
 stage artifact (gh#764); a spread without its particle count is meaningless,
 since `sigma` scales as `1/sqrt(N)`.
+
+**One `theta'`, reused across the pairs.** The constraint above says the second
+evaluation is taken at a `theta'` drawn from the initial proposal; it does not
+say whether that draw is repeated. It is not. The pair difference is
+`log L-hat(theta') - log L-hat(theta)`, so with `theta'` fixed the true
+log-likelihood difference is a constant offset and the spread of the differences
+is estimator noise alone — the quantity the ceiling is a function of. Redrawing
+`theta'` per pair would fold the curvature of the log-likelihood surface into
+`s`, and the ceiling would then be a statement about the posterior rather than
+about the filter. The cost is that the measurement is conditional on the one
+`theta'` drawn, and the reported standard error does not cover that
+conditioning.
+
+**A consequence worth stating: `s` is not `sigma*sqrt(2)`, even for plain
+PMMH.** The identity holds where both evaluations see the same noise level,
+which is the small-step limit. Constraint 3 deliberately puts the second
+evaluation a full initial-proposal step away, and the filter's noise level
+varies across the parameter space, so what is measured is
+`s^2 = sigma_theta^2 + sigma_theta'^2`. On a two-parameter SIR with 20 daily
+observations at 200 particles: `sigma` 4.07 at the base point against `s` 9.40
+across the step, implying a `sigma` of 8.5 where the proposal lands — twice as
+noisy. Neither the plain-PMMH identity nor a `rho`-derived value would have
+produced that number, which is the case for measuring it.
+
+**So the reported ceiling is a bound, not the limit — and the bound is
+directional.** `2*Phi(-s/2)` is derived at `lambda -> 0`, where both evaluations
+sit at `theta` and the spread is `sigma_theta * sqrt(2)`. Measuring across a
+full step gives a larger `s` whenever the filter is noisier at `theta'` than at
+`theta`, and then the reported ceiling falls _below_ the true `lambda -> 0`
+ceiling. Two consequences, and the second is the honest limit of the claim:
+
+- The check can warn where a root does exist. That is a false alarm, and it is
+  what makes "warn and proceed" (decision 4) the right disposition rather than a
+  concession: the converse error — blessing a run that provably cannot sample —
+  is the one this fix exists to remove, and a conservative bound cannot commit
+  it.
+- The direction is the usual one, not a guarantee. A `theta'` that happens to
+  land somewhere _quieter_ than the base point yields an `s` below the
+  small-step value and a reported ceiling above the limit. The base point of a
+  fit is normally the better-behaved end of a proposal step, so this is the
+  minority case, but it is not excluded and the ceiling is not a certificate.
+
+**Decision: the message carries the caveat; the quantity keeps its name.** The
+alternative was to rename it to something that does not promise the limit. But
+`2*Phi(-s/2)` is exactly what is computed, and printing the formula beside the
+number is what makes the check auditable rather than an oracle; renaming would
+decouple the code from the published formula and from this document's
+vocabulary, and would still need a sentence to say why. So the report states,
+once, that `s` spans a full proposal step rather than the `lambda -> 0` limit
+and that the ceiling should be read as a conservative bound, and the
+below-target branch says outright that it can fire where a root exists.
 
 ## Fix 4: adaptation stops at the end of warm-up
 

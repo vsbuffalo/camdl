@@ -458,6 +458,7 @@ mod tests {
             resolved_loglik_eval: None,
             chain_init_source: None,
             dt_check: None,
+            pf_noise: None,
         }
     }
 

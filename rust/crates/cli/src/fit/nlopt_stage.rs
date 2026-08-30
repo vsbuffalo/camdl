@@ -311,6 +311,8 @@ pub fn run_stage(
         } else {
             Some(dt_check_result)
         },
+        // gh#764: a deterministic optimiser, not a pseudo-marginal sampler.
+        pf_noise: None,
     };
     fit_state
         .save(&stage_dir.to_string_lossy())
