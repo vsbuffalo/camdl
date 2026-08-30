@@ -5723,15 +5723,31 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
 --metric elpd,crps,pit_cov90
 --format table|md|json      (default table)
 --allow-mismatched-horizon  render even if T_score differs (Δ columns → '—')
+--allow-data-mismatch       render even if the compared fits were bound to
+                            different observed data; the Δ is then confounded
 --particles N               for derived prequentials (default 1000, applied uniformly)
 --seed N                    for derived prequentials (default 1)
 --exclude-chains [@FIT:]IDS per-fit (`@a:4`) or cohort-wide (`3,4`); mixing the two
                             forms is rejected. Always warns
+--pointwise PATH            write the per-observation Δelpd vector as a TSV
 ```
 
-Columns: `T_score`, `elpd`, `Δelpd`, `E_T` (= exp(Δelpd), the terminal e-value),
-`se(Δ)` (paired standard error over pointwise differences), `crps`, `Δcrps`,
-`PIT_cov90` (nominal 0.90; below 0.70 triggers an overconfidence warning).
+Columns: `T_score`, `elpd`, `Δelpd`, `LR` (= exp(Δelpd), the in-sample
+likelihood ratio against the baseline on the same scored observations — not an
+e-value: nothing here establishes a null expectation ≤ 1, so it carries no
+anytime-valid reading), `se(Δ)` (paired standard error over pointwise
+differences), `evidence` (decibans plus a Jeffreys tier, or `within noise` when
+`|Δelpd| < 2·se(Δ)`), `crps`, `Δcrps`, `PIT_cov90` (nominal 0.90; below 0.70
+triggers an overconfidence warning).
+
+Every format carries the same footer: the optimism caveat, the miscalibration
+flags, each trace's warnings, a note that the Jeffreys tiers calibrate Bayes
+factors rather than these likelihood ratios, and — below 100 scored steps — a
+caveat that `se(Δ)`'s normal approximation is unreliable at small `T` and when
+the models predict alike (Sivula, Magnusson & Vehtari, arXiv:2008.10296). In
+JSON they are the `optimism_caveat`, `evidence_scale_note`, `se_caveat`,
+`data_mismatch` and `data_unchecked` fields, plus per-row `provenance`,
+`conditioning`, `warnings` and `pit_cov90_warning`.
 
 ### Browsing, labelling, data
 

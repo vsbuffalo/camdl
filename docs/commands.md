@@ -36,18 +36,18 @@ transform. A few commands delegate to the compiler.
 
 ### Read, display, compare
 
-| Command                                            | Does                                                                                                                                                            |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`                                             | Browse cached runs as a table.                                                                                                                                  |
-| `show`                                             | Full metadata for one cached run.                                                                                                                               |
-| `cat`                                              | Emit a cached run's trajectory or observations as TSV.                                                                                                          |
-| `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (caveat printed); not a leave-future-out forecast score. |
-| `label`                                            | Set a display label on any run.                                                                                                                                 |
-| `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                |
-| `batch status`                                     | Completion of a sweep.                                                                                                                                          |
-| `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                              |
-| `data split`                                       | Split a data TSV into train/holdout.                                                                                                                            |
-| `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                       |
+| Command                                            | Does                                                                                                                                                                                  |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`                                             | Browse cached runs as a table.                                                                                                                                                        |
+| `show`                                             | Full metadata for one cached run.                                                                                                                                                     |
+| `cat`                                              | Emit a cached run's trajectory or observations as TSV.                                                                                                                                |
+| `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (the caveat is printed with the table); not a leave-future-out forecast score. |
+| `label`                                            | Set a display label on any run.                                                                                                                                                       |
+| `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                      |
+| `batch status`                                     | Completion of a sweep.                                                                                                                                                                |
+| `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
+| `data split`                                       | Split a data TSV into train/holdout.                                                                                                                                                  |
+| `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |
 
 ### Compiler passthrough
 
@@ -244,17 +244,37 @@ handle and are applied **uniformly** across all derived fits, so `T_score` and
 the scores stay commensurable; they are ignored for an explicit
 `prequential.json` (read as-is). The scores are **plug-in and
 in-sample-optimistic** — computed at a single θ fit to the whole series — so
-they support _relative_ comparison but are not a leave-future-out forecast
-score; `compare` prints this caveat on every run.
+they are not a leave-future-out forecast score. The optimism does not cancel
+when two models are differenced, either: it grows with the effective number of
+parameters each model was free to tune against the same observations, so Δelpd
+tilts toward the more flexible model. Read a comparison as indicative, alongside
+`se(Δ)` and the caveats; `compare` prints them with the table on every run.
+
+The evidence column is gated on that standard error: when `|Δelpd| < 2·se(Δ)`
+the cell reads `within noise` and carries no Jeffreys tier, because the tier
+would name a magnitude the data cannot resolve. The `LR` column is `exp(Δelpd)`
+— the candidate's in-sample predictive likelihood over the baseline's on the
+same scored observations.
+
+`compare` refuses, rather than renders, four unlike-for-unlike comparisons: a
+differing `T_score` (override: `--allow-mismatched-horizon`, which suppresses
+the Δ columns), traces scored at different observation times, traces that scored
+different observation streams at the same time (gh#570 — the step's log score is
+the joint score over those streams), and fits bound to different observed data
+(gh#713; override: `--allow-data-mismatch`, which renders the Δ as confounded).
+A fit whose terminal stage ran on a backend other than `chain_binomial` is
+refused on the derive path, since the derived score would come from a different
+forward process than the fit used (gh#312).
 
 `--pointwise PATH` writes the per-observation difference the table already
 computes in order to form `se(Δelpd)`, as a TSV with one row per candidate ×
 scored step, joint and per stream: `model`, `baseline`, `t`, `scope`, `stream`,
 `log_score`, `baseline_log_score`, `delta_log_score`. `Δelpd = 12 nats` says a
 model won; this says _where_ it won — on three weeks around an intervention, on
-one district, on a single reporting batch. A stream only one side scored gets an
-empty difference rather than a number, so an elpd gap taken across two different
-stream sets is visible instead of hidden inside the scalar.
+one district, on a single reporting batch. An elpd gap taken across two
+different stream sets never reaches this file: the preflight refuses that
+comparison before the table is rendered or the TSV is written, naming the
+streams that differ (gh#570).
 
 ## The boundaries, stated plainly
 

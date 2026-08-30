@@ -194,8 +194,8 @@ max R̂ = 1.313  ~  NOT converged  (rank-normalized split R̂, threshold 1.05)
 ```
 
 No threshold is placed on the gap between the halves; it is reported, not
-linted. See `docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`
-for the evidence and for what a cutoff would need before it could be picked.
+linted. See `docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md` for
+the evidence and for what a cutoff would need before it could be picked.
 
 `ESS` is the rank-normalized **bulk** effective sample size, with the **tail**
 ESS (the smaller of the 5% and 95% quantile-indicator ESS) beside it. Neither is
@@ -339,9 +339,13 @@ same particle count and seed for both, so the scores stay commensurable — so y
 no longer hand-run `pfilter --save-prequential` first. (You still can: an
 explicit `prequential.json` path is read as-is, for a custom filter
 configuration.) Its scores are **plug-in and in-sample-optimistic** — computed
-at a single θ that was fit to the whole series — so they are useful for
-_relative_ comparison but are not a leave-future-out forecast score; `compare`
-prints this caveat on every run.
+at a single θ that was fit to the whole series — so they are not a
+leave-future-out forecast score. Nor does the optimism cancel in a difference:
+it grows with the effective number of parameters a model was free to tune
+against the same observations, so Δelpd tilts toward the more flexible model.
+Treat a comparison as indicative rather than decisive, and read it with `se(Δ)`
+— when `|Δelpd| < 2·se(Δ)` the evidence column says `within noise` and gives no
+tier. `compare` prints these caveats with the table on every run.
 
 ## When to stop and ask a human
 
