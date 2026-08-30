@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use crate::chain_binomial::{StepScratch, step_one, RATE_EPSILON};
 use crate::compiled_model::CompiledModel;
 use crate::rng::StatefulRng;
-use crate::error::SimError;
+use crate::error::{InitSource, SimError};
 use crate::inference::obs_loglik::{poisson_logpmf, binom_logpmf};
 use crate::inference::numerics::BINOM_PROB_EPS;
 use crate::inference::particle_filter::Observation;
@@ -558,6 +558,12 @@ pub struct PGASResult {
     /// (audit H4): rate < 0.10 on tempered chains is a sign the
     /// temperature ladder is too sparse.
     pub swap_acceptance_rates: Vec<f64>,
+    /// gh#784. Where this chain's initial reference trajectory `X₀` came from,
+    /// on a fresh start; `None` when the chain resumed (the restored trajectory
+    /// was produced by an earlier call). `ForwardDraw(..)` means the
+    /// unconditional SMC pass could not produce a valid path — the count that
+    /// decides whether gh#784's step 3b is needed.
+    pub init_source: Option<InitSource>,
 }
 
 /// Serializable chain state for `--resume`. Saved to `chain_N/resume_state.bin`
@@ -1366,7 +1372,7 @@ pub type EffectFiring<'a> = Option<(&'a ObsAtSubstep, &'a [Vec<usize>])>;
 /// [`crate::effects::split_due_batch`]. PGAS still rejects always-active events
 /// under Exact (the residual guard below), so in practice only scheduled
 /// interventions reach the `Some` branch here. step_one then applies `out`.
-fn fill_producer_batch(
+pub(crate) fn fill_producer_batch(
     model: &CompiledModel,
     fire_steps: &[std::collections::BTreeSet<i64>],
     t_end: f64,
@@ -2027,6 +2033,40 @@ pub fn fill_ancestor_log_weights(
     Ok(())
 }
 
+/// One free particle's initial state `x₀`: a draw from the model's declared
+/// `init {}` law, with the declared `balance {}` constraint re-applied.
+///
+/// The ONE definition of "a free particle's starting state" — the CSMC sweep's
+/// free particles and the unconditional initialization pass
+/// ([`super::pgas_init`]) both call it, so the two cannot drift on what a free
+/// draw is. For a deterministic `init {}` the seam consumes nothing from `rng`
+/// and every particle gets the same state.
+///
+/// The balance constraint is the DECLARED expression, evaluated exactly as
+/// `lifecycle.rs` evaluates it every substep — not the hardcoded
+/// `total_pop − Σothers` an earlier version assumed. Any model whose balance
+/// expression is not that got two different initial states from the two paths.
+pub(crate) fn draw_free_particle_initial_state(
+    model: &CompiledModel,
+    params: &[f64],
+    rng: &mut StatefulRng,
+    per_eval: Option<&[f64]>,
+) -> Result<Vec<i64>, SimError> {
+    let (int_s, real_s) = model.initial_state_draw(params, rng)?;
+    let mut c = int_s.counts;
+    if let Some(ref bal) = model.balance {
+        let int_view = crate::state::IntState::from_vec(c.clone());
+        let ctx = crate::propensity::EvalCtx {
+            model, int_s: &int_view, real_s: &real_s, params,
+            t: model.model.simulation.t_start, dt: 0.0, projected: None, aux: None,
+            int_float_override: None, per_eval,
+        };
+        c[bal.local_int_idx] =
+            crate::resolved_expr::eval_resolved(&bal.expr, &ctx).round() as i64;
+    }
+    Ok(c)
+}
+
 /// Run one CSMC-AS sweep: draw X' ~ p(X | θ, y) conditioned on
 /// the reference trajectory.
 ///
@@ -2084,24 +2124,7 @@ pub fn csmc_as(
             if j == j_ref {
                 return Ok(reference.initial_counts.clone());
             }
-            let (int_s, real_s) = model.initial_state_draw(params, &mut rngs[j])?;
-            let mut c = int_s.counts;
-            // Re-apply the balance constraint to the drawn state. The DECLARED
-            // expression, evaluated exactly as `lifecycle.rs` evaluates it every
-            // substep — not the hardcoded `total_pop − Σothers` this used to
-            // assume. Any model whose balance expression is not that got two
-            // different initial states from the two paths.
-            if let Some(ref bal) = model.balance {
-                let int_view = crate::state::IntState::from_vec(c.clone());
-                let ctx = crate::propensity::EvalCtx {
-                    model, int_s: &int_view, real_s: &real_s, params,
-                    t: t_start, dt: 0.0, projected: None, aux: None,
-                    int_float_override: None, per_eval,
-                };
-                c[bal.local_int_idx] =
-                    crate::resolved_expr::eval_resolved(&bal.expr, &ctx).round() as i64;
-            }
-            Ok(c)
+            draw_free_particle_initial_state(model, params, &mut rngs[j], per_eval)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -2585,7 +2608,7 @@ pub fn csmc_as(
 /// Applies the log-sum-exp trick for numerical stability: subtracts the max
 /// log-weight before exponentiating, then draws from the resulting categorical.
 /// Returns `None` if all weights are -inf (degenerate case).
-fn sample_categorical_log(log_weights: &[f64], rng: &mut StatefulRng) -> Option<usize> {
+pub(crate) fn sample_categorical_log(log_weights: &[f64], rng: &mut StatefulRng) -> Option<usize> {
     let max_w = log_weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     if !max_w.is_finite() {
         return None;
@@ -3015,6 +3038,11 @@ pub fn run_pgas(
     let start_sweep;
     let trajectory;
     let current_transformed: Vec<f64>;
+    // gh#784. Where X₀ came from, on a fresh start; `None` on resume (the
+    // restored trajectory was produced by an earlier call, which recorded its
+    // own source). Reported on the result and carried into the chain-start
+    // refusal so an initialization failure is never read as a claim about θ₀.
+    let init_source: Option<InitSource>;
 
     // Whether this call begins a chain (vs continues one). The chain-start
     // refusal below applies only to a fresh start: a resumed θ already passed
@@ -3034,6 +3062,7 @@ pub fn run_pgas(
         current_params.copy_from_slice(&state.params);
         trajectory = state.trajectory;
         start_sweep = state.completed_sweeps;
+        init_source = None;
 
         current_transformed = restore_z_values(
             &state.param_names, &state.transformed, if2_params, &current_params,
@@ -3045,13 +3074,36 @@ pub fn run_pgas(
             current_params[spec.index] = clamped;
         }
     } else {
-        eprintln!("  initializing reference trajectory...");
-        trajectory = simulate_reference_on_grid(
-            model, &current_params, config.dt, &grid.steps, firing, &mut rng,
+        // gh#784. X₀ comes from an ORDINARY UNCONDITIONAL SMC pass at θ₀ — the
+        // standard particle-Gibbs seeding (Andrieu, Doucet & Holenstein 2010
+        // §4.5; Lindsten, Jordan & Schön 2014 §2.3) — not from a single forward
+        // draw. A forward draw puts no weight on the observations, so on an
+        // informative model it routinely lands where the observation model
+        // scores −∞, and the conditional sweep is then asked to repair a
+        // reference it has been conditioned on. gh#780 measured that repair
+        // failing: the reference takes essentially the whole normalised weight
+        // in an early window and the swarm becomes its own descendants.
+        //
+        // BEHAVIOUR CHANGE, stated plainly: every fresh PGAS chain whose
+        // unconditional pass succeeds now starts from a different X₀ than
+        // before, so its whole sweep sequence differs. A chain whose pass FAILS
+        // falls back to exactly the old forward draw off this same `rng`, which
+        // the pass never touches, and is therefore bit-identical to a pre-gh#784
+        // run.
+        eprintln!("  initializing reference trajectory (unconditional SMC pass, \
+                   {} particles)...", config.n_particles);
+        let init_t0 = std::time::Instant::now();
+        let (init_traj, source) = super::pgas_init::initial_reference_trajectory(
+            model, &current_params, &grid.steps, config.n_particles, config.dt,
+            observations, obs_model, seed, &obs_at_substep, firing, &mut rng,
         )?;
-        eprintln!("  reference: {} substeps, initial S={}",
+        trajectory = init_traj;
+        let init_secs = init_t0.elapsed().as_secs_f64();
+        eprintln!("  reference: {} substeps, initial S={} — {} ({:.1}s)",
             trajectory.substeps.len(),
-            trajectory.initial_counts.first().copied().unwrap_or(0));
+            trajectory.initial_counts.first().copied().unwrap_or(0),
+            source, init_secs);
+        init_source = Some(source);
         current_transformed = if2_params.iter()
             .map(|p| p.to_transformed(current_params[p.index]))
             .collect();
@@ -3774,6 +3826,14 @@ pub fn run_pgas(
                 if !any_rung_finite {
                     return Err(SimError::NonFiniteChainStart {
                         log_posterior, transition, observation, ivp, log_prior,
+                        // gh#784. A refusal on a chain whose unconditional pass
+                        // SUCCEEDED is a different finding from one whose pass
+                        // failed, and only the latter is an initialization
+                        // failure. `is_fresh_start` is the guard on
+                        // `start_at_zero_density`, so this arm is unreachable on
+                        // resume and the `unwrap_or` never fires in practice.
+                        init: init_source.clone()
+                            .unwrap_or(InitSource::UnconditionalFilter),
                     });
                 }
                 eprintln!("  chain recovered from a non-finite start on its first \
@@ -3947,6 +4007,7 @@ pub fn run_pgas(
         n_max_treedepth_total: n_max_treedepth,
         n_max_treedepth_post_burn,
         swap_acceptance_rates,
+        init_source,
     })
 }
 

@@ -149,7 +149,7 @@ pub enum SimError {
     #[error("chain start has zero posterior density and did not recover on its \
              first trajectory update: the initial complete-data log-posterior is \
              {log_posterior} (log-likelihood terms: transition {transition}, \
-             observation {observation}, ivp {ivp}; log prior {log_prior})")]
+             observation {observation}, ivp {ivp}; log prior {log_prior}); {init}")]
     NonFiniteChainStart {
         /// `transition + observation + ivp + log_prior` — the number the
         /// chain would have been seeded with.
@@ -166,6 +166,13 @@ pub enum SimError {
         /// `Σ log p(θ₀)` over the estimated parameters. Non-finite here means
         /// the start is outside its own prior's support.
         log_prior: f64,
+        /// gh#784. How `X₀` was obtained. `ForwardDraw(..)` means the
+        /// unconditional SMC pass could not produce a valid path and the chain
+        /// fell back to a forward draw — an INITIALIZATION failure, and the
+        /// count that decides whether gh#784's step 3b is needed.
+        /// `UnconditionalFilter` means initialization succeeded and the chain
+        /// was still refused, which is a different finding.
+        init: InitSource,
     },
 
     /// gh#81 Phase 2. A model parameter reached the rate evaluator
@@ -266,6 +273,92 @@ pub enum PFDegenerateKind {
     /// marked dead. Resampling on the next step would have zero
     /// weight everywhere; bail before the divide-by-zero.
     AllParticlesDead,
+}
+
+/// gh#784. Where a PGAS chain's initial reference trajectory `X₀` came from.
+///
+/// Carried on the chain-start refusal so "we could not build a starting latent
+/// path" is never read as "this `θ₀` is impossible". Produced by
+/// `inference::pgas_init`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitSource {
+    /// An unconditional SMC pass at `θ₀` returned a lineage whose complete-data
+    /// density is finite. The intended path: the filter reweights against the
+    /// data at every observation, so `X₀` already explains them as well as `N`
+    /// draws at `θ₀` can.
+    UnconditionalFilter,
+    /// The unconditional pass did not yield a usable path, so `X₀` is the
+    /// forward `simulate_reference` draw — the pre-gh#784 behaviour, kept as the
+    /// fallback so no chain is worse off than before.
+    ForwardDraw(InitFallback),
+}
+
+impl InitSource {
+    /// The fallback reason, when the unconditional pass did not produce `X₀`.
+    pub fn fallback(&self) -> Option<&InitFallback> {
+        match self {
+            InitSource::UnconditionalFilter => None,
+            InitSource::ForwardDraw(r) => Some(r),
+        }
+    }
+}
+
+impl std::fmt::Display for InitSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InitSource::UnconditionalFilter => {
+                write!(f, "X0 from the unconditional SMC pass")
+            }
+            InitSource::ForwardDraw(r) => write!(
+                f,
+                "X0 from the forward draw — the unconditional pass could not \
+                 produce a valid path ({r})"
+            ),
+        }
+    }
+}
+
+/// gh#784. Why the unconditional initialization pass did not produce `X₀`.
+///
+/// Every variant is a fact about that pass over that swarm. **None of them
+/// asserts `p(y | θ) = 0`** — gh#784's `STRUCTURALLY_INFEASIBLE` status is
+/// reserved for support logic that can prove infeasibility, which this is not.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitFallback {
+    /// At observation index `obs_index` (substep `substep`) every particle
+    /// scored `−∞`, so no lineage carries non-zero weight past that point.
+    SwarmCollapsed { obs_index: usize, substep: usize },
+    /// Every particle hit a recoverable per-particle error (a chain-binomial
+    /// overshoot, a numerical collapse) by substep `substep`.
+    AllParticlesDied { substep: usize },
+    /// A lineage was traced, but its complete-data log-density is not finite.
+    /// The component breakdown says which term.
+    NonFiniteDensity {
+        transition: f64,
+        observation: f64,
+        initial_state: f64,
+    },
+}
+
+impl std::fmt::Display for InitFallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InitFallback::SwarmCollapsed { obs_index, substep } => write!(
+                f,
+                "every particle scored -inf at observation {obs_index} \
+                 (substep {substep})"
+            ),
+            InitFallback::AllParticlesDied { substep } => {
+                write!(f, "every particle died by substep {substep}")
+            }
+            InitFallback::NonFiniteDensity { transition, observation, initial_state } => write!(
+                f,
+                "the traced path has non-finite complete-data density \
+                 (transition {transition}, observation {observation}, \
+                 initial_state {initial_state})"
+            ),
+        }
+    }
 }
 
 impl SimError {
@@ -552,6 +645,7 @@ mod tests {
             observation: f64::NEG_INFINITY,
             ivp: 0.0,
             log_prior: -2.5,
+            init: InitSource::UnconditionalFilter,
         };
         assert!(!err.is_structural(),
             "a bad chain START must not abort the whole fit: {err}");
@@ -563,5 +657,50 @@ mod tests {
         let s = format!("{err}");
         assert!(s.contains("observation -inf"), "message must name the components: {s}");
         assert!(s.contains("log prior -2.5"), "message must name the prior term: {s}");
+    }
+
+    /// gh#784. A refusal must say whether the chain's `X₀` came from the
+    /// unconditional SMC pass or from the forward-draw fallback, because only
+    /// the second is an INITIALIZATION failure. Reading the two as one number is
+    /// how "we could not build a starting path" gets reported as "this θ is
+    /// impossible" — the conflation gh#784 exists to remove.
+    #[test]
+    fn chain_start_refusal_names_where_x0_came_from() {
+        let recovered = SimError::NonFiniteChainStart {
+            log_posterior: f64::NEG_INFINITY,
+            transition: -10.0, observation: f64::NEG_INFINITY,
+            ivp: 0.0, log_prior: -1.0,
+            init: InitSource::UnconditionalFilter,
+        };
+        let s = format!("{recovered}");
+        assert!(s.contains("X0 from the unconditional SMC pass"),
+            "a refusal after a SUCCESSFUL initialization must say so: {s}");
+
+        let failed = SimError::NonFiniteChainStart {
+            log_posterior: f64::NEG_INFINITY,
+            transition: -10.0, observation: f64::NEG_INFINITY,
+            ivp: 0.0, log_prior: -1.0,
+            init: InitSource::ForwardDraw(InitFallback::SwarmCollapsed {
+                obs_index: 38, substep: 275,
+            }),
+        };
+        let s = format!("{failed}");
+        assert!(s.contains("the unconditional pass could not produce a valid path"),
+            "a refusal after a FAILED initialization must say so: {s}");
+        assert!(s.contains("observation 38"),
+            "the fallback reason must name where the swarm lost support: {s}");
+        // And it must never be phrased as a claim about theta (gh#784: only
+        // STRUCTURALLY_INFEASIBLE may say that, and nothing produces it yet).
+        assert!(!s.contains("infeasible"),
+            "an initialization failure must not assert infeasibility: {s}");
+    }
+
+    /// gh#784. `fallback()` is the discriminator the driver counts on, so the
+    /// two variants must not answer it the same way.
+    #[test]
+    fn init_source_fallback_discriminates() {
+        assert!(InitSource::UnconditionalFilter.fallback().is_none());
+        let f = InitFallback::AllParticlesDied { substep: 7 };
+        assert_eq!(InitSource::ForwardDraw(f.clone()).fallback(), Some(&f));
     }
 }
