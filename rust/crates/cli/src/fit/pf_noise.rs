@@ -353,7 +353,13 @@ pub fn measure(
             let mut proposed_lls = Vec::with_capacity(pairs);
             for _ in 0..pairs {
                 let u = PFRandomState::draw_fresh(
-                    n_particles, &steps_per_obs, n_source_groups, &mut rng);
+                    n_particles, &steps_per_obs, n_source_groups,
+                    // gh#772 gave the noise block an initial-state row. Size it
+                    // the way the run will size it: a smaller block measures a
+                    // spread the run never sees, and a model whose `init { }`
+                    // draws a compartment would be refused here for a mis-sized
+                    // block.
+                    config.compiled.init_noise_width, &mut rng);
                 base_lls.push(eval_correlated(
                     &process, &obs_model, base, &smc_config, &u, seed)?);
                 let u_prime = u.correlate(rho, &mut rng);
