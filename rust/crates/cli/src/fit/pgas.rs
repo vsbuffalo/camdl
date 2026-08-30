@@ -22,6 +22,11 @@ use io::progress::{Heartbeat, RunState};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+/// One chain's representative `(θ, x)` draw for the cross-chain compatibility
+/// matrix (gh#785) — the cold rung's parameter vector and the latent path it
+/// held at the end of the final sweep. `None` for a chain that never sampled.
+type ChainFinalDraw = Option<(Vec<f64>, PGASTrajectory)>;
+
 /// Trace column names for `CSMCDiagnostics::renewal_by_bin` (gh#688), one per
 /// tenth of the substep series. The array type is `[&str; RENEWAL_BINS]`, so a
 /// change to the bin count that this list does not follow is a compile error
@@ -664,6 +669,23 @@ pub fn run_stage(
     let chain_saved_sweeps: std::sync::Mutex<Vec<Vec<usize>>> =
         std::sync::Mutex::new(vec![Vec::new(); n_chains]);
 
+    // gh#785. Each chain's representative `(θ, x)` draw for the cross-chain
+    // path/parameter compatibility matrix, indexed by chain_id and filled
+    // inside the parallel closure (the pattern `chain_nuts` uses). `None` for a
+    // chain that never sampled — a start refused as `BadInit` (gh#607) has no
+    // path, so it is omitted from the matrix rather than given a null row.
+    //
+    // Both halves come from `PGASResult`'s end-of-run cold-rung state, which is
+    // ONE instant: `final_trajectory` and `resume_state.params` are both
+    // `rungs[0].*` cloned adjacently at the end of the final sweep
+    // (`sim/inference/pgas.rs`). Taking θ from `sweeps.last()` instead would
+    // pair the last RETAINED sweep's parameters with the FINAL sweep's path —
+    // the same sweep only when `thin` divides the post-burn-in count, and a
+    // silent cross term otherwise, which is exactly the entry the diagonal must
+    // not be.
+    let chain_final_draw: std::sync::Mutex<Vec<ChainFinalDraw>> =
+        std::sync::Mutex::new((0..n_chains).map(|_| None).collect());
+
     // Per-chain progress bars (mirrors IF2 / PMMH). One `Reporter` hands out a
     // `Task` per chain, rendered as a coordinated stack; the Reporter honors
     // --progress (Pretty=bars, Plain=throttled `chain N pos/len ll=…` log
@@ -1071,6 +1093,17 @@ pub fn run_stage(
                 };
             }
 
+            // gh#785. This chain's representative (θ, x) pair for the
+            // cross-chain compatibility matrix. Both from the end-of-run cold
+            // rung, i.e. the same sweep — see the declaration.
+            {
+                let mut fd = chain_final_draw.lock().unwrap();
+                fd[chain_id] = Some((
+                    result.resume_state.params.clone(),
+                    result.final_trajectory.clone(),
+                ));
+            }
+
             Ok(Some((chain_id, result.sweeps, result.acceptance_rates)))
         })
         .collect();
@@ -1466,6 +1499,15 @@ pub fn run_stage(
     let diag_path = stage_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 
+    // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the
+    // cross-chain path/parameter compatibility matrix `M[i][j] = log p(x_j |
+    // θ_i)`, which separates augmentation locking (each chain pinned to its own
+    // path) from the marginal posterior genuinely having several modes. Purely
+    // read-only — k² evaluations of the density the sampler already ran, after
+    // every draw is written, consuming no randomness.
+    write_cross_chain_compat(
+        &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), stage_dir);
+
     let wall_secs = elapsed.as_secs_f64();
     eprintln!("\npgas complete in {:.1}s: {}/", wall_secs, stage_dir.display());
     eprintln!("  best complete-data ll: {:.1} (chain {})",
@@ -1477,6 +1519,87 @@ pub fn run_stage(
     heartbeat.finish(RunState::Done);
 
     Ok(())
+}
+
+// ── Cross-chain path/parameter compatibility (gh#785) ────────────
+
+/// Compute and write `cross_chain_compat.json`, then print the two derived
+/// numbers.
+///
+/// Written for **PGAS and cSMC only** — a path-augmented sampler is the only
+/// one that has an `x` to score. PMMH stores no path, so it writes no file at
+/// all: an empty matrix there would read as "measured, found nothing" rather
+/// than "the question does not apply".
+///
+/// `all_results` is the surviving-chain list in `chain_id` order, so the rows
+/// of `M` come out in the same order as `acceptance_rates` and the `draws.tsv`
+/// chain blocks. Ids are written 1-based to match `chain_N/`.
+///
+/// Best-effort by design: this runs after every posterior artifact is already
+/// on disk, so a failure here reports itself on stderr and leaves the fit
+/// intact rather than failing a completed run.
+fn write_cross_chain_compat(
+    config: &FitRunConfig,
+    dt: f64,
+    all_results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
+    chain_final_draw: Vec<ChainFinalDraw>,
+    stage_dir: &Path,
+) {
+    use super::cross_chain_compat::{ChainDraw, CrossChainCompat};
+
+    // Only chains that sampled. `chain_final_draw[id]` is `None` exactly for a
+    // chain refused at its start (gh#607), which `all_results` has already
+    // dropped — the `filter_map` keeps the two in agreement rather than
+    // assuming it.
+    let draws: Vec<ChainDraw<'_>> = all_results.iter()
+        .filter_map(|(chain_id, _, _)| {
+            chain_final_draw.get(*chain_id)?.as_ref().map(|(params, traj)| ChainDraw {
+                chain: chain_id + 1,
+                params,
+                trajectory: traj,
+            })
+        })
+        .collect();
+    if draws.len() < 2 {
+        return;
+    }
+
+    let observations: Vec<sim::inference::particle_filter::Observation> =
+        config.observations.iter()
+            .map(|o| sim::inference::particle_filter::Observation {
+                time: o.time, value: o.value,
+            })
+            .collect();
+    let obs_model = config.build_obs_model();
+    // The stage pins `StepPolicy::Snap` (see `pgas_config` above), under which
+    // `build_substep_grid`'s obs map IS `build_obs_at_substep` — the same map
+    // `run_pgas` scored every recorded `transition_ll` against.
+    let t_start = config.compiled.model.simulation.t_start;
+    let obs_at_substep = match sim::inference::pgas::build_obs_at_substep(
+        &observations, t_start, dt)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("warning: cross-chain compatibility matrix skipped: {e}");
+            return;
+        }
+    };
+
+    let compat = match CrossChainCompat::compute(
+        &config.compiled, &draws, &observations, dt, &obs_model, &obs_at_substep)
+    {
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("warning: cross-chain compatibility matrix skipped: {e}");
+            return;
+        }
+    };
+    if let Err(e) = compat.write(&stage_dir.join("cross_chain_compat.json")) {
+        eprintln!("warning: {e}");
+        return;
+    }
+    eprint!("{}", compat.report());
 }
 
 // ── Diagnostics ──────────────────────────────────────────────────
