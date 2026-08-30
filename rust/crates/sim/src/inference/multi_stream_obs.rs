@@ -923,6 +923,19 @@ impl StreamSpec {
 }
 
 impl MultiStreamObsModel {
+    /// The model this observation model is bound to — the one every stream's
+    /// projection and likelihood expression was resolved against.
+    ///
+    /// Exposed so a caller that holds only a `&CompiledModel` can build a
+    /// [`ChainBinomialProcess`](super::ChainBinomialProcess) that is the same
+    /// model *by construction* rather than by a second `Arc` threaded through
+    /// its own parameter and trusted to match. Its one consumer is `pgas.rs`'s
+    /// chain-start feasibility filter (gh#780), which must score `y` under
+    /// exactly the model the sampler is sampling.
+    pub fn compiled(&self) -> &Arc<CompiledModel> {
+        &self.compiled
+    }
+
     /// Create an empty observation model (no streams, no data).
     /// Used when only the transition density is needed (e.g., gradient tests
     /// with no observation data). `log_likelihood_from_flows_and_counts`

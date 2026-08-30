@@ -2893,6 +2893,182 @@ struct RungState {
 // Main PGAS loop
 // ═══════════════════════════════════════════════════════════════════
 
+/// gh#780. The verdict on a fresh chain start whose complete-data posterior is
+/// zero and stayed zero through its probation sweep.
+enum StartFeasibility {
+    /// The bootstrap filter estimates a finite `log p(y | θ₀)`, so a
+    /// positive-density trajectory exists at θ₀ and the zero above is a
+    /// property of the trajectory draw, not of θ₀.
+    Feasible(f64),
+    /// It does not, or the question could not be put to the filter at all. The
+    /// string is the reason the refusal reports.
+    Refused(String),
+}
+
+/// Distinct RNG stream for the chain-start feasibility filter, so running it
+/// cannot disturb the chain's own draws.
+const FEASIBILITY_SEED_SALT: u64 = 0x9e37_0780_9e37_0780;
+
+/// The verdict [`start_feasibility`] reads off a bootstrap-filter outcome.
+///
+/// Split out from the filter run so every arm is exercisable without a model —
+/// the `Ok(−∞)` arm in particular, which a fixture reaches only through a
+/// specific pattern of window deaths (a filter whose swarm dies for long enough
+/// bails with `PFDegenerate` before it can return a number).
+fn feasibility_from_filter(
+    outcome: Result<f64, SimError>,
+    n_particles: usize,
+) -> StartFeasibility {
+    match outcome {
+        Ok(ll) if ll.is_finite() => StartFeasibility::Feasible(ll),
+        Ok(ll) => StartFeasibility::Refused(format!(
+            "the bootstrap particle filter estimates log p(y | theta_0) = {ll} at \
+             {n_particles} particles, so no trajectory at this theta explains the data"
+        )),
+        // A degeneracy bail is the same answer, arrived at sooner: the swarm
+        // died before the filter could reach the end of the series. Every other
+        // non-structural error is likewise θ-dependent, and the inference stack
+        // already treats those as a rejected θ (gh#224).
+        Err(e) if !e.is_structural() => StartFeasibility::Refused(format!(
+            "the bootstrap particle filter could not score theta_0 at {n_particles} \
+             particles: {e}"
+        )),
+        // Structural: the filter cannot run on this model/config at all — an
+        // exact-alignment guard (`ExactInferenceTimeline::build` runs them
+        // unconditionally, where PGAS under `snap` does not) or the compute
+        // budget. That is not evidence about θ₀ either way, so the probation
+        // verdict that got us here stands, and the message says the check was
+        // unavailable rather than implying the filter answered.
+        Err(e) => StartFeasibility::Refused(format!(
+            "the marginal likelihood could not be evaluated for this model, so the \
+             failed trajectory update is all the evidence there is: {e}"
+        )),
+    }
+}
+
+/// Is there a trajectory at θ₀ with positive density under the data?
+///
+/// One bootstrap particle-filter pass at `config.n_particles`. It runs only on
+/// the refusal path — a start whose complete-data density is zero *and* whose
+/// probation sweep did not clear it — so a healthy fit never pays for it, and a
+/// refused chain pays one filter run against the thousands of sweeps it was
+/// about to be given.
+///
+/// The process is built from the observation model's own `CompiledModel`, which
+/// is the model every stream's likelihood was resolved against, so the filter
+/// scores `y` under exactly the model the sampler is sampling.
+///
+/// The estimate inherits the filter's own particle-count sensitivity: a swarm
+/// too small for the model returns `−∞`, or bails, at a θ where a larger one
+/// would not. That is a real limitation of this criterion and not a bug in it —
+/// it is the same number `camdl pfilter` reports at the same particle count,
+/// and it fails in the direction the caller can see and act on. Measured on the
+/// `gh780_start_feasibility` fixture: at 1 000 particles the filter is finite
+/// at 16 of 31 seeds, at 4 800 at all 31.
+fn start_feasibility(
+    model: &CompiledModel,
+    obs_model: &super::multi_stream_obs::MultiStreamObsModel,
+    params: &[f64],
+    config: &PGASConfig,
+    seed: u64,
+) -> StartFeasibility {
+    debug_assert!(
+        std::ptr::eq(model, &**obs_model.compiled()),
+        "the chain-start feasibility filter must score the SAME model run_pgas is \
+         sampling; the observation model is bound to a different one"
+    );
+    let process = super::ChainBinomialProcess::new(obs_model.compiled().clone());
+    let smc = super::traits::SMCConfig {
+        n_particles: config.n_particles,
+        dt: config.dt,
+        t_start: model.model.simulation.t_start,
+        // Score every observation. `camdl pfilter` does the same, so the number
+        // this refusal quotes is the number a user reproduces by hand.
+        skip_first_obs_from_loglik: false,
+        record_ancestry: false,
+        record_prequential: false,
+        max_substeps: super::degeneracy::ITER_BUDGET,
+    };
+    feasibility_from_filter(
+        super::particle_filter::bootstrap_filter(
+            &process, obs_model, params, &smc, seed ^ FEASIBILITY_SEED_SALT,
+        )
+        .map(|r| r.log_likelihood),
+        config.n_particles,
+    )
+}
+
+#[cfg(test)]
+mod start_feasibility_tests {
+    use super::*;
+
+    fn refusal(v: StartFeasibility) -> String {
+        match v {
+            StartFeasibility::Refused(s) => s,
+            StartFeasibility::Feasible(ll) => panic!("expected a refusal, got Feasible({ll})"),
+        }
+    }
+
+    /// A finite marginal admits the start: a positive-density trajectory exists
+    /// at θ₀, so the zero complete-data density is about the trajectory draw.
+    #[test]
+    fn a_finite_marginal_admits_the_start() {
+        match feasibility_from_filter(Ok(-2821.4), 4800) {
+            StartFeasibility::Feasible(ll) => assert_eq!(ll, -2821.4),
+            StartFeasibility::Refused(s) => panic!("a finite marginal must admit: {s}"),
+        }
+    }
+
+    /// `−∞` from the filter is the answer the refusal is looking for. The arm a
+    /// model fixture cannot reach on demand — a swarm that dies for long enough
+    /// bails with `PFDegenerate` before the filter returns a number — which is
+    /// why this decision is a separate function.
+    #[test]
+    fn a_minus_infinite_marginal_refuses_the_start() {
+        let s = refusal(feasibility_from_filter(Ok(f64::NEG_INFINITY), 4800));
+        assert!(s.contains("log p(y | theta_0) = -inf"), "must quote the marginal: {s}");
+        assert!(s.contains("4800"), "must say at how many particles: {s}");
+    }
+
+    /// A NaN is not a finite marginal and must not be read as one.
+    #[test]
+    fn a_nan_marginal_refuses_the_start() {
+        let _ = refusal(feasibility_from_filter(Ok(f64::NAN), 100));
+    }
+
+    /// A degeneracy bail is the same answer arrived at sooner — the swarm died
+    /// before the filter could finish. These are the small-epidemic starts
+    /// `bad_init` exists to drop (gh#780 acceptance).
+    #[test]
+    fn a_degenerate_filter_refuses_the_start() {
+        let err = SimError::PFDegenerate {
+            kind: crate::error::PFDegenerateKind::EssCollapsed { last_ess: vec![0.0, 0.0, 0.0] },
+            obs_window: 38,
+            elapsed_s: 0.1,
+        };
+        assert!(!err.is_structural(), "precondition: the bail is not structural");
+        let s = refusal(feasibility_from_filter(Err(err), 4800));
+        assert!(s.contains("bootstrap particle filter"), "must name the filter: {s}");
+        assert!(s.contains("38"), "must carry the bail's own diagnostic: {s}");
+    }
+
+    /// A structural error means the filter cannot run on this model at all — an
+    /// exact-alignment guard, or the compute budget. That is not evidence about
+    /// θ₀, so the probation verdict stands (a refusal, since a failed probation
+    /// sweep is what reaches this code) and the message must say the check was
+    /// unavailable rather than implying the filter answered.
+    #[test]
+    fn a_structural_failure_leaves_the_probation_verdict_standing() {
+        let err = SimError::Validation("exact obs-alignment does not support …".into());
+        assert!(err.is_structural(), "precondition: a Validation error is structural");
+        let s = refusal(feasibility_from_filter(Err(err), 4800));
+        assert!(
+            s.contains("could not be evaluated"),
+            "must say the marginal was unavailable, not that it was -inf: {s}"
+        );
+    }
+}
+
 /// Whether the θ|X move runs NUTS (vs the MH-within-Gibbs fallback): NUTS is
 /// requested AND the compiler emitted gradient expressions. ONE predicate for
 /// the sampler and for every diagnostic that keys a healthy band on the
@@ -2914,9 +3090,11 @@ pub fn nuts_active(use_nuts: bool, model: &CompiledModel) -> bool {
 ///
 /// # Errors
 ///
-/// `SimError::NonFiniteChainStart` (gh#607) when the chain's starting
-/// (θ₀, X₀) has zero posterior density AND is still at zero density after the
-/// first Gibbs sweep — a chain that cannot move, refused instead of sampled.
+/// `SimError::NonFiniteChainStart` (gh#607, gh#780) when the chain's starting
+/// (θ₀, X₀) has zero posterior density, is still at zero density after the
+/// first Gibbs sweep, AND the bootstrap filter finds no positive-density
+/// trajectory at θ₀ either — a chain that cannot move, refused instead of
+/// sampled.
 /// Callers running several chains should treat it as skip-this-chain, not as a
 /// failed fit; `cli/src/fit/pgas.rs` is the reference handling. Everything else
 /// is structural or a `Validation` refusal from the preflights above.
@@ -3216,11 +3394,23 @@ pub fn run_pgas(
     // NUTS is worse — `log p = −∞` gives `h0 = +∞`, so every doubling trips
     // `(h_new − h0).abs() > delta_max` and the tree stops at depth 0
     // (`nuts.rs`). Each later sweep is then an independent retry of the SAME
-    // failed X-move at the SAME θ₀. That retry is not impossible, only
-    // vanishingly unlikely in practice: the production run that motivated this
-    // measured 40 000 consecutive failures, acceptance 0.000 and `n_divergent`
-    // 1.000 throughout, with ONE distinct parameter vector across 7 600
-    // retained draws.
+    // failed X-move at the SAME θ₀. On the production run that motivated this,
+    // that retry never came: 40 000 consecutive failures, acceptance 0.000 and
+    // `n_divergent` 1.000 throughout, with ONE distinct parameter vector across
+    // 7 600 retained draws.
+    //
+    // WHY ONE SWEEP IS NOT THE WHOLE TEST (gh#780). A failed sweep does not
+    // establish that the retry probability is near zero. Two very different
+    // situations flatten into it: θ₀ is infeasible, where the retry probability
+    // is exactly zero; or the conditional sampler collapsed onto its reference
+    // this once, where it is near one. Measured on the `gh780_start_feasibility`
+    // fixture, whose θ has a finite marginal likelihood (−132 at 1 000
+    // particles): one sweep fails to clear 8 of the 31 chain seeds in 0..40 that
+    // start at `−∞`, and chaining sweeps from the same reference reaches finite
+    // density in all 24 runs tried — a mean of 0.46 sweeps (max 3) at 1 000
+    // particles, 0.17 (max 2) at 4 800. Only the marginal likelihood separates
+    // the two situations, so a failed sweep now opens the question rather than
+    // closing it; the refusal site below puts it to the filter.
     //
     // Contrast with PMMH/ODE-MH, which keep their warn-and-continue: their
     // likelihood is MARGINAL in X (the filter re-integrates it at every
@@ -3772,12 +3962,52 @@ pub fn run_pgas(
                     (rung.ll + rung_log_prior).is_finite()
                 });
                 if !any_rung_finite {
-                    return Err(SimError::NonFiniteChainStart {
-                        log_posterior, transition, observation, ivp, log_prior,
-                    });
+                    // gh#780. Put the question to the filter before refusing.
+                    // The sweep can fail for a reason specific to the CONDITIONAL
+                    // sampler: `csmc_as` retains the reference as one particle
+                    // whatever its weight, so a reference that takes the whole
+                    // normalised weight at one window pulls every free particle
+                    // onto its own lineage, and the swarm then inherits whatever
+                    // the reference's state cannot explain. Measured on the
+                    // `gh780_start_feasibility` fixture (1 000 particles, 12
+                    // windows, the reference at zero density in window 10):
+                    // `W_ref = 1.0000` at window 5, then the live-particle count
+                    // falls 1 000 → 847 → 528 → 141 → 46 over windows 8-11 and
+                    // the reference holds half the final weight, so half of those
+                    // sweeps return the reference verbatim. The UNCONDITIONAL
+                    // filter at the same θ, particle count and seed keeps
+                    // 1 000/1 000 particles alive at every window and returns
+                    // log p(y | θ₀) = −132.
+                    //
+                    // `p(y | θ₀) > 0` holds exactly when a positive-density
+                    // trajectory exists at θ₀, which is the question this refusal
+                    // is trying to answer; X is a nuisance variable the sampler
+                    // resamples every sweep. The check is DIRECTIONAL — it can
+                    // only rescue a start probation would have refused, never
+                    // refuse one probation admitted — so a chain that recovers on
+                    // its first sweep is untouched and pays nothing.
+                    match start_feasibility(model, obs_model, &current_params, config, seed) {
+                        StartFeasibility::Feasible(marginal) => {
+                            eprintln!(
+                                "  chain start still has zero complete-data density \
+                                 after its first trajectory update, but log p(y | θ₀) \
+                                 = {marginal:.1} at {} particles — a positive-density \
+                                 trajectory exists at this θ, so the start is kept \
+                                 (gh#780)",
+                                config.n_particles,
+                            );
+                        }
+                        StartFeasibility::Refused(marginal) => {
+                            return Err(SimError::NonFiniteChainStart {
+                                log_posterior, transition, observation, ivp,
+                                log_prior, marginal,
+                            });
+                        }
+                    }
+                } else {
+                    eprintln!("  chain recovered from a non-finite start on its first \
+                               trajectory update (complete-data ll: {:.1})", rungs[0].ll);
                 }
-                eprintln!("  chain recovered from a non-finite start on its first \
-                           trajectory update (complete-data ll: {:.1})", rungs[0].ll);
             }
         }
 

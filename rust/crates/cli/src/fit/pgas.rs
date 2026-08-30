@@ -953,20 +953,22 @@ pub fn run_stage(
                 config_hash.clone(),
             ) {
                 Ok(r) => r,
-                // gh#607. The chain's start has zero posterior density and did
-                // not recover on its first trajectory update, so it could only
-                // have produced `-inf` draws for the whole run. Skip it with a
-                // loud `BadInit` diagnostic (collector + stderr) — never
-                // silently — and let the survivors finish.
+                // gh#607, gh#780. The chain's start has zero posterior density,
+                // did not recover on its first trajectory update, and the
+                // bootstrap filter found no positive-density trajectory at this
+                // θ either — so it could only have produced `-inf` draws for the
+                // whole run. Skip it with a loud `BadInit` diagnostic (collector
+                // + stderr) — never silently — and let the survivors finish.
                 Err(sim::error::SimError::NonFiniteChainStart {
-                    log_posterior, transition, observation, ivp, log_prior,
+                    log_posterior, transition, observation, ivp, log_prior, marginal,
                 }) => {
                     let reason = format!(
-                        "initial complete-data log-posterior is {}, still \
-                         non-finite after the first trajectory update \
+                        "{}. The initial complete-data log-posterior is {}, \
+                         still non-finite after the first trajectory update \
                          (log-likelihood terms: transition {:.4}, observation \
                          {:.4}, ivp {:.4}; log prior {:.4})",
-                        log_posterior, transition, observation, ivp, log_prior);
+                        marginal, log_posterior, transition, observation, ivp,
+                        log_prior);
                     // gh#513: report the start THIS chain ran from, not the
                     // configured one. `chain_starts[chain_id]` is the same
                     // vector handed to `run_pgas` above and the same one

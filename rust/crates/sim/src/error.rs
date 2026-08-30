@@ -141,13 +141,28 @@ pub enum SimError {
     /// sweep, ONE distinct parameter vector across 7 600 retained draws, an
     /// eighth of a 2 h 29 m run pooled into the posterior and R̂.
     ///
+    /// gh#780. A failed probation sweep is NOT on its own sufficient. The
+    /// conditional SMC keeps the reference trajectory as one particle whatever
+    /// its weight, so a reference that carries most of the normalised weight at
+    /// one window pulls the whole swarm onto its own lineage — and if that
+    /// lineage has a zero-density window, every particle is at zero density
+    /// from there on and the sweep returns the reference unchanged. The
+    /// unconditional filter cannot do this, and at the same θ, particle count
+    /// and seed it keeps every particle alive and returns a finite marginal.
+    /// So after the probation sweep fails, `p(y | θ₀) > 0` — which holds
+    /// exactly when a positive-density trajectory exists at θ₀, and which is
+    /// what the refusal is trying to decide — is checked with a bootstrap
+    /// filter, and the chain is refused only if that also says no. `marginal`
+    /// records what it said.
+    ///
     /// Not `is_structural`: like `PFDegenerate` this is a property of the
     /// chain's START, not of the model — sibling chains of the same fit run
     /// normally. The driver (`cli/src/fit/pgas.rs`) turns it into a `BadInit`
     /// diagnostic and skips the chain, erroring only when EVERY chain is
     /// refused.
-    #[error("chain start has zero posterior density and did not recover on its \
-             first trajectory update: the initial complete-data log-posterior is \
+    #[error("chain start is infeasible: {marginal}. Its reference trajectory \
+             also had zero complete-data density, before and after the first \
+             trajectory update: the initial complete-data log-posterior is \
              {log_posterior} (log-likelihood terms: transition {transition}, \
              observation {observation}, ivp {ivp}; log prior {log_prior})")]
     NonFiniteChainStart {
@@ -166,6 +181,12 @@ pub enum SimError {
         /// `Σ log p(θ₀)` over the estimated parameters. Non-finite here means
         /// the start is outside its own prior's support.
         log_prior: f64,
+        /// gh#780. What the bootstrap filter said about `log p(y | θ₀)` — the
+        /// quantity this refusal decides on. Either the `-inf` it estimated,
+        /// the bail it raised instead, or (for a model the filter cannot run
+        /// on at all) that the check was unavailable and the probation verdict
+        /// stood.
+        marginal: String,
     },
 
     /// gh#81 Phase 2. A model parameter reached the rate evaluator
@@ -552,6 +573,8 @@ mod tests {
             observation: f64::NEG_INFINITY,
             ivp: 0.0,
             log_prior: -2.5,
+            marginal: "the bootstrap particle filter estimates \
+                       log p(y | theta_0) = -inf".into(),
         };
         assert!(!err.is_structural(),
             "a bad chain START must not abort the whole fit: {err}");
@@ -563,5 +586,8 @@ mod tests {
         let s = format!("{err}");
         assert!(s.contains("observation -inf"), "message must name the components: {s}");
         assert!(s.contains("log prior -2.5"), "message must name the prior term: {s}");
+        // gh#780: and the quantity the refusal actually decided on leads.
+        assert!(s.contains("log p(y | theta_0) = -inf"),
+            "message must name what the marginal likelihood said: {s}");
     }
 }
