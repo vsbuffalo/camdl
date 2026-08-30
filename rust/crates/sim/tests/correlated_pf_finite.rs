@@ -236,7 +236,8 @@ fn compare_filters(compiled: CompiledModel, params: &[f64], inf_idx: usize, n_pa
     let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
     let n_source_groups = compiled.source_groups.len();
     let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(n_particles, &steps_per_obs, n_source_groups, &mut rng);
+    let randoms = PFRandomState::draw_fresh(
+        n_particles, &steps_per_obs, n_source_groups, compiled.init_noise_width, &mut rng);
     let corr = bootstrap_filter_correlated(&process, &obs_model, params, &config, &randoms, 7).unwrap();
 
     eprintln!("  plain PF loglik = {}   corr PF loglik = {}", plain.log_likelihood, corr.log_likelihood);
@@ -311,7 +312,8 @@ fn correlated_pf_finite_on_t0_starting_grid() {
     assert_eq!(steps_per_obs[0], 0, "the leading t=0 window consumes no noise");
     let n_source_groups = compiled.source_groups.len();
     let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(200, &steps_per_obs, n_source_groups, &mut rng);
+    let randoms = PFRandomState::draw_fresh(
+        200, &steps_per_obs, n_source_groups, compiled.init_noise_width, &mut rng);
     let corr = bootstrap_filter_correlated(&process, &obs_model, &params, &config, &randoms, 7)
         .expect("CPM must accept a leading t=0 (zero-width) window (gh#193)");
     eprintln!("corr  PF on t=0-starting grid: loglik = {}", corr.log_likelihood);
@@ -368,7 +370,8 @@ fn correlated_pf_finite_where_plain_pf_is() {
     let steps_per_obs = cpm_steps_per_obs(&obs_times, config.t_start, dt);
     let n_source_groups = compiled.source_groups.len();
     let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(n_particles, &steps_per_obs, n_source_groups, &mut rng);
+    let randoms = PFRandomState::draw_fresh(
+        n_particles, &steps_per_obs, n_source_groups, compiled.init_noise_width, &mut rng);
     let corr = bootstrap_filter_correlated(&process, &obs_model, &params, &config, &randoms, 7).unwrap();
     eprintln!("corr  PF  loglik = {}", corr.log_likelihood);
 

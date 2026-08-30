@@ -193,10 +193,16 @@ same backend by another**. Representative confirmed cases:
   give "silently biased posteriors." Blocked with a hint to fix the parameter or
   switch to IF2/PMMH. This is a top-severity _silent-wrong-answer_ guard, caught
   correctly.
-- **The correlated-PMMH family** (`correlated_pf.rs`) rejects unequal obs-window
-  substep counts, state-dependent overdispersion σ², >1 overdispersed transition
-  per source group, etc. — all keyed on the correlated-PMMH _algorithm variant_
-  (rho ≠ None), not the backend.
+- **The correlated-PMMH family** (`correlated_pf.rs`) rejects state-dependent
+  overdispersion σ², more than one overdispersed transition per source group,
+  and distinct σ² values across overdispersed transitions — all keyed on the
+  correlated-PMMH _algorithm variant_ (rho ≠ None), not the backend. Unequal
+  obs-window substep counts are **not** among them: each window carries its own
+  block of pre-drawn noise, sized at its own substep count
+  (`cpm_steps_per_obs`), so a reporting series that skips a day runs. What
+  `validate_cpm_obs_grid` still rejects is a grid that does not describe a
+  forward walk at all — a non-finite observation time, or times that go
+  backwards.
 - **`ic_free` requires `if2`, or a model that DRAWS its initial state**
   (`methods.rs::validate_ic_free`, called per stage from
   `FitConfigV2::validate`). Two properties are needed, not one: the algorithm
@@ -218,23 +224,27 @@ same backend by another**. Representative confirmed cases:
   property is re-checked in `FitRunConfig::build`, where a fit with neither
   source — no `init { }` law and no `perturb_only_at_t0` parameter — is refused
   before any filter time is spent.
-- **Correlated PMMH refuses a DECLARED `init { }` law**
-  (`correlated_pf.rs::bootstrap_filter_correlated`, keyed on
-  `CompiledModel::has_init_law`). Since ir/VERSION 0.35 an initial condition may
-  be drawn (`I ~ poisson(rate = I0)`), which makes x₀ a random variable the
-  filter has to integrate over. The bootstrap filter (`pfilter`, plain `pmmh`,
-  `if2`) draws it per particle and needs no guard. Correlated PMMH does: its
-  efficiency comes from the whole particle system being a deterministic function
-  of one pre-drawn correlated random vector, and that vector covers the
-  transition kernel only — an x₀ draw from a separate stream would inject
-  uncorrelated noise into exactly the quantity the method needs correlated
-  between the current and proposed θ. Putting x₀ into the correlated vector is a
-  design change to the CPM proposal, not a wiring fix, so it refuses by name and
-  points at plain `pmmh` (drop `rho`), `pgas` or `if2`.
+- **A DECLARED `init { }` law is supported on every algorithm, correlated PMMH
+  included** (gh#772). Since ir/VERSION 0.35 an initial condition may be drawn
+  (`I ~ poisson(rate = I0)`), which makes x₀ a random variable the filter has to
+  integrate over; every filter draws it per particle. Correlated PMMH is the one
+  that needed more than wiring, and it is worth knowing why, because the
+  constraint it lives under is the same one every future CPM feature will meet:
+  its efficiency comes from the whole particle system being a deterministic
+  function of one pre-drawn correlated random vector, so a draw taken from a
+  separate stream is uncorrelated noise injected into exactly the quantity the
+  method needs correlated between the current and proposed θ. x₀ is therefore
+  part of that vector — `PFRandomState::init_noise`, one block of
+  `CompiledModel::init_noise_width` standard normals per particle, read at the
+  build-time offsets in `CompiledModel::init_noise_offsets` and transformed to
+  each law at consumption time.
 
-  Unusually for this axis, the check lives at the ENFORCEMENT point rather than
-  in `FitConfigV2::validate`: the predicate is a property of the compiled model,
-  which config validation does not hold.
+  What is checked at dispatch is not the model feature but the noise's agreement
+  with the model: `bootstrap_filter_correlated` refuses a pre-drawn vector whose
+  `init_width` or `n_source_groups` disagrees with the compiled model's, before
+  any particle moves. A disagreeing stride does not error on its own — it reads
+  a valid float from another particle's slot — so it is refused by construction
+  rather than hoped against.
 - **`perturb_only_at_t0` requires the fit to have an `if2` stage**
   (`methods.rs::validate_perturb_only_at_t0`, called once from
   `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"
@@ -292,8 +302,8 @@ Out of scope for this doc, listed so the map is complete:
 - **parameter-attribute × {attribute, config-flag}** — prior↔transform and
   prior↔bounds (`fit/runner.rs::validate_prior_transform_compat`),
   `perturb_only_at_t0`↔`ic_free` (`runner.rs` — the residual half, now a
-  disjunction with the model's `init { }`: either source of t=0 spread
-  satisfies it; the algorithm-level half is on axis 3, above),
+  disjunction with the model's `init { }`: either source of t=0 spread satisfies
+  it; the algorithm-level half is on axis 3, above),
   `perturb_only_at_t0`↔simplex-membership (`config_v2.rs`). No algorithm or
   backend involved. Partly typed already:
   `docs/dev/proposals/2026-06-08-typed-parameter-surface.md` (landed, IR 0.11)

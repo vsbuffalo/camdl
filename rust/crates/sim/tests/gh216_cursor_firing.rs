@@ -357,7 +357,8 @@ fn correlated_pf_firing_correct_under_offgrid_obs() {
         &off_grid_times, config.t_start, config.dt);
     assert_eq!(steps_per_obs, vec![4, 4]);
     let randoms = PFRandomState::draw_fresh(
-        config.n_particles, &steps_per_obs, n_source_groups, &mut rng);
+        config.n_particles, &steps_per_obs, n_source_groups,
+        compiled.init_noise_width, &mut rng);
     let res = bootstrap_filter_correlated(&process, &obs, &params, &config, &randoms, 42)
         .expect("off-grid obs + on-grid intervention must now FIT under correlated-PF (gh#216 fix)");
     let final_m = res.final_states.as_ref().unwrap()[0].counts[1];
@@ -432,7 +433,8 @@ fn correlated_pf_refuses_a_window_the_intervention_lengthens() {
 
     let mut rng = StatefulRng::new(7);
     let randoms = PFRandomState::draw_fresh(
-        config.n_particles, &steps_per_obs, compiled.source_groups.len(), &mut rng);
+        config.n_particles, &steps_per_obs, compiled.source_groups.len(),
+        compiled.init_noise_width, &mut rng);
     let err = match bootstrap_filter_correlated(&process, &obs, &params, &config, &randoms, 42) {
         Ok(_) => panic!("a window lengthened by an intervention must be refused"),
         Err(e) => e,
@@ -467,7 +469,8 @@ fn correlated_pf_event_firing_correct_under_offgrid_obs() {
         &off_grid_times, config.t_start, config.dt);
     assert_eq!(steps_per_obs, vec![4, 4]);
     let randoms = PFRandomState::draw_fresh(
-        config.n_particles, &steps_per_obs, n_source_groups, &mut rng);
+        config.n_particles, &steps_per_obs, n_source_groups,
+        compiled.init_noise_width, &mut rng);
     let res = bootstrap_filter_correlated(&process, &obs, &params, &config, &randoms, 42)
         .expect("off-grid obs + always-active event must fit under correlated-PF");
     let final_m = res.final_states.as_ref().unwrap()[0].counts[1];
