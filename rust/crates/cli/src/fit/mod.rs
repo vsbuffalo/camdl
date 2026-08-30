@@ -80,6 +80,7 @@ pub mod trace_writer;
 pub mod synthetic;
 pub mod gating;
 pub mod chain_diagnostics;  // gh#406: per-chain loglik outlier z-scores (read-side)
+pub mod cross_chain_compat; // gh#785: log p(x_j | θ_i) across the path-augmented chains
 pub mod dt_check;
 pub mod init;
 pub mod chain_starts;
