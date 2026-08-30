@@ -791,9 +791,20 @@ pub fn run_stage(
                 .map(|n| super::loglik::trace_col_obs_ll_stream(n))
                 .collect();
             let mut trace_columns: Vec<&str> =
-                Vec::with_capacity(RENEWAL_BINS + 13 + obs_ll_stream_columns.len());
+                Vec::with_capacity(RENEWAL_BINS + 15 + obs_ll_stream_columns.len());
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
+            // gh#783: `collapsed_windows` is how many of the sweep's
+            // observation windows left EVERY particle at zero density, and
+            // `min_alive` is the fewest particles any of those windows left
+            // able to be drawn. A non-zero `collapsed_windows` is a sweep whose
+            // filter found no trajectory explaining the data; `min_alive` is
+            // the near miss the count alone cannot show — 1 and `n_particles`
+            // are the same row on every other column. They sit beside
+            // `trajectory_renewal` because the two are read together: renewal
+            // says whether the path moved, these say whether the selection had
+            // anything to choose from.
+            trace_columns.extend(["collapsed_windows", "min_alive"]);
             // gh#718: `as_opportunity` is how many substeps in the sweep drew
             // an ancestry, which is the only place an ancestor move is legal.
             // It is NOT the observation count: the weights an observation
@@ -868,6 +879,11 @@ pub fn run_stage(
                 let renewal_bins: Vec<String> = result.csmc_diag.renewal_by_bin.iter()
                     .map(|&r| if r.is_finite() { format!("{r:.4}") } else { "NA".to_string() })
                     .collect();
+                // gh#783: whether this sweep's filter weights ever left nothing
+                // to draw from, and how close they came.
+                let collapsed_windows_str =
+                    result.csmc_diag.weight_collapse.n_windows.to_string();
+                let min_alive_str = result.csmc_diag.weight_collapse.min_alive.to_string();
                 // gh#607 follow-up: the ancestor-sampling Metropolis acceptance
                 // rate, with its denominator alongside. `NA` means the step
                 // never ran (no alternative ancestor was admissible), which is
@@ -897,9 +913,10 @@ pub fn run_stage(
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
                 let mut extra: Vec<&str> =
-                    Vec::with_capacity(RENEWAL_BINS + 13 + obs_ll_stream_strs.len());
+                    Vec::with_capacity(RENEWAL_BINS + 15 + obs_ll_stream_strs.len());
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
+                extra.extend([collapsed_windows_str.as_str(), min_alive_str.as_str()]);
                 extra.extend([
                     as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
@@ -1273,11 +1290,23 @@ pub fn run_stage(
         let mut total_n_substeps:   usize = 0;
         let mut renewal_sum:        f64   = 0.0;
         let mut renewal_n:          usize = 0;
+        // gh#783: sweeps whose filter weights collapsed at some observation
+        // window, and the windows they collapsed at. Counted separately from
+        // `n_degenerate` above because the two are different vectors and
+        // different failures — that one is the ancestor weights (no particle
+        // could reach the reference), this one is the filter weights (no
+        // particle could explain the data).
+        let mut collapsed_sweeps:   usize = 0;
+        let mut collapsed_windows:  usize = 0;
         for sw in sweeps {
             total_n_degenerate += sw.csmc_diag.n_degenerate;
             total_n_substeps   += sw.csmc_diag.n_substeps;
             renewal_sum        += sw.csmc_diag.trajectory_renewal;
             renewal_n          += 1;
+            if sw.csmc_diag.weight_collapse.n_windows > 0 {
+                collapsed_sweeps  += 1;
+                collapsed_windows += sw.csmc_diag.weight_collapse.n_windows;
+            }
         }
         if total_n_substeps > 0 {
             let pct = total_n_degenerate as f64 / total_n_substeps as f64 * 100.0;
@@ -1296,6 +1325,17 @@ pub fn run_stage(
                     renewal: mean_renewal,
                 });
             }
+        }
+        // No percentage threshold, unlike the two above: one sweep that
+        // searched and found nothing is already a sweep whose result carries no
+        // information about the data, and there is no rate below which that
+        // stops being worth saying.
+        if collapsed_sweeps > 0 {
+            collector.push(DiagnosticKind::FilterWeightCollapse {
+                n_sweeps: collapsed_sweeps,
+                n_total_sweeps: sweeps.len(),
+                n_windows: collapsed_windows,
+            });
         }
     }
 
