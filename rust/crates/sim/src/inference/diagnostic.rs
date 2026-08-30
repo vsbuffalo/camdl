@@ -166,6 +166,39 @@ pub enum DiagnosticKind {
     LowTrajectoryRenewal {
         renewal: f64,
     },
+    /// gh#791. Renewal is concentrated at the END of the series: the per-bin
+    /// profile is near zero over the early bins and near one over the last.
+    ///
+    /// This is the coalescence signature, and it is a **different** finding
+    /// from [`Self::LowTrajectoryRenewal`], which keys on the aggregate. The
+    /// aggregate is a weighted mean over the bins, and its last term is
+    /// structurally near 1 — the segment after the final observation is
+    /// resampled freely every sweep whatever the sampler's health — so a run
+    /// whose first sixty percent of the series is frozen can still average a
+    /// third and never trip the aggregate rule. Keyed on the SHAPE
+    /// (`last_bin − first_bin`) rather than the level, so a run that renews
+    /// poorly but uniformly in time draws the aggregate finding instead: that
+    /// is a different failure with a different remedy.
+    PathRenewalCoalesced {
+        /// Mean renewal over the first half of the bins.
+        prefix: f64,
+        /// `last_bin − first_bin`. Near 0 when renewal is uniform in time,
+        /// near 1 when the genealogy has fully coalesced onto the reference.
+        gradient: f64,
+        /// Renewal in the first bin — the earliest tenth of the series, where
+        /// the initial condition and the earliest dynamics live.
+        first_bin: f64,
+        /// Renewal in the last bin.
+        last_bin: f64,
+        /// The aggregate `trajectory_renewal` this profile resolves, so the
+        /// message can say what reading the aggregate alone would have given.
+        aggregate: f64,
+        /// Bins in the profile, and in the `prefix` mean — carried so the
+        /// message states the span rather than assuming the reader knows it.
+        n_bins: usize,
+        /// Leading bins the `prefix` mean spans.
+        n_prefix_bins: usize,
+    },
     /// gh#783. Sweeps in which every particle scored zero observation density
     /// at some observation window, so the filter weight vector there could not
     /// be sampled. Distinct from `DegenerateAncestorSampling`, which is about
@@ -305,6 +338,12 @@ impl DiagnosticKind {
             Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::Nuts, .. }
                 if *rate < 0.30 || *rate > 0.99 => Severity::Error,
             Self::AcceptanceRateUnhealthy { .. } => Severity::Warning,
+            // gh#791: never an error, at any gradient. The threshold behind it
+            // is a midpoint of the statistic's own range and not a calibrated
+            // bar (see `cli::fit::path_renewal::COALESCENCE_GRADIENT`), so it
+            // must not be able to stop a run — it is a pointer at the profile,
+            // which is the actual diagnostic.
+            Self::PathRenewalCoalesced { .. } => Severity::Warning,
             _ => Severity::Warning,
         }
     }
@@ -362,6 +401,19 @@ impl DiagnosticKind {
             Self::LowTrajectoryRenewal { renewal } =>
                 format!("Trajectory renewal is {:.1}% — CSMC may not be mixing.",
                     renewal * 100.0),
+            Self::PathRenewalCoalesced {
+                prefix, gradient, first_bin, last_bin, aggregate, n_bins, n_prefix_bins,
+            } =>
+                format!(
+                    "Trajectory renewal is concentrated at the end of the series: the \
+                     first 1/{n_bins} of it renews in {:.1}% of sweeps and the last in \
+                     {:.1}% (gradient {:.2}), while the aggregate reads {:.1}%. The mean \
+                     over the first {n_prefix_bins} of {n_bins} bins is {:.1}%. That \
+                     shape is a coalesced conditional-SMC genealogy: the early path is \
+                     held at the reference, and the parameters whose likelihood lives \
+                     there are not being informed.",
+                    first_bin * 100.0, last_bin * 100.0, gradient, aggregate * 100.0,
+                    prefix * 100.0),
             Self::FilterWeightCollapse { n_sweeps, n_total_sweeps, n_windows } =>
                 format!("{}/{} sweeps had an observation window where every particle \
                          scored zero density ({} windows in total). The filter found no \
@@ -452,6 +504,18 @@ impl DiagnosticKind {
             Self::CompressedLogitPosition { .. } => vec![
                 "Widen parameter bounds if scientifically justified",
                 "Use a different transform (e.g., log instead of logit)",
+            ],
+            Self::PathRenewalCoalesced { .. } => vec![
+                "Raise the particle count. On a matched probe that changed nothing \
+                 else, four times the particles roughly tripled renewal over the \
+                 early bins, so the frozen prefix there was particle-limited",
+                "Read the whole profile rather than either summary: \
+                 `path_renewal.bins` in pgas_summary.json, or `renewal_b0 … \
+                 renewal_b9` in each chain's trace.tsv, one column per tenth of \
+                 the substep series",
+                "Read `as_accept` beside it — it says whether the ancestor-sampling \
+                 splice is contributing to renewal at all, or whether the profile \
+                 is coming from the filter alone",
             ],
             Self::FilterWeightCollapse { .. } => vec![
                 "Read collapsed_windows and min_alive in the chain's trace.tsv \
