@@ -105,10 +105,43 @@ method**, and reading the wrong symptom sends you to the wrong fix.
   its symptom is _mixing_, not noise.** The conditional sequential Monte Carlo
   (CSMC) step has to renew the reference trajectory; with too few particles it
   rarely does, the chain barely moves in latent space, and what you see is
-  **poor R̂ and low `trajectory_renewal`** — never a noisy loglik. Read
-  `trajectory_renewal` in `camdl fit summary` (the `LowTrajectoryRenewal` and
-  `DegenerateAncestorSampling` diagnostics fire on it); gh#685 will add
-  per-chain filter ESS next to it, which is the direct reading.
+  **poor R̂ and a renewal profile that is flat near zero over the early part of
+  the series** — never a noisy loglik. Read the **profile**, not the aggregate
+  (`path_renewal` in `pgas_summary.json`, printed at the end of every PGAS
+  stage). gh#685 will add per-chain filter ESS next to it, which is the direct
+  reading.
+
+**Read the profile, not `trajectory_renewal` alone.** The aggregate is a
+weighted mean over ten equal time bins, and its last bin is high in every run —
+the segment of the path after the final observation is resampled freely whatever
+the sampler's health. So a run whose early path is completely frozen still
+averages a healthy-looking third. Measured on an 11-compartment stochastic Ebola
+model, 103 daily observation times, post-burn-in means across 16 chains:
+
+```text
+b0    b1    b2    b3    b4    b5    b6    b7    b8    b9   trajectory_renewal
+0.03  0.03  0.03  0.03  0.03  0.03  0.53  0.84  0.87  0.98        0.336
+```
+
+An aggregate of 0.34 reads as "a third of the path renews per sweep". What is
+happening is that the first sixty percent of the series — the whole initial
+condition and the early dynamics — changes in 3% of sweeps, because the CSMC
+genealogy has coalesced and the early path is held at the reference. The
+parameters whose likelihood lives in that prefix (initial infectious load,
+routing shares, dwell durations) sat at R̂ 2.0-3.7 while every observation-model
+parameter, whose likelihood is spread across the whole window, sat at 1.0-1.1.
+Nothing else in the diagnostics moves when the prefix freezes.
+
+The block reports the profile plus two numbers to act on: **prefix renewal**,
+the mean over the first five bins, and the **renewal gradient**, last bin minus
+first — near 0 when renewal is uniform in time, near 1 when the genealogy has
+coalesced. It also reports the **ancestor-sampling acceptance rate** beside
+them, because a near-zero rate says the ancestor splice is contributing nothing
+to renewal and the profile will not improve on its own. The per-sweep columns
+are in each chain's `trace.tsv` as `trajectory_renewal` and
+`renewal_b0 … renewal_b9`; bin `b` is the fraction of the series from `b/10` to
+`(b+1)/10`, a fixed tenth, so profiles compare across models and particle
+counts.
 
 **If you are running PGAS, this is your bullet — do not read past it into (b).**
 The fix for a starved CSMC is particles, and it looks nothing like the fix for
@@ -132,7 +165,7 @@ estimate); see [`camdl docs inference`](inference.md) (the `--pf-health`
 section). The fix there is a different method, not brute-force N.
 
 For PGAS the equivalent probe is one re-run at roughly 4× the particles,
-comparing R̂ and `trajectory_renewal`. Measured on a national Ebola PGAS fit —
+comparing R̂ and the renewal profile. Measured on a national Ebola PGAS fit —
 same model, same data, same config, same 8,000 sweeps, **only `particles`
 differs** — with per-parameter R̂:
 
@@ -145,6 +178,23 @@ Every parameter improved, acceptance and divergence counts became healthy, and
 one further chain cleared the initialisation check (hence 6 → 7 from an
 unchanged config). Nothing about the model changed. Before that re-run the team
 had spent a day reading these R̂ values as (b) and was about to reparameterise.
+
+Read the probe on the profile and it says more. A second matched probe on one
+model and dataset, 200 sweeps, changing only the particle count:
+
+| `particles` | b0   | b1   | b2   | b3   | b4   | b5   | b6   | b7   | b8   | b9   | `as_accept` |
+| ----------- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ----------- |
+| 4,800       | 0.07 | 0.07 | 0.07 | 0.08 | 0.08 | 0.09 | 0.51 | 0.77 | 0.82 | 0.98 | 0.0160      |
+| 19,200      | 0.21 | 0.23 | 0.23 | 0.23 | 0.24 | 0.24 | 0.67 | 0.93 | 0.94 | 0.99 | 0.0157      |
+
+Four times the particles roughly triples renewal over the first six bins, so the
+frozen prefix is particle-limited rather than geometric — the profile answers
+"will more particles help" that the aggregate cannot. The ancestor-sampling
+acceptance rate meanwhile does not move (0.0160 → 0.0157): ancestor sampling
+contributes essentially nothing on this model and more particles do not change
+that, which is what to expect for an integer compartment state whose ancestor
+weight is sharply peaked and often exactly zero on support grounds. That is only
+visible because the two are reported side by side.
 
 **The ordering lesson, which is the generalisable part: establish that the
 instrument is adequate before concluding anything about the model or its
