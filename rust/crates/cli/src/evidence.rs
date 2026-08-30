@@ -12,6 +12,12 @@
 //! Jacobian cancels and the value is a scale-free log-likelihood ratio), not
 //! for raw absolute log-likelihoods (whose additive constant is arbitrary).
 //!
+//! Second rule: a tier is attached only to a difference that exceeds twice its
+//! paired standard error ([`within_noise`]). The scale calibrates *magnitude*
+//! and knows nothing about *resolution*, so an ungated tier can name a
+//! magnitude the data cannot resolve — the same 6 nats reads "strong" whether
+//! its se(Δ) is 0.3 or 30.
+//!
 //! Evidence scale (labels and thresholds). Attribution is split, and the
 //! split matters — do not move labels without updating the citations:
 //!
@@ -128,27 +134,65 @@ pub fn jeffreys_label(db: f64) -> &'static str {
     else             { "overwhelming"   }
 }
 
-/// Compact two-column form for use inside tables or tight displays:
-/// returns `(nats_str, db_with_label_str)` for a Δlog-lik (nats).
+/// Is a paired difference inside its own noise band, `|Δ| < 2·se(Δ)`?
 ///
-/// The `db_with_label_str` cell carries direction explicitly via a
-/// `for` / `against` suffix on every non-indeterminate tier. This
-/// closes a real readability bug — pre-fix, `-32.3 dB, decisive`
-/// could be misread as "decisive evidence supporting this model"
-/// when the negative sign actually means decisive evidence
-/// *against* it (the baseline outscored it). Below ±5 dB the
-/// "indeterminate" tier carries no direction and the suffix is
-/// suppressed (the whole point of that tier is "we can't commit").
+/// `Δelpd` is a sum over the scored observations and `se(Δ)` is the paired
+/// standard error of that sum, so `|Δ| < 2·se` says the difference is smaller
+/// than the observation-to-observation scatter it was built from. A Jeffreys
+/// word on such a difference reports a magnitude the data cannot resolve — the
+/// tier is computed from `Δ` alone and knows nothing about its spread, so
+/// without this gate a Δ of 6 nats reads "strong" whether its se is 0.3 or 30.
+///
+/// The two-SE cut is the conventional descriptive band, not a test: `se(Δ)`
+/// itself rests on a normal approximation that is unreliable at small `T` and
+/// when the models are similar (Sivula, Magnusson & Vehtari, arXiv:2008.10296).
+/// It is used here only to decline to label, never to declare a winner.
+///
+/// A non-finite or zero `se` cannot establish a band, so it does not gate: the
+/// answer is `false` and the tier is shown.
+pub fn within_noise(delta_nats: f64, se_nats: f64) -> bool {
+    se_nats.is_finite() && se_nats > 0.0 && delta_nats.abs() < 2.0 * se_nats
+}
+
+/// The machine-readable evidence label for a Δlog-lik (nats) and its paired
+/// standard error: `within_noise` when [`within_noise`] holds, else the
+/// magnitude tier from [`jeffreys_label`] (direction is carried by the sign of
+/// `delta_elpd`, which is reported alongside).
+pub fn evidence_label(delta_nats: f64, se_nats: f64) -> &'static str {
+    if within_noise(delta_nats, se_nats) {
+        "within_noise"
+    } else {
+        jeffreys_label(delta_nats * NATS_TO_DB)
+    }
+}
+
+/// The display cell for a Δlog-lik (nats) and its paired standard error:
+/// the difference in decibans, then what may honestly be said about it.
+///
+/// The dB number is always shown — it is just a unit change on `Δ`. The word
+/// after it is gated on the SE: inside the noise band the cell says
+/// `within noise` and no tier, because the tier would name a magnitude the
+/// data cannot resolve.
+///
+/// Outside the band the cell carries direction explicitly via a `for` /
+/// `against` suffix. This closes a real readability bug — pre-fix,
+/// `-32.3 dB, decisive` could be misread as "decisive evidence supporting this
+/// model" when the negative sign actually means decisive evidence *against* it
+/// (the baseline outscored it). The "indeterminate" tier keeps no direction
+/// (the whole point of that tier is "we can't commit").
 ///
 /// Examples:
-/// - `evidence_cells(+27.3)` → `("+27.300", "+118.6 dB, decisive for")`
-/// - `evidence_cells(-7.45)` → `("-7.450", "-32.4 dB, decisive against")`
-/// - `evidence_cells(+0.5)`  → `("+0.500", "+2.2 dB, indeterminate")`
-pub fn evidence_cells(delta_nats: f64) -> (String, String) {
+/// - `evidence_cell(+27.3, 1.0)` → `"+118.6 dB, decisive for"`
+/// - `evidence_cell(-7.45, 0.5)` → `"-32.4 dB, decisive against"`
+/// - `evidence_cell(+0.5, 1.0)`  → `"+2.2 dB, within noise"`
+pub fn evidence_cell(delta_nats: f64, se_nats: f64) -> String {
     if !delta_nats.is_finite() {
-        return (format!("{}", delta_nats), "—".into());
+        return "—".into();
     }
     let db = delta_nats * NATS_TO_DB;
+    if within_noise(delta_nats, se_nats) {
+        return format!("{:+.1} dB, within noise", db);
+    }
     let tag = jeffreys_label(db);
     let labeled = if tag == "indeterminate" {
         // Below the substantial-evidence threshold the data don't
@@ -160,7 +204,7 @@ pub fn evidence_cells(delta_nats: f64) -> (String, String) {
     } else {
         format!("{} against", tag)
     };
-    (format!("{:+.3}", delta_nats), format!("{:+.1} dB, {}", db, labeled))
+    format!("{:+.1} dB, {}", db, labeled)
 }
 
 #[cfg(test)]
@@ -201,52 +245,65 @@ mod tests {
     }
 
     #[test]
-    fn evidence_cells_positive_carries_for() {
+    fn evidence_cell_positive_carries_for() {
         // Positive Δ → candidate model beats the baseline → "for".
-        let (nats, db_label) = evidence_cells(5.5);
-        assert_eq!(nats, "+5.500");
-        assert_eq!(db_label, "+23.9 dB, decisive for");
+        // se = 0.5 ⇒ the band is ±1.0 nats and 5.5 is well outside it.
+        assert_eq!(evidence_cell(5.5, 0.5), "+23.9 dB, decisive for");
     }
 
     #[test]
-    fn evidence_cells_negative_carries_against() {
+    fn evidence_cell_negative_carries_against() {
         // Negative Δ → baseline beats the candidate → "against".
         // The motivating bug: pre-fix this read "−32.3 dB, decisive"
         // and a reader could miss the sign and conclude the model
         // was preferred.
-        let (nats, db_label) = evidence_cells(-7.45);
-        assert_eq!(nats, "-7.450");
+        let cell = evidence_cell(-7.45, 0.5);
         // -7.45 nats × 4.342944819 ≈ -32.35 dB → rounds to -32.4.
-        assert!(db_label.starts_with("-32.4 dB"),
-            "expected -32.4 dB prefix, got {}", db_label);
-        assert!(db_label.ends_with("decisive against"),
-            "expected `decisive against` suffix, got {}", db_label);
+        assert!(cell.starts_with("-32.4 dB"), "expected -32.4 dB prefix, got {}", cell);
+        assert!(cell.ends_with("decisive against"),
+            "expected `decisive against` suffix, got {}", cell);
     }
 
     #[test]
-    fn evidence_cells_indeterminate_carries_no_direction() {
-        // Below |5 dB|, the tier is "indeterminate" — we explicitly
-        // refuse to commit to a direction, so adding for/against
-        // would dress up noise as a finding.
-        let (_, db_label) = evidence_cells(0.5);  // ≈ 2.2 dB
-        assert!(db_label.contains("indeterminate"));
-        assert!(!db_label.contains("for"));
-        assert!(!db_label.contains("against"));
+    fn evidence_cell_indeterminate_carries_no_direction() {
+        // Below |5 dB| and outside the noise band, the tier is
+        // "indeterminate" — we explicitly refuse to commit to a
+        // direction, so adding for/against would dress up noise as
+        // a finding.
+        let cell = evidence_cell(0.5, 0.1);  // ≈ 2.2 dB, band ±0.2
+        assert!(cell.contains("indeterminate"), "{cell}");
+        assert!(!cell.contains("for"));
+        assert!(!cell.contains("against"));
         // Same for negative-but-still-indeterminate.
-        let (_, db_label) = evidence_cells(-0.5);
-        assert!(db_label.contains("indeterminate"));
-        assert!(!db_label.contains("for"));
-        assert!(!db_label.contains("against"));
+        let cell = evidence_cell(-0.5, 0.1);
+        assert!(cell.contains("indeterminate"), "{cell}");
+        assert!(!cell.contains("for"));
+        assert!(!cell.contains("against"));
+    }
+
+    /// The SE gate: the same Δ is a tier against a small SE and `within noise`
+    /// against a large one. The dB number is unchanged — only what may be said
+    /// about it changes.
+    #[test]
+    fn evidence_cell_is_gated_by_the_paired_se() {
+        assert_eq!(evidence_cell(3.0, 0.5), "+13.0 dB, strong for");
+        assert_eq!(evidence_cell(3.0, 2.0), "+13.0 dB, within noise");
+        assert_eq!(evidence_label(3.0, 0.5), "strong");
+        assert_eq!(evidence_label(3.0, 2.0), "within_noise");
+        // The boundary is closed on the tier side: |Δ| = 2·se is not "within".
+        assert!(!within_noise(3.0, 1.5));
+        assert!(within_noise(3.0, 1.500001));
+        // An SE that cannot describe a band does not gate.
+        assert!(!within_noise(0.0, 0.0));
+        assert!(!within_noise(0.1, f64::NAN));
+        assert_eq!(evidence_label(0.1, f64::NAN), "indeterminate");
     }
 
     #[test]
-    fn evidence_cells_handles_non_finite() {
+    fn evidence_cell_handles_non_finite() {
         // NaN / ±∞ → "—" in the dB column, not a panic.
-        let (n, db) = evidence_cells(f64::NAN);
-        assert!(n.contains("NaN"));
-        assert_eq!(db, "—");
-        let (_, db) = evidence_cells(f64::INFINITY);
-        assert_eq!(db, "—");
+        assert_eq!(evidence_cell(f64::NAN, 1.0), "—");
+        assert_eq!(evidence_cell(f64::INFINITY, 1.0), "—");
     }
 
     #[test]
@@ -365,16 +422,14 @@ mod tests {
 
     #[test]
     fn boundary_evidence_from_proposal() {
-        // Spot-check the Jeffreys table against the proposal's worked values.
+        // Spot-check the Jeffreys table against the proposal's worked values,
+        // each against an SE small enough that the noise gate does not fire.
         // 20 nats × 4.343 ≈ 86.9 dB, "overwhelming" (above 40 dB).
-        let (_, tag) = evidence_cells(20.0);
-        assert!(tag.contains("overwhelming"));
+        assert!(evidence_cell(20.0, 1.0).contains("overwhelming"));
         // Small gap (0.5 nats ≈ 2.2 dB) should be indeterminate — noise floor.
-        let (_, tag) = evidence_cells(0.5);
-        assert!(tag.contains("indeterminate"));
+        assert!(evidence_cell(0.5, 0.1).contains("indeterminate"));
         // 3-nat gap (~13 dB) should be "strong" — a few nats of difference
         // on a weekly-obs fit is already beyond anecdotal.
-        let (_, tag) = evidence_cells(3.0);
-        assert!(tag.contains("strong"));
+        assert!(evidence_cell(3.0, 0.5).contains("strong"));
     }
 }

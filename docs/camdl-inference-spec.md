@@ -56,18 +56,24 @@ output_dir = "fit/he2010"
 
 # Data sources — one per observation block in the model.
 # Keys must match observation block names in the .camdl file.
-[data]
+[data.observations]
 weekly_cases = "data/london_cases.tsv"
 
 # For multi-stream models (polio):
-# [data]
+# [data.observations]
 # afp_cases = "data/afp_by_district.tsv"
 # es_positive = "data/es_results.tsv"
+#
+# Or, when one wide TSV holds every stream's column:
+# [data]
+# file = "data/all_streams.tsv"
 
-# Optional: out-of-sample holdout data.
-# Keys must match [data] keys. Scout/refine never see holdout data.
-# Validate runs PF on train + holdout and reports separate logliks.
-# [holdout]
+# Optional: holdout data. Keys must match [data] keys.
+# Not yet applied (gh#585): [data.holdout] and holdout_after parse, are
+# validated, and enter the fit's identity, but no stage reads them — every
+# stage trains on all of [data], and no held-out score is computed. A score
+# from such a fit is in-sample; do not report it as out-of-sample.
+# [data.holdout]
 # weekly_cases = "data/london_cases_holdout.tsv"
 
 [config]

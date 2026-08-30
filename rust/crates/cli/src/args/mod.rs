@@ -2705,6 +2705,18 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_mismatched_horizon: bool,
 
+    /// Render even if the compared fits are bound to different observed data
+    /// (gh#713). By default, two fits whose `fit.meta.json` records different
+    /// content hashes for a shared observation stream are refused: Δelpd would
+    /// then mix a model difference with a data difference, and nothing in the
+    /// table would say so. Use this only when the difference is understood and
+    /// intended — comparing a fit on revised case counts against the fit on the
+    /// original ones, say — and read the Δ as confounded. Rows given as an
+    /// explicit `prequential.json` carry no data identity and are never part of
+    /// the check.
+    #[arg(long)]
+    pub allow_data_mismatch: bool,
+
     /// Particle count for any fit handle whose prequential is
     /// auto-derived. Applied uniformly to every derived fit so T_score
     /// and scores stay commensurable. Ignored for an explicit

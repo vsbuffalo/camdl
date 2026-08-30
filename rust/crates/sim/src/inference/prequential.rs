@@ -168,6 +168,14 @@ impl PrequentialTrace {
     /// the data, so it has seen the future). Returns `None` only when the score
     /// is honest on both axes (out-of-sample posterior). #295: the number must
     /// never be silently read as a true out-of-sample forecast score.
+    ///
+    /// The in-sample clause names the bias in *differences* as well as in the
+    /// level, because a difference is what model comparison reads. The
+    /// in-sample optimism is not a shared constant that cancels: it is roughly
+    /// the effective number of parameters θ was free to tune against these very
+    /// observations (the bias term the AIC/DIC/WAIC corrections estimate), so
+    /// the more flexible of two models collects more of it and Δelpd tilts its
+    /// way.
     pub fn optimism_caveat(&self) -> Option<String> {
         let plug_in = self.provenance == Provenance::PlugIn;
         let in_sample = self.conditioning == Conditioning::InSample;
@@ -179,7 +187,11 @@ impl PrequentialTrace {
             why.push("plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed)");
         }
         if in_sample {
-            why.push("in-sample (θ fit to all the data → optimistic in absolute level)");
+            why.push(
+                "in-sample (θ fit to all the data → optimistic in absolute level, by \
+                 roughly the effective number of parameters fit, which does not cancel \
+                 in a Δelpd and so biases differences toward the more flexible model)",
+            );
         }
         Some(format!(
             "scores are {} — not a leave-future-out forecast score. See LFO (#295).",
@@ -544,6 +556,16 @@ mod tests {
         let caveat = t.optimism_caveat().expect("plug-in + in-sample must be flagged");
         assert!(caveat.contains("plug-in"), "names the treatment optimism: {caveat}");
         assert!(caveat.contains("in-sample"), "names the conditioning optimism: {caveat}");
+        // The in-sample optimism is not a constant offset that cancels when two
+        // models are differenced: it grows with the number of parameters θ was
+        // free to tune, so Δelpd tilts toward the more flexible model. A reader
+        // told only "optimistic in absolute level" would reasonably assume the
+        // level cancels in a difference — which is the quantity `compare`
+        // renders.
+        assert!(caveat.contains("does not cancel"),
+            "says the optimism does not cancel in a difference: {caveat}");
+        assert!(caveat.contains("more flexible model"),
+            "and which way the difference is biased: {caveat}");
     }
 
     #[test]

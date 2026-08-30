@@ -1582,30 +1582,60 @@ RNG provides the spread" behaviour.
 
 ### Out-of-sample validation
 
-Add a `[holdout]` section to fit.toml with holdout data files:
+**The `fit.toml` holdout keys do not split anything yet (gh#585).** A
+`[data.holdout]` section, and `holdout_after = <time>` under `[data]`, parse,
+are validated against the model's declared streams, and are folded into the
+fit's identity — but no stage reads them. Every stage trains on all of
+`[data.observations]`, and no held-out score is computed. A loglik or elpd from
+such a fit is in-sample, whichever key is set; never report one as
+out-of-sample.
 
 ```toml
 [data.observations]
 weekly_cases = "data/cases_train.tsv"
 
+# Parsed, identity-bearing, and currently inert — see gh#585.
 [data.holdout]
 weekly_cases = "data/cases_holdout.tsv"
 ```
 
-Scout and refine only see `[data.observations]` — holdout is structurally
-unreachable during parameter estimation. Validate runs the particle filter on
-train + holdout and reports separate logliks:
-
-```
-train loglik:   -4200.3 (780 obs)
-holdout loglik: -1615.1 (316 obs)
-```
-
-Use `camdl data split` to produce train/holdout files:
+To get an honest held-out number today, split the data yourself, fit on the
+training file, then score the **full** series in one filter pass and read off
+the rows past the split:
 
 ```bash
 camdl data split data/cases.tsv --at-time 5474
+camdl fit run fit_train.toml
+camdl fit summary @train --params-only
+camdl pfilter model.camdl --params theta.toml --data weekly_cases=data/cases.tsv --save-prequential preq
 ```
+
+`camdl data split` writes the train and holdout TSVs; point the fit's
+`[data.observations]` at the training file, and write the fit's θ̂ (from
+`fit summary --params-only`) to `theta.toml`.
+
+Score the full series, not the holdout file alone. Binding only the held-out
+rows starts the filter from the model's prior at the first held-out observation,
+with nothing assimilated from the training window: that scores
+`p(y_holdout | θ̂)` under unanchored state uncertainty, which penalises a
+stochastic model for exactly the uncertainty the training data would have
+resolved — and it usually trips the wide-first-window warning as well. Over the
+full series, each row of `preq.tsv` with `t` past the split time is a
+one-step-ahead score whose filter state assimilated the training window while θ̂
+never saw the held-out observations. That subset is the held-out quantity.
+
+Sum the `log_score` column over those rows with `stream = "joint"` for the
+held-out elpd. The TSV is tidy/long — a `joint` row per step followed by one row
+per scheduled stream — so summing every row double-counts each step.
+
+Two numbers not to mis-read:
+
+- the loglik `pfilter` prints covers the whole series, training window included.
+  It is not a held-out score.
+- the emitted trace is stamped `conditioning = "in_sample"` whatever window you
+  score; the stamp is hardcoded in the trace builder today, and gh#585's fix is
+  what adds an honest one. The row subset is the honest number, not the trace's
+  own label.
 
 ### Prediction quantiles
 
