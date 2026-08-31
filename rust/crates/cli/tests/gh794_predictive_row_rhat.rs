@@ -32,6 +32,9 @@
 //!     `--by-chain` writes a superset of the pooled file and needs none. Chain
 //!     ids are the fit's own, so a subset artifact's `2` names the same chain
 //!     the pooled artifact's `2` does.
+//!   * `reported_quantities_carry_their_own_rhat_and_ess` — the same reduction
+//!     on `quantities/<name>.tsv`, where the case is stronger still: those are
+//!     the numbers that get published.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -139,6 +142,11 @@ observations {
     emit_schedule = every 7 'days
     weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
   }
+}
+
+quantities {
+  prevalence  = I / N
+  peak_burden = max(I)
 }
 
 simulate {
@@ -574,5 +582,61 @@ fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address
     assert_eq!(
         v["streams"][0]["file"], "predictive-excl1/weekly_cases.tsv",
         "the manifest points at the keyed location"
+    );
+}
+
+/// gh#794 on the reported estimands: `quantities/<name>.tsv` carries the R-hat
+/// and bulk-ESS of the value in each row — the same chain-grouped reduction the
+/// predictive rows get, on the numbers that actually get published.
+#[test]
+fn reported_quantities_carry_their_own_rhat_and_ess() {
+    let bin = skip_if_missing_binary();
+    let tmp = setup("quantities");
+    fit_then_predict(&bin, &tmp);
+
+    // A series quantity: one row per snapshot, each with its own reduction.
+    let series = find_artifact(&tmp.join("results"), "quantities", "prevalence")
+        .expect("quantities/prevalence.tsv must be written");
+    let txt = std::fs::read_to_string(&series).unwrap();
+    let header: Vec<&str> = txt.lines().next().unwrap().split('\t').collect();
+    let ix = |name: &str| col(&header, name);
+    assert_eq!(
+        header[ix("n_draws") + 1],
+        "rhat",
+        "rhat follows n_draws: {header:?}"
+    );
+    assert_eq!(header[ix("n_draws") + 2], "ess");
+
+    let mut rhats: Vec<f64> = Vec::new();
+    for l in txt.lines().skip(1) {
+        let c: Vec<&str> = l.split('\t').collect();
+        let (r, e) = (c[ix("rhat")], c[ix("ess")]);
+        if r.is_empty() {
+            continue; // a constant row is refused, not fabricated
+        }
+        let r: f64 = r.parse().expect("rhat parses");
+        let e: f64 = e.parse().expect("ess parses");
+        assert!(r.is_finite() && r > 0.0, "rhat is a positive finite number, got {r}");
+        assert!(e.is_finite() && e > 0.0, "ess is a positive finite number, got {e}");
+        rhats.push(r);
+    }
+    assert!(!rhats.is_empty(), "a two-chain fit reports rhat on its series rows:\n{txt}");
+    let distinct: std::collections::BTreeSet<String> =
+        rhats.iter().map(|r| format!("{r:.4}")).collect();
+    assert!(
+        distinct.len() > 1,
+        "rhat is computed per row, so it moves down the file; got only {distinct:?}"
+    );
+
+    // A scalar quantity: one row, still carrying its own reduction.
+    let scalar = find_artifact(&tmp.join("results"), "quantities", "peak_burden")
+        .expect("quantities/peak_burden.tsv must be written");
+    let txt = std::fs::read_to_string(&scalar).unwrap();
+    let header: Vec<&str> = txt.lines().next().unwrap().split('\t').collect();
+    let cells: Vec<&str> = txt.lines().nth(1).unwrap().split('\t').collect();
+    let r = cells[col(&header, "rhat")];
+    assert!(
+        !r.is_empty() && r.parse::<f64>().is_ok(),
+        "a scalar estimand reports its own rhat too, got {r:?}\n{txt}"
     );
 }

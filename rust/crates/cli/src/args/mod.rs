@@ -1256,6 +1256,14 @@ than 2 chains, fewer than 4 draws per chain, a draws.tsv with no chain column,
 or a constant row. The one_step horizon leaves both pairs empty (its cells
 pool over particles as well as draws).
 
+quantities/<name>.tsv carries the same reduction as `rhat` and `ess` — one
+pair, because a quantity has one value per draw. Those are the numbers that
+get published, so read them first. A quantity over latent state or derived
+arithmetic is noise-free, so its `rhat` is the undiluted kind; a quantity
+whose manifest `source` is `observations` reduces sampled y_rep and so carries
+observation noise, making it the diluted (rhat_pred) kind. `simulate` has no
+chains behind it and writes neither column.
+
 --by-chain adds a leading `chain` column: `all` on the pooled rows, the
 1-based chain id on one extra band per chain. Use it after rhat_mean has
 flagged something, to see *which* way the chains disagree — overlapping

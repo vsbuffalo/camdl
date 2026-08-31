@@ -261,13 +261,13 @@ thin = 1
     let mut plines = prev_txt.lines();
     assert_eq!(
         plines.next().unwrap(),
-        "scenario\ttime\tn_draws\tq05\tq25\tq50\tq75\tq95",
-        "series quantity header: scenario + time + banded columns"
+        "scenario\ttime\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
+        "series quantity header: scenario + time + the per-row convergence pair + band"
     );
     let prow: Vec<&str> = plines.next().expect("at least one prevalence row").split('\t').collect();
-    assert_eq!(prow.len(), 8, "series row shape matches header");
+    assert_eq!(prow.len(), 10, "series row shape matches header");
     assert_eq!(prow[0], "fitted", "quantity rows tagged with the scenario");
-    let pq: Vec<f64> = prow[3..8].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let pq: Vec<f64> = prow[5..10].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in pq.windows(2) {
         assert!(w[0] <= w[1], "prevalence quantiles ordered: {pq:?}");
     }
@@ -279,11 +279,11 @@ thin = 1
     let mut klines = peak_txt.lines();
     assert_eq!(
         klines.next().unwrap(),
-        "scenario\tn_draws\tq05\tq25\tq50\tq75\tq95",
-        "value-scalar header: scenario + banded columns, no time, no censoring"
+        "scenario\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
+        "value-scalar header: scenario + convergence + banded columns, no time, no censoring"
     );
     let krow: Vec<&str> = klines.next().expect("a peak row").split('\t').collect();
-    assert_eq!(krow.len(), 7, "value-scalar row shape matches header");
+    assert_eq!(krow.len(), 9, "value-scalar row shape matches header");
     assert_eq!(krow[0], "fitted", "value scalar tagged with the scenario");
 
     // ── quantities/peak_obs.tsv: an observation-source value scalar ──────────
@@ -296,12 +296,12 @@ thin = 1
     let mut polines = po_txt.lines();
     assert_eq!(
         polines.next().unwrap(),
-        "scenario\tn_draws\tq05\tq25\tq50\tq75\tq95",
-        "obs value-scalar header: scenario + banded columns, no censoring trio"
+        "scenario\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
+        "obs value-scalar header: scenario + convergence + banded columns, no censoring trio"
     );
     let porow: Vec<&str> = polines.next().expect("a peak_obs row").split('\t').collect();
-    assert_eq!(porow.len(), 7, "obs value-scalar row shape matches header");
-    let q50: f64 = porow[4].parse().expect("peak_obs q50 parses");
+    assert_eq!(porow.len(), 9, "obs value-scalar row shape matches header");
+    let q50: f64 = porow[6].parse().expect("peak_obs q50 parses");
     assert!(
         q50.is_finite() && q50 > 0.0,
         "peak_obs median must be a finite positive count (y_sim materialized), got {q50}"
@@ -314,11 +314,11 @@ thin = 1
     let mut olines2 = onset_txt.lines();
     assert_eq!(
         olines2.next().unwrap(),
-        "scenario\tn_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
-        "censorable scalar header: scenario + the censoring trio"
+        "scenario\tn_draws\trhat\tess\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
+        "censorable scalar header: scenario + convergence + the censoring trio"
     );
     let orow: Vec<&str> = olines2.next().expect("an onset row").split('\t').collect();
-    assert_eq!(orow.len(), 10, "censorable row shape matches header");
+    assert_eq!(orow.len(), 12, "censorable row shape matches header");
 
     // ── quantities/spread.tsv: a Derived over Time scalars inherits censoring ──
     // `spread = onset2 - onset` propagates a censored endpoint, so it must carry
@@ -328,7 +328,7 @@ thin = 1
     let spread_txt = std::fs::read_to_string(&spreadf).unwrap();
     assert_eq!(
         spread_txt.lines().next().unwrap(),
-        "scenario\tn_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
+        "scenario\tn_draws\trhat\tess\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
         "a Derived transitively referencing a Time scalar inherits the censoring trio (scenario-tagged)"
     );
 
@@ -519,7 +519,7 @@ thin = 1
     let mut klines = peak_txt.lines();
     assert_eq!(
         klines.next().unwrap(),
-        "scenario\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
         "quantity header leads with scenario"
     );
     let qscen: std::collections::BTreeSet<&str> =

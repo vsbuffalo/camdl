@@ -2107,6 +2107,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                             paths: &cell_paths,
                             n_conditioned: accum.n_conditioned,
                         }),
+                        // The same chain partition the predictive rows reduce
+                        // over, so a `quantities/` row and a `predictive/` row
+                        // from one fit describe the same chains (gh#794).
+                        Some(&accum.draw_chain),
                         &calendar,
                     )?;
                 }
@@ -3274,7 +3278,7 @@ fn one_step_bands(
                 // ESS computed from its autocorrelation would be inflated by the
                 // particles. Deferred rather than approximated: *both* channels
                 // stay empty, so a reader cannot pick up the diluted one by
-                // accident. Follow-up: gh#795.
+                // accident. Follow-up: gh#798.
                 rows.push(BandRow {
                     time: t,
                     stratum: stratum.clone(),

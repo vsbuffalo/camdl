@@ -311,6 +311,14 @@ the run directory:
   row carries no `rhat_*`/`ess_*` cell (those compare chains) and reports its
   own `n_draws`. Without the flag no `chain` column is written.
 
+  `quantities/<name>.tsv` carries the same reduction under `rhat` / `ess` — one
+  pair, since a quantity has a single value per draw. Those are the reported
+  estimands, so they are the first numbers to read. A quantity over latent state
+  or derived arithmetic is noise-free and its `rhat` is the undiluted kind; a
+  quantity whose manifest `source` is `observations` reduces sampled `y_rep`,
+  carries observation noise, and so reads like `rhat_pred`. `simulate --draws`
+  has no chains behind it and writes neither column.
+
   The two per-row pairs and the parameter R̂ can disagree in either direction,
   and both directions are ordinary. A reportable quantity is often far better
   determined than the parameters behind it, so a fit with `fit_rhat_max` near

@@ -572,6 +572,19 @@ diff-stable axis; `calendar` is additive metadata, not a re-encoding of it.
 `quantities/<name>.tsv` plus a `quantities.json` manifest. Those numbers are not
 all folded over the same object, and the manifest says which.
 
+Every banded row there carries `rhat` and `ess` after `n_draws`: the
+rank-normalized split R̂ and bulk-ESS of _that row's_ reported value, reduced
+over the same draws the band pools but grouped by the chain each draw came from.
+One pair, not two, because a quantity has a single value per draw. These are the
+reported estimands, so they are the first convergence numbers to read — and they
+routinely disagree with the parameter R̂ in either direction: a reportable
+quantity is often far better determined than the parameters behind it. What the
+value carries decides which kind of R̂ it is: a `state` or `derived` quantity is
+a deterministic function of the trajectory and the parameters, so its R̂ is
+undiluted; a quantity whose manifest `source` is `observations` reduces sampled
+`y_rep`, carries observation noise, and so reads like `rhat_pred`.
+`simulate --quantities-out` has no chains behind it and writes neither column.
+
 A quantity anchored **inside the observed record** — `value_at(EXPR, last_obs)`,
 `value_at(EXPR, first_obs + 2 'weeks)`, or a literal time at or before the last
 observation — is a retrospective estimand: there are observations covering the

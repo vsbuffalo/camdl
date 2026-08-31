@@ -236,7 +236,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     let qheader = peak_txt.lines().next().unwrap();
     assert_eq!(
         qheader,
-        "scenario\tsweep:k\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\tsweep:k\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
         "the quantity header carries the sweep:k column after scenario"
     );
     let qcells: std::collections::BTreeSet<String> = peak_txt
