@@ -473,6 +473,18 @@ columns are join coordinates versus band versus per-cell diagnostics, the
 chain-subset band is never mistakable for a full-cloud one. `observed.json`
 (`camdl.observed/v1`) is its sibling for the observed series.
 
+**A chain subset is a different address, not a rewrite of the pooled one.**
+`fit predict --exclude-chains 3,5` writes `predictive-excl3,5/<stream>.tsv` +
+`predictive-excl3,5.json`, and likewise `contrasts-excl3,5/` and
+`quantities-excl3,5/`; the full cloud keeps the bare names. The key is the
+excluded **set**, so `3,5` and `5,3` are one address, and it composes with the
+reporting-vocabulary key (`quantities-<key8>-excl3,5/`). Without this a subset
+would silently replace the run's canonical predictive and a second subset would
+replace that, leaving only a stamp inside the file that had already been
+overwritten. `observed/` is not keyed — it is the recorded data, identical under
+any selection. `camdl show <fit>` lists every address a fit holds, and
+`camdl cat <fit> --stream <address>/<stream>.tsv` reads one.
+
 **Calendar semantics travel with the artifact.** `predictive.json`,
 `observed.json`, `quantities.json`, and the per-chain `trajectories.json` each
 carry a top-level `calendar` block, produced by one shared emitter so every

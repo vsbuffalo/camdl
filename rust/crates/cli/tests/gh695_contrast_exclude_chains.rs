@@ -202,8 +202,18 @@ fn draws_per_chain(seg: &Path) -> HashMap<usize, usize> {
     counts
 }
 
-fn contrast_path(seg: &Path, name: &str) -> PathBuf {
-    seg.join("contrasts").join(format!("{name}.tsv"))
+/// The artifact address a run under `excl` writes to (gh#795): the bare family
+/// for the full cloud, `<family>-excl<ids>` for a chain subset. Spelled out here
+/// rather than imported so the test pins the on-disk name a user sees.
+fn addr(family: &str, excl: Option<&str>) -> String {
+    match excl {
+        None => family.to_string(),
+        Some(ids) => format!("{family}-excl{ids}"),
+    }
+}
+
+fn contrast_path(seg: &Path, name: &str, excl: Option<&str>) -> PathBuf {
+    seg.join(addr("contrasts", excl)).join(format!("{name}.tsv"))
 }
 
 /// The `n_used` cell of a scalar contrast's single band row — the count of
@@ -223,8 +233,8 @@ fn contrast_n_used(path: &Path) -> usize {
 
 /// The distinct `n_draws` values across a free-forward predictive stream — the
 /// size of the posterior cloud each banded cell pooled.
-fn predictive_n_draws(seg: &Path, stream: &str) -> Vec<usize> {
-    let path = seg.join("predictive").join(format!("{stream}.tsv"));
+fn predictive_n_draws(seg: &Path, stream: &str, excl: Option<&str>) -> Vec<usize> {
+    let path = seg.join(addr("predictive", excl)).join(format!("{stream}.tsv"));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
@@ -245,12 +255,14 @@ fn predictive_n_draws(seg: &Path, stream: &str) -> Vec<usize> {
     seen
 }
 
-/// The `chain_selection` object `fit predict` stamps into `predictive.json`.
-fn manifest_chain_selection(seg: &Path) -> Option<serde_json::Value> {
-    let path = seg.join("predictive.json");
+/// The `chain_selection` object `fit predict` stamps into the manifest at the
+/// address the run wrote to.
+fn manifest_chain_selection(seg: &Path, excl: Option<&str>) -> Option<serde_json::Value> {
+    let path = seg.join(format!("{}.json", addr("predictive", excl)));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    let v: serde_json::Value = serde_json::from_str(&txt).expect("predictive.json parses");
+    let v: serde_json::Value =
+        serde_json::from_str(&txt).expect("the predictive manifest parses");
     v.get("chain_selection").cloned()
 }
 
@@ -285,7 +297,7 @@ fn contrast_bands_over_the_retained_chains_only() {
         "fit predict failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let averted = contrast_path(&seg, "averted");
+    let averted = contrast_path(&seg, "averted", None);
     let full_bytes = std::fs::read(&averted).expect("contrasts/averted.tsv must be emitted");
     let full_n_used = contrast_n_used(&averted);
     assert_eq!(
@@ -293,7 +305,7 @@ fn contrast_bands_over_the_retained_chains_only() {
         "sanity: with no selection the contrast bands the whole cloud ({n_all} draws)"
     );
     assert_eq!(
-        manifest_chain_selection(&seg),
+        manifest_chain_selection(&seg, None),
         None,
         "an unselected run records no chain_selection"
     );
@@ -306,8 +318,17 @@ fn contrast_bands_over_the_retained_chains_only() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let sub_bytes = std::fs::read(&averted).unwrap();
-    let sub_n_used = contrast_n_used(&averted);
+    // The subset contrast is written at its OWN address (gh#795), so it can
+    // never replace the pooled one — which must still hold (a)'s bytes.
+    let sub_averted = contrast_path(&seg, "averted", Some("2"));
+    let sub_bytes = std::fs::read(&sub_averted)
+        .expect("contrasts-excl2/averted.tsv must be emitted");
+    let sub_n_used = contrast_n_used(&sub_averted);
+    assert_eq!(
+        std::fs::read(&averted).unwrap(),
+        full_bytes,
+        "the pooled contrast must survive a chain-subset run"
+    );
 
     // The artifact must MOVE. Byte-identity here is the whole bug: it means the
     // excluded chain's draws were forked into the band regardless.
@@ -319,7 +340,7 @@ fn contrast_bands_over_the_retained_chains_only() {
 
     // The contrast's denominator and the free-forward rows' denominator are the
     // same cloud — the issue's own measurement (`n_used` vs `n_draws`).
-    let ff = predictive_n_draws(&seg, "weekly_cases");
+    let ff = predictive_n_draws(&seg, "weekly_cases", Some("2"));
     assert_eq!(
         ff,
         vec![n_kept],
@@ -337,7 +358,8 @@ fn contrast_bands_over_the_retained_chains_only() {
 
     // The manifest and the data now agree: the manifest names chain 2 as
     // excluded, and the contrast really did drop it.
-    let sel = manifest_chain_selection(&seg).expect("a selected run stamps chain_selection");
+    let sel = manifest_chain_selection(&seg, Some("2"))
+        .expect("a selected run stamps chain_selection");
     assert_eq!(sel["excluded"], serde_json::json!([2]), "manifest: {sel}");
     assert_eq!(sel["kept"], serde_json::json!([1]), "manifest: {sel}");
     assert_eq!(sel["n_total"], serde_json::json!(2), "manifest: {sel}");
@@ -405,8 +427,10 @@ fn empty_forkable_intersection_refuses_by_name() {
         "the refusal must name the selection as the cause; stderr:\n{stderr}"
     );
     assert!(
-        !contrast_path(&seg, "averted").exists(),
-        "a refused contrast must leave no artifact behind"
+        !contrast_path(&seg, "averted", Some("1")).exists()
+            && !contrast_path(&seg, "averted", None).exists(),
+        "a refused contrast must leave no artifact behind — at its own address \
+         or the pooled one"
     );
 
     // Negative control: excluding the chain that has NO saved paths is not an
@@ -418,7 +442,7 @@ fn empty_forkable_intersection_refuses_by_name() {
         "excluding the path-less chain must still predict:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let averted = contrast_path(&seg, "averted");
+    let averted = contrast_path(&seg, "averted", Some("2"));
     assert!(averted.is_file(), "the retained chain's contrast must be emitted");
     assert_eq!(
         contrast_n_used(&averted),

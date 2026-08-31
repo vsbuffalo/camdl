@@ -2022,6 +2022,16 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // headers. Net-new sibling of `quantities.json`.
     let mut predictive_manifest_entries: Vec<serde_json::Value> = Vec::new();
 
+    // WHERE the predictive lands is keyed by the chain selection it was banded
+    // over (gh#795): the full cloud keeps `predictive/` + `predictive.json`,
+    // a `--exclude-chains 3,5` subset writes `predictive-excl3,5/` +
+    // `predictive-excl3,5.json`. A subset is a different posterior — its own
+    // warning says so — and writing it at the pooled address REPLACED the run's
+    // canonical predictive with a cherry-picked one, silently, with only a
+    // `chain_selection` stamp inside the file it had already overwritten.
+    let predictive_sub =
+        crate::chain_selection::artifact_name("predictive", selection.as_ref());
+
     for source in &sources {
         // Each free-forward design cell's StreamBands for this source (in
         // sweep × scenario order), plus the one-step StreamBands (sweep- and
@@ -2094,7 +2104,9 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             .unwrap_or("count");
         predictive_manifest_entries.push(serde_json::json!({
             "name": source,
-            "file": format!("predictive/{source}.tsv"),
+            // The manifest's declared location is the keyed one, or a consumer
+            // that follows it lands back on the pooled artifact.
+            "file": format!("{predictive_sub}/{source}.tsv"),
             "value_kind": value_kind,
             "coordinates": coordinates,
             "diagnostics": ["rhat_max", "ess_min", "n_draws"],
@@ -2103,7 +2115,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         }));
 
         let pred_tsv = render_predictive_tsv_sections(&index_dims, &sections);
-        written.push(write_tsv(&segment, "predictive", source, &pred_tsv)?);
+        written.push(write_tsv(&segment, &predictive_sub, source, &pred_tsv)?);
     }
     // `predictive.json`: the per-stream join contract beside the predictive
     // TSVs — a sibling of `quantities.json`, NOT in the run_id-keyed CAS leaf
@@ -2124,11 +2136,13 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         });
         // Provenance: a chain-subset predictive records the selection alongside
         // the streams, so a chain-subset artifact is never mistakable for a
-        // full-cloud one. Absent (no key) when the full cloud was used.
+        // full-cloud one. Absent (no key) when the full cloud was used. The
+        // ADDRESS (`predictive_sub`, above) is what keeps the two artifacts from
+        // colliding; this stamp is what names the selection once you have one.
         if let Some(info) = posterior.selection() {
             manifest["chain_selection"] = info.to_json();
         }
-        let path = segment.join("predictive.json");
+        let path = segment.join(format!("{predictive_sub}.json"));
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing predictive manifest: {e}"))?;
         std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -2176,15 +2190,22 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // with a matching manifest. Two vocabularies applied to one fit are two
     // different tables; sharing one address would overwrite the first and leave
     // no way to tell which formulas produced the survivor.
-    let quantities_sub = crate::quantities_file::quantities_dir_name(vocabulary.as_ref());
+    //
+    // A quantity is read off the posterior cloud, so the CHAIN SELECTION keys it
+    // for exactly the same reason (gh#795) — a chain-subset table is a different
+    // table. The two keys are independent and compose:
+    // `quantities-<key8>-excl3,5/`.
+    let quantities_sub = crate::chain_selection::artifact_name(
+        &crate::quantities_file::quantities_dir_name(vocabulary.as_ref()),
+        selection.as_ref(),
+    );
     for (name, content) in &quantity_outputs {
         written.push(write_tsv(&segment, &quantities_sub, name, content)?);
     }
     if let Some(manifest) = &quantity_manifest {
         let manifest =
             crate::quantities_file::stamp_provenance(manifest, vocabulary.as_ref())?;
-        let path = segment
-            .join(crate::quantities_file::quantities_manifest_name(vocabulary.as_ref()));
+        let path = segment.join(format!("{quantities_sub}.json"));
         std::fs::write(&path, &manifest)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         written.push(path);
