@@ -146,7 +146,8 @@ fn run(with_event: bool, obs_times: Vec<f64>) -> Result<f64, sim::SimError> {
     let config = SMCConfig {
         n_particles: 100, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false, record_ancestry: false,
-        record_prequential: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET,
+        record_prequential: false, record_predictions: false,
+        max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     bootstrap_filter(&process, &obs_model, &params, &config, 42).map(|r| r.log_likelihood)
 }

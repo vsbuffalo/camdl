@@ -185,13 +185,22 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     let mut ess_trace = Vec::with_capacity(n_obs);
     let mut logw_var_trace = Vec::with_capacity(n_obs);
     let mut ll_increments = Vec::with_capacity(n_obs);
-    // Can this obs model project a state at all? A SHAPE question — `mean()`
-    // returns `vec![]` for an impl that does not override it — asked of
-    // particle 0, whose `acc` is sized `n_acc` so a projection that indexes
-    // `acc[k]` is in bounds. With no particles there is none to ask, so the
-    // probe is a state off a scratch stream; `rngs` is empty there and
-    // indexing it would panic.
-    let has_predictions = obs_model.n_streams() > 0 && match swarm.states.first() {
+    // gh#520: the PredictionDiag block below is a real per-particle cost (a
+    // `mean()` call, an RNG-consuming `sample()` draw, two O(N log N) sorts,
+    // every observation) that only `camdl pfilter --trace` reads. It used to
+    // run whenever the obs model COULD project a state, regardless of
+    // whether the caller wanted it — which made it true for essentially
+    // every fitted model, including PMMH's/IF2's inner likelihood-only
+    // evaluations, which throw the result away. `config.record_predictions`
+    // is the caller's explicit ask; the shape check after it is still needed
+    // because a caller may ask for predictions from an obs model that can't
+    // produce them (no streams, or `mean()`/`sample()` unimplemented) — that
+    // is not an error, `predictions` is just `None`, as before. `mean()` is
+    // asked of particle 0, whose `acc` is sized `n_acc` so a projection that
+    // indexes `acc[k]` is in bounds. With no particles there is none to ask,
+    // so the probe is a state off a scratch stream; `rngs` is empty there
+    // and indexing it would panic.
+    let has_predictions = config.record_predictions && obs_model.n_streams() > 0 && match swarm.states.first() {
         Some(s) => !obs_model.mean(s, 0, params).is_empty(),
         None => {
             let mut probe = process.initial_state_draw(

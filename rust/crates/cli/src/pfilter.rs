@@ -369,6 +369,13 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     // active. Both flags consume the same per-step snapshot data; the
     // difference is only in what we write to disk at the end.
     let need_ancestry = save_paths.is_some() || save_filtering.is_some();
+    // gh#520: the PredictionDiag block is only read by the single-run
+    // `--trace` writer below (`result.predictions`, ~line 660). It used to
+    // compute unconditionally whenever the obs model could project a state —
+    // which meant `--replicates N` (which never reads `.predictions` at all,
+    // only `.log_likelihood`) and a plain single run with no `--trace` both
+    // paid for it and threw it away.
+    let want_predictions = trace_path.is_some() && n_replicates <= 1;
     let smc_config = SMCConfig {
         n_particles,
         dt,
@@ -376,6 +383,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         skip_first_obs_from_loglik: false,
         record_ancestry: need_ancestry,
         record_prequential: save_prequential.is_some(),
+        record_predictions: want_predictions,
         // gh#241: deterministic compute budget (the engine default unless the
         // user passes `--pf-max-substeps`). Reproducible across machines — there
         // is no wall-clock watchdog, so a content-addressed `pfilters/` leaf is

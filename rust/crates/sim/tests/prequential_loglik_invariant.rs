@@ -146,6 +146,7 @@ fn run_loglik(record_prequential: bool) -> f64 {
         skip_first_obs_from_loglik: false,
         record_ancestry: false,
         record_prequential,
+        record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let params = compiled.default_params.clone();
@@ -190,6 +191,7 @@ fn record_prequential_does_not_perturb_loglik() {
         n_particles: 64, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: true,
+        record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     let params = compiled.default_params.clone();

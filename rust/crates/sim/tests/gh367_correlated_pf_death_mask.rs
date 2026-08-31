@@ -233,6 +233,7 @@ fn smc_config() -> SMCConfig {
         skip_first_obs_from_loglik: false,
         record_ancestry: false,
         record_prequential: false,
+        record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     }
 }

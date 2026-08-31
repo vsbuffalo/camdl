@@ -561,6 +561,12 @@ impl FitRunConfig {
             skip_first_obs_from_loglik: self.ic_free,
             record_ancestry: false,
             record_prequential: false,
+            // gh#520: nothing downstream of this shared default reads
+            // `.predictions` — PMMH's uncorrelated per-step `eval_loglik`
+            // (via `run_quick_pfilter_with_dt` below) keeps only
+            // `.log_likelihood`; every other caller of `..config.smc_config()`
+            // is likewise a likelihood-only or prequential-only evaluation.
+            record_predictions: false,
             // gh#241: deterministic compute budget (engine default); no
             // wall-clock watchdog. See the IF2Config above.
             max_substeps: sim::inference::degeneracy::ITER_BUDGET,

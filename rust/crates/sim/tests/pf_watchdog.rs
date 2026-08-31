@@ -186,6 +186,7 @@ fn bootstrap_filter_bails_on_ess_collapse() {
         n_particles: 200, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
+        record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
@@ -594,6 +595,7 @@ fn bootstrap_filter_iteration_budget_aborts_pre_window() {
         n_particles, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
         record_ancestry: false, record_prequential: false,
+        record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 
@@ -692,6 +694,7 @@ fn an_empty_swarm_does_not_panic_the_bootstrap_filter() {
         skip_first_obs_from_loglik: false,
         record_ancestry: false,
         record_prequential: false,
+        record_predictions: false, // TimeGridObs has n_streams() == 0
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
 

@@ -215,6 +215,7 @@ fn run(builder: RefBuilder) -> f64 {
         skip_first_obs_from_loglik: false,
         record_ancestry: false,
         record_prequential: false,
+        record_predictions: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
     };
     bootstrap_filter(&process, &obs_model, &params, &config, SEED)

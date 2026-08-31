@@ -1204,6 +1204,7 @@ fn eval_point_pfilter(
             skip_first_obs_from_loglik: false,
             record_ancestry: false,
             record_prequential: false,
+            record_predictions: false, // gh#520: only `.log_likelihood`/`.ess_trace` are read below
             // gh#241: deterministic compute budget (engine default). No
             // wall-clock watchdog — the content-addressed `surveys/` landscape
             // is reproducible across machines.

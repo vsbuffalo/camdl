@@ -1498,6 +1498,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                             skip_first_obs_from_loglik: false,
                             record_ancestry: false,
                             record_prequential: false,
+                            record_predictions: false, // gh#520: only `.log_likelihood` is read below
                             max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
                         };
                         // Distinct seed from the IF2 inner run so the
@@ -1614,6 +1615,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     skip_first_obs_from_loglik: false,
                     record_ancestry: false,
                     record_prequential: false,
+                    record_predictions: false, // gh#520: only `.log_likelihood` is read below
                     max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
                 };
 
