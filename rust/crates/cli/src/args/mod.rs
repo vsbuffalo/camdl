@@ -1265,15 +1265,29 @@ observation noise, making it the diluted (rhat_pred) kind. `simulate` has no
 chains behind it and writes neither column.
 
 --by-chain adds a leading `chain` column: `all` on the pooled rows, the
-1-based chain id on one extra band per chain. Use it after rhat_mean has
-flagged something, to see *which* way the chains disagree — overlapping
-per-chain forward bands mean the pooled band summarises one forecast;
-separated ones mean it is a mixture of several, and quoting its quantiles
-reads as uncertainty where the truth is disagreement. Per-chain rows carry no
-rhat_*/ess_* cell (those compare chains) and report their own n_draws. Without
-the flag no `chain` column is written at all. It adds no artifact address of
-its own — the `all` rows are byte-identical, so the file is a superset of the
-pooled one — and composes with --exclude-chains, which does: --by-chain
+1-based chain id on one extra band per chain, on both horizons. Use it after
+rhat_mean has flagged something, to see *which* way the chains disagree.
+
+  free_forward per chain  do the chains project the same future? Overlapping
+                          bands mean the pooled band summarises one forecast;
+                          separated ones mean it is a mixture of several, and
+                          quoting its quantiles reads as uncertainty where the
+                          truth is disagreement.
+  one_step per chain      does each chain explain the observed record? These
+                          are re-anchored to the data at every step, so a
+                          separation is disagreement about the fitted
+                          trajectory with the extrapolation removed — the
+                          sharper statement about mixing.
+
+Per-chain rows carry no rhat_*/ess_* cell (those compare chains) and report
+their own n_draws — smaller than the pooled count, and smaller still for a
+chain some of whose one-step draws hit a degenerate filter (that loss is named
+on stderr; a chain that lost every draw is omitted rather than banded over
+nothing). Without the flag no `chain` column is written at all.
+
+It adds no artifact address of its own — the `all` rows are byte-identical, so
+the file is a superset of the pooled one — and composes with
+--exclude-chains, which does: --by-chain
 --exclude-chains 3,5 writes predictive-excl3,5/ with a `chain` column, and the
 ids there are the fit's own numbering with 3 and 5 simply absent."))]
 pub struct FitPredictArgs {
@@ -1370,8 +1384,16 @@ pub struct FitPredictArgs {
     /// the pooled band summarises one forecast; if they separate, it is a
     /// mixture of several and quoting its quantiles reads as uncertainty where
     /// the truth is disagreement. Per-chain rows carry no `rhat_*`/`ess_*` cell
-    /// (those compare chains). Free-forward only: the one-step band pools over
-    /// filter particles as well as draws, so its rows stay `chain = all`.
+    /// (those compare chains). Both horizons are decomposed, and they answer
+    /// different questions: free-forward per-chain bands say whether the chains
+    /// *project* the same future, one-step per-chain bands say whether each chain
+    /// *explains* the observed record. The one-step half is the sharper statement
+    /// about mixing — it is re-anchored to the data at every step, so a
+    /// separation there is disagreement about the fitted trajectory itself
+    /// rather than extrapolation uncertainty. The one-step cell also pools over
+    /// filter particles, but that affects a per-chain band's width exactly as it
+    /// already affects the pooled band's; it is why those rows carry no
+    /// `rhat_*`/`ess_*` (gh#798), not a reason to leave them pooled.
     ///
     /// Composes with `--exclude-chains`, and adds no address of its own: the
     /// keyed directory is the exclusion's (`predictive-excl3,5/`), because a
