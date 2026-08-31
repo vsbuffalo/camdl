@@ -294,6 +294,21 @@ pub struct SMCConfig {
     /// `docs/dev/proposals/2026-04-20-prequential-evaluation.md`.
     pub record_prequential: bool,
 
+    /// Compute the one-step-ahead `PredictionDiag` block (per-particle
+    /// `obs_model.mean()` + `obs_model.sample()` draw + two weighted-quantile
+    /// sorts, at every observation). Off by default: this used to be inferred
+    /// from the observation model's shape (`obs_model.n_streams() > 0` and a
+    /// non-empty `mean()`), which made it true for essentially every fitted
+    /// model — including the inner likelihood evaluation of every PMMH step,
+    /// every IF2 iteration's periodic re-check, and every `survey`/preflight
+    /// call, none of which read `PFilterResult.predictions` (gh#520). Only
+    /// `camdl pfilter --trace <path>` (single-run, not `--replicates`) reads
+    /// it. Requesting this with an observation model that has no streams, or
+    /// whose `mean()`/`sample()` are unimplemented (return `vec![]`), is not
+    /// an error — `PFilterResult.predictions` is simply `None`, exactly as
+    /// before.
+    pub record_predictions: bool,
+
     /// gh#241. The deterministic per-call compute budget: the maximum
     /// cumulative particle-substep count one filter evaluation may execute
     /// before bailing with `PFIterationBudget`. Default
