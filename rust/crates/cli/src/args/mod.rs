@@ -1218,7 +1218,10 @@ Examples:
 Outputs, under the run directory:
   predictive/<stream>.tsv   time | <dims...> | horizon | treatment | rhat_max | q05..q95
   observed/<stream>.tsv     time | <dims...> | value
-Read both, join on (time, <dims>), plot observed over the predictive ribbon."))]
+Read both, join on (time, <dims>), plot observed over the predictive ribbon.
+Under --exclude-chains the bands land in predictive-excl<ids>/ instead, so a
+chain subset never overwrites the pooled artifact; `camdl show <fit>` lists
+every address the fit holds."))]
 pub struct FitPredictArgs {
     /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
     /// directory, or a `fit.toml` config (resolved to its unique run). A handle
@@ -1310,6 +1313,10 @@ pub struct FitPredictArgs {
     /// The escape hatch for a known-stuck minority of chains; post-hoc exclusion
     /// BIASES the posterior toward the retained mode and always prints a warning.
     /// A chain id not in the fit, or excluding every chain, is a hard error.
+    /// The bands, quantities and contrasts land in `predictive-excl<ids>/`,
+    /// `quantities-excl<ids>/` and `contrasts-excl<ids>/`, keyed by the excluded
+    /// SET (`3,5` and `5,3` are one address), so a subset never overwrites the
+    /// pooled artifact and two subsets never overwrite each other.
     #[arg(long, value_name = "IDS")]
     pub exclude_chains: Option<String>,
 }
