@@ -229,7 +229,7 @@ fn max_rel_q95_shift(a: &[FfRow], b: &[FfRow]) -> f64 {
     m
 }
 
-/// Read the `rhat_max` / `ess_min` cells of the first free-forward row of a
+/// Read the `fit_rhat_max` / `fit_ess_min` cells of the first free-forward row of a
 /// `predictive/<stream>.tsv`. Both are section-level (identical across a
 /// section's rows), so the first free-forward row is representative. Returns the
 /// raw cell strings so an empty cell (NotAssessed) stays distinguishable from
@@ -238,7 +238,7 @@ fn free_forward_convergence_cells(pred_tsv: &str) -> (String, String) {
     let mut lines = pred_tsv.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let col = |name: &str| header.iter().position(|c| *c == name).unwrap();
-    let (hi, ri, ei) = (col("horizon"), col("rhat_max"), col("ess_min"));
+    let (hi, ri, ei) = (col("horizon"), col("fit_rhat_max"), col("fit_ess_min"));
     for l in lines {
         let f: Vec<&str> = l.split('\t').collect();
         if f.get(hi).copied() == Some("free_forward") {

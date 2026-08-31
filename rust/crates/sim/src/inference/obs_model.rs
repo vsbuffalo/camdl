@@ -435,6 +435,16 @@ pub(crate) fn dlogp_dprojected(
 
 // ── rmeasure: observation model sampler ─────────────────────────────────────
 
+/// A compiled observation emitter: `(projected, t, counts, aux, rng) → y`, one
+/// draw from `p(y | x_t, θ)`. Named so the sampler and its mean companion below
+/// read as a pair.
+pub type ObsSampleFn =
+    Box<dyn Fn(f64, f64, &[i64], &[(String, f64)], &mut StatefulRng) -> f64>;
+
+/// The mean companion: `(projected, t, counts, aux) → E[y | x_t, θ]`. The same
+/// arguments minus the RNG — the type is what proves it draws nothing.
+pub type ObsMeanFn = Box<dyn Fn(f64, f64, &[i64], &[(String, f64)]) -> f64>;
+
 /// Build an rmeasure closure for pfilter (fixed params).
 /// Takes (projected, t, counts, rng) → observation draw.
 ///
@@ -451,7 +461,7 @@ pub fn compile_obs_sample_pf(
     obs_model: &ObservationModel,
     compiled: Arc<CompiledModel>,
     params: &[f64],
-) -> Box<dyn Fn(f64, f64, &[i64], &[(String, f64)], &mut crate::rng::StatefulRng) -> f64> {
+) -> ObsSampleFn {
     let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled)
         .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {:?}", e));
     let params = params.to_vec();
@@ -473,6 +483,42 @@ pub fn compile_obs_sample_pf(
         // likelihood that references an unavailable aux column then evaluates its
         // denominator to 0 and draws 0, the honest data-free behaviour.
         sample_obs_resolved(&resolved, t, projected, aux, &params, &compiled, &int_s, &real_s, rng)
+    })
+}
+
+/// Build the mean companion of [`compile_obs_sample_pf`] (fixed params).
+/// Takes (projected, t, counts, aux) → `E[y | x_t, θ]`, the value the
+/// observation distribution is centred on **before** observation noise.
+///
+/// Same arguments, same resolution, same state contract as the sampler — the
+/// two differ only in whether the noise is drawn, so this consumes no RNG and
+/// is safe to call beside a sampler without perturbing a paired-seed replay.
+/// It is a sibling rather than an extra field on the sampler's closure because
+/// the two have different signatures (one needs an RNG, one must be provably
+/// unable to consume one) and eight call sites want only the sampler.
+///
+/// The reason it is public: a diagnostic that reduces the predictive over
+/// chains has to reduce the *mean*, not the draw. Observation noise lands in the
+/// within-chain variance and drags a draw-based R̂ toward 1 however much the
+/// chains disagree about the trajectory (gh#794).
+pub fn compile_obs_mean_pf(
+    obs_model: &ObservationModel,
+    compiled: Arc<CompiledModel>,
+    params: &[f64],
+) -> ObsMeanFn {
+    let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled)
+        .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {:?}", e));
+    let params = params.to_vec();
+    let real_s = RealState::new(compiled.real_local_to_global.len());
+    let n_int = compiled.int_local_to_global.len();
+
+    Box::new(move |projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)]| {
+        assert_eq!(counts.len(), n_int,
+            "compile_obs_mean_pf: counts length {} != expected {}", counts.len(), n_int);
+        let int_s = IntState::from_vec(counts.to_vec());
+        eval_obs_mean_resolved(
+            &resolved, t, projected, aux, &params, &compiled, &int_s, &real_s,
+        )
     })
 }
 

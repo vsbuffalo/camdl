@@ -436,7 +436,9 @@ plot-ready families of files there, plus a JSON manifest for each.
 ```
 results/fits/<stem>-<hash8>/predictive/<stream>.tsv
   scenario | sweep:<param>… | time | <dims…> | horizon | treatment
-           | rhat_max | ess_min | n_draws | q05 | q25 | q50 | q75 | q95
+           | fit_rhat_max | fit_ess_min
+           | rhat_mean | ess_mean | rhat_pred | ess_pred
+           | n_draws | q05 | q25 | q50 | q75 | q95
 
 results/fits/<stem>-<hash8>/observed/<stream>.tsv
   time | <dims…> | value
@@ -452,12 +454,52 @@ draw and pooling over particles × draws); both stack under one header. The
 `treatment` column is `posterior` when the band averages over the whole draw
 cloud — the only treatment the band-builder accepts today, enforced by typing
 rather than a runtime check, so a posterior-labelled band over a single point
-estimate is unrepresentable — with `plug_in` reserved. `rhat_max`/`ess_min`
-carry the producing stage's convergence numbers, empty when the stage reported
-none; `n_draws` is the cloud size behind each band. The `scenario` column is
-`fitted` for the one-step rows, which are scenario- and sweep-agnostic by
-construction: filtering _observed_ data through a counterfactual model is
-ill-defined.
+estimate is unrepresentable — with `plug_in` reserved. `fit_rhat_max`/
+`fit_ess_min` are the producing stage's **rank-normalized split R̂** and
+**bulk-ESS** of Vehtari et al. (2021) — the maximum R̂ and the minimum ESS over
+the stage's estimated parameters — empty when the stage reported none, and
+`fit_ess_min` withheld entirely whenever any assessed parameter has no pooled
+ESS rather than minimized over the ones that do. Their names say whose numbers
+they are: the fit's worst parameter, repeated identically on every row —
+provenance, not a statement about the value beside them.
+
+Beside them sit two per-row convergence channels, both reducing the same draws
+the quantiles pool over but grouped by the chain each draw came from.
+`rhat_mean`/`ess_mean` reduce the **latent expected value** `E[y | x_t, θ]`,
+before observation noise: "do the chains agree about the expected trajectory
+here?". `rhat_pred`/`ess_pred` reduce the **predictive draws**: "do the chains
+give the same predictive distribution?". The two are not interchangeable. A
+predictive draw carries observation noise, and that noise lands in the
+within-chain variance, so where it is comparable to the between-chain
+disagreement it swamps the numerator and `rhat_pred` is pulled toward 1 however
+much the chains disagree — worst on overdispersed counts. Decide on `rhat_mean`;
+read `rhat_pred` only for an interval genuinely dominated by irreducible
+observation noise. An empty cell is a refusal (fewer than 2 chains, fewer than 4
+draws per chain, a `draws.tsv` with no chain column, a constant row), never a
+pass; the `one_step` horizon leaves both pairs empty, because its cell pools
+over filter particles as well as draws.
+
+`camdl fit predict --by-chain` adds a leading `chain` column — `all` on the
+pooled rows, the 1-based chain id on one additional band per chain, free-forward
+only. The pooled band is unchanged and remains the default object; without the
+flag no `chain` column is written. A per-chain band carries no `rhat_*`/`ess_*`
+cell, because those compare chains, and reports its own chain's `n_draws`.
+
+`--by-chain` adds no artifact address of its own, and composes with
+`--exclude-chains`, which does. A `--by-chain` file is a strict superset of the
+pooled one — its `all` rows are byte-identical, so re-running with the flag adds
+rows and one column rather than replacing an artifact with a different object,
+exactly as `--scenario` and `--sweep` do. A chain subset is a different
+posterior, so it keeps its own keyed directory, and the two compose:
+`camdl fit predict --by-chain --exclude-chains 3,5` writes
+`predictive-excl3,5/<stream>.tsv` with a `chain` column. Chain ids are the fit's
+own numbering and are never renumbered by an exclusion, so an excluded chain is
+simply absent from the column and the ids that remain name the same chains as in
+the pooled artifact.
+
+`n_draws` is the cloud size behind each band. The `scenario` column is `fitted`
+for the one-step rows, which are scenario- and sweep-agnostic by construction:
+filtering _observed_ data through a counterfactual model is ill-defined.
 
 `observed/<stream>.tsv` is the recorded value per `(time, stratum)` in the same
 tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
@@ -466,12 +508,28 @@ tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
 per stratum, using `index_dims` from the `fit.meta.json` schema and no
 run-store, DSL, or likelihood knowledge.
 
-`predictive.json` (schema tag `camdl.predictive/v1`) declares, per stream, which
+`predictive.json` (schema tag `camdl.predictive/v3`) declares, per stream, which
 columns are join coordinates versus band versus per-cell diagnostics, the
 `value_kind`, and the band's quantile levels; it also carries a
 `chain_selection` block when `--exclude-chains` narrowed the cloud, so a
-chain-subset band is never mistakable for a full-cloud one. `observed.json`
-(`camdl.observed/v1`) is its sibling for the observed series.
+chain-subset band is never mistakable for a full-cloud one.
+
+**The tag is load-bearing, and a stored artifact must be read under its own.**
+The three versions do not carry the same numbers under the same column names:
+
+| tag  | the two stage-provenance columns         | what they hold                                                                                                            |
+| ---- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `v1` | `rhat_max`, `ess_min`                    | classic Gelman–Rubin R̂ and a Geyer per-chain sum                                                                          |
+| `v2` | `rhat_max`, `ess_min` — _the same names_ | rank-normalized split R̂ and bulk-ESS (gh#84), `ess_min` withheld rather than minimized when any parameter has none        |
+| `v3` | `fit_rhat_max`, `fit_ess_min`            | the v2 statistics, renamed to say whose they are, plus the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels |
+
+The v1 → v2 row is why the tag exists at all: the estimator changed and the
+column names did not, so for those two versions the tag is the _only_ signal
+that two artifacts in one store hold different quantities. Joining them without
+keying on it compares a classic R̂ against a rank-normalized split R̂, which are
+not the same number. The v3 rename is the first time that distinction is visible
+in the column name itself. `observed.json` (`camdl.observed/v1`) is its sibling
+for the observed series.
 
 **A chain subset is a different address, not a rewrite of the pooled one.**
 `fit predict --exclude-chains 3,5` writes `predictive-excl3,5/<stream>.tsv` +
@@ -513,6 +571,19 @@ diff-stable axis; `calendar` is additive metadata, not a re-encoding of it.
 `fit predict` also writes the model's `quantities {}` block to
 `quantities/<name>.tsv` plus a `quantities.json` manifest. Those numbers are not
 all folded over the same object, and the manifest says which.
+
+Every banded row there carries `rhat` and `ess` after `n_draws`: the
+rank-normalized split R̂ and bulk-ESS of _that row's_ reported value, reduced
+over the same draws the band pools but grouped by the chain each draw came from.
+One pair, not two, because a quantity has a single value per draw. These are the
+reported estimands, so they are the first convergence numbers to read — and they
+routinely disagree with the parameter R̂ in either direction: a reportable
+quantity is often far better determined than the parameters behind it. What the
+value carries decides which kind of R̂ it is: a `state` or `derived` quantity is
+a deterministic function of the trajectory and the parameters, so its R̂ is
+undiluted; a quantity whose manifest `source` is `observations` reduces sampled
+`y_rep`, carries observation noise, and so reads like `rhat_pred`.
+`simulate --quantities-out` has no chains behind it and writes neither column.
 
 A quantity anchored **inside the observed record** — `value_at(EXPR, last_obs)`,
 `value_at(EXPR, first_obs + 2 'weeks)`, or a literal time at or before the last
@@ -3357,11 +3428,15 @@ wrote fits/../results/fits/02_posterior-77595169/observed.json
 ```
 
 ```
-$ head -3 results/fits/02_posterior-77595169/predictive/weekly_cases.tsv
-scenario	time	horizon	treatment	rhat_max	ess_min	n_draws	q05	q25	q50	q75	q95
-fitted	0	free_forward	posterior	2.0652		20	0	0	0	0	0
-fitted	7	free_forward	posterior	2.0652		20	10.7	19	38	48.25	98.4
+$ cut -f1-6 results/fits/02_posterior-77595169/predictive/weekly_cases.tsv | head -3
+scenario	time	horizon	treatment	fit_rhat_max	fit_ess_min
+fitted	0	free_forward	posterior	2.0652	
+fitted	7	free_forward	posterior	2.0652
 ```
+
+(`cut` keeps the excerpt narrow; the full row continues with the per-row
+`rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels, `n_draws`, and the
+`q05…q95` band.)
 
 > **Current limitation.** A fit whose stage list contains a `pfilter` stage is
 > dropped from `camdl fit table` with a `unknown fit-stage method 'pfilter'`
@@ -4672,7 +4747,9 @@ camdl fit predict results/fits/fit_pgas-4dadedae
 It emits, under the run directory:
 
 ```
-predictive/<stream>.tsv   time | <dims…> | horizon | treatment | rhat_max | q05..q95
+predictive/<stream>.tsv   time | <dims…> | horizon | treatment | fit_rhat_max | fit_ess_min
+                          | rhat_mean | ess_mean | rhat_pred | ess_pred
+                          | n_draws | q05..q95
 observed/<stream>.tsv     time | <dims…> | value
 ```
 

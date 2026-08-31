@@ -1215,13 +1215,67 @@ Examples:
   # Point at a run directory directly (instead of the config)
   camdl fit predict results/fits/sle-8a3f12b4/
 
+  # Look at a disagreement rhat_mean flagged: one band per chain, beside
+  # the pooled one, under a leading `chain` column
+  camdl fit predict --fit fit.toml --by-chain
+
 Outputs, under the run directory:
-  predictive/<stream>.tsv   time | <dims...> | horizon | treatment | rhat_max | q05..q95
+  predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
+                            | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean
+                            | rhat_pred | ess_pred | n_draws | q05..q95
   observed/<stream>.tsv     time | <dims...> | value
 Read both, join on (time, <dims>), plot observed over the predictive ribbon.
 Under --exclude-chains the bands land in predictive-excl<ids>/ instead, so a
 chain subset never overwrites the pooled artifact; `camdl show <fit>` lists
-every address the fit holds."))]
+every address the fit holds.
+
+Convergence columns — two different questions, do not mix them up:
+  fit_rhat_max,        the fit's worst parameter, copied from the producing
+  fit_ess_min          stage. Provenance about the fit, not about this row:
+                       the same number repeats down the whole file.
+  rhat_mean, ess_mean  this row's latent expected value, across chains.
+                       \"Do the chains agree about the expected trajectory
+                       here?\"  ← decide on this one.
+  rhat_pred, ess_pred  this row's predictive draws, across chains. \"Do the
+                       chains give the same predictive distribution?\"
+
+Why the two per-row numbers differ, and why it matters: a predictive draw
+carries observation noise, and that noise lands in the within-chain variance.
+Where the noise is comparable to the between-chain disagreement it swamps the
+numerator and rhat_pred is pulled toward 1 however much the chains disagree —
+worst on overdispersed counts, i.e. most mechanistic models. Chains whose
+8-week forecasts span 93 to 372 cases/day can still show rhat_pred near 1.
+rhat_mean strips the observation noise and sees the disagreement.
+
+  Use rhat_mean to decide whether a fitted curve or a forecast can be reported.
+  Use rhat_pred only when the interval you are quoting is genuinely dominated
+  by irreducible observation noise; it is the weaker of the two.
+
+An empty cell means the reduction was refused, never that it passed: fewer
+than 2 chains, fewer than 4 draws per chain, a draws.tsv with no chain column,
+or a constant row. The one_step horizon leaves both pairs empty (its cells
+pool over particles as well as draws).
+
+quantities/<name>.tsv carries the same reduction as `rhat` and `ess` — one
+pair, because a quantity has one value per draw. Those are the numbers that
+get published, so read them first. A quantity over latent state or derived
+arithmetic is noise-free, so its `rhat` is the undiluted kind; a quantity
+whose manifest `source` is `observations` reduces sampled y_rep and so carries
+observation noise, making it the diluted (rhat_pred) kind. `simulate` has no
+chains behind it and writes neither column.
+
+--by-chain adds a leading `chain` column: `all` on the pooled rows, the
+1-based chain id on one extra band per chain. Use it after rhat_mean has
+flagged something, to see *which* way the chains disagree — overlapping
+per-chain forward bands mean the pooled band summarises one forecast;
+separated ones mean it is a mixture of several, and quoting its quantiles
+reads as uncertainty where the truth is disagreement. Per-chain rows carry no
+rhat_*/ess_* cell (those compare chains) and report their own n_draws. Without
+the flag no `chain` column is written at all. It adds no artifact address of
+its own — the `all` rows are byte-identical, so the file is a superset of the
+pooled one — and composes with --exclude-chains, which does: --by-chain
+--exclude-chains 3,5 writes predictive-excl3,5/ with a `chain` column, and the
+ids there are the fit's own numbering with 3 and 5 simply absent."))]
 pub struct FitPredictArgs {
     /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
     /// directory, or a `fit.toml` config (resolved to its unique run). A handle
@@ -1306,6 +1360,28 @@ pub struct FitPredictArgs {
     /// RNG seed for the y_rep observation sampling (default 1).
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Also band each MCMC chain on its own, tagged by a leading `chain` column
+    /// (`all` on the pooled rows, the 1-based chain id on the per-chain ones) —
+    /// the same way `--scenario` tags its arms and `--sweep` its grid cells. The
+    /// pooled band is unchanged and stays first-class; this adds rows to the
+    /// same file, never a second file tree. Use it to *look* at a disagreement
+    /// `rhat_mean` has already flagged: if the per-chain forward bands overlap,
+    /// the pooled band summarises one forecast; if they separate, it is a
+    /// mixture of several and quoting its quantiles reads as uncertainty where
+    /// the truth is disagreement. Per-chain rows carry no `rhat_*`/`ess_*` cell
+    /// (those compare chains). Free-forward only: the one-step band pools over
+    /// filter particles as well as draws, so its rows stay `chain = all`.
+    ///
+    /// Composes with `--exclude-chains`, and adds no address of its own: the
+    /// keyed directory is the exclusion's (`predictive-excl3,5/`), because a
+    /// `--by-chain` file is a strict superset of the pooled one — the `all`
+    /// rows are byte-identical — while a chain subset is a different posterior.
+    /// Chain ids are the fit's own numbering, never renumbered by an exclusion,
+    /// so an excluded chain is simply absent and the ids that remain line up row
+    /// for row with the pooled artifact's.
+    #[arg(long = "by-chain")]
+    pub by_chain: bool,
 
     /// Drop the named MCMC chains from the posterior cloud before banding —
     /// a comma-separated list of 1-based chain ids (matching the `chain_N/`

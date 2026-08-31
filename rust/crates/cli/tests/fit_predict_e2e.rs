@@ -187,12 +187,12 @@ thin = 1
     let header = lines.next().unwrap();
     assert_eq!(
         header,
-        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "predictive header leads with the scenario overlay axis, then both axes + convergence + band"
     );
     let first = lines.next().expect("at least one predictive row");
     let cols: Vec<&str> = first.split('\t').collect();
-    assert_eq!(cols.len(), 12, "row shape matches header");
+    assert_eq!(cols.len(), 16, "row shape matches header");
     assert_eq!(cols[0], "fitted", "no --scenario → the no-overlay row tagged fitted");
     assert_eq!(cols[2], "free_forward", "horizon axis is explicit");
     assert_eq!(cols[3], "posterior", "treatment axis is explicit (not a plug-in)");
@@ -202,14 +202,15 @@ thin = 1
         "rhat_max carried on the band, got {:?}",
         cols[4]
     );
-    // n_draws is a positive count of the cloud the band was reduced over.
+    // n_draws is a positive count of the cloud the band was reduced over. It
+    // sits after the four per-row convergence cells (gh#794).
     assert!(
-        cols[6].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        cols[10].parse::<usize>().map(|n| n > 0).unwrap_or(false),
         "n_draws carried and positive, got {:?}",
-        cols[6]
+        cols[10]
     );
     // The quantile band is monotone non-decreasing q05 ≤ q25 ≤ … ≤ q95.
-    let qs: Vec<f64> = cols[7..12].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let qs: Vec<f64> = cols[11..16].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in qs.windows(2) {
         assert!(w[0] <= w[1], "quantiles must be ordered: {qs:?}");
     }
@@ -229,16 +230,16 @@ thin = 1
     // A one-step row is well-formed: fitted scenario, posterior treatment,
     // positive n_draws, ordered quantile band.
     let osr: Vec<&str> = one_step_rows[0].split('\t').collect();
-    assert_eq!(osr.len(), 12, "one_step row shape matches header");
+    assert_eq!(osr.len(), 16, "one_step row shape matches header");
     assert_eq!(osr[0], "fitted", "one_step is scenario-agnostic (fitted model)");
     assert_eq!(osr[2], "one_step", "horizon axis");
     assert_eq!(osr[3], "posterior", "one-step is a posterior-treatment band");
     assert!(
-        osr[6].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        osr[10].parse::<usize>().map(|n| n > 0).unwrap_or(false),
         "one_step n_draws carried and positive (the subsample used), got {:?}",
-        osr[6]
+        osr[10]
     );
-    let osq: Vec<f64> = osr[7..12].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let osq: Vec<f64> = osr[11..16].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in osq.windows(2) {
         assert!(w[0] <= w[1], "one_step quantiles must be ordered: {osq:?}");
     }
@@ -260,13 +261,13 @@ thin = 1
     let mut plines = prev_txt.lines();
     assert_eq!(
         plines.next().unwrap(),
-        "scenario\ttime\tn_draws\tq05\tq25\tq50\tq75\tq95",
-        "series quantity header: scenario + time + banded columns"
+        "scenario\ttime\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
+        "series quantity header: scenario + time + the per-row convergence pair + band"
     );
     let prow: Vec<&str> = plines.next().expect("at least one prevalence row").split('\t').collect();
-    assert_eq!(prow.len(), 8, "series row shape matches header");
+    assert_eq!(prow.len(), 10, "series row shape matches header");
     assert_eq!(prow[0], "fitted", "quantity rows tagged with the scenario");
-    let pq: Vec<f64> = prow[3..8].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let pq: Vec<f64> = prow[5..10].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in pq.windows(2) {
         assert!(w[0] <= w[1], "prevalence quantiles ordered: {pq:?}");
     }
@@ -278,11 +279,11 @@ thin = 1
     let mut klines = peak_txt.lines();
     assert_eq!(
         klines.next().unwrap(),
-        "scenario\tn_draws\tq05\tq25\tq50\tq75\tq95",
-        "value-scalar header: scenario + banded columns, no time, no censoring"
+        "scenario\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
+        "value-scalar header: scenario + convergence + banded columns, no time, no censoring"
     );
     let krow: Vec<&str> = klines.next().expect("a peak row").split('\t').collect();
-    assert_eq!(krow.len(), 7, "value-scalar row shape matches header");
+    assert_eq!(krow.len(), 9, "value-scalar row shape matches header");
     assert_eq!(krow[0], "fitted", "value scalar tagged with the scenario");
 
     // ── quantities/peak_obs.tsv: an observation-source value scalar ──────────
@@ -295,12 +296,12 @@ thin = 1
     let mut polines = po_txt.lines();
     assert_eq!(
         polines.next().unwrap(),
-        "scenario\tn_draws\tq05\tq25\tq50\tq75\tq95",
-        "obs value-scalar header: scenario + banded columns, no censoring trio"
+        "scenario\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
+        "obs value-scalar header: scenario + convergence + banded columns, no censoring trio"
     );
     let porow: Vec<&str> = polines.next().expect("a peak_obs row").split('\t').collect();
-    assert_eq!(porow.len(), 7, "obs value-scalar row shape matches header");
-    let q50: f64 = porow[4].parse().expect("peak_obs q50 parses");
+    assert_eq!(porow.len(), 9, "obs value-scalar row shape matches header");
+    let q50: f64 = porow[6].parse().expect("peak_obs q50 parses");
     assert!(
         q50.is_finite() && q50 > 0.0,
         "peak_obs median must be a finite positive count (y_sim materialized), got {q50}"
@@ -313,11 +314,11 @@ thin = 1
     let mut olines2 = onset_txt.lines();
     assert_eq!(
         olines2.next().unwrap(),
-        "scenario\tn_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
-        "censorable scalar header: scenario + the censoring trio"
+        "scenario\tn_draws\trhat\tess\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
+        "censorable scalar header: scenario + convergence + the censoring trio"
     );
     let orow: Vec<&str> = olines2.next().expect("an onset row").split('\t').collect();
-    assert_eq!(orow.len(), 10, "censorable row shape matches header");
+    assert_eq!(orow.len(), 12, "censorable row shape matches header");
 
     // ── quantities/spread.tsv: a Derived over Time scalars inherits censoring ──
     // `spread = onset2 - onset` propagates a censored endpoint, so it must carry
@@ -327,7 +328,7 @@ thin = 1
     let spread_txt = std::fs::read_to_string(&spreadf).unwrap();
     assert_eq!(
         spread_txt.lines().next().unwrap(),
-        "scenario\tn_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
+        "scenario\tn_draws\trhat\tess\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95",
         "a Derived transitively referencing a Time scalar inherits the censoring trio (scenario-tagged)"
     );
 
@@ -361,13 +362,13 @@ thin = 1
         .expect("predictive.json manifest must be written");
     let pjson: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
-    // Review blocker 2. `rhat_max` / `ess_min` in `predictive/<stream>.tsv` are
-    // now sourced from rank-normalized R̂ and bulk-ESS with a new suppression
-    // rule (gh#84), against a contract `docs/workflow.md` publishes under this
-    // tag. A consumer joining `camdl.predictive/v1` across a store written
-    // before and after that change silently mixes two statistics, so the tag
-    // has to move with the fields it describes.
-    assert_eq!(pjson["schema"], "camdl.predictive/v2", "predictive manifest schema tag");
+    // The tag has to move with the fields it describes. v1 → v2 changed the two
+    // stage-provenance columns from classic Gelman-Rubin R̂ and a Geyer sum to
+    // rank-normalized split R̂ and bulk-ESS (gh#84) WITHOUT renaming them, so
+    // for those two versions the tag is the only signal that two artifacts in
+    // one store hold different quantities. v3 renames them `fit_rhat_max` /
+    // `fit_ess_min` and adds the per-row channels (gh#794).
+    assert_eq!(pjson["schema"], "camdl.predictive/v3", "predictive manifest schema tag");
     let streams = pjson["streams"].as_array().expect("streams array");
     let wc = streams
         .iter()
@@ -491,7 +492,7 @@ thin = 1
     let mut lines = pred_txt.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "one header, scenario leads"
     );
     let scenarios_seen: std::collections::BTreeSet<&str> =
@@ -518,7 +519,7 @@ thin = 1
     let mut klines = peak_txt.lines();
     assert_eq!(
         klines.next().unwrap(),
-        "scenario\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
         "quantity header leads with scenario"
     );
     let qscen: std::collections::BTreeSet<&str> =
