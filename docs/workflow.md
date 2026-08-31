@@ -264,23 +264,25 @@ integrates over the cloud by pooling and quantiling, and writes two files under
 the run directory:
 
 - `predictive/<stream>.tsv` —
-  `time | <dims…> | horizon | treatment | rhat_max | ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
+  `time | <dims…> | horizon | treatment | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
   The `q05…q95` columns are the ribbon; the `horizon` and `treatment` columns
   make the two predictive axes explicit (so an honestly-wide posterior band is
-  never confused with a narrow plug-in one), and `rhat_max`/`ess_min` carry the
-  fit's own convergence numbers alongside every band. **`rhat_max` is the
-  rank-normalized split R̂ and `ess_min` the bulk-ESS** (see
-  [Which R̂, and which ESS](#which-r-and-which-ess)); `ess_min` is left empty
+  never confused with a narrow plug-in one), and `fit_rhat_max`/`fit_ess_min`
+  carry the fit's own convergence numbers alongside every band. **`fit_rhat_max`
+  is the rank-normalized split R̂ and `fit_ess_min` the bulk-ESS** (see
+  [Which R̂, and which ESS](#which-r-and-which-ess)); `fit_ess_min` is left empty
   when any assessed parameter has no pooled ESS, rather than minimizing over the
   ones that do. The sibling `predictive.json` tags this contract
-  `camdl.predictive/v2`; a `/v1` manifest carries classic Gelman–Rubin R̂ and a
-  per-chain Geyer sum under the same two column names, so **do not join the two
-  versions without keying on the tag**.
+  `camdl.predictive/v3`. Earlier tags are not join-compatible with it and **must
+  not be joined without keying on the tag**: `/v2` spelled these two columns
+  `rhat_max`/`ess_min` and had no per-row channels, and `/v1` carried classic
+  Gelman–Rubin R̂ and a per-chain Geyer sum under those same two names — the same
+  header, a different statistic.
 
-  `rhat_max`/`ess_min` describe **the fit**, not the row: they are the worst
-  parameter's numbers, repeated identically down the file. The two pairs beside
-  them describe **the row**, and are what a decision to publish a curve or a
-  forecast should rest on:
+  `fit_rhat_max`/`fit_ess_min` describe **the fit**, not the row — which is what
+  their names say. They are the worst parameter's numbers, repeated identically
+  down the file. The two pairs beside them describe **the row**, and are what a
+  decision to publish a curve or a forecast should rest on:
 
   | column pair              | reduces                                    | answers                                                     |
   | ------------------------ | ------------------------------------------ | ----------------------------------------------------------- |
@@ -302,8 +304,8 @@ the run directory:
 
   The two per-row pairs and the parameter R̂ can disagree in either direction,
   and both directions are ordinary. A reportable quantity is often far better
-  determined than the parameters behind it, so a fit with `rhat_max` near 2.7
-  can carry a forecast whose `rhat_mean` sits near 1.05.
+  determined than the parameters behind it, so a fit with `fit_rhat_max` near
+  2.7 can carry a forecast whose `rhat_mean` sits near 1.05.
 - `observed/<stream>.tsv` — `time | <dims…> | value`, the recorded series in the
   same tidy keys.
 

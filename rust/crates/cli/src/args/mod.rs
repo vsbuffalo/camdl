@@ -1217,7 +1217,7 @@ Examples:
 
 Outputs, under the run directory:
   predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
-                            | rhat_max | ess_min | rhat_mean | ess_mean
+                            | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean
                             | rhat_pred | ess_pred | n_draws | q05..q95
   observed/<stream>.tsv     time | <dims...> | value
 Read both, join on (time, <dims>), plot observed over the predictive ribbon.
@@ -1226,8 +1226,9 @@ chain subset never overwrites the pooled artifact; `camdl show <fit>` lists
 every address the fit holds.
 
 Convergence columns — two different questions, do not mix them up:
-  rhat_max, ess_min    the fit's worst parameter, copied from the producing
-                       stage. Provenance: the same number on every row.
+  fit_rhat_max,        the fit's worst parameter, copied from the producing
+  fit_ess_min          stage. Provenance about the fit, not about this row:
+                       the same number repeats down the whole file.
   rhat_mean, ess_mean  this row's latent expected value, across chains.
                        \"Do the chains agree about the expected trajectory
                        here?\"  ← decide on this one.

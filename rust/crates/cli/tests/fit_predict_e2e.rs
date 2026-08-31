@@ -187,7 +187,7 @@ thin = 1
     let header = lines.next().unwrap();
     assert_eq!(
         header,
-        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "predictive header leads with the scenario overlay axis, then both axes + convergence + band"
     );
     let first = lines.next().expect("at least one predictive row");
@@ -362,13 +362,13 @@ thin = 1
         .expect("predictive.json manifest must be written");
     let pjson: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
-    // Review blocker 2. `rhat_max` / `ess_min` in `predictive/<stream>.tsv` are
-    // now sourced from rank-normalized R̂ and bulk-ESS with a new suppression
-    // rule (gh#84), against a contract `docs/workflow.md` publishes under this
-    // tag. A consumer joining `camdl.predictive/v1` across a store written
-    // before and after that change silently mixes two statistics, so the tag
-    // has to move with the fields it describes.
-    assert_eq!(pjson["schema"], "camdl.predictive/v2", "predictive manifest schema tag");
+    // The tag has to move with the fields it describes. v1 → v2 changed the two
+    // stage-provenance columns from classic Gelman-Rubin R̂ and a Geyer sum to
+    // rank-normalized split R̂ and bulk-ESS (gh#84) WITHOUT renaming them, so
+    // for those two versions the tag is the only signal that two artifacts in
+    // one store hold different quantities. v3 renames them `fit_rhat_max` /
+    // `fit_ess_min` and adds the per-row channels (gh#794).
+    assert_eq!(pjson["schema"], "camdl.predictive/v3", "predictive manifest schema tag");
     let streams = pjson["streams"].as_array().expect("streams array");
     let wc = streams
         .iter()
@@ -492,7 +492,7 @@ thin = 1
     let mut lines = pred_txt.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "one header, scenario leads"
     );
     let scenarios_seen: std::collections::BTreeSet<&str> =

@@ -1,21 +1,21 @@
 //! gh#794 — `predictive/<stream>.tsv` carries the convergence of the value in
 //! each row, not only the producing stage's worst-parameter stamp.
 //!
-//! `rhat_max` / `ess_min` are the fit's worst parameter, copied from the stage
-//! summary: one number repeated on every row of every stream. A column called
-//! `rhat_max` sitting beside a predicted value reads as the R̂ *of that
-//! prediction*, and a user acting on it draws the wrong conclusion in either
-//! direction — a reportable quantity can be far better determined than the
-//! parameters behind it, and a forecast can be undetermined while the
-//! parameters look settled.
+//! `fit_rhat_max` / `fit_ess_min` are the fit's worst parameter, copied from
+//! the stage summary: one number repeated on every row of every stream. Under
+//! their former names (`rhat_max` / `ess_min`) they read as the R̂ *of the
+//! prediction beside them*, and a user acting on that draws the wrong
+//! conclusion in either direction — a reportable quantity can be far better
+//! determined than the parameters behind it, and a forecast can be
+//! undetermined while the parameters look settled.
 //!
 //! What these tests pin, end to end through a real two-chain fit:
 //!
 //!   * `per_row_convergence_columns_are_written_and_vary_down_the_file` — the
 //!     four new columns exist in the documented order, carry real numbers, and
-//!     — the point of the change — differ from row to row, while `rhat_max`
-//!     stays constant. A per-row column that never moves has not been computed
-//!     per row.
+//!     — the point of the change — differ from row to row, while
+//!     `fit_rhat_max` stays constant. A per-row column that never moves has
+//!     not been computed per row.
 //!   * `one_step_rows_leave_both_per_row_pairs_empty` — the one-step horizon
 //!     pools over particles as well as draws, so neither channel is emitted
 //!     there. Both are empty, so a reader cannot pick up the diluted one by
@@ -215,7 +215,7 @@ fn per_row_convergence_columns_are_written_and_vary_down_the_file() {
 
     // The documented layout: the stage stamp, then the two per-row pairs, then
     // n_draws. A consumer reading positionally must not find them interleaved.
-    let (c_rmax, c_emin) = (col(&header, "rhat_max"), col(&header, "ess_min"));
+    let (c_rmax, c_emin) = (col(&header, "fit_rhat_max"), col(&header, "fit_ess_min"));
     let (c_rmean, c_emean) = (col(&header, "rhat_mean"), col(&header, "ess_mean"));
     let (c_rpred, c_epred) = (col(&header, "rhat_pred"), col(&header, "ess_pred"));
     let c_n = col(&header, "n_draws");
@@ -252,7 +252,7 @@ fn per_row_convergence_columns_are_written_and_vary_down_the_file() {
     assert_eq!(
         stamps.len(),
         1,
-        "rhat_max is the producing stage's worst parameter — provenance, constant \
+        "fit_rhat_max is the producing stage's worst parameter — provenance, constant \
          down the file. Got {stamps:?}"
     );
     let stamp: f64 = stamps.iter().next().unwrap().parse().expect(
@@ -324,7 +324,7 @@ fn one_step_rows_leave_both_per_row_pairs_empty() {
     }
     // The stage stamp still rides on the one-step rows: it is provenance, so it
     // is horizon-independent and carries the SAME value the free-forward rows do.
-    let i = col(&header, "rhat_max");
+    let i = col(&header, "fit_rhat_max");
     let (_, ff) = rows_of(&txt, "free_forward");
     let ff_stamp = ff[0][i];
     assert!(
@@ -351,7 +351,7 @@ fn predictive_manifest_lists_the_new_diagnostics() {
         .iter()
         .map(|d| d.as_str().unwrap().to_string())
         .collect::<Vec<String>>();
-    for name in ["rhat_max", "ess_min", "rhat_mean", "ess_mean", "rhat_pred", "ess_pred", "n_draws"]
+    for name in ["fit_rhat_max", "fit_ess_min", "rhat_mean", "ess_mean", "rhat_pred", "ess_pred", "n_draws"]
     {
         assert!(diags.contains(&name.to_string()), "manifest must list `{name}`: {diags:?}");
     }

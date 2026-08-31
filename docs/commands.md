@@ -163,8 +163,8 @@ camdl fit predict --fit fit.toml --stream onset     # predicted-vs-observed arti
 
 `fit predict` resolves the fit's posterior draws and writes
 `predictive/<stream>.tsv` (the `q05…q95` ribbon, with typed
-`horizon`/`treatment` columns, the fit's `rhat_max`/`ess_min` stamp, and the
-per-row `rhat_mean`/`rhat_pred` convergence channels) and
+`horizon`/`treatment` columns, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and
+the per-row `rhat_mean`/`rhat_pred` convergence channels) and
 `observed/<stream>.tsv` under the run directory. Join the two on
 `(time, <dims>)` and plot, one facet per stratum. Omit `--horizon` for all
 applicable horizons (chain-binomial → `free_forward` + `one_step`; ODE →

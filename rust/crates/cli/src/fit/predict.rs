@@ -109,10 +109,18 @@ impl TreatmentKind {
     }
 }
 
-/// Every band carries its own convergence number, copied from the producing
-/// stage's summary, so a band is never silent about whether its fit settled.
-/// v1 records the number; it does not gate on it (the refusal policy is the
+/// The producing stage's own convergence numbers, copied from its summary, so
+/// a band is never silent about whether the fit behind it settled. It records
+/// the number; it does not reject a band on it (the refusal policy is the
 /// deferred guardrail).
+///
+/// This is **provenance about the fit**, not a statement about any row: it is
+/// the worst parameter's R̂ over the whole stage, repeated identically on every
+/// row of every stream. That is why the columns it writes are named
+/// `fit_rhat_max` / `fit_ess_min` (gh#794) — under their former names
+/// `rhat_max` / `ess_min` they read as the R̂ of the predicted value beside
+/// them, which they are not. The columns that do describe the row are
+/// [`BandRow::mean_conv`] and [`BandRow::pred_conv`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConvergenceStatus {
     /// The stage reported a Gelman–Rubin R̂ / ESS summary.
@@ -122,18 +130,19 @@ pub enum ConvergenceStatus {
 }
 
 impl ConvergenceStatus {
-    /// The value written into the `rhat_max` column — the empty string when
+    /// The value written into the `fit_rhat_max` column — the empty string when
     /// not assessed, so a consumer can tell "converged at 1.01" from "unknown".
-    pub fn rhat_max_cell(&self) -> String {
+    pub fn fit_rhat_max_cell(&self) -> String {
         match self {
             ConvergenceStatus::Reported { rhat_max, .. } => format!("{rhat_max:.4}"),
             ConvergenceStatus::NotAssessed => String::new(),
         }
     }
 
-    /// The value written into the `ess_min` column — empty when not assessed or
-    /// when no finite ESS was reported (a single-chain / ESS-less summary).
-    pub fn ess_min_cell(&self) -> String {
+    /// The value written into the `fit_ess_min` column — empty when not
+    /// assessed or when no finite ESS was reported (a single-chain / ESS-less
+    /// summary).
+    pub fn fit_ess_min_cell(&self) -> String {
         match self {
             ConvergenceStatus::Reported { ess_min, .. } if ess_min.is_finite() => {
                 // ESS is an effective count; render it cleanly.
@@ -459,7 +468,8 @@ pub struct PredictiveSection<'a> {
 }
 
 /// Render `predictive/<stream>.tsv`: `scenario | time | <dims…> | horizon |
-/// treatment | rhat_max | ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred |
+/// treatment | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred |
+/// ess_pred |
 /// n_draws | q05 … q95`. Tidy, plot-ready; the axes and the convergence channels
 /// are columns so a new predictive cell — a new scenario, a new horizon, a new
 /// treatment — is more rows, never new consumer code. Several
@@ -467,7 +477,7 @@ pub struct PredictiveSection<'a> {
 /// header.
 ///
 /// Two convergence channels sit side by side and must not be confused (gh#794).
-/// `rhat_max`/`ess_min` are the *producing stage's* worst-parameter numbers,
+/// `fit_rhat_max`/`fit_ess_min` are the *producing stage's* worst-parameter numbers,
 /// constant down the file — provenance. `rhat_mean`/`ess_mean` and
 /// `rhat_pred`/`ess_pred` describe *this row*: the first over the latent expected
 /// value, the second over the predictive draws.
@@ -499,7 +509,7 @@ pub fn render_predictive_tsv_sections(
         out.push_str(d);
     }
     out.push_str(
-        "\thorizon\ttreatment\trhat_max\tess_min\
+        "\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
          \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws",
     );
     for (_, label) in QUANTILE_LEVELS {
@@ -509,8 +519,8 @@ pub fn render_predictive_tsv_sections(
     out.push('\n');
 
     for section in sections {
-        let rhat = section.convergence.rhat_max_cell();
-        let ess = section.convergence.ess_min_cell();
+        let rhat = section.convergence.fit_rhat_max_cell();
+        let ess = section.convergence.fit_ess_min_cell();
         let n = section.n_draws.to_string();
         for row in section.rows {
             out.push_str(&section.scenario);
@@ -2176,7 +2186,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         // columns (the group-by keys) in header order: `scenario`, the
         // `sweep:<param>` columns, `time`, the stratum dims, `horizon`,
         // `treatment`. The band columns are the quantile labels; the diagnostics
-        // are the stage-provenance pair (`rhat_max` / `ess_min`, constant down
+        // are the stage-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
         // the file), the per-row pairs (`rhat_mean` / `ess_mean` over the latent
         // expected value, `rhat_pred` / `ess_pred` over the predictive draws —
         // gh#794), and `n_draws`. `value_kind` is the observation's likelihood
@@ -2201,7 +2211,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             "value_kind": value_kind,
             "coordinates": coordinates,
             "diagnostics": [
-                "rhat_max", "ess_min",
+                "fit_rhat_max", "fit_ess_min",
                 "rhat_mean", "ess_mean", "rhat_pred", "ess_pred",
                 "n_draws",
             ],
@@ -2218,14 +2228,23 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // stream was emitted.
     if !predictive_manifest_entries.is_empty() {
         let mut manifest = serde_json::json!({
-            // v2 (gh#84): `rhat_max` and `ess_min` in each stream's TSV are the
-            // rank-normalized split R̂ and the bulk-ESS of Vehtari et al.
-            // (2021), and `ess_min` is now withheld whenever any assessed
-            // parameter has no pooled ESS rather than silently minimizing over
-            // the ones that do. v1 carried classic Gelman-Rubin R̂ and a
-            // Geyer per-chain sum. The fields kept their names, so a consumer
-            // joining across a store has only this tag to tell the two apart.
-            "schema": "camdl.predictive/v2",
+            // The tag is the only thing telling a consumer which column
+            // contract a stored artifact was written under, so every change to
+            // the column set bumps it.
+            //
+            // v1: `rhat_max`/`ess_min` carried classic Gelman-Rubin R̂ and a
+            //     Geyer per-chain sum.
+            // v2 (gh#84): the same two column NAMES, now the rank-normalized
+            //     split R̂ and bulk-ESS of Vehtari et al. (2021), with `ess_min`
+            //     withheld whenever any assessed parameter has no pooled ESS
+            //     rather than silently minimizing over the ones that do. Same
+            //     names, different statistics — which is exactly why the tag
+            //     has to be keyed on.
+            // v3 (gh#794): those two are renamed `fit_rhat_max`/`fit_ess_min`,
+            //     because they describe the *fit* and not the row they sit on,
+            //     and the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred`
+            //     channels join them.
+            "schema": "camdl.predictive/v3",
             "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
         });
@@ -3844,16 +3863,16 @@ mod tests {
         let at = |name: &str| header.iter().position(|h| *h == name)
             .unwrap_or_else(|| panic!("no `{name}` column in {header:?}"));
         // Provenance pair, then the two per-row pairs, then n_draws.
-        assert!(at("rhat_max") < at("rhat_mean"));
+        assert!(at("fit_rhat_max") < at("rhat_mean"));
         assert!(at("ess_mean") < at("rhat_pred"));
         assert!(at("ess_pred") < at("n_draws"));
         // The stage stamp is the fit's worst parameter; the per-row numbers are
         // this row's. They are different numbers, which is the whole point.
-        assert_eq!(cells[at("rhat_max")], "2.7863");
+        assert_eq!(cells[at("fit_rhat_max")], "2.7863");
         assert_ne!(cells[at("rhat_mean")], "", "an assessed row reports rhat_mean");
         assert_ne!(cells[at("rhat_pred")], "", "an assessed row reports rhat_pred");
         assert_ne!(
-            cells[at("rhat_mean")], cells[at("rhat_max")],
+            cells[at("rhat_mean")], cells[at("fit_rhat_max")],
             "the per-row R̂ must not be the stage's provenance stamp"
         );
     }
@@ -3894,7 +3913,7 @@ mod tests {
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
-            "scenario\ttime\tpatch\thorizon\ttreatment\trhat_max\tess_min\
+            "scenario\ttime\tpatch\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
         assert_eq!(lines[1],
             "fitted\t7\tBo\tfree_forward\tposterior\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
@@ -3926,7 +3945,7 @@ mod tests {
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
         // values; n_draws is still carried. Scenario leads.
         assert_eq!(lines[0],
-            "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\
+            "scenario\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
         assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
     }
@@ -3973,7 +3992,7 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(
             lines[0],
-            "scenario\tsweep:k\ttime\thorizon\ttreatment\trhat_max\tess_min\
+            "scenario\tsweep:k\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
             "sweep:k column follows scenario"
         );
