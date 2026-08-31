@@ -1,3 +1,9 @@
+# Seasonal variant of `seir_vaccine`: SEIR+V with sinusoidal forcing and SIA rounds.
+#
+# Adds a `sinusoidal 'ratio` forcing on transmission, waning immunity out of
+# both R and V, and OPV reversion (V --> E) on top of the Layer 1 SIA
+# intervention and its enable-by-scenario switch.
+
 time_unit = 'days
 
 compartments { S, E, I, R, V }

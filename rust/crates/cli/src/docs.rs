@@ -37,6 +37,12 @@ const TOPICS: &[Topic] = &[
         body: include_str!("../../../../docs/intro.md"),
     },
     Topic {
+        slug: "examples",
+        aliases: &["gallery", "models", "example"],
+        summary: "Catalogue of every model shipped with camdl: structure, features, and what each one demonstrates",
+        body: include_str!("../../../../docs/examples.md"),
+    },
+    Topic {
         slug: "language",
         aliases: &["dsl", "spec", "syntax"],
         summary: "Full DSL reference: units & dimensions, parameter kinds, tables, forcings",
@@ -89,6 +95,12 @@ const TOPICS: &[Topic] = &[
         aliases: &["catalogue", "catalog"],
         summary: "Feature catalogue, with the pomp comparison",
         body: include_str!("../../../../docs/user-features.md"),
+    },
+    Topic {
+        slug: "alternatives",
+        aliases: &["compare", "comparison", "stan", "pomp", "vs"],
+        summary: "How camdl compares to Stan, pomp, odin/monty, Turing.jl and others — and which camdl models port elsewhere",
+        body: include_str!("../../../../docs/camdl-alternatives.md"),
     },
     Topic {
         slug: "backends",

@@ -1,3 +1,10 @@
+# Spatial SEIR whose `patch` dimension is DEFINED by a column of a data file.
+#
+# Both the dimension and the tables come from disk: a multi-name declaration
+# (`pop, init_sus : patch`) reads two columns of one file, and a `patch x patch`
+# weight table with `default = 0.0` drives a guarded (`where p != q`)
+# importation transition.
+
 time_unit = 'days
 
 dimensions {
