@@ -112,11 +112,12 @@ method**, and reading the wrong symptom sends you to the wrong fix.
   reading.
 
 **Read the profile, not `trajectory_renewal` alone.** The aggregate is a
-weighted mean over ten equal time bins, and its last bin is high in every run —
-the segment of the path after the final observation is resampled freely whatever
-the sampler's health. So a run whose early path is completely frozen still
-averages a healthy-looking third. Measured on an 11-compartment stochastic Ebola
-model, 103 daily observation times, post-burn-in means across 16 chains:
+weighted mean over ten equal time bins, and its late bins are high in most runs:
+the traceback's lineages have not yet coalesced by the time it reaches the late
+states, so the tail of the path renews freely and holds the mean up. A run whose
+early path is completely frozen therefore still averages a healthy-looking
+third. Measured on an 11-compartment stochastic Ebola model, 103 daily
+observation times, post-burn-in means across 16 chains:
 
 ```text
 b0    b1    b2    b3    b4    b5    b6    b7    b8    b9   trajectory_renewal
@@ -134,14 +135,36 @@ Nothing else in the diagnostics moves when the prefix freezes.
 
 The block reports the profile plus two numbers to act on: **prefix renewal**,
 the mean over the first five bins, and the **renewal gradient**, last bin minus
-first — near 0 when renewal is uniform in time, near 1 when the genealogy has
-coalesced. It also reports the **ancestor-sampling acceptance rate** beside
-them, because a near-zero rate says the ancestor splice is contributing nothing
-to renewal and the profile will not improve on its own. The per-sweep columns
-are in each chain's `trace.tsv` as `trajectory_renewal` and
-`renewal_b0 … renewal_b9`; bin `b` is the fraction of the series from `b/10` to
-`(b+1)/10`, a fixed tenth, so profiles compare across models and particle
-counts.
+first — near 0 when renewal is uniform in time, large when it is concentrated
+late. It also reports the **ancestor-sampling acceptance rate** beside them,
+because a near-zero rate says the ancestor splice is contributing nothing to
+renewal and the profile will not improve on its own.
+
+The per-sweep columns are in each chain's `trace.tsv`: `trajectory_renewal` for
+the aggregate, and one column per bin from `renewal_b0` to `renewal_b9`. Bin `b`
+is the fraction of the series from `b/10` to `(b+1)/10` — a fixed tenth of the
+substep index, so profiles compare across models, particle counts and step
+sizes. (Measured: halving `dt` moved the gradient 0.141 → 0.172, which is the
+invariance the fixed bins were chosen for.)
+
+**Two things the gradient cannot do, worth knowing before you act on it.**
+
+_It does not tell you why renewal is concentrated late._ It reads only the two
+end bins, and two different shapes produce a large value: an early region flat
+and near zero followed by a step — the coalesced genealogy above — or a smooth
+monotone ramp, which is the ordinary finite coalescence depth of a long series
+and can carry a perfectly respectable prefix. camdl's own `polio_afp_es` fixture
+reports a gradient of 0.93 on a `0.06 → 0.31 → 0.53 → … → 0.99` ramp with a
+prefix of 0.449. Firing there is defensible; concluding "the early path is
+frozen" from it is not. Look at the profile and see which shape you have.
+
+_It can miss a frozen prefix on a short series._ Where the last bin is itself
+low, the gradient is bounded below the warning threshold however frozen the
+early path is. A measured 60-step SIRS run has `b0 = 0.000` and a prefix of
+0.001 — completely frozen — and a gradient of only 0.402, because its last bin
+is 0.402 too. That run is caught by the aggregate rule (`trajectory_renewal`
+below 0.10) and not by the gradient. **The two readings cover different cases;
+read both.**
 
 **If you are running PGAS, this is your bullet — do not read past it into (b).**
 The fix for a starved CSMC is particles, and it looks nothing like the fix for
@@ -195,6 +218,14 @@ contributes essentially nothing on this model and more particles do not change
 that, which is what to expect for an integer compartment state whose ancestor
 weight is sharply peaked and often exactly zero on support grounds. That is only
 visible because the two are reported side by side.
+
+**When you re-run at more particles, compare the profile and the aggregate — not
+the gradient.** The gradient describes a shape, and raising the particle count
+can steepen that shape even as the sampler improves. Measured on one model
+family with model, data and sweeps held fixed, raising `particles` 100 → 400 →
+1600 moved the gradient 0.812 → 0.857 → 0.899 while the aggregate improved. The
+verdict does not change — the warning fires at all three — but a user who reads
+the gradient as a progress bar will conclude the re-run made things worse.
 
 **The ordering lesson, which is the generalisable part: establish that the
 instrument is adequate before concluding anything about the model or its
