@@ -29,6 +29,7 @@ pub mod pmmh;
 pub mod correlated_pf;
 pub mod pgas;
 pub mod pgas_grad;
+pub mod pgas_init;  // gh#784 — X₀ from an unconditional SMC pass
 pub mod nuts;
 pub mod linalg;
 pub mod diagnostic;

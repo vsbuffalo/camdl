@@ -998,14 +998,19 @@ pub fn run_stage(
                 // loud `BadInit` diagnostic (collector + stderr) — never
                 // silently — and let the survivors finish.
                 Err(sim::error::SimError::NonFiniteChainStart {
-                    log_posterior, transition, observation, ivp, log_prior,
+                    log_posterior, transition, observation, ivp, log_prior, init,
                 }) => {
+                    // gh#784: the reason names WHERE X₀ came from, because a
+                    // refusal after a successful unconditional initialization
+                    // and a refusal after a failed one are different findings —
+                    // only the second is an initialization failure. Neither ever
+                    // claims p(y | θ) = 0.
                     let reason = format!(
                         "initial complete-data log-posterior is {}, still \
                          non-finite after the first trajectory update \
                          (log-likelihood terms: transition {:.4}, observation \
-                         {:.4}, ivp {:.4}; log prior {:.4})",
-                        log_posterior, transition, observation, ivp, log_prior);
+                         {:.4}, ivp {:.4}; log prior {:.4}); {}",
+                        log_posterior, transition, observation, ivp, log_prior, init);
                     // gh#513: report the start THIS chain ran from, not the
                     // configured one. `chain_starts[chain_id]` is the same
                     // vector handed to `run_pgas` above and the same one
