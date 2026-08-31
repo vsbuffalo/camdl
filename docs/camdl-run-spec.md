@@ -479,6 +479,24 @@ draws per chain, a `draws.tsv` with no chain column, a constant row), never a
 pass; the `one_step` horizon leaves both pairs empty, because its cell pools
 over filter particles as well as draws.
 
+`camdl fit predict --by-chain` adds a leading `chain` column — `all` on the
+pooled rows, the 1-based chain id on one additional band per chain, free-forward
+only. The pooled band is unchanged and remains the default object; without the
+flag no `chain` column is written. A per-chain band carries no `rhat_*`/`ess_*`
+cell, because those compare chains, and reports its own chain's `n_draws`.
+
+`--by-chain` adds no artifact address of its own, and composes with
+`--exclude-chains`, which does. A `--by-chain` file is a strict superset of the
+pooled one — its `all` rows are byte-identical, so re-running with the flag adds
+rows and one column rather than replacing an artifact with a different object,
+exactly as `--scenario` and `--sweep` do. A chain subset is a different
+posterior, so it keeps its own keyed directory, and the two compose:
+`camdl fit predict --by-chain --exclude-chains 3,5` writes
+`predictive-excl3,5/<stream>.tsv` with a `chain` column. Chain ids are the fit's
+own numbering and are never renumbered by an exclusion, so an excluded chain is
+simply absent from the column and the ids that remain name the same chains as in
+the pooled artifact.
+
 `n_draws` is the cloud size behind each band. The `scenario` column is `fitted`
 for the one-step rows, which are scenario- and sweep-agnostic by construction:
 filtering _observed_ data through a counterfactual model is ill-defined.

@@ -109,6 +109,35 @@ impl TreatmentKind {
     }
 }
 
+/// Which chains a band was drawn from — the `chain` column `--by-chain` adds
+/// (gh#794).
+///
+/// The pooled band is the default and stays first-class; a per-chain band is an
+/// addition beside it, tagged rather than filed separately, the same way
+/// `--scenario` tags its arms with a leading `scenario` column and `--sweep`
+/// with `sweep:<param>`. So a run with `--by-chain` is more rows in the same
+/// file, never a second file tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainLabel {
+    /// Every retained chain, pooled — what the file carries with no
+    /// `--by-chain`, and what a reader who does nothing gets.
+    All,
+    /// One chain's draws alone. Carried 0-based; rendered 1-based to match the
+    /// `chain_N/` directories, the `fit summary` per-chain table and
+    /// `--exclude-chains`.
+    One(usize),
+}
+
+impl ChainLabel {
+    /// The value written into the `chain` column.
+    pub fn as_cell(&self) -> String {
+        match self {
+            ChainLabel::All => "all".to_string(),
+            ChainLabel::One(c) => (c + 1).to_string(),
+        }
+    }
+}
+
 /// The producing stage's own convergence numbers, copied from its summary, so
 /// a band is never silent about whether the fit behind it settled. It records
 /// the number; it does not reject a band on it (the refusal policy is the
@@ -391,8 +420,17 @@ pub struct StreamBands {
     /// The dimensions this stream is stratified over, the artifact's key
     /// columns (`[]` for a national series).
     pub index_dims: Vec<String>,
-    /// One row per `(time, stratum)`.
+    /// One row per `(time, stratum)`, pooled over every retained chain — the
+    /// default band, and the only one without `--by-chain`.
     pub rows: Vec<BandRow>,
+    /// `--by-chain` only: the same rows banded from ONE chain's draws, keyed by
+    /// 0-based chain id and ordered by it. EMPTY without the flag, so the
+    /// rendered file is byte-identical to the pooled-only path (gh#794).
+    ///
+    /// A per-chain band carries no `rhat_*` / `ess_*` cell: those compare
+    /// chains, and one chain has nothing to compare against. The pooled row is
+    /// where the comparison lives.
+    pub per_chain: Vec<(usize, Vec<BandRow>)>,
 }
 
 /// One free-forward design cell: a sweep coordinate × scenario, with the banded
@@ -451,6 +489,12 @@ pub struct ObservedRow {
 /// plus the `one_step` rows into the same file — the `scenario` and `horizon`
 /// columns distinguish them.
 pub struct PredictiveSection<'a> {
+    /// Which chains this section's band was drawn from (gh#794). The `chain`
+    /// column is emitted only when some section carries a
+    /// [`ChainLabel::One`] — so a run without `--by-chain` has no such column
+    /// and renders byte-identically, exactly as `sweep:<param>` appears only
+    /// under `--sweep`.
+    pub chain: ChainLabel,
     /// The overlay axis value: a scenario name, or `fitted` for the no-overlay
     /// (fitted-model) rows. ALWAYS present (the leading column), the way
     /// `horizon`/`treatment` are.
@@ -495,9 +539,18 @@ pub fn render_predictive_tsv_sections(
         .map(|s| s.sweep.iter().map(|(n, _)| n.clone()).collect())
         .unwrap_or_default();
 
+    // The `chain` column exists only when a per-chain band is present
+    // (`--by-chain`). Data-driven, like `sweep_names` above: no flag plumbed
+    // into the renderer, and no column when there is nothing to put in it.
+    let by_chain = sections.iter().any(|s| s.chain != ChainLabel::All);
+
     let mut out = String::new();
-    // Header — `scenario` leads (the overlay axis), then the `sweep:<param>`
-    // columns, then everything else. Both are always present in the layout.
+    // Header — `chain` leads when present (the outermost partition of the
+    // draws: every other coordinate is nested inside it), then `scenario` (the
+    // overlay axis), then the `sweep:<param>` columns, then everything else.
+    if by_chain {
+        out.push_str("chain\t");
+    }
     out.push_str("scenario");
     for n in &sweep_names {
         out.push_str("\tsweep:");
@@ -522,7 +575,12 @@ pub fn render_predictive_tsv_sections(
         let rhat = section.convergence.fit_rhat_max_cell();
         let ess = section.convergence.fit_ess_min_cell();
         let n = section.n_draws.to_string();
+        let chain_cell = section.chain.as_cell();
         for row in section.rows {
+            if by_chain {
+                out.push_str(&chain_cell);
+                out.push('\t');
+            }
             out.push_str(&section.scenario);
             // This section's swept values, aligned to `sweep_names`. A section
             // with no sweep coordinate (the one-step rows) leaves each cell empty.
@@ -1591,6 +1649,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // onto each free-forward band section's `n_draws` diagnostic. Stays 0 when
     // the horizon was not requested (that band section then never runs).
     let mut ff_n_draws: usize = 0;
+    // The same count split by chain — the denominator a `--by-chain` section
+    // reports, since a per-chain band is over that chain's draws alone (gh#794).
+    // Empty when the horizon was not requested or the cloud carries no chain
+    // keys.
+    let mut ff_draws_per_chain: BTreeMap<usize, usize> = BTreeMap::new();
 
     // ── Free-forward horizon: replay the posterior forward under each scenario.
     //
@@ -1753,6 +1816,9 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             Some(k) => ff_idx.iter().map(|&i| k.per_draw[i].map(|(c, _)| c)).collect(),
             None => vec![None; ff_idx.len()],
         };
+        for c in ff_chain_of_point.iter().flatten() {
+            *ff_draws_per_chain.entry(*c).or_insert(0) += 1;
+        }
         if ff_chain_of_point.iter().all(Option::is_none) {
             eprintln!(
                 "fit predict: this fit's draws.tsv carries no chain column, so the \
@@ -1760,6 +1826,13 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                  ess_pred) are left empty — a between-chain statistic needs to know \
                  which chain each draw came from."
             );
+            if args.by_chain {
+                eprintln!(
+                    "fit predict: --by-chain has nothing to split on for the same \
+                     reason, so no `chain` column is written and the file carries \
+                     the pooled band only."
+                );
+            }
         }
         if ff_n_draws < posterior.n_draws() {
             eprintln!(
@@ -2042,6 +2115,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     scenario: scenario_name.clone(),
                     bands: assemble_predictive(
                         &model, accum, &ff_emit_times, &leaves, schema.as_ref(),
+                        args.by_chain,
                     )?,
                 });
             }
@@ -2158,7 +2232,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
 
         let mut sections: Vec<PredictiveSection> = Vec::new();
         for (cell, s) in &ff_for_source {
+            // The pooled band first — the default object, and the one a reader
+            // who ignores the `chain` column gets.
             sections.push(PredictiveSection {
+                chain: ChainLabel::All,
                 scenario: cell.scenario.clone(),
                 sweep: cell.sweep.clone(),
                 horizon: Horizon::FreeForward,
@@ -2167,9 +2244,29 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 n_draws: ff_n_draws,
                 rows: &s.rows,
             });
+            // Then one section per chain (`--by-chain`; empty otherwise). Each
+            // reports its OWN draw count: a per-chain band is over that chain's
+            // draws, and carrying the pooled `n_draws` there would overstate the
+            // denominator by the number of chains.
+            for (chain, chain_rows) in &s.per_chain {
+                sections.push(PredictiveSection {
+                    chain: ChainLabel::One(*chain),
+                    scenario: cell.scenario.clone(),
+                    sweep: cell.sweep.clone(),
+                    horizon: Horizon::FreeForward,
+                    treatment: treatment_kind,
+                    convergence: posterior.convergence,
+                    n_draws: ff_draws_per_chain.get(chain).copied().unwrap_or(0),
+                    rows: chain_rows,
+                });
+            }
         }
         if let Some(s) = os_stream {
             sections.push(PredictiveSection {
+                // The one-step cell pools over filter particles as well as
+                // draws, so it has no per-chain decomposition to offer: its rows
+                // stay `all` even under `--by-chain`.
+                chain: ChainLabel::All,
                 scenario: crate::args::FITTED.to_string(),
                 // The one-step horizon is sweep-agnostic (it filters the OBSERVED
                 // data through the fitted model, so a swept-parameter overlay is
@@ -2183,15 +2280,20 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             });
         }
         // Record this stream's join contract for `predictive.json`. Coordinate
-        // columns (the group-by keys) in header order: `scenario`, the
-        // `sweep:<param>` columns, `time`, the stratum dims, `horizon`,
-        // `treatment`. The band columns are the quantile labels; the diagnostics
+        // columns (the group-by keys) in header order: the `chain` column when
+        // `--by-chain` wrote one, `scenario`, the `sweep:<param>` columns,
+        // `time`, the stratum dims, `horizon`, `treatment`. The band columns are
+        // the quantile labels; the diagnostics
         // are the stage-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
         // the file), the per-row pairs (`rhat_mean` / `ess_mean` over the latent
         // expected value, `rhat_pred` / `ess_pred` over the predictive draws —
         // gh#794), and `n_draws`. `value_kind` is the observation's likelihood
         // family (the nature of the banded value).
-        let mut coordinates: Vec<String> = vec!["scenario".to_string()];
+        let mut coordinates: Vec<String> = Vec::new();
+        if sections.iter().any(|s| s.chain != ChainLabel::All) {
+            coordinates.push("chain".to_string());
+        }
+        coordinates.push("scenario".to_string());
         coordinates.extend(sweep_col_names.iter().map(|n| format!("sweep:{n}")));
         coordinates.push("time".to_string());
         coordinates.extend(index_dims.iter().cloned());
@@ -2630,12 +2732,18 @@ fn forecast_times(obs_times: &[f64], output_times: &[f64]) -> Vec<f64> {
 /// bands, grouping leaves by logical stream. The scenario/horizon/treatment/
 /// convergence/n_draws labels are applied at render time (each
 /// [`PredictiveSection`] carries them), so this returns only the bands.
+///
+/// `by_chain` additionally bands each chain's own draws into
+/// [`StreamBands::per_chain`] (gh#794). The pooled band is computed and
+/// returned identically either way — a per-chain band is an addition beside it,
+/// never a replacement.
 fn assemble_predictive(
     model: &ir::Model,
     accum: &ScenarioAccum,
     emit_times: &[Vec<f64>],
     leaves: &[LeafObs],
     schema: Option<&ObsSchema>,
+    by_chain: bool,
 ) -> Result<Vec<StreamBands>, String> {
     // Group leaf indices by logical source, preserving first-appearance order.
     let mut order: Vec<String> = Vec::new();
@@ -2658,13 +2766,16 @@ fn assemble_predictive(
             .stratum.iter().map(|k| k.dim.clone()).collect();
         let index_dims = index_dims_for(schema, source, &leaf_dims);
         let mut rows = Vec::new();
+        // chain id → its rows, in the same (leaf, time) order as `rows`.
+        let mut per_chain: BTreeMap<usize, Vec<BandRow>> = BTreeMap::new();
         for &si in leaf_idxs {
             let stratum: Vec<(String, String)> = model.observations[si]
                 .stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
             for (ti, draws_at_t) in accum.samples[si].iter().enumerate() {
+                let t = emit_times[si][ti];
                 rows.push(
                     band_row(
-                        emit_times[si][ti],
+                        t,
                         stratum.clone(),
                         CellDraws {
                             predictive: draws_at_t,
@@ -2672,13 +2783,39 @@ fn assemble_predictive(
                         },
                         &accum.draw_chain,
                     )
-                    .map_err(|e| {
-                        format!("stream '{source}' at t={}: {e}", emit_times[si][ti])
-                    })?,
+                    .map_err(|e| format!("stream '{source}' at t={t}: {e}"))?,
                 );
+                if !by_chain {
+                    continue;
+                }
+                // One band per chain, over that chain's draws ALONE — no
+                // truncation to a common length (that is an R̂ precondition,
+                // not a banding one), and no convergence cells (a between-chain
+                // statistic has nothing to compare a single chain against).
+                let Some(split) =
+                    crate::fit::row_convergence::group_by_chain(draws_at_t, &accum.draw_chain)
+                else {
+                    continue;
+                };
+                for (chain, chain_draws) in split {
+                    per_chain.entry(chain).or_default().push(BandRow {
+                        time: t,
+                        stratum: stratum.clone(),
+                        quantiles: band(&chain_draws).map_err(|e| {
+                            format!("stream '{source}' at t={t}, chain {}: {e}", chain + 1)
+                        })?,
+                        mean_conv: None,
+                        pred_conv: None,
+                    });
+                }
             }
         }
-        streams.push(StreamBands { source: source.clone(), index_dims, rows });
+        streams.push(StreamBands {
+            source: source.clone(),
+            index_dims,
+            rows,
+            per_chain: per_chain.into_iter().collect(),
+        });
     }
 
     Ok(streams)
@@ -3147,7 +3284,15 @@ fn one_step_bands(
                 });
             }
         }
-        streams.push(StreamBands { source: source.clone(), index_dims, rows });
+        // No per-chain decomposition on the one-step horizon: the cell pools
+        // over (posterior draws × filter particles), so a "chain's band" here
+        // would not be the same object the free-forward per-chain band is.
+        streams.push(StreamBands {
+            source: source.clone(),
+            index_dims,
+            rows,
+            per_chain: Vec::new(),
+        });
     }
 
     Ok((streams, n_pooled))
@@ -3848,6 +3993,7 @@ mod tests {
         let tsv = render_predictive_tsv_sections(
             &[],
             &[PredictiveSection {
+                chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
@@ -3889,11 +4035,149 @@ mod tests {
         assert_eq!(row.quantiles.len(), QUANTILE_LEVELS.len());
     }
 
+    // ── gh#794: `--by-chain` ────────────────────────────────────────────────
+
+    /// The `chain` column appears only when a per-chain section is present, and
+    /// then it leads. Without one the rendered bytes are unchanged — the
+    /// property `--by-chain` has to keep, since every existing consumer reads
+    /// the no-flag file.
+    #[test]
+    fn the_chain_column_is_absent_until_a_per_chain_section_exists() {
+        let rows = vec![bare_row(7.0, vec![], vec![1.0, 2.0, 3.0, 4.0, 5.0])];
+        let conv = ConvergenceStatus::Reported { rhat_max: 1.0, ess_min: 100.0 };
+        let pooled = PredictiveSection {
+            chain: ChainLabel::All,
+            scenario: "fitted".to_string(),
+            sweep: Vec::new(),
+            horizon: Horizon::FreeForward,
+            treatment: TreatmentKind::Posterior,
+            convergence: conv,
+            n_draws: 40,
+            rows: &rows,
+        };
+        let without = render_predictive_tsv_sections(&[], std::slice::from_ref(&pooled));
+        assert!(
+            !without.lines().next().unwrap().starts_with("chain\t"),
+            "no per-chain section ⇒ no `chain` column: {}",
+            without.lines().next().unwrap()
+        );
+
+        let per_chain = PredictiveSection { chain: ChainLabel::One(2), n_draws: 20, ..pooled };
+        // Rebuild the pooled section (it was consumed by the struct update).
+        let pooled = PredictiveSection {
+            chain: ChainLabel::All,
+            scenario: "fitted".to_string(),
+            sweep: Vec::new(),
+            horizon: Horizon::FreeForward,
+            treatment: TreatmentKind::Posterior,
+            convergence: conv,
+            n_draws: 40,
+            rows: &rows,
+        };
+        let with = render_predictive_tsv_sections(&[], &[pooled, per_chain]);
+        let lines: Vec<&str> = with.trim_end().lines().collect();
+        assert!(lines[0].starts_with("chain\tscenario\t"), "chain leads: {}", lines[0]);
+        assert!(lines[1].starts_with("all\tfitted\t"), "the pooled row is `all`: {}", lines[1]);
+        // 0-based internally, 1-based in the artifact — matching `chain_N/` and
+        // `--exclude-chains`.
+        assert!(lines[2].starts_with("3\tfitted\t"), "chain 2 renders as 3: {}", lines[2]);
+        // A per-chain section reports its own denominator, not the pooled one.
+        let hdr: Vec<&str> = lines[0].split('\t').collect();
+        let n = hdr.iter().position(|h| *h == "n_draws").unwrap();
+        assert_eq!(lines[1].split('\t').nth(n), Some("40"));
+        assert_eq!(lines[2].split('\t').nth(n), Some("20"));
+    }
+
+    /// Everything except the leading `chain` cell is unchanged by the flag, so a
+    /// consumer that drops the column recovers the pooled file exactly.
+    #[test]
+    fn by_chain_only_prepends_a_cell_to_the_rows_that_were_already_there() {
+        let rows = vec![
+            bare_row(7.0, vec![], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+            bare_row(14.0, vec![], vec![2.0, 3.0, 4.0, 5.0, 6.0]),
+        ];
+        let conv = ConvergenceStatus::NotAssessed;
+        let mk = |chain| PredictiveSection {
+            chain,
+            scenario: "fitted".to_string(),
+            sweep: Vec::new(),
+            horizon: Horizon::FreeForward,
+            treatment: TreatmentKind::Posterior,
+            convergence: conv,
+            n_draws: 40,
+            rows: &rows,
+        };
+        let pooled_only = render_predictive_tsv_sections(&[], &[mk(ChainLabel::All)]);
+        let with_chain =
+            render_predictive_tsv_sections(&[], &[mk(ChainLabel::All), mk(ChainLabel::One(0))]);
+        let stripped: String = with_chain
+            .lines()
+            .filter(|l| !l.starts_with("1\t")) // drop the per-chain rows
+            .map(|l| l.split_once('\t').unwrap().1) // drop the `chain` cell
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            stripped, pooled_only,
+            "dropping the `chain` column and its per-chain rows must reproduce \
+             the pooled file byte for byte"
+        );
+    }
+
+    /// A per-chain band carries no convergence cells: R̂ compares chains, and a
+    /// single chain has nothing to compare against. Publishing a number there
+    /// would be the same category error the whole issue is about.
+    #[test]
+    fn a_per_chain_row_reports_no_between_chain_statistic() {
+        let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
+        let pooled =
+            band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
+                .expect("the pooled cell bands");
+        assert!(pooled.mean_conv.is_some(), "the pooled row does carry one");
+
+        // What `assemble_predictive` builds for a per-chain row.
+        let one_chain = BandRow {
+            time: 56.0,
+            stratum: vec![],
+            quantiles: pooled.quantiles.clone(),
+            mean_conv: None,
+            pred_conv: None,
+        };
+        let rows = vec![one_chain];
+        let tsv = render_predictive_tsv_sections(
+            &[],
+            &[PredictiveSection {
+                chain: ChainLabel::One(0),
+                scenario: "fitted".to_string(),
+                sweep: Vec::new(),
+                horizon: Horizon::FreeForward,
+                treatment: TreatmentKind::Posterior,
+                convergence: ConvergenceStatus::NotAssessed,
+                n_draws: 16,
+                rows: &rows,
+            }],
+        );
+        let lines: Vec<&str> = tsv.trim_end().lines().collect();
+        let hdr: Vec<&str> = lines[0].split('\t').collect();
+        let cells: Vec<&str> = lines[1].split('\t').collect();
+        for name in ["rhat_mean", "ess_mean", "rhat_pred", "ess_pred"] {
+            let i = hdr.iter().position(|h| *h == name).unwrap();
+            assert_eq!(cells[i], "", "`{name}` must be empty on a single-chain band");
+        }
+    }
+
+    #[test]
+    fn chain_label_renders_one_based_and_pooled_as_all() {
+        assert_eq!(ChainLabel::All.as_cell(), "all");
+        assert_eq!(ChainLabel::One(0).as_cell(), "1");
+        assert_eq!(ChainLabel::One(7).as_cell(), "8");
+    }
+
     #[test]
     fn predictive_tsv_has_typed_axis_columns_and_one_row_per_cell() {
         let stream = StreamBands {
             source: "onset".into(),
             index_dims: vec!["patch".into()],
+            per_chain: Vec::new(),
             rows: vec![
                 bare_row(7.0, stratum(&[("patch", "Bo")]), vec![0.0, 1.0, 3.0, 6.0, 12.0]),
                 bare_row(7.0, stratum(&[("patch", "Bombali")]), vec![0.0, 0.0, 1.0, 3.0, 7.0]),
@@ -3902,6 +4186,7 @@ mod tests {
         let tsv = render_predictive_tsv_sections(
             &stream.index_dims,
             &[PredictiveSection {
+                chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
@@ -3927,11 +4212,13 @@ mod tests {
         let stream = StreamBands {
             source: "cases".into(),
             index_dims: vec![],
+            per_chain: Vec::new(),
             rows: vec![bare_row(1.0, vec![], vec![1.0, 2.0, 3.0, 4.0, 5.0])],
         };
         let tsv = render_predictive_tsv_sections(
             &stream.index_dims,
             &[PredictiveSection {
+                chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
@@ -3961,6 +4248,7 @@ mod tests {
             &[],
             &[
                 PredictiveSection {
+                    chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 8.0)],
                     horizon: Horizon::FreeForward,
@@ -3970,6 +4258,7 @@ mod tests {
                     rows: &rows,
                 },
                 PredictiveSection {
+                    chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 12.0)],
                     horizon: Horizon::FreeForward,
@@ -3979,6 +4268,7 @@ mod tests {
                     rows: &rows,
                 },
                 PredictiveSection {
+                    chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: Vec::new(), // one-step is sweep-agnostic
                     horizon: Horizon::OneStepAhead,

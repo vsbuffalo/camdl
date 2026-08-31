@@ -302,6 +302,15 @@ the run directory:
   the `one_step` horizon leaves both pairs empty, because its cell pools over
   filter particles as well as draws.
 
+  `--by-chain` is the follow-up once `rhat_mean` has flagged a row: it adds a
+  leading `chain` column and one extra band per chain beside the pooled `all`
+  rows, so you can see _which_ way the chains disagree. Overlapping per-chain
+  forward bands mean the pooled band summarises one forecast; separated ones
+  mean it is a mixture of several, and quoting its quantiles reads as
+  uncertainty where the truth is disagreement — opposite actions. A per-chain
+  row carries no `rhat_*`/`ess_*` cell (those compare chains) and reports its
+  own `n_draws`. Without the flag no `chain` column is written.
+
   The two per-row pairs and the parameter R̂ can disagree in either direction,
   and both directions are ordinary. A reportable quantity is often far better
   determined than the parameters behind it, so a fit with `fit_rhat_max` near

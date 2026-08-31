@@ -1215,6 +1215,10 @@ Examples:
   # Point at a run directory directly (instead of the config)
   camdl fit predict results/fits/sle-8a3f12b4/
 
+  # Look at a disagreement rhat_mean flagged: one band per chain, beside
+  # the pooled one, under a leading `chain` column
+  camdl fit predict --fit fit.toml --by-chain
+
 Outputs, under the run directory:
   predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
                             | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean
@@ -1250,7 +1254,20 @@ rhat_mean strips the observation noise and sees the disagreement.
 An empty cell means the reduction was refused, never that it passed: fewer
 than 2 chains, fewer than 4 draws per chain, a draws.tsv with no chain column,
 or a constant row. The one_step horizon leaves both pairs empty (its cells
-pool over particles as well as draws)."))]
+pool over particles as well as draws).
+
+--by-chain adds a leading `chain` column: `all` on the pooled rows, the
+1-based chain id on one extra band per chain. Use it after rhat_mean has
+flagged something, to see *which* way the chains disagree — overlapping
+per-chain forward bands mean the pooled band summarises one forecast;
+separated ones mean it is a mixture of several, and quoting its quantiles
+reads as uncertainty where the truth is disagreement. Per-chain rows carry no
+rhat_*/ess_* cell (those compare chains) and report their own n_draws. Without
+the flag no `chain` column is written at all. It adds no artifact address of
+its own — the `all` rows are byte-identical, so the file is a superset of the
+pooled one — and composes with --exclude-chains, which does: --by-chain
+--exclude-chains 3,5 writes predictive-excl3,5/ with a `chain` column, and the
+ids there are the fit's own numbering with 3 and 5 simply absent."))]
 pub struct FitPredictArgs {
     /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
     /// directory, or a `fit.toml` config (resolved to its unique run). A handle
@@ -1335,6 +1352,28 @@ pub struct FitPredictArgs {
     /// RNG seed for the y_rep observation sampling (default 1).
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Also band each MCMC chain on its own, tagged by a leading `chain` column
+    /// (`all` on the pooled rows, the 1-based chain id on the per-chain ones) —
+    /// the same way `--scenario` tags its arms and `--sweep` its grid cells. The
+    /// pooled band is unchanged and stays first-class; this adds rows to the
+    /// same file, never a second file tree. Use it to *look* at a disagreement
+    /// `rhat_mean` has already flagged: if the per-chain forward bands overlap,
+    /// the pooled band summarises one forecast; if they separate, it is a
+    /// mixture of several and quoting its quantiles reads as uncertainty where
+    /// the truth is disagreement. Per-chain rows carry no `rhat_*`/`ess_*` cell
+    /// (those compare chains). Free-forward only: the one-step band pools over
+    /// filter particles as well as draws, so its rows stay `chain = all`.
+    ///
+    /// Composes with `--exclude-chains`, and adds no address of its own: the
+    /// keyed directory is the exclusion's (`predictive-excl3,5/`), because a
+    /// `--by-chain` file is a strict superset of the pooled one — the `all`
+    /// rows are byte-identical — while a chain subset is a different posterior.
+    /// Chain ids are the fit's own numbering, never renumbered by an exclusion,
+    /// so an excluded chain is simply absent and the ids that remain line up row
+    /// for row with the pooled artifact's.
+    #[arg(long = "by-chain")]
+    pub by_chain: bool,
 
     /// Drop the named MCMC chains from the posterior cloud before banding —
     /// a comma-separated list of 1-based chain ids (matching the `chain_N/`

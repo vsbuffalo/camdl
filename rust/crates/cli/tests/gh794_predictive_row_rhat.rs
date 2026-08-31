@@ -23,6 +23,15 @@
 //!   * `predictive_manifest_lists_the_new_diagnostics` — the join contract
 //!     beside the TSVs names them, so a consumer discovers them without
 //!     reading the header.
+//!   * `by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical`
+//!     — `--by-chain` adds a leading `chain` column and one band per chain, and
+//!     nothing else: strip the column and the per-chain rows and the file is
+//!     byte-identical to the one written without the flag.
+//!   * `by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_
+//!     address` — only the exclusion keys the artifact address (gh#795);
+//!     `--by-chain` writes a superset of the pooled file and needs none. Chain
+//!     ids are the fit's own, so a subset artifact's `2` names the same chain
+//!     the pooled artifact's `2` does.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -185,6 +194,10 @@ fn setup(tag: &str) -> PathBuf {
 }
 
 fn fit_then_predict(bin: &Path, tmp: &Path) {
+    fit_then_predict_with(bin, tmp, &[])
+}
+
+fn fit_then_predict_with(bin: &Path, tmp: &Path, extra: &[&str]) {
     let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(
         out.status.success(),
@@ -192,10 +205,16 @@ fn fit_then_predict(bin: &Path, tmp: &Path) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = run(bin, tmp, &["fit", "predict", "--fit", "fit.toml"]);
+    predict_with(bin, tmp, extra);
+}
+
+fn predict_with(bin: &Path, tmp: &Path, extra: &[&str]) {
+    let mut args = vec!["fit", "predict", "--fit", "fit.toml"];
+    args.extend_from_slice(extra);
+    let out = run(bin, tmp, &args);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "fit predict {extra:?} failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -355,4 +374,205 @@ fn predictive_manifest_lists_the_new_diagnostics() {
     {
         assert!(diags.contains(&name.to_string()), "manifest must list `{name}`: {diags:?}");
     }
+}
+
+/// `--by-chain` adds a leading `chain` column with `all` on the pooled rows and
+/// one band per chain beside them — and, the property every existing consumer
+/// depends on, changes nothing else: strip the `chain` column and the per-chain
+/// rows and the file is byte-identical to the one written without the flag.
+#[test]
+fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
+    let bin = skip_if_missing_binary();
+    let tmp = setup("bychain");
+
+    // The pooled file first, then the same fit re-predicted with the flag.
+    fit_then_predict(&bin, &tmp);
+    let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
+        .expect("predictive/weekly_cases.tsv must be written");
+    let pooled_only = std::fs::read_to_string(&pred).unwrap();
+    assert!(
+        !pooled_only.lines().next().unwrap().starts_with("chain\t"),
+        "no --by-chain ⇒ no `chain` column"
+    );
+
+    predict_with(&bin, &tmp, &["--by-chain"]);
+    let with_chain = std::fs::read_to_string(&pred).unwrap();
+    let header: Vec<&str> = with_chain.lines().next().unwrap().split('\t').collect();
+    assert_eq!(header[0], "chain", "the chain column leads: {header:?}");
+
+    // Both chains of the fit appear, 1-based, beside the pooled `all` rows.
+    let chains: std::collections::BTreeSet<&str> = with_chain
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').next().unwrap())
+        .collect();
+    assert_eq!(
+        chains,
+        ["1", "2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        "the pooled band plus one band per chain, 1-based"
+    );
+
+    // The pooled rows survive untouched: drop the per-chain rows and the leading
+    // cell and the two files agree byte for byte.
+    let stripped: String = with_chain
+        .lines()
+        .filter(|l| l.starts_with("all\t") || l.starts_with("chain\t"))
+        .map(|l| format!("{}\n", l.split_once('\t').unwrap().1))
+        .collect();
+    assert_eq!(
+        stripped, pooled_only,
+        "--by-chain must add rows and one column, never alter the pooled band"
+    );
+
+    // A per-chain row is a band over one chain, so it carries no between-chain
+    // statistic — and its n_draws is its own chain's, not the pooled count.
+    let ix = |name: &str| header.iter().position(|h| *h == name).unwrap();
+    let (c_n, c_hor) = (ix("n_draws"), ix("horizon"));
+    let mut pooled_n = String::new();
+    let mut per_chain_n: Vec<String> = Vec::new();
+    for l in with_chain.lines().skip(1) {
+        let c: Vec<&str> = l.split('\t').collect();
+        if c[c_hor] != "free_forward" {
+            continue;
+        }
+        if c[0] == "all" {
+            pooled_n = c[c_n].to_string();
+            continue;
+        }
+        for name in ["rhat_mean", "ess_mean", "rhat_pred", "ess_pred"] {
+            assert_eq!(
+                c[ix(name)], "",
+                "a single-chain band has no `{name}`: R-hat compares chains"
+            );
+        }
+        per_chain_n.push(c[c_n].to_string());
+    }
+    assert!(!per_chain_n.is_empty(), "free-forward per-chain rows exist:\n{with_chain}");
+    let pooled: usize = pooled_n.parse().unwrap();
+    for n in &per_chain_n {
+        let n: usize = n.parse().unwrap();
+        assert!(
+            n < pooled && n > 0,
+            "a chain's band is over its own draws ({n}), not the pooled {pooled}"
+        );
+    }
+
+    // One-step rows keep `chain = all`: that cell pools over filter particles as
+    // well as draws, so it has no per-chain decomposition to offer.
+    let one_step_chains: std::collections::BTreeSet<&str> = with_chain
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').collect::<Vec<&str>>())
+        .filter(|c| c[c_hor] == "one_step")
+        .map(|c| c[0])
+        .collect();
+    assert_eq!(
+        one_step_chains,
+        ["all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        "one_step is not decomposed by chain"
+    );
+
+    // The manifest declares the new coordinate, so a consumer discovers it
+    // without parsing the header.
+    let path = find_file(&tmp.join("results"), "predictive.json").unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let coords: Vec<String> = v["streams"][0]["coordinates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(coords.first().map(String::as_str), Some("chain"), "{coords:?}");
+}
+
+/// `--by-chain` and `--exclude-chains` compose, and only one of them keys the
+/// artifact address.
+///
+/// `--exclude-chains` does key it (gh#795): a chain subset is a different
+/// posterior, and writing it at the pooled address replaced the run's canonical
+/// predictive with a cherry-picked one. `--by-chain` does not: its file is a
+/// strict superset of the pooled one — the `all` rows are byte-identical — so
+/// re-running with the flag adds rows and a column rather than replacing an
+/// artifact with a different object, exactly as `--scenario` and `--sweep` do.
+///
+/// The sharp part is the numbering. `ChainSelection::apply_keyed` filters draws
+/// and leaves each row's `chain` value alone, so the ids in a subset artifact
+/// name the same chains as in the pooled one. Excluding chain 1 of a two-chain
+/// fit must therefore leave a `chain` column reading `2`, not a renumbered `1`
+/// — a renumbering would make the two artifacts silently incomparable.
+#[test]
+fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address() {
+    let bin = skip_if_missing_binary();
+    let tmp = setup("compose");
+
+    // Pooled first, so the canonical artifact exists to compare against.
+    fit_then_predict(&bin, &tmp);
+    let pooled = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
+        .expect("the pooled predictive is written first");
+    let pooled_before = std::fs::read_to_string(&pooled).unwrap();
+
+    // Drop chain 1 and ask for the per-chain decomposition at the same time.
+    predict_with(&bin, &tmp, &["--by-chain", "--exclude-chains", "1"]);
+
+    // The exclusion keys the address; --by-chain adds none of its own.
+    let excl = find_artifact(&tmp.join("results"), "predictive-excl1", "weekly_cases")
+        .expect("--exclude-chains 1 writes predictive-excl1/, not predictive/");
+    let txt = std::fs::read_to_string(&excl).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&pooled).unwrap(),
+        pooled_before,
+        "the pooled artifact is untouched by a chain-subset run (gh#795)"
+    );
+
+    let header: Vec<&str> = txt.lines().next().unwrap().split('\t').collect();
+    assert_eq!(header[0], "chain", "--by-chain still writes its column: {header:?}");
+    let chains: std::collections::BTreeSet<&str> =
+        txt.lines().skip(1).map(|l| l.split('\t').next().unwrap()).collect();
+    assert_eq!(
+        chains,
+        ["2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        "the retained chain keeps its own id 2 — an exclusion filters draws, it \
+         does not renumber, so these rows name the same chain the pooled \
+         artifact's `2` rows do"
+    );
+
+    // One retained chain, so the between-chain statistics are refused rather
+    // than computed over a single chain. The consequence of excluding down to
+    // one chain, made visible rather than papered over with a number.
+    let ix = |name: &str| col(&header, name);
+    let c_hor = ix("horizon");
+    let mut saw_free_forward = false;
+    for l in txt.lines().skip(1) {
+        let c: Vec<&str> = l.split('\t').collect();
+        if c[c_hor] != "free_forward" {
+            continue;
+        }
+        saw_free_forward = true;
+        for name in ["rhat_mean", "ess_mean", "rhat_pred", "ess_pred"] {
+            assert_eq!(
+                c[ix(name)], "",
+                "one retained chain leaves `{name}` empty on every row, pooled \
+                 and per-chain alike: R-hat compares chains"
+            );
+        }
+    }
+    assert!(saw_free_forward, "free-forward rows exist in the subset artifact:\n{txt}");
+
+    // The manifest travels to the keyed name and still declares `chain`.
+    let mf = find_file(&tmp.join("results"), "predictive-excl1.json")
+        .expect("the keyed manifest is written beside the keyed directory");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mf).unwrap()).unwrap();
+    let coords: Vec<String> = v["streams"][0]["coordinates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(coords.first().map(String::as_str), Some("chain"), "{coords:?}");
+    assert_eq!(
+        v["streams"][0]["file"], "predictive-excl1/weekly_cases.tsv",
+        "the manifest points at the keyed location"
+    );
 }

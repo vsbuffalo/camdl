@@ -97,9 +97,31 @@ impl ChainOfDraw {
     }
 }
 
-/// Partition `values` (one per draw, in accumulation order) by chain, dropping
-/// chains that contributed nothing and truncating the rest to their common
-/// length.
+/// Split `values` (one per draw, in accumulation order) into one list per
+/// chain, keyed by chain id and preserving each chain's draw order. Every draw
+/// is kept — this is the grouping a per-chain BAND reduces, where an unequal
+/// count is not a problem.
+///
+/// `None` when the cloud carries no chain keys, or when the key list is not 1:1
+/// with the values.
+pub fn group_by_chain(
+    values: &[f64],
+    chains: &ChainOfDraw,
+) -> Option<std::collections::BTreeMap<usize, Vec<f64>>> {
+    let ids = chains.dense()?;
+    if ids.len() != values.len() {
+        return None;
+    }
+    let mut by_chain: std::collections::BTreeMap<usize, Vec<f64>> =
+        std::collections::BTreeMap::new();
+    for (v, c) in values.iter().zip(ids.iter()) {
+        by_chain.entry(*c).or_default().push(*v);
+    }
+    Some(by_chain)
+}
+
+/// [`group_by_chain`], narrowed to what R̂ will accept: at least two chains,
+/// each truncated to their common length.
 ///
 /// The truncation is what makes the input admissible: `rank_convergence`'s
 /// between-chain variance uses one draw count for every chain, and a strided
@@ -110,15 +132,7 @@ impl ChainOfDraw {
 /// Returns `None` when the partition is unusable — an unkeyed cloud, or fewer
 /// than two chains with any draws.
 pub fn partition_by_chain(values: &[f64], chains: &ChainOfDraw) -> Option<Vec<Vec<f64>>> {
-    let ids = chains.dense()?;
-    if ids.len() != values.len() {
-        return None;
-    }
-    let mut by_chain: std::collections::BTreeMap<usize, Vec<f64>> =
-        std::collections::BTreeMap::new();
-    for (v, c) in values.iter().zip(ids.iter()) {
-        by_chain.entry(*c).or_default().push(*v);
-    }
+    let by_chain = group_by_chain(values, chains)?;
     if by_chain.len() < 2 {
         return None;
     }
