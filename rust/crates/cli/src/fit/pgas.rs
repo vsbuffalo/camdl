@@ -1233,6 +1233,25 @@ pub fn run_stage(
         eprint!("{}", diagnostics.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
     }
 
+    // gh#791. Trajectory renewal resolved in time, pooled over the retained
+    // post-burn-in sweeps of every surviving chain. Printed unconditionally,
+    // and BESIDE the aggregate rather than instead of it: the aggregate's last
+    // term is structurally near 1, so a run whose early path is frozen still
+    // averages a healthy-looking third. `as_accept` is on the same block
+    // because the two are only legible together — the profile says where the
+    // path is stuck, the acceptance rate says whether the ancestor splice is
+    // contributing anything.
+    let path_renewal = {
+        let mut acc = super::path_renewal::PathRenewalAccum::new();
+        for (_, sweeps, _) in &all_results {
+            acc.add_chain(sweeps.iter().map(|s| &s.csmc_diag));
+        }
+        acc.finish()
+    };
+    if let Some(pr) = &path_renewal {
+        eprint!("{}", pr.report());
+    }
+
     // gh#audit-C7 + audit-H4. NUTS / tempering diagnostics surfaced from
     // PGASResult fields. Thresholds:
     //   - DivergentTransitions: ANY post-burn-in divergence (Stan
@@ -1339,6 +1358,16 @@ pub fn run_stage(
         }
     }
 
+    // gh#791. The coalescence finding, keyed on the SHAPE of the renewal
+    // profile rather than its level — pushed once for the stage, over the same
+    // pooled profile printed above and written into the summary, so the message
+    // and the artifact cannot show a reader different numbers. It is a
+    // `Severity::Warning` at any gradient and gates nothing: the profile is the
+    // diagnostic, and this only points at it.
+    if let Some(d) = path_renewal.as_ref().and_then(|pr| pr.coalescence_finding()) {
+        collector.push(d);
+    }
+
     // Write summary JSON. gh#727: the saved-vs-forkable counts go in with it,
     // measured from the sweeps each chain wrote rather than re-derived from the
     // stride, so the artifact records what happened.
@@ -1351,7 +1380,7 @@ pub fn run_stage(
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
     write_summary(stage_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
-        n_trajectories, &diagnostics)?;
+        n_trajectories, &diagnostics, path_renewal.as_ref())?;
 
     // No-op resume: every chain already reached the target sweep count
     // before this invocation. There are no new sweeps to aggregate
@@ -1721,6 +1750,7 @@ fn write_summary(
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
     diagnostics: &StageConvergence,
+    path_renewal: Option<&super::path_renewal::PathRenewal>,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<Vec<f64>> = results.iter()
         .map(|(_, _, rates)| rates.clone())
@@ -1747,6 +1777,18 @@ fn write_summary(
             "n_forkable": saved_paths.n_forkable,
         },
     });
+    // gh#791. Trajectory renewal resolved in time, plus the two derived numbers
+    // and the ancestor-sampling acceptance rate. Purely ADDITIVE — no existing
+    // key is renamed or reinterpreted, and `trace.tsv` keeps `trajectory_renewal`
+    // and `renewal_b0 … renewal_b9` per sweep exactly as before. The block is
+    // OMITTED, not nulled, for a stage that retained no sweep: a row of nulls
+    // would read as "measured, found nothing".
+    if let Some(pr) = path_renewal {
+        let block = serde_json::to_value(pr)
+            .map_err(|e| format!("cannot serialize the path-renewal profile: {e}"))?;
+        summary.as_object_mut().expect("json! built an object")
+            .insert(super::path_renewal::PATH_RENEWAL_KEY.to_string(), block);
+    }
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pmmh's or nuts's.
     summary.as_object_mut().expect("json! built an object")
