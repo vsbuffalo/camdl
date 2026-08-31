@@ -187,12 +187,12 @@ thin = 1
     let header = lines.next().unwrap();
     assert_eq!(
         header,
-        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "predictive header leads with the scenario overlay axis, then both axes + convergence + band"
     );
     let first = lines.next().expect("at least one predictive row");
     let cols: Vec<&str> = first.split('\t').collect();
-    assert_eq!(cols.len(), 12, "row shape matches header");
+    assert_eq!(cols.len(), 16, "row shape matches header");
     assert_eq!(cols[0], "fitted", "no --scenario → the no-overlay row tagged fitted");
     assert_eq!(cols[2], "free_forward", "horizon axis is explicit");
     assert_eq!(cols[3], "posterior", "treatment axis is explicit (not a plug-in)");
@@ -202,14 +202,15 @@ thin = 1
         "rhat_max carried on the band, got {:?}",
         cols[4]
     );
-    // n_draws is a positive count of the cloud the band was reduced over.
+    // n_draws is a positive count of the cloud the band was reduced over. It
+    // sits after the four per-row convergence cells (gh#794).
     assert!(
-        cols[6].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        cols[10].parse::<usize>().map(|n| n > 0).unwrap_or(false),
         "n_draws carried and positive, got {:?}",
-        cols[6]
+        cols[10]
     );
     // The quantile band is monotone non-decreasing q05 ≤ q25 ≤ … ≤ q95.
-    let qs: Vec<f64> = cols[7..12].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let qs: Vec<f64> = cols[11..16].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in qs.windows(2) {
         assert!(w[0] <= w[1], "quantiles must be ordered: {qs:?}");
     }
@@ -229,16 +230,16 @@ thin = 1
     // A one-step row is well-formed: fitted scenario, posterior treatment,
     // positive n_draws, ordered quantile band.
     let osr: Vec<&str> = one_step_rows[0].split('\t').collect();
-    assert_eq!(osr.len(), 12, "one_step row shape matches header");
+    assert_eq!(osr.len(), 16, "one_step row shape matches header");
     assert_eq!(osr[0], "fitted", "one_step is scenario-agnostic (fitted model)");
     assert_eq!(osr[2], "one_step", "horizon axis");
     assert_eq!(osr[3], "posterior", "one-step is a posterior-treatment band");
     assert!(
-        osr[6].parse::<usize>().map(|n| n > 0).unwrap_or(false),
+        osr[10].parse::<usize>().map(|n| n > 0).unwrap_or(false),
         "one_step n_draws carried and positive (the subsample used), got {:?}",
-        osr[6]
+        osr[10]
     );
-    let osq: Vec<f64> = osr[7..12].iter().map(|s| s.parse::<f64>().unwrap()).collect();
+    let osq: Vec<f64> = osr[11..16].iter().map(|s| s.parse::<f64>().unwrap()).collect();
     for w in osq.windows(2) {
         assert!(w[0] <= w[1], "one_step quantiles must be ordered: {osq:?}");
     }
@@ -491,7 +492,7 @@ thin = 1
     let mut lines = pred_txt.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "one header, scenario leads"
     );
     let scenarios_seen: std::collections::BTreeSet<&str> =

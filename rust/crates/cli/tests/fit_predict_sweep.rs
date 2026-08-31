@@ -194,7 +194,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     let header = pred_txt.lines().next().unwrap();
     assert_eq!(
         header,
-        "scenario\tsweep:k\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\tsweep:k\ttime\thorizon\ttreatment\trhat_max\tess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "the sweep:k column follows the scenario column"
     );
 
@@ -372,7 +372,7 @@ fn fit_predict_no_sweep_header_is_byte_identical() {
     let header = pred_txt.lines().next().unwrap();
     assert_eq!(
         header,
-        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "no --sweep ⇒ no sweep: column ⇒ byte-identical header"
     );
     assert!(

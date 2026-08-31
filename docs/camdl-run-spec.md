@@ -436,7 +436,9 @@ plot-ready families of files there, plus a JSON manifest for each.
 ```
 results/fits/<stem>-<hash8>/predictive/<stream>.tsv
   scenario | sweep:<param>… | time | <dims…> | horizon | treatment
-           | rhat_max | ess_min | n_draws | q05 | q25 | q50 | q75 | q95
+           | rhat_max | ess_min
+           | rhat_mean | ess_mean | rhat_pred | ess_pred
+           | n_draws | q05 | q25 | q50 | q75 | q95
 
 results/fits/<stem>-<hash8>/observed/<stream>.tsv
   time | <dims…> | value
@@ -454,10 +456,27 @@ cloud — the only treatment the band-builder accepts today, enforced by typing
 rather than a runtime check, so a posterior-labelled band over a single point
 estimate is unrepresentable — with `plug_in` reserved. `rhat_max`/`ess_min`
 carry the producing stage's convergence numbers, empty when the stage reported
-none; `n_draws` is the cloud size behind each band. The `scenario` column is
-`fitted` for the one-step rows, which are scenario- and sweep-agnostic by
-construction: filtering _observed_ data through a counterfactual model is
-ill-defined.
+none.
+
+Beside them sit two per-row convergence channels, both reducing the same draws
+the quantiles pool over but grouped by the chain each draw came from.
+`rhat_mean`/`ess_mean` reduce the **latent expected value** `E[y | x_t, θ]`,
+before observation noise: "do the chains agree about the expected trajectory
+here?". `rhat_pred`/`ess_pred` reduce the **predictive draws**: "do the chains
+give the same predictive distribution?". The two are not interchangeable. A
+predictive draw carries observation noise, and that noise lands in the
+within-chain variance, so where it is comparable to the between-chain
+disagreement it swamps the numerator and `rhat_pred` is pulled toward 1 however
+much the chains disagree — worst on overdispersed counts. Decide on `rhat_mean`;
+read `rhat_pred` only for an interval genuinely dominated by irreducible
+observation noise. An empty cell is a refusal (fewer than 2 chains, fewer than 4
+draws per chain, a `draws.tsv` with no chain column, a constant row), never a
+pass; the `one_step` horizon leaves both pairs empty, because its cell pools
+over filter particles as well as draws.
+
+`n_draws` is the cloud size behind each band. The `scenario` column is `fitted`
+for the one-step rows, which are scenario- and sweep-agnostic by construction:
+filtering _observed_ data through a counterfactual model is ill-defined.
 
 `observed/<stream>.tsv` is the recorded value per `(time, stratum)` in the same
 tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
@@ -3357,11 +3376,15 @@ wrote fits/../results/fits/02_posterior-77595169/observed.json
 ```
 
 ```
-$ head -3 results/fits/02_posterior-77595169/predictive/weekly_cases.tsv
-scenario	time	horizon	treatment	rhat_max	ess_min	n_draws	q05	q25	q50	q75	q95
-fitted	0	free_forward	posterior	2.0652		20	0	0	0	0	0
-fitted	7	free_forward	posterior	2.0652		20	10.7	19	38	48.25	98.4
+$ cut -f1-6 results/fits/02_posterior-77595169/predictive/weekly_cases.tsv | head -3
+scenario	time	horizon	treatment	rhat_max	ess_min
+fitted	0	free_forward	posterior	2.0652	
+fitted	7	free_forward	posterior	2.0652
 ```
+
+(`cut` keeps the excerpt narrow; the full row continues with the per-row
+`rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels, `n_draws`, and the
+`q05…q95` band.)
 
 > **Current limitation.** A fit whose stage list contains a `pfilter` stage is
 > dropped from `camdl fit table` with a `unknown fit-stage method 'pfilter'`
@@ -4672,7 +4695,9 @@ camdl fit predict results/fits/fit_pgas-4dadedae
 It emits, under the run directory:
 
 ```
-predictive/<stream>.tsv   time | <dims…> | horizon | treatment | rhat_max | q05..q95
+predictive/<stream>.tsv   time | <dims…> | horizon | treatment | rhat_max | ess_min
+                          | rhat_mean | ess_mean | rhat_pred | ess_pred
+                          | n_draws | q05..q95
 observed/<stream>.tsv     time | <dims…> | value
 ```
 

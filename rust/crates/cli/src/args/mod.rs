@@ -1216,12 +1216,40 @@ Examples:
   camdl fit predict results/fits/sle-8a3f12b4/
 
 Outputs, under the run directory:
-  predictive/<stream>.tsv   time | <dims...> | horizon | treatment | rhat_max | q05..q95
+  predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
+                            | rhat_max | ess_min | rhat_mean | ess_mean
+                            | rhat_pred | ess_pred | n_draws | q05..q95
   observed/<stream>.tsv     time | <dims...> | value
 Read both, join on (time, <dims>), plot observed over the predictive ribbon.
 Under --exclude-chains the bands land in predictive-excl<ids>/ instead, so a
 chain subset never overwrites the pooled artifact; `camdl show <fit>` lists
-every address the fit holds."))]
+every address the fit holds.
+
+Convergence columns — two different questions, do not mix them up:
+  rhat_max, ess_min    the fit's worst parameter, copied from the producing
+                       stage. Provenance: the same number on every row.
+  rhat_mean, ess_mean  this row's latent expected value, across chains.
+                       \"Do the chains agree about the expected trajectory
+                       here?\"  ← decide on this one.
+  rhat_pred, ess_pred  this row's predictive draws, across chains. \"Do the
+                       chains give the same predictive distribution?\"
+
+Why the two per-row numbers differ, and why it matters: a predictive draw
+carries observation noise, and that noise lands in the within-chain variance.
+Where the noise is comparable to the between-chain disagreement it swamps the
+numerator and rhat_pred is pulled toward 1 however much the chains disagree —
+worst on overdispersed counts, i.e. most mechanistic models. Chains whose
+8-week forecasts span 93 to 372 cases/day can still show rhat_pred near 1.
+rhat_mean strips the observation noise and sees the disagreement.
+
+  Use rhat_mean to decide whether a fitted curve or a forecast can be reported.
+  Use rhat_pred only when the interval you are quoting is genuinely dominated
+  by irreducible observation noise; it is the weaker of the two.
+
+An empty cell means the reduction was refused, never that it passed: fewer
+than 2 chains, fewer than 4 draws per chain, a draws.tsv with no chain column,
+or a constant row. The one_step horizon leaves both pairs empty (its cells
+pool over particles as well as draws)."))]
 pub struct FitPredictArgs {
     /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
     /// directory, or a `fit.toml` config (resolved to its unique run). A handle

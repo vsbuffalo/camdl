@@ -264,7 +264,7 @@ integrates over the cloud by pooling and quantiling, and writes two files under
 the run directory:
 
 - `predictive/<stream>.tsv` —
-  `time | <dims…> | horizon | treatment | rhat_max | ess_min | n_draws | q05 q25 q50 q75 q95`.
+  `time | <dims…> | horizon | treatment | rhat_max | ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
   The `q05…q95` columns are the ribbon; the `horizon` and `treatment` columns
   make the two predictive axes explicit (so an honestly-wide posterior band is
   never confused with a narrow plug-in one), and `rhat_max`/`ess_min` carry the
@@ -276,6 +276,34 @@ the run directory:
   `camdl.predictive/v2`; a `/v1` manifest carries classic Gelman–Rubin R̂ and a
   per-chain Geyer sum under the same two column names, so **do not join the two
   versions without keying on the tag**.
+
+  `rhat_max`/`ess_min` describe **the fit**, not the row: they are the worst
+  parameter's numbers, repeated identically down the file. The two pairs beside
+  them describe **the row**, and are what a decision to publish a curve or a
+  forecast should rest on:
+
+  | column pair              | reduces                                    | answers                                                     |
+  | ------------------------ | ------------------------------------------ | ----------------------------------------------------------- |
+  | `rhat_mean` / `ess_mean` | the latent expected value `E[y \| x_t, θ]` | do the chains agree about the **expected trajectory** here? |
+  | `rhat_pred` / `ess_pred` | the predictive draws `y_rep`               | do the chains give the same **predictive distribution**?    |
+
+  **Decide on `rhat_mean`.** A predictive draw carries observation noise, and
+  that noise lands in the within-chain variance; where it is comparable to the
+  between-chain disagreement it swamps the numerator and `rhat_pred` is pulled
+  toward 1 however much the chains disagree. Chains whose eight-week forecasts
+  span 93 to 372 cases per day can still show `rhat_pred` near 1. The dilution
+  grows with the observation dispersion, so it is worst exactly where
+  mechanistic models live. Read `rhat_pred` only when the interval you are
+  quoting is genuinely dominated by irreducible observation noise. An empty cell
+  is a refusal — fewer than 2 chains, fewer than 4 draws per chain, a
+  `draws.tsv` with no chain column, or a row that never moved — never a pass;
+  the `one_step` horizon leaves both pairs empty, because its cell pools over
+  filter particles as well as draws.
+
+  The two per-row pairs and the parameter R̂ can disagree in either direction,
+  and both directions are ordinary. A reportable quantity is often far better
+  determined than the parameters behind it, so a fit with `rhat_max` near 2.7
+  can carry a forecast whose `rhat_mean` sits near 1.05.
 - `observed/<stream>.tsv` — `time | <dims…> | value`, the recorded series in the
   same tidy keys.
 
