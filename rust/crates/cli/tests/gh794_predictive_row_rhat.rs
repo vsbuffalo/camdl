@@ -27,6 +27,9 @@
 //!     — `--by-chain` adds a leading `chain` column and one band per chain, and
 //!     nothing else: strip the column and the per-chain rows and the file is
 //!     byte-identical to the one written without the flag.
+//!   * `by_chain_decomposes_the_one_step_horizon_too` — the in-sample half:
+//!     does each chain explain the observed record, as against the
+//!     free-forward rows' does each chain project the same future.
 //!   * `by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_
 //!     address` — only the exclusion keys the artifact address (gh#795);
 //!     `--by-chain` writes a superset of the pooled file and needs none. Chain
@@ -465,8 +468,11 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
         );
     }
 
-    // One-step rows keep `chain = all`: that cell pools over filter particles as
-    // well as draws, so it has no per-chain decomposition to offer.
+    // Both horizons are decomposed: the one-step cell pools over particles as
+    // well as draws, but that affects a per-chain band's WIDTH exactly as it
+    // already affects the pooled band's, and grouping is not a variance
+    // decomposition. (What the particle pooling does rule out is R-hat/ESS on
+    // those rows — gh#798, asserted just below.)
     let one_step_chains: std::collections::BTreeSet<&str> = with_chain
         .lines()
         .skip(1)
@@ -476,8 +482,8 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
         .collect();
     assert_eq!(
         one_step_chains,
-        ["all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
-        "one_step is not decomposed by chain"
+        ["1", "2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        "one_step carries a pooled band plus one per chain"
     );
 
     // The manifest declares the new coordinate, so a consumer discovers it
@@ -638,5 +644,142 @@ fn reported_quantities_carry_their_own_rhat_and_ess() {
     assert!(
         !r.is_empty() && r.parse::<f64>().is_ok(),
         "a scalar estimand reports its own rhat too, got {r:?}\n{txt}"
+    );
+}
+
+/// `--by-chain` decomposes the **one-step** horizon as well as the free-forward
+/// one, and that is the half the diagnostic was asked for by name.
+///
+/// The two horizons answer different questions and a reader has to know which
+/// they are looking at. Free-forward per-chain bands say whether the chains
+/// *project* the same future — disagreement there mixes mixing pathology with
+/// extrapolation uncertainty, because the bands are running free past the data.
+/// One-step per-chain bands say whether each chain *explains the observed
+/// record*: they are re-anchored to the data at every step, so a separation
+/// between them is disagreement about the fitted trajectory itself, with the
+/// extrapolation removed. That is the sharper statement about mixing.
+///
+/// Grouping the pool by chain is not a variance decomposition: each chain's
+/// band pools its own draws x particles exactly as the pooled band pools all of
+/// them. The particle pooling that rules out a bulk-ESS on these rows (gh#798)
+/// does not rule out banding them.
+#[test]
+fn by_chain_decomposes_the_one_step_horizon_too() {
+    let bin = skip_if_missing_binary();
+    let tmp = setup("onestep_bychain");
+
+    fit_then_predict(&bin, &tmp);
+    let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
+        .expect("predictive/weekly_cases.tsv must be written");
+    let pooled_only = std::fs::read_to_string(&pred).unwrap();
+
+    predict_with(&bin, &tmp, &["--by-chain"]);
+    let with_chain = std::fs::read_to_string(&pred).unwrap();
+    let header: Vec<&str> = with_chain.lines().next().unwrap().split('\t').collect();
+    let ix = |name: &str| col(&header, name);
+    let (c_hor, c_n, c_time) = (ix("horizon"), ix("n_draws"), ix("time"));
+
+    let one_step: Vec<Vec<&str>> = with_chain
+        .lines()
+        .skip(1)
+        .map(|l| l.split('\t').collect::<Vec<&str>>())
+        .filter(|c| c[c_hor] == "one_step")
+        .collect();
+    assert!(!one_step.is_empty(), "a chain-binomial fit emits one_step rows:\n{with_chain}");
+
+    // One band per chain beside the pooled one, 1-based.
+    let chains: std::collections::BTreeSet<&str> = one_step.iter().map(|c| c[0]).collect();
+    assert_eq!(
+        chains,
+        ["1", "2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        "the one-step horizon is decomposed by chain, not left pooled-only"
+    );
+
+    // Each chain covers the same observation axis the pooled rows do — a
+    // per-chain band that silently dropped time points would look like a
+    // shorter series rather than a missing one.
+    let times_of = |chain: &str| -> Vec<&str> {
+        one_step.iter().filter(|c| c[0] == chain).map(|c| c[c_time]).collect()
+    };
+    let pooled_times = times_of("all");
+    assert!(!pooled_times.is_empty());
+    for chain in ["1", "2"] {
+        assert_eq!(times_of(chain), pooled_times, "chain {chain} covers the pooled time axis");
+    }
+
+    // No between-chain statistic on a single chain's rows — the same rule the
+    // free-forward per-chain rows follow, and the pooled one-step rows keep
+    // their empty cells for the gh#798 reason.
+    for c in &one_step {
+        for name in ["rhat_mean", "ess_mean", "rhat_pred", "ess_pred"] {
+            assert_eq!(
+                c[ix(name)], "",
+                "`{name}` is withheld on every one-step row (gh#798), pooled and \
+                 per-chain alike"
+            );
+        }
+    }
+
+    // A chain's band is over its *own* draws, not a relabelled copy of the pooled
+    // one. Without this the grouping could be a no-op that renames rows.
+    let q50 = ix("q50");
+    let band_of = |chain: &str| -> Vec<&str> {
+        one_step.iter().filter(|c| c[0] == chain).map(|c| c[q50]).collect()
+    };
+    let pooled_band = band_of("all");
+    for chain in ["1", "2"] {
+        assert_ne!(
+            band_of(chain),
+            pooled_band,
+            "chain {chain}'s one-step band must be over its own draws — an \
+             identical band means the pooled cell was banded and relabelled"
+        );
+    }
+
+    // A chain's band is over its own draws: its n_draws is smaller than the
+    // pooled count, and positive.
+    let pooled_n: usize = one_step
+        .iter()
+        .find(|c| c[0] == "all")
+        .map(|c| c[c_n].parse().unwrap())
+        .unwrap();
+    for chain in ["1", "2"] {
+        let n: usize = one_step
+            .iter()
+            .find(|c| c[0] == chain)
+            .map(|c| c[c_n].parse().unwrap())
+            .unwrap();
+        assert!(
+            n > 0 && n < pooled_n,
+            "chain {chain} bands over its own {n} draws, not the pooled {pooled_n}"
+        );
+    }
+
+    // And the pooled one-step rows are byte-identical to the no-flag run's.
+    // This is the property the whole change has to keep: the partition is a
+    // regrouping of the same samples, and `band` sorts a copy, so the pooled
+    // quantiles cannot move.
+    let strip = |txt: &str, keep_all: bool| -> String {
+        txt.lines()
+            .filter(|l| {
+                let c: Vec<&str> = l.split('\t').collect();
+                if keep_all {
+                    c[0] == "chain" || (c[0] == "all" && c[c_hor] == "one_step")
+                } else {
+                    // The no-flag file has no `chain` column; its horizon
+                    // column sits one to the left.
+                    l.starts_with("scenario\t") || c[c_hor - 1] == "one_step"
+                }
+            })
+            .map(|l| {
+                if keep_all { l.split_once('\t').unwrap().1.to_string() } else { l.to_string() }
+            })
+            .map(|l| format!("{l}\n"))
+            .collect()
+    };
+    assert_eq!(
+        strip(&with_chain, true),
+        strip(&pooled_only, false),
+        "the pooled one-step rows must survive --by-chain byte for byte"
     );
 }

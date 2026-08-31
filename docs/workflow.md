@@ -304,12 +304,17 @@ the run directory:
 
   `--by-chain` is the follow-up once `rhat_mean` has flagged a row: it adds a
   leading `chain` column and one extra band per chain beside the pooled `all`
-  rows, so you can see _which_ way the chains disagree. Overlapping per-chain
-  forward bands mean the pooled band summarises one forecast; separated ones
-  mean it is a mixture of several, and quoting its quantiles reads as
-  uncertainty where the truth is disagreement — opposite actions. A per-chain
-  row carries no `rhat_*`/`ess_*` cell (those compare chains) and reports its
-  own `n_draws`. Without the flag no `chain` column is written.
+  rows, on **both** horizons, so you can see _which_ way the chains disagree.
+  Overlapping per-chain forward bands mean the pooled band summarises one
+  forecast; separated ones mean it is a mixture of several, and quoting its
+  quantiles reads as uncertainty where the truth is disagreement — opposite
+  actions. The `one_step` per-chain bands ask the in-sample version of the same
+  question — does each chain explain the record you already have? — and, being
+  re-anchored to the data at every step, they separate disagreement about the
+  fitted trajectory from extrapolation uncertainty, which the free-forward bands
+  cannot. A per-chain row carries no `rhat_*`/`ess_*` cell (those compare
+  chains) and reports its own `n_draws`. Without the flag no `chain` column is
+  written.
 
   `quantities/<name>.tsv` carries the same reduction under `rhat` / `ess` — one
   pair, since a quantity has a single value per draw. Those are the reported

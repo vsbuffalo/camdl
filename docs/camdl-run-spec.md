@@ -480,10 +480,36 @@ pass; the `one_step` horizon leaves both pairs empty, because its cell pools
 over filter particles as well as draws.
 
 `camdl fit predict --by-chain` adds a leading `chain` column — `all` on the
-pooled rows, the 1-based chain id on one additional band per chain, free-forward
-only. The pooled band is unchanged and remains the default object; without the
-flag no `chain` column is written. A per-chain band carries no `rhat_*`/`ess_*`
-cell, because those compare chains, and reports its own chain's `n_draws`.
+pooled rows, the 1-based chain id on one additional band per chain, on **both**
+horizons. The pooled band is unchanged and remains the default object; without
+the flag no `chain` column is written. A per-chain band carries no
+`rhat_*`/`ess_*` cell, because those compare chains, and reports its own chain's
+`n_draws`.
+
+The two horizons answer different questions per chain, and a reader must know
+which they are looking at. A **free-forward** per-chain band asks whether the
+chains _project_ the same future; it runs free past the data, so a separation
+there mixes disagreement about the fitted trajectory with extrapolation
+uncertainty. A **one-step** per-chain band asks whether each chain _explains the
+observed record_; it is re-anchored to the data at every step, so a separation
+there is disagreement about the fitted trajectory itself, with the extrapolation
+removed. The one-step half is therefore the sharper statement about mixing, and
+the in-sample counterpart of the free-forward one.
+
+Grouping the one-step pool by chain is a regrouping of the same reduction, not a
+decomposition of the particle contribution: each chain's band pools its own
+draws × particles exactly as the pooled band pools all of them, so the particle
+pooling affects a per-chain band's width the same way it already affects the
+pooled band's. That pooling is why one-step rows carry no `rhat_*`/`ess_*` at
+all (an ESS from an autocorrelation over draws × particles is inflated by the
+particle count — deferred, gh#798); it is not a reason to leave the rows pooled.
+
+A chain whose one-step filter degenerated on some of its draws still bands, and
+its `n_draws` reports what it actually pooled rather than what the subsample
+gave it, so a narrower band there is legible as a thinner sample; the loss is
+named on stderr. A chain that lost _every_ draw contributes no band at all and
+is named too — banding an empty cell would publish `NaN` quantiles, which reads
+as a band.
 
 `--by-chain` adds no artifact address of its own, and composes with
 `--exclude-chains`, which does. A `--by-chain` file is a strict superset of the
