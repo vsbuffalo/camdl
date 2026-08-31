@@ -167,23 +167,39 @@ pub enum DiagnosticKind {
         renewal: f64,
     },
     /// gh#791. Renewal is concentrated at the END of the series: the per-bin
-    /// profile is near zero over the early bins and near one over the last.
+    /// profile rises steeply from the first bin to the last.
     ///
-    /// This is the coalescence signature, and it is a **different** finding
-    /// from [`Self::LowTrajectoryRenewal`], which keys on the aggregate. The
-    /// aggregate is a weighted mean over the bins, and its last term is
-    /// structurally near 1 — the segment after the final observation is
-    /// resampled freely every sweep whatever the sampler's health — so a run
-    /// whose first sixty percent of the series is frozen can still average a
-    /// third and never trip the aggregate rule. Keyed on the SHAPE
-    /// (`last_bin − first_bin`) rather than the level, so a run that renews
-    /// poorly but uniformly in time draws the aggregate finding instead: that
-    /// is a different failure with a different remedy.
+    /// A **different** finding from [`Self::LowTrajectoryRenewal`], which keys
+    /// on the aggregate. The aggregate is a weighted mean over the bins, and
+    /// its late terms are high in most runs, so a run whose early bins sit at
+    /// 0.03 can still average a third and never trip the aggregate rule. Keyed
+    /// on the SHAPE (`last_bin − first_bin`) rather than the level, so a run
+    /// that renews poorly but uniformly in time draws the aggregate finding
+    /// instead: that is a different failure with a different remedy.
+    ///
+    /// # What this finding does NOT claim
+    ///
+    /// **It does not name a cause.** The gradient reads only the two end bins,
+    /// so it cannot distinguish the two shapes that produce a steep rise, and
+    /// [`Self::render`] therefore describes the shape and hands the reader the
+    /// discriminator rather than asserting a mechanism:
+    ///
+    /// - a **flat, near-zero early region followed by a step** — the coalesced
+    ///   genealogy, measured at 0.03-0.07 across six bins on the gh#791 Ebola
+    ///   runs;
+    /// - a **smooth monotone ramp** — the ordinary finite coalescence depth of
+    ///   a long series, which fires with a perfectly respectable prefix. The
+    ///   repository's own `tests/fixtures/polio_afp_es` fires at prefix 0.449
+    ///   on a 0.06 → 0.31 → 0.53 → … → 0.99 ramp with no flat region, and
+    ///   `sir_T160_N40` at prefix 0.618. Firing is defensible on both; a 45% or
+    ///   62% prefix is not a path "held at the reference", and a message saying
+    ///   so would contradict the number printed beside it.
     PathRenewalCoalesced {
         /// Mean renewal over the first half of the bins.
         prefix: f64,
         /// `last_bin − first_bin`. Near 0 when renewal is uniform in time,
-        /// near 1 when the genealogy has fully coalesced onto the reference.
+        /// large when it is concentrated late. Reads only the two end bins —
+        /// see the type doc for what it therefore cannot say.
         gradient: f64,
         /// Renewal in the first bin — the earliest tenth of the series, where
         /// the initial condition and the earliest dynamics live.
@@ -401,6 +417,10 @@ impl DiagnosticKind {
             Self::LowTrajectoryRenewal { renewal } =>
                 format!("Trajectory renewal is {:.1}% — CSMC may not be mixing.",
                     renewal * 100.0),
+            // Describes the shape and stops. Naming a mechanism here would be
+            // false on the runs that fire with a healthy prefix — the polio
+            // fixture fires at prefix 0.449 — and the contradiction would be
+            // visible against the prefix printed in the same sentence.
             Self::PathRenewalCoalesced {
                 prefix, gradient, first_bin, last_bin, aggregate, n_bins, n_prefix_bins,
             } =>
@@ -408,10 +428,12 @@ impl DiagnosticKind {
                     "Trajectory renewal is concentrated at the end of the series: the \
                      first 1/{n_bins} of it renews in {:.1}% of sweeps and the last in \
                      {:.1}% (gradient {:.2}), while the aggregate reads {:.1}%. The mean \
-                     over the first {n_prefix_bins} of {n_bins} bins is {:.1}%. That \
-                     shape is a coalesced conditional-SMC genealogy: the early path is \
-                     held at the reference, and the parameters whose likelihood lives \
-                     there are not being informed.",
+                     over the first {n_prefix_bins} of {n_bins} bins is {:.1}%. The \
+                     gradient reads only the two end bins, so it does not say which \
+                     shape produced the rise: an early region flat and near zero is a \
+                     coalesced conditional-SMC genealogy holding the early path at the \
+                     reference, whereas a smooth monotone ramp is the ordinary finite \
+                     coalescence depth of a long series. Read the profile.",
                     first_bin * 100.0, last_bin * 100.0, gradient, aggregate * 100.0,
                     prefix * 100.0),
             Self::FilterWeightCollapse { n_sweeps, n_total_sweeps, n_windows } =>
@@ -506,13 +528,20 @@ impl DiagnosticKind {
                 "Use a different transform (e.g., log instead of logit)",
             ],
             Self::PathRenewalCoalesced { .. } => vec![
-                "Raise the particle count. On a matched probe that changed nothing \
-                 else, four times the particles roughly tripled renewal over the \
-                 early bins, so the frozen prefix there was particle-limited",
-                "Read the whole profile rather than either summary: \
+                "Read the whole profile before concluding anything: \
                  `path_renewal.bins` in pgas_summary.json, or `renewal_b0 … \
                  renewal_b9` in each chain's trace.tsv, one column per tenth of \
-                 the substep series",
+                 the substep series. Flat and near zero across the early bins is \
+                 a coalesced genealogy; a smooth monotone ramp is not",
+                "If the early bins are flat and near zero, raise the particle \
+                 count. On a matched probe that changed nothing else, four times \
+                 the particles roughly tripled renewal over the early bins, so \
+                 the frozen prefix there was particle-limited",
+                "After changing the particle count, re-read the PROFILE and the \
+                 AGGREGATE, not the gradient. Holding model, data and sweeps \
+                 fixed while raising N 100 → 400 → 1600 on one model family moved \
+                 the gradient 0.81 → 0.86 → 0.90 — the wrong way — while the \
+                 aggregate improved. The gradient is a shape, not a progress bar",
                 "Read `as_accept` beside it — it says whether the ancestor-sampling \
                  splice is contributing to renewal at all, or whether the profile \
                  is coming from the filter alone",

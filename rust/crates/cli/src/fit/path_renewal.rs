@@ -5,13 +5,18 @@
 //! ## Why the aggregate cannot answer this
 //!
 //! [`CSMCDiagnostics::trajectory_renewal`] is a weighted mean over the bins of
-//! [`CSMCDiagnostics::renewal_by_bin`]. Its last term is structurally near 1:
-//! the segment of the path after the final observation is resampled freely
-//! every sweep, whatever the sampler's health, so that one bin holds the mean
-//! up on its own. A conditional-SMC genealogy that has coalesced — every
-//! lineage traced back to the same ancestor by the time the traceback reaches
-//! the early states, so the early path is held at the reference — therefore
-//! scores an aggregate that reads healthy.
+//! [`CSMCDiagnostics::renewal_by_bin`], and its late terms are high in most
+//! runs: the traceback's lineages have not yet coalesced by the time it reaches
+//! the late states, so the tail of the path renews freely. Those terms hold the
+//! mean up. A conditional-SMC genealogy that has coalesced — every lineage
+//! traced back to the same ancestor by the time the traceback reaches the EARLY
+//! states, so the early path is held at the reference — therefore scores an
+//! aggregate that reads healthy.
+//!
+//! What drives the high late bins is coalescence depth, measured rather than
+//! assumed: truncating a run's observation series to its first 40% left the
+//! gradient at 0.122 against 0.141 for the full series, so the free segment
+//! after the final observation is **not** the mechanism.
 //!
 //! Measured on an 11-compartment stochastic Ebola model, 103 daily observation
 //! times, chain-binomial backend, post-burn-in means across 16 chains:
@@ -96,12 +101,11 @@ pub const PREFIX_BINS: usize = RENEWAL_BINS / 2;
 ///
 /// The statistic runs over `[-1, 1]` — ≈0 when renewal is uniform in time, ≈1
 /// when the genealogy has fully coalesced — so 0.5 looks like the natural bar.
-/// It is not, because the last bin is high in EVERY run: the segment of the
-/// path after the final observation is resampled freely whatever the sampler's
-/// health, so `gradient ≈ 1 − first_bin` and a bar at the midpoint is an
-/// absolute bar on the first bin wearing a disguise. Measured, rather than
-/// argued: a 2-chain, 40-particle, 40-substep SIR fit — an ordinary working
-/// short run — reads
+/// It is not, because on the runs this bar was anchored to the last bin is
+/// high, so `gradient ≈ 1 − first_bin` and a bar at the midpoint is an absolute
+/// bar on the first bin wearing a disguise. Measured, rather than argued: a
+/// 2-chain, 40-particle, 40-substep SIR fit — an ordinary working short run —
+/// reads
 ///
 /// ```text
 ///   b0    b1    b2    b3    b4    b5    b6    b7    b8    b9   gradient
@@ -133,6 +137,50 @@ pub const PREFIX_BINS: usize = RENEWAL_BINS / 2;
 /// improved to 0.21-0.24 and were still not healthy. So the bar sits at 0.75:
 /// below every diagnosed failure, above an ordinary working short fit. That is
 /// an anchor on seven measurements, and it is stated as one.
+///
+/// ## What an independent check found
+///
+/// Run against 27 PGAS runs on four further model families plus this
+/// repository's own `tests/fixtures/polio_afp_es`, the bar holds. Eight
+/// converged runs (rank-normalized split R̂ < 1.05, bulk ESS 214-464) read
+/// gradient 0.018-0.172; every firing run had R̂ ≥ 1.88; nothing in that cohort
+/// landed between 0.172 and 0.758. The anchor generalises beyond the family it
+/// was fitted on, and there is no false-positive population in the gap.
+///
+/// The gap is nonetheless wider than the evidence permits the bar to roam. The
+/// working short SIR fit above reads 0.51, which is inside `[0.172, 0.758]` — it
+/// was not part of that cohort. So the cohort rules out a bar below 0.172 and
+/// above 0.758, and the working run rules out the bottom half of what is left.
+/// 0.75 sits near the top of the gap for that reason, not in its middle.
+///
+/// Two things the same check ruled out as confounds, recorded because they are
+/// the first two anyone asks about:
+///
+/// - **Step size.** Halving `dt` moved the gradient 0.141 → 0.172. The bins are
+///   fixed tenths of the substep INDEX, not of wall-clock time, so this is the
+///   invariance the fixed-bin choice was made for.
+/// - **Series length.** Truncating the observations to the first 40% of the
+///   series left it at 0.122 against 0.141. The high last bin is therefore not
+///   the free segment after the final observation; it is coalescence depth.
+///
+/// ## Where `gradient ≈ 1 − first_bin` does not hold, and the blind spot
+///
+/// That approximation is a property of the anchor family, not of the statistic,
+/// and the reasoning above leans on it — so its scope belongs here. Across the
+/// 27 runs the LAST bin spans **0.402 to 0.998**, not the 0.98-0.99 of the
+/// Ebola table, and the mean absolute discrepancy between the gradient and
+/// `1 − first_bin` is **0.146**.
+///
+/// The consequence is a genuine blind spot, and it is this statistic's own
+/// target case: **where the last bin is low, the gradient is bounded below the
+/// bar however frozen the prefix is.** Measured — `sirs_T60_N100` has
+/// `first_bin = 0.000` and `prefix = 0.001`, which is exactly the failure gh#791
+/// exists to catch, and reads gradient 0.402. This finding stays quiet on it.
+/// It is caught only because the aggregate is under 0.10 and
+/// `LowTrajectoryRenewal` fires. The two rules together cover it; neither does
+/// alone, and on a short series it is the aggregate rule doing the work. A
+/// reader deserves that up front rather than discovering it.
+/// `the_short_series_blind_spot_is_covered_only_by_the_aggregate_rule` pins it.
 ///
 /// Three consequences follow, and are enforced rather than intended:
 ///
@@ -451,11 +499,10 @@ mod tests {
          [0.21, 0.23, 0.23, 0.23, 0.24, 0.24, 0.67, 0.93, 0.94, 0.99]),
     ];
 
-    /// A profile that renews roughly uniformly in time, with the structural
-    /// rise over the final bins that EVERY run has — the segment after the last
-    /// observation is resampled freely whatever the sampler's health. A healthy
-    /// run is not a flat profile, and a rule that demanded one would fire on
-    /// every run there is.
+    /// A profile that renews roughly uniformly in time, with the rise over the
+    /// final bins that most runs have — the traceback's lineages have not yet
+    /// coalesced when it reaches the late states. A healthy run is not a flat
+    /// profile, and a rule that demanded one would fire on every run there is.
     const HEALTHY: [f64; RENEWAL_BINS] =
         [0.55, 0.57, 0.56, 0.58, 0.60, 0.62, 0.66, 0.72, 0.85, 0.95];
 
@@ -465,6 +512,25 @@ mod tests {
     /// a bar at the midpoint of the statistic's range would report it.
     const MEASURED_WORKING_SHORT_RUN: [f64; RENEWAL_BINS] =
         [0.425, 0.312, 0.338, 0.525, 0.375, 0.425, 0.550, 0.842, 0.908, 0.938];
+
+    /// A smooth monotone ramp with no flat region, of the shape
+    /// `tests/fixtures/polio_afp_es` produces (0.06 → 0.31 → 0.53 → … → 0.99).
+    /// Interior bins are interpolated; the measured facts pinned against it are
+    /// its endpoints, its prefix of 0.449, and that it fires. It fires for a
+    /// defensible reason — renewal really is concentrated late — but a 45%
+    /// prefix is not a path held at the reference, which is why the message
+    /// must not say it is.
+    const MEASURED_RAMP_THAT_FIRES: [f64; RENEWAL_BINS] =
+        [0.06, 0.31, 0.53, 0.62, 0.725, 0.81, 0.88, 0.93, 0.97, 0.99];
+
+    /// The short-series blind spot, from the independent check:
+    /// `sirs_T60_N100` reads `first_bin = 0.000`, `prefix = 0.001` and
+    /// `gradient = 0.402` — a genuinely frozen prefix that this finding does
+    /// NOT report, because its last bin is low. Those four numbers plus
+    /// "aggregate under 0.10" are the measured ones; the interior bins are
+    /// chosen to satisfy the aggregate constraint.
+    const MEASURED_SHORT_SERIES_BLIND_SPOT: [f64; RENEWAL_BINS] =
+        [0.000, 0.000, 0.001, 0.001, 0.003, 0.010, 0.050, 0.120, 0.250, 0.402];
 
     /// The two derived numbers must be checkable against the bins by hand, or
     /// they can silently drift from the profile they claim to summarise.
@@ -566,6 +632,129 @@ mod tests {
             "a 2-chain 40-particle 40-substep SIR fit is a working sampler whose \
              early bins renew in ~40% of sweeps; reporting it would bury the runs \
              that renew in 3% (gradient {gradient})");
+    }
+
+    /// The finding fires on two different shapes and can distinguish neither,
+    /// because the gradient reads only the two end bins. So the message must
+    /// describe the shape and hand over the discriminator — it must not assert
+    /// a mechanism.
+    ///
+    /// The case that makes this load-bearing: the repository's own polio
+    /// fixture fires with a prefix of 0.449 on a smooth monotone ramp. A
+    /// message claiming "the early path is held at the reference" would
+    /// contradict the 44.9% printed in the same sentence.
+    #[test]
+    fn the_message_describes_the_shape_without_asserting_a_cause() {
+        for (label, profile) in
+            [("coalesced", COALESCED), ("monotone ramp", MEASURED_RAMP_THAT_FIRES)]
+        {
+            let pr = one_chain(&[profile]);
+            let msg = pr.coalescence_finding()
+                .unwrap_or_else(|| panic!("{label}: fixture premise — this profile fires"))
+                .render();
+            assert!(msg.contains("does not say which shape produced"),
+                "{label}: the message must say what the gradient cannot resolve: {msg}");
+            assert!(msg.contains("monotone ramp"),
+                "{label}: and offer the other reading, not just the alarming one: {msg}");
+            assert!(!msg.contains("are not being informed"),
+                "{label}: the message must not assert a consequence it cannot \
+                 establish from two end bins: {msg}");
+        }
+        // And on the ramp specifically, the prefix the old wording contradicted
+        // is printed, so a reader can see the claim would have been false.
+        let pr = one_chain(&[MEASURED_RAMP_THAT_FIRES]);
+        let prefix = pr.prefix.expect("observed");
+        assert!((prefix - 0.449).abs() < 1e-12,
+            "fixture premise: the polio fixture's prefix is 0.449, got {prefix}");
+        assert!(pr.coalescence_finding().unwrap().render().contains("44.9%"),
+            "the prefix must be in the message, beside the shape description");
+    }
+
+    /// The blind spot, stated rather than discovered. `gradient ≈ 1 − b0` is a
+    /// property of the family the bar was anchored on, not of the statistic:
+    /// across the independent check's 27 runs the last bin spans 0.402 to
+    /// 0.998. Where it is low the gradient is bounded below the bar no matter
+    /// how frozen the prefix is — and `sirs_T60_N100`, at `b0 = 0.000` and
+    /// `prefix = 0.001`, is exactly the failure gh#791 exists to catch.
+    ///
+    /// This finding stays quiet on it. The aggregate rule catches it. Both are
+    /// asserted here so the gap is a documented property with a test on it
+    /// rather than something a user runs into.
+    #[test]
+    fn the_short_series_blind_spot_is_covered_only_by_the_aggregate_rule() {
+        let pr = one_chain(&[MEASURED_SHORT_SERIES_BLIND_SPOT]);
+        assert_eq!(pr.bins[0], Some(0.0), "the first tenth never renews at all");
+        let prefix = pr.prefix.expect("observed");
+        assert!((prefix - 0.001).abs() < 1e-9,
+            "fixture premise: the measured prefix is 0.001, got {prefix}");
+        let gradient = pr.gradient.expect("observed");
+        assert!((gradient - 0.402).abs() < 1e-9,
+            "fixture premise: the measured gradient is 0.402, got {gradient}");
+
+        assert!(pr.coalescence_finding().is_none(),
+            "the gradient rule does NOT report a completely frozen prefix when the \
+             last bin is low — this is the documented blind spot, not a bug to \
+             fix by lowering the bar");
+        // The pre-existing aggregate rule is what covers it. `LowTrajectoryRenewal`
+        // fires below 0.10 (cli/src/fit/pgas.rs), so this run is reported — by the
+        // other rule. Neither rule alone covers both cases.
+        let aggregate = pr.aggregate.expect("recorded");
+        assert!(aggregate < 0.10,
+            "and it is caught only because the aggregate is {aggregate:.4} < 0.10, \
+             which is the threshold LowTrajectoryRenewal applies");
+    }
+
+    /// The independent check ran the bar against 27 PGAS runs on four further
+    /// model families plus this repository's polio fixture. Converged runs
+    /// (R̂ < 1.05, ESS 214-464) read 0.018-0.172; every firing run had R̂ ≥ 1.88
+    /// and read ≥ 0.758; nothing in that cohort landed in between. The bar must
+    /// sit inside the gap.
+    ///
+    /// The gap is emptier than the evidence overall, though, and this test is
+    /// deliberately not the only thing holding the value: the separately
+    /// measured working short run reads 0.51, which is INSIDE `[0.172, 0.758]`.
+    /// So the cohort's gap alone would permit a bar anywhere above 0.172, and it
+    /// is `a_measured_working_short_run_is_not_flagged` that rules out the
+    /// bottom of that range. The two anchors are complementary, and 0.75 sits
+    /// near the top of the gap for that reason rather than in its middle.
+    #[test]
+    fn the_bar_lies_inside_the_validation_cohorts_empty_gap() {
+        const HIGHEST_CONVERGED: f64 = 0.172;
+        const LOWEST_FIRING: f64 = 0.758;
+        assert!(COALESCENCE_GRADIENT > HIGHEST_CONVERGED,
+            "the bar must clear every converged run in the 27-run cohort \
+             (highest {HIGHEST_CONVERGED})");
+        assert!(COALESCENCE_GRADIENT < LOWEST_FIRING,
+            "and sit below every run that fired (lowest {LOWEST_FIRING})");
+        // The cohort gap does not pin the lower end on its own — a working run
+        // measured outside that cohort sits in it. Named here so a reader does
+        // not mistake this test for the whole justification.
+        let working = one_chain(&[MEASURED_WORKING_SHORT_RUN])
+            .gradient.expect("observed");
+        assert!(working > HIGHEST_CONVERGED && working < LOWEST_FIRING,
+            "premise: the measured working run at {working:.3} falls inside the \
+             cohort's gap, so the gap alone cannot justify the bar");
+    }
+
+    /// The particle-count advice is right about the underlying problem and
+    /// misleading about the instrument: raising N moves the gradient the WRONG
+    /// way (0.81 → 0.86 → 0.90 measured at N = 100, 400, 1600 with everything
+    /// else held fixed) while the aggregate improves. A user who follows the
+    /// hint and re-reads the gradient concludes it got worse, so the hints must
+    /// say which number to re-read.
+    #[test]
+    fn the_hints_say_which_number_to_re_read_after_changing_particles() {
+        let finding = one_chain(&[COALESCED]).coalescence_finding().expect("fires");
+        let hints = finding.hints();
+        let re_read = hints.iter()
+            .find(|h| h.contains("re-read"))
+            .unwrap_or_else(|| panic!(
+                "a hint must tell the user what to re-read after changing the \
+                 particle count: {hints:?}"));
+        assert!(re_read.contains("not the gradient"),
+            "and must say the gradient is NOT it: {re_read}");
+        assert!(re_read.contains("0.81") && re_read.contains("0.90"),
+            "with the measurement that shows why: {re_read}");
     }
 
     /// The bar is an empirical anchor, and this is the evidence it is anchored

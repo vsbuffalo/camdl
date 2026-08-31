@@ -1,10 +1,10 @@
 //! gh#791: `pgas_summary.json` carries the per-bin trajectory-renewal profile.
 //!
-//! `trajectory_renewal` is a weighted mean over ten time bins whose LAST term
-//! is structurally near 1 — the segment of the path after the final observation
-//! is resampled freely every sweep, whatever the sampler's health. A run whose
-//! conditional-SMC genealogy has coalesced, so the early path is held at the
-//! reference, therefore still averages a healthy-looking third. The per-bin
+//! `trajectory_renewal` is a weighted mean over ten time bins whose LATE terms
+//! are high in most runs — the traceback's lineages have not yet coalesced when
+//! it reaches the late states, so the tail of the path renews freely. A run
+//! whose conditional-SMC genealogy has coalesced, so the EARLY path is held at
+//! the reference, therefore still averages a healthy-looking third. The per-bin
 //! data already existed in `trace.tsv` (`renewal_b0 … renewal_b9`, gh#688);
 //! nothing summarised it.
 //!
