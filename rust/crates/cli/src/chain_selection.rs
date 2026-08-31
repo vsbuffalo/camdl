@@ -380,6 +380,49 @@ pub fn eprint_bias_caveat() {
     eprintln!("         {BIAS_CAVEAT_B}");
 }
 
+/// The artifact address for a report derived from a chain-selected cloud:
+/// `base` for the full cloud, `<base>-excl<ids>` for a subset (gh#795).
+///
+/// `base` is the full-cloud artifact name — `predictive`, `contrasts`, or an
+/// already-keyed `quantities-<key8>` — and the manifest beside it is always
+/// `<returned name>.json`, so the directory and its manifest cannot drift.
+///
+/// ## Why the address is keyed and not just stamped
+///
+/// `--exclude-chains` does not re-key the fit: no fit is re-run, the CAS store
+/// is untouched, and `predictive.json` already stamps `chain_selection`. But a
+/// stamp inside a file cannot stop the file from being written over. A subset
+/// predictive at the pooled address REPLACES the run's canonical posterior
+/// predictive, and a reader (`camdl-scope`, or a person) then renders a
+/// deliberately cherry-picked minority of chains as the posterior predictive of
+/// the fit, with nothing in the run directory saying so. Two exclusions in a row
+/// destroy each other as well.
+///
+/// This is the line `quantities-<key8>` drew (proposal 2026-08-19): it is the
+/// *report* that is keyed, not the run. Same convention, same shape, so a run
+/// directory has one addressing scheme rather than two.
+///
+/// ## The key is the SET
+///
+/// [`ChainSelection`] holds a `BTreeSet`, so `4,2`, `2,4` and `2,4,2` are one
+/// selection and therefore one address — the normalisation happens at parse, and
+/// [`ChainSelection::excluded_csv`] is the single canonical rendering (the same
+/// one the warnings and the `fit summary` header print), so a name here can
+/// never disagree with what the user was told was dropped.
+///
+/// The ids are spelled out rather than digested: a reader who lists the run
+/// directory must be able to see which artifact is which without opening a
+/// file, and unlike a vocabulary file's bytes an exclusion set has a short
+/// canonical literal form. The cost is that the name grows with the set — a
+/// selection of some tens of chains would exceed a filesystem's 255-byte
+/// component limit, and fails loudly at write time if it ever does.
+pub fn artifact_name(base: &str, selection: Option<&ChainSelection>) -> String {
+    match selection {
+        None => base.to_string(),
+        Some(sel) => format!("{base}-excl{}", sel.excluded_csv()),
+    }
+}
+
 /// The loud, non-quietable warning printed to stderr on EVERY active selection.
 ///
 /// The failure mode this guards is silent: a cherry-picked posterior read as if
@@ -493,6 +536,56 @@ mod tests {
         let sel = ChainSelection::parse_exclude("1").unwrap();
         let e = sel.apply_keyed(draws).unwrap_err();
         assert!(e.contains("no `chain` column"), "refuses a keyless cloud: {e}");
+    }
+
+    /// gh#795: the full cloud keeps the historical address exactly — every
+    /// existing reader (`camdl-scope` reads `predictive/`) depends on it.
+    #[test]
+    fn no_selection_is_the_historical_address() {
+        assert_eq!(artifact_name("predictive", None), "predictive");
+        assert_eq!(artifact_name("quantities", None), "quantities");
+        assert_eq!(artifact_name("contrasts", None), "contrasts");
+        // An already-keyed quantities vocabulary passes through untouched.
+        assert_eq!(artifact_name("quantities-a1b2c3d4", None), "quantities-a1b2c3d4");
+    }
+
+    /// The key is the SET, so two spellings of one exclusion are one address —
+    /// and it composes with the `quantities-<key8>` vocabulary key.
+    #[test]
+    fn a_selection_keys_the_address_by_its_normalised_set() {
+        let a = ChainSelection::parse_exclude("2,4").unwrap();
+        let b = ChainSelection::parse_exclude("4,2").unwrap();
+        let c = ChainSelection::parse_exclude(" 4 , 2 , 4 ").unwrap();
+        assert_eq!(artifact_name("predictive", Some(&a)), "predictive-excl2,4");
+        assert_eq!(
+            artifact_name("predictive", Some(&b)),
+            artifact_name("predictive", Some(&a)),
+            "order must not make a second artifact"
+        );
+        assert_eq!(
+            artifact_name("predictive", Some(&c)),
+            artifact_name("predictive", Some(&a)),
+            "repeats and whitespace must not make a third"
+        );
+
+        // Two different exclusions are two addresses, and neither is the pooled
+        // one — the collision the fix exists to prevent.
+        let d = ChainSelection::parse_exclude("4").unwrap();
+        assert_ne!(
+            artifact_name("predictive", Some(&d)),
+            artifact_name("predictive", Some(&a))
+        );
+        for sel in [&a, &d] {
+            assert_ne!(artifact_name("predictive", Some(sel)), "predictive");
+        }
+
+        // Composes with the vocabulary key: a reporting vocabulary AND a chain
+        // subset are two independent report keys over one fit.
+        assert_eq!(
+            artifact_name("quantities-a1b2c3d4", Some(&a)),
+            "quantities-a1b2c3d4-excl2,4"
+        );
+        assert_eq!(artifact_name("contrasts", Some(&a)), "contrasts-excl2,4");
     }
 
     #[test]

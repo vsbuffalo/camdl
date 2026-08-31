@@ -63,9 +63,11 @@ check -> simulate (sanity) -> survey -> write fit.toml -> fit run
 The predicted-vs-observed step is **one verb, not a hand-rolled pipeline**:
 `camdl fit predict --fit fit.toml --stream <name>` resolves the fit's posterior
 draws and writes a tidy `predictive/<stream>.tsv` (`q05…q95` ribbon + typed
-`horizon`/`treatment`/`rhat_max` columns) and `observed/<stream>.tsv` under the
-run directory. Join the two on `(time, <dims>)` and plot — do not glob the run
-store for `trace.tsv`, re-inject fixed params, shell `simulate --draws`, and
+`horizon`/`treatment` columns, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and
+the per-row `rhat_mean`/`rhat_pred` convergence channels — act on `rhat_mean`,
+which observation noise cannot dilute) and `observed/<stream>.tsv` under the run
+directory. Join the two on `(time, <dims>)` and plot — do not glob the run store
+for `trace.tsv`, re-inject fixed params, shell `simulate --draws`, and
 pivot/quantile by hand; that reconstruction is exactly what this verb owns. Omit
 `--horizon` for all applicable horizons (chain-binomial → `free_forward` +
 `one_step`; ODE → `free_forward`).

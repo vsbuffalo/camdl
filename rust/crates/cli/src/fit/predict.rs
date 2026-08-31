@@ -109,10 +109,47 @@ impl TreatmentKind {
     }
 }
 
-/// Every band carries its own convergence number, copied from the producing
-/// stage's summary, so a band is never silent about whether its fit settled.
-/// v1 records the number; it does not gate on it (the refusal policy is the
+/// Which chains a band was drawn from — the `chain` column `--by-chain` adds
+/// (gh#794).
+///
+/// The pooled band is the default and stays first-class; a per-chain band is an
+/// addition beside it, tagged rather than filed separately, the same way
+/// `--scenario` tags its arms with a leading `scenario` column and `--sweep`
+/// with `sweep:<param>`. So a run with `--by-chain` is more rows in the same
+/// file, never a second file tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainLabel {
+    /// Every retained chain, pooled — what the file carries with no
+    /// `--by-chain`, and what a reader who does nothing gets.
+    All,
+    /// One chain's draws alone. Carried 0-based; rendered 1-based to match the
+    /// `chain_N/` directories, the `fit summary` per-chain table and
+    /// `--exclude-chains`.
+    One(usize),
+}
+
+impl ChainLabel {
+    /// The value written into the `chain` column.
+    pub fn as_cell(&self) -> String {
+        match self {
+            ChainLabel::All => "all".to_string(),
+            ChainLabel::One(c) => (c + 1).to_string(),
+        }
+    }
+}
+
+/// The producing stage's own convergence numbers, copied from its summary, so
+/// a band is never silent about whether the fit behind it settled. It records
+/// the number; it does not reject a band on it (the refusal policy is the
 /// deferred guardrail).
+///
+/// This is **provenance about the fit**, not a statement about any row: it is
+/// the worst parameter's R̂ over the whole stage, repeated identically on every
+/// row of every stream. That is why the columns it writes are named
+/// `fit_rhat_max` / `fit_ess_min` (gh#794) — under their former names
+/// `rhat_max` / `ess_min` they read as the R̂ of the predicted value beside
+/// them, which they are not. The columns that do describe the row are
+/// [`BandRow::mean_conv`] and [`BandRow::pred_conv`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConvergenceStatus {
     /// The stage reported a Gelman–Rubin R̂ / ESS summary.
@@ -122,18 +159,19 @@ pub enum ConvergenceStatus {
 }
 
 impl ConvergenceStatus {
-    /// The value written into the `rhat_max` column — the empty string when
+    /// The value written into the `fit_rhat_max` column — the empty string when
     /// not assessed, so a consumer can tell "converged at 1.01" from "unknown".
-    pub fn rhat_max_cell(&self) -> String {
+    pub fn fit_rhat_max_cell(&self) -> String {
         match self {
             ConvergenceStatus::Reported { rhat_max, .. } => format!("{rhat_max:.4}"),
             ConvergenceStatus::NotAssessed => String::new(),
         }
     }
 
-    /// The value written into the `ess_min` column — empty when not assessed or
-    /// when no finite ESS was reported (a single-chain / ESS-less summary).
-    pub fn ess_min_cell(&self) -> String {
+    /// The value written into the `fit_ess_min` column — empty when not
+    /// assessed or when no finite ESS was reported (a single-chain / ESS-less
+    /// summary).
+    pub fn fit_ess_min_cell(&self) -> String {
         match self {
             ConvergenceStatus::Reported { ess_min, .. } if ess_min.is_finite() => {
                 // ESS is an effective count; render it cleanly.
@@ -382,8 +420,17 @@ pub struct StreamBands {
     /// The dimensions this stream is stratified over, the artifact's key
     /// columns (`[]` for a national series).
     pub index_dims: Vec<String>,
-    /// One row per `(time, stratum)`.
+    /// One row per `(time, stratum)`, pooled over every retained chain — the
+    /// default band, and the only one without `--by-chain`.
     pub rows: Vec<BandRow>,
+    /// `--by-chain` only: the same rows banded from ONE chain's draws, keyed by
+    /// 0-based chain id and ordered by it. EMPTY without the flag, so the
+    /// rendered file is byte-identical to the pooled-only path (gh#794).
+    ///
+    /// A per-chain band carries no `rhat_*` / `ess_*` cell: those compare
+    /// chains, and one chain has nothing to compare against. The pooled row is
+    /// where the comparison lives.
+    pub per_chain: Vec<(usize, Vec<BandRow>)>,
 }
 
 /// One free-forward design cell: a sweep coordinate × scenario, with the banded
@@ -409,6 +456,18 @@ pub struct BandRow {
     pub stratum: Vec<(String, String)>,
     /// Quantile values, aligned to [`QUANTILE_LEVELS`].
     pub quantiles: Vec<f64>,
+    /// R̂ / bulk-ESS of *this cell's* **latent expected value** across chains —
+    /// "do the chains agree about the expected trajectory here?" (gh#794). The
+    /// diagnostic to act on: it is the one an overdispersed observation model
+    /// cannot dilute. `None` when the reduction was refused (see
+    /// [`crate::fit::row_convergence::row_convergence`]).
+    pub mean_conv: Option<crate::fit::row_convergence::RowConvergence>,
+    /// R̂ / bulk-ESS of *this cell's* **predictive draws** across chains — "do the
+    /// chains give the same predictive distribution?". Legitimate when the
+    /// reported interval is genuinely dominated by irreducible observation
+    /// noise, and the weaker of the two: the noise lands in the within-chain
+    /// variance and pulls it toward 1.
+    pub pred_conv: Option<crate::fit::row_convergence::RowConvergence>,
 }
 
 /// One observed series cell: a time, its stratum, the recorded value (`None`
@@ -430,6 +489,12 @@ pub struct ObservedRow {
 /// plus the `one_step` rows into the same file — the `scenario` and `horizon`
 /// columns distinguish them.
 pub struct PredictiveSection<'a> {
+    /// Which chains this section's band was drawn from (gh#794). The `chain`
+    /// column is emitted only when some section carries a
+    /// [`ChainLabel::One`] — so a run without `--by-chain` has no such column
+    /// and renders byte-identically, exactly as `sweep:<param>` appears only
+    /// under `--sweep`.
+    pub chain: ChainLabel,
     /// The overlay axis value: a scenario name, or `fitted` for the no-overlay
     /// (fitted-model) rows. ALWAYS present (the leading column), the way
     /// `horizon`/`treatment` are.
@@ -447,11 +512,19 @@ pub struct PredictiveSection<'a> {
 }
 
 /// Render `predictive/<stream>.tsv`: `scenario | time | <dims…> | horizon |
-/// treatment | rhat_max | ess_min | n_draws | q05 … q95`. Tidy, plot-ready; the
-/// axes and the convergence channel are columns so a new predictive cell — a new
-/// scenario, a new horizon, a new treatment — is more rows, never new consumer
-/// code. Several [`PredictiveSection`]s (one per (scenario, horizon)) stack under
-/// the single header.
+/// treatment | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred |
+/// ess_pred |
+/// n_draws | q05 … q95`. Tidy, plot-ready; the axes and the convergence channels
+/// are columns so a new predictive cell — a new scenario, a new horizon, a new
+/// treatment — is more rows, never new consumer code. Several
+/// [`PredictiveSection`]s (one per (scenario, horizon)) stack under the single
+/// header.
+///
+/// Two convergence channels sit side by side and must not be confused (gh#794).
+/// `fit_rhat_max`/`fit_ess_min` are the *producing stage's* worst-parameter numbers,
+/// constant down the file — provenance. `rhat_mean`/`ess_mean` and
+/// `rhat_pred`/`ess_pred` describe *this row*: the first over the latent expected
+/// value, the second over the predictive draws.
 pub fn render_predictive_tsv_sections(
     index_dims: &[String],
     sections: &[PredictiveSection],
@@ -466,9 +539,18 @@ pub fn render_predictive_tsv_sections(
         .map(|s| s.sweep.iter().map(|(n, _)| n.clone()).collect())
         .unwrap_or_default();
 
+    // The `chain` column exists only when a per-chain band is present
+    // (`--by-chain`). Data-driven, like `sweep_names` above: no flag plumbed
+    // into the renderer, and no column when there is nothing to put in it.
+    let by_chain = sections.iter().any(|s| s.chain != ChainLabel::All);
+
     let mut out = String::new();
-    // Header — `scenario` leads (the overlay axis), then the `sweep:<param>`
-    // columns, then everything else. Both are always present in the layout.
+    // Header — `chain` leads when present (the outermost partition of the
+    // draws: every other coordinate is nested inside it), then `scenario` (the
+    // overlay axis), then the `sweep:<param>` columns, then everything else.
+    if by_chain {
+        out.push_str("chain\t");
+    }
     out.push_str("scenario");
     for n in &sweep_names {
         out.push_str("\tsweep:");
@@ -479,7 +561,10 @@ pub fn render_predictive_tsv_sections(
         out.push('\t');
         out.push_str(d);
     }
-    out.push_str("\thorizon\ttreatment\trhat_max\tess_min\tn_draws");
+    out.push_str(
+        "\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+         \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws",
+    );
     for (_, label) in QUANTILE_LEVELS {
         out.push('\t');
         out.push_str(label);
@@ -487,10 +572,15 @@ pub fn render_predictive_tsv_sections(
     out.push('\n');
 
     for section in sections {
-        let rhat = section.convergence.rhat_max_cell();
-        let ess = section.convergence.ess_min_cell();
+        let rhat = section.convergence.fit_rhat_max_cell();
+        let ess = section.convergence.fit_ess_min_cell();
         let n = section.n_draws.to_string();
+        let chain_cell = section.chain.as_cell();
         for row in section.rows {
+            if by_chain {
+                out.push_str(&chain_cell);
+                out.push('\t');
+            }
             out.push_str(&section.scenario);
             // This section's swept values, aligned to `sweep_names`. A section
             // with no sweep coordinate (the one-step rows) leaves each cell empty.
@@ -514,6 +604,17 @@ pub fn render_predictive_tsv_sections(
             out.push_str(&rhat);
             out.push('\t');
             out.push_str(&ess);
+            // The per-row channels (gh#794): the mean one first, because it is
+            // the one to act on.
+            use crate::fit::row_convergence::RowConvergence;
+            out.push('\t');
+            out.push_str(&RowConvergence::rhat_cell(row.mean_conv.as_ref()));
+            out.push('\t');
+            out.push_str(&RowConvergence::ess_cell(row.mean_conv.as_ref()));
+            out.push('\t');
+            out.push_str(&RowConvergence::rhat_cell(row.pred_conv.as_ref()));
+            out.push('\t');
+            out.push_str(&RowConvergence::ess_cell(row.pred_conv.as_ref()));
             out.push('\t');
             out.push_str(&n);
             for q in &row.quantiles {
@@ -781,6 +882,15 @@ fn subset_convergence(
 struct ScenarioAccum {
     /// `samples[leaf][time_idx]` = the `y_rep` values across this scenario's draws.
     samples: Vec<Vec<Vec<f64>>>,
+    /// `means[leaf][time_idx]` = `E[y | x_t, θ]` for the *same* draws, in the same
+    /// order — the latent expected value the observation distribution is centred
+    /// on, before observation noise. The operand of `rhat_mean` (gh#794): an R̂
+    /// over `samples` buries the chains' disagreement in the observation noise.
+    means: Vec<Vec<Vec<f64>>>,
+    /// The chain each accumulated draw came from, pushed once per merged cell so
+    /// it is positionally aligned with `samples`/`means`/`quant_draws` by
+    /// construction rather than by re-deriving the subsample stride (gh#794).
+    draw_chain: crate::fit::row_convergence::ChainOfDraw,
     /// One inner `Vec` per draw: each quantity leaf's value, in
     /// `model.quantities` order. Empty when the model declares no quantities.
     quant_draws: Vec<Vec<sim::quantity::QuantityResult>>,
@@ -927,6 +1037,11 @@ struct PredictiveSink {
     /// the model declares one AND this sink's design cell is the no-overlay
     /// fitted arm.
     conditioned: Option<ConditionedSource>,
+    /// Per free-forward draw index (`CellSpec::point_idx`, which indexes the
+    /// subsample the engine was handed): the chain that draw came from, `None`
+    /// when the cloud's `draws.tsv` carries no chain column. The partition every
+    /// per-row R̂ reduces over (gh#794).
+    chain_of_point: Vec<Option<usize>>,
     /// Scenario name → its accumulator. Insertion order (= the engine's canonical
     /// `scenario → point → rep` order, scenario outermost) is preserved so the
     /// rendered files list scenarios in CLI order.
@@ -940,6 +1055,8 @@ impl PredictiveSink {
         let leaf_times = &self.leaf_times;
         self.by_scenario.entry(scenario.to_string()).or_insert_with(|| ScenarioAccum {
             samples: leaf_times.iter().map(|ts| vec![Vec::new(); ts.len()]).collect(),
+            means: leaf_times.iter().map(|ts| vec![Vec::new(); ts.len()]).collect(),
+            draw_chain: crate::fit::row_convergence::ChainOfDraw::default(),
             quant_draws: Vec::new(),
             quant_times: Vec::new(),
             n_conditioned: 0,
@@ -985,12 +1102,23 @@ impl crate::engine::RunSink for PredictiveSink {
         // `self.quant_eval` does not overlap the `&mut self` accumulator borrow).
         let scenario_name = cell.spec.scenario.name().to_string();
         let mut leaf_y: Vec<Vec<f64>> = vec![Vec::new(); model.observations.len()];
+        // The *same* draws' latent expected values, `E[y | x_t, θ]` before
+        // observation noise (gh#794). Accumulated beside `leaf_y` so the two are
+        // the same draw at the same time with the same resolved parameters.
+        let mut leaf_mean: Vec<Vec<f64>> = vec![Vec::new(); model.observations.len()];
         for (si, obs_ir) in model.observations.iter().enumerate() {
             let times = &self.leaf_times[si];
             if times.is_empty() {
                 continue;
             }
             let sampler = sim::inference::obs_model::compile_obs_sample_pf(
+                obs_ir,
+                self.compiled.clone(),
+                &params,
+            );
+            // Consumes no RNG, so it cannot perturb the paired-seed replay the
+            // sampler above drives.
+            let meaner = sim::inference::obs_model::compile_obs_mean_pf(
                 obs_ir,
                 self.compiled.clone(),
                 &params,
@@ -1002,6 +1130,7 @@ impl crate::engine::RunSink for PredictiveSink {
             )?;
             let leaf_aux = &self.leaf_aux[si];
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
+            let mut stream_means: Vec<f64> = Vec::with_capacity(times.len());
             for (ti, &t) in times.iter().enumerate() {
                 let snap = crate::snap_at(&cell.traj, t);
                 // Carry the OBSERVED aux (survey denominator) at this obs time
@@ -1010,6 +1139,7 @@ impl crate::engine::RunSink for PredictiveSink {
                 let aux: &[(String, f64)] = leaf_aux.get(ti).map(|v| v.as_slice()).unwrap_or(&[]);
                 let y = sampler(projected[ti], t, &snap.int_state.counts, aux, &mut obs_rng);
                 stream_vals.push(y);
+                stream_means.push(meaner(projected[ti], t, &snap.int_state.counts, aux));
             }
             if want_obs {
                 // Key by the stream's declared `name` — what `observations.<name>`
@@ -1017,6 +1147,7 @@ impl crate::engine::RunSink for PredictiveSink {
                 obs_set.streams.insert(obs_ir.name.clone(), (times.clone(), stream_vals.clone()));
             }
             leaf_y[si] = stream_vals;
+            leaf_mean[si] = stream_means;
         }
 
         // gh#722: a quantity anchored at or before `last_obs` is read off this
@@ -1075,10 +1206,18 @@ impl crate::engine::RunSink for PredictiveSink {
         };
 
         // Commit into the cell's scenario accumulator.
+        let chain_of_this_draw =
+            self.chain_of_point.get(cell.spec.point_idx).copied().flatten();
         let acc = self.accum_for(&scenario_name);
+        acc.draw_chain.0.push(chain_of_this_draw);
         for (si, ys) in leaf_y.into_iter().enumerate() {
             for (ti, y) in ys.into_iter().enumerate() {
                 acc.samples[si][ti].push(y);
+            }
+        }
+        for (si, ms) in leaf_mean.into_iter().enumerate() {
+            for (ti, m) in ms.into_iter().enumerate() {
+                acc.means[si][ti].push(m);
             }
         }
         if let Some(results) = quant_results {
@@ -1510,6 +1649,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // onto each free-forward band section's `n_draws` diagnostic. Stays 0 when
     // the horizon was not requested (that band section then never runs).
     let mut ff_n_draws: usize = 0;
+    // The same count split by chain — the denominator a `--by-chain` section
+    // reports, since a per-chain band is over that chain's draws alone (gh#794).
+    // Empty when the horizon was not requested or the cloud carries no chain
+    // keys.
+    let mut ff_draws_per_chain: BTreeMap<usize, usize> = BTreeMap::new();
 
     // ── Free-forward horizon: replay the posterior forward under each scenario.
     //
@@ -1664,6 +1808,32 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         let ff_draws: Vec<&IndexMap<String, f64>> =
             ff_idx.iter().map(|&i| &posterior.draws()[i]).collect();
         ff_n_draws = ff_draws.len();
+        // The chain behind each replayed draw, picked by the *same* indices as the
+        // draws themselves — the partition the per-row R̂ reduces over (gh#794).
+        // Every entry is `None` when the cloud's `draws.tsv` has no chain column,
+        // and the per-row columns are then empty rather than invented.
+        let ff_chain_of_point: Vec<Option<usize>> = match posterior.keys() {
+            Some(k) => ff_idx.iter().map(|&i| k.per_draw[i].map(|(c, _)| c)).collect(),
+            None => vec![None; ff_idx.len()],
+        };
+        for c in ff_chain_of_point.iter().flatten() {
+            *ff_draws_per_chain.entry(*c).or_insert(0) += 1;
+        }
+        if ff_chain_of_point.iter().all(Option::is_none) {
+            eprintln!(
+                "fit predict: this fit's draws.tsv carries no chain column, so the \
+                 per-row convergence columns (rhat_mean / ess_mean / rhat_pred / \
+                 ess_pred) are left empty — a between-chain statistic needs to know \
+                 which chain each draw came from."
+            );
+            if args.by_chain {
+                eprintln!(
+                    "fit predict: --by-chain has nothing to split on for the same \
+                     reason, so no `chain` column is written and the file carries \
+                     the pooled band only."
+                );
+            }
+        }
         if ff_n_draws < posterior.n_draws() {
             eprintln!(
                 "fit predict: free_forward horizon — subsampling {ff_n_draws} of {} \
@@ -1830,6 +2000,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 quant_eval: quant_eval.clone(),
                 obs_anchors: quantity_obs_anchors,
                 conditioned,
+                chain_of_point: ff_chain_of_point.clone(),
                 by_scenario: IndexMap::new(),
             };
 
@@ -1936,6 +2107,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                             paths: &cell_paths,
                             n_conditioned: accum.n_conditioned,
                         }),
+                        // The same chain partition the predictive rows reduce
+                        // over, so a `quantities/` row and a `predictive/` row
+                        // from one fit describe the same chains (gh#794).
+                        Some(&accum.draw_chain),
                         &calendar,
                     )?;
                 }
@@ -1944,6 +2119,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     scenario: scenario_name.clone(),
                     bands: assemble_predictive(
                         &model, accum, &ff_emit_times, &leaves, schema.as_ref(),
+                        args.by_chain,
                     )?,
                 });
             }
@@ -2022,6 +2198,16 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // headers. Net-new sibling of `quantities.json`.
     let mut predictive_manifest_entries: Vec<serde_json::Value> = Vec::new();
 
+    // WHERE the predictive lands is keyed by the chain selection it was banded
+    // over (gh#795): the full cloud keeps `predictive/` + `predictive.json`,
+    // a `--exclude-chains 3,5` subset writes `predictive-excl3,5/` +
+    // `predictive-excl3,5.json`. A subset is a different posterior — its own
+    // warning says so — and writing it at the pooled address REPLACED the run's
+    // canonical predictive with a cherry-picked one, silently, with only a
+    // `chain_selection` stamp inside the file it had already overwritten.
+    let predictive_sub =
+        crate::chain_selection::artifact_name("predictive", selection.as_ref());
+
     for source in &sources {
         // Each free-forward design cell's StreamBands for this source (in
         // sweep × scenario order), plus the one-step StreamBands (sweep- and
@@ -2050,7 +2236,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
 
         let mut sections: Vec<PredictiveSection> = Vec::new();
         for (cell, s) in &ff_for_source {
+            // The pooled band first — the default object, and the one a reader
+            // who ignores the `chain` column gets.
             sections.push(PredictiveSection {
+                chain: ChainLabel::All,
                 scenario: cell.scenario.clone(),
                 sweep: cell.sweep.clone(),
                 horizon: Horizon::FreeForward,
@@ -2059,9 +2248,29 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 n_draws: ff_n_draws,
                 rows: &s.rows,
             });
+            // Then one section per chain (`--by-chain`; empty otherwise). Each
+            // reports its OWN draw count: a per-chain band is over that chain's
+            // draws, and carrying the pooled `n_draws` there would overstate the
+            // denominator by the number of chains.
+            for (chain, chain_rows) in &s.per_chain {
+                sections.push(PredictiveSection {
+                    chain: ChainLabel::One(*chain),
+                    scenario: cell.scenario.clone(),
+                    sweep: cell.sweep.clone(),
+                    horizon: Horizon::FreeForward,
+                    treatment: treatment_kind,
+                    convergence: posterior.convergence,
+                    n_draws: ff_draws_per_chain.get(chain).copied().unwrap_or(0),
+                    rows: chain_rows,
+                });
+            }
         }
         if let Some(s) = os_stream {
             sections.push(PredictiveSection {
+                // The one-step cell pools over filter particles as well as
+                // draws, so it has no per-chain decomposition to offer: its rows
+                // stay `all` even under `--by-chain`.
+                chain: ChainLabel::All,
                 scenario: crate::args::FITTED.to_string(),
                 // The one-step horizon is sweep-agnostic (it filters the OBSERVED
                 // data through the fitted model, so a swept-parameter overlay is
@@ -2075,12 +2284,20 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             });
         }
         // Record this stream's join contract for `predictive.json`. Coordinate
-        // columns (the group-by keys) in header order: `scenario`, the
-        // `sweep:<param>` columns, `time`, the stratum dims, `horizon`,
-        // `treatment`. The band columns are the quantile labels; `rhat_max` /
-        // `ess_min` / `n_draws` are per-cell diagnostics. `value_kind` is the
-        // observation's likelihood family (the nature of the banded value).
-        let mut coordinates: Vec<String> = vec!["scenario".to_string()];
+        // columns (the group-by keys) in header order: the `chain` column when
+        // `--by-chain` wrote one, `scenario`, the `sweep:<param>` columns,
+        // `time`, the stratum dims, `horizon`, `treatment`. The band columns are
+        // the quantile labels; the diagnostics
+        // are the stage-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
+        // the file), the per-row pairs (`rhat_mean` / `ess_mean` over the latent
+        // expected value, `rhat_pred` / `ess_pred` over the predictive draws —
+        // gh#794), and `n_draws`. `value_kind` is the observation's likelihood
+        // family (the nature of the banded value).
+        let mut coordinates: Vec<String> = Vec::new();
+        if sections.iter().any(|s| s.chain != ChainLabel::All) {
+            coordinates.push("chain".to_string());
+        }
+        coordinates.push("scenario".to_string());
         coordinates.extend(sweep_col_names.iter().map(|n| format!("sweep:{n}")));
         coordinates.push("time".to_string());
         coordinates.extend(index_dims.iter().cloned());
@@ -2094,16 +2311,22 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             .unwrap_or("count");
         predictive_manifest_entries.push(serde_json::json!({
             "name": source,
-            "file": format!("predictive/{source}.tsv"),
+            // The manifest's declared location is the keyed one, or a consumer
+            // that follows it lands back on the pooled artifact.
+            "file": format!("{predictive_sub}/{source}.tsv"),
             "value_kind": value_kind,
             "coordinates": coordinates,
-            "diagnostics": ["rhat_max", "ess_min", "n_draws"],
+            "diagnostics": [
+                "fit_rhat_max", "fit_ess_min",
+                "rhat_mean", "ess_mean", "rhat_pred", "ess_pred",
+                "n_draws",
+            ],
             "band": QUANTILE_LEVELS.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
             "quantiles": QUANTILE_LEVELS.iter().map(|(q, _)| *q).collect::<Vec<_>>(),
         }));
 
         let pred_tsv = render_predictive_tsv_sections(&index_dims, &sections);
-        written.push(write_tsv(&segment, "predictive", source, &pred_tsv)?);
+        written.push(write_tsv(&segment, &predictive_sub, source, &pred_tsv)?);
     }
     // `predictive.json`: the per-stream join contract beside the predictive
     // TSVs — a sibling of `quantities.json`, NOT in the run_id-keyed CAS leaf
@@ -2111,24 +2334,35 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // stream was emitted.
     if !predictive_manifest_entries.is_empty() {
         let mut manifest = serde_json::json!({
-            // v2 (gh#84): `rhat_max` and `ess_min` in each stream's TSV are the
-            // rank-normalized split R̂ and the bulk-ESS of Vehtari et al.
-            // (2021), and `ess_min` is now withheld whenever any assessed
-            // parameter has no pooled ESS rather than silently minimizing over
-            // the ones that do. v1 carried classic Gelman-Rubin R̂ and a
-            // Geyer per-chain sum. The fields kept their names, so a consumer
-            // joining across a store has only this tag to tell the two apart.
-            "schema": "camdl.predictive/v2",
+            // The tag is the only thing telling a consumer which column
+            // contract a stored artifact was written under, so every change to
+            // the column set bumps it.
+            //
+            // v1: `rhat_max`/`ess_min` carried classic Gelman-Rubin R̂ and a
+            //     Geyer per-chain sum.
+            // v2 (gh#84): the same two column NAMES, now the rank-normalized
+            //     split R̂ and bulk-ESS of Vehtari et al. (2021), with `ess_min`
+            //     withheld whenever any assessed parameter has no pooled ESS
+            //     rather than silently minimizing over the ones that do. Same
+            //     names, different statistics — which is exactly why the tag
+            //     has to be keyed on.
+            // v3 (gh#794): those two are renamed `fit_rhat_max`/`fit_ess_min`,
+            //     because they describe the *fit* and not the row they sit on,
+            //     and the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred`
+            //     channels join them.
+            "schema": "camdl.predictive/v3",
             "calendar": calendar.to_json(),
             "streams": predictive_manifest_entries,
         });
         // Provenance: a chain-subset predictive records the selection alongside
         // the streams, so a chain-subset artifact is never mistakable for a
-        // full-cloud one. Absent (no key) when the full cloud was used.
+        // full-cloud one. Absent (no key) when the full cloud was used. The
+        // ADDRESS (`predictive_sub`, above) is what keeps the two artifacts from
+        // colliding; this stamp is what names the selection once you have one.
         if let Some(info) = posterior.selection() {
             manifest["chain_selection"] = info.to_json();
         }
-        let path = segment.join("predictive.json");
+        let path = segment.join(format!("{predictive_sub}.json"));
         let text = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing predictive manifest: {e}"))?;
         std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -2176,15 +2410,22 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // with a matching manifest. Two vocabularies applied to one fit are two
     // different tables; sharing one address would overwrite the first and leave
     // no way to tell which formulas produced the survivor.
-    let quantities_sub = crate::quantities_file::quantities_dir_name(vocabulary.as_ref());
+    //
+    // A quantity is read off the posterior cloud, so the CHAIN SELECTION keys it
+    // for exactly the same reason (gh#795) — a chain-subset table is a different
+    // table. The two keys are independent and compose:
+    // `quantities-<key8>-excl3,5/`.
+    let quantities_sub = crate::chain_selection::artifact_name(
+        &crate::quantities_file::quantities_dir_name(vocabulary.as_ref()),
+        selection.as_ref(),
+    );
     for (name, content) in &quantity_outputs {
         written.push(write_tsv(&segment, &quantities_sub, name, content)?);
     }
     if let Some(manifest) = &quantity_manifest {
         let manifest =
             crate::quantities_file::stamp_provenance(manifest, vocabulary.as_ref())?;
-        let path = segment
-            .join(crate::quantities_file::quantities_manifest_name(vocabulary.as_ref()));
+        let path = segment.join(format!("{quantities_sub}.json"));
         std::fs::write(&path, &manifest)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         written.push(path);
@@ -2495,12 +2736,18 @@ fn forecast_times(obs_times: &[f64], output_times: &[f64]) -> Vec<f64> {
 /// bands, grouping leaves by logical stream. The scenario/horizon/treatment/
 /// convergence/n_draws labels are applied at render time (each
 /// [`PredictiveSection`] carries them), so this returns only the bands.
+///
+/// `by_chain` additionally bands each chain's own draws into
+/// [`StreamBands::per_chain`] (gh#794). The pooled band is computed and
+/// returned identically either way — a per-chain band is an addition beside it,
+/// never a replacement.
 fn assemble_predictive(
     model: &ir::Model,
     accum: &ScenarioAccum,
     emit_times: &[Vec<f64>],
     leaves: &[LeafObs],
     schema: Option<&ObsSchema>,
+    by_chain: bool,
 ) -> Result<Vec<StreamBands>, String> {
     // Group leaf indices by logical source, preserving first-appearance order.
     let mut order: Vec<String> = Vec::new();
@@ -2523,24 +2770,98 @@ fn assemble_predictive(
             .stratum.iter().map(|k| k.dim.clone()).collect();
         let index_dims = index_dims_for(schema, source, &leaf_dims);
         let mut rows = Vec::new();
+        // chain id → its rows, in the same (leaf, time) order as `rows`.
+        let mut per_chain: BTreeMap<usize, Vec<BandRow>> = BTreeMap::new();
         for &si in leaf_idxs {
             let stratum: Vec<(String, String)> = model.observations[si]
                 .stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
             for (ti, draws_at_t) in accum.samples[si].iter().enumerate() {
-                let quantiles = band(draws_at_t).map_err(|e| {
-                    format!("stream '{source}' at t={}: {e}", emit_times[si][ti])
-                })?;
-                rows.push(BandRow {
-                    time: emit_times[si][ti],
-                    stratum: stratum.clone(),
-                    quantiles,
-                });
+                let t = emit_times[si][ti];
+                rows.push(
+                    band_row(
+                        t,
+                        stratum.clone(),
+                        CellDraws {
+                            predictive: draws_at_t,
+                            mean: &accum.means[si][ti],
+                        },
+                        &accum.draw_chain,
+                    )
+                    .map_err(|e| format!("stream '{source}' at t={t}: {e}"))?,
+                );
+                if !by_chain {
+                    continue;
+                }
+                // One band per chain, over that chain's draws ALONE — no
+                // truncation to a common length (that is an R̂ precondition,
+                // not a banding one), and no convergence cells (a between-chain
+                // statistic has nothing to compare a single chain against).
+                let Some(split) =
+                    crate::fit::row_convergence::group_by_chain(draws_at_t, &accum.draw_chain)
+                else {
+                    continue;
+                };
+                for (chain, chain_draws) in split {
+                    per_chain.entry(chain).or_default().push(BandRow {
+                        time: t,
+                        stratum: stratum.clone(),
+                        quantiles: band(&chain_draws).map_err(|e| {
+                            format!("stream '{source}' at t={t}, chain {}: {e}", chain + 1)
+                        })?,
+                        mean_conv: None,
+                        pred_conv: None,
+                    });
+                }
             }
         }
-        streams.push(StreamBands { source: source.clone(), index_dims, rows });
+        streams.push(StreamBands {
+            source: source.clone(),
+            index_dims,
+            rows,
+            per_chain: per_chain.into_iter().collect(),
+        });
     }
 
     Ok(streams)
+}
+
+/// The two per-draw series one free-forward predictive cell carries, named so
+/// the operand each convergence channel reduces is explicit at the call site
+/// (gh#794).
+struct CellDraws<'a> {
+    /// `y_rep` at this cell, one per draw — the posterior predictive draw, with
+    /// observation noise.
+    predictive: &'a [f64],
+    /// `E[y | x_t, θ]` for the *same* draws in the same order — the latent
+    /// expected value, before observation noise.
+    mean: &'a [f64],
+}
+
+/// Band one predictive cell and attach its two per-row convergence channels.
+///
+/// The quantiles pool over every draw; the convergence numbers run the *same*
+/// draws through the chain-grouped reduction. The channel split is the whole
+/// point of gh#794 and it lives here, in one place: `rhat_mean` reduces
+/// [`CellDraws::mean`] and `rhat_pred` reduces [`CellDraws::predictive`].
+/// Reducing the predictive draws where the mean belongs is not a near-miss —
+/// observation noise inflates the within-chain variance and drags R̂ toward 1,
+/// so the diagnostic reports a forecast the chains disagree fourfold about as
+/// sound.
+fn band_row(
+    time: f64,
+    stratum: Vec<(String, String)>,
+    draws: CellDraws<'_>,
+    chains: &crate::fit::row_convergence::ChainOfDraw,
+) -> Result<BandRow, String> {
+    use crate::fit::row_convergence::row_convergence;
+    let quantiles = band(draws.predictive)?;
+    Ok(BandRow {
+        time,
+        stratum,
+        quantiles,
+        mean_conv: row_convergence(draws.mean, chains),
+        pred_conv: row_convergence(draws.predictive, chains),
+    })
 }
 
 // ── Posterior-cloud subsampling (shared by both horizons) ───────────────────
@@ -2951,10 +3272,31 @@ fn one_step_bands(
                 }
                 let quantiles = band(cell)
                     .map_err(|e| format!("stream '{source}' (one_step) at t={t}: {e}"))?;
-                rows.push(BandRow { time: t, stratum: stratum.clone(), quantiles });
+                // No per-row R̂ on the one-step horizon (gh#794). Its cell is a
+                // pool over (posterior draws × filter particles), so the
+                // sequence a chain contributes is not the posterior chain and an
+                // ESS computed from its autocorrelation would be inflated by the
+                // particles. Deferred rather than approximated: *both* channels
+                // stay empty, so a reader cannot pick up the diluted one by
+                // accident. Follow-up: gh#798.
+                rows.push(BandRow {
+                    time: t,
+                    stratum: stratum.clone(),
+                    quantiles,
+                    mean_conv: None,
+                    pred_conv: None,
+                });
             }
         }
-        streams.push(StreamBands { source: source.clone(), index_dims, rows });
+        // No per-chain decomposition on the one-step horizon: the cell pools
+        // over (posterior draws × filter particles), so a "chain's band" here
+        // would not be the same object the free-forward per-chain band is.
+        streams.push(StreamBands {
+            source: source.clone(),
+            index_dims,
+            rows,
+            per_chain: Vec::new(),
+        });
     }
 
     Ok((streams, n_pooled))
@@ -3059,6 +3401,7 @@ fn plugin_refusal(method: Option<FitAlgorithm>, stage: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fit::row_convergence::ChainOfDraw;
 
     #[test]
     fn read_convergence_finds_mh_summary_for_mh_method() {
@@ -3423,6 +3766,12 @@ mod tests {
         pairs.iter().map(|(d, l)| (d.to_string(), l.to_string())).collect()
     }
 
+    /// A band row with no per-row convergence — the layout tests assert the
+    /// column POSITIONS, and an unassessed row renders those four cells empty.
+    fn bare_row(time: f64, stratum: Vec<(String, String)>, quantiles: Vec<f64>) -> BandRow {
+        BandRow { time, stratum, quantiles, mean_conv: None, pred_conv: None }
+    }
+
     /// A one-draw posterior cloud on the given backend, for the witness tests.
     fn posterior_on(backend: crate::args::types::ForwardBackend) -> PosteriorDraws {
         PosteriorDraws::new(
@@ -3512,21 +3861,336 @@ mod tests {
         }
     }
 
+    // ── gh#794: the per-row convergence channels ───────────────────────────
+    //
+    // The fixture below is the reason the feature has two columns instead of
+    // one. It reproduces the five-chain Ebola forecast the issue measured: the
+    // chains disagree FOURFOLD about the expected trajectory at +56 days (chain
+    // medians 93 … 372 cases/day), while each chain's own negative-binomial
+    // predictive band is two to three times wider than that disagreement. An R̂
+    // over the predictive draws sits near 1 and calls the forecast sound; an R̂
+    // over the latent mean does not.
+
+    /// Sixteen fixed standardized offsets (mean 0, unit scale), so the fixture
+    /// is deterministic and the two channels differ only in the *scale* the
+    /// offsets are applied at — never in the draw pattern.
+    ///
+    /// Sign-alternating rather than sorted, and balanced within each half, so
+    /// neither half of a chain drifts from the other. A sorted sequence would
+    /// hand split-R̂ a within-chain trend and inflate *both* channels — an
+    /// artifact of the fixture, not of the observation noise this test is about.
+    const OFFSETS: [f64; 16] = [
+        -1.53, 1.53, -0.89, 0.89, -0.49, 0.49, -0.16, 0.16,
+        1.15, -1.15, 0.67, -0.67, 0.32, -0.32, 0.0, 0.0,
+    ];
+
+    /// The measured chain medians of the eight-week forecast (issue gh#794).
+    const CHAIN_LEVELS: [f64; 5] = [93.0, 125.0, 140.0, 155.0, 372.0];
+
+    /// The fixture: per-draw latent means and predictive draws for one cell,
+    /// plus the chain each draw came from.
+    ///
+    /// `mean_sd` is the within-chain spread of the expected trajectory (the
+    /// parameter uncertainty inside one chain); `obs_sd` is the extra spread the
+    /// observation model adds on top of it. The predictive draw is the mean plus
+    /// its own noise, so the two series are the same object before and after the
+    /// observation model — exactly what the production path accumulates.
+    fn diluted_forecast_cell(mean_sd: f64, obs_sd: f64) -> (Vec<f64>, Vec<f64>, ChainOfDraw) {
+        let mut means = Vec::new();
+        let mut preds = Vec::new();
+        let mut chains = Vec::new();
+        for (c, level) in CHAIN_LEVELS.iter().enumerate() {
+            for (i, z) in OFFSETS.iter().enumerate() {
+                let m = level + mean_sd * z;
+                means.push(m);
+                // A *different* fixed offset for the observation noise (rotated by
+                // the chain and the draw), so the noise is not a rescaling of
+                // the parameter spread.
+                let w = OFFSETS[(i + 5 * c + 3) % OFFSETS.len()];
+                preds.push((m + obs_sd * w).max(0.0));
+                chains.push(Some(c));
+            }
+        }
+        (means, preds, ChainOfDraw(chains))
+    }
+
+    /// *The* test for gh#794: on chains that genuinely disagree about the
+    /// trajectory, under an observation model dispersed enough to hide it,
+    /// `rhat_mean` is large and `rhat_pred` is near 1.
+    ///
+    /// If this ever passes with the two agreeing, the fixture has stopped
+    /// exercising the point of the feature.
+    #[test]
+    fn rhat_mean_catches_a_disagreement_that_rhat_pred_is_diluted_past() {
+        // Within-chain parameter spread 12; observation noise 230 on top, giving
+        // a within-chain predictive spread of ~230 against a between-chain
+        // spread of ~100 — the issue's measured 0.37 ratio.
+        let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
+        let row = band_row(
+            56.0,
+            vec![],
+            CellDraws { predictive: &preds, mean: &means },
+            &chains,
+        )
+        .expect("the cell bands");
+
+        let mean_conv = row.mean_conv.expect("5 chains x 16 draws is assessable");
+        let pred_conv = row.pred_conv.expect("5 chains x 16 draws is assessable");
+        let (rhat_mean, rhat_pred) = (mean_conv.rhat, pred_conv.rhat);
+
+        // Measured on this fixture: rhat_mean 2.7445, rhat_pred 1.0825.
+        assert!(
+            rhat_mean > 2.5,
+            "the chains disagree fourfold about the expected trajectory, so \
+             rhat_mean must flag it; got {rhat_mean:.4}"
+        );
+        assert!(
+            rhat_pred < 1.15,
+            "the observation noise hides that disagreement from a draw-based \
+             R̂, which is why rhat_pred is the weaker column; got {rhat_pred:.4}"
+        );
+        // The gap is the finding, not either number alone. A change that made
+        // both columns read the same operand would collapse it.
+        assert!(
+            rhat_mean - rhat_pred > 1.0,
+            "rhat_mean {rhat_mean:.4} and rhat_pred {rhat_pred:.4} must come \
+             apart on this fixture — if they agree, neither column is telling \
+             the user anything the other does not"
+        );
+        // The dilution inflates the effective sample size the same way: 11.5
+        // against 62.8 here. A user reading `ess_pred` alone would believe the
+        // forecast rests on five times the information it does.
+        assert!(
+            pred_conv.ess > 4.0 * mean_conv.ess,
+            "ess_pred {:.1} must be far larger than ess_mean {:.1} — the noise \
+             that hides the disagreement also reads as independent information",
+            pred_conv.ess,
+            mean_conv.ess
+        );
+    }
+
+    /// The other direction: when the observation model adds nothing, the two
+    /// channels agree. This is what makes the test above a statement about
+    /// DILUTION rather than about the fixture's arithmetic.
+    #[test]
+    fn the_two_channels_agree_when_the_observation_model_adds_no_noise() {
+        let (means, preds, chains) = diluted_forecast_cell(12.0, 0.0);
+        let row = band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
+            .expect("the cell bands");
+        let rhat_mean = row.mean_conv.expect("assessable").rhat;
+        let rhat_pred = row.pred_conv.expect("assessable").rhat;
+        assert!(
+            rhat_mean > 2.0 && rhat_pred > 2.0,
+            "with no observation noise both channels see the same disagreement: \
+             mean {rhat_mean:.4}, pred {rhat_pred:.4}"
+        );
+    }
+
+    /// The columns land in the header positions the manifest advertises, and an
+    /// assessed row renders real numbers there.
+    #[test]
+    fn per_row_convergence_columns_render_between_the_stage_stamp_and_n_draws() {
+        let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
+        let row = band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
+            .expect("the cell bands");
+        let rows = vec![row];
+        let tsv = render_predictive_tsv_sections(
+            &[],
+            &[PredictiveSection {
+                chain: ChainLabel::All,
+                scenario: "fitted".to_string(),
+                sweep: Vec::new(),
+                horizon: Horizon::FreeForward,
+                treatment: TreatmentKind::Posterior,
+                convergence: ConvergenceStatus::Reported { rhat_max: 2.7863, ess_min: 5.8 },
+                n_draws: 80,
+                rows: &rows,
+            }],
+        );
+        let lines: Vec<&str> = tsv.trim_end().lines().collect();
+        let header: Vec<&str> = lines[0].split('\t').collect();
+        let cells: Vec<&str> = lines[1].split('\t').collect();
+        let at = |name: &str| header.iter().position(|h| *h == name)
+            .unwrap_or_else(|| panic!("no `{name}` column in {header:?}"));
+        // Provenance pair, then the two per-row pairs, then n_draws.
+        assert!(at("fit_rhat_max") < at("rhat_mean"));
+        assert!(at("ess_mean") < at("rhat_pred"));
+        assert!(at("ess_pred") < at("n_draws"));
+        // The stage stamp is the fit's worst parameter; the per-row numbers are
+        // this row's. They are different numbers, which is the whole point.
+        assert_eq!(cells[at("fit_rhat_max")], "2.7863");
+        assert_ne!(cells[at("rhat_mean")], "", "an assessed row reports rhat_mean");
+        assert_ne!(cells[at("rhat_pred")], "", "an assessed row reports rhat_pred");
+        assert_ne!(
+            cells[at("rhat_mean")], cells[at("fit_rhat_max")],
+            "the per-row R̂ must not be the stage's provenance stamp"
+        );
+    }
+
+    #[test]
+    fn a_cloud_with_no_chain_keys_leaves_the_per_row_columns_empty() {
+        let (means, preds, _) = diluted_forecast_cell(12.0, 230.0);
+        let unkeyed = ChainOfDraw(vec![None; means.len()]);
+        let row = band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &unkeyed)
+            .expect("the cell still bands");
+        assert!(row.mean_conv.is_none(), "no chain column ⇒ no between-chain statistic");
+        assert!(row.pred_conv.is_none());
+        // The band itself is unaffected: the quantiles still pool every draw.
+        assert_eq!(row.quantiles.len(), QUANTILE_LEVELS.len());
+    }
+
+    // ── gh#794: `--by-chain` ────────────────────────────────────────────────
+
+    /// The `chain` column appears only when a per-chain section is present, and
+    /// then it leads. Without one the rendered bytes are unchanged — the
+    /// property `--by-chain` has to keep, since every existing consumer reads
+    /// the no-flag file.
+    #[test]
+    fn the_chain_column_is_absent_until_a_per_chain_section_exists() {
+        let rows = vec![bare_row(7.0, vec![], vec![1.0, 2.0, 3.0, 4.0, 5.0])];
+        let conv = ConvergenceStatus::Reported { rhat_max: 1.0, ess_min: 100.0 };
+        let pooled = PredictiveSection {
+            chain: ChainLabel::All,
+            scenario: "fitted".to_string(),
+            sweep: Vec::new(),
+            horizon: Horizon::FreeForward,
+            treatment: TreatmentKind::Posterior,
+            convergence: conv,
+            n_draws: 40,
+            rows: &rows,
+        };
+        let without = render_predictive_tsv_sections(&[], std::slice::from_ref(&pooled));
+        assert!(
+            !without.lines().next().unwrap().starts_with("chain\t"),
+            "no per-chain section ⇒ no `chain` column: {}",
+            without.lines().next().unwrap()
+        );
+
+        let per_chain = PredictiveSection { chain: ChainLabel::One(2), n_draws: 20, ..pooled };
+        // Rebuild the pooled section (it was consumed by the struct update).
+        let pooled = PredictiveSection {
+            chain: ChainLabel::All,
+            scenario: "fitted".to_string(),
+            sweep: Vec::new(),
+            horizon: Horizon::FreeForward,
+            treatment: TreatmentKind::Posterior,
+            convergence: conv,
+            n_draws: 40,
+            rows: &rows,
+        };
+        let with = render_predictive_tsv_sections(&[], &[pooled, per_chain]);
+        let lines: Vec<&str> = with.trim_end().lines().collect();
+        assert!(lines[0].starts_with("chain\tscenario\t"), "chain leads: {}", lines[0]);
+        assert!(lines[1].starts_with("all\tfitted\t"), "the pooled row is `all`: {}", lines[1]);
+        // 0-based internally, 1-based in the artifact — matching `chain_N/` and
+        // `--exclude-chains`.
+        assert!(lines[2].starts_with("3\tfitted\t"), "chain 2 renders as 3: {}", lines[2]);
+        // A per-chain section reports its own denominator, not the pooled one.
+        let hdr: Vec<&str> = lines[0].split('\t').collect();
+        let n = hdr.iter().position(|h| *h == "n_draws").unwrap();
+        assert_eq!(lines[1].split('\t').nth(n), Some("40"));
+        assert_eq!(lines[2].split('\t').nth(n), Some("20"));
+    }
+
+    /// Everything except the leading `chain` cell is unchanged by the flag, so a
+    /// consumer that drops the column recovers the pooled file exactly.
+    #[test]
+    fn by_chain_only_prepends_a_cell_to_the_rows_that_were_already_there() {
+        let rows = vec![
+            bare_row(7.0, vec![], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+            bare_row(14.0, vec![], vec![2.0, 3.0, 4.0, 5.0, 6.0]),
+        ];
+        let conv = ConvergenceStatus::NotAssessed;
+        let mk = |chain| PredictiveSection {
+            chain,
+            scenario: "fitted".to_string(),
+            sweep: Vec::new(),
+            horizon: Horizon::FreeForward,
+            treatment: TreatmentKind::Posterior,
+            convergence: conv,
+            n_draws: 40,
+            rows: &rows,
+        };
+        let pooled_only = render_predictive_tsv_sections(&[], &[mk(ChainLabel::All)]);
+        let with_chain =
+            render_predictive_tsv_sections(&[], &[mk(ChainLabel::All), mk(ChainLabel::One(0))]);
+        let stripped: String = with_chain
+            .lines()
+            .filter(|l| !l.starts_with("1\t")) // drop the per-chain rows
+            .map(|l| l.split_once('\t').unwrap().1) // drop the `chain` cell
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            stripped, pooled_only,
+            "dropping the `chain` column and its per-chain rows must reproduce \
+             the pooled file byte for byte"
+        );
+    }
+
+    /// A per-chain band carries no convergence cells: R̂ compares chains, and a
+    /// single chain has nothing to compare against. Publishing a number there
+    /// would be the same category error the whole issue is about.
+    #[test]
+    fn a_per_chain_row_reports_no_between_chain_statistic() {
+        let (means, preds, chains) = diluted_forecast_cell(12.0, 230.0);
+        let pooled =
+            band_row(56.0, vec![], CellDraws { predictive: &preds, mean: &means }, &chains)
+                .expect("the pooled cell bands");
+        assert!(pooled.mean_conv.is_some(), "the pooled row does carry one");
+
+        // What `assemble_predictive` builds for a per-chain row.
+        let one_chain = BandRow {
+            time: 56.0,
+            stratum: vec![],
+            quantiles: pooled.quantiles.clone(),
+            mean_conv: None,
+            pred_conv: None,
+        };
+        let rows = vec![one_chain];
+        let tsv = render_predictive_tsv_sections(
+            &[],
+            &[PredictiveSection {
+                chain: ChainLabel::One(0),
+                scenario: "fitted".to_string(),
+                sweep: Vec::new(),
+                horizon: Horizon::FreeForward,
+                treatment: TreatmentKind::Posterior,
+                convergence: ConvergenceStatus::NotAssessed,
+                n_draws: 16,
+                rows: &rows,
+            }],
+        );
+        let lines: Vec<&str> = tsv.trim_end().lines().collect();
+        let hdr: Vec<&str> = lines[0].split('\t').collect();
+        let cells: Vec<&str> = lines[1].split('\t').collect();
+        for name in ["rhat_mean", "ess_mean", "rhat_pred", "ess_pred"] {
+            let i = hdr.iter().position(|h| *h == name).unwrap();
+            assert_eq!(cells[i], "", "`{name}` must be empty on a single-chain band");
+        }
+    }
+
+    #[test]
+    fn chain_label_renders_one_based_and_pooled_as_all() {
+        assert_eq!(ChainLabel::All.as_cell(), "all");
+        assert_eq!(ChainLabel::One(0).as_cell(), "1");
+        assert_eq!(ChainLabel::One(7).as_cell(), "8");
+    }
+
     #[test]
     fn predictive_tsv_has_typed_axis_columns_and_one_row_per_cell() {
         let stream = StreamBands {
             source: "onset".into(),
             index_dims: vec!["patch".into()],
+            per_chain: Vec::new(),
             rows: vec![
-                BandRow { time: 7.0, stratum: stratum(&[("patch", "Bo")]),
-                          quantiles: vec![0.0, 1.0, 3.0, 6.0, 12.0] },
-                BandRow { time: 7.0, stratum: stratum(&[("patch", "Bombali")]),
-                          quantiles: vec![0.0, 0.0, 1.0, 3.0, 7.0] },
+                bare_row(7.0, stratum(&[("patch", "Bo")]), vec![0.0, 1.0, 3.0, 6.0, 12.0]),
+                bare_row(7.0, stratum(&[("patch", "Bombali")]), vec![0.0, 0.0, 1.0, 3.0, 7.0]),
             ],
         };
         let tsv = render_predictive_tsv_sections(
             &stream.index_dims,
             &[PredictiveSection {
+                chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
@@ -3538,9 +4202,12 @@ mod tests {
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
-            "scenario\ttime\tpatch\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "fitted\t7\tBo\tfree_forward\tposterior\t1.0100\t420\t40\t0\t1\t3\t6\t12");
-        assert_eq!(lines[2], "fitted\t7\tBombali\tfree_forward\tposterior\t1.0100\t420\t40\t0\t0\t1\t3\t7");
+            "scenario\ttime\tpatch\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+             \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
+        assert_eq!(lines[1],
+            "fitted\t7\tBo\tfree_forward\tposterior\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
+        assert_eq!(lines[2],
+            "fitted\t7\tBombali\tfree_forward\tposterior\t1.0100\t420\t\t\t\t\t40\t0\t0\t1\t3\t7");
         assert_eq!(lines.len(), 3, "header + one row per (time, stratum)");
     }
 
@@ -3549,11 +4216,13 @@ mod tests {
         let stream = StreamBands {
             source: "cases".into(),
             index_dims: vec![],
-            rows: vec![BandRow { time: 1.0, stratum: vec![], quantiles: vec![1.0, 2.0, 3.0, 4.0, 5.0] }],
+            per_chain: Vec::new(),
+            rows: vec![bare_row(1.0, vec![], vec![1.0, 2.0, 3.0, 4.0, 5.0])],
         };
         let tsv = render_predictive_tsv_sections(
             &stream.index_dims,
             &[PredictiveSection {
+                chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
@@ -3566,8 +4235,10 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
         // values; n_draws is still carried. Scenario leads.
-        assert_eq!(lines[0], "scenario\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\t\t\t12\t1\t2\t3\t4\t5");
+        assert_eq!(lines[0],
+            "scenario\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+             \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
+        assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
     }
 
     #[test]
@@ -3576,11 +4247,12 @@ mod tests {
         // section: the `sweep:k` column follows `scenario`, free-forward rows carry
         // the cell's swept value, and the one-step rows leave it blank.
         let conv = ConvergenceStatus::Reported { rhat_max: 1.0, ess_min: 100.0 };
-        let rows = vec![BandRow { time: 7.0, stratum: vec![], quantiles: vec![1.0, 2.0, 3.0, 4.0, 5.0] }];
+        let rows = vec![bare_row(7.0, vec![], vec![1.0, 2.0, 3.0, 4.0, 5.0])];
         let tsv = render_predictive_tsv_sections(
             &[],
             &[
                 PredictiveSection {
+                    chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 8.0)],
                     horizon: Horizon::FreeForward,
@@ -3590,6 +4262,7 @@ mod tests {
                     rows: &rows,
                 },
                 PredictiveSection {
+                    chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 12.0)],
                     horizon: Horizon::FreeForward,
@@ -3599,6 +4272,7 @@ mod tests {
                     rows: &rows,
                 },
                 PredictiveSection {
+                    chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: Vec::new(), // one-step is sweep-agnostic
                     horizon: Horizon::OneStepAhead,
@@ -3612,13 +4286,17 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(
             lines[0],
-            "scenario\tsweep:k\ttime\thorizon\ttreatment\trhat_max\tess_min\tn_draws\tq05\tq25\tq50\tq75\tq95",
+            "scenario\tsweep:k\ttime\thorizon\ttreatment\tfit_rhat_max\tfit_ess_min\
+             \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
             "sweep:k column follows scenario"
         );
-        assert_eq!(lines[1], "fitted\t8\t7\tfree_forward\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
-        assert_eq!(lines[2], "fitted\t12\t7\tfree_forward\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
+        assert_eq!(lines[1],
+            "fitted\t8\t7\tfree_forward\tposterior\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+        assert_eq!(lines[2],
+            "fitted\t12\t7\tfree_forward\tposterior\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
         // One-step row: the sweep:k cell is blank (empty), not a fabricated value.
-        assert_eq!(lines[3], "fitted\t\t7\tone_step\tposterior\t1.0000\t100\t10\t1\t2\t3\t4\t5");
+        assert_eq!(lines[3],
+            "fitted\t\t7\tone_step\tposterior\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
     }
 
     #[test]

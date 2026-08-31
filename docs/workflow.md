@@ -264,18 +264,65 @@ integrates over the cloud by pooling and quantiling, and writes two files under
 the run directory:
 
 - `predictive/<stream>.tsv` —
-  `time | <dims…> | horizon | treatment | rhat_max | ess_min | n_draws | q05 q25 q50 q75 q95`.
+  `time | <dims…> | horizon | treatment | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
   The `q05…q95` columns are the ribbon; the `horizon` and `treatment` columns
   make the two predictive axes explicit (so an honestly-wide posterior band is
-  never confused with a narrow plug-in one), and `rhat_max`/`ess_min` carry the
-  fit's own convergence numbers alongside every band. **`rhat_max` is the
-  rank-normalized split R̂ and `ess_min` the bulk-ESS** (see
-  [Which R̂, and which ESS](#which-r-and-which-ess)); `ess_min` is left empty
+  never confused with a narrow plug-in one), and `fit_rhat_max`/`fit_ess_min`
+  carry the fit's own convergence numbers alongside every band. **`fit_rhat_max`
+  is the rank-normalized split R̂ and `fit_ess_min` the bulk-ESS** (see
+  [Which R̂, and which ESS](#which-r-and-which-ess)); `fit_ess_min` is left empty
   when any assessed parameter has no pooled ESS, rather than minimizing over the
   ones that do. The sibling `predictive.json` tags this contract
-  `camdl.predictive/v2`; a `/v1` manifest carries classic Gelman–Rubin R̂ and a
-  per-chain Geyer sum under the same two column names, so **do not join the two
-  versions without keying on the tag**.
+  `camdl.predictive/v3`. Earlier tags are not join-compatible with it and **must
+  not be joined without keying on the tag**: `/v2` spelled these two columns
+  `rhat_max`/`ess_min` and had no per-row channels, and `/v1` carried classic
+  Gelman–Rubin R̂ and a per-chain Geyer sum under those same two names — the same
+  header, a different statistic.
+
+  `fit_rhat_max`/`fit_ess_min` describe **the fit**, not the row — which is what
+  their names say. They are the worst parameter's numbers, repeated identically
+  down the file. The two pairs beside them describe **the row**, and are what a
+  decision to publish a curve or a forecast should rest on:
+
+  | column pair              | reduces                                    | answers                                                     |
+  | ------------------------ | ------------------------------------------ | ----------------------------------------------------------- |
+  | `rhat_mean` / `ess_mean` | the latent expected value `E[y \| x_t, θ]` | do the chains agree about the **expected trajectory** here? |
+  | `rhat_pred` / `ess_pred` | the predictive draws `y_rep`               | do the chains give the same **predictive distribution**?    |
+
+  **Decide on `rhat_mean`.** A predictive draw carries observation noise, and
+  that noise lands in the within-chain variance; where it is comparable to the
+  between-chain disagreement it swamps the numerator and `rhat_pred` is pulled
+  toward 1 however much the chains disagree. Chains whose eight-week forecasts
+  span 93 to 372 cases per day can still show `rhat_pred` near 1. The dilution
+  grows with the observation dispersion, so it is worst exactly where
+  mechanistic models live. Read `rhat_pred` only when the interval you are
+  quoting is genuinely dominated by irreducible observation noise. An empty cell
+  is a refusal — fewer than 2 chains, fewer than 4 draws per chain, a
+  `draws.tsv` with no chain column, or a row that never moved — never a pass;
+  the `one_step` horizon leaves both pairs empty, because its cell pools over
+  filter particles as well as draws.
+
+  `--by-chain` is the follow-up once `rhat_mean` has flagged a row: it adds a
+  leading `chain` column and one extra band per chain beside the pooled `all`
+  rows, so you can see _which_ way the chains disagree. Overlapping per-chain
+  forward bands mean the pooled band summarises one forecast; separated ones
+  mean it is a mixture of several, and quoting its quantiles reads as
+  uncertainty where the truth is disagreement — opposite actions. A per-chain
+  row carries no `rhat_*`/`ess_*` cell (those compare chains) and reports its
+  own `n_draws`. Without the flag no `chain` column is written.
+
+  `quantities/<name>.tsv` carries the same reduction under `rhat` / `ess` — one
+  pair, since a quantity has a single value per draw. Those are the reported
+  estimands, so they are the first numbers to read. A quantity over latent state
+  or derived arithmetic is noise-free and its `rhat` is the undiluted kind; a
+  quantity whose manifest `source` is `observations` reduces sampled `y_rep`,
+  carries observation noise, and so reads like `rhat_pred`. `simulate --draws`
+  has no chains behind it and writes neither column.
+
+  The two per-row pairs and the parameter R̂ can disagree in either direction,
+  and both directions are ordinary. A reportable quantity is often far better
+  determined than the parameters behind it, so a fit with `fit_rhat_max` near
+  2.7 can carry a forecast whose `rhat_mean` sits near 1.05.
 - `observed/<stream>.tsv` — `time | <dims…> | value`, the recorded series in the
   same tidy keys.
 

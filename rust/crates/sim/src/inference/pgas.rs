@@ -345,6 +345,159 @@ impl RenewalBins {
     }
 }
 
+/// What the sweep's **filter** weight vector did at the observation substeps:
+/// the record that separates a sweep which searched from one that could not.
+///
+/// # The condition (gh#783)
+///
+/// At an observation substep every particle is scored by the observation model,
+/// the reference slot included. When every one of those scores is `-inf` the
+/// weight vector carries nothing a draw can use, and both of its consumers
+/// absorb that silently:
+/// [`normalize_log_weights`](super::types::normalize_log_weights) hands the
+/// next resample a uniform distribution no particle earned, and the sweep's
+/// final categorical draw has nothing to select and returns the reference
+/// slot's index. A sweep whose search found nothing therefore looks, to its
+/// caller, exactly like a sweep that searched and legitimately kept the
+/// reference — which is a common and correct outcome.
+///
+/// # Why this is data, and not the error the unconditional filter raises
+///
+/// [`check_pf_degeneracy`](super::degeneracy::check_pf_degeneracy) refuses the
+/// analogous situation in `bootstrap_filter`. The asymmetry is deliberate, and
+/// it follows from the two functions returning different things:
+///
+/// - `bootstrap_filter` must return `log p(y | theta)`. A window at which every
+///   particle scores zero density makes that number exactly `-inf`, no
+///   continuation recovers it, and the next resample would have to invent the
+///   swarm it resamples from. Bailing discards nothing a caller could use.
+/// - `csmc_as` returns a draw from a Markov kernel whose contract is invariance
+///   of `p(X | theta, y)`. The reference slot's lineage is a legitimate output
+///   of that kernel: it is the output whenever no free particle beats the
+///   conditional path. The returned value is not wrong. Its silence is.
+///
+/// Refusing here would also be a strict regression on runs that work today. A
+/// collapsed sweep is recoverable, and three of this repository's own fixtures
+/// (`fit_predict_e2e`, `contrasts_e2e`, `pgas_resume`) start a chain at `-inf`
+/// and are finite by the first recorded sweep — the measurement written up at
+/// `start_at_zero_density`. So the sweep completes, `csmc_as` warns, and the
+/// counts travel to the caller, which is the layer that can decide what a run
+/// does about them.
+///
+/// # What a non-zero count does and does not say
+///
+/// It says the observation-weight selection had nothing to select at that
+/// window. It does **not** say the sweep left the path untouched: ancestor
+/// sampling runs earlier in the same substep, under a different weight vector
+/// (`ancestor_log_w`), and an accepted splice re-anchors the reference slot on
+/// another particle's prefix. The trajectory traced back from the reference
+/// slot is then not the trajectory that went in.
+/// [`CSMCDiagnostics::trajectory_renewal`] is the field that says whether the
+/// path moved; this one says whether the final selection had a choice.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WeightCollapse {
+    /// Observation substeps at which no particle — the reference slot included
+    /// — carried a finite weight.
+    pub n_windows: usize,
+    /// Substep index of the first such window; `None` when there was none.
+    ///
+    /// The substep index rather than the observation index, so it reads in the
+    /// same coordinate as [`CSMCDiagnostics::n_substeps`] and
+    /// [`CSMCDiagnostics::renewal_by_bin`] and can be compared against them
+    /// without a conversion.
+    pub first_substep: Option<usize>,
+    /// Fewest particles carrying a finite weight at any observation substep of
+    /// this sweep. Equal to the particle count when the sweep has no
+    /// observation substep at all, and `0` exactly when `n_windows > 0`.
+    ///
+    /// Kept alongside the count rather than reducing the condition to a
+    /// boolean: a sweep that came within one particle of collapse
+    /// (`min_alive == 1`) is indistinguishable from a healthy one on every
+    /// other field, and that near miss is what the boolean discards.
+    pub min_alive: usize,
+    /// The sweep's final trajectory draw found no positive weight and fell back
+    /// to the reference slot's index.
+    ///
+    /// Separate from `n_windows > 0`, and not implied by it: a collapse
+    /// anywhere but the last weight-setting substep is consumed by the
+    /// following resample, which replaces it with a uniform distribution, and
+    /// never reaches this draw. `n_windows > 0` with
+    /// `final_draw_fell_back == false` is a different diagnosis from the two
+    /// holding together.
+    pub final_draw_fell_back: bool,
+}
+
+impl WeightCollapse {
+    /// The reading of a sweep that never scored an observation: nothing
+    /// collapsed, because nothing was weighed. The placeholder `run_pgas`
+    /// needs for `csmc_sweeps_per_nuts == 0`.
+    pub fn none(n_particles: usize) -> Self {
+        WeightCollapse {
+            n_windows: 0,
+            first_substep: None,
+            min_alive: n_particles,
+            final_draw_fell_back: false,
+        }
+    }
+}
+
+/// Accumulator for [`WeightCollapse`] over a sweep's observation substeps.
+///
+/// A type rather than three loose counters in `csmc_as`, for the same reason
+/// [`RenewalBins`] is one: the predicate "how many particles can this weight
+/// vector be sampled from" is then written once, and the three fields cannot
+/// be updated out of step with each other.
+#[derive(Clone, Debug)]
+pub struct WeightCollapseTally {
+    n_windows: usize,
+    first_substep: Option<usize>,
+    min_alive: usize,
+}
+
+impl WeightCollapseTally {
+    pub fn new(n_particles: usize) -> Self {
+        WeightCollapseTally { n_windows: 0, first_substep: None, min_alive: n_particles }
+    }
+
+    /// How many entries of `log_weights` a categorical draw has anything to
+    /// select: the finite ones.
+    ///
+    /// `is_finite`, not `> -inf`, so a `NaN` weight counts as dead. A `NaN` is
+    /// not a particle [`sample_categorical_log`] can return either, and
+    /// calling it alive would report a swarm that is not there.
+    #[inline]
+    pub fn n_alive(log_weights: &[f64]) -> usize {
+        log_weights.iter().filter(|w| w.is_finite()).count()
+    }
+
+    /// Record the weight vector produced at observation substep `s`. Call only
+    /// at a substep carrying an observation: between observations the weights
+    /// are uniform by construction, and folding those in would report a swarm
+    /// that was never scored.
+    pub fn record(&mut self, s: usize, log_weights: &[f64]) {
+        let alive = Self::n_alive(log_weights);
+        self.min_alive = self.min_alive.min(alive);
+        if alive == 0 {
+            self.n_windows += 1;
+            self.first_substep.get_or_insert(s);
+        }
+    }
+
+    /// Close the tally with the outcome of the sweep's final trajectory draw.
+    ///
+    /// `final_draw_fell_back` comes from the draw itself rather than being
+    /// re-derived from the last weight vector, so the field cannot disagree
+    /// with what the draw did.
+    pub fn finish(self, final_draw_fell_back: bool) -> WeightCollapse {
+        WeightCollapse {
+            n_windows: self.n_windows,
+            first_substep: self.first_substep,
+            min_alive: self.min_alive,
+            final_draw_fell_back,
+        }
+    }
+}
+
 /// Diagnostics from one CSMC-AS sweep.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CSMCDiagnostics {
@@ -411,6 +564,11 @@ pub struct CSMCDiagnostics {
     /// coin-flip rejection rate at finite ratios means the proposal is simply
     /// badly matched to the target and mixing is paying for it.
     pub n_as_refused_inadmissible: usize,
+    /// gh#783. Whether the sweep's observation weights ever collapsed to
+    /// nothing, and how close they came. [`WeightCollapse`] carries the
+    /// condition, the argument for reporting it rather than refusing the
+    /// sweep, and what a non-zero count does not claim.
+    pub weight_collapse: WeightCollapse,
 }
 
 impl CSMCDiagnostics {
@@ -2199,6 +2357,13 @@ pub fn csmc_as(
     let mut n_as_accepted: usize = 0;
     let mut n_as_refused_inadmissible: usize = 0;
 
+    // gh#783: the FILTER weights' own degeneracy — a different vector from
+    // `ancestor_log_w` below, and a different failure. `n_degenerate` counts
+    // substeps where no ancestor could reach the reference; this counts
+    // observation substeps where no particle could explain the data. Counters
+    // only, consuming no RNG, so trajectories stay bit-identical.
+    let mut weight_collapse = WeightCollapseTally::new(n_particles);
+
     // Pre-allocated buffer for ancestor sampling weights (reused each substep)
     let mut ancestor_log_w = vec![f64::NEG_INFINITY; n_particles];
 
@@ -2502,6 +2667,13 @@ pub fn csmc_as(
                     for f in cflows.iter_mut() { *f = 0; }
                     obs_model.reset_due_acc(obs_idx, a);
                 });
+            // gh#783: how many particles this observation left able to be
+            // drawn. Recorded HERE, where the weight vector is produced, and
+            // not at the final draw: a vector that collapses anywhere but the
+            // last weight-setting substep is consumed by the next resample,
+            // which replaces it with a uniform distribution and leaves no
+            // trace of the collapse by the end of the sweep.
+            weight_collapse.record(s, &log_weights);
         } else {
             // Non-observation substep: uniform weights
             log_weights.fill(0.0);
@@ -2526,7 +2698,42 @@ pub fn csmc_as(
     }
 
     // ── Select final trajectory ──
-    let k = sample_categorical_log(&log_weights, &mut resample_rng).unwrap_or(j_ref);
+    // gh#783: this draw fails when the last weight-setting substep left every
+    // particle at zero density, and its fallback is the reference slot's index
+    // — which is also what a successful draw returns whenever the reference
+    // wins. Under `unwrap_or(j_ref)` those were the same event to every
+    // caller. Take the branch explicitly and record which one ran; the
+    // argument for reporting rather than refusing is at [`WeightCollapse`].
+    let (k, final_draw_fell_back) =
+        match sample_categorical_log(&log_weights, &mut resample_rng) {
+            Some(j) => (j, false),
+            None => (j_ref, true),
+        };
+    let weight_collapse = weight_collapse.finish(final_draw_fell_back);
+
+    // The sweep is not refused, so say what happened. `log::warn!` reaches the
+    // user without a flag: the CLI's default log filter is `Warn`
+    // (`cli/src/main.rs`).
+    if let Some(first) = weight_collapse.first_substep {
+        log::warn!(
+            "CSMC-AS: all {} particles scored zero observation density at {} of {} \
+             observation substeps this sweep, first at substep {} (t={:.1}). The weight \
+             vector there cannot be sampled: the following resample draws from a uniform \
+             distribution no particle earned{}. The sweep completed and carries \
+             `weight_collapse` on its diagnostics — a run of these is a run whose filter \
+             found no trajectory that explains the data at these parameters.",
+            n_particles,
+            weight_collapse.n_windows,
+            obs_at_substep.len(),
+            first,
+            reference.substeps[first].t0,
+            if weight_collapse.final_draw_fell_back {
+                ", and the sweep's final trajectory draw returned the reference by fallback"
+            } else {
+                ""
+            },
+        );
+    }
 
     // Trace back through ancestry and compute trajectory renewal
     let mut trajectory_substeps = Vec::with_capacity(n_substeps);
@@ -2595,6 +2802,7 @@ pub fn csmc_as(
         n_as_proposed,
         n_as_accepted,
         n_as_refused_inadmissible,
+        weight_collapse,
     };
 
     Ok((PGASTrajectory {
@@ -3763,6 +3971,7 @@ pub fn run_pgas(
                 trajectory_renewal: 0.0, renewal_by_bin: [f64::NAN; RENEWAL_BINS],
                 n_degenerate: 0, n_resampled: 0, n_as_skipped_no_resample: 0, n_substeps: 0,
                 n_as_proposed: 0, n_as_accepted: 0, n_as_refused_inadmissible: 0,
+                weight_collapse: WeightCollapse::none(config.n_particles),
             };
             for csmc_rep in 0..config.csmc_sweeps_per_nuts {
                 let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))

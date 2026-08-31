@@ -191,12 +191,19 @@ fn push_design_row_cells(cells: &mut Vec<String>, coords: DesignCoords) {
     }
 }
 
-/// The banded TSV header — a deterministic function of `(shape, stratified)`.
-/// Every shape carries `n_draws` + the quantile columns; a series prepends
-/// `time`; a stratified leaf inserts its `<dims…>`; a censorable scalar inserts
-/// the censoring trio. The `fit predict` design overlay (`scenario`, then
-/// `sweep:<param>`) leads everything else.
-fn quantity_header(shape: QShape, dims: &[String], coords: DesignCoords) -> String {
+/// The banded TSV header — a deterministic function of
+/// `(shape, stratified, convergence)`. Every shape carries `n_draws` + the
+/// quantile columns; a series prepends `time`; a stratified leaf inserts its
+/// `<dims…>`; a censorable scalar inserts the censoring trio; a caller that
+/// supplied a chain partition gets `rhat`/`ess` after `n_draws` (gh#794). The
+/// `fit predict` design overlay (`scenario`, then `sweep:<param>`) leads
+/// everything else.
+fn quantity_header(
+    shape: QShape,
+    dims: &[String],
+    coords: DesignCoords,
+    convergence: bool,
+) -> String {
     let mut cols: Vec<String> = Vec::new();
     push_design_header_cols(&mut cols, coords);
     if shape.is_series() {
@@ -204,6 +211,10 @@ fn quantity_header(shape: QShape, dims: &[String], coords: DesignCoords) -> Stri
     }
     cols.extend(dims.iter().cloned());
     cols.push("n_draws".to_string());
+    if convergence {
+        cols.push("rhat".to_string());
+        cols.push("ess".to_string());
+    }
     if shape == QShape::ScalarCensorable {
         cols.push("n_value".to_string());
         cols.push("n_censored".to_string());
@@ -264,6 +275,12 @@ fn collect_qrefs(se: &ir::quantity::ScalarExpr, out: &mut Vec<String>) {
 /// manifest entry (the same way the predictive TSV tags its rows). The
 /// `simulate --quantities-out` caller passes [`DesignCoords::none`] (pools all
 /// cells into one band) and omits both — today's behaviour, unchanged.
+///
+/// `chains` is the chain each draw came from, in `quant_draws` order. `Some`
+/// adds a per-row `rhat` / `ess` pair to a banded header (gh#794): the R-hat
+/// and bulk-ESS of THIS row's reported value, reduced over the same draws the
+/// band pools but grouped by chain. `None` — the `simulate` path, which has no
+/// chains behind it — adds no columns at all, so that output is byte-identical.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_quantities(
     quantities: &[ir::quantity::Quantity],
@@ -272,6 +289,7 @@ pub(crate) fn render_quantities(
     mode: Mode,
     coords: DesignCoords,
     evaluated_on: Option<EvaluatedOn>,
+    chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
     calendar: &io::CalendarMeta,
 ) -> Result<(Vec<(String, String)>, String), String> {
     use ir::quantity::{QuantityBody, TemporalReduce};
@@ -344,7 +362,7 @@ pub(crate) fn render_quantities(
 
         let mut out = String::new();
         match mode {
-            Mode::Banded => out.push_str(&quantity_header(shape, &dims, coords)),
+            Mode::Banded => out.push_str(&quantity_header(shape, &dims, coords, chains.is_some())),
             Mode::Point => out.push_str(&point_header(shape, &dims, coords)),
         }
         out.push('\n');
@@ -354,7 +372,8 @@ pub(crate) fn render_quantities(
                 quantities[gi].stratum.iter().map(|k| k.level.clone()).collect();
             match mode {
                 Mode::Banded => render_banded_leaf(
-                    name, gi, shape, &levels, n_draws, quant_draws, snapshot_times, coords, &mut out,
+                    name, gi, shape, &levels, n_draws, quant_draws, snapshot_times, coords,
+                    chains, &mut out,
                 )?,
                 Mode::Point => render_point_leaf(
                     name, gi, shape, &levels, quant_draws, snapshot_times, coords, &mut out,
@@ -471,10 +490,11 @@ impl StackedQuantities {
         draws: &[Vec<sim::quantity::QuantityResult>],
         times: &[f64],
         evaluated_on: Option<EvaluatedOn<'_>>,
+        chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
         calendar: &io::CalendarMeta,
     ) -> Result<(), String> {
         let (outs, manifest) = render_quantities(
-            quantities, draws, times, self.mode, coords, evaluated_on, calendar,
+            quantities, draws, times, self.mode, coords, evaluated_on, chains, calendar,
         )?;
         for (name, content) in outs {
             match self.bodies.entry(name) {
@@ -523,6 +543,47 @@ impl StackedQuantities {
     }
 }
 
+/// Append this row's `rhat` / `ess` cells when a chain partition was supplied
+/// (gh#794), and nothing at all when it was not — so a caller with no chains
+/// behind it (`simulate`) renders a byte-identical row.
+///
+/// A quantity has ONE value per draw, so unlike a predictive row there is only
+/// one reduction to report. What that value carries depends on the quantity: a
+/// `state` or `derived` quantity is a deterministic function of the trajectory
+/// and the parameters, so its R-hat is the undiluted kind; a quantity whose
+/// manifest `source` is `observations` reduces sampled `y_rep` and therefore
+/// carries observation noise, which makes its R-hat the diluted kind (the
+/// `rhat_pred` flavour, see `fit predict --help`).
+fn push_row_convergence(
+    cells: &mut Vec<String>,
+    chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
+    values: &[f64],
+) {
+    use crate::fit::row_convergence::{row_convergence, RowConvergence};
+    let Some(chains) = chains else { return };
+    let c = row_convergence(values, chains);
+    cells.push(RowConvergence::rhat_cell(c.as_ref()));
+    cells.push(RowConvergence::ess_cell(c.as_ref()));
+}
+
+/// The finite values of a scalar quantity's draws, with the chain ids of the
+/// SAME draws — the two filtered in one pass so they cannot drift apart.
+fn finite_with_chains(
+    vals: &[sim::quantity::QuantityDrawValue],
+    chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
+) -> (Vec<f64>, Option<crate::fit::row_convergence::ChainOfDraw>) {
+    use sim::quantity::QuantityDrawValue;
+    let mut finite = Vec::new();
+    let mut ids = Vec::new();
+    for (i, v) in vals.iter().enumerate() {
+        if let QuantityDrawValue::Value(x) = v {
+            finite.push(*x);
+            ids.push(chains.and_then(|c| c.0.get(i).copied()).flatten());
+        }
+    }
+    (finite, chains.map(|_| crate::fit::row_convergence::ChainOfDraw(ids)))
+}
+
 /// Banded rendering of one leaf (one column per draw → a quantile band). Every
 /// row is prefixed with the design overlay cells (`scenario`, then this cell's
 /// swept values) — empty `coords` prefix nothing.
@@ -535,6 +596,7 @@ fn render_banded_leaf(
     quant_draws: &[Vec<sim::quantity::QuantityResult>],
     snapshot_times: &[f64],
     coords: DesignCoords,
+    chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
     out: &mut String,
 ) -> Result<(), String> {
     use sim::quantity::{QuantityDrawValue, QuantityResult};
@@ -568,6 +630,7 @@ fn render_banded_leaf(
             cells.push(fmt_time(t));
             cells.extend(levels.iter().cloned());
             cells.push(n_draws.to_string());
+            push_row_convergence(&mut cells, chains, &col);
             cells.extend(bands.iter().map(|b| fmt_value(*b)));
             out.push_str(&cells.join("\t"));
             out.push('\n');
@@ -590,6 +653,14 @@ fn render_banded_leaf(
         push_design_row_cells(&mut cells, coords);
         cells.extend(levels.iter().cloned());
         cells.push(total.to_string());
+        // The reduction runs over the SAME draws the band was built from — the
+        // finite ones — with each draw's chain carried alongside, so a censored
+        // draw drops out of the value list and its chain id with it. Dropping
+        // one side only would pair a value with another draw's chain.
+        if chains.is_some() {
+            let (finite, finite_chains) = finite_with_chains(&vals, chains);
+            push_row_convergence(&mut cells, finite_chains.as_ref(), &finite);
+        }
         if shape == QShape::ScalarCensorable {
             cells.push(n_value.to_string());
             cells.push(n_censored.to_string());
@@ -719,26 +790,26 @@ mod tests {
     fn quantity_header_is_a_function_of_shape_and_dims() {
         let none = DesignCoords { scenario: None, sweep: &[] };
         assert_eq!(
-            quantity_header(QShape::Series, &[], none),
+            quantity_header(QShape::Series, &[], none, false),
             "time\tn_draws\tq05\tq25\tq50\tq75\tq95"
         );
         assert_eq!(
-            quantity_header(QShape::Series, &["patch".to_string()], none),
+            quantity_header(QShape::Series, &["patch".to_string()], none, false),
             "time\tpatch\tn_draws\tq05\tq25\tq50\tq75\tq95"
         );
         assert_eq!(
-            quantity_header(QShape::ScalarPlain, &[], none),
+            quantity_header(QShape::ScalarPlain, &[], none, false),
             "n_draws\tq05\tq25\tq50\tq75\tq95"
         );
         // The censoring trio sits between n_draws and the quantiles, after the dims.
         assert_eq!(
-            quantity_header(QShape::ScalarCensorable, &["patch".to_string()], none),
+            quantity_header(QShape::ScalarCensorable, &["patch".to_string()], none, false),
             "patch\tn_draws\tn_value\tn_censored\tp_censored\tq05\tq25\tq50\tq75\tq95"
         );
         // With the scenario overlay column: it leads everything else.
         let scen = DesignCoords { scenario: Some("with_sia"), sweep: &[] };
         assert_eq!(
-            quantity_header(QShape::Series, &["patch".to_string()], scen),
+            quantity_header(QShape::Series, &["patch".to_string()], scen, false),
             "scenario\ttime\tpatch\tn_draws\tq05\tq25\tq50\tq75\tq95"
         );
         // With a scenario AND a sweep: scenario leads, then one sweep:<param>
@@ -746,8 +817,19 @@ mod tests {
         let sweep = [("k".to_string(), 8.0)];
         let scen_sweep = DesignCoords { scenario: Some("with_sia"), sweep: &sweep };
         assert_eq!(
-            quantity_header(QShape::Series, &["patch".to_string()], scen_sweep),
+            quantity_header(QShape::Series, &["patch".to_string()], scen_sweep, false),
             "scenario\tsweep:k\ttime\tpatch\tn_draws\tq05\tq25\tq50\tq75\tq95"
+        );
+        // gh#794: a caller with a chain partition gets `rhat`/`ess` right after
+        // `n_draws`, before the censoring trio and the band.
+        assert_eq!(
+            quantity_header(QShape::Series, &[], none, true),
+            "time\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95"
+        );
+        assert_eq!(
+            quantity_header(QShape::ScalarCensorable, &["patch".to_string()], none, true),
+            "patch\tn_draws\trhat\tess\tn_value\tn_censored\tp_censored\
+             \tq05\tq25\tq50\tq75\tq95"
         );
     }
 
@@ -793,7 +875,7 @@ mod tests {
         ]];
         let times = vec![0.0, 7.0];
         let (outs, _manifest) =
-            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords { scenario: None, sweep: &[] }, None, &test_cal()).unwrap();
+            render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal()).unwrap();
 
         let prev = &outs.iter().find(|(n, _)| n == "prevalence").unwrap().1;
         let plines: Vec<&str> = prev.trim_end().lines().collect();
@@ -834,7 +916,7 @@ mod tests {
     #[test]
     fn point_mode_rejects_multiple_realizations() {
         let draws: Vec<Vec<sim::quantity::QuantityResult>> = vec![vec![], vec![]];
-        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords { scenario: None, sweep: &[] }, None, &test_cal()).unwrap_err();
+        let err = render_quantities(&[], &draws, &[], Mode::Point, DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal()).unwrap_err();
         assert!(err.contains("exactly one realization"), "got: {err}");
     }
 
@@ -864,7 +946,7 @@ mod tests {
 
         let (outs, manifest) =
             render_quantities(&quantities, &draws, &[], Mode::Banded,
-                DesignCoords { scenario: Some("with_sia"), sweep: &[] }, None, &test_cal()).unwrap();
+                DesignCoords { scenario: Some("with_sia"), sweep: &[] }, None, None, &test_cal()).unwrap();
         let peak = &outs.iter().find(|(n, _)| n == "peak").unwrap().1;
         let lines: Vec<&str> = peak.trim_end().lines().collect();
         assert_eq!(
@@ -891,6 +973,7 @@ mod tests {
             &quantities, &draws, &[], Mode::Banded,
             DesignCoords { scenario: Some("with_sia"), sweep: &sweep },
             None,
+            None,
             &test_cal(),
         )
         .unwrap();
@@ -912,7 +995,7 @@ mod tests {
 
         // None → no scenario column or field (simulate's byte-identical path).
         let (outs2, manifest2) =
-            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords { scenario: None, sweep: &[] }, None, &test_cal()).unwrap();
+            render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal()).unwrap();
         let peak2 = &outs2.iter().find(|(n, _)| n == "peak").unwrap().1;
         assert_eq!(
             peak2.lines().next().unwrap(),
@@ -924,5 +1007,183 @@ mod tests {
             mjson2["quantities"].as_array().unwrap()[0].get("scenario").is_none(),
             "scenario=None omits the manifest field"
         );
+    }
+
+    // ── gh#794: per-row convergence on a reported estimand ──────────────────
+
+    /// A quantity is the number that gets published, so its own R-hat is the
+    /// one a report should rest on — and it can be far better determined than
+    /// the parameters behind it (`f_cfr` at 1.31 while `p_fatal` and
+    /// `h_care_surv` sit at 2.85 and 2.56).
+    ///
+    /// Two chains of eight draws that disagree about a series quantity: the
+    /// `rhat` cell must flag it, and it must move from one time point to the
+    /// next (a column that does not is a stamp, not a per-row statistic).
+    #[test]
+    fn banded_quantities_carry_the_row_s_own_rhat_and_ess() {
+        use crate::fit::row_convergence::ChainOfDraw;
+        use ir::observation::StratumKey;
+        use ir::quantity::{Quantity, QuantityBody, QuantitySource};
+        use sim::quantity::QuantityResult;
+
+        let quantities = vec![Quantity {
+            name: "prevalence".to_string(),
+            stratum: Vec::<StratumKey>::new(),
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(ir::expr::Expr::Const(ir::expr::ConstExpr {
+                    value: 0.0,
+                })),
+                reduce: None,
+            },
+            dimension: None,
+        }];
+        // t = 0: the chains agree (both near 0.10). t = 7: chain 0 sits near
+        // 0.30 and chain 1 near 0.90 — a disagreement about the reported curve
+        // that no parameter R-hat is being consulted for here.
+        //
+        // The within-chain jitter repeats across the two halves of the chain,
+        // so split-R-hat sees no half-to-half difference within a chain: a
+        // sequence that drifted (or narrowed) between the halves would inflate
+        // every row, which is a property of the fixture and not of the chains.
+        const JITTER: [f64; 8] = [-1.0, 1.0, -0.3, 0.3, -1.0, 1.0, -0.3, 0.3];
+        let mut draws: Vec<Vec<QuantityResult>> = Vec::new();
+        let mut ids: Vec<Option<usize>> = Vec::new();
+        for chain in 0..2usize {
+            for j in JITTER.iter() {
+                let jitter = j * 0.002;
+                let late = if chain == 0 { 0.30 } else { 0.90 };
+                draws.push(vec![QuantityResult::Series(vec![0.10 + jitter, late + jitter])]);
+                ids.push(Some(chain));
+            }
+        }
+        let chains = ChainOfDraw(ids);
+        let times = vec![0.0, 7.0];
+        let (outs, _m) = render_quantities(
+            &quantities,
+            &draws,
+            &times,
+            Mode::Banded,
+            DesignCoords { scenario: None, sweep: &[] },
+            None,
+            Some(&chains),
+            &test_cal(),
+        )
+        .unwrap();
+
+        let text = &outs.iter().find(|(n, _)| n == "prevalence").unwrap().1;
+        let lines: Vec<&str> = text.trim_end().lines().collect();
+        assert_eq!(
+            lines[0], "time\tn_draws\trhat\tess\tq05\tq25\tq50\tq75\tq95",
+            "rhat/ess follow n_draws"
+        );
+        let cell = |row: usize, col: usize| lines[row].split('\t').nth(col).unwrap();
+        let rhat_at = |row: usize| cell(row, 2).parse::<f64>().unwrap();
+        // Measured on this fixture: 0.8660 at t=0, 1.7419 at t=7. (A
+        // rank-normalized R-hat can sit just below 1 on a finite sample where
+        // the chains agree exactly — that is the estimator, not a bug.)
+        assert!(
+            rhat_at(1) < 1.05,
+            "the chains agree at t=0, so its rhat is at or below 1: {}",
+            cell(1, 2)
+        );
+        assert!(
+            rhat_at(2) > 1.5,
+            "the chains disagree threefold at t=7, so its rhat must flag it: {}",
+            cell(2, 2)
+        );
+        assert_ne!(cell(1, 2), cell(2, 2), "a per-row statistic moves with the row");
+        // ESS is reported alongside, and is a positive count.
+        assert!(cell(1, 3).parse::<f64>().unwrap() > 0.0);
+    }
+
+    /// Without a chain partition — the `simulate --draws` path, which has no
+    /// chains behind it — no columns are added at all, so that output is
+    /// byte-identical.
+    #[test]
+    fn quantities_render_byte_identically_without_a_chain_partition() {
+        use crate::fit::row_convergence::ChainOfDraw;
+        use ir::observation::StratumKey;
+        use ir::quantity::{Quantity, QuantityBody, QuantitySource};
+        use sim::quantity::QuantityResult;
+
+        let quantities = vec![Quantity {
+            name: "prevalence".to_string(),
+            stratum: Vec::<StratumKey>::new(),
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(ir::expr::Expr::Const(ir::expr::ConstExpr {
+                    value: 0.0,
+                })),
+                reduce: None,
+            },
+            dimension: None,
+        }];
+        let draws: Vec<Vec<QuantityResult>> = (0..8)
+            .map(|i| vec![QuantityResult::Series(vec![0.1 + i as f64 * 0.01])])
+            .collect();
+        let times = vec![0.0];
+        let render = |chains: Option<&ChainOfDraw>| {
+            render_quantities(
+                &quantities,
+                &draws,
+                &times,
+                Mode::Banded,
+                DesignCoords { scenario: None, sweep: &[] },
+                None,
+                chains,
+                &test_cal(),
+            )
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|(n, _)| n == "prevalence")
+            .unwrap()
+            .1
+        };
+        let without = render(None);
+        assert!(!without.lines().next().unwrap().contains("rhat"), "{without}");
+
+        let ids = ChainOfDraw((0..8).map(|i| Some(i / 4)).collect());
+        let with = render(Some(&ids));
+        assert!(with.lines().next().unwrap().contains("\trhat\tess\t"), "{with}");
+        // Strip the two added cells and the two files agree.
+        let stripped: String = with
+            .lines()
+            .map(|l| {
+                let c: Vec<&str> = l.split('\t').collect();
+                let mut keep: Vec<&str> = c[..2].to_vec();
+                keep.extend_from_slice(&c[4..]);
+                format!("{}\n", keep.join("\t"))
+            })
+            .collect();
+        assert_eq!(stripped, without, "the flag adds two cells and changes nothing else");
+    }
+
+    /// A censored draw drops out of the band, and its chain id must drop with
+    /// it. Filtering one side only pairs a value with another draw's chain and
+    /// still produces a plausible number.
+    #[test]
+    fn a_censored_scalar_draw_drops_its_chain_id_too() {
+        use crate::fit::row_convergence::ChainOfDraw;
+        use sim::quantity::{QuantityDrawValue, QuantityResult};
+
+        let vals: Vec<QuantityDrawValue> = vec![
+            QuantityDrawValue::Value(1.0),
+            QuantityDrawValue::Censored,
+            QuantityDrawValue::Value(2.0),
+            QuantityDrawValue::Value(3.0),
+        ];
+        let chains = ChainOfDraw(vec![Some(0), Some(0), Some(1), Some(1)]);
+        let (finite, finite_chains) = finite_with_chains(&vals, Some(&chains));
+        assert_eq!(finite, vec![1.0, 2.0, 3.0]);
+        assert_eq!(
+            finite_chains.unwrap().0,
+            vec![Some(0), Some(1), Some(1)],
+            "the censored draw's chain id is dropped with its value, not left \
+             behind to shift every later pairing"
+        );
+        // And the untyped `None` case carries no partition at all.
+        let (_, none) = finite_with_chains(&vals, None);
+        assert!(none.is_none());
+        let _ = QuantityResult::Scalar(QuantityDrawValue::Censored);
     }
 }

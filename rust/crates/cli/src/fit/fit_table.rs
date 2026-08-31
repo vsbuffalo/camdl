@@ -119,7 +119,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             Some(raw) => match crate::chain_selection::ChainSelection::parse_exclude(raw) {
                 Ok(sel) => {
                     sel.warn_requested();
-                    Some(raw)
+                    Some(sel)
                 }
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -137,7 +137,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                 continue;
             };
             for name in &args.quantities {
-                if let Some(median) = resolve_quantity_median(fit_dir, name, selection) {
+                if let Some(median) = resolve_quantity_median(fit_dir, name, selection.as_ref()) {
                     r.quantities.insert(name.clone(), median);
                 }
             }
@@ -329,8 +329,8 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 /// single fit. Read-or-derive, mirroring Phase 2a's prequential
 /// derivation (`compare::derive_prequential`):
 ///
-///   1. **Read existing**: if `<fit_dir>/quantities/<name>.tsv` is
-///      present, return the `fitted` row's `q50`.
+///   1. **Read existing**: if the sidecar `selection` addresses is present,
+///      return the `fitted` row's `q50`.
 ///   2. **Derive on demand**: else, if the fit carries a posterior
 ///      cloud (method `pgas` / `pmmh`), spawn `camdl fit predict
 ///      <fit_dir> --horizon free_forward` (the single source of truth
@@ -338,24 +338,32 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 ///      re-read the file.
 ///   3. **Not derivable** (optimizer fit, no draws): `None`.
 ///
+/// `selection` picks the ADDRESS as well as the cloud: `quantities/` for the
+/// full cloud, `quantities-excl<ids>/` for a chain subset. Read and derive
+/// therefore agree, and a derived cell no longer has to overwrite the fit's
+/// pooled table to be visible (gh#795).
+///
 /// Any failure (predict refused, the model doesn't declare `name`, a
 /// malformed or scalar-less TSV) yields `None` — a single uncomputable
 /// cell renders `—` and never fails the whole table.
 fn resolve_quantity_median(
     fit_dir: &std::path::Path,
     name: &str,
-    exclude_chains: Option<&str>,
+    selection: Option<&crate::chain_selection::ChainSelection>,
 ) -> Option<f64> {
-    let tsv = fit_dir.join("quantities").join(format!("{name}.tsv"));
+    // The sidecar this cell reads is the one the SELECTION addresses (gh#795):
+    // `quantities/` for the full cloud, `quantities-excl<ids>/` for a subset.
+    // Reading the pooled address under a selection meant the derived predict had
+    // to overwrite the fit's stored table to be seen — so rendering a table
+    // silently replaced every listed fit's pooled quantities with a chain-subset
+    // one, and a second `--exclude-chains` replaced that.
+    let sub = crate::chain_selection::artifact_name("quantities", selection);
+    let tsv = fit_dir.join(&sub).join(format!("{name}.tsv"));
 
-    // (1) Fast path: an already-computed quantities TSV — BUT only when no chain
-    // selection is active. A pre-computed sidecar was banded over the FULL
-    // cloud, so honouring `--exclude-chains` means re-deriving it (the derive
-    // path below re-runs predict with the flag, overwriting the sidecar).
-    if exclude_chains.is_none() {
-        if let Some(median) = read_scalar_quantity_q50(&tsv) {
-            return Some(median);
-        }
+    // (1) Fast path: an already-computed quantities TSV at that address. It was
+    // banded over exactly this cloud, so it answers this cell.
+    if let Some(median) = read_scalar_quantity_q50(&tsv) {
+        return Some(median);
     }
 
     // (2/3) Derive only for fits that carry a posterior cloud — gated through
@@ -378,10 +386,11 @@ fn resolve_quantity_median(
         .arg("free_forward")
         .env("CAMDL_SKIP_VERSION_CHECK", "1");
     // Forward the chain selection so the derived quantity is banded over the
-    // same subset. `fit predict` re-parses + validates it against THIS fit's
-    // chains; an id absent here makes predict refuse → this cell renders `—`.
-    if let Some(ids) = exclude_chains {
-        cmd.arg("--exclude-chains").arg(ids);
+    // same subset, in its canonical spelling — the one that resolves to `sub`
+    // above. `fit predict` re-parses + validates it against THIS fit's chains;
+    // an id absent here makes predict refuse → this cell renders `—`.
+    if let Some(sel) = selection {
+        cmd.arg("--exclude-chains").arg(sel.excluded_csv());
     }
     let output = cmd.output().ok()?;
     if !output.status.success() {

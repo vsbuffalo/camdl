@@ -2026,7 +2026,7 @@ fn run_simulate(a: &args::SimulateArgs) {
                     // `simulate` has no fit behind it, so there is no
                     // conditioned/replay distinction to tag (gh#722) and the
                     // manifest is byte-identical.
-                    .push_group(&q.quantities, coords, &acc.draws, &acc.times, None, &q.calendar)
+                    .push_group(&q.quantities, coords, &acc.draws, &acc.times, None, None, &q.calendar)
                     .unwrap_or_else(|e| {
                         eprintln!("error rendering quantities: {}", e);
                         std::process::exit(1);

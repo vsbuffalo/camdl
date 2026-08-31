@@ -22,6 +22,11 @@ use io::progress::{Heartbeat, RunState};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+/// One chain's representative `(θ, x)` draw for the cross-chain compatibility
+/// matrix (gh#785) — the cold rung's parameter vector and the latent path it
+/// held at the end of the final sweep. `None` for a chain that never sampled.
+type ChainFinalDraw = Option<(Vec<f64>, PGASTrajectory)>;
+
 /// Trace column names for `CSMCDiagnostics::renewal_by_bin` (gh#688), one per
 /// tenth of the substep series. The array type is `[&str; RENEWAL_BINS]`, so a
 /// change to the bin count that this list does not follow is a compile error
@@ -664,6 +669,23 @@ pub fn run_stage(
     let chain_saved_sweeps: std::sync::Mutex<Vec<Vec<usize>>> =
         std::sync::Mutex::new(vec![Vec::new(); n_chains]);
 
+    // gh#785. Each chain's representative `(θ, x)` draw for the cross-chain
+    // path/parameter compatibility matrix, indexed by chain_id and filled
+    // inside the parallel closure (the pattern `chain_nuts` uses). `None` for a
+    // chain that never sampled — a start refused as `BadInit` (gh#607) has no
+    // path, so it is omitted from the matrix rather than given a null row.
+    //
+    // Both halves come from `PGASResult`'s end-of-run cold-rung state, which is
+    // ONE instant: `final_trajectory` and `resume_state.params` are both
+    // `rungs[0].*` cloned adjacently at the end of the final sweep
+    // (`sim/inference/pgas.rs`). Taking θ from `sweeps.last()` instead would
+    // pair the last RETAINED sweep's parameters with the FINAL sweep's path —
+    // the same sweep only when `thin` divides the post-burn-in count, and a
+    // silent cross term otherwise, which is exactly the entry the diagonal must
+    // not be.
+    let chain_final_draw: std::sync::Mutex<Vec<ChainFinalDraw>> =
+        std::sync::Mutex::new((0..n_chains).map(|_| None).collect());
+
     // Per-chain progress bars (mirrors IF2 / PMMH). One `Reporter` hands out a
     // `Task` per chain, rendered as a coordinated stack; the Reporter honors
     // --progress (Pretty=bars, Plain=throttled `chain N pos/len ll=…` log
@@ -769,9 +791,20 @@ pub fn run_stage(
                 .map(|n| super::loglik::trace_col_obs_ll_stream(n))
                 .collect();
             let mut trace_columns: Vec<&str> =
-                Vec::with_capacity(RENEWAL_BINS + 13 + obs_ll_stream_columns.len());
+                Vec::with_capacity(RENEWAL_BINS + 15 + obs_ll_stream_columns.len());
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
+            // gh#783: `collapsed_windows` is how many of the sweep's
+            // observation windows left EVERY particle at zero density, and
+            // `min_alive` is the fewest particles any of those windows left
+            // able to be drawn. A non-zero `collapsed_windows` is a sweep whose
+            // filter found no trajectory explaining the data; `min_alive` is
+            // the near miss the count alone cannot show — 1 and `n_particles`
+            // are the same row on every other column. They sit beside
+            // `trajectory_renewal` because the two are read together: renewal
+            // says whether the path moved, these say whether the selection had
+            // anything to choose from.
+            trace_columns.extend(["collapsed_windows", "min_alive"]);
             // gh#718: `as_opportunity` is how many substeps in the sweep drew
             // an ancestry, which is the only place an ancestor move is legal.
             // It is NOT the observation count: the weights an observation
@@ -846,6 +879,11 @@ pub fn run_stage(
                 let renewal_bins: Vec<String> = result.csmc_diag.renewal_by_bin.iter()
                     .map(|&r| if r.is_finite() { format!("{r:.4}") } else { "NA".to_string() })
                     .collect();
+                // gh#783: whether this sweep's filter weights ever left nothing
+                // to draw from, and how close they came.
+                let collapsed_windows_str =
+                    result.csmc_diag.weight_collapse.n_windows.to_string();
+                let min_alive_str = result.csmc_diag.weight_collapse.min_alive.to_string();
                 // gh#607 follow-up: the ancestor-sampling Metropolis acceptance
                 // rate, with its denominator alongside. `NA` means the step
                 // never ran (no alternative ancestor was admissible), which is
@@ -875,9 +913,10 @@ pub fn run_stage(
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
                 let mut extra: Vec<&str> =
-                    Vec::with_capacity(RENEWAL_BINS + 13 + obs_ll_stream_strs.len());
+                    Vec::with_capacity(RENEWAL_BINS + 15 + obs_ll_stream_strs.len());
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
+                extra.extend([collapsed_windows_str.as_str(), min_alive_str.as_str()]);
                 extra.extend([
                     as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
@@ -1076,6 +1115,17 @@ pub fn run_stage(
                 };
             }
 
+            // gh#785. This chain's representative (θ, x) pair for the
+            // cross-chain compatibility matrix. Both from the end-of-run cold
+            // rung, i.e. the same sweep — see the declaration.
+            {
+                let mut fd = chain_final_draw.lock().unwrap();
+                fd[chain_id] = Some((
+                    result.resume_state.params.clone(),
+                    result.final_trajectory.clone(),
+                ));
+            }
+
             Ok(Some((chain_id, result.sweeps, result.acceptance_rates)))
         })
         .collect();
@@ -1188,6 +1238,25 @@ pub fn run_stage(
         eprint!("{}", diagnostics.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
     }
 
+    // gh#791. Trajectory renewal resolved in time, pooled over the retained
+    // post-burn-in sweeps of every surviving chain. Printed unconditionally,
+    // and BESIDE the aggregate rather than instead of it: the aggregate's last
+    // term is structurally near 1, so a run whose early path is frozen still
+    // averages a healthy-looking third. `as_accept` is on the same block
+    // because the two are only legible together — the profile says where the
+    // path is stuck, the acceptance rate says whether the ancestor splice is
+    // contributing anything.
+    let path_renewal = {
+        let mut acc = super::path_renewal::PathRenewalAccum::new();
+        for (_, sweeps, _) in &all_results {
+            acc.add_chain(sweeps.iter().map(|s| &s.csmc_diag));
+        }
+        acc.finish()
+    };
+    if let Some(pr) = &path_renewal {
+        eprint!("{}", pr.report());
+    }
+
     // gh#audit-C7 + audit-H4. NUTS / tempering diagnostics surfaced from
     // PGASResult fields. Thresholds:
     //   - DivergentTransitions: ANY post-burn-in divergence (Stan
@@ -1245,11 +1314,23 @@ pub fn run_stage(
         let mut total_n_substeps:   usize = 0;
         let mut renewal_sum:        f64   = 0.0;
         let mut renewal_n:          usize = 0;
+        // gh#783: sweeps whose filter weights collapsed at some observation
+        // window, and the windows they collapsed at. Counted separately from
+        // `n_degenerate` above because the two are different vectors and
+        // different failures — that one is the ancestor weights (no particle
+        // could reach the reference), this one is the filter weights (no
+        // particle could explain the data).
+        let mut collapsed_sweeps:   usize = 0;
+        let mut collapsed_windows:  usize = 0;
         for sw in sweeps {
             total_n_degenerate += sw.csmc_diag.n_degenerate;
             total_n_substeps   += sw.csmc_diag.n_substeps;
             renewal_sum        += sw.csmc_diag.trajectory_renewal;
             renewal_n          += 1;
+            if sw.csmc_diag.weight_collapse.n_windows > 0 {
+                collapsed_sweeps  += 1;
+                collapsed_windows += sw.csmc_diag.weight_collapse.n_windows;
+            }
         }
         if total_n_substeps > 0 {
             let pct = total_n_degenerate as f64 / total_n_substeps as f64 * 100.0;
@@ -1269,6 +1350,27 @@ pub fn run_stage(
                 });
             }
         }
+        // No percentage threshold, unlike the two above: one sweep that
+        // searched and found nothing is already a sweep whose result carries no
+        // information about the data, and there is no rate below which that
+        // stops being worth saying.
+        if collapsed_sweeps > 0 {
+            collector.push(DiagnosticKind::FilterWeightCollapse {
+                n_sweeps: collapsed_sweeps,
+                n_total_sweeps: sweeps.len(),
+                n_windows: collapsed_windows,
+            });
+        }
+    }
+
+    // gh#791. The coalescence finding, keyed on the SHAPE of the renewal
+    // profile rather than its level — pushed once for the stage, over the same
+    // pooled profile printed above and written into the summary, so the message
+    // and the artifact cannot show a reader different numbers. It is a
+    // `Severity::Warning` at any gradient and gates nothing: the profile is the
+    // diagnostic, and this only points at it.
+    if let Some(d) = path_renewal.as_ref().and_then(|pr| pr.coalescence_finding()) {
+        collector.push(d);
     }
 
     // Write summary JSON. gh#727: the saved-vs-forkable counts go in with it,
@@ -1283,7 +1385,7 @@ pub fn run_stage(
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
     write_summary(stage_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
-        n_trajectories, &diagnostics)?;
+        n_trajectories, &diagnostics, path_renewal.as_ref())?;
 
     // No-op resume: every chain already reached the target sweep count
     // before this invocation. There are no new sweeps to aggregate
@@ -1471,6 +1573,15 @@ pub fn run_stage(
     let diag_path = stage_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 
+    // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the
+    // cross-chain path/parameter compatibility matrix `M[i][j] = log p(x_j |
+    // θ_i)`, which separates augmentation locking (each chain pinned to its own
+    // path) from the marginal posterior genuinely having several modes. Purely
+    // read-only — k² evaluations of the density the sampler already ran, after
+    // every draw is written, consuming no randomness.
+    write_cross_chain_compat(
+        &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), stage_dir);
+
     let wall_secs = elapsed.as_secs_f64();
     eprintln!("\npgas complete in {:.1}s: {}/", wall_secs, stage_dir.display());
     eprintln!("  best complete-data ll: {:.1} (chain {})",
@@ -1482,6 +1593,87 @@ pub fn run_stage(
     heartbeat.finish(RunState::Done);
 
     Ok(())
+}
+
+// ── Cross-chain path/parameter compatibility (gh#785) ────────────
+
+/// Compute and write `cross_chain_compat.json`, then print the two derived
+/// numbers.
+///
+/// Written for **PGAS and cSMC only** — a path-augmented sampler is the only
+/// one that has an `x` to score. PMMH stores no path, so it writes no file at
+/// all: an empty matrix there would read as "measured, found nothing" rather
+/// than "the question does not apply".
+///
+/// `all_results` is the surviving-chain list in `chain_id` order, so the rows
+/// of `M` come out in the same order as `acceptance_rates` and the `draws.tsv`
+/// chain blocks. Ids are written 1-based to match `chain_N/`.
+///
+/// Best-effort by design: this runs after every posterior artifact is already
+/// on disk, so a failure here reports itself on stderr and leaves the fit
+/// intact rather than failing a completed run.
+fn write_cross_chain_compat(
+    config: &FitRunConfig,
+    dt: f64,
+    all_results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
+    chain_final_draw: Vec<ChainFinalDraw>,
+    stage_dir: &Path,
+) {
+    use super::cross_chain_compat::{ChainDraw, CrossChainCompat};
+
+    // Only chains that sampled. `chain_final_draw[id]` is `None` exactly for a
+    // chain refused at its start (gh#607), which `all_results` has already
+    // dropped — the `filter_map` keeps the two in agreement rather than
+    // assuming it.
+    let draws: Vec<ChainDraw<'_>> = all_results.iter()
+        .filter_map(|(chain_id, _, _)| {
+            chain_final_draw.get(*chain_id)?.as_ref().map(|(params, traj)| ChainDraw {
+                chain: chain_id + 1,
+                params,
+                trajectory: traj,
+            })
+        })
+        .collect();
+    if draws.len() < 2 {
+        return;
+    }
+
+    let observations: Vec<sim::inference::particle_filter::Observation> =
+        config.observations.iter()
+            .map(|o| sim::inference::particle_filter::Observation {
+                time: o.time, value: o.value,
+            })
+            .collect();
+    let obs_model = config.build_obs_model();
+    // The stage pins `StepPolicy::Snap` (see `pgas_config` above), under which
+    // `build_substep_grid`'s obs map IS `build_obs_at_substep` — the same map
+    // `run_pgas` scored every recorded `transition_ll` against.
+    let t_start = config.compiled.model.simulation.t_start;
+    let obs_at_substep = match sim::inference::pgas::build_obs_at_substep(
+        &observations, t_start, dt)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("warning: cross-chain compatibility matrix skipped: {e}");
+            return;
+        }
+    };
+
+    let compat = match CrossChainCompat::compute(
+        &config.compiled, &draws, &observations, dt, &obs_model, &obs_at_substep)
+    {
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("warning: cross-chain compatibility matrix skipped: {e}");
+            return;
+        }
+    };
+    if let Err(e) = compat.write(&stage_dir.join("cross_chain_compat.json")) {
+        eprintln!("warning: {e}");
+        return;
+    }
+    eprint!("{}", compat.report());
 }
 
 // ── Diagnostics ──────────────────────────────────────────────────
@@ -1563,6 +1755,7 @@ fn write_summary(
     saved_paths: &SavedPathCounts,
     n_trajectories: usize,
     diagnostics: &StageConvergence,
+    path_renewal: Option<&super::path_renewal::PathRenewal>,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<Vec<f64>> = results.iter()
         .map(|(_, _, rates)| rates.clone())
@@ -1589,6 +1782,18 @@ fn write_summary(
             "n_forkable": saved_paths.n_forkable,
         },
     });
+    // gh#791. Trajectory renewal resolved in time, plus the two derived numbers
+    // and the ancestor-sampling acceptance rate. Purely ADDITIVE — no existing
+    // key is renamed or reinterpreted, and `trace.tsv` keeps `trajectory_renewal`
+    // and `renewal_b0 … renewal_b9` per sweep exactly as before. The block is
+    // OMITTED, not nulled, for a stage that retained no sweep: a row of nulls
+    // would read as "measured, found nothing".
+    if let Some(pr) = path_renewal {
+        let block = serde_json::to_value(pr)
+            .map_err(|e| format!("cannot serialize the path-renewal profile: {e}"))?;
+        summary.as_object_mut().expect("json! built an object")
+            .insert(super::path_renewal::PATH_RENEWAL_KEY.to_string(), block);
+    }
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pmmh's or nuts's.
     summary.as_object_mut().expect("json! built an object")

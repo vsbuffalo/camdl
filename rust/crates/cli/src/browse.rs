@@ -461,6 +461,43 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     println!("{}", "engine".bright_black()); println!("  {}", rec.engine_version);
 }
 
+/// Every address of one artifact family under a fit segment, sorted: the bare
+/// `family` plus every `family-<key>` sibling.
+///
+/// `fit predict` keys the address of a report by what produced it — the
+/// reporting vocabulary (`quantities-<key8>`, proposal 2026-08-19) and the chain
+/// selection (`predictive-excl3,5`, gh#795) — so the pooled artifact and each
+/// keyed one coexist. A fixed-name listing would show only the pooled one and
+/// read as "the subset was never generated".
+///
+/// `dirs` selects directories (the TSVs) rather than the `<address>.json`
+/// manifests beside them. Manifests are returned with their `.json` suffix, so
+/// either list can be printed as-is.
+///
+/// Ordered by ADDRESS, not by filename, so the pooled artifact leads both lists.
+/// Sorting manifests by filename would put `predictive.json` after
+/// `predictive-excl4.json` (`-` sorts before `.`) while the directories put
+/// `predictive/` first — the same fit reading in two different orders.
+fn keyed_children(segment: &Path, family: &str, dirs: bool) -> Vec<String> {
+    let prefix = format!("{family}-");
+    let stem_of = |n: &str| -> String {
+        if dirs { n.to_string() } else { n.strip_suffix(".json").unwrap_or("").to_string() }
+    };
+    let mut out: Vec<(String, String)> = std::fs::read_dir(segment)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir() == dirs)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter_map(|n| {
+            let stem = stem_of(&n);
+            (stem == family || stem.starts_with(&prefix)).then_some((stem, n))
+        })
+        .collect();
+    out.sort();
+    out.into_iter().map(|(_, n)| n).collect()
+}
+
 /// Render a fit SEGMENT as its *output envelope*: the fit-level identity (label,
 /// fit hash, declared stages) plus the discoverable output files the fit
 /// produced (predictive / observed / quantities artifacts + top-level
@@ -492,21 +529,17 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
     // shows fewer outputs).
     println!("{}", "outputs".bright_black());
     let mut any = false;
-    // `quantities` is not one fixed name: a `fit predict --quantities FILE`
-    // writes `quantities-<key8>/` (proposal 2026-08-19), one per reporting
-    // vocabulary applied to this fit. Discover them rather than listing a fixed
-    // name, or a table that was written would read here as never generated.
-    let mut subs: Vec<String> = vec!["predictive".into(), "observed".into()];
-    let mut keyed: Vec<String> = std::fs::read_dir(segment)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n == "quantities" || n.starts_with("quantities-"))
-        .collect();
-    keyed.sort();
-    subs.extend(keyed);
+    // None of these is one fixed name. `fit predict --quantities FILE` writes
+    // `quantities-<key8>/` (proposal 2026-08-19), one per reporting vocabulary;
+    // `fit predict --exclude-chains 3,5` writes `predictive-excl3,5/`,
+    // `contrasts-excl3,5/` and `quantities…-excl3,5/` (gh#795), one per chain
+    // subset. Discover each family rather than listing fixed names, or an
+    // artifact that WAS written would read here as never generated. `observed/`
+    // is unkeyed — it is the fit's data, the same under any selection.
+    let mut subs: Vec<String> = keyed_children(segment, "predictive", true);
+    subs.push("observed".into());
+    subs.extend(keyed_children(segment, "contrasts", true));
+    subs.extend(keyed_children(segment, "quantities", true));
     for sub in &subs {
         let sub = sub.as_str();
         if let Ok(entries) = std::fs::read_dir(segment.join(sub)) {
@@ -528,16 +561,8 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
             }
         }
     }
-    let mut manifests: Vec<String> = vec!["predictive.json".into()];
-    let mut keyed_manifests: Vec<String> = std::fs::read_dir(segment)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n == "quantities.json" || (n.starts_with("quantities-") && n.ends_with(".json")))
-        .collect();
-    keyed_manifests.sort();
-    manifests.extend(keyed_manifests);
+    let mut manifests: Vec<String> = keyed_children(segment, "predictive", false);
+    manifests.extend(keyed_children(segment, "quantities", false));
     manifests.push("fit.meta.json".into());
     for manifest in &manifests {
         if segment.join(manifest).exists() {

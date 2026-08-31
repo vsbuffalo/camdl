@@ -207,6 +207,14 @@ pub fn emit_contrasts(
         return Ok(Vec::new());
     }
 
+    // WHERE the contrast lands is keyed by the same selection it bands over
+    // (gh#795): the full cloud keeps `contrasts/`, a subset writes
+    // `contrasts-excl<ids>/`. A contrast is a posterior-derived report like the
+    // predictive beside it, so writing a chain-subset one at the pooled address
+    // replaced the run's canonical contrast with a cherry-picked one.
+    let contrasts_sub =
+        crate::chain_selection::artifact_name("contrasts", selection);
+
     // Honest denominator, part 1: WHICH cloud. A chain selection narrows the
     // posterior before the forkable subset is taken, and a band over 25 of 25
     // retained draws looks identical on paper to one over the whole fit — so
@@ -449,7 +457,7 @@ pub fn emit_contrasts(
         }
 
         let content = band_and_render(&c.name, &shaped)?;
-        written.push(write_tsv(segment, "contrasts", &c.name, &content)?);
+        written.push(write_tsv(segment, &contrasts_sub, &c.name, &content)?);
     }
     Ok(written)
 }
