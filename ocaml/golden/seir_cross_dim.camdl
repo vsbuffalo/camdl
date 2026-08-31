@@ -1,3 +1,10 @@
+# SEIR stratified over TWO axes at once — spatial patches x age groups.
+#
+# Exercises cross-dimension expressions: an age-mixing matrix inside a
+# per-patch force of infection, adjacency-weighted importation summed over
+# patches, aging through `consecutive(age)`, and a `patch x age` table
+# supplying the initial conditions.
+
 time_unit = 'days
 
 compartments { S, E, I, R }
