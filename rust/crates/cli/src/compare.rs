@@ -80,6 +80,36 @@ const JEFFREYS_SCALE_NOTE: &str =
     "The Jeffreys tiers calibrate Bayes factors; these are in-sample \
      likelihood ratios, not Bayes factors.";
 
+/// The last line of every human rendering (gh#806).
+///
+/// The footer's job is to state what is specific to THIS comparison — how many
+/// steps were scored, what θ saw, the numbers the noise gates read. The
+/// definitions behind the column names are the same on every render, so they
+/// live in one place that can hold citations and derivations, and the footer
+/// names the two ways to reach it.
+const METHODS_POINTER: &str =
+    "Definitions and caveats: `camdl compare --explain` \
+     (or `camdl docs model-comparison`).";
+
+/// What θ saw, in one line, from the traces' `Conditioning` stamp.
+///
+/// Held-out and in-sample scores answer different questions, and the answer
+/// changes how a Δelpd should be read — an in-sample Δ tilts toward the more
+/// flexible model, a held-out one does not. Until now the stamp reached only
+/// the JSON, so the table a reader actually looks at never said which it was.
+/// One line, not per row: the conditioning preflight refuses a cohort whose
+/// rows disagree, so the baseline's stamp is the cohort's.
+fn conditioning_line(trace: &PrequentialTrace) -> String {
+    match &trace.conditioning {
+        Conditioning::InSample =>
+            "Conditioning: in-sample — θ fit to all scored data; Δelpd favors \
+             the more flexible model.".to_string(),
+        Conditioning::HoldOutTail { train_end, .. } => format!(
+            "Conditioning: held-out tail (train_end = {train_end}) — θ sealed \
+             before the scored window."),
+    }
+}
+
 /// Settings applied uniformly to every fit handle whose prequential is
 /// auto-derived, so T_score and the scores stay commensurable across the
 /// compared fits. An explicit `prequential.json` input ignores these (it is
@@ -1701,7 +1731,6 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         idx
     };
     let mut body: Vec<Vec<String>> = Vec::with_capacity(rows.len());
-    let mut any_evidence = false;
     for &i in &order {
         let r = &rows[i];
         let elpd = r.trace.elpd();
@@ -1726,7 +1755,6 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
             row.push(fmt_lr(d.exp()));
             row.push(format!("{:.2}", se));
             row.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
-            any_evidence |= d.is_finite();
         }
         if want_crps {
             row.push(format!("{:.3}", r.trace.mean_crps()));
@@ -1762,24 +1790,26 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: b
         out.push_str(&fmt_table_row(row, &widths));
     }
 
+    // The footer states what is specific to this comparison — the scored
+    // window, the baseline, what θ saw, and the numbers behind the noise
+    // gates — and points at the methods page for everything that is the same
+    // on every render (gh#806). The static explanations it used to carry are
+    // still in the JSON (`evidence_scale_note`, `se_caveat`), which is the
+    // machine surface and loses nothing by repeating itself.
     out.push('\n');
     out.push_str(&format!("Scored steps: {} (t0={}).  Baseline: {}.\n",
         base.n_scored(), base.t0, rows[base_idx].name));
     if !t_mismatch {
         out.push_str("Sorted by Δelpd ascending — best-supported model at the bottom.\n");
     }
-    if any_evidence {
-        out.push_str(JEFFREYS_SCALE_NOTE);
-        out.push('\n');
-        if let Some(caveat) = se_caveat(base.n_scored()) {
-            out.push_str(&caveat);
-            out.push('\n');
-        }
-    }
+    out.push_str(&conditioning_line(base));
+    out.push('\n');
     for line in warning_lines(rows, base_idx, t_mismatch) {
         out.push_str(&line);
         out.push('\n');
     }
+    out.push_str(METHODS_POINTER);
+    out.push('\n');
     out
 }
 
@@ -1822,18 +1852,21 @@ fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String>
         }
     }
     // §3.4 remedy 4: print each row's filter-noise MC SE so the reader
-    // sees the scale the "within filter noise" gate reads.
+    // sees the scale the "within filter noise" gate reads. The numbers are
+    // this comparison's; what they are and where they come from is the
+    // methods page's job (gh#806).
     let with_mc: Vec<String> = rows.iter()
         .filter_map(|r| r.mc_se.map(|se| format!("{} ±{:.2}", r.name, se)))
         .collect();
     if !with_mc.is_empty() {
         lines.push(format!(
-            "note: filter-noise MC SE of elpd (replicate derives): {}",
+            "note: filter-noise MC SE of elpd: {}",
             with_mc.join(", ")));
     }
     // Stage 4.3 (§3.4 remedy 2): the serial dependence the HAC se(Δ)
     // exists for — printed so the reader sees how far from iid the
-    // per-step differentials are.
+    // per-step differentials are. Same split: the value here, the
+    // Newey–West/HLN construction on the methods page.
     let lag1: Vec<String> = rows.iter().enumerate()
         .filter(|(i, _)| *i != base_idx)
         .filter_map(|(_, r)| {
@@ -1844,9 +1877,7 @@ fn warning_lines(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<String>
         .collect();
     if !lag1.is_empty() {
         lines.push(format!(
-            "note: se(Δ) is a Newey–West HAC SE with the Harvey–Leybourne–\
-             Newbold small-sample correction (reference: t with T−1 df); \
-             lag-1 autocorrelation of the per-step Δelpd vs baseline: {}",
+            "note: lag-1 autocorrelation of the per-step Δelpd vs baseline: {}",
             lag1.join(", ")));
     }
     if let Some(caveat) = optimism_caveat(rows) {
@@ -1929,7 +1960,6 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
         });
         idx
     };
-    let mut any_evidence = false;
     for &i in &order {
         let r = &rows[i];
         let mut cells: Vec<String> = vec![
@@ -1948,7 +1978,6 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
             cells.push(fmt_lr(d.exp()));
             cells.push(format!("{:.2}", se));
             cells.push(crate::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
-            any_evidence |= d.is_finite();
         }
         if want_crps {
             cells.push(format!("{:.3}", r.trace.mean_crps()));
@@ -1963,18 +1992,15 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
         if want_pit { cells.push(format!("{:.2}", r.trace.pit_coverage(0.90))); }
         out.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
+    // Same footer as the text table (gh#806), in markdown: the sort order,
+    // the conditioning stamp, the comparison-specific notes, and the pointer
+    // at the methods page.
     if !t_mismatch {
         out.push('\n');
         out.push_str("_Sorted by Δelpd ascending — best-supported model at the bottom._\n");
     }
-    if any_evidence {
-        out.push('\n');
-        out.push_str(&format!("_{JEFFREYS_SCALE_NOTE}_\n"));
-        if let Some(caveat) = se_caveat(base.n_scored()) {
-            out.push('\n');
-            out.push_str(&format!("_{caveat}_\n"));
-        }
-    }
+    out.push('\n');
+    out.push_str(&format!("_{}_\n", conditioning_line(base)));
     // The same block the text table prints, as a markdown list so each warning
     // stays its own line when the document is rendered.
     let warnings = warning_lines(rows, base_idx, t_mismatch);
@@ -1984,6 +2010,8 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], t_mismatch: bool
             out.push_str(&format!("- {line}\n"));
         }
     }
+    out.push('\n');
+    out.push_str(&format!("_{METHODS_POINTER}_\n"));
     out
 }
 
@@ -2221,14 +2249,10 @@ mod tests {
             "a Δ inside the noise band is labelled `within noise`:\n{table}");
         assert!(!table.contains("indeterminate"),
             "and carries no Jeffreys tier:\n{table}");
-        assert!(table.contains("not Bayes factors"),
-            "a table showing evidence labels states what the Jeffreys scale \
-             calibrates:\n{table}");
 
         let md = render_md(&rows, 0, &metrics, false);
         assert!(md.contains("within noise"), "the md table agrees:\n{md}");
         assert!(!md.contains("indeterminate"), "{md}");
-        assert!(md.contains("not Bayes factors"), "{md}");
 
         let json = render_json(&rows, 0, &metrics);
         assert!(json.contains("\"evidence_label\": \"within_noise\""),
@@ -2474,39 +2498,116 @@ mod tests {
 
     /// `se(Δ)` is √(T·Var) of the per-observation differences — a normal
     /// approximation whose accuracy depends on T and on how alike the two
-    /// models are. At a short scoring window it is not a quantity to read a
-    /// verdict from, and the table says so once, not once per row.
+    /// models are. It stays a per-comparison fact in the JSON (`se_caveat`,
+    /// populated only below 100 scored steps); the sentence explaining it left
+    /// the human footer for the methods page (gh#806).
     #[test]
-    fn a_short_scoring_window_carries_the_se_caveat() {
+    fn the_small_t_se_caveat_is_a_json_field_not_a_footer_sentence() {
         let metrics = vec!["elpd".to_string()];
         let short = vec![
             row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
             row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
         ];
 
-        let table = render_table(&short, 0, &metrics, false);
-        assert_eq!(table.matches("arXiv:2008.10296").count(), 1,
-            "the caveat fires once per render, not once per row:\n{table}");
-        let md = render_md(&short, 0, &metrics, false);
-        assert_eq!(md.matches("arXiv:2008.10296").count(), 1, "{md}");
         let json = render_json(&short, 0, &metrics);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["se_caveat"].as_str().is_some_and(|s| s.contains("2008.10296")),
-            "the JSON carries it as a field:\n{json}");
+            "the JSON carries the caveat as a field:\n{json}");
 
-        // A long scoring window does not: the caveat must mean something when
-        // it appears.
+        let table = render_table(&short, 0, &metrics, false);
+        assert!(!table.contains("2008.10296"),
+            "the citation belongs to the methods page now:\n{table}");
+        let md = render_md(&short, 0, &metrics, false);
+        assert!(!md.contains("2008.10296"), "{md}");
+
+        // A long scoring window does not carry it at all: the field must mean
+        // something when it is populated.
         let times: Vec<f64> = (1..=120).map(|i| i as f64).collect();
         let long = vec![
             row_at("a", &times, &vec![-6.0; 120]),
             row_at("b", &times, &vec![-5.9; 120]),
         ];
-        let table = render_table(&long, 0, &metrics, false);
-        assert!(!table.contains("2008.10296"),
-            "120 scored steps is not a small-T window:\n{table}");
         let json = render_json(&long, 0, &metrics);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v["se_caveat"].is_null(), "{json}");
+        assert!(v["se_caveat"].is_null(),
+            "120 scored steps is not a small-T window:\n{json}");
+    }
+
+    /// gh#806. The footer states what is specific to THIS comparison and
+    /// points at the methods page for the rest. Both human renderings end at
+    /// the pointer; neither repeats the Jeffreys-scale note, the small-T
+    /// citation, or the Newey–West/HLN construction — and the JSON, the
+    /// machine surface, keeps every field it had.
+    #[test]
+    fn the_human_footer_points_at_the_methods_page_and_the_json_keeps_its_fields() {
+        let rows = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        let metrics = vec!["elpd".to_string()];
+
+        for (fmt, out) in [("table", render_table(&rows, 0, &metrics, false)),
+                           ("md",    render_md(&rows, 0, &metrics, false))] {
+            assert!(out.contains("camdl compare --explain"),
+                "the {fmt} footer names where the definitions are:\n{out}");
+            assert!(out.contains("camdl docs model-comparison"),
+                "and the offline topic:\n{out}");
+            assert!(!out.contains("not Bayes factors"),
+                "the {fmt} footer no longer carries the Jeffreys-scale \
+                 sentence:\n{out}");
+            assert!(!out.contains("Newey"),
+                "nor the HAC construction:\n{out}");
+            assert!(!out.contains("Harvey"), "{out}");
+            // The numeric note it replaced still prints its value.
+            assert!(out.contains("lag-1 autocorrelation of the per-step Δelpd"),
+                "the lag-1 number survives the collapse:\n{out}");
+        }
+
+        let json = render_json(&rows, 0, &metrics);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["evidence_scale_note"].as_str()
+                .is_some_and(|s| s.contains("not Bayes factors")),
+            "the JSON keeps the Jeffreys-scale note verbatim:\n{json}");
+        assert!(v["se_caveat"].as_str().is_some_and(|s| s.contains("2008.10296")),
+            "and the small-T caveat:\n{json}");
+        assert!(v["rows"][1]["lag1_autocorr_delta_elpd"].is_number(),
+            "and the per-row lag-1 field:\n{json}");
+    }
+
+    /// gh#806. A comparison never said what θ had seen: `hold_out_tail`'s
+    /// sealed boundary reached the JSON only, so a held-out table and an
+    /// in-sample one were indistinguishable at a glance — while their Δelpd
+    /// answer different questions. Both human renderings state it, once.
+    #[test]
+    fn the_footer_states_the_conditioning_the_rows_were_scored_under() {
+        let metrics = vec!["elpd".to_string()];
+        let in_sample = vec![
+            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
+            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
+        ];
+        let table = render_table(&in_sample, 0, &metrics, false);
+        assert!(table.contains("Conditioning: in-sample"),
+            "the in-sample stamp reaches the table:\n{table}");
+        assert_eq!(table.matches("Conditioning:").count(), 1,
+            "stated once for the cohort, not once per row:\n{table}");
+        let md = render_md(&in_sample, 0, &metrics, false);
+        assert!(md.contains("Conditioning: in-sample"), "{md}");
+
+        // Held out at t = 42: the boundary is the fact a reader needs, so the
+        // line carries the number, not just the mode.
+        let mut held = in_sample;
+        for r in &mut held {
+            r.trace.conditioning = Conditioning::HoldOutTail {
+                train_end: 42.0,
+                theta_source: "results/fits/sir-abc12345".into(),
+            };
+        }
+        let table = render_table(&held, 0, &metrics, false);
+        assert!(table.contains("Conditioning: held-out tail (train_end = 42)"),
+            "the sealed boundary is named:\n{table}");
+        assert!(!table.contains("in-sample"), "{table}");
+        let md = render_md(&held, 0, &metrics, false);
+        assert!(md.contains("train_end = 42"), "{md}");
     }
 
     /// A comparison rendered in spite of a data mismatch (the reader passed

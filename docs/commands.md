@@ -250,13 +250,21 @@ they are not a leave-future-out forecast score. The optimism does not cancel
 when two models are differenced, either: it grows with the effective number of
 parameters each model was free to tune against the same observations, so Δelpd
 tilts toward the more flexible model. Read a comparison as indicative, alongside
-`se(Δ)` and the caveats; `compare` prints them with the table on every run.
+`se(Δ)` and the caveats.
 
 The evidence column is gated on that standard error: when `|Δelpd| < 2·se(Δ)`
 the cell reads `within noise` and carries no Jeffreys tier, because the tier
 would name a magnitude the data cannot resolve. The `LR` column is `exp(Δelpd)`
 — the candidate's in-sample predictive likelihood over the baseline's on the
 same scored observations.
+
+The footer under the table states what is specific to that comparison: the
+scored window and baseline, the conditioning the rows were scored under
+(in-sample, or a held-out tail with the sealed `train_end`), the optimism
+caveat, any miscalibration flag, and the numbers the noise gates read — the
+filter-noise MC SE per row and the lag-1 autocorrelation of the per-step Δelpd.
+What those quantities are, and their citations and caveats, is
+`camdl compare --explain` (the same guide as `camdl docs model-comparison`).
 
 `compare` refuses, rather than renders, four unlike-for-unlike comparisons: a
 differing `T_score` (override: `--allow-mismatched-horizon`, which suppresses

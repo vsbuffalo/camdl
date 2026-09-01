@@ -209,9 +209,9 @@ $$\mathrm{se}(\Delta) \;=\; \sqrt{T \cdot \widehat{\mathrm{Var}}_t(d_t)}$$
 - **The limitation:** all of this rests on a normal approximation that is
   unreliable when the scored count is small (tens rather than hundreds) or the
   models predict alike (Sivula, Magnusson, Matamoros & Vehtari,
-  arXiv:2008.10296). Compartmental fits routinely score 10–50 steps. The table
-  says so whenever it applies; read se(Δ) as a description of scatter, not as a
-  hypothesis test.
+  arXiv:2008.10296). Compartmental fits routinely score 10–50 steps. The JSON
+  output carries `se_caveat` whenever it applies; read se(Δ) as a description of
+  scatter, not as a hypothesis test.
 
 ### 4.5 The evidence column: decibans and the Jeffreys tiers
 
@@ -242,12 +242,13 @@ scales are not interchangeable.
 Two guards keep the words honest. First, a tier is printed only when
 $\lvert\Delta\mathrm{elpd}\rvert \ge 2\,\mathrm{se}(\Delta)$ — otherwise the
 cell reads `within noise`, because a tier names a magnitude the data cannot
-resolve. Second, the footer states on every render that these scales calibrate
-**Bayes factors** — ratios of marginal likelihoods, with $\theta$ integrated out
-— and a camdl Δelpd is not yet one: at plug-in provenance it is a ratio of
-maximized (or point-evaluated) likelihoods, which flatters the more flexible
-model in a way a Bayes factor would not. Treat the tier as a readability aid for
-the magnitude, not as a Bayesian conclusion.
+resolve. Second, these scales calibrate **Bayes factors** — ratios of marginal
+likelihoods, with $\theta$ integrated out — and a camdl Δelpd is not yet one: at
+plug-in provenance it is a ratio of maximized (or point-evaluated) likelihoods,
+which flatters the more flexible model in a way a Bayes factor would not. Treat
+the tier as a readability aid for the magnitude, not as a Bayesian conclusion.
+(The JSON output states this as `evidence_scale_note`; the rendered table points
+here instead of repeating it.)
 
 ## 5. The posterior-mixture predictive
 
