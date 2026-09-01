@@ -120,6 +120,12 @@ const TOPICS: &[Topic] = &[
         summary: "Package a minimal reproducible example (`camdl mre fit`) to send the maintainer when a fit misbehaves",
         body: include_str!("../../../../docs/mre.md"),
     },
+    Topic {
+        slug: "model-comparison",
+        aliases: &["compare", "comparison", "elpd", "evidence", "jeffreys", "holdout"],
+        summary: "Reading `camdl compare`: elpd and the prequential score, LR and the Jeffreys tiers, se(Δ), PIT coverage, held-out evaluation",
+        body: include_str!("../../../../docs/methods/model-comparison.md"),
+    },
 ];
 
 fn resolve(name: &str) -> Option<&'static Topic> {
