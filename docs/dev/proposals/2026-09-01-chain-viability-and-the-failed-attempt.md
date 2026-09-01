@@ -318,18 +318,23 @@ PgasStartRecoveryExhausted {
 
 ### 6.3 The run-level denominator — replacing `n_good_chains`, not joining it
 
-camdl already counts this, twice, and neither place is good enough.
+camdl already counts this and the existing counter is not good enough.
 `n_good_chains` (`cli/fit/pgas.rs:1154`) prints `ran 9 of 16 chains` to stderr
 and lands in `fit_state.toml` — but only as `Some(n)` when something failed
 (`pgas.rs:1468`), which is exactly the "absence of a complaint" the honest
-version has to fix. `chain_starts.tsv` carries a third copy of the requested
-count in its header (`init.rs:1220`).
+version has to fix.
 
-An earlier draft of this section added a fourth. **`ChainAccounting` replaces
-`n_good_chains` outright**; `n_good_chains` and its `fit_state.toml` field are
-deleted in the same commit, and `chain_starts.tsv`'s header count is derived
-from the accounting rather than recomputed. One counter, one definition, always
-present.
+**`ChainAccounting` replaces `n_good_chains` outright**; `n_good_chains` and its
+`fit_state.toml` field are deleted in the same commit.
+
+The rule being applied is about code, not artifacts. **One definition in one
+place in the source; any number of appearances in outputs.** A count that shows
+up in `chain_starts.tsv`'s header (`init.rs:1220`), in `fit_state.toml`, in
+stderr and in `diagnostics.json` is not duplication — it is four files each
+legible on its own, which is what a human opening one of them needs. What must
+not exist is a second piece of code that _computes_ it, because that is what
+drifts. So `chain_starts.tsv` keeps its header; it reads the number from the
+accounting instead of counting again.
 
 ```rust
 /// What the fit was asked for versus what it got. The single authority — this
@@ -762,8 +767,12 @@ is revisable against those.
 ## 13. Nothing here adds a second implementation
 
 camdl's standing rule is that a knob, a counter, or a policy has exactly one
-definition. This proposal deletes more than it adds, and the places where an
-implementer could accidentally fork are named here.
+definition **in the source**. Artifacts are the opposite case: repeating a value
+across `trace.tsv`, `chain_starts.tsv`, `fit_state.toml` and `diagnostics.json`
+makes each file readable standalone, which is a property worth paying for. The
+rule bites on code that computes the same thing twice, because that is what
+drifts apart. This proposal deletes more than it adds, and the places where an
+implementer could accidentally fork a computation are named here.
 
 **Deleted outright** — alpha posture, no aliases, no compatibility shims:
 
