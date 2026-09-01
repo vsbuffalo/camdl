@@ -423,9 +423,9 @@ diagnostic, it is the frame every diagnostic is read against:
           "budget": 100,
           "init": "unconditional_filter",
           "last": {
-            "log_posterior": null,
+            "log_posterior": "-inf",
             "transition": -2245.09,
-            "observation": null,
+            "observation": "-inf",
             "ivp": -26.28,
             "log_prior": -33.83
           },
@@ -444,12 +444,80 @@ diagnostic, it is the frame every diagnostic is read against:
 }
 ```
 
-Non-finite floats serialise as JSON `null` — camdl already runs a finiteness
-gate on raw floats rather than on built `Value`s (`140ef57f`), because
-`json!`/`to_value` collapse NaN and infinity to `Null` before any gate can see
-them. `CompleteDataTerms` must therefore be serialised through that same path,
-with the sentinel documented, or a consumer cannot distinguish `-inf` from
-absent.
+### 7.3 `-inf` is a value, and JSON must carry it as one
+
+A log-density lives on the extended reals ℝ ∪ {−∞}. `−∞` means _this state is
+off the support_ — a measurement, not a failure to take one. Every field of
+`CompleteDataTerms` is such a density, and the observation term is `−∞` in
+essentially every refusal this proposal is about.
+
+JSON has no encoding for it, and `serde_json` maps every non-finite `f64` to
+`null` — which is also what an absent field looks like. Collapsing those two
+throws away the only signal a refusal record carries.
+
+camdl has already made this decision one layer up. `chain_loglik_cell`
+(`fit/fit_summary.rs:1326`) renders `-inf` loudly and `—` for "nothing
+readable", and says why: "softening either one hides the only signal there is."
+The terminal gets it right; JSON does not. So this is not a new convention, it
+is an existing one crossing a layer boundary.
+
+```rust
+/// A quantity on the EXTENDED reals ℝ ∪ {−∞}, encoded so JSON does not lose
+/// the distinction between "off the support" and "not computed".
+///
+/// Encoding: a finite value is a JSON **number**; a non-finite one is one of
+/// the **strings** `"-inf"`, `"inf"`, `"nan"`. `null` keeps its ordinary
+/// meaning — the field was not computed. A consumer branches on the JSON type,
+/// which is why the file carries a `schema` tag (§7.2).
+///
+/// `NaN` is not a legitimate log-density; it round-trips as `"nan"` rather than
+/// vanishing precisely so it stays visible. A `"nan"` in an artifact is a
+/// report of a bug upstream, and `diagnostic.rs` already holds the line that
+/// "`NaN` and `0.0` are different diagnoses and must not be collapsed".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtendedReal(pub f64);
+
+impl serde::Serialize for ExtendedReal {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.0.is_finite() { s.serialize_f64(self.0) }
+        else if self.0.is_nan() { s.serialize_str("nan") }
+        else if self.0 > 0.0    { s.serialize_str("inf") }
+        else                    { s.serialize_str("-inf") }
+    }
+}
+// Deserialize accepts a number or one of the three strings; anything else errs.
+```
+
+`CompleteDataTerms` therefore becomes:
+
+```rust
+pub struct CompleteDataTerms {
+    pub log_posterior: ExtendedReal,
+    pub transition:    ExtendedReal,
+    pub observation:   ExtendedReal,   // `-inf` in essentially every refusal
+    pub ivp:           ExtendedReal,
+    pub log_prior:     ExtendedReal,
+}
+```
+
+**Scope it deliberately.** `ExtendedReal` is for densities and scores, not a
+blanket replacement for `f64` in artifacts. Most floats camdl writes are finite
+by construction, and widening this beyond the fields where non-finiteness is
+_meaningful_ would make every consumer branch on a type union for no gain.
+
+**One hazard, stated because it is not obvious.** `ensure_finite`
+(`cli/fit/cas.rs:380`) rejects non-finite floats before hashing, by driving a
+custom `FiniteCheck` serializer over the value — it exists because
+`json!`/`to_value` collapse non-finites to `Null` before any gate can see them
+(`140ef57f`). An `ExtendedReal` serialises a non-finite as a **string**, which
+`FiniteCheck` does not inspect. **Putting an `ExtendedReal` into anything that
+enters the run address would silently bypass the finiteness gate.**
+
+The boundary is therefore: `ExtendedReal` is an **output** type, for diagnostics
+and reports, and never an **input** type. Identity payloads keep raw `f64` and
+keep the gate. This should be enforced by a test asserting no type reachable
+from an identity payload contains an `ExtendedReal`, not left to the reader —
+the failure mode is silent and the gate is load-bearing.
 
 Three further changes, each small and each closing a live complaint:
 
@@ -464,7 +532,7 @@ Three further changes, each small and each closing a live complaint:
   logged warning at minimum. A diagnostics file that silently failed to write is
   indistinguishable from a fit with no diagnostics.
 
-### 7.3 Consumers
+### 7.4 Consumers
 
 `camdl-viewer` reads these artifacts and currently conveys refused chains
 poorly, which is a direct consequence of §7.1: the only machine-readable signal
@@ -542,8 +610,10 @@ whether its own joint state recovered.
 
 Each step is independently landable and green.
 
-1. **`CompleteDataTerms`**, replacing the five loose `f64`s on
-   `NonFiniteChainStart`. Pure refactor, no behaviour change, no re-key.
+1. **`ExtendedReal` and `CompleteDataTerms`**, replacing the five loose `f64`s
+   on `NonFiniteChainStart` (§7.3). Pure refactor of the error's shape, no
+   behaviour change, no re-key. Includes the test asserting no identity payload
+   can reach an `ExtendedReal`, since that hazard is silent.
 2. **`ChainNotSampled` + `NotSampledCause`**, with the three call sites
    converted. `BadInit` is deleted outright — alpha posture, no alias. Changes
    `diagnostics.json`; add the `schema` tag in the same commit.
