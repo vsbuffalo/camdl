@@ -2229,11 +2229,24 @@ fn build_fit_sidecar(
         .unwrap_or_default();
     let fit_toml_bytes = std::fs::read(fit_path).unwrap_or_default();
     let fit_toml_hash = crate::hashing::sha256_hex(&fit_toml_bytes);
+    // gh#771: hash the RESOLVED stream set — the same seam the fit identity
+    // uses (`effective_observations`, see `cmd_fit_run_v2`). The single-file
+    // `[data] file = "..."` shorthand leaves `[data.observations]` empty and
+    // binds one wide TSV to every stream the model declares; hashing
+    // `observations` directly wrote an empty `data_hashes` for exactly that
+    // config style, and the `camdl compare` data preflight (gh#713) then
+    // reports such a fit as unchecked instead of comparing its digests.
+    // With no model in scope (`fit where`) the shorthand cannot be expanded,
+    // and `effective_observations` errors — the map stays empty, as before.
+    let model_obs_names: Vec<String> = model
+        .map(|m| m.observations.iter().map(|o| o.name.clone()).collect())
+        .unwrap_or_default();
     let data_hashes: std::collections::HashMap<String, String> = config
         .data.as_ref()
-        .map(|d| d.observations.iter()
+        .and_then(|d| d.effective_observations(&model_obs_names).ok())
+        .map(|obs| obs.into_iter()
             .filter_map(|(name, path)| {
-                crate::hashing::file_hash(path).map(|h| (name.clone(), h))
+                crate::hashing::file_hash(&path).map(|h| (name, h))
             })
             .collect())
         .unwrap_or_default();
@@ -3028,6 +3041,87 @@ mod tests {
             assert!(err.contains(bad_char),
                 "err for `{}` should call out `{}` by character; got: {}",
                 raw, bad_char, err);
+        }
+    }
+
+    // ── gh#771: the sidecar hashes the RESOLVED stream set ─────────
+
+    /// Deserialize a golden IR envelope into an `ir::Model` (no compile —
+    /// only the declared observation names are read here).
+    fn golden_model(rel: &str) -> ir::Model {
+        let path = format!("{}/../../../{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let json = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let envv: serde_json::Value =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        serde_json::from_value(envv["model"].clone())
+            .unwrap_or_else(|e| panic!("deserialize {path}: {e}"))
+    }
+
+    #[test]
+    fn sidecar_hashes_every_stream_under_the_single_file_shorthand() {
+        // gh#771: `[data] file = "..."` binds one wide TSV to every
+        // observation stream the model declares. Fit IDENTITY resolves that
+        // shorthand through `effective_observations`; the sidecar hashed
+        // `[data.observations]` — empty under the shorthand — so
+        // `fit.meta.json` carried no `data_hashes` at all, and the
+        // `camdl compare` data preflight reported the fit as unchecked.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_path = tmp.path().join("wide.tsv");
+        std::fs::write(&data_path, b"time\tweekly_cases\tdetection\n1\t5\t0.4\n")
+            .expect("write data");
+        let fit_path = tmp.path().join("fit.toml");
+        // `.ir.json` (not `.camdl`) and non-existent: `build_fit_sidecar`
+        // falls back to an empty model identity rather than shelling out to
+        // camdlc. The model under test is passed in directly.
+        let toml_src = format!(
+            r#"
+[model]
+camdl = "no-such-model.ir.json"
+
+[data]
+file = "{}"
+
+[estimate]
+beta = {{ bounds = [0.01, 2.0] }}
+
+[fixed]
+N0 = 1000
+
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 10
+iterations = 1
+cooling = 0.7
+"#,
+            data_path.display()
+        );
+        std::fs::write(&fit_path, &toml_src).expect("write fit.toml");
+        let config = config_v2::FitConfigV2::from_toml_str(&toml_src)
+            .expect("fixture fit.toml should parse");
+
+        let model = golden_model("ocaml/golden/seir_observations.ir.json");
+        let stream_names: Vec<String> =
+            model.observations.iter().map(|o| o.name.clone()).collect();
+        assert_eq!(stream_names.len(), 2, "fixture must declare two streams");
+
+        let sidecar = build_fit_sidecar(
+            &config, fit_path.to_str().unwrap(), None, Some(&model));
+
+        let expected = crate::hashing::file_hash(data_path.to_str().unwrap())
+            .expect("the fixture data file must hash");
+        assert_eq!(
+            sidecar.data_hashes.len(), stream_names.len(),
+            "the shorthand must produce one digest per declared stream; got {:?}",
+            sidecar.data_hashes);
+        for name in &stream_names {
+            assert_eq!(
+                sidecar.data_hashes.get(name).map(String::as_str),
+                Some(expected.as_str()),
+                "stream `{name}` should carry the wide file's digest; got {:?}",
+                sidecar.data_hashes);
         }
     }
 }
