@@ -552,9 +552,10 @@ against the observed series, generated quantities, per-parameter and
 log-posterior traces, camdl's own convergence verdict, and the
 syntax-highlighted `.camdl` + `fit.toml`. Across fits it runs the authoritative
 `camdl compare` on any that carry a `prequential.json` (elpd, Δelpd ± paired SE,
-CRPS, PIT). It is read-only on the store, auto-discovers concurrent runs, and
-refreshes a run that is still sampling — so diagnostics are readable _during_ a
-long fit rather than only after it.
+CRPS, PIT — what those are and how to read them is `camdl compare --explain`).
+It is read-only on the store, auto-discovers concurrent runs, and refreshes a
+run that is still sampling — so diagnostics are readable _during_ a long fit
+rather than only after it.
 
 It is a separate package; install its `camdl-watch` command with `uv`. The
 install builds the browser UI from source, so Node.js (for `npm`) must be on the
@@ -646,6 +647,7 @@ version-matched to the `camdl` you're running. No checkout, no network:
 | Backends / data format / debugging                  | `camdl docs backends` / `data` / `debugging`        |
 | Dated data and calendar time (`origin`, anchoring)  | `camdl docs dates`                                  |
 | Packaging a bug report (minimal repro example)      | `camdl docs mre`                                    |
+| Reading a `camdl compare` table (elpd, evidence)    | `camdl docs model-comparison`                       |
 | Full topic list / search                            | `camdl docs` / `camdl docs --search <term>`         |
 
 For sustained work you can also pin the source (working `.camdl` for every
