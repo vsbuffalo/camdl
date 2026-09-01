@@ -183,6 +183,63 @@ enum DataIdentity {
     Unknown(String),
 }
 
+/// Row names for positional inputs: the file basename, extended leftward with
+/// parent directory components until every name is distinct (gh#806).
+///
+/// The convention that names a row by its basename renders `a/fit.toml
+/// b/fit.toml` as two rows both called `fit.toml` — the arrangement a
+/// per-variant directory layout produces, so the collision is the common case
+/// rather than a corner one. There is nothing in such a table to say which row
+/// is which, and `--baseline` / `--exclude-chains` match the displayed name, so
+/// an ambiguous name is not only unreadable but unaddressable.
+///
+/// Only the colliding names grow, and only far enough to separate them, so a
+/// cohort with distinct basenames renders exactly as before. Identical paths
+/// stay identical — that is one fit listed twice, which `parse_cohort_exclude`
+/// rejects by name as ambiguous.
+///
+/// Runs at name-assignment time, before `parse_cohort_exclude` reads the names,
+/// so a per-fit `--exclude-chains @NAME:IDS` token targets the name the table
+/// shows.
+fn positional_model_names(paths: &[String]) -> Vec<String> {
+    // Root, prefix and `.` components carry no identity; `..` does.
+    let components = |p: &String| -> Vec<String> {
+        use std::path::Component;
+        std::path::Path::new(p).components().filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            Component::ParentDir => Some("..".to_string()),
+            _ => None,
+        }).collect()
+    };
+    let comps: Vec<Vec<String>> = paths.iter().map(components).collect();
+    let name_at = |i: usize, depth: usize| -> String {
+        let c = &comps[i];
+        if c.is_empty() { return paths[i].clone(); }
+        c[c.len() - depth.min(c.len())..].join("/")
+    };
+
+    let mut depth: Vec<usize> = vec![1; paths.len()];
+    loop {
+        let mut by_name: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for i in 0..paths.len() {
+            by_name.entry(name_at(i, depth[i])).or_default().push(i);
+        }
+        let mut grew = false;
+        for group in by_name.values().filter(|g| g.len() > 1) {
+            for &i in group {
+                if depth[i] < comps[i].len() {
+                    depth[i] += 1;
+                    grew = true;
+                }
+            }
+        }
+        // Every collision is either separated or unseparable (identical paths).
+        if !grew { break; }
+    }
+    (0..paths.len()).map(|i| name_at(i, depth[i])).collect()
+}
+
 pub fn cmd_compare(a: &crate::args::CompareArgs) {
     // `--explain` serves the methods page the footer points at, and exits.
     // It is answered before any input is resolved: the reader who needs the
@@ -237,10 +294,9 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         });
         (cfg.models, cfg.baseline, cfg.metrics, fmt)
     } else if positional.len() >= 2 {
-        let models = positional.iter().map(|p| CompareModelEntry {
-            name: std::path::Path::new(p).file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| p.clone()),
+        let names = positional_model_names(&positional);
+        let models = positional.iter().zip(names).map(|(p, name)| CompareModelEntry {
+            name,
             path: p.clone(),
         }).collect();
         (models, None, None, None)
@@ -2777,6 +2833,62 @@ mod tests {
             beta_of(&sub),
             "excluding a stuck chain must change θ̂ (hence the prequential score)"
         );
+    }
+
+    /// gh#806. Naming a positional row by its basename renders
+    /// `a/fit.toml b/fit.toml` as two rows both called `fit.toml` — the
+    /// per-variant directory layout produces exactly that, so it is the common
+    /// arrangement, not a corner case. Colliding names grow leftward until
+    /// distinct; names that already differ are untouched.
+    #[test]
+    fn positional_names_grow_only_until_the_collision_is_resolved() {
+        let names = |ps: &[&str]| positional_model_names(
+            &ps.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+
+        // The collision: one parent component separates them.
+        assert_eq!(names(&["a/fit.toml", "b/fit.toml"]),
+            vec!["a/fit.toml", "b/fit.toml"]);
+
+        // Distinct basenames render as before — the whole path is not shown
+        // just because some other cohort needed it.
+        assert_eq!(names(&["a/ctl_rm.toml", "b/ctl_bb.toml"]),
+            vec!["ctl_rm.toml", "ctl_bb.toml"]);
+
+        // Only the colliding pair grows.
+        assert_eq!(names(&["x/fit.toml", "y/fit.toml", "z/other.toml"]),
+            vec!["x/fit.toml", "y/fit.toml", "other.toml"]);
+
+        // Growth stops at the first component that separates them: the shared
+        // `runs/` prefix above it is never shown.
+        assert_eq!(names(&["runs/a/fit.toml", "runs/b/fit.toml"]),
+            vec!["a/fit.toml", "b/fit.toml"]);
+
+        // When the distinguishing component is further up, it keeps going.
+        assert_eq!(names(&["v1/run/fit.toml", "v2/run/fit.toml"]),
+            vec!["v1/run/fit.toml", "v2/run/fit.toml"]);
+
+        // A handle or bare name has no parent to grow into and is left alone.
+        assert_eq!(names(&["@a", "@b"]), vec!["@a", "@b"]);
+    }
+
+    /// The disambiguation runs at name-assignment time, BEFORE
+    /// `parse_cohort_exclude` reads the names — so a per-fit
+    /// `--exclude-chains NAME:IDS` token matches the name the table shows.
+    /// Assigning names after parsing would have made the grown rows
+    /// unaddressable.
+    #[test]
+    fn a_disambiguated_name_is_the_name_exclude_chains_matches() {
+        let names = positional_model_names(&[
+            "a/fit.toml".to_string(), "b/fit.toml".to_string()]);
+        let c = parse_cohort_exclude(&["a/fit.toml:3".to_string()], &names).unwrap();
+        assert_eq!(c.for_fit("a/fit.toml").unwrap().excluded_csv(), "3");
+        assert!(c.for_fit("b/fit.toml").is_none(), "the other fit keeps all chains");
+
+        // The bare basename is no longer a fit name, and says so.
+        let e = parse_cohort_exclude(&["fit.toml:3".to_string()], &names).unwrap_err();
+        assert!(e.contains("no compared fit named 'fit.toml'")
+            && e.contains("a/fit.toml"),
+            "the error names the fits as displayed: {e}");
     }
 
     /// gh#418: per-fit `@fit:ids` binds to one fit; bare ids are cohort-wide.
