@@ -135,6 +135,18 @@ fn resolve(name: &str) -> Option<&'static Topic> {
         .find(|t| t.slug == n || t.aliases.contains(&n.as_str()))
 }
 
+/// The body of one topic, by slug or alias — the same text `camdl docs <slug>`
+/// prints.
+///
+/// The seam another command uses to serve a guide from its own surface
+/// (`camdl compare --explain`). It exists so there is exactly one
+/// `include_str!` per doc: a second one would put a second copy of the file in
+/// the binary, and the two would drift the first time a topic is renamed or
+/// re-pathed.
+pub(crate) fn topic_body(name: &str) -> Option<&'static str> {
+    resolve(name).map(|t| t.body)
+}
+
 fn print_index() {
     println!("camdl docs — usage guides embedded in this binary (offline, version-matched).\n");
     let w = TOPICS.iter().map(|t| t.slug.len()).max().unwrap_or(0);

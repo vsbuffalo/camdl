@@ -154,6 +154,18 @@ enum DataIdentity {
 }
 
 pub fn cmd_compare(a: &crate::args::CompareArgs) {
+    // `--explain` serves the methods page the footer points at, and exits.
+    // It is answered before any input is resolved: the reader who needs the
+    // definitions is usually the one who has not assembled a comparison yet,
+    // and requiring two model paths to read a definition is the friction the
+    // pointer exists to remove. Given alongside model paths it still only
+    // prints — one contract, no mode where the guide and a table interleave.
+    if a.explain {
+        print!("{}", crate::docs::topic_body("model-comparison")
+            .expect("the model-comparison docs topic is compiled into the binary"));
+        return;
+    }
+
     let config_path: Option<String> = a.config.clone();
     let baseline: Option<String> = a.baseline.clone();
     let allow_mismatched_horizon = a.allow_mismatched_horizon;

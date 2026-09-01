@@ -5833,6 +5833,9 @@ mirror).
 PATHS                       ≥2 when --config is absent. Each is a prequential.json
                             (or a stage dir holding one), read as-is, OR a fit
                             handle whose prequential is auto-derived from its θ̂
+--explain                   print the model-comparison methods guide and exit
+                            (the same text as `camdl docs model-comparison`);
+                            takes no PATHS
 --config compare.toml       [[model]] entries; can also carry baseline/metrics/format
 --baseline NAME             reference for Δ columns (default: argmax elpd)
 --metric elpd,crps,pit_cov90
