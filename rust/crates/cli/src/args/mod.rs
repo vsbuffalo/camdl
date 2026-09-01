@@ -2802,6 +2802,15 @@ pub struct CompareArgs {
     /// whose prequential is auto-derived from its sealed θ̂ + data.
     pub paths: Vec<String>,
 
+    /// Print the model-comparison methods guide and exit — what elpd, LR,
+    /// se(Δ), the Jeffreys tiers, the within-noise gate and the conditioning
+    /// modes mean, with citations. The same text as
+    /// `camdl docs model-comparison`, and the page the table's footer points
+    /// at. Takes no model arguments; given alongside them it still only
+    /// prints the guide and runs no comparison.
+    #[arg(long)]
+    pub explain: bool,
+
     /// compare.toml with [[model]] entries (baseline/metrics/format
     /// also loadable from the file)
     #[arg(long)]
