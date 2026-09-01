@@ -5843,6 +5843,16 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
 --allow-mismatched-horizon  render even if T_score differs (Δ columns → '—')
 --allow-data-mismatch       render even if the compared fits were bound to
                             different observed data; the Δ is then confounded
+--draws N                   mixture size for a Bayesian fit's predictive: one
+                            filter pass per posterior draw, densities averaged
+                            (default 64; 1 = plug-in at the posterior mean)
+--replicates N              filter replicates per derived fit, combined by
+                            log-mean-exp; their totals give each row's MC SE
+                            (default 5; 1 = no replication and no MC SE)
+--allow-mixed-provenance    render rows whose provenance kinds differ
+                            (plug-in vs posterior mixture) rather than refusing
+--in-sample                 score every fit in-sample even when it declares a
+                            holdout; stamped in_sample, with the optimism caveat
 --particles N               for derived prequentials (default 1000, applied uniformly)
 --seed N                    for derived prequentials (default 1)
 --exclude-chains [@FIT:]IDS per-fit (`@a:4`) or cohort-wide (`3,4`); mixing the two
