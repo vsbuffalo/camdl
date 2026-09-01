@@ -5858,14 +5858,22 @@ differences), `evidence` (decibans plus a Jeffreys tier, or `within noise` when
 `|Δelpd| < 2·se(Δ)`), `crps`, `Δcrps`, `PIT_cov90` (nominal 0.90; below 0.70
 triggers an overconfidence warning).
 
-Every format carries the same footer: the optimism caveat, the miscalibration
-flags, each trace's warnings, a note that the Jeffreys tiers calibrate Bayes
-factors rather than these likelihood ratios, and — below 100 scored steps — a
-caveat that `se(Δ)`'s normal approximation is unreliable at small `T` and when
-the models predict alike (Sivula, Magnusson & Vehtari, arXiv:2008.10296). In
-JSON they are the `optimism_caveat`, `evidence_scale_note`, `se_caveat`,
-`data_mismatch` and `data_unchecked` fields, plus per-row `provenance`,
-`conditioning`, `warnings` and `pit_cov90_warning`.
+The `table` and `md` renderings carry the same footer, and it states only what
+is specific to that comparison: the scored window and baseline, the conditioning
+the rows were scored under (`in-sample`, or `held-out tail` with the sealed
+`train_end`), the sort order, the optimism caveat, the miscalibration flags,
+each trace's warnings, the filter-noise MC SE per row, the lag-1 autocorrelation
+of the per-step Δelpd, and a closing pointer to `camdl compare --explain`. The
+definitions those numbers rest on — the Jeffreys tiers and what they do and do
+not calibrate, `se(Δ)`'s Newey–West/HLN construction and its small-`T`
+unreliability (Sivula, Magnusson & Vehtari, arXiv:2008.10296) — live in that
+guide (`docs/methods/model-comparison.md`), not under every table.
+
+The JSON keeps every field: `optimism_caveat`, `evidence_scale_note`,
+`se_caveat` (populated below 100 scored steps), `data_mismatch` and
+`data_unchecked`, plus per-row `provenance`, `conditioning`,
+`lag1_autocorr_delta_elpd`, `mc_se_elpd`, `warnings` and `pit_cov90_warning`. It
+is the machine surface and loses nothing by repeating itself.
 
 ### Browsing, labelling, data
 
