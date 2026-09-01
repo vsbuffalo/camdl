@@ -163,8 +163,8 @@ records it: on a 40,000-sweep, 8-chain production fit, **one chain** failed
 7,600 retained draws — an eighth of a 2 h 29 m run pooled into the posterior and
 R̂. One chain of eight, not the whole fit; a fit where every chain is refused
 takes the different `all_results.is_empty()` path at `cli/fit/pgas.rs:1171`.
-§2's measurement contains that exact pathology — the longest observed run of
-consecutive `-inf` sweeps is 40,000.
+That one chain is the pathology this guard exists for, and nothing in this
+proposal removes the guard — §12 keeps it, bounded.
 
 The two answer different questions and both survive:
 
@@ -203,12 +203,25 @@ pub enum DiagnosticKind {
     /// A chain that was requested and produced no draws. Deliberately NOT named
     /// for initialisation: `cause` says what failed, and for two of the three
     /// variants the failure is not at the start at all.
-    ChainNotSampled {
-        chain_id: usize,
-        params: std::collections::BTreeMap<String, f64>,   // unchanged
-        cause: NotSampledCause,
-    },
+    ///
+    /// A NEWTYPE over the struct below, not an inline variant — `ChainAccounting`
+    /// holds `Vec<ChainNotSampled>` and must not be able to hold an unrelated
+    /// diagnostic. One definition, two views.
+    ChainNotSampled(ChainNotSampled),
     // …
+}
+
+/// One requested chain that produced no draws. The single definition; the
+/// `DiagnosticKind` variant above wraps it and `ChainAccounting` collects it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChainNotSampled {
+    pub chain_id: usize,
+    /// Estimated parameter name → starting value on the natural scale, exactly
+    /// as offered to the engine. Carried on the record so a refusal is
+    /// self-contained; `chain_starts.tsv` holds the same values for every
+    /// chain, which is artifact redundancy and deliberate.
+    pub params: std::collections::BTreeMap<String, f64>,
+    pub cause: NotSampledCause,
 }
 
 /// Why a requested chain produced no draws. One variant per algorithm, because
@@ -237,9 +250,12 @@ pub enum NotSampledCause {
         /// current `NonFiniteChainStart` already carries.
         last: CompleteDataTerms,
         /// Per probation sweep, in order. `0.0` means that sweep returned the
-        /// reference unchanged. §2 measured this as near-universally non-zero,
-        /// which is why the budget is operational rather than calibrated —
-        /// recording it keeps that measurable per run instead of assumed.
+        /// reference unchanged. §2 argues from the code that this is routinely
+        /// non-zero; recording it per sweep is what would let a future revision
+        /// of the default rest on evidence from current code rather than on a
+        /// model. Note it measures which particle SLOT the traceback sat on,
+        /// not whether the path's values changed — a weaker statement than it
+        /// looks, and the reason §2 does not lean on it.
         trajectory_renewal: Vec<f64>,
     },
 
@@ -361,6 +377,11 @@ pub struct ChainAccounting {
 /// `refused_max`/`sampled_min`, which silently presumes refusals sit BELOW the
 /// sampled starts — true in the motivating case, and a printed falsehood in the
 /// mirror case.
+/// Which side of the sampled starts the refused ones fall on.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side { RefusedBelow, RefusedAbove }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefusalSeparation {
     pub param: String,
@@ -372,7 +393,9 @@ pub struct RefusalSeparation {
     pub sampled_bound: f64,
     /// Fraction of the posterior on the refused side of `sampled_bound`, when a
     /// posterior exists. 0.915 in the motivating case. `None` at the two write
-    /// sites that have no posterior (all chains refused) and for IF2.
+    /// sites that have no posterior (all chains refused) and for IF2. Computed
+    /// with `cli/src/quantile.rs`'s `quantile` — do not add a third
+    /// implementation of the type-7 rule.
     pub posterior_on_refused_side: Option<f64>,
 }
 ```
@@ -460,9 +483,10 @@ diagnostic, it is the frame every diagnostic is read against:
     ],
     "refusal_separation": {
       "param": "I0",
-      "refused_max": 51.4,
-      "sampled_min": 112.9,
-      "posterior_below_sampled_min": 0.915
+      "direction": "refused_below",
+      "refused_bound": 51.4,
+      "sampled_bound": 112.9,
+      "posterior_on_refused_side": 0.915
     }
   },
   "diagnostics": [/* … existing DiagnosticKind list … */]
@@ -574,12 +598,26 @@ Three further changes, each small and each closing a live complaint:
   ```
 
   where `ChainProgress { requested, sampled, not_sampled, running }` accounts
-  for every requested chain at every instant. That is what makes a ten-hour fit
-  abandonable in its first minute — the single most requested change from
-  downstream — and it lands in the file they already read, with no second
-  artifact to keep consistent. It also fixes what §8 previously claimed and
-  could not deliver: a chain **stranded** by the `--parallel` scheduler is
-  `running` with no progress, which is visibly different from `not_sampled`.
+  for every requested chain at every instant.
+
+  **One tracker, two views — this must not become a second counter.** An earlier
+  draft of this proposal added `ChainAccounting` beside the existing
+  `n_good_chains`, which was a defect; adding `ChainProgress` as a third
+  independent tally would repeat it. `ChainAccounting` cannot simply read
+  `ChainProgress`, because the two exist at different times: the live view is
+  written from inside the rayon closure as chains finish, the terminal view only
+  after `collect()`. So neither owns the numbers. A single `ChainTracker` — one
+  `Mutex`-guarded record of every requested chain's state, written once per
+  transition — owns them, and both types are projections of it: `ChainProgress`
+  is `tracker.snapshot()` mid-run, `ChainAccounting` is `tracker.finish()` at
+  stage end. They cannot disagree because neither counts anything. If an
+  implementer finds themselves writing `sampled += 1` in two places, the design
+  has been lost. That is what makes a ten-hour fit abandonable in its first
+  minute — the single most requested change from downstream — and it lands in
+  the file they already read, with no second artifact to keep consistent. It
+  also fixes what §8 previously claimed and could not deliver: a chain
+  **stranded** by the `--parallel` scheduler is `running` with no progress,
+  which is visibly different from `not_sampled`.
 - **Stop discarding the write result.** `let _ = collector.write_json(…)`
   appears at **eight** sites — `pgas.rs:1172, 1432, 1574`;
   `pmmh.rs:903, 929,
@@ -694,10 +732,15 @@ Each step is independently landable and green.
    `InitSource::UnconditionalFilter` emits `unconditional_filter`. `BadInit` is
    deleted outright — alpha posture, no alias. Changes `diagnostics.json`; add
    the `schema` tag in the same commit.
-3. **`ChainAccounting`** including `refusal_separation`, emitted by all three
-   drivers. This is the user-visible win and depends on step 2.
-4. **Incremental flush** (`diagnostics.partial.json`) plus handling the write
-   result. Independent of 1-3; could land first if downstream needs it sooner.
+3. **`ChainAccounting`** including `refusal_separation`, emitted by all **four**
+   drivers — PGAS, PMMH, IF2 and NUTS. This is the user-visible win and depends
+   on step 2. `nuts.rs` is easy to miss and would otherwise write a `schema` tag
+   it does not honour.
+4. **`ChainProgress` on `RunState::Running`** (§7.2), plus handling the write
+   result at all eight `write_json` sites. No `diagnostics.partial.json` — the
+   live channel is `progress.json`, which already exists. Independent of 1-3;
+   land it first if downstream needs it sooner, since it is what makes a
+   ten-hour fit abandonable in its first minute.
 5. **The probation budget.** `PgasStartRecoveryExhausted` replaces
    `NonFiniteChainStart`, with `probation_sweeps` (default 100) as a typed field
    on `Stage::PGAS`. **This is the step that re-keys** — see §11.
@@ -784,6 +827,14 @@ implementer could accidentally fork a computation are named here.
 | `start_at_zero_density: Option<(f64, f64, f64, f64, f64)>` (`sim/inference/pgas.rs:3498`) — the same five floats one layer up, as an anonymous tuple | `Option<CompleteDataTerms>`                                           |
 | `option_finite` (`cli/compare.rs:1492`), the ad-hoc `is_finite → null` collapse                                                                      | `ExtendedReal` (§7.3)                                                 |
 | the `diagnostics.partial.json` an earlier draft proposed                                                                                             | `RunState::Running`'s chain counts (§7.2)                             |
+
+**The counts have one owner.** `ChainTracker` (§7.2) records every requested
+chain's state; `ChainProgress` is its live projection into `progress.json` and
+`ChainAccounting` its terminal projection into `diagnostics.json`. Neither
+increments a counter of its own, and `chain_starts.tsv`'s header reads the
+requested count from the tracker rather than recomputing it. Four artifacts may
+show the number — that is legibility, and intended — but exactly one place in
+the source derives it.
 
 **Single-sited by construction.** Three drivers currently build a `BadInit`
 independently (`pgas.rs:1026`, `pmmh.rs:640`, `runner.rs:2162`), each mapping a
