@@ -79,14 +79,36 @@ runs, both N):
 | p95       | 200                     |
 | max       | 525                     |
 
-The density factorizes by province (sum of three per-province sums, never a
-cross product). Implied prototype cost at N = 2,400, T = 104, all-N backward
-weights: ~1.4×10⁸ group-pmf evaluations per sweep — seconds per sweep,
-acceptable for the experiment without any optimization. The heavy tail is a
-**production** concern with a known path (the two directions couple only through
-`confirm_die + m₂ − m₃ ≥ 0`, admitting a DP/prefix reduction of the 2-D sum);
-per the agreed guardrails, none of that is built until the experiment justifies
-it.
+The density factorizes by province as a **product of per-province sums** —
+`log p(Z'|Z) = Σ_p log [ Σ_{F_p ∈ 𝓕_p} p(F_p | Z_p) ]` — so the enumeration cost
+is the SUM of the three per-province lattice sizes; the Cartesian product across
+provinces is never enumerated (and `Σ_p Σ_{F_p}` alone is not the probability —
+the inner sums are combined in log space). Implied prototype cost at N = 2,400,
+T = 104, all-N backward weights: ~1.4×10⁸ group-pmf evaluations per sweep —
+seconds per sweep, acceptable for the experiment without any optimization. The
+heavy tail is a **production** concern with a known path (the two directions
+couple only through `confirm_die + m₂ − m₃ ≥ 0`, admitting a DP/prefix reduction
+of the 2-D sum); per the agreed guardrails, none of that is built until the
+experiment justifies it.
+
+**Backward-candidate edges are not realized edges (measured).** The backward
+weight evaluates `p(Z_{s+1}^chosen | Z_s^j)` for every candidate `j` — deltas
+that never occurred in any forward simulation. Proxy measurement over cross-run
+candidate pairs (6 independent N = 2,400 runs, counts-only — exact for
+cardinality on this model since `H` annihilates both diamond directions; an
+upper bound on feasibility): **75.2% of 9,450 candidate province-edges are
+zero-compatible**, detected by the rational consistency check alone at
+negligible cost; among the feasible remainder the lattice is **median 28, mean
+391, p95 2,376, max ~9,000** — wider than realized edges because the candidate's
+state mismatch is absorbed into the flows. Naive implied cost at N = 2,400:
+~7×10⁷ terms/sweep, minutes-per-sweep — tolerable for the go/no-go run,
+uncomfortable beyond it. Both proxy biases point down (accumulator constraints
+only add zeros; within-cloud candidates concentrate tighter than cross-seed
+draws), so `csmc_bs` must carry an in-kernel version of this instrument
+(feasible fraction, lattice-size distribution, terms per sweep) and its numbers
+supersede this proxy before C is interpreted. One free-exactness optimization is
+in prototype scope: propensities depend only on `Z_s^j`, so they are evaluated
+once per candidate and shared across its lattice terms.
 
 Two testability requirements carried from review: (a) `H` must be generated from
 the compiled observation/accumulator semantics (stream-, interval- and
@@ -99,14 +121,26 @@ fact the test must pin.)
 
 ## The kernel (deliverable B)
 
-Backward simulation over stored particle states: run the conditional forward
-filter exactly as today (states and accumulators are already carried); draw the
-final state from the final weights; then for s = T−1…0 draw particle j with
-weight `w_s^j · p(Z_{s+1}^chosen | Z_s^j)` over all N candidates (naïve all-N,
-per guardrail — no subsampling in the prototype). Reconstruction then draws, per
-stitched edge, the flows from the lattice-restricted conditional and (once gamma
-exists) the noise — yielding a complete `PGASTrajectory` for the θ-move and
-outputs.
+Backward simulation over stored particle states. The FREE particles reuse
+today's machinery unchanged — propagation, resampling, observation scoring,
+history storage, RNG streams: simulating `G → F → Z'` and keeping only `Z'`
+already samples the marginal state transition. The REFERENCE slot does not: it
+must be **pinned to the reference state path** — `Z_t = Z_t^⋆` at every substep,
+accumulators included — never reconstructed by replaying the old innovation
+record from an ancestor state. That pinning IS the representation change; an
+innovation-conditioned reference inside something named `csmc_bs` would
+reproduce the old pathology under a new name, so the state-conditioned reference
+gets its own test (below). Then draw the final state from the final weights;
+then for s = T−1…0 draw particle j with weight
+`w_s^j · p(Z_{s+1}^chosen | Z_s^j)` over all N candidates (naïve all-N, per
+guardrail — no subsampling in the prototype). Reconstruction then draws, per
+stitched edge, the flows from the lattice-restricted conditional
+`p(F | Z, Z', θ) ∝ p(F | Z, θ)` on the compatible set — the SAME lattice
+enumeration and weights the backward density already computed, so reconstruction
+is a categorical re-read of the density's own terms plus the merged-class split
+conditionals, not a separate algorithm — yielding a complete `PGASTrajectory`
+for the θ-move and outputs. (With gamma, the conditional becomes
+`p(F, G | Z, Z', θ)`; same principle, harder integrand — deferred.)
 
 Opt-in surface, following the `binomial`/`ancestor_sampling` identity pattern
 verbatim: `trajectory_representation = "innovation" | "state"` and
@@ -119,9 +153,17 @@ is not modified.
 
 - **Transition-density oracle**: `p(Z′|Z)` against brute-force enumeration on
   small models, and against forward-simulation frequencies.
-- **Exact invariance** on an enumerable toy (nullspace-zero SIR, pop 5–10, T
-  3–5): initialize from the enumerated posterior, one kernel application, verify
-  the posterior is preserved (`csmc_exact_invariance` style).
+- **Exact invariance, unique-flow toy** (nullspace-zero SIR, pop 5–10, T 3–5):
+  initialize from the enumerated posterior, one kernel application, verify the
+  posterior is preserved (`csmc_exact_invariance` style).
+- **Exact invariance, ambiguous-flow toy**: a tiny enumerable model with a
+  nonzero nullspace (a diamond A→B→D / A→C→D, ideally plus one accumulator
+  constraint), so the invariance test exercises the COLLAPSED sum `Σ_F p(F|Z)` —
+  the novel object — not just unique inversion. Required before production
+  results are trusted.
+- **State-conditioned reference test**: the reference slot holds `Z^⋆` itself at
+  every substep (equality asserted against the retained path), and no code path
+  applies a recorded flow delta to an ancestor state inside `csmc_bs`.
 - **Reconstruction consistency**: reconstructed records satisfy the same
   complete-data density their edge conditionals imply.
 - **Ordering invariant test** (see above).
@@ -132,12 +174,16 @@ Fixed θ (the fit config's curated start), hier3 with `sigma_se = 0` fixed. Arms
 PF-only (`ancestor_sampling = false`), innovation-PGAS, state-PGBS. **Same N
 compared within N** — the innovation baselines are N-dependent (early renewal
 0.005/sweep at N = 2,400, 0.026 at 19,200), so no cross-N thresholds. Start at N
-= 2,400; primary outputs renewal-by-bin and renewal per CPU-second; if clearly
+= 2,400; primary outputs on **two axes, both recorded**: early renewal per sweep
+(the statistical mechanism — did the representation change convert the cloud's
+diversity?) and early renewal per CPU-second (the practical value). Both are
+needed to read an outcome: 20× renewal/sweep at 5× CPU is a clear win; 2× at 10×
+CPU is a kill; 50× at 20× CPU says optimize before deciding. If clearly
 promising, repeat at 4,800/9,600 and then 19,200 for the envelope over N; rerun
 at posterior-typical θ once chain viability lands (particle geometry is
 θ-dependent). Kill criterion: if state-PGBS does not decisively beat the same-N
-innovation baseline on early renewal per CPU-second, stop — gamma is never built
-and `csmc_as` stands.
+innovation baseline on the joint reading of those two axes, stop — gamma is
+never built and `csmc_as` stands.
 
 ## Deferred, with reasons recorded
 
