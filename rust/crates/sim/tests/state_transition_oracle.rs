@@ -268,7 +268,8 @@ fn chain_density_matches_brute_force_and_has_no_free_dims() {
     for d in [[-3i64, 2, 1], [0, 0, 0], [-1, 1, 0], [-2, -1, 3], [1, -1, 0]] {
         let got =
             log_state_transition_density(&compiled, &an, &before, &d, &[], &params, T0, DT, None)
-                .unwrap();
+                .unwrap()
+                .0;
         let want = brute_force(&compiled, &[], &before, &d, &[], &params, 8);
         assert_close(got, want, &format!("chain edge {d:?}"));
     }
@@ -306,7 +307,8 @@ fn diamond_density_matches_brute_force_over_the_lattice() {
     ] {
         let got =
             log_state_transition_density(&compiled, &an, &before, &d, &[], &params, T0, DT, None)
-                .unwrap();
+                .unwrap()
+                .0;
         let want = brute_force(&compiled, &[], &before, &d, &[], &params, 9);
         assert_close(got, want, &format!("diamond edge {d:?}"));
     }
@@ -330,7 +332,8 @@ fn an_incidence_stream_on_one_arm_makes_the_diamond_unique() {
     for (d, da) in [([-4i64, 1, 1, 2], [3i64]), ([-4, 1, 1, 2], [1]), ([-2, 2, 0, 0], [2])] {
         let got =
             log_state_transition_density(&compiled, &an, &before, &d, &da, &params, T0, DT, None)
-                .unwrap();
+                .unwrap()
+                .0;
         let want = brute_force(&compiled, &h_rows, &before, &d, &da, &params, 9);
         assert_close(got, want, &format!("constrained diamond edge {d:?} acc {da:?}"));
     }
@@ -353,7 +356,8 @@ fn identical_stoichiometry_pair_marginalizes_exactly() {
     for d in [[-4i64, 4], [0, 0], [-1, 1], [-7, 7]] {
         let got =
             log_state_transition_density(&compiled, &an, &before, &d, &[], &params, T0, DT, None)
-                .unwrap();
+                .unwrap()
+                .0;
         let want = brute_force(&compiled, &[], &before, &d, &[], &params, 8);
         assert_close(got, want, &format!("merged-pair edge {d:?}"));
     }
@@ -401,6 +405,7 @@ fn density_matches_forward_simulation_frequencies_on_the_diamond() {
             &compiled, &an, &before, d, &[], &params, T0, DT, None,
         )
         .unwrap()
+        .0
         .exp();
         assert!(
             (got - emp).abs() < 0.20 * emp.max(0.02),
@@ -445,7 +450,8 @@ fn sampled_edge_flows_satisfy_constraints_and_follow_the_conditional() {
     let total_log = log_state_transition_density(
         &compiled, &an, &before, &d, &[], &params, T0, DT, None,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     for (f, n) in freq.iter().filter(|(_, &n)| n > 300) {
         let emp = *n as f64 / n_draws as f64;
         let lp = log_transition_density_substep(
