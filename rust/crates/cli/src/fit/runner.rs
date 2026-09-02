@@ -561,10 +561,17 @@ impl FitRunConfig {
     }
     pub fn build_obs_model(&self) -> sim::inference::MultiStreamObsModel {
         let specs = stream_specs_from_obs_streams(&self.streams);
-        let (bound, _report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {
+        let (bound, report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
         });
+
+        // gh#812: a non-fatal bind report was previously discarded, so the
+        // Warn channel was write-only. Surface it — a zero denominator scores
+        // as zero, and the user must be told which rows and why.
+        if !report.findings().is_empty() {
+            eprintln!("{}", report.render());
+        }
         sim::inference::MultiStreamObsModel::new(bound, self.compiled.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: observation model construction failed: {:?}", e);

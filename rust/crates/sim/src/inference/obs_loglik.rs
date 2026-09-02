@@ -488,6 +488,8 @@ pub fn discretized_normal_logpmf_tol(y: f64, mean: f64, variance: f64, tol: f64)
 ///
 /// Used by PGAS for transition density evaluation.
 pub fn binom_logpmf(k: u64, n: u64, p: f64) -> f64 {
+    // See `beta_binomial_logpmf`: zero trials, one possible outcome, exactly 0.
+    if n == 0 { return if k == 0 { 0.0 } else { f64::NEG_INFINITY }; }
     // gh#645's rule: a NaN `p` is FALSE for the `<=` / `>=` comparisons
     // below, so without this it walks past them into ln and returns NaN.
     // Checked FIRST because `p == 0.0` and `p == 1.0` have their own
@@ -515,6 +517,21 @@ pub fn binom_logpmf(k: u64, n: u64, p: f64) -> f64 {
 /// a `log::warn!` + `-inf` stub that made every BetaBinomial
 /// observation corrupt the fit.
 pub fn beta_binomial_logpmf(k: u64, n: u64, alpha: f64, beta: f64) -> f64 {
+    // Zero trials: exactly one possible outcome, so the pmf is exactly 1 and
+    // this is exactly 0 for EVERY parameter value -- `C(0,0) = 1` and the beta
+    // ratio `B(a,b)/B(a,b) = 1` cancel. Surveillance data carries `n = 0`
+    // whenever no one was examined that day, which is routine, not malformed.
+    //
+    // FIRST, before the shape parameters are read, for two reasons. The general
+    // formula below reaches 0 only to lgamma round-off (8.9e-16), where a hole
+    // contributes a literal 0.0 -- and a zero-effort row and a missing row must
+    // be bit-identical, since they differ only in what they claim about the
+    // world, not in what they contribute. And a model whose mean is written
+    // `k * projected / denom` has NaN shapes exactly here, which gh#810 now
+    // (correctly) scores -inf; reading them at all would turn a certain outcome
+    // into an impossible one. Stan agrees: `check_nonnegative` admits N = 0 and
+    // `beta_binomial_lpmf(0 | N=0, ..)` measures 0 across the parameter range.
+    if n == 0 { return if k == 0 { 0.0 } else { f64::NEG_INFINITY }; }
     // gh#645's rule, applied to this family: a NaN argument is FALSE for
     // every `<=` / `<` comparison below, so without this it walks past the
     // domain guard into lgamma/ln and returns NaN. A NaN poisons every
@@ -1237,5 +1254,53 @@ mod nan_parameter_guards {
              still, since it is indistinguishable from a real fit:\n  {}",
             bad.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod zero_denominator {
+    use super::*;
+
+    /// A zero denominator is a well-defined observation, not a malformed row.
+    ///
+    /// `n = 0` means no one was examined that day — a fact about the
+    /// surveillance system, which surveillance data carries routinely
+    /// (weekends, stockouts, a lab that did not run). With zero trials there is
+    /// exactly one possible outcome, so the pmf is exactly 1 and the
+    /// log-likelihood exactly 0, for EVERY parameter value: `C(0,0) = 1` and
+    /// `B(a,b)/B(a,b) = 1`.
+    ///
+    /// Stan agrees. `beta_binomial_lpmf`'s `check_nonnegative` admits zero, and
+    /// measured on CmdStan 2.39.0, `beta_binomial_lpmf(0 | N=0, ...)` returns 0
+    /// across the parameter range while `(1 | N=0)` returns `-inf`.
+    ///
+    /// The short-circuit must come FIRST, before the shape parameters are read.
+    /// A model that writes its mean as `k * projected / denom` has a NaN mean
+    /// exactly where `denom` is 0, and since gh#810 a NaN shape correctly
+    /// scores `-inf` — so a check placed after the NaN guard would score these
+    /// rows impossible. Reading the shapes at all is wrong here: the outcome is
+    /// certain, so they cancel.
+    #[test]
+    fn zero_trials_score_zero_whatever_the_parameters() {
+        let nan = f64::NAN;
+        let cases: Vec<(&str, f64, f64)> = vec![
+            ("beta_binomial k=0 n=0 mean=.01 conc=5",  beta_binomial_logpmf(0, 0, 0.05, 4.95), 0.0),
+            ("beta_binomial k=0 n=0 mean=.50 conc=500", beta_binomial_logpmf(0, 0, 250.0, 250.0), 0.0),
+            ("beta_binomial k=0 n=0 mean=.99 conc=5",  beta_binomial_logpmf(0, 0, 4.95, 0.05), 0.0),
+            // The motivating case: mean = 0.96 * projected / tests_covered is
+            // NaN at tests_covered = 0, and must not turn a certain outcome
+            // into an impossible one.
+            ("beta_binomial k=0 n=0 shapes=NaN",       beta_binomial_logpmf(0, 0, nan, nan), 0.0),
+            ("binomial     k=0 n=0 p=0.3",             binom_logpmf(0, 0, 0.3), 0.0),
+            ("binomial     k=0 n=0 p=NaN",             binom_logpmf(0, 0, nan), 0.0),
+            // Still impossible: no trials cannot yield a success.
+            ("beta_binomial k=1 n=0",  beta_binomial_logpmf(1, 0, 2.5, 2.5), f64::NEG_INFINITY),
+            ("binomial     k=1 n=0",   binom_logpmf(1, 0, 0.3),              f64::NEG_INFINITY),
+        ];
+        let bad: Vec<String> = cases.iter()
+            .filter(|(_, got, want)| got != want)
+            .map(|(n, got, want)| format!("{n}: got {got}, want {want}"))
+            .collect();
+        assert!(bad.is_empty(), "zero-trial scoring is wrong:\n  {}", bad.join("\n  "));
     }
 }

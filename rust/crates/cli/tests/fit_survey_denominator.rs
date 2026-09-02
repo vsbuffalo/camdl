@@ -121,6 +121,34 @@ fn write_missing_denom_data(dir: &Path) -> PathBuf {
     p
 }
 
+/// A survey with a ZERO denominator at t=2 (`pos = 0, tested = 0`): nobody was
+/// examined that day. gh#812 — a well-defined, non-identifying observation, not
+/// a malformed row. The fit must RUN and the row must contribute exactly zero.
+fn write_zero_denom_data(dir: &Path) -> PathBuf {
+    let p = dir.join("survey_zero.tsv");
+    std::fs::write(&p,
+        "time\tpos\ttested\n1\t1\t100\n2\t0\t0\n3\t5\t90\n4\t4\t110\n5\t2\t100\n6\t1\t95\n").unwrap();
+    p
+}
+
+/// The same survey with that row written `NA` instead. A zero-effort row and a
+/// missing row contribute identically, so the two fits must agree exactly.
+fn write_zero_as_na_data(dir: &Path) -> PathBuf {
+    let p = dir.join("survey_zero_na.tsv");
+    std::fs::write(&p,
+        "time\tpos\ttested\n1\t1\t100\n2\tNA\tNA\n3\t5\t90\n4\t4\t110\n5\t2\t100\n6\t1\t95\n").unwrap();
+    p
+}
+
+/// A zero denominator carrying a POSITIVE count (`pos = 3, tested = 0`): still
+/// an error. No trials cannot yield a success.
+fn write_zero_denom_positive_count(dir: &Path) -> PathBuf {
+    let p = dir.join("survey_zero_bad.tsv");
+    std::fs::write(&p,
+        "time\tpos\ttested\n1\t1\t100\n2\t3\t0\n3\t5\t90\n4\t4\t110\n5\t2\t100\n6\t1\t95\n").unwrap();
+    p
+}
+
 fn write_if2_toml(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
     let out_root = dir.join("results_if2");
     let toml = format!(r#"
@@ -236,4 +264,82 @@ fn missing_denominator_is_a_hole_not_nan() {
         .unwrap_or_else(|| panic!("no `loglik=` line:\n{stdout}\n{stderr}"));
     assert!(ll.is_finite() && ll < 0.0,
         "survey fit with a missing denominator (hole) must stay finite, got {ll}");
+}
+
+/// gh#812: a zero denominator is a well-defined observation, and a fit carrying
+/// one must run.
+///
+/// `n = 0` means nobody was examined that day — routine in surveillance data
+/// (weekends, stockouts, a lab that did not run). With no trials there is
+/// exactly one possible outcome, so the term is exactly zero for every
+/// parameter value: non-identifying, not invalid. camdl's kernel already
+/// computed this correctly; only a bind-time guard refused it.
+#[test]
+fn a_zero_denominator_runs_and_warns_rather_than_refusing() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("zero_denom");
+    let ir = write_model(tmp.path());
+    let data = write_zero_denom_data(tmp.path());
+    let toml = write_if2_toml(tmp.path(), &ir, &data);
+
+    let out = run_fit(&camdl, &toml, "1");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(),
+        "a zero denominator must not refuse the fit:\n{stderr}");
+    assert!(best_loglik(&stdout, &stderr).is_some_and(|ll| ll.is_finite()),
+        "the fit must reach a finite loglik:\n{stderr}");
+    // Reported once, with the row, so a zero-effort row is not silently
+    // confused with a missing one.
+    assert!(stderr.contains("denominator") && stderr.contains("= 0"),
+        "the zero-denominator rows must be reported:\n{stderr}");
+    assert!(stderr.contains("NA"),
+        "the warning must say what to write if the rows are MISSING rather \
+         than zero-effort:\n{stderr}");
+}
+
+/// gh#812: a zero-effort row and a missing row contribute identically, so the
+/// two fits must agree — bit-identically, which is why the kernel
+/// short-circuits to a literal 0.0 rather than letting the general formula
+/// reach 0 to lgamma round-off.
+#[test]
+fn a_zero_denominator_scores_exactly_as_a_hole_does() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("zero_vs_na");
+    let ir = write_model(tmp.path());
+
+    let zero = write_if2_toml(tmp.path(), &ir, &write_zero_denom_data(tmp.path()));
+    let na_dir = tmp.path().join("na");
+    std::fs::create_dir_all(&na_dir).unwrap();
+    let ir2 = write_model(&na_dir);
+    let na = write_if2_toml(&na_dir, &ir2, &write_zero_as_na_data(&na_dir));
+
+    let o1 = run_fit(&camdl, &zero, "1");
+    let o2 = run_fit(&camdl, &na, "1");
+    let ll1 = best_loglik(&String::from_utf8_lossy(&o1.stdout), &String::from_utf8_lossy(&o1.stderr));
+    let ll2 = best_loglik(&String::from_utf8_lossy(&o2.stdout), &String::from_utf8_lossy(&o2.stderr));
+
+    assert!(ll1.is_some() && ll2.is_some(), "both fits must produce a loglik");
+    assert_eq!(ll1, ll2,
+        "a zero-effort row and a missing row must score identically — got \
+         {ll1:?} (n = 0) vs {ll2:?} (NA)");
+}
+
+/// gh#812 does not relax the half of the check that matters: a positive count
+/// against zero trials is still impossible.
+#[test]
+fn a_positive_count_against_zero_trials_is_still_an_error() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("zero_denom_bad");
+    let ir = write_model(tmp.path());
+    let data = write_zero_denom_positive_count(tmp.path());
+    let toml = write_if2_toml(tmp.path(), &ir, &data);
+
+    let out = run_fit(&camdl, &toml, "1");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(),
+        "a positive count against a zero denominator must be rejected:\n{stderr}");
+    assert!(stderr.contains("row 1") && stderr.contains("denominator"),
+        "the error must locate the row and name the denominator:\n{stderr}");
 }

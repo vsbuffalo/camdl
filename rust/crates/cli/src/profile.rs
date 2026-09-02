@@ -909,10 +909,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // union and validates aux — identical to how `fit run` and `pfilter`
         // build their obs model, so an indexed survey family scores identically.
         let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
-        let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+        let (bound, report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
         });
+
+        // gh#812: a non-fatal bind report was previously discarded, so the
+        // Warn channel was write-only. Surface it — a zero denominator scores
+        // as zero, and the user must be told which rows and why.
+        if !report.findings().is_empty() {
+            eprintln!("{}", report.render());
+        }
         Arc::new(MultiStreamObsModel::new(bound, compiled.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: observation model construction failed: {:?}", e);
