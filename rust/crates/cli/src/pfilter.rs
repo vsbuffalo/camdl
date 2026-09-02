@@ -355,10 +355,17 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let compiled = std::sync::Arc::new(compiled);
     let process = ChainBinomialProcess::new(compiled.clone());
     let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
-    let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+    let (bound, report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
         eprintln!("error: observation data invalid:\n{}", report.render());
         std::process::exit(1);
     });
+
+    // gh#812: a non-fatal bind report was previously discarded, so the
+    // Warn channel was write-only. Surface it — a zero denominator scores
+    // as zero, and the user must be told which rows and why.
+    if !report.findings().is_empty() {
+        eprintln!("{}", report.render());
+    }
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
         .unwrap_or_else(|e| {
             eprintln!("error: observation model construction failed: {:?}", e);

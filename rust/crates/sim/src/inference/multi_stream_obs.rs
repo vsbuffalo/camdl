@@ -691,6 +691,10 @@ impl BoundObs {
             let stream_name = &spec.ir_model.name;
             let required = aux_refs_in_likelihood(&spec.ir_model.likelihood);
             let denom = denominator_aux_name(&spec.ir_model.likelihood);
+            // gh#812: reported ONCE per stream with the row list, not per row.
+            // A file full of zero denominators is still worth shouting about;
+            // 5 of 49 is a fact about the testing programme.
+            let mut zero_denom_rows: Vec<usize> = Vec::new();
 
             if spec.aux.len() != spec.observations.len() {
                 findings.push(Finding {
@@ -731,18 +735,45 @@ impl BoundObs {
                         });
                     }
                 }
-                // n > 0 and value ≤ n for a binomial denominator (§3.2).
+                // `n >= 0` and `value <= n` for a binomial denominator (§3.2).
+                //
+                // gh#812: `n == 0` is NOT an error. Zero trials has exactly one
+                // possible outcome, so the term is exactly 0 for every parameter
+                // value -- non-identifying, not invalid -- and refusing it
+                // rejects a likelihood the kernel already computes correctly
+                // (`obs_loglik::beta_binomial_logpmf`). Stan admits it too
+                // (`check_nonnegative` on the population size). Surveillance data
+                // carries a zero denominator on any day nobody was examined, and
+                // the alternative -- writing those rows NA -- destroys real
+                // information wherever the same column is also bound as a count.
+                //
+                // The `value <= n` half of this check is the load-bearing one and
+                // still applies at n = 0, where it rejects a positive count
+                // against zero trials. Only the `n > 0` half is relaxed.
                 if let Some(dn) = denom {
                     if let Some((_, n)) = aux_row.iter().find(|(k, _)| k == dn) {
-                        if !(*n > 0.0) {
+                        if !(*n >= 0.0) {
                             findings.push(Finding {
                                 severity: Severity::Error,
                                 message: format!(
                                     "observation stream '{}' row {}: denominator '{}' = {} \
-                                     must be > 0",
+                                     must be >= 0",
                                     stream_name, i, dn, n
                                 ),
                             });
+                        } else if *n == 0.0 {
+                            zero_denom_rows.push(i);
+                            if observed > 0.0 {
+                                findings.push(Finding {
+                                    severity: Severity::Error,
+                                    message: format!(
+                                        "observation stream '{}' row {}: scored value {} \
+                                         against denominator '{}' = 0 — no trials cannot \
+                                         yield a positive count",
+                                        stream_name, i, observed, dn
+                                    ),
+                                });
+                            }
                         } else if observed > *n {
                             findings.push(Finding {
                                 severity: Severity::Error,
@@ -756,6 +787,36 @@ impl BoundObs {
                         }
                     }
                 }
+            }
+
+            // gh#812: one warning per stream, naming the rows, so a zero-effort
+            // row is not silently indistinguishable from a missing one. `NA`
+            // means "we do not know what happened"; `n = 0` means "we know
+            // nobody was examined". They contribute identically to the
+            // likelihood and are different claims about the world.
+            if !zero_denom_rows.is_empty() {
+                let shown: Vec<String> =
+                    zero_denom_rows.iter().take(8).map(|r| r.to_string()).collect();
+                let more = if zero_denom_rows.len() > 8 {
+                    format!(", +{} more", zero_denom_rows.len() - 8)
+                } else {
+                    String::new()
+                };
+                findings.push(Finding {
+                    severity: Severity::Warn,
+                    message: format!(
+                        "observation stream '{}': {} of {} rows have denominator '{}' = 0 \
+                         (rows {}{}). These score as zero — with no trials there is one \
+                         possible outcome, so the term is non-identifying, not invalid. \
+                         If those rows are MISSING rather than zero-effort, write them as NA.",
+                        stream_name,
+                        zero_denom_rows.len(),
+                        spec.observations.len(),
+                        denom.unwrap_or("?"),
+                        shown.join(", "),
+                        more,
+                    ),
+                });
             }
         }
 
