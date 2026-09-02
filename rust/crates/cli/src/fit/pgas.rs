@@ -815,7 +815,18 @@ pub fn run_stage(
             // The three complete-data components are named by the shared
             // constants, so the writer here and the readers in
             // `chain_diagnostics` cannot drift on a column name.
+            // `as_finite_frac` / `as_admissible_frac` / `as_starved`: the
+            // ancestor-move starvation instrument — mean fraction of the
+            // ensemble with a finite Eq.-(17) weight before / after the
+            // SpliceGuard mask, and the count of AS steps left with no
+            // alternative ancestor at all. Read them with `as_accept`: a low
+            // acceptance at near-zero admissible fraction is the density's
+            // support starving the move (no proposal can fix the ratio's
+            // denominator), while a low acceptance at a healthy admissible
+            // fraction blames the proposal/suffix ratio instead. Field docs on
+            // `CSMCDiagnostics` carry the full reading.
             trace_columns.extend(["as_opportunity", "as_accept", "as_proposed",
+                  "as_finite_frac", "as_admissible_frac", "as_starved",
                   super::loglik::TRACE_COL_TRANSITION_LL,
                   super::loglik::TRACE_COL_OBS_LL,
                   super::loglik::TRACE_COL_INITIAL_STATE_LL]);
@@ -896,6 +907,16 @@ pub fn run_stage(
                 };
                 let as_proposed_str = result.csmc_diag.n_as_proposed.to_string();
                 let as_opportunity_str = result.csmc_diag.n_resampled.to_string();
+                // Starvation instrument: `NA` when no AS step ran this sweep,
+                // same convention as `as_accept`.
+                let fmt_frac = |v: f64| if v.is_finite() {
+                    format!("{v:.6}")
+                } else {
+                    "NA".to_string()
+                };
+                let as_finite_frac_str = fmt_frac(result.csmc_diag.as_finite_frac);
+                let as_admissible_frac_str = fmt_frac(result.csmc_diag.as_admissible_frac);
+                let as_starved_str = result.csmc_diag.n_as_starved.to_string();
                 let transition_ll_str = format!("{:.4}", result.transition_ll);
                 let obs_ll_str = format!("{:.4}", result.obs_ll);
                 let initial_state_ll_str = format!("{:.4}", result.initial_state_ll);
@@ -920,6 +941,8 @@ pub fn run_stage(
                 extra.extend([
                     as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
+                    as_finite_frac_str.as_str(), as_admissible_frac_str.as_str(),
+                    as_starved_str.as_str(),
                     transition_ll_str.as_str(), obs_ll_str.as_str(),
                     initial_state_ll_str.as_str(),
                 ]);

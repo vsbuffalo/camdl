@@ -569,6 +569,31 @@ pub struct CSMCDiagnostics {
     /// condition, the argument for reporting it rather than refusing the
     /// sweep, and what a non-zero count does not claim.
     pub weight_collapse: WeightCollapse,
+    /// Mean, over this sweep's ancestor-sampling steps, of the fraction of the
+    /// ensemble with a FINITE Eq.-(17) ancestor weight before the
+    /// [`SpliceGuard`] mask — particles that are both alive at the preceding
+    /// observation and able to host the reference's recorded flows and noise
+    /// (the gh#607 −inf rules). `NaN` when no AS step ran.
+    ///
+    /// This is the "starvation" instrument for the ancestor move: the
+    /// categorical can only ever choose among these particles, so a fraction
+    /// near `1/n_particles` (the reference alone) says the move is starved by
+    /// the density's support, not by the Metropolis ratio — a different
+    /// diagnosis from a low [`Self::as_accept_rate`], and the one that decides
+    /// whether a cheaper AS proposal (screen-then-exact vs multiple-try) can
+    /// work at all. Counters only: no RNG is consumed and trajectories are
+    /// bit-identical with and without them.
+    pub as_finite_frac: f64,
+    /// As [`Self::as_finite_frac`], after the [`SpliceGuard`] mask — the
+    /// fraction actually selectable by the categorical. The gap between the
+    /// two is what the guard's backward-feasibility screen removes on top of
+    /// the density's own support.
+    pub as_admissible_frac: f64,
+    /// Ancestor-sampling steps where at most ONE ancestor weight survived the
+    /// mask — the reference itself, or nothing — so no alternative ancestor
+    /// existed and the move could not have fired regardless of the ratio.
+    /// Denominator: `n_resampled`.
+    pub n_as_starved: usize,
 }
 
 impl CSMCDiagnostics {
@@ -2364,6 +2389,13 @@ pub fn csmc_as(
     // only, consuming no RNG, so trajectories stay bit-identical.
     let mut weight_collapse = WeightCollapseTally::new(n_particles);
 
+    // Ancestor-move starvation instrument (see the field docs on
+    // [`CSMCDiagnostics`]): how much of the ensemble each AS step could choose
+    // among, before and after the SpliceGuard mask. Counters only — no RNG.
+    let mut as_finite_frac_sum: f64 = 0.0;
+    let mut as_admissible_frac_sum: f64 = 0.0;
+    let mut n_as_starved: usize = 0;
+
     // Pre-allocated buffer for ancestor sampling weights (reused each substep)
     let mut ancestor_log_w = vec![f64::NEG_INFINITY; n_particles];
 
@@ -2536,6 +2568,10 @@ pub fn csmc_as(
                 per_eval,
             )?;
 
+            // Starvation instrument, half 1: how many particles are alive AND
+            // can host the reference's recorded step (finite Eq.-17 weight).
+            let n_finite = ancestor_log_w.iter().filter(|w| w.is_finite()).count();
+
             // gh#607: refuse a candidate whose splice would shift the reference's
             // remaining recorded flows onto states that cannot produce them.
             splice_guard.mask_inadmissible(
@@ -2545,6 +2581,16 @@ pub fn csmc_as(
                 &ref_rec.counts_before,
                 j_ref,
             );
+
+            // Half 2: what actually remains selectable after the guard. At most
+            // one survivor (the reference, or nothing) means no alternative
+            // ancestor existed — the move was starved before any ratio ran.
+            let n_admissible = ancestor_log_w.iter().filter(|w| w.is_finite()).count();
+            as_finite_frac_sum += n_finite as f64 / n_particles as f64;
+            as_admissible_frac_sum += n_admissible as f64 / n_particles as f64;
+            if n_admissible <= 1 {
+                n_as_starved += 1;
+            }
 
             // PROPOSE from categorical(softmax(ancestor_log_w)) — the screened
             // Eq.-(17) weights, used as LJS §6.1's independence proposal `ρ̂`.
@@ -2803,6 +2849,19 @@ pub fn csmc_as(
         n_as_accepted,
         n_as_refused_inadmissible,
         weight_collapse,
+        // Means over the AS steps that ran (`n_resampled`); NaN when none did,
+        // matching the `as_accept_rate` "no data is not zero" convention.
+        as_finite_frac: if n_resampled > 0 {
+            as_finite_frac_sum / n_resampled as f64
+        } else {
+            f64::NAN
+        },
+        as_admissible_frac: if n_resampled > 0 {
+            as_admissible_frac_sum / n_resampled as f64
+        } else {
+            f64::NAN
+        },
+        n_as_starved,
     };
 
     Ok((PGASTrajectory {
@@ -3972,6 +4031,7 @@ pub fn run_pgas(
                 n_degenerate: 0, n_resampled: 0, n_as_skipped_no_resample: 0, n_substeps: 0,
                 n_as_proposed: 0, n_as_accepted: 0, n_as_refused_inadmissible: 0,
                 weight_collapse: WeightCollapse::none(config.n_particles),
+                as_finite_frac: f64::NAN, as_admissible_frac: f64::NAN, n_as_starved: 0,
             };
             for csmc_rep in 0..config.csmc_sweeps_per_nuts {
                 let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
