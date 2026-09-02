@@ -120,8 +120,20 @@ fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
     x
 }
 
-/// The Stirling-series tail correction `ln(k!) − ln(√(2πk)·(k/e)^k)`, used by
-/// [`btrs_binomial`]'s final acceptance test.
+/// The Stirling-series tail correction, used by [`btrs_binomial`]'s final
+/// acceptance test.
+///
+/// **Read the argument convention before touching this.** Writing
+/// `δ(j) = ln(j!) − ln(√(2πj)·(j/e)^j)`, this function returns `δ(k + 1)`, not
+/// `δ(k)`: `TAIL[0] = 0.0810614667953272` is `δ(1) = 1 − ½·ln(2π)`, and the
+/// series branch evaluates at `k + 1`. The shift is deliberate and
+/// LOAD-BEARING: [`BtrsHat::log_bound`] is derived under it, so "correcting"
+/// this function to return `δ(k)` while leaving `log_bound` alone takes the
+/// spread of `log_bound − log_pmf` at `(20, 0.5)` from ~1e-11 to **0.121**, and
+/// the sampler then draws from a visibly wrong distribution. It is the
+/// reference's convention, not an error in transcription.
+/// `log_bound_is_proportional_to_the_exact_pmf` catches the substitution, which
+/// is the only reason this is a trap for a reader and not for the build.
 ///
 /// Exact tabulated values below `k = 10`, where the asymptotic series has not
 /// yet converged; the series above. Transcribed from TensorFlow's
@@ -129,7 +141,8 @@ fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
 /// license as this project. See [`btrs_binomial`] for the full attribution.
 fn stirling_approx_tail(k: f64) -> f64 {
     debug_assert!(k >= 0.0 && k.fract() == 0.0, "tail wants a non-negative integer, got {k}");
-    /// `ln(k!) − Stirling(k)` for k = 0..=9.
+    /// `δ(k+1) = ln((k+1)!) − Stirling(k+1)` for k = 0..=9 — note the shift,
+    /// documented above.
     const TAIL: [f64; 10] = [
         0.081_061_466_795_327_2,
         0.041_340_695_955_409_2,
@@ -318,8 +331,12 @@ impl BtrsHat {
 /// A rejection sampler: the accepted values are distributed `Binomial(n, p)` up
 /// to the floating-point accuracy of the acceptance test, whose density is
 /// evaluated through [`stirling_approx_tail`]'s table-plus-truncated-series
-/// makes, so it is not a regression — but it is why this doc says "up to
-/// floating point" and not "exact".
+/// correction rather than through exact factorials. The BTPE branch does the
+/// same — `rand_distr` 0.4.3's final acceptance test calls its own truncated
+/// Stirling series (`binomial.rs:266`, five terms in `1/a²` and no table for
+/// small `a`) in the same `+f(m+1)+f(n−m+1)−f(k+1)−f(n−k+1)` arrangement — so
+/// this is not a regression on the sampler it replaces. But it is why this doc
+/// says "up to floating point" and not "exact".
 ///
 /// **Measured, against a 60-digit reference for `ln(k!)`** — an earlier version
 /// of this comment said "~1e-15" and "at machine precision", which were wrong by
@@ -354,10 +371,10 @@ impl BtrsHat {
 /// routing predicate in [`StatefulRng::binomial`] is what keeps this sampler
 /// valid at the bottom, and [`BTRS_MAX_N`] is what keeps it valid at the top.
 ///
-/// Flipping first also keeps `k > n` unreachable at `n > 2^53`, where `n as f64`
-/// rounds up and `n − k` could underflow `u64`. Note that is a SEPARATE hazard
-/// from the `O(n·ε)` precision loss above, which is the one that actually bites
-/// at large `n` and which `BTRS_MAX_N` fences.
+/// A `k > n` reaching the caller would underflow `n − k` to ~1.8e19 under the
+/// `p > 0.5` reflection. What prevents that is the support check in
+/// [`BtrsHat::propose`] — not the flip, and not [`BTRS_MAX_N`], whose job is the
+/// `O(n·ε)` precision loss described above and nothing else.
 ///
 /// **Source.** Transcribed from TensorFlow's `random_binomial_op.cc` (`btrs`),
 /// Apache-2.0 — the same license as this project. This is deliberately the
@@ -1075,12 +1092,22 @@ mod btrs_tests {
         (chi2, cells.len().saturating_sub(1))
     }
 
-    /// χ² critical value at ≈6σ on the `Normal(df, 2·df)` approximation. Loose
-    /// on purpose: every test here uses a FIXED seed, so a pass/fail is
-    /// deterministic and cannot flake, and the headroom means an unrelated
-    /// change to RNG consumption order does not turn into a red here. That the
-    /// looseness has NOT cost the suite its power is not asserted — it is
-    /// demonstrated by `chi_square_rejects_a_one_percent_bias` below.
+    /// χ² critical value, six standard deviations out on the `Normal(df, 2·df)`
+    /// approximation to the χ² distribution.
+    ///
+    /// **That is not a 6σ test.** The approximation is much lighter in the tail
+    /// than the χ² itself, so the true rejection level is milder than the "6"
+    /// suggests: the upper-tail probability at this cutoff is 1.8e-5 at
+    /// `df = 18` and 3.2e-7 at `df = 130`, i.e. 4.13σ and 4.98σ in normal terms.
+    /// Over the `df` this grid actually produces — 18 at `(24, 0.5)` up to 128
+    /// at `(1000, 0.5)` — the test runs at 4.1σ to 5.0σ. The direction is
+    /// benign (it under-rejects, so it cannot manufacture a red) and every test
+    /// here uses a FIXED seed, so a pass/fail is deterministic and cannot flake.
+    ///
+    /// Loose on purpose, so that an unrelated change to RNG consumption order
+    /// does not turn into a red here. That the looseness has NOT cost the suite
+    /// its power is not asserted — it is demonstrated by
+    /// `chi_square_rejects_a_one_percent_bias` below.
     fn critical(df: usize) -> f64 {
         df as f64 + 6.0 * (2.0 * df as f64).sqrt()
     }
