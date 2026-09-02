@@ -1676,6 +1676,79 @@ mod btrs_tests {
         }
     }
 
+    /// The mirror of `the_hat_stops_dominating_below_the_routing_threshold`, for
+    /// the other end. [`BTRS_MAX_N`] is a correctness fence, and until this test
+    /// existed nothing pinned it: raising it from 1e12 to 1e15, or to 1e18, left
+    /// all 24 tests green while the hat stopped dominating and the sampler
+    /// silently returned a wrong distribution.
+    /// `btrs_de_selects_itself_above_its_max_n` reads the constant symbolically,
+    /// so it follows the mutation rather than catching it.
+    ///
+    /// Two halves, and both are needed. At the fence the hat must still
+    /// dominate — that is what fails if the constant is raised. Above it the hat
+    /// must FAIL to dominate — that is what says the fence is doing work rather
+    /// than being a decoration, and its `n > BTRS_MAX_N` precondition is what
+    /// fails if the constant is raised past these cells instead.
+    ///
+    /// Measured `sup V` on the shipped lattice, over `p ∈ {1e-6 … 0.5}`:
+    /// 0.9951–0.9955 at 1e12, 0.9963–0.9967 at 1e13, 1.102–1.140 at 1e15,
+    /// 3.59–8.20 at 1e16, 2.4e75–9.1e81 at 1e18. The crossing is between 1e13
+    /// and 1e15; 1e12 sits a decade inside it, per the constant's own docstring.
+    ///
+    /// **These cells are deliberately NOT in [`DOMAIN`].** Domination is only
+    /// the first of the three exactness conditions, and the second —
+    /// `log_bound_is_proportional_to_the_exact_pmf` — is already violated here:
+    /// its `spread < 1e-7` bar is crossed at `n ≈ 4.6e8` (measured spread
+    /// 1.02e-7 there, 2.22e-4 at 1e12). That is the SEPARATE, open defect in
+    /// gh#802 — the fence is derived from domination but pmf proportionality
+    /// binds ~2000× lower — and choosing between the `ln_1p` repair, a lower
+    /// fence, and accepting it is a maintainer decision, not something this test
+    /// should pre-empt by turning a DOMAIN cell red.
+    #[test]
+    fn the_hat_stops_dominating_above_btrs_max_n() {
+        // At the fence itself, on both edges of the `p` range the router can
+        // hand BTRS at this `n`.
+        for &p in &[1e-6f64, 0.5] {
+            assert!(
+                (BTRS_MAX_N as f64) * p >= BINV_THRESHOLD,
+                "precondition: (BTRS_MAX_N, {p}) must reach the BTRS branch"
+            );
+            let (worst, overshoot) = worst_ratios(&BtrsHat::new(BTRS_MAX_N, p));
+            assert!(
+                worst <= 1.0,
+                "at BTRS_MAX_N = {BTRS_MAX_N} with p={p} the hat does NOT dominate \
+                 (max V = {worst:.6} > 1) — the fence is above the range the hat \
+                 is valid on, so every draw at the top of the routed domain comes \
+                 from the wrong distribution"
+            );
+            assert!(
+                overshoot.is_none(),
+                "at BTRS_MAX_N = {BTRS_MAX_N} with p={p} the squeeze accepts \
+                 v = V·(1 + {:.0e})",
+                overshoot.unwrap_or(0.0)
+            );
+        }
+        // And above it, where the fence exists precisely because it does not.
+        for &(n, p) in &[
+            (1_000_000_000_000_000u64, 1e-6f64),
+            (10_000_000_000_000_000, 1e-6),
+            (1_000_000_000_000_000_000, 1e-6),
+        ] {
+            assert!(
+                n > BTRS_MAX_N,
+                "n={n} is no longer above BTRS_MAX_N = {BTRS_MAX_N}: the fence has \
+                 been raised into the region where the hat is known to fail"
+            );
+            let (worst, _) = worst_ratios(&BtrsHat::new(n, p));
+            assert!(
+                worst > 1.0,
+                "expected the hat to FAIL above the fence at n={n}, got max V = \
+                 {worst:.6}. If it now dominates here, the `(n+1)·ln(…)` precision \
+                 loss has been repaired — re-derive BTRS_MAX_N before raising it."
+            );
+        }
+    }
+
     /// The margin at the boundary is small enough to be worth pinning: if a
     /// future edit erodes it, that shows up here before it shows up as a wrong
     /// posterior.
