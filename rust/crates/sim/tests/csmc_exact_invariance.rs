@@ -22,7 +22,7 @@
 //!
 //! ```text
 //!   X₀ ~ π   (exact categorical draw over the enumerated support)
-//!   X₁ = csmc_as(X₀)
+//!   X₁ = csmc_as(X₀, true)
 //!   H₀:  X₁ ~ π
 //! ```
 //!
@@ -418,6 +418,7 @@ fn check_invariance(
             &f.obs_at_substep,
             EffectFiring::default(),
             sim::rng::BinomialAlgorithm::Btpe,
+            true,
         )
         .expect("csmc_as");
         n_proposed += diag.n_as_proposed;

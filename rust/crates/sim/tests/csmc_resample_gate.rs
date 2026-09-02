@@ -154,6 +154,7 @@ fn sweep(f: &Fixture, seed: u64) -> (PGASTrajectory, sim::inference::pgas::CSMCD
         &f.obs_at_substep,
         EffectFiring::default(),
         sim::rng::BinomialAlgorithm::Btpe,
+        true,
     )
     .expect("csmc_as")
 }

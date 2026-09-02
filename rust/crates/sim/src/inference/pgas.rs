@@ -88,6 +88,14 @@ pub struct PGASConfig {
     /// obs time (`build_substep_grid`). The CLI keeps this `Snap` until the
     /// exact path's recovery evidence lands and the default is flipped.
     pub step_policy: StepPolicy,
+    /// Run the ancestor-sampling move (default `true`). `false` is plain
+    /// particle Gibbs without AS — a valid kernel in its own right (ADH 2010;
+    /// AS is the LJS mixing addition) used as a diagnostic control: it
+    /// measures what AS contributes to renewal, and what it costs. Spelled
+    /// `ancestor_sampling = false` on the stage TOML or
+    /// `--no-ancestor-sampling` on the CLI; identity-bearing (it changes the
+    /// sampled draws), riding the stage payload like `binomial` does.
+    pub ancestor_sampling: bool,
 }
 
 impl super::traits::InferenceConfig for PGASConfig {
@@ -2272,6 +2280,17 @@ pub fn csmc_as(
     // gh#747: stamped onto every particle RNG below, so the choice rides on the
     // particle rather than on whichever rayon worker happens to steal it.
     binomial: crate::rng::BinomialAlgorithm,
+    // Run the ancestor-sampling move at all (`ancestor_sampling = false` on
+    // the stage disables it). `false` is plain particle Gibbs — Andrieu,
+    // Doucet & Holenstein (2010, JRSS-B 72:269-342) — which is a valid kernel
+    // on its own: ancestor sampling is Lindsten-Jordan-Schön's mixing
+    // addition, and removing it leaves the invariant distribution intact. The
+    // reference then keeps its own ancestry at every substep, and the
+    // Eq.-(17) density pass, the SpliceGuard, and the suffix-ratio Metropolis
+    // step are all skipped. A diagnostic control, not a recommendation: it is
+    // what separates "AS is contributing to renewal" from "renewal comes from
+    // the filter alone" on a real fit.
+    ancestor_sampling: bool,
 ) -> Result<(PGASTrajectory, CSMCDiagnostics), SimError> {
     let t_start = model.model.simulation.t_start;
     let n_substeps = reference.substeps.len();
@@ -2402,6 +2421,11 @@ pub fn csmc_as(
     let mut as_finite_frac_sum: f64 = 0.0;
     let mut as_admissible_frac_sum: f64 = 0.0;
     let mut n_as_starved: usize = 0;
+    // Denominator for the two means above: substeps where the AS density pass
+    // actually ran. Distinct from `n_resampled` because `ancestor_sampling =
+    // false` resamples without ever evaluating ancestor weights — the means
+    // must then read `NaN` ("no data"), not `0.0` ("measured empty").
+    let mut n_as_eval_steps: usize = 0;
 
     // Pre-allocated buffer for ancestor sampling weights (reused each substep)
     let mut ancestor_log_w = vec![f64::NEG_INFINITY; n_particles];
@@ -2425,15 +2449,22 @@ pub fn csmc_as(
         // dropped log_weights from the sum to mask part of the issue,
         // but the state mismatch persisted. Capturing the pre-resample
         // counts here closes that loop.
-        let prev_counts_for_ancestor: Vec<Vec<i64>> = counts.clone();
-        // gh#607: the interval accumulators must be snapshotted HERE, in the
-        // same index space as `prev_counts_for_ancestor`. `ref_ancestor` indexes
-        // the PRE-resample ensemble, while `cum_flows`/`acc` are permuted BY the
-        // resample below — reading `cum_flows[ref_ancestor]` after it would be
-        // an index-space bug that silently pairs one particle's state with
-        // another's accumulated flows.
-        let prev_cum_flows_for_ancestor: Vec<Vec<u64>> = cum_flows.clone();
-        let prev_acc_for_ancestor: Vec<Vec<u64>> = acc.clone();
+        // With ancestor sampling disabled these snapshots have no consumer, so
+        // they are skipped along with the density pass; empty vectors are never
+        // read (the AS branch below is unreachable). With it enabled the clones
+        // run unconditionally, exactly as before — byte-identical.
+        let (prev_counts_for_ancestor, prev_cum_flows_for_ancestor, prev_acc_for_ancestor):
+            (Vec<Vec<i64>>, Vec<Vec<u64>>, Vec<Vec<u64>>) = if ancestor_sampling {
+            // gh#607: the interval accumulators must be snapshotted HERE, in the
+            // same index space as `prev_counts_for_ancestor`. `ref_ancestor` indexes
+            // the PRE-resample ensemble, while `cum_flows`/`acc` are permuted BY the
+            // resample below — reading `cum_flows[ref_ancestor]` after it would be
+            // an index-space bug that silently pairs one particle's state with
+            // another's accumulated flows.
+            (counts.clone(), cum_flows.clone(), acc.clone())
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
 
         // ── 1. Resample free particles (ancestor selection from prev weights) ──
         // Between observations there is no new information, so every weight is
@@ -2552,8 +2583,15 @@ pub fn csmc_as(
         // particle scoring it identically), and then the resample is skipped and
         // an ancestor move here would be exactly the invalid one. LJS §6 permit
         // performing ancestor sampling only on some substeps; the cost is mixing.
-        if !did_resample {
-            n_as_skipped_no_resample += 1;
+        // With `ancestor_sampling = false` the reference keeps its own
+        // ancestry unconditionally — the same bookkeeping as the
+        // no-resample case, minus its counter. Note the AS-off kernel
+        // consumes no `resample_rng` draws here, so AS-off runs are not
+        // draw-couplable to AS-on runs; comparisons are distributional.
+        if !did_resample || !ancestor_sampling {
+            if !did_resample {
+                n_as_skipped_no_resample += 1;
+            }
             let mut step_ancestors = substep_ancestors;
             step_ancestors[j_ref] = j_ref;
             ancestors.push(step_ancestors);
@@ -2593,6 +2631,7 @@ pub fn csmc_as(
             // one survivor (the reference, or nothing) means no alternative
             // ancestor existed — the move was starved before any ratio ran.
             let n_admissible = ancestor_log_w.iter().filter(|w| w.is_finite()).count();
+            n_as_eval_steps += 1;
             as_finite_frac_sum += n_finite as f64 / n_particles as f64;
             as_admissible_frac_sum += n_admissible as f64 / n_particles as f64;
             if n_admissible <= 1 {
@@ -2856,15 +2895,16 @@ pub fn csmc_as(
         n_as_accepted,
         n_as_refused_inadmissible,
         weight_collapse,
-        // Means over the AS steps that ran (`n_resampled`); NaN when none did,
-        // matching the `as_accept_rate` "no data is not zero" convention.
-        as_finite_frac: if n_resampled > 0 {
-            as_finite_frac_sum / n_resampled as f64
+        // Means over the AS steps that actually evaluated weights; NaN when
+        // none did (no resample, or `ancestor_sampling = false`), matching the
+        // `as_accept_rate` "no data is not zero" convention.
+        as_finite_frac: if n_as_eval_steps > 0 {
+            as_finite_frac_sum / n_as_eval_steps as f64
         } else {
             f64::NAN
         },
-        as_admissible_frac: if n_resampled > 0 {
-            as_admissible_frac_sum / n_resampled as f64
+        as_admissible_frac: if n_as_eval_steps > 0 {
+            as_admissible_frac_sum / n_as_eval_steps as f64
         } else {
             f64::NAN
         },
@@ -3763,6 +3803,7 @@ pub fn run_pgas(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
                     csmc_seed, &obs_at_substep, firing, config.binomial,
+                    config.ancestor_sampling,
                 )?;
                 rungs[rung].trajectory = new_traj;
                 rungs[rung].ll = complete_data_loglik(
@@ -4051,6 +4092,7 @@ pub fn run_pgas(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
                     csmc_seed, &obs_at_substep, firing, config.binomial,
+                    config.ancestor_sampling,
                 )?;
                 rungs[rung].trajectory = new_trajectory;
                 csmc_diag = diag;
