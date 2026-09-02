@@ -297,6 +297,8 @@ fn pgas_config() -> PGASConfig {
     PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe,
         ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: N_PARTICLES,
         n_sweeps: N_SWEEPS,
         burn_in: 0,

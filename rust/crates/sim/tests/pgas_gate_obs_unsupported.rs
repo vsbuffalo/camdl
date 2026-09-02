@@ -174,6 +174,8 @@ fn attempt_nuts_fit_with(
     let config = PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe,
         ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: 50,
         n_sweeps: 3,
         burn_in: 1,

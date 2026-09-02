@@ -202,3 +202,54 @@ never built and `csmc_as` stands.
   rejuvenation, exact for arbitrary stoichiometry/noise, preserving locality) is
   recorded as the Phase-D design spine; the fast marginal path above is its
   optimization where the IR algebra allows.
+
+## Result (2026-09-02, same day): the go/no-go tripped its kill criterion — with the mechanism identified
+
+The three-arm experiment ran on `bvd_province_hier3_ksmooth_sigma0` (the
+overdispersion wrapper removed at the model level; all 48 transitions plain),
+fixed θ at the curated starts, N = 2,400, 30 sweeps, seed 51:
+
+| arm             | early renewal (b0–b7) | aggregate | user CPU |
+| --------------- | --------------------- | --------- | -------- |
+| PF-only         | 0.056                 | 0.136     | 59 s     |
+| innovation-PGAS | 0.091                 | 0.169     | 91 s     |
+| state-PGBS      | 0.056                 | 0.136     | 215 s    |
+
+The state arm's trace is byte-for-byte the PF-only arm's, at 3.7× the cost. The
+in-kernel instrument says why, precisely: **exactly 1 feasible backward
+candidate out of 2,400 at every level — the true genealogical parent.** The
+backward stitch degenerates to retracing the forward genealogy.
+
+The mechanism is structural, not a code defect (the kernel passes all three
+exact-invariance gates, including the load-bearing-accumulator one): the `A`
+component of `Z = (X, A)` remembers the CURRENT BIN'S ACTUAL FLOWS, so a
+stitched edge from any other particle must reproduce the target's bin content
+exactly from a different starting state and bin history. The `[S; H]` system's
+consistency rows turn that into a set of exact integer constraints that, on a
+9-stream model, essentially only the true parent satisfies. The very coordinate
+that helped identifiability (ΔA shrinking the flow lattice) eliminates backward
+diversity. The toys passed invariance because at population 5–10 exact
+cross-lineage `A`-matches are common; at realistic scale they are measure-≈1/N.
+Correctness and mixing came apart exactly where the theory says they can.
+
+**Read against the spike's own criteria: stop.** No gamma work proceeds on this
+formulation. `csmc_as` stands.
+
+What survives, and the repair direction this measurement points at:
+
+- The state-transition density module, its oracle suite, and the invariance
+  harness are formulation-independent assets — any successor formulation reuses
+  them.
+- The repair is the one §12 of the downstream design note anticipated and this
+  spike's `Z = (X, A)` choice tried to shortcut: keep `Z = X` only, and move
+  interval observations into the transition factor by marginalizing the BIN'S
+  flows jointly across its substeps (`p(y_bin, X-path segment)` via a joint
+  lattice over the bin) — so cross-lineage stitching is constrained by states
+  and observations, not by another particle's realized bin history. That is a
+  substantially heavier derivation (multi-substep lattices, per-stream cadences,
+  the leading-gap/never-closing-bin cases this model's exits streams exhibit),
+  and whether it is worth attempting is a maintainer decision informed by this
+  measurement — not an implementation default.
+- The measured innovation-PGAS numbers above (AS worth 0.091 vs 0.056 early
+  renewal at N = 2,400 on the sigma0 model — a larger AS contribution than the
+  overdispersed model showed at this N) are a useful baseline regardless.

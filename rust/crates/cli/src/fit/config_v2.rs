@@ -1267,6 +1267,24 @@ pub enum Stage {
         #[serde(default = "default_ancestor_sampling",
                 skip_serializing_if = "ancestor_sampling_is_on")]
         ancestor_sampling: bool,
+        /// EXPERIMENTAL (spike note 2026-09-02). Which latent-trajectory
+        /// representation the CSMC sweep conditions on:
+        /// `"innovation"` (default — today's flow/noise record with ancestor
+        /// sampling) or `"state"` (the Markov state path, innovations
+        /// marginalized). Identity follows the `ancestor_sampling` pattern:
+        /// the default keeps payloads byte-identical, a non-default value
+        /// serializes and re-keys, and absence means `innovation`
+        /// permanently.
+        #[serde(default,
+                skip_serializing_if = "trajectory_representation_is_default")]
+        trajectory_representation: sim::inference::state_pgbs::TrajectoryRepresentation,
+        /// EXPERIMENTAL. The trajectory update on that representation:
+        /// `"ancestor_sampling"` (default; innovation only) or `"backward"`
+        /// (backward simulation; state only). Supported combinations are
+        /// innovation+ancestor_sampling and state+backward; anything else is
+        /// refused at config validation, never silently coerced.
+        #[serde(default, skip_serializing_if = "trajectory_kernel_is_default")]
+        trajectory_kernel: sim::inference::state_pgbs::TrajectoryKernel,
     },
 
     #[serde(rename = "pmmh")]
@@ -2032,6 +2050,18 @@ fn default_ancestor_sampling() -> bool { true }
 /// absence in a stored payload must mean AS-on permanently, whatever the
 /// default may later become — see the field's doc comment.
 fn ancestor_sampling_is_on(b: &bool) -> bool { *b }
+/// `skip_serializing_if` predicates for the experimental trajectory fields.
+/// Same absence-pinning rule as `ancestor_sampling`: absence means today's
+/// behavior permanently, so the predicates test the CURRENT default values
+/// literally, not `== default()` at some future date.
+fn trajectory_representation_is_default(
+    r: &sim::inference::state_pgbs::TrajectoryRepresentation,
+) -> bool {
+    matches!(r, sim::inference::state_pgbs::TrajectoryRepresentation::Innovation)
+}
+fn trajectory_kernel_is_default(k: &sim::inference::state_pgbs::TrajectoryKernel) -> bool {
+    matches!(k, sim::inference::state_pgbs::TrajectoryKernel::AncestorSampling)
+}
 fn default_nuts_warmup() -> usize { 500 }
 fn default_nuts_samples() -> usize { 500 }
 fn default_target_accept() -> f64 { 0.8 }
@@ -3681,6 +3711,45 @@ init       = "{init}"
                 "an absent field must mean ancestor sampling ON"),
             other => panic!("expected PGAS, got {}", other.method_name()),
         }
+    }
+
+    /// The experimental trajectory fields follow the ancestor_sampling
+    /// identity pattern exactly: non-default selections re-key, defaults keep
+    /// the payload byte-identical, absence parses to today's behavior.
+    #[test]
+    fn trajectory_fields_parse_rekey_and_default_out_of_the_payload() {
+        use sim::inference::state_pgbs::{TrajectoryKernel, TrajectoryRepresentation};
+        let toml_src = r#"
+            algorithm = "pgas"
+            backend = "chain_binomial"
+            chains = 2
+            particles = 10
+            sweeps = 5
+            trajectory_representation = "state"
+            trajectory_kernel = "backward"
+        "#;
+        let stage: Stage = toml::from_str(toml_src).expect("stage parses");
+        match &stage {
+            Stage::PGAS { trajectory_representation, trajectory_kernel, .. } => {
+                assert_eq!(*trajectory_representation, TrajectoryRepresentation::State);
+                assert_eq!(*trajectory_kernel, TrajectoryKernel::Backward);
+            }
+            other => panic!("expected PGAS, got {}", other.method_name()),
+        }
+        let default = pgas_stage();
+        assert_ne!(default.identity_payload(), stage.identity_payload(),
+            "a state-kernel fit must not share a leaf with an innovation fit");
+        let obj = default.identity_payload();
+        let obj = obj.as_object().unwrap();
+        assert!(!obj.contains_key("trajectory_representation")
+                && !obj.contains_key("trajectory_kernel"),
+            "defaults must keep the payload byte-identical to the pre-field format");
+
+        let bad = toml_src.replace("trajectory_representation = \"state\"", "");
+        let bad_stage: Stage = toml::from_str(&bad).expect("parses");
+        let err = crate::fit::pgas::PgasStageOpts::from_stage(&bad_stage)
+            .expect_err("innovation + backward must be refused");
+        assert!(err.contains("unsupported trajectory combination"), "{err}");
     }
 
     /// `--no-ancestor-sampling` rides the same seam as `--no-nuts` and is
@@ -6948,6 +7017,8 @@ decibans_thresh = 100.0
             use_nuts: true,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
             ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         }
     }
 
@@ -6980,13 +7051,15 @@ decibans_thresh = 100.0
                 survey_path, survey_top_k_n,
                 burn_in, thin,
                 tempering, max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
-                n_trajectories, dense_mass, use_nuts, ancestor_sampling, .. } =>
+                n_trajectories, dense_mass, use_nuts, ancestor_sampling,
+                trajectory_representation, trajectory_kernel, .. } =>
                 Stage::PGAS { backend, chains: 8, particles, sweeps, starts_from, init_method,
                     survey_path, survey_top_k_n,
                     burn_in, thin,
                     tempering, max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
                         binomial: sim::rng::BinomialAlgorithm::Btpe,
-                    n_trajectories, dense_mass, use_nuts, ancestor_sampling },
+                    n_trajectories, dense_mass, use_nuts, ancestor_sampling,
+                    trajectory_representation, trajectory_kernel },
             _ => unreachable!(),
         };
         assert_ne!(s_short.identity_payload(), s_more_chains.identity_payload());

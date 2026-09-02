@@ -96,6 +96,12 @@ pub struct PGASConfig {
     /// `--no-ancestor-sampling` on the CLI; identity-bearing (it changes the
     /// sampled draws), riding the stage payload like `binomial` does.
     pub ancestor_sampling: bool,
+    /// Experimental (spike note 2026-09-02): the trajectory representation
+    /// and kernel. `Innovation` + `AncestorSampling` is today's sweep;
+    /// `State` + `Backward` routes the X-move through `csmc_bs`. The caller
+    /// (`PgasStageOpts::from_stage`) has already validated the combination.
+    pub trajectory_representation: super::state_pgbs::TrajectoryRepresentation,
+    pub trajectory_kernel: super::state_pgbs::TrajectoryKernel,
 }
 
 impl super::traits::InferenceConfig for PGASConfig {
@@ -3792,6 +3798,45 @@ pub fn run_pgas(
     // `eval_emitted_grad` seam).
     let estimated_to_model: Vec<usize> = if2_params.iter().map(|spec| spec.index).collect();
 
+    // ── Experimental state-space kernel (spike note 2026-09-02) ──
+    // Built once per chain; `from_model` refuses models outside the
+    // prototype class loudly (overdispersed/deterministic draws, events,
+    // balance, interventions), so an unsupported selection fails here, at
+    // the boundary, never mid-sweep.
+    let bs_analysis: Option<super::state_transition::StateTransitionAnalysis> =
+        if matches!(config.trajectory_representation,
+                    super::state_pgbs::TrajectoryRepresentation::State) {
+            eprintln!("  trajectory: state representation + backward kernel (experimental)");
+            Some(super::state_transition::StateTransitionAnalysis::from_model(
+                model, obs_model,
+            )?)
+        } else {
+            None
+        };
+    /// The BS diagnostics mapped onto the trace surface: renewal is the same
+    /// slot-identity statistic; the AS counters do not exist for this kernel
+    /// and read as their "no data" values.
+    fn bs_diag_to_csmc(
+        bs: &super::state_pgbs::BsDiagnostics,
+        n_particles: usize,
+    ) -> CSMCDiagnostics {
+        CSMCDiagnostics {
+            trajectory_renewal: bs.trajectory_renewal,
+            renewal_by_bin: bs.renewal_by_bin,
+            n_degenerate: 0,
+            n_resampled: 0,
+            n_as_skipped_no_resample: 0,
+            n_substeps: bs.n_substeps,
+            n_as_proposed: 0,
+            n_as_accepted: 0,
+            n_as_refused_inadmissible: 0,
+            weight_collapse: WeightCollapse::none(n_particles),
+            as_finite_frac: f64::NAN,
+            as_admissible_frac: f64::NAN,
+            n_as_starved: 0,
+        }
+    }
+
     // ── Trajectory warm-up: CSMC-only sweeps before parameter updates ──
     if config.trajectory_warmup > 0 && start_sweep == 0 {
         eprintln!("  trajectory warm-up: {} CSMC-only sweeps", config.trajectory_warmup);
@@ -3799,12 +3844,22 @@ pub fn run_pgas(
             for rung in 0..n_rungs {
                 let csmc_seed = seed ^ ((warmup_sweep as u64).wrapping_mul(0x517cc1b727220a95))
                     ^ (rung as u64).wrapping_mul(0x6c62272e07bb0142);
-                let (new_traj, _diag) = csmc_as(
-                    model, &rungs[rung].params, observations, &rungs[rung].trajectory,
-                    config.n_particles, config.dt, obs_model,
-                    csmc_seed, &obs_at_substep, firing, config.binomial,
-                    config.ancestor_sampling,
-                )?;
+                let (new_traj, _diag) = if let Some(analysis) = &bs_analysis {
+                    let (traj, bs) = super::state_pgbs::csmc_bs(
+                        model, &rungs[rung].params, &rungs[rung].trajectory,
+                        config.n_particles, config.dt, obs_model,
+                        csmc_seed, &obs_at_substep, firing, analysis,
+                    )?;
+                    let d = bs_diag_to_csmc(&bs, config.n_particles);
+                    (traj, d)
+                } else {
+                    csmc_as(
+                        model, &rungs[rung].params, observations, &rungs[rung].trajectory,
+                        config.n_particles, config.dt, obs_model,
+                        csmc_seed, &obs_at_substep, firing, config.binomial,
+                        config.ancestor_sampling,
+                    )?
+                };
                 rungs[rung].trajectory = new_traj;
                 rungs[rung].ll = complete_data_loglik(
                     model, &rungs[rung].trajectory, &rungs[rung].params, observations,
@@ -4088,12 +4143,33 @@ pub fn run_pgas(
                 let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
                     ^ (rung as u64).wrapping_mul(0x6c62272e07bb0142)
                     ^ (csmc_rep as u64).wrapping_mul(0xa2ce44bbfe0cf6d5);
-                let (new_trajectory, diag) = csmc_as(
-                    model, &rungs[rung].params, observations, &rungs[rung].trajectory,
-                    config.n_particles, config.dt, obs_model,
-                    csmc_seed, &obs_at_substep, firing, config.binomial,
-                    config.ancestor_sampling,
-                )?;
+                let (new_trajectory, diag) = if let Some(analysis) = &bs_analysis {
+                    let (traj, bs) = super::state_pgbs::csmc_bs(
+                        model, &rungs[rung].params, &rungs[rung].trajectory,
+                        config.n_particles, config.dt, obs_model,
+                        csmc_seed, &obs_at_substep, firing, analysis,
+                    )?;
+                    // The in-kernel candidate instrument (spike note): these
+                    // numbers supersede the cross-run proxy. `info` level so a
+                    // probe run with --progress plain captures them without
+                    // spamming a production log.
+                    log::info!(
+                        "csmc_bs sweep {sweep} rung {rung}: renewal {:.3}, \
+                         candidate feasible frac {:.3}, lattice terms {}",
+                        bs.trajectory_renewal,
+                        bs.candidate_feasible_frac,
+                        bs.total_lattice_terms,
+                    );
+                    let d = bs_diag_to_csmc(&bs, config.n_particles);
+                    (traj, d)
+                } else {
+                    csmc_as(
+                        model, &rungs[rung].params, observations, &rungs[rung].trajectory,
+                        config.n_particles, config.dt, obs_model,
+                        csmc_seed, &obs_at_substep, firing, config.binomial,
+                        config.ancestor_sampling,
+                    )?
+                };
                 rungs[rung].trajectory = new_trajectory;
                 csmc_diag = diag;
             }

@@ -136,6 +136,8 @@ fn run_once() -> PGASResult {
     let config = PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe,
         ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: N_PARTICLES,
         n_sweeps: 4,
         burn_in: 1,

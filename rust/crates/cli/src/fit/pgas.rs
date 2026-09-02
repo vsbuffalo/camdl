@@ -192,6 +192,10 @@ pub struct PgasStageOpts {
     /// `--no-ancestor-sampling` disables it — plain particle Gibbs, a
     /// diagnostic control). Identity-bearing; see the field on `Stage::PGAS`.
     pub ancestor_sampling: bool,
+    /// Experimental trajectory representation/kernel (spike note
+    /// 2026-09-02); the combination is validated by `from_stage`.
+    pub trajectory_representation: sim::inference::state_pgbs::TrajectoryRepresentation,
+    pub trajectory_kernel: sim::inference::state_pgbs::TrajectoryKernel,
     pub init_method: super::init::InitMethod,
     /// Survey CAS directory consumed when
     /// `init_method = InitMethod::SurveyTopK` (gh#51 v2). `None`
@@ -219,7 +223,8 @@ impl PgasStageOpts {
                 chains, particles, sweeps, burn_in, thin,
                 tempering, max_tree_depth, trajectory_warmup,
                 csmc_sweeps_per_nuts, n_trajectories,
-                dense_mass, use_nuts, ancestor_sampling, init_method,
+                dense_mass, use_nuts, ancestor_sampling,
+                trajectory_representation, trajectory_kernel, init_method,
                 survey_path, survey_top_k_n, binomial,
                 ..
             } => {
@@ -243,6 +248,32 @@ impl PgasStageOpts {
                              Got ladder: {:?}", i, beta, tempering));
                     }
                 }
+                {
+                    use sim::inference::state_pgbs::{TrajectoryKernel as K,
+                                                     TrajectoryRepresentation as R};
+                    let ok = matches!(
+                        (trajectory_representation, trajectory_kernel),
+                        (R::Innovation, K::AncestorSampling) | (R::State, K::Backward)
+                    );
+                    if !ok {
+                        return Err(format!(
+                            "unsupported trajectory combination: representation \
+                             `{trajectory_representation:?}` with kernel \
+                             `{trajectory_kernel:?}`. Supported: \
+                             innovation + ancestor_sampling (default), and \
+                             state + backward (experimental). Nothing is \
+                             silently coerced."
+                        ));
+                    }
+                    if matches!(trajectory_representation, R::State) && !ancestor_sampling {
+                        return Err(
+                            "ancestor_sampling = false has no meaning under \
+                             trajectory_representation = \"state\" (the backward \
+                             kernel replaces the ancestor move entirely); remove \
+                             one of the two settings".into(),
+                        );
+                    }
+                }
                 Ok(PgasStageOpts {
                     n_chains: *chains,
                     n_particles: *particles,
@@ -257,6 +288,8 @@ impl PgasStageOpts {
                     dense_mass: *dense_mass,
                     use_nuts: *use_nuts,
                     ancestor_sampling: *ancestor_sampling,
+                    trajectory_representation: *trajectory_representation,
+                    trajectory_kernel: *trajectory_kernel,
                     init_method: init_method.clone(),
                     survey_path: survey_path.clone(),
                     survey_top_k_n: *survey_top_k_n,
@@ -768,6 +801,8 @@ pub fn run_stage(
                 // evidence lands and resolve_obs_alignment flips the default.
                 step_policy: sim::schedule::StepPolicy::Snap,
                 ancestor_sampling: pgas_opts.ancestor_sampling,
+                trajectory_representation: pgas_opts.trajectory_representation,
+                trajectory_kernel: pgas_opts.trajectory_kernel,
             };
 
             // Build multi-stream observation model (evaluates with params at call time)
@@ -1865,6 +1900,8 @@ mod tests {
             use_nuts: true,
             binomial: sim::rng::BinomialAlgorithm::Btpe,
             ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         }
     }
 
