@@ -246,6 +246,52 @@ impl BtrsHat {
         us >= SQUEEZE_US_MIN && v <= self.v_r
     }
 
+    /// One BTRS proposal: `Some(k)` if the pair `(u, v)` is accepted, `None` if
+    /// it must be redrawn. The whole body of [`btrs_binomial`]'s loop, as a
+    /// method on the hat.
+    ///
+    /// Separated for the same reason [`Self::us_of`] and [`Self::in_support`]
+    /// are methods, but one level up: the support guard below is a DELIBERATE
+    /// DEVIATION from the reference, and in the routed domain it is a no-op —
+    /// the hat's geometry keeps every squeeze-region candidate inside `[0, n]`
+    /// (it takes `n·p < 1.3` to break that, and the routing predicate requires
+    /// `n·p ≥ 10`). So no draw can distinguish the guard's presence, and
+    /// deleting it was green under `--release`, where the `debug_assert!` below
+    /// is compiled out and the gate never builds this module optimised (gh#802).
+    /// A test can hand this method a hat the sampler would never construct;
+    /// `btrs_tests::an_out_of_support_candidate_is_redrawn_not_returned` does.
+    #[inline(always)]
+    fn propose(&self, u: f64, v: f64) -> Option<u64> {
+        let us = Self::us_of(u);
+        let k = self.k_of(u, us);
+
+        // The reference does this check only AFTER the squeeze, and so returns
+        // `k` from the squeeze unchecked, on the strength of the hat's
+        // in-support guarantee. Hoisting it is a no-op wherever that guarantee
+        // holds — `hat_dominates_and_squeeze_is_valid` asserts it holds across
+        // the routed domain — and where it might not, this redraws instead of
+        // handing the caller a `k > n` that the `p > 0.5` reflection would turn
+        // into a `u64` underflow of ~1.8e19, or a negative `k` that the
+        // saturating `as u64` below would turn into a silent zero count.
+        if !self.in_support(k) {
+            return None;
+        }
+        let k_int = k as u64;
+        debug_assert!(
+            (k_int as f64) <= self.count,
+            "k={k} escaped the f64 support check at n={}",
+            self.count
+        );
+
+        if self.squeeze_accepts(v, us) {
+            return Some(k_int);
+        }
+        if self.slow_accepts(v, us, k) {
+            return Some(k_int);
+        }
+        None
+    }
+
     /// The acceptance ratio `V(u)`: the slow test accepts exactly when
     /// `v ≤ V(u)`. **This is what BTRS's exactness is.** The scheme is a valid
     /// rejection sampler iff `V ≤ 1` everywhere (the hat dominates the pmf), and
@@ -321,33 +367,15 @@ fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
 
     loop {
         // `u ∈ [−0.5, 0.5)`, so `us ∈ (0, 0.5]`. At `u == −0.5` exactly (one draw
-        // in 2^53) `us == 0`, `2a/us` is `+∞` and `k` is `−∞` — which the support
-        // check below rejects in f64, BEFORE any integer cast. That order is
-        // load-bearing: `(−∞) as u64` saturates to 0 in Rust, so casting first
-        // would silently return a zero count instead of redrawing.
+        // in 2^53) `us == 0`, `2a/us` is `+∞` and `k` is `−∞` — which
+        // [`BtrsHat::propose`]'s support check rejects in f64, BEFORE any integer
+        // cast. That order is load-bearing: `(−∞) as u64` saturates to 0 in Rust,
+        // so casting first would silently return a zero count instead of
+        // redrawing.
         let u: f64 = rng.gen::<f64>() - 0.5;
         let v: f64 = rng.gen();
-        let us = BtrsHat::us_of(u);
-        let k = h.k_of(u, us);
-
-        // DELIBERATE DEVIATION from the reference, which does this check only
-        // AFTER the squeeze and so returns `k` from the squeeze unchecked, on the
-        // strength of the hat's in-support guarantee. Hoisting it is a no-op
-        // wherever that guarantee holds — `hat_dominates_and_squeeze_is_valid`
-        // asserts it holds across the routed domain — and where it might not, this
-        // redraws instead of handing the caller a `k > n` that the `p > 0.5`
-        // reflection would turn into a `u64` underflow of ~1.8e19.
-        if !h.in_support(k) {
-            continue;
-        }
-        let k_int = k as u64;
-        debug_assert!(k_int <= n, "k={k} escaped the f64 support check at n={n}");
-
-        if h.squeeze_accepts(v, us) {
-            return k_int;
-        }
-        if h.slow_accepts(v, us, k) {
-            return k_int;
+        if let Some(k) = h.propose(u, v) {
+            return k;
         }
     }
 }
@@ -1588,6 +1616,64 @@ mod btrs_tests {
              {worst:.6}. If this now passes, the domination region is wider than \
              assumed — re-derive it before touching BINV_THRESHOLD."
         );
+    }
+
+    /// The support guard at the top of [`BtrsHat::propose`] is a deviation from
+    /// the reference, which checks the support only after the squeeze. In the
+    /// routed domain the guard is a no-op — that is the point of it — so no
+    /// draw can distinguish its presence, and deleting it left the suite GREEN
+    /// under `--release`. Five tests went red in debug, but only through the
+    /// `debug_assert!` beside it, and the gate never builds this module
+    /// optimised, which is the build every fit runs (gh#802).
+    ///
+    /// So test the guard at the level it is written at: hand `propose` a hat
+    /// whose geometry puts a squeeze-region candidate outside `[0, n]` and
+    /// require the answer to be "redraw". Without the guard the squeeze returns
+    /// that candidate — below zero it becomes 0 through the saturating
+    /// `as u64`, and above `n` it becomes a `k > n` that `binomial`'s `p > 0.5`
+    /// reflection turns into an `n − k` underflow of ~1.8e19.
+    #[test]
+    fn an_out_of_support_candidate_is_redrawn_not_returned() {
+        // Not a routed hat: `a` is inflated so the candidate leaves `[0, n]`
+        // while `us` is still inside the squeeze region. The shipped constants
+        // make that impossible above `n·p ≈ 1.3`, and the routing predicate
+        // admits nothing below `n·p = 10` — which is why no draw can reach here.
+        let h = BtrsHat {
+            count: 20.0,
+            b: 1.0,
+            a: 2.0,
+            c: 10.0,
+            v_r: 0.5,
+            r: 1.0,
+            alpha: 1.0,
+            m: 10.0,
+        };
+        let v = 0.1; // below v_r, so the squeeze is what would fire
+
+        for (u, edge) in [(0.42f64, "above n"), (-0.42, "below 0")] {
+            let us = BtrsHat::us_of(u);
+            let k = h.k_of(u, us);
+            // The fixture has to actually pose the question, or this test is
+            // vacuous: the candidate must be out of support AND the squeeze
+            // must be live at this `us`.
+            assert!(
+                !h.in_support(k),
+                "fixture is wrong: k={k} is in support, so the guard is not \
+                 exercised {edge}"
+            );
+            assert!(
+                h.squeeze_accepts(v, us),
+                "fixture is wrong: the squeeze does not fire at us={us}, so the \
+                 guard is not what decides the outcome {edge}"
+            );
+            assert_eq!(
+                h.propose(u, v),
+                None,
+                "a candidate {edge} (k={k}) was RETURNED instead of redrawn — \
+                 the hoisted support check is what stands between the squeeze \
+                 and a saturating `as u64`"
+            );
+        }
     }
 
     /// The margin at the boundary is small enough to be worth pinning: if a
