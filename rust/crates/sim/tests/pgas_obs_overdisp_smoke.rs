@@ -144,6 +144,9 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: 100,
         n_sweeps: 100,
         burn_in: 30,
@@ -266,6 +269,9 @@ fn smoke_pgas_nuts_estimates_rho() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: 100,
         n_sweeps: 100,
         burn_in: 30,

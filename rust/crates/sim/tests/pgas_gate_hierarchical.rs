@@ -157,6 +157,9 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
     })];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: 50,
         n_sweeps: 5,
         burn_in: 2,

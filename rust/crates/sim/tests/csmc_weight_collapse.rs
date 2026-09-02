@@ -183,6 +183,7 @@ fn sweep(f: &Fixture) -> (PGASTrajectory, CSMCDiagnostics) {
         SEED,
         &f.obs_at_substep,
         EffectFiring::default(),
+        true,
     )
     .expect("csmc_as")
 }

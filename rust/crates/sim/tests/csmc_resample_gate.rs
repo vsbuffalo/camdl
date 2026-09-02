@@ -153,6 +153,7 @@ fn sweep(f: &Fixture, seed: u64) -> (PGASTrajectory, sim::inference::pgas::CSMCD
         seed,
         &f.obs_at_substep,
         EffectFiring::default(),
+        true,
     )
     .expect("csmc_as")
 }

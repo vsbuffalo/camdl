@@ -416,6 +416,9 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: 50,
         n_sweeps: 50,
         burn_in: 15,
@@ -479,6 +482,9 @@ fn exact_alignment_rejected_on_always_active_event_model() {
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
 
     let config = PGASConfig {
+        ancestor_sampling: true,
+            trajectory_representation: Default::default(),
+            trajectory_kernel: Default::default(),
         n_particles: 10, n_sweeps: 1, burn_in: 0, thin: 1, dt: 0.5,
         use_nuts: false, dense_mass: false, max_tree_depth: 4,
         tempering: vec![1.0], trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,
