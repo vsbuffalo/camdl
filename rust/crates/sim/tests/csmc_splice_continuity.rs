@@ -132,6 +132,7 @@ fn csmc_returns_a_continuous_path() {
             SEED + seed,
             &obs_at_substep,
             EffectFiring::default(),
+            true,
         )
         .expect("csmc_as");
         sweeps += 1;

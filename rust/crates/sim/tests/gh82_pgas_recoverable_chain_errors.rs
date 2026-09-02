@@ -295,6 +295,7 @@ fn mu_param() -> EstimatedParam {
 
 fn pgas_config() -> PGASConfig {
     PGASConfig {
+        ancestor_sampling: true,
         n_particles: N_PARTICLES,
         n_sweeps: N_SWEEPS,
         burn_in: 0,

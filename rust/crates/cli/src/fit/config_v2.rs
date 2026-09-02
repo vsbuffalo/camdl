@@ -1211,6 +1211,24 @@ pub enum Stage {
         /// expressions in the IR (compiled with autodiff). Default: true.
         #[serde(default = "default_use_nuts")]
         use_nuts: bool,
+        /// Run the ancestor-sampling move in the CSMC sweep. `false` is plain
+        /// particle Gibbs without AS (Andrieu, Doucet & Holenstein 2010) — a
+        /// valid kernel used as a diagnostic control: it measures what AS
+        /// contributes to trajectory renewal, and what its density pass costs.
+        /// Spelled `ancestor_sampling = false` in the stage TOML or
+        /// `--no-ancestor-sampling` on the CLI. Default: true.
+        ///
+        /// Identity: disabling AS changes the sampled draws, so `false` must
+        /// re-key — and it does, by serializing into the payload.
+        /// `skip_serializing_if` keeps the default's payload byte-identical to
+        /// the pre-field format, so adding the field orphans no stored leaf
+        /// and breaks no in-flight `--resume`. The predicate tests `== true`
+        /// literally, not `== default()`: absence must mean AS-on permanently,
+        /// because that is what every run predating the field did (the same
+        /// reasoning as `binomial`'s absence-means-btpe).
+        #[serde(default = "default_ancestor_sampling",
+                skip_serializing_if = "ancestor_sampling_is_on")]
+        ancestor_sampling: bool,
     },
 
     #[serde(rename = "pmmh")]
@@ -1760,7 +1778,8 @@ impl Stage {
         match self {
             Stage::PGAS {
                 tempering, max_tree_depth, trajectory_warmup,
-                csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts, ..
+                csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts,
+                ancestor_sampling, ..
             } => {
                 if let Some(t) = &cli.tempering { *tempering = t.clone(); }
                 if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
@@ -1769,6 +1788,7 @@ impl Stage {
                 if let Some(n) = cli.n_trajectories { *n_trajectories = n; }
                 if cli.diagonal_mass { *dense_mass = false; }
                 if cli.no_nuts { *use_nuts = false; }
+                if cli.no_ancestor_sampling { *ancestor_sampling = false; }
             }
             Stage::Nuts { max_tree_depth, dense_mass, .. } => {
                 if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
@@ -1837,6 +1857,9 @@ pub struct CliStageOverrides {
     pub n_trajectories: Option<usize>,
     pub diagonal_mass: bool,
     pub no_nuts: bool,
+    /// `--no-ancestor-sampling` (PGAS): one-way override to plain particle
+    /// Gibbs without the AS move. Identity-bearing like `no_nuts`.
+    pub no_ancestor_sampling: bool,
     pub no_adapt: bool,
     pub adapt_start: Option<usize>,
     pub rho: Option<f64>,
@@ -1957,6 +1980,12 @@ fn default_dense_mass() -> bool { true }
 /// Opt into dense (`dense_mass = true`) for a correlated posterior.
 fn default_nuts_dense_mass() -> bool { false }
 fn default_use_nuts() -> bool { true }
+fn default_ancestor_sampling() -> bool { true }
+/// The `skip_serializing_if` predicate for `Stage::PGAS::ancestor_sampling`.
+/// Deliberately `*b` (i.e. `== true`), NOT `== default_ancestor_sampling()`:
+/// absence in a stored payload must mean AS-on permanently, whatever the
+/// default may later become — see the field's doc comment.
+fn ancestor_sampling_is_on(b: &bool) -> bool { *b }
 fn default_nuts_warmup() -> usize { 500 }
 fn default_nuts_samples() -> usize { 500 }
 fn default_target_accept() -> f64 { 0.8 }
@@ -3559,9 +3588,72 @@ init       = "{init}"
         assert_eq!(more.cas_n_trajectories(), 500);
     }
 
+    /// AS-off changes the draws, so it is count-in-the-key; AS-on (the
+    /// default) keeps the pre-field payload bytes, so nothing re-keys.
+    #[test]
+    fn ancestor_sampling_off_is_in_the_stage_identity() {
+        // Disabling AS changes the sampled draws, so it must re-key
+        // (count-in-the-key discipline)…
+        let on = pgas_stage();
+        let mut off = pgas_stage();
+        if let Stage::PGAS { ref mut ancestor_sampling, .. } = off {
+            *ancestor_sampling = false;
+        }
+        assert_ne!(on.identity_payload(), off.identity_payload(),
+            "an AS-off fit must not be served from (or stored over) an AS-on leaf");
+        // …while the DEFAULT serializes to the pre-field bytes, so no stored
+        // leaf is orphaned and no in-flight --resume breaks. The byte golden
+        // (`identity_payload_is_byte_stable_against_recompiles`) is the other
+        // half of this assertion.
+        assert!(!on.identity_payload().as_object().unwrap()
+                    .contains_key("ancestor_sampling"),
+            "the default must keep the payload byte-identical to the pre-field format");
+        assert!(off.identity_payload().as_object().unwrap()
+                    .contains_key("ancestor_sampling"),
+            "the non-default must serialize, or it could not re-key");
+    }
+
+    /// `ancestor_sampling = false` is the TOML spelling; absent means on.
+    #[test]
+    fn ancestor_sampling_parses_from_stage_toml() {
+        let toml_src = r#"
+            algorithm = "pgas"
+            backend = "chain_binomial"
+            chains = 2
+            particles = 10
+            sweeps = 5
+            ancestor_sampling = false
+        "#;
+        let stage: Stage = toml::from_str(toml_src).expect("stage parses");
+        match stage {
+            Stage::PGAS { ancestor_sampling, .. } => assert!(!ancestor_sampling),
+            other => panic!("expected PGAS, got {}", other.method_name()),
+        }
+        let default_src = toml_src.replace("ancestor_sampling = false", "");
+        match toml::from_str::<Stage>(&default_src).expect("stage parses") {
+            Stage::PGAS { ancestor_sampling, .. } => assert!(ancestor_sampling,
+                "an absent field must mean ancestor sampling ON"),
+            other => panic!("expected PGAS, got {}", other.method_name()),
+        }
+    }
+
+    /// `--no-ancestor-sampling` rides the same seam as `--no-nuts` and is
+    /// equally keyed.
+    #[test]
+    fn cli_no_ancestor_sampling_overrides_and_rekeys() {
+        let base = pgas_stage();
+        let mut overridden = pgas_stage();
+        overridden.apply_cli_overrides(&CliStageOverrides {
+            no_ancestor_sampling: true, ..Default::default() });
+        match &overridden {
+            Stage::PGAS { ancestor_sampling, .. } => assert!(!ancestor_sampling),
+            other => panic!("expected PGAS, got {}", other.method_name()),
+        }
+        assert_ne!(base.identity_payload(), overridden.identity_payload());
+    }
+
     /// The other half, and the one that protects existing users: a run with
-    /// no CLI overrides must key exactly as it did before, so no cached fit
-    /// is invalidated by this change.
+    /// no CLI overrides must key exactly as it did before.
     #[test]
     fn no_cli_override_leaves_the_stage_identity_untouched() {
         let declared = scout_stage("uniform");
@@ -6808,6 +6900,7 @@ decibans_thresh = 100.0
             n_trajectories: 200,
             dense_mass: true,
             use_nuts: true,
+            ancestor_sampling: true,
         }
     }
 
@@ -6840,12 +6933,12 @@ decibans_thresh = 100.0
                 survey_path, survey_top_k_n,
                 burn_in, thin,
                 tempering, max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
-                n_trajectories, dense_mass, use_nuts, .. } =>
+                n_trajectories, dense_mass, use_nuts, ancestor_sampling, .. } =>
                 Stage::PGAS { backend, chains: 8, particles, sweeps, starts_from, init_method,
                     survey_path, survey_top_k_n,
                     burn_in, thin,
                     tempering, max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
-                    n_trajectories, dense_mass, use_nuts },
+                    n_trajectories, dense_mass, use_nuts, ancestor_sampling },
             _ => unreachable!(),
         };
         assert_ne!(s_short.identity_payload(), s_more_chains.identity_payload());

@@ -1067,6 +1067,15 @@ pub struct FitRunArgs {
     #[arg(long, requires = "stage")]
     pub no_nuts: bool,
 
+    /// Override [stages.<stage>.ancestor_sampling] to false: run the CSMC
+    /// sweep as plain particle Gibbs, without the ancestor-sampling move.
+    /// A diagnostic control (what does AS contribute, and what does its
+    /// density pass cost?); changes the sampled draws, so the run stores
+    /// under its own address. One-way: edit TOML to flip back. Requires
+    /// --stage.
+    #[arg(long, requires = "stage")]
+    pub no_ancestor_sampling: bool,
+
     // ── PMMH-specific algorithm overrides (require --stage) ──────────
 
     /// Override [stages.<stage>.adapt] to false (lock proposal SDs;

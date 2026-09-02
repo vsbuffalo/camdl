@@ -134,6 +134,7 @@ fn run_once() -> PGASResult {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
         n_particles: N_PARTICLES,
         n_sweeps: 4,
         burn_in: 1,

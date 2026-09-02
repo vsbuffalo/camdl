@@ -162,6 +162,7 @@ fn test_single_rung_deterministic() {
     let obs_m = obs_model(&compiled);
 
     let config = PGASConfig {
+        ancestor_sampling: true,
         n_particles: 20,
         n_sweeps: 50,
         burn_in: 10,
@@ -180,6 +181,7 @@ fn test_single_rung_deterministic() {
 
     let obs_m2 = obs_model(&compiled);
     let config2 = PGASConfig {
+        ancestor_sampling: true,
         n_particles: 20,
         n_sweeps: 50,
         burn_in: 10,
@@ -213,6 +215,7 @@ fn test_two_rungs_no_panic() {
     let obs_m = obs_model(&compiled);
 
     let config = PGASConfig {
+        ancestor_sampling: true,
         n_particles: 20,
         n_sweeps: 100,
         burn_in: 20,
@@ -246,6 +249,7 @@ fn test_four_rungs_runs() {
     let obs_m = obs_model(&compiled);
 
     let config = PGASConfig {
+        ancestor_sampling: true,
         n_particles: 20,
         n_sweeps: 200,
         burn_in: 50,

@@ -192,6 +192,7 @@ fn report_the_mixing_cost_of_the_ancestor_sampling_gate() {
             SEED.wrapping_add(i as u64).wrapping_mul(0x9e3779b97f4a7c15),
             &obs_at_substep,
             EffectFiring::default(),
+            true,
         )
         .expect("csmc_as");
         renewal_sum += d.trajectory_renewal;

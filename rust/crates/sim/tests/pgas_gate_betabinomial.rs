@@ -218,6 +218,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
         n_particles: 50,
         n_sweeps: 3,
         burn_in: 1,
@@ -324,6 +325,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
         n_particles: 50,
         n_sweeps: 5,
         burn_in: 2,

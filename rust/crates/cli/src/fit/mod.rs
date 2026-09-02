@@ -264,6 +264,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         n_trajectories:       a.n_trajectories,
         diagonal_mass:        a.diagonal_mass,
         no_nuts:              a.no_nuts,
+        no_ancestor_sampling: a.no_ancestor_sampling,
         no_adapt:             a.no_adapt,
         adapt_start:          a.adapt_start,
         rho:                  a.rho,

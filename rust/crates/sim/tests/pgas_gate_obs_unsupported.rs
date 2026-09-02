@@ -172,6 +172,7 @@ fn attempt_nuts_fit_with(
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        ancestor_sampling: true,
         n_particles: 50,
         n_sweeps: 3,
         burn_in: 1,
