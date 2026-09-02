@@ -1450,7 +1450,15 @@ mod btrs_tests {
                 let ratio = h.accept_ratio(us, k);
                 // Probe both sides of the boundary, and skip a narrow band
                 // around it where the two forms may legitimately round apart.
-                for scale in [0.5f64, 0.9, 1.1, 2.0] {
+                //
+                // The 0.999/1.001 rungs are what give this test its resolution.
+                // With only ±0.5 and ±10% probes, the two forms could disagree
+                // by any factor `f ∈ (0.909, 1.111)` without a single probe
+                // straddling the boundary: a 9% bias in `slow_accepts` passed
+                // (total variation 3.5e-3, 3.5% max relative pmf error) and 12%
+                // was the first caught (gh#802). At ±0.1% the blind window
+                // closes to `f ∈ (0.999, 1.001)`.
+                for scale in [0.5f64, 0.9, 0.999, 1.001, 1.1, 2.0] {
                     let v = ratio * scale;
                     if !(v > 0.0 && v.is_finite()) {
                         continue;
