@@ -468,6 +468,9 @@ mod tests {
             n_as_accepted: as_accepted,
             n_as_refused_inadmissible: 0,
             weight_collapse: WeightCollapse::none(100),
+            as_finite_frac: f64::NAN,
+            as_admissible_frac: f64::NAN,
+            n_as_starved: 0,
         }
     }
 
