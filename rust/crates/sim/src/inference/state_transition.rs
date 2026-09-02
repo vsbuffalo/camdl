@@ -440,7 +440,8 @@ impl StateTransitionAnalysis {
 
 /// `log p_θ(Z' | Z)` for one substep: log-sum-exp over the feasible flow
 /// lattice of the innovation-conditional density, with merged-class splits
-/// marginalized exactly.
+/// marginalized exactly. Also returns the number of lattice terms scored —
+/// the in-kernel cost instrument the spike note requires.
 ///
 /// `d_counts` = X' − X (length n_comp); `d_acc` = the accumulator deltas this
 /// substep contributes (length n_interval_streams) — the CALLER owns the
@@ -462,7 +463,7 @@ pub fn log_state_transition_density(
     t: f64,
     dt: f64,
     per_eval: Option<&[f64]>,
-) -> Result<f64, SimError> {
+) -> Result<(f64, u64), SimError> {
     debug_assert_eq!(d_counts.len(), analysis.n_comp);
     debug_assert_eq!(d_acc.len(), analysis.n_streams);
 
@@ -471,7 +472,7 @@ pub fn log_state_transition_density(
     delta.extend_from_slice(d_acc);
 
     let Some(particular) = analysis.particular_solution(&delta) else {
-        return Ok(f64::NEG_INFINITY);
+        return Ok((f64::NEG_INFINITY, 0));
     };
 
     // Rates for the canonical-split correction (class rate = Σ member rates).
@@ -525,14 +526,15 @@ pub fn log_state_transition_density(
         }
         terms.push(lp);
     })?;
+    let n_points = terms.len() as u64;
     if let Some(e) = inner_err {
         return Err(e);
     }
     if terms.is_empty() {
-        return Ok(f64::NEG_INFINITY);
+        return Ok((f64::NEG_INFINITY, 0));
     }
     let mx = terms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    Ok(mx + terms.iter().map(|v| (v - mx).exp()).sum::<f64>().ln())
+    Ok((mx + terms.iter().map(|v| (v - mx).exp()).sum::<f64>().ln(), n_points))
 }
 
 /// Draw a per-transition flow vector from the lattice-restricted conditional
