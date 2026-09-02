@@ -435,7 +435,8 @@ pub fn run_chain_binomial_with_observer(
                 scratch.effect_batch.intervention_idx.push(iv_idx);
             }
         }
-        step_one(model, &mut int_s.counts, &mut flows, &mut real_s, params, t_grid, dt, per_eval, &mut rng, &mut scratch)?;
+        step_one(model, &mut int_s.counts, &mut flows, &mut real_s, params, t_grid, dt, per_eval,
+                 crate::rng::BinomialAlgorithm::default(), &mut rng, &mut scratch)?;
 
         // Lineage observer: feed each transition's per-step flow count against
         // the frozen start-of-step state. step_one has already drawn from the
@@ -562,6 +563,14 @@ pub fn step_one(
     // producer steps pass `None` (on-demand, byte-identical; per-particle θ means
     // staging here is a Phase 2 wiring, not a correctness requirement).
     per_eval: Option<&[f64]>,
+    // Which binomial accept/reject scheme the exit draws use, resolved by the
+    // caller from its own typed config (PGAS `binomial = "btrs"`) and threaded
+    // as a value — a thread-local cannot reach draws made on rayon workers
+    // inside nested `par_iter`s, and a draw that disagreed with the stage's
+    // hashed selection would store a posterior under the wrong address
+    // (`docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1). Callers
+    // without a knob pass `BinomialAlgorithm::default()` (Btpe, today's draws).
+    binomial: crate::rng::BinomialAlgorithm,
     rng: &mut StatefulRng,
     scratch: &mut StepScratch,
 ) -> Result<(), SimError> {
@@ -714,7 +723,7 @@ pub fn step_one(
             scratch.binomial_z_idx += 1;
             crate::inference::correlated_pf::binomial_from_normal(n_src as u64, p_total, z)
         } else {
-            rng.binomial(n_src as u64, p_total)
+            rng.binomial_with(binomial, n_src as u64, p_total)
         };
 
         debug_assert!(n_events <= n_src as u64,
@@ -731,7 +740,7 @@ pub fn step_one(
             } else if n_events > 0 && rate_remaining > 0.0 {
                 // pomp: if (rate[k] > p) p = rate[k]; trans[k] = rbinom(size, rate[k]/p)
                 let p_split = (eff_rate / rate_remaining).clamp(0.0, 1.0);
-                let c = rng.binomial(n_events, p_split);
+                let c = rng.binomial_with(binomial, n_events, p_split);
                 n_events -= c;
                 rate_remaining -= eff_rate;
                 c

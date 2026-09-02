@@ -85,7 +85,7 @@ fn csmc_returns_a_continuous_path() {
 
     // A reference path, and weekly observations taken from it.
     let mut rng = StatefulRng::new(SEED);
-    let reference = simulate_reference(&compiled, &params, t_end, DT, &mut rng).expect("reference");
+    let reference = simulate_reference(&compiled, &params, t_end, DT, sim::rng::BinomialAlgorithm::default(), &mut rng).expect("reference");
     let mut cum: u64 = 0;
     let mut obs: Vec<Observation> = Vec::new();
     for (s, rec) in reference.substeps.iter().enumerate() {
@@ -132,6 +132,7 @@ fn csmc_returns_a_continuous_path() {
             SEED + seed,
             &obs_at_substep,
             EffectFiring::default(),
+            sim::rng::BinomialAlgorithm::default(),
         )
         .expect("csmc_as");
         sweeps += 1;

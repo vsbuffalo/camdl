@@ -485,7 +485,7 @@ fn gh76_negbin_obs_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(42);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     // multi-stream constraint: all streams share obs_times. weekly_cases is
@@ -545,7 +545,7 @@ fn licm_hoisting_kernel_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(43);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(
@@ -615,7 +615,7 @@ fn zinb_obs_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(42);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(
@@ -659,7 +659,7 @@ fn gh76_poisson_obs_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(45);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(
@@ -789,7 +789,7 @@ fn gh76_binomial_obs_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(47);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(
@@ -884,7 +884,7 @@ fn gh76_beta_binomial_obs_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(48);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(
@@ -1004,7 +1004,7 @@ fn gh440_beta_obs_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(48);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(
@@ -1131,7 +1131,7 @@ fn gh180_parametric_projection_grad_matches_fd() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(49);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(
@@ -1200,7 +1200,7 @@ fn run_discretized_normal_grad_fd(tail_sigmas: f64, name: &str) {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(46);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let n_substeps = trajectory.substeps.len();
 
     let (substep_idx, obs_times) = obs_substep_indices_regular(

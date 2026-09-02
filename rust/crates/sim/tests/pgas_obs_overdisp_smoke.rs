@@ -73,7 +73,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
     let t_end = compiled.model.simulation.t_end;
     let dt = 1.0;
     let mut rng = StatefulRng::new(42);
-    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Build incidence-style observations (cumulative infection flow,
     // weekly). No obs-likelihood params estimated — just σ_se.
@@ -144,6 +144,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 100,
         n_sweeps: 100,
         burn_in: 30,
@@ -216,7 +217,7 @@ fn smoke_pgas_nuts_estimates_rho() {
     let dt = 1.0;
     let mut rng = StatefulRng::new(43);
     let t_end = compiled.model.simulation.t_end;
-    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Build weekly NegBin obs from incidence(infection).
     let mut cum_infection: u64 = 0;
@@ -266,6 +267,7 @@ fn smoke_pgas_nuts_estimates_rho() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 100,
         n_sweeps: 100,
         burn_in: 30,

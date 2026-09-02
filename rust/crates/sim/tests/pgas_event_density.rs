@@ -258,7 +258,7 @@ fn pgas_simulate_reference_finite_density_on_event_model() {
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(7);
 
-    let traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let t_start = compiled.model.simulation.t_start;
     let mut total_ll = 0.0;
@@ -290,7 +290,7 @@ fn pgas_simulate_reference_finite_density_on_seir_event_model() {
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(7);
 
-    let traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let t_start = compiled.model.simulation.t_start;
     let mut total_ll = 0.0;
@@ -347,7 +347,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
     let dt = 0.5;
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(101);
-    let truth = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let truth = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Daily-cadence observations of incidence(infection) = transition 0.
     // Sum daily flows on integer days, dropping noise (NegBin obs noise
@@ -416,6 +416,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 50,
         n_sweeps: 50,
         burn_in: 15,
@@ -479,6 +480,7 @@ fn exact_alignment_rejected_on_always_active_event_model() {
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 10, n_sweeps: 1, burn_in: 0, thin: 1, dt: 0.5,
         use_nuts: false, dense_mass: false, max_tree_depth: 4,
         tempering: vec![1.0], trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,

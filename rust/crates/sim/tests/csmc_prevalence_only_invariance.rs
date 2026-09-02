@@ -111,7 +111,7 @@ fn fixture() -> Fixture {
     let t_end = compiled.model.simulation.t_end;
 
     let mut rng = StatefulRng::new(SEED);
-    let reference = simulate_reference(&compiled, &params, t_end, DT, &mut rng).expect("reference");
+    let reference = simulate_reference(&compiled, &params, t_end, DT, sim::rng::BinomialAlgorithm::default(), &mut rng).expect("reference");
 
     // Weekly prevalence readings taken off the reference path.
     let mut obs: Vec<Observation> = Vec::new();
@@ -218,6 +218,7 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
                 SEED + seed,
                 &f.obs_at_substep,
                 EffectFiring::default(),
+                sim::rng::BinomialAlgorithm::default(),
             )
             .expect("csmc_as");
             accepted += diag.n_as_accepted;

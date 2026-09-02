@@ -140,7 +140,7 @@ fn report_the_mixing_cost_of_the_ancestor_sampling_gate() {
     let compiled = model(n_substeps as f64 * DT);
     let params = compiled.default_params.clone();
     let mut rng = StatefulRng::new(SEED);
-    let reference = simulate_reference(&compiled, &params, n_substeps as f64 * DT, DT, &mut rng)
+    let reference = simulate_reference(&compiled, &params, n_substeps as f64 * DT, DT, sim::rng::BinomialAlgorithm::default(), &mut rng)
         .expect("reference");
 
     // Observations every `cadence` substeps — the knob that sets how many
@@ -192,6 +192,7 @@ fn report_the_mixing_cost_of_the_ancestor_sampling_gate() {
             SEED.wrapping_add(i as u64).wrapping_mul(0x9e3779b97f4a7c15),
             &obs_at_substep,
             EffectFiring::default(),
+            sim::rng::BinomialAlgorithm::default(),
         )
         .expect("csmc_as");
         renewal_sum += d.trajectory_renewal;

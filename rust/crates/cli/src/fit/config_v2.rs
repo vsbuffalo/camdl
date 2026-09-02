@@ -1211,6 +1211,17 @@ pub enum Stage {
         /// expressions in the IR (compiled with autodiff). Default: true.
         #[serde(default = "default_use_nuts")]
         use_nuts: bool,
+        /// Which binomial accept/reject sampler every propagation draw in
+        /// this stage uses: `"btpe"` (default; `rand_distr`'s BTPE) or
+        /// `"btrs"` (the in-house Hörmann 1993 transformed rejection,
+        /// gh#747 — ~1.48× faster on the sampler, exact but not
+        /// bit-compatible). Enters `identity_payload` like every other
+        /// stage field, so the two samplers store under distinct
+        /// addresses; the resolved value is threaded to `step_one` as a
+        /// value (a thread-local cannot reach rayon-worker draws).
+        /// Proposal: docs/dev/proposals/2026-08-24-faster-binomial-sampler.md §1.
+        #[serde(default)]
+        binomial: sim::rng::BinomialAlgorithm,
     },
 
     #[serde(rename = "pmmh")]
@@ -3514,7 +3525,8 @@ init       = "{init}"
         // Everything else the stage carries is present, under its TOML spelling.
         for key in ["algorithm", "backend", "chains", "particles", "burn_in", "thin",
                     "tempering", "use_nuts", "dense_mass", "max_tree_depth",
-                    "init", "init_mle", "trajectory_warmup", "csmc_sweeps_per_nuts"] {
+                    "init", "init_mle", "trajectory_warmup", "csmc_sweeps_per_nuts",
+                    "binomial"] {
             assert!(obj.contains_key(key),
                 "'{key}' must be in the stage identity; present keys: {:?}",
                 obj.keys().collect::<Vec<_>>());
@@ -6808,6 +6820,7 @@ decibans_thresh = 100.0
             n_trajectories: 200,
             dense_mass: true,
             use_nuts: true,
+            binomial: Default::default(),
         }
     }
 
@@ -6840,12 +6853,12 @@ decibans_thresh = 100.0
                 survey_path, survey_top_k_n,
                 burn_in, thin,
                 tempering, max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
-                n_trajectories, dense_mass, use_nuts, .. } =>
+                n_trajectories, dense_mass, use_nuts, binomial, .. } =>
                 Stage::PGAS { backend, chains: 8, particles, sweeps, starts_from, init_method,
                     survey_path, survey_top_k_n,
                     burn_in, thin,
                     tempering, max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
-                    n_trajectories, dense_mass, use_nuts },
+                    n_trajectories, dense_mass, use_nuts, binomial },
             _ => unreachable!(),
         };
         assert_ne!(s_short.identity_payload(), s_more_chains.identity_payload());
@@ -7001,6 +7014,48 @@ decibans_thresh = 100.0
             "PMMH survey_top_k_n must change the identity");
     }
 
+    /// The sampler is a knob that changes the stored draws, so it MUST be in
+    /// the key (count-in-the-key discipline): two stages differing only in
+    /// `binomial` must never share a CAS address. Deleting the field from the
+    /// stage (or subtracting it from the payload) turns this red.
+    #[test]
+    fn binomial_sampler_is_in_the_stage_identity() {
+        let btpe = make_pgas_stage(1000);
+        let mut btrs = make_pgas_stage(1000);
+        if let Stage::PGAS { ref mut binomial, .. } = btrs {
+            *binomial = sim::rng::BinomialAlgorithm::Btrs;
+        }
+        assert_ne!(btpe.identity_payload(), btrs.identity_payload(),
+            "a `btrs` fit must not be served from (or stored over) a `btpe` leaf");
+    }
+
+    /// `binomial = "btrs"` is the TOML spelling; absent means Btpe.
+    #[test]
+    fn binomial_sampler_parses_from_stage_toml() {
+        let toml_src = r#"
+            algorithm = "pgas"
+            backend = "chain_binomial"
+            chains = 2
+            particles = 10
+            sweeps = 5
+            binomial = "btrs"
+        "#;
+        let stage: Stage = toml::from_str(toml_src).expect("stage parses");
+        match stage {
+            Stage::PGAS { binomial, .. } =>
+                assert_eq!(binomial, sim::rng::BinomialAlgorithm::Btrs),
+            other => panic!("expected PGAS, got {}", other.method_name()),
+        }
+        let default_src = toml_src.replace("binomial = \"btrs\"", "");
+        let stage: Stage = toml::from_str(&default_src).expect("stage parses");
+        match stage {
+            Stage::PGAS { binomial, .. } =>
+                assert_eq!(binomial, sim::rng::BinomialAlgorithm::Btpe,
+                    "an absent field must mean today's sampler"),
+            other => panic!("expected PGAS, got {}", other.method_name()),
+        }
+    }
+
     #[test]
     fn pmmh_identity_payload_omits_iterations() {
         let s_short = make_pmmh_stage(1000);
@@ -7031,7 +7086,13 @@ decibans_thresh = 100.0
         // `init_method`). Same fields, same values — a deliberate re-key,
         // approved as part of the 2026-08-23 batch. See the commit for the
         // --resume consequence.
-        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"init":"uniform_unconstrained","init_mle":"random","max_tree_depth":10,"particles":100,"survey_path":null,"survey_top_k_n":null,"tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
+        //
+        // Updated 2026-09-01: `"binomial":"btpe"` joined the payload when the
+        // typed sampler field landed (proposal
+        // 2026-08-24-faster-binomial-sampler.md §1; re-keying authorised by
+        // the maintainer in that proposal, 2026-08-24). Every PGAS stage leaf
+        // re-keys once and --resume against pre-change chains rejects.
+        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","binomial":"btpe","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"init":"uniform_unconstrained","init_mle":"random","max_tree_depth":10,"particles":100,"survey_path":null,"survey_top_k_n":null,"tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
         assert_eq!(payload_str, expected,
             "identity_payload byte format drifted — every existing \
              resume_state.bin would be invalidated. If this change is \

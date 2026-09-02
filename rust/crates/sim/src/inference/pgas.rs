@@ -84,6 +84,14 @@ pub struct PGASConfig {
     /// obs time (`build_substep_grid`). The CLI keeps this `Snap` until the
     /// exact path's recovery evidence lands and the default is flipped.
     pub step_policy: StepPolicy,
+    /// Which binomial accept/reject scheme every propagation draw in this
+    /// stage uses (reference producer, init passes, and CSMC free particles
+    /// alike — one stage, one sampler). Resolved from the typed stage field
+    /// `binomial = "btpe" | "btrs"`, which enters `Stage::identity_payload`,
+    /// and threaded as a value down to `step_one` — a thread-local cannot
+    /// reach draws made on rayon workers inside the nested `par_iter`s
+    /// (`docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1).
+    pub binomial: crate::rng::BinomialAlgorithm,
 }
 
 impl super::traits::InferenceConfig for PGASConfig {
@@ -1567,13 +1575,14 @@ pub fn simulate_reference(
     params: &[f64],
     t_end: f64,
     dt: f64,
+    binomial: crate::rng::BinomialAlgorithm,
     rng: &mut StatefulRng,
 ) -> Result<PGASTrajectory, SimError> {
     let t_start = model.model.simulation.t_start;
     let n_substeps = crate::time::interval_steps(t_start, t_end, dt);
     let grid: Vec<(f64, f64)> = (0..n_substeps).map(|s| (t_start + s as f64 * dt, dt)).collect();
     // Snap (uniform grid): effects fire on the round(t/dt) key in the producer.
-    simulate_reference_on_grid(model, params, dt, &grid, None, rng)
+    simulate_reference_on_grid(model, params, dt, &grid, None, binomial, rng)
 }
 
 /// Simulate a forward reference trajectory over an explicit substep grid
@@ -1590,6 +1599,7 @@ pub fn simulate_reference_on_grid(
     dt: f64,
     grid: &[(f64, f64)],
     firing: EffectFiring<'_>,
+    binomial: crate::rng::BinomialAlgorithm,
     rng: &mut StatefulRng,
 ) -> Result<PGASTrajectory, SimError> {
     // A reference trajectory is one realization of the process, so its x₀ is a
@@ -1630,7 +1640,7 @@ pub fn simulate_reference_on_grid(
         // Populate the due batch step_one applies (gh#216). `dt` is the nominal
         // grid the firing keys on; `dt_s` is the realized (possibly clipped) step.
         fill_producer_batch(model, &fire_steps, t0 + dt_s, dt, s, firing, &mut scratch.effect_batch);
-        step_one(model, &mut counts, &mut flows, &mut real, params, t0, dt_s, per_eval, rng, &mut scratch)?;
+        step_one(model, &mut counts, &mut flows, &mut real, params, t0, dt_s, per_eval, binomial, rng, &mut scratch)?;
 
         // Verify: density evaluation of this record won't produce k > n.
         // This catches state/flow mismatches before they cause -inf later.
@@ -2240,6 +2250,7 @@ pub fn csmc_as(
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
     firing: EffectFiring<'_>,
+    binomial: crate::rng::BinomialAlgorithm,
 ) -> Result<(PGASTrajectory, CSMCDiagnostics), SimError> {
     let t_start = model.model.simulation.t_start;
     let n_substeps = reference.substeps.len();
@@ -2475,7 +2486,7 @@ pub fn csmc_as(
                     model, cnt, flows, real,
                     // `step_dt` is the realized substep (clipped under Exact).
                     // gh#272 LICM: scratch staged once for this sweep, threaded in.
-                    params, t, step_dt, per_eval, rng, scratch,
+                    params, t, step_dt, per_eval, binomial, rng, scratch,
                 )?;
 
                 std::mem::swap(gammas, &mut scratch.gamma_used);
@@ -3303,7 +3314,7 @@ pub fn run_pgas(
         let init_t0 = std::time::Instant::now();
         let (init_traj, source) = super::pgas_init::initial_reference_trajectory(
             model, &current_params, &grid.steps, config.n_particles, config.dt,
-            observations, obs_model, seed, &obs_at_substep, firing, &mut rng,
+            observations, obs_model, seed, &obs_at_substep, firing, config.binomial, &mut rng,
         )?;
         trajectory = init_traj;
         let init_secs = init_t0.elapsed().as_secs_f64();
@@ -3693,7 +3704,7 @@ pub fn run_pgas(
                 let (new_traj, _diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
-                    csmc_seed, &obs_at_substep, firing,
+                    csmc_seed, &obs_at_substep, firing, config.binomial,
                 )?;
                 rungs[rung].trajectory = new_traj;
                 rungs[rung].ll = complete_data_loglik(
@@ -3980,7 +3991,7 @@ pub fn run_pgas(
                 let (new_trajectory, diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
-                    csmc_seed, &obs_at_substep, firing,
+                    csmc_seed, &obs_at_substep, firing, config.binomial,
                 )?;
                 rungs[rung].trajectory = new_trajectory;
                 csmc_diag = diag;

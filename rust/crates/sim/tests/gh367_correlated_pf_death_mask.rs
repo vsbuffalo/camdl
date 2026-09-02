@@ -275,7 +275,7 @@ fn harness_produces_a_recoverable_per_particle_error() {
     scratch.binomial_z_idx = 0;
     sim::chain_binomial::step_one(
         &compiled, &mut counts, &mut flows, &mut real, &params, 0.0, DT, None,
-        &mut rng, &mut scratch,
+        sim::rng::BinomialAlgorithm::default(), &mut rng, &mut scratch,
     ).expect("substep 0 drains X but must not error");
     assert_eq!(counts[0], 0, "substep 0 must empty X (got counts {counts:?})");
 
@@ -283,7 +283,7 @@ fn harness_produces_a_recoverable_per_particle_error() {
     scratch.binomial_z_idx = 0;
     let err = sim::chain_binomial::step_one(
         &compiled, &mut counts, &mut flows, &mut real, &params, DT, DT, None,
-        &mut rng, &mut scratch,
+        sim::rng::BinomialAlgorithm::default(), &mut rng, &mut scratch,
     ).expect_err("substep 1 must hit beta*Y/0");
     assert!(
         err.is_per_particle_recoverable(),

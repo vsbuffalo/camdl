@@ -176,7 +176,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
     let dt = 1.0;
     let mut rng = StatefulRng::new(42);
     let t_end = compiled.model.simulation.t_end;
-    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Synthetic weekly obs by summing the infection flow into windows, halved
     // so the BetaBinomial constraint k ≤ n holds.
@@ -218,6 +218,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 50,
         n_sweeps: 3,
         burn_in: 1,
@@ -271,7 +272,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
     let dt = 1.0;
     let mut rng = StatefulRng::new(42);
     let t_end = compiled.model.simulation.t_end;
-    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // The projection is `scale · I` — a state snapshot, so the observations are
     // weekly PREVALENCE, read off the truth trajectory at the observation
@@ -324,6 +325,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 50,
         n_sweeps: 5,
         burn_in: 2,

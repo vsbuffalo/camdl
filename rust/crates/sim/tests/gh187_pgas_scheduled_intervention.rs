@@ -83,7 +83,7 @@ fn gh187_pgas_applies_scheduled_intervention() {
     let mut rng = StatefulRng::new(42);
 
     // Drive the PGAS producer directly.
-    let traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Dump A,B across the t=5 boundary from the producer's own latent trajectory.
     eprintln!("[gh#187] PGAS producer (simulate_reference) latent trajectory:");

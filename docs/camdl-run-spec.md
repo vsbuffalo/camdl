@@ -2467,6 +2467,7 @@ restarting mid-schedule is statistically incoherent.
 | `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                             |
 | `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                             |
 | `use_nuts`             | `true`  | `false` falls back to MH-within-Gibbs for θ\|X.                                                |
+| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible). |
 
 **`pmmh`** — `chains`, `particles`, `iterations` required.
 

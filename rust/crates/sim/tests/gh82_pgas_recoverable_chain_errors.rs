@@ -295,6 +295,7 @@ fn mu_param() -> EstimatedParam {
 
 fn pgas_config() -> PGASConfig {
     PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: N_PARTICLES,
         n_sweeps: N_SWEEPS,
         burn_in: 0,
@@ -323,7 +324,7 @@ fn harness_produces_a_recoverable_error_at_a_proposed_theta() {
 
     let mut rng = StatefulRng::new(SEED);
     let params = compiled.default_params.clone();
-    let traj = simulate_reference(&compiled, &params, T_END, DT, &mut rng)
+    let traj = simulate_reference(&compiled, &params, T_END, DT, sim::rng::BinomialAlgorithm::default(), &mut rng)
         .expect("the reference walk at k = K0 takes the healthy branch");
 
     // Same trajectory, a proposed k one step outside the pinhole.

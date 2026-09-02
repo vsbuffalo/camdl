@@ -128,7 +128,7 @@ fn attempt_nuts_fit_with(
     let dt = 1.0;
     let mut rng = StatefulRng::new(42);
     let t_end = compiled.model.simulation.t_end;
-    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Synthetic weekly obs by summing the infection flow into windows.
     let mut cum: u64 = 0;
@@ -172,6 +172,7 @@ fn attempt_nuts_fit_with(
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 50,
         n_sweeps: 3,
         burn_in: 1,

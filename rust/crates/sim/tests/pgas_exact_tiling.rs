@@ -102,11 +102,11 @@ fn exact_equals_snap_on_grid() {
     let last_obs = 200.0;
 
     let mut rng_snap = StatefulRng::new(SEED);
-    let snap = simulate_reference(&compiled, &params, last_obs, dt, &mut rng_snap).unwrap();
+    let snap = simulate_reference(&compiled, &params, last_obs, dt, sim::rng::BinomialAlgorithm::default(), &mut rng_snap).unwrap();
 
     let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng_exact = StatefulRng::new(SEED);
-    let exact = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng_exact).unwrap();
+    let exact = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, sim::rng::BinomialAlgorithm::default(), &mut rng_exact).unwrap();
 
     assert!(
         trajectories_bit_identical(&snap, &exact),
@@ -136,7 +136,7 @@ fn exact_shortened_substep_density_recompute() {
 
     let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
-    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng).unwrap();
+    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Non-vacuity: genuinely shortened substeps exist, each in (0, dt).
     let n_short = traj.substeps.iter().filter(|r| r.dt_substep != dt).count();
@@ -202,7 +202,7 @@ fn exact_shortened_substep_gradient_matches_fd() {
 
     let grid = build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
     let mut rng = StatefulRng::new(SEED);
-    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, &mut rng).unwrap();
+    let traj = simulate_reference_on_grid(&compiled, &params, dt, &grid.steps, None, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     assert!(traj.substeps.iter().any(|r| r.dt_substep != dt),
         "gate is vacuous without a shortened substep");
 

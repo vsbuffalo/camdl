@@ -115,10 +115,11 @@ pub fn initial_reference_trajectory(
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
     firing: EffectFiring<'_>,
+    binomial: crate::rng::BinomialAlgorithm,
     forward_rng: &mut StatefulRng,
 ) -> Result<(PGASTrajectory, InitSource), SimError> {
     let fallback = match unconditional_smc_pass(
-        model, params, grid, n_particles, dt, obs_model, seed, obs_at_substep, firing,
+        model, params, grid, n_particles, dt, obs_model, seed, obs_at_substep, firing, binomial,
     )? {
         UnconditionalPass::Path(traj) => {
             let ll = complete_data_loglik(
@@ -142,7 +143,7 @@ pub fn initial_reference_trajectory(
         UnconditionalPass::NoSupport(reason) => reason,
     };
 
-    let traj = simulate_reference_on_grid(model, params, dt, grid, firing, forward_rng)?;
+    let traj = simulate_reference_on_grid(model, params, dt, grid, firing, binomial, forward_rng)?;
     Ok((traj, InitSource::ForwardDraw(fallback)))
 }
 
@@ -184,6 +185,7 @@ pub fn unconditional_smc_pass(
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
     firing: EffectFiring<'_>,
+    binomial: crate::rng::BinomialAlgorithm,
 ) -> Result<UnconditionalPass, SimError> {
     assert!(n_particles > 0, "unconditional init pass needs at least one particle");
     let t_start = model.model.simulation.t_start;
@@ -305,7 +307,8 @@ pub fn unconditional_smc_pass(
                     // `classify` is the shared policy: `?` tears the pass down on
                     // a non-recoverable error, `true` kills this particle only.
                     let died = DeathMask::classify(step_one(
-                        model, cnt, flows, real, params, t, step_dt, per_eval, rng, scratch,
+                        model, cnt, flows, real, params, t, step_dt, per_eval, binomial, rng,
+                        scratch,
                     ))?;
                     std::mem::swap(gammas, &mut scratch.gamma_used);
                     Ok(died)

@@ -217,7 +217,7 @@ fn per_stream_obs_ll_sums_to_obs_ll_and_matches_each_stream_scored_alone() {
     let params = compiled.default_params.clone();
     let mut rng = StatefulRng::new(11);
     let trajectory =
-        sim::inference::pgas::simulate_reference(&compiled, &params, T_END, DT, &mut rng)
+        sim::inference::pgas::simulate_reference(&compiled, &params, T_END, DT, sim::rng::BinomialAlgorithm::default(), &mut rng)
             .expect("reference trajectory");
 
     // The two-stream, two-cadence fit.
@@ -313,7 +313,7 @@ fn single_stream_reports_one_entry_equal_to_obs_ll() {
     let params = compiled.default_params.clone();
     let mut rng = StatefulRng::new(11);
     let trajectory =
-        sim::inference::pgas::simulate_reference(&compiled, &params, T_END, DT, &mut rng)
+        sim::inference::pgas::simulate_reference(&compiled, &params, T_END, DT, sim::rng::BinomialAlgorithm::default(), &mut rng)
             .expect("reference trajectory");
 
     let only = bind(
@@ -346,7 +346,7 @@ fn no_streams_reports_an_empty_decomposition() {
     let params = compiled.default_params.clone();
     let mut rng = StatefulRng::new(11);
     let trajectory =
-        sim::inference::pgas::simulate_reference(&compiled, &params, T_END, DT, &mut rng)
+        sim::inference::pgas::simulate_reference(&compiled, &params, T_END, DT, sim::rng::BinomialAlgorithm::default(), &mut rng)
             .expect("reference trajectory");
 
     let empty = MultiStreamObsModel::empty(compiled.clone());

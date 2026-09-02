@@ -141,7 +141,7 @@ fn run_gh20_check(sigma_se: f64, seed: u64, dt: f64) {
 
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(seed);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let total_gammas: usize = trajectory.substeps.iter().map(|s| s.gammas.len()).sum();
     assert!(total_gammas > 0,
@@ -265,7 +265,7 @@ fn run_gh76_cleanup_two_overdisp_check(sigma_inf: f64, sigma_loss: f64, seed: u6
 
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(seed);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Sanity: each substep should record exactly 2 gammas (one per
     // overdispersed transition out of S), at least when S > 0 with both
@@ -354,7 +354,7 @@ fn run_spine_oracle(sigma_se: f64, seed: u64, dt: f64) {
 
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(seed);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let total_gammas: usize = trajectory.substeps.iter().map(|s| s.gammas.len()).sum();
     assert!(total_gammas > 0,
@@ -496,7 +496,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
     let (params, _names) = build_params_and_names(&compiled);
 
     let mut rng = StatefulRng::new(7);
-    let trajectory = simulate_reference(&compiled, &params, 20.0, 1.0, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, 20.0, 1.0, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Sanity: the deterministic birth actually fired (else the oracle is vacuous).
     let birth_idx = compiled.model.transitions.iter()
@@ -552,7 +552,7 @@ fn spine_oracle_two_overdispersed_multi_gamma_bit_exact() {
 
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(46);
-    let trajectory = simulate_reference(&compiled, &params, t_end, 1.0, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, 1.0, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Confirm we actually hit the multi-gamma case (≥2 gammas in some substep).
     let max_g = trajectory.substeps.iter().map(|s| s.gammas.len()).max().unwrap_or(0);

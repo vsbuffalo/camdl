@@ -87,7 +87,7 @@ fn bench_step_one(c: &mut Criterion) {
                 || (init_int.counts.clone(), vec![0u64; n_tr], init_real.clone(), StatefulRng::new(42)),
                 |(mut counts, mut flows, mut real, mut rng)| {
                     step_one(&model, &mut counts, &mut flows, &mut real, &params, 0.0, 1.0, None,
-                             &mut rng, &mut scratch).unwrap();
+                             sim::rng::BinomialAlgorithm::default(), &mut rng, &mut scratch).unwrap();
                 },
                 criterion::BatchSize::SmallInput,
             );

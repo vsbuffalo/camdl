@@ -1014,7 +1014,11 @@ pub fn bootstrap_filter_correlated(
                         model, &mut state.counts, &mut state.flow_accumulators,
                         &mut real,
                         // gh#272 LICM: scratch staged once for this filter, threaded in.
-                        params, t_local, step_dt, per_eval, rng, scratch,
+                        // Sampler knob is PGAS-only in Phase 1; CPM's total-exit
+                        // draw bypasses `rng.binomial` anyway (normal transform)
+                        // and its splits keep today's default (Btpe).
+                        params, t_local, step_dt, per_eval,
+                        crate::rng::BinomialAlgorithm::default(), rng, scratch,
                     ))? {
                         return Ok(true);
                     }

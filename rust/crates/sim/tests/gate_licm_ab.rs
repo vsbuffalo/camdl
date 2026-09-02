@@ -448,7 +448,7 @@ fn gate_licm_pgas_loglik_byte_identical() {
             build_substep_grid(t_start, dt, &observations, &[], StepPolicy::Exact).unwrap();
         let mut rng = StatefulRng::new(SEED);
         let traj =
-            simulate_reference_on_grid(compiled, params, dt, &grid.steps, None, &mut rng).unwrap();
+            simulate_reference_on_grid(compiled, params, dt, &grid.steps, None, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
         let obs_model = MultiStreamObsModel::empty(compiled.clone());
         let no_obs: Vec<Observation> = vec![];
         let no_map = ObsAtSubstep::new();

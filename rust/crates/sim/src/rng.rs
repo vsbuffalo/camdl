@@ -348,7 +348,14 @@ pub struct StatefulRng(ChaCha8Rng);
 /// Which accept/reject scheme [`StatefulRng::binomial`] uses above
 /// `BINV_THRESHOLD`. Below it, BINV is used regardless — that branch is not
 /// part of this choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serde derives exist because the choice is a typed fit-config field
+/// (`binomial = "btrs"` on a PGAS stage) that rides the stage's own
+/// serialization into `Stage::identity_payload` — selecting a sampler changes
+/// results, so it must enter the run address
+/// (`docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BinomialAlgorithm {
     /// `rand_distr` 0.4.3's BTPE (Kachitvichyanukul & Schmeiser 1988). The
     /// production default, and the oracle the BTRS suite is calibrated against.
@@ -366,21 +373,23 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// The production choice. BTRS is not selectable from any user-facing input: the
-/// knob has been DECIDED — a typed `binomial` field on `Stage::PGAS`, riding
-/// `Stage::identity_payload`'s include-by-default subtraction, per
-/// `docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1 — but is not
-/// built yet. An environment variable was considered and rejected: one that
-/// changed draws without entering the run address would serve one sampler's
-/// posterior from the other's cache leaf.
-///
-/// Until the typed field lands, the thread-local below is the only door, so no
-/// stored run can disagree with its own address. Note what that door CANNOT be
-/// when the field does land: the draws happen on rayon workers inside
-/// `pgas.rs`'s nested `par_iter`, not on the thread that reads the config, so a
-/// thread-local set once per chain reaches almost none of them. The resolved
-/// value has to be threaded to `step_one` as a value.
+/// The production choice for every draw that does not carry its own selection.
+/// BTRS is selectable from exactly one user-facing input: the typed `binomial`
+/// field on `Stage::PGAS`, which rides `Stage::identity_payload`'s
+/// include-by-default subtraction into the run address and is threaded **as a
+/// value** to `step_one` → [`StatefulRng::binomial_with`]
+/// (`docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1). An
+/// environment variable was considered and rejected: one that changed draws
+/// without entering the run address would serve one sampler's posterior from
+/// the other's cache leaf. The thread-local below stays a test/bench-only
+/// affordance — it cannot be the production door because the draws happen on
+/// rayon workers inside `pgas.rs`'s nested `par_iter`, not on the thread that
+/// reads the config.
 const DEFAULT_BINOMIAL: BinomialAlgorithm = BinomialAlgorithm::Btpe;
+
+impl Default for BinomialAlgorithm {
+    fn default() -> Self { DEFAULT_BINOMIAL }
+}
 
 fn binomial_algorithm() -> BinomialAlgorithm {
     BINOMIAL_OVERRIDE.with(|c| c.get()).unwrap_or(DEFAULT_BINOMIAL)
@@ -537,6 +546,20 @@ impl StatefulRng {
     /// guards have extreme parameters, produce -inf logliks, and are resampled
     /// away — the fallback value doesn't affect inference.
     pub fn binomial(&mut self, n: u64, p: f64) -> u64 {
+        self.binomial_with(binomial_algorithm(), n, p)
+    }
+
+    /// [`Self::binomial`] with the accept/reject scheme passed **as a value**.
+    ///
+    /// This is the production door for a selected sampler: the draws happen on
+    /// rayon workers inside nested `par_iter`s, so a thread-local set by the
+    /// thread that read the config reaches almost none of them — the resolved
+    /// choice has to travel with the call, the way `params` and `per_eval` do
+    /// (`docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1).
+    /// `chain_binomial::step_one` threads a caller-resolved value here;
+    /// [`Self::binomial`] delegates with this thread's default-or-override, so
+    /// every draw shares the guards and the BINV routing below.
+    pub fn binomial_with(&mut self, algo: BinomialAlgorithm, n: u64, p: f64) -> u64 {
         if n == 0 || p <= 0.0 { return 0; }
         if p >= 1.0 { return n; }
         // A NaN `p` passes BOTH guards above — every NaN comparison is false —
@@ -636,7 +659,7 @@ impl StatefulRng {
         // including its own huge-`n` fallback. Resolved BEFORE the match so the
         // match stays exhaustive over the enum: a third algorithm must not be
         // able to reach the hot path through a `_` arm.
-        let algo = match binomial_algorithm() {
+        let algo = match algo {
             BinomialAlgorithm::Btrs if n > BTRS_MAX_N => BinomialAlgorithm::Btpe,
             other => other,
         };

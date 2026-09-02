@@ -396,7 +396,7 @@ fn snapshot_reads_post_intervention_state() {
     for k in 0..5 {
         let t = k as f64;
         sim::effects::due_effects(&compiled, &fire_steps, t + 1.0, 1.0, &mut scratch.effect_batch);
-        step_one(&compiled, &mut counts, &mut flows, &mut real, &params, t, 1.0, None, &mut rng, &mut scratch)
+        step_one(&compiled, &mut counts, &mut flows, &mut real, &params, t, 1.0, None, sim::rng::BinomialAlgorithm::default(), &mut rng, &mut scratch)
             .unwrap();
     }
 

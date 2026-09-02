@@ -41,7 +41,7 @@ fn test_density_matches_step_one_sir() {
     let mut rng = StatefulRng::new(42);
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
     let t_end = compiled.model.simulation.t_end;
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let observations: Vec<Observation> = vec![];
@@ -87,7 +87,7 @@ fn test_density_matches_step_one_sir_demography() {
     let mut rng = StatefulRng::new(42);
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
     let t_end = compiled.model.simulation.t_end;
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let observations: Vec<Observation> = vec![];
@@ -123,7 +123,7 @@ fn test_density_matches_step_one_two_patch() {
     let mut rng = StatefulRng::new(42);
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
     let t_end = compiled.model.simulation.t_end;
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let empty_obs: Vec<Observation> = vec![];
     let oas = build_obs_at_substep(&empty_obs, compiled.model.simulation.t_start, dt).unwrap();
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
@@ -175,7 +175,7 @@ fn test_density_matches_step_one_polio_spatial_5() {
     let mut rng = StatefulRng::new(42);
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
     let t_end = compiled.model.simulation.t_end;
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
     let observations: Vec<Observation> = vec![];
@@ -240,7 +240,7 @@ fn test_density_seir_spatial_5_vignette_regression() {
     let mut rng = StatefulRng::new(42);
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
     let t_end = compiled.model.simulation.t_end;
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     eprintln!("  {} substeps", trajectory.substeps.len());
 
     // Check EACH substep individually to find the first -inf
@@ -327,7 +327,7 @@ fn test_density_downstream_multi_seed() {
 
     for seed in 0..100 {
         let mut rng = StatefulRng::new(seed);
-        let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+        let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
         // Check per-substep
         let mut _this_inf = false;
@@ -432,7 +432,7 @@ fn test_step_one_zero_infection_flow() {
         let mut flows = vec![0u64; n_tr];
         scratch.gamma_used.clear();
         sim::effects::due_effects(&compiled, &fire_steps, step as f64 + 1.0, 1.0, &mut scratch.effect_batch);
-        step_one(&compiled, &mut counts, &mut flows, &mut real, &params, step as f64, 1.0, None, &mut rng, &mut scratch).unwrap();
+        step_one(&compiled, &mut counts, &mut flows, &mut real, &params, step as f64, 1.0, None, sim::rng::BinomialAlgorithm::default(), &mut rng, &mut scratch).unwrap();
 
         if flows[inf_p5_idx] > 0 {
             eprintln!("  STEP {}: infection_p5 has {} flows but I_p5 was {}",

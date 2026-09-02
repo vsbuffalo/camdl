@@ -22,7 +22,7 @@
 //!
 //! ```text
 //!   X₀ ~ π   (exact categorical draw over the enumerated support)
-//!   X₁ = csmc_as(X₀)
+//!   X₁ = csmc_as(X₀, sim::rng::BinomialAlgorithm::default())
 //!   H₀:  X₁ ~ π
 //! ```
 //!
@@ -315,7 +315,7 @@ fn the_scored_density_is_the_producers_own_law() {
         let mut flows = vec![0u64; n_tr];
         let mut real = RealState::new(f.compiled.real_local_to_global.len());
         step_one(
-            &f.compiled, &mut counts, &mut flows, &mut real, &f.params, 0.0, DT, None, &mut rng,
+            &f.compiled, &mut counts, &mut flows, &mut real, &f.params, 0.0, DT, None, sim::rng::BinomialAlgorithm::default(), &mut rng,
             &mut scratch,
         )
         .expect("step_one");
@@ -417,6 +417,7 @@ fn check_invariance(
             0x5eed_0000_0000_0000u64.wrapping_add(i as u64),
             &f.obs_at_substep,
             EffectFiring::default(),
+            sim::rng::BinomialAlgorithm::default(),
         )
         .expect("csmc_as");
         n_proposed += diag.n_as_proposed;

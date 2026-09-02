@@ -95,7 +95,7 @@ fn run_once() -> PGASResult {
     // Synthetic weekly observations from a fixed-seed reference trajectory.
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(SEED);
-    let truth = simulate_reference(&compiled, &params, t_end, DT, &mut rng).unwrap();
+    let truth = simulate_reference(&compiled, &params, t_end, DT, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
     let mut cum: u64 = 0;
     let mut obs: Vec<Observation> = Vec::new();
     for (s, rec) in truth.substeps.iter().enumerate() {
@@ -134,6 +134,7 @@ fn run_once() -> PGASResult {
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: N_PARTICLES,
         n_sweeps: 4,
         burn_in: 1,

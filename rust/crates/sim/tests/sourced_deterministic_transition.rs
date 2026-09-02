@@ -256,7 +256,7 @@ fn sim_density_and_gradient_agree_for_sole_exit_deterministic() {
     let t_start = compiled.model.simulation.t_start;
 
     let mut rng = StatefulRng::new(7);
-    let reference = simulate_reference(&compiled, &params, T_END, DT, &mut rng).expect("produce reference");
+    let reference = simulate_reference(&compiled, &params, T_END, DT, sim::rng::BinomialAlgorithm::default(), &mut rng).expect("produce reference");
 
     // gamma is the only param (index 0); estimate it so the gradient path is
     // exercised. The hand-built model carries no rate_grad, so the resolved run

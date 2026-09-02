@@ -67,7 +67,7 @@ fn test_gradient_vs_finite_differences_sir() {
     let mut rng = StatefulRng::new(42);
     let t_end = compiled.model.simulation.t_end;
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
 
@@ -185,7 +185,7 @@ fn test_gradient_vs_finite_differences_spatial_bindings() {
     let mut rng = StatefulRng::new(42);
     let t_end = compiled.model.simulation.t_end;
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
@@ -312,7 +312,7 @@ fn test_gradient_vs_finite_differences_meanfield_coupling() {
     let mut rng = StatefulRng::new(42);
     let t_end = compiled.model.simulation.t_end;
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
@@ -397,7 +397,7 @@ fn test_nuts_target_gradient_on_z_scale() {
     let mut rng = StatefulRng::new(42);
     let dt = compiled.model.simulation.dt.unwrap_or(1.0);
     let t_end = compiled.model.simulation.t_end;
-    let trajectory = simulate_reference(&compiled, &[0.4, 0.1, 1000.0, 10.0], t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &[0.4, 0.1, 1000.0, 10.0], t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
@@ -617,7 +617,7 @@ fn test_gradient_vs_finite_differences_seasonal() {
     }
 
     let mut rng = StatefulRng::new(42);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());
@@ -726,7 +726,7 @@ fn test_gradient_vs_finite_differences_lagged_forcing() {
     }
 
     let mut rng = StatefulRng::new(42);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     let observations: Vec<Observation> = vec![];
     let obs_model = MultiStreamObsModel::empty(compiled.clone());

@@ -188,6 +188,10 @@ pub struct PgasStageOpts {
     pub n_trajectories: usize,
     pub dense_mass: bool,
     pub use_nuts: bool,
+    /// Binomial sampler for every propagation draw in the stage
+    /// (`binomial = "btpe" | "btrs"` in the stage TOML). Identity-bearing —
+    /// see the field's doc on `Stage::PGAS`.
+    pub binomial: sim::rng::BinomialAlgorithm,
     pub init_method: super::init::InitMethod,
     /// Survey CAS directory consumed when
     /// `init_method = InitMethod::SurveyTopK` (gh#51 v2). `None`
@@ -212,7 +216,7 @@ impl PgasStageOpts {
                 chains, particles, sweeps, burn_in, thin,
                 tempering, max_tree_depth, trajectory_warmup,
                 csmc_sweeps_per_nuts, n_trajectories,
-                dense_mass, use_nuts, init_method,
+                dense_mass, use_nuts, binomial, init_method,
                 survey_path, survey_top_k_n,
                 ..
             } => {
@@ -249,6 +253,7 @@ impl PgasStageOpts {
                     n_trajectories: *n_trajectories,
                     dense_mass: *dense_mass,
                     use_nuts: *use_nuts,
+                    binomial: *binomial,
                     init_method: init_method.clone(),
                     survey_path: survey_path.clone(),
                     survey_top_k_n: *survey_top_k_n,
@@ -755,6 +760,7 @@ pub fn run_stage(
                 // Stage 3: PGAS keeps snap alignment until exact-PGAS recovery
                 // evidence lands and resolve_obs_alignment flips the default.
                 step_policy: sim::schedule::StepPolicy::Snap,
+                binomial: pgas_opts.binomial,
             };
 
             // Build multi-stream observation model (evaluates with params at call time)
@@ -1827,6 +1833,7 @@ mod tests {
             n_trajectories: 10,
             dense_mass: true,
             use_nuts: true,
+            binomial: Default::default(),
         }
     }
 

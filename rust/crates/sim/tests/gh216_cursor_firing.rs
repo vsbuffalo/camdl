@@ -537,7 +537,7 @@ fn pgas_producer_fires_once_at_registered_boundary() {
         .expect("build exact grid with the registered effect boundary");
     let firing = Some((&grid.effect_at_substep, scheduled.batches.as_slice()));
     let mut rng = StatefulRng::new(1);
-    let traj = simulate_reference_on_grid(&compiled, &params, 1.0, &grid.steps, firing, &mut rng)
+    let traj = simulate_reference_on_grid(&compiled, &params, 1.0, &grid.steps, firing, sim::rng::BinomialAlgorithm::default(), &mut rng)
         .expect("reference producer must simulate");
 
     // M (local int index 1) jumps to TRANSFER at the firing substep, and stays.
@@ -691,6 +691,7 @@ fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str
     let obs_model = pgas_obs_model(compiled, obs_times);
     let observations = pgas_observations(obs_times);
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 10, n_sweeps: 1, burn_in: 0, thin: 1, dt: 1.0,
         use_nuts: false, dense_mass: false, max_tree_depth: 4,
         tempering: vec![1.0], trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,

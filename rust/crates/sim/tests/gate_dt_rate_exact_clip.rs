@@ -68,7 +68,7 @@ fn reference_trajectory(
     let grid = build_substep_grid(t_start, DT, &observations, &[], StepPolicy::Exact)
         .expect("build exact substep grid");
     let mut rng = StatefulRng::new(SEED);
-    simulate_reference_on_grid(compiled, params, DT, &grid.steps, None, &mut rng)
+    simulate_reference_on_grid(compiled, params, DT, &grid.steps, None, sim::rng::BinomialAlgorithm::default(), &mut rng)
         .expect("simulate_reference_on_grid on dt_rate")
 }
 

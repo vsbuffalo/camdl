@@ -104,7 +104,10 @@ impl ProcessModel for ChainBinomialProcess {
             // gh#272 LICM: the scratch staged at the filter's θ-stable boundary
             // (or `None` ⇒ on-demand). Threaded, NOT staged here (per-substep
             // staging would defeat the hoist).
-            params, t, dt, per_eval, rng, scratch,
+            // Phase 1 of the sampler knob is PGAS-only: the bootstrap-filter /
+            // PMMH / IF2 path has no `binomial` config field yet, so it draws
+            // with the default (Btpe) — today's draws, byte-identical.
+            params, t, dt, per_eval, crate::rng::BinomialAlgorithm::default(), rng, scratch,
         )
     }
 

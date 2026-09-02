@@ -131,7 +131,7 @@ fn tally(interval: bool, sweeps: u64) -> AsTally {
     let t_end = compiled.model.simulation.t_end;
 
     let mut rng = StatefulRng::new(SEED);
-    let reference = simulate_reference(&compiled, &params, t_end, DT, &mut rng).expect("reference");
+    let reference = simulate_reference(&compiled, &params, t_end, DT, sim::rng::BinomialAlgorithm::default(), &mut rng).expect("reference");
 
     let mut cum: u64 = 0;
     let mut obs: Vec<Observation> = Vec::new();
@@ -173,6 +173,7 @@ fn tally(interval: bool, sweeps: u64) -> AsTally {
         let (_traj, diag) = csmc_as(
             &compiled, &params, &obs, &reference, 32, DT, &obs_model,
             SEED + seed, &obs_at_substep, EffectFiring::default(),
+            sim::rng::BinomialAlgorithm::default(),
         )
         .expect("csmc_as");
         t.proposed += diag.n_as_proposed;

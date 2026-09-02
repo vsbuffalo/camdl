@@ -52,7 +52,7 @@ fn reference_total_logdensity(dt: f64) -> f64 {
     let t_start = compiled.model.simulation.t_start;
     let t_end = compiled.model.simulation.t_end;
     let mut rng = StatefulRng::new(SEED);
-    let traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng)
+    let traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng)
         .expect("simulate_reference on seasonal_drift");
 
     let mut total = 0.0;

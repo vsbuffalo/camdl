@@ -421,6 +421,7 @@ fn generate_data(compiled: &CompiledModel, params: &[f64]) -> (Vec<f64>, Vec<f64
             t,
             1.0,
             None,
+            sim::rng::BinomialAlgorithm::default(),
             &mut rng,
             &mut scratch,
         )

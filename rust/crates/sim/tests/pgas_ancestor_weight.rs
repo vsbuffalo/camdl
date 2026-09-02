@@ -44,7 +44,7 @@ fn ancestor_weight_includes_importance_weight() {
 
     // A deterministic reference gives us valid (finite-density) substep records.
     let mut rng = StatefulRng::new(7);
-    let traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng)
+    let traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng)
         .expect("simulate_reference on seasonal_drift");
     assert!(traj.substeps.len() >= 2, "need a couple of substeps");
 

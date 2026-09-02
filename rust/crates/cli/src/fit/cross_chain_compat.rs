@@ -350,7 +350,8 @@ mod tests {
     /// parameter-locked chain would hold.
     fn path_at(model: &CompiledModel, params: &[f64], seed: u64) -> sim::inference::pgas::PGASTrajectory {
         let mut rng = StatefulRng::new(seed);
-        simulate_reference(model, params, T_END, DT, &mut rng).expect("reference path")
+        simulate_reference(model, params, T_END, DT, sim::rng::BinomialAlgorithm::default(),
+                           &mut rng).expect("reference path")
     }
 
     /// Weekly prevalence observations read off a baseline path, plus the

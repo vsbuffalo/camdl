@@ -143,7 +143,7 @@ fn fixture(n_substeps: usize, obs: &[(usize, f64)], ref_i0: f64) -> Fixture {
 
     let mut rng = StatefulRng::new(SEED);
     let reference =
-        simulate_reference(&compiled, &ref_params, n_substeps as f64 * DT, DT, &mut rng)
+        simulate_reference(&compiled, &ref_params, n_substeps as f64 * DT, DT, sim::rng::BinomialAlgorithm::default(), &mut rng)
             .expect("reference");
     assert_eq!(reference.substeps.len(), n_substeps, "grid is not what the test assumes");
 
@@ -183,6 +183,7 @@ fn sweep(f: &Fixture) -> (PGASTrajectory, CSMCDiagnostics) {
         SEED,
         &f.obs_at_substep,
         EffectFiring::default(),
+        sim::rng::BinomialAlgorithm::default(),
     )
     .expect("csmc_as")
 }

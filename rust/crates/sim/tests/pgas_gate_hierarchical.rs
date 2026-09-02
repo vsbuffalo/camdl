@@ -100,7 +100,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
     let dt = 1.0;
     let mut rng = StatefulRng::new(42);
     let t_end = compiled.model.simulation.t_end;
-    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let truth_traj = simulate_reference(&compiled, &params, t_end, dt, sim::rng::BinomialAlgorithm::default(), &mut rng).unwrap();
 
     // Synthetic weekly obs by summing the infection flow (transition 0).
     let mut cum_infection: u64 = 0;
@@ -157,6 +157,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
     })];
 
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::default(),
         n_particles: 50,
         n_sweeps: 5,
         burn_in: 2,
