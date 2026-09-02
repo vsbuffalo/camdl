@@ -1,0 +1,158 @@
+# State-space PGBS spike: contract, measured feasibility, and the go/no-go experiment
+
+Date: 2026-09-02\
+Project: camdl\
+Tags: pgas, pgbs, inference, state-space, design-spike
+
+The design contract and de-risking measurements for an **opt-in, experimental**
+state-space trajectory kernel (`csmc_bs`) beside the untouched innovation kernel
+(`csmc_as`). Scope is the reviewer-agreed milestone: enough state-PGBS to pass
+exact invariance on an enumerable toy and run the fixed-θ
+`bvd_province_hier3_ksmooth` experiment at `sigma_se = 0`. Gamma overdispersion
+and all performance optimization are deliberately out of scope until that
+experiment reads out. Background: the innovation-representation diagnosis in
+[`2026-09-01-hier3-ksmooth-pgas-profile.md`](2026-09-01-hier3-ksmooth-pgas-profile.md)
+and the ancestor-sampling starvation instrument (PR#819).
+
+## Why (one paragraph)
+
+The conditioned object in today's PGAS is the innovation record (flows + gamma
+noise); an ancestor change drags the reference's remaining innovations onto an
+offset state path, and the exact suffix correction rejects ~97.5% of proposals
+over long horizons. Measured: the cloud holds abundant locally compatible states
+(finite fraction 0.61, admissible 0.24), AS converts almost none of it (early
+renewal ≤ 0.026/sweep at N = 19,200; 0.005 at 2,400), and the early 70–80% of
+the latent path effectively never renews. A kernel that conditions on the
+**state path** and re-draws innovations locally removes the long-horizon
+coupling by construction. Whether it converts the measured diversity into early
+renewal is the experiment.
+
+## The hard invariant: partially-collapsed Gibbs ordering
+
+The joint target is π(θ, Z, U | Y) with U = (F, G) the per-substep innovations.
+The sweep is, in this order and no other:
+
+1. `Z′ ~ p(Z | θ, Y)` — the state kernel, innovations marginalized;
+2. `U′ ~ p(U | Z′, θ, Y)` — edge-local reconstruction;
+3. `θ′ ~ p(θ | Z′, U′, Y)` — today's complete-data NUTS, **unchanged**.
+
+Step 3 must never see innovations from any earlier trajectory: collapsing U out
+of step 1 and then conditioning on a stale U is not a Gibbs sweep and silently
+targets the wrong distribution. The API must make the wrong ordering hard to
+express — the state kernel returns only a state path; the complete
+`PGASTrajectory` handed to the θ-move is constructible only through the
+reconstruction seam. This invariant gets a test, not a comment.
+
+## The Markov state
+
+`Z_t = (X_t, A_t)`: integer compartment counts plus the open interval-stream
+accumulators. A is not a nuisance: each accumulator adds a linear constraint
+`ΔA = H·F` on the substep's flows, shrinking the flow-ambiguity lattice the
+transition density marginalizes over. Sufficiency test (to be asserted in the
+Phase-2 production note, stated here for the record): two histories with equal
+`Z_t` must induce identical laws over all future latent states and observations.
+For the `sigma_se = 0` prototype class — no persistent noise, no
+reactive-intervention agenda — `(X, A)` suffices.
+
+## The transition density, and what was measured about it
+
+Per substep, `p(Z′ | Z)` = the sum of the innovation-conditional density over
+integer flow vectors consistent with `(ΔX = S·F, ΔA = H·F)`. The classification
+is **computed from the compiled IR, never hand-derived**:
+
+1. collapse identical stoichiometry columns (their split marginalizes exactly
+   into the group total — for hier3, infection/importation per province);
+2. form `[S; H]` from the stoichiometry and the interval-stream projections;
+3. integer nullspace ⇒ ambiguity directions;
+4. enumerate the bounded lattice (non-negativity + group support) and sum.
+
+Measured on hier3 (exact rational elimination over the IR): after step 1 the
+nullspace is **2 dimensions per province, provinces uncoupled** — the
+onset/confirm/community-death/facility-death diamond and the care-exit/ abscond
+diamond. Lattice cardinality over 3,180 real posterior-trajectory edges (E1
+runs, both N):
+
+| statistic | terms per province-edge |
+| --------- | ----------------------- |
+| median    | 5                       |
+| mean      | 38.6                    |
+| p95       | 200                     |
+| max       | 525                     |
+
+The density factorizes by province (sum of three per-province sums, never a
+cross product). Implied prototype cost at N = 2,400, T = 104, all-N backward
+weights: ~1.4×10⁸ group-pmf evaluations per sweep — seconds per sweep,
+acceptable for the experiment without any optimization. The heavy tail is a
+**production** concern with a known path (the two directions couple only through
+`confirm_die + m₂ − m₃ ≥ 0`, admitting a DP/prefix reduction of the 2-D sum);
+per the agreed guardrails, none of that is built until the experiment justifies
+it.
+
+Two testability requirements carried from review: (a) `H` must be generated from
+the compiled observation/accumulator semantics (stream-, interval- and
+missingness-aware), not extracted ad hoc — the extraction is part of the kernel
+and gets its own oracle; (b) claims of the form "stream X cannot change the
+nullspace" are asserted by test, not comment. (The first ad-hoc extraction in
+this spike missed the exits streams' projection encoding — harmless here only
+because `discharge` lies in no null direction, which is now exactly the kind of
+fact the test must pin.)
+
+## The kernel (deliverable B)
+
+Backward simulation over stored particle states: run the conditional forward
+filter exactly as today (states and accumulators are already carried); draw the
+final state from the final weights; then for s = T−1…0 draw particle j with
+weight `w_s^j · p(Z_{s+1}^chosen | Z_s^j)` over all N candidates (naïve all-N,
+per guardrail — no subsampling in the prototype). Reconstruction then draws, per
+stitched edge, the flows from the lattice-restricted conditional and (once gamma
+exists) the noise — yielding a complete `PGASTrajectory` for the θ-move and
+outputs.
+
+Opt-in surface, following the `binomial`/`ancestor_sampling` identity pattern
+verbatim: `trajectory_representation = "innovation" | "state"` and
+`trajectory_kernel = "ancestor_sampling" | "backward"` on `Stage::PGAS`,
+absent-means-today permanently, `skip_serializing_if` keeps default payloads
+byte-identical, CLI overrides, unsupported combinations refuse loudly. `csmc_as`
+is not modified.
+
+## Gates before the experiment counts
+
+- **Transition-density oracle**: `p(Z′|Z)` against brute-force enumeration on
+  small models, and against forward-simulation frequencies.
+- **Exact invariance** on an enumerable toy (nullspace-zero SIR, pop 5–10, T
+  3–5): initialize from the enumerated posterior, one kernel application, verify
+  the posterior is preserved (`csmc_exact_invariance` style).
+- **Reconstruction consistency**: reconstructed records satisfy the same
+  complete-data density their edge conditionals imply.
+- **Ordering invariant test** (see above).
+
+## The go/no-go experiment (deliverable C)
+
+Fixed θ (the fit config's curated start), hier3 with `sigma_se = 0` fixed. Arms:
+PF-only (`ancestor_sampling = false`), innovation-PGAS, state-PGBS. **Same N
+compared within N** — the innovation baselines are N-dependent (early renewal
+0.005/sweep at N = 2,400, 0.026 at 19,200), so no cross-N thresholds. Start at N
+= 2,400; primary outputs renewal-by-bin and renewal per CPU-second; if clearly
+promising, repeat at 4,800/9,600 and then 19,200 for the envelope over N; rerun
+at posterior-typical θ once chain viability lands (particle geometry is
+θ-dependent). Kill criterion: if state-PGBS does not decisively beat the same-N
+innovation baseline on early renewal per CPU-second, stop — gamma is never built
+and `csmc_as` stands.
+
+## Deferred, with reasons recorded
+
+- **Gamma overdispersion**: postponed through C. Note for Phase D: the
+  binomial-with-`1−e^{−aG}` gamma marginal has a closed form via the alternating
+  Laplace-transform sum (external review, 2026-09-02) — the earlier "quadrature
+  or augmentation only" claim was too pessimistic — but the alternating sum
+  cancels catastrophically at large k, so production needs a stable-evaluation
+  design (hybrid closed-form/quadrature); a separate problem from the
+  representation question by construction.
+- **M ≪ N subsampled backward weights**: production-relevant (the tail above
+  says so), not prototype-relevant.
+- **Full-DSL generalization**: the landing bar is feature parity with the
+  innovation kernel — nothing ships for one model. The general fallback that
+  makes parity a theorem rather than a hope (edge-local augmentation with joint
+  rejuvenation, exact for arbitrary stoichiometry/noise, preserving locality) is
+  recorded as the Phase-D design spine; the fast marginal path above is its
+  optimization where the IR algebra allows.
