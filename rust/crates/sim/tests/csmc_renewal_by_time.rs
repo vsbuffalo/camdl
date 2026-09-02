@@ -279,6 +279,7 @@ fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
             let (_traj, diag) = csmc_as(
                 &compiled, &params, &obs, &reference, n_particles, DT, &obs_model,
                 SEED + seed, &obs_at_substep, EffectFiring::default(),
+                sim::rng::BinomialAlgorithm::Btpe,
             )
             .expect("csmc_as");
             SweepProfile {

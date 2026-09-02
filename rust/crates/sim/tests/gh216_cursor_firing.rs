@@ -691,6 +691,7 @@ fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str
     let obs_model = pgas_obs_model(compiled, obs_times);
     let observations = pgas_observations(obs_times);
     let config = PGASConfig {
+        binomial: sim::rng::BinomialAlgorithm::Btpe,
         n_particles: 10, n_sweeps: 1, burn_in: 0, thin: 1, dt: 1.0,
         use_nuts: false, dense_mass: false, max_tree_depth: 4,
         tempering: vec![1.0], trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,

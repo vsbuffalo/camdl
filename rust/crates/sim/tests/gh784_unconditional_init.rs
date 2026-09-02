@@ -242,6 +242,7 @@ impl Fixture {
         }];
         let priors = vec![Prior::Fixed(Density::Flat)];
         let config = PGASConfig {
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
             n_particles: N_PARTICLES,
             n_sweeps: 2,
             burn_in: 1,
@@ -448,6 +449,7 @@ fn a_start_no_swarm_can_explain_falls_back_to_the_forward_draw_bit_for_bit() {
     let pass = unconditional_smc_pass(
         &f.compiled, &f.params, &f.grid, N_PARTICLES, DT, &f.obs_model,
         CHAIN_SEED, &f.obs_at_substep, EffectFiring::default(),
+        sim::rng::BinomialAlgorithm::Btpe,
     )
     .expect("unconditional pass");
     match pass {

@@ -88,6 +88,33 @@ ancestor-sampling density pass, which draws no binomials at all; and Haut-Uele's
 small counts push more split draws under `BINV_THRESHOLD`, where the two arms
 are the same code. The measured number is the one to quote.
 
+### Corroboration by a second method, and the wall-clock number
+
+An independent implementation measured the same model at **full parallelism** (1
+chain, 19,200 particles, 20 sweeps, `--parallel` unset) rather than serial, and
+on an otherwise **idle** machine as well as a loaded one:
+
+| condition                     | btpe        | btrs        | ratio      |
+| ----------------------------- | ----------- | ----------- | ---------- |
+| user CPU, loaded (3 reps)     | 446.1 s     | 415.1 s     | 1.075×     |
+| user CPU, idle (4 reps)       | 409.5 s     | 388.2 s     | **1.055×** |
+| **wall clock, idle** (4 reps) | **51.34 s** | **49.62 s** | **1.035×** |
+
+The user-CPU figures agree with the serial measurement above (1.051×) to within
+half a percent, by a different method on a different parallelism setting. Two
+independent measurements landing on 1.05× is the number.
+
+**Wall clock is lower than CPU, and that is the number a user feels.** Saving
+arithmetic inside a parallel section does not shorten the serial parts or the
+synchronisation, so a 5.5% CPU saving shows up as a 3.4% shorter run.
+
+**Wall clock is also unusable on a shared box, and by a wide margin.** The same
+fit took 97.6 s wall with two production fits co-resident and 51.3 s idle — the
+co-tenancy cost **1.9×**, which is larger than every optimisation discussed in
+this note put together. A first wall-clock A/B under load produced 1.013× and a
+reversed sign on one rep; only user-CPU was stable enough to read. Do not
+benchmark this on a shared machine, and if you must, read user-CPU.
+
 **The flat rows are a finding about the toggle, not the evaluator.**
 `CAMDL_EVAL_FLAT` moved nothing because the flat VM never engaged: a samply
 profile of the flat run still shows `eval_resolved` as the top leaf (33.8%) and

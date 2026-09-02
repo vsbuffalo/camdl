@@ -395,7 +395,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // 32 bits, particle i in the bottom 32 — fits 2^32
         // iterations × 2^32 particles with room to spare.
         let stream_base = (iter as u64) << 32;
-        let mut rngs = init_particle_rngs(seed, n, stream_base);
+        let mut rngs = init_particle_rngs(seed, n, stream_base, crate::rng::BinomialAlgorithm::Btpe);
         let mut resample_rng = StatefulRng::new_stream(
             seed,
             stream_base | super::types::RESAMPLE_RNG_STREAM,

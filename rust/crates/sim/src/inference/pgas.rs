@@ -44,6 +44,10 @@ use crate::state::{IntState, RealState};
 
 /// PGAS configuration.
 pub struct PGASConfig {
+    /// gh#747: which binomial sampler the chain-binomial draws use. Selecting
+    /// `Btrs` CHANGES DRAWS, so it arrives from `Stage::PGAS.binomial`, a typed
+    /// field that enters the run address -- never an environment variable.
+    pub binomial: crate::rng::BinomialAlgorithm,
     pub n_particles: usize,
     pub n_sweeps: usize,
     pub burn_in: usize,
@@ -2240,6 +2244,9 @@ pub fn csmc_as(
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
     firing: EffectFiring<'_>,
+    // gh#747: stamped onto every particle RNG below, so the choice rides on the
+    // particle rather than on whichever rayon worker happens to steal it.
+    binomial: crate::rng::BinomialAlgorithm,
 ) -> Result<(PGASTrajectory, CSMCDiagnostics), SimError> {
     let t_start = model.model.simulation.t_start;
     let n_substeps = reference.substeps.len();
@@ -2269,7 +2276,7 @@ pub fn csmc_as(
         reference_baseline(model, reference, params, obs_model, obs_at_substep, per_eval)?;
 
     // Per-particle RNGs via ChaCha8 stream counter (IM1 fix 2026-04-19).
-    let mut rngs = init_particle_rngs(seed, n_particles, 0);
+    let mut rngs = init_particle_rngs(seed, n_particles, 0, binomial);
 
     // Each free particle draws its own initial state, through the same seam
     // every forward path uses. For a model whose `init {}` declares a law that
@@ -3187,7 +3194,10 @@ pub fn run_pgas(
         )));
     }
 
-    let mut rng = StatefulRng::new(seed);
+    // gh#747: the reference trajectory and the initial-state draw run on THIS
+    // rng, sequentially on the chain thread, while the particle swarm runs on
+    // rayon workers. Both must use the selected sampler or one sweep mixes two.
+    let mut rng = StatefulRng::new(seed).with_binomial(config.binomial);
     let mut current_params = base_params.to_vec();
     let t_start = model.model.simulation.t_start;
 
@@ -3693,7 +3703,7 @@ pub fn run_pgas(
                 let (new_traj, _diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
-                    csmc_seed, &obs_at_substep, firing,
+                    csmc_seed, &obs_at_substep, firing, config.binomial,
                 )?;
                 rungs[rung].trajectory = new_traj;
                 rungs[rung].ll = complete_data_loglik(
@@ -3980,7 +3990,7 @@ pub fn run_pgas(
                 let (new_trajectory, diag) = csmc_as(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
-                    csmc_seed, &obs_at_substep, firing,
+                    csmc_seed, &obs_at_substep, firing, config.binomial,
                 )?;
                 rungs[rung].trajectory = new_trajectory;
                 csmc_diag = diag;

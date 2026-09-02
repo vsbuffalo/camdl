@@ -2463,6 +2463,7 @@ restarting mid-schedule is statistically incoherent.
 | `tempering`            | `[1.0]` | Parallel-tempering ladder of β ∈ (0,1]. First entry must be `1.0`; only the cold rung samples. |
 | `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                   |
 | `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                               |
+| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible). |
 | `csmc_sweeps_per_nuts` | `1`     | CSMC trajectory updates per parameter update.                                                  |
 | `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                             |
 | `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                             |

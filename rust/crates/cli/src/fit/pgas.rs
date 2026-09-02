@@ -198,6 +198,9 @@ pub struct PgasStageOpts {
     /// Top-K count for `init_method = SurveyTopK`. `None` → defaults
     /// to `chains`. v2 enforces `top_k == chains`.
     pub survey_top_k_n: Option<usize>,
+    /// gh#747: the binomial sampler this stage's draws use. Hashed into the
+    /// stage identity by being a `Stage::PGAS` field.
+    pub binomial: sim::rng::BinomialAlgorithm,
 }
 
 pub(crate) const DEFAULT_BURN_IN: usize = 2000;
@@ -213,7 +216,7 @@ impl PgasStageOpts {
                 tempering, max_tree_depth, trajectory_warmup,
                 csmc_sweeps_per_nuts, n_trajectories,
                 dense_mass, use_nuts, init_method,
-                survey_path, survey_top_k_n,
+                survey_path, survey_top_k_n, binomial,
                 ..
             } => {
                 if tempering.is_empty() || (tempering[0] - 1.0).abs() > 1e-9 {
@@ -252,6 +255,7 @@ impl PgasStageOpts {
                     init_method: init_method.clone(),
                     survey_path: survey_path.clone(),
                     survey_top_k_n: *survey_top_k_n,
+                    binomial: *binomial,
                 })
             }
             other => Err(format!(
@@ -741,6 +745,9 @@ pub fn run_stage(
             let task = &bars[chain_id];
 
             let pgas_config = PGASConfig {
+                // gh#747: from the stage field, so the sampler that runs is the
+                // one the stage's address names.
+                binomial: pgas_opts.binomial,
                 n_particles,
                 n_sweeps,
                 burn_in,
@@ -1827,6 +1834,7 @@ mod tests {
             n_trajectories: 10,
             dense_mass: true,
             use_nuts: true,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }
     }
 

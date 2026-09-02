@@ -218,6 +218,7 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
                 SEED + seed,
                 &f.obs_at_substep,
                 EffectFiring::default(),
+                sim::rng::BinomialAlgorithm::Btpe,
             )
             .expect("csmc_as");
             accepted += diag.n_as_accepted;

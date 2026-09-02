@@ -659,6 +659,7 @@ fn snare_geometry_is_a_live_unrepaired_ancestor_move() {
             0x5eed_a5a5_0000_0000u64.wrapping_add(i as u64),
             &f.obs_at_substep,
             EffectFiring::default(),
+            sim::rng::BinomialAlgorithm::Btpe,
         )
         .expect("csmc_as");
         n_proposed += diag.n_as_proposed;
