@@ -230,6 +230,22 @@ impl BtrsHat {
         (v * self.alpha / (self.a / (us * us) + self.b)).ln() <= self.log_bound(k)
     }
 
+    /// The squeeze: the fast accept, taken where the hat is tight enough to
+    /// return `k` without touching the density at all. This is the branch BTRS
+    /// wins on.
+    ///
+    /// A method rather than an inline comparison against `v_r`, for exactly the
+    /// reason [`SQUEEZE_US_MIN`] is a named constant. The sampler runs this
+    /// comparison and `btrs_tests::hat_dominates_and_squeeze_is_valid` certifies
+    /// it; as two copies they can drift, and then the sweep certifies a squeeze
+    /// the sampler does not use. Widening the shipped comparison by a factor of
+    /// 1.10 is a 4.3% relative pmf error at `(6.3e6, 3.05e-5)` and used to leave
+    /// the entire suite green (gh#802).
+    #[inline]
+    fn squeeze_accepts(&self, v: f64, us: f64) -> bool {
+        us >= SQUEEZE_US_MIN && v <= self.v_r
+    }
+
     /// The acceptance ratio `V(u)`: the slow test accepts exactly when
     /// `v ≤ V(u)`. **This is what BTRS's exactness is.** The scheme is a valid
     /// rejection sampler iff `V ≤ 1` everywhere (the hat dominates the pmf), and
@@ -327,9 +343,7 @@ fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
         let k_int = k as u64;
         debug_assert!(k_int <= n, "k={k} escaped the f64 support check at n={n}");
 
-        // The squeeze: where the hat is tight enough to accept without touching
-        // the density. This is the branch BTRS wins on.
-        if us >= SQUEEZE_US_MIN && v <= h.v_r {
+        if h.squeeze_accepts(v, us) {
             return k_int;
         }
         if h.slow_accepts(v, us, k) {
@@ -1090,12 +1104,37 @@ mod btrs_tests {
         (22, 0.4997), (752, 0.0135), (23, 0.4583),
     ];
 
-    /// The worst (largest) acceptance ratio over a deterministic lattice in `u`,
-    /// and the worst squeeze shortfall (`v_r − V`, positive means the squeeze
-    /// accepts where the slow test would reject).
-    fn worst_ratios(h: &BtrsHat) -> (f64, f64) {
+    /// The worst (largest) acceptance ratio `V` over a deterministic lattice in
+    /// `u`, and the worst squeeze overshoot: the largest relative distance above
+    /// `V` at which [`BtrsHat::squeeze_accepts`] still accepts. `None` means it
+    /// never did, which is what squeeze validity is.
+    ///
+    /// The overshoot is PROBED through the sampler's own predicate rather than
+    /// computed as `v_r − V`. The squeeze accepts a half-line in `v`, so "it
+    /// never accepts a `v` the slow test rejects" is decided by evaluating the
+    /// shipped comparison just above `V`; reading `v_r` off the struct instead
+    /// certifies the field while leaving the comparison that uses it untested,
+    /// which is how a 10% widening of that comparison stayed green (gh#802).
+    ///
+    /// **This lattice is a SAMPLE, not a proof**, and its bias has a known
+    /// direction: a maximum over a subset of `u` is at most the maximum over all
+    /// of it, so it UNDERSTATES `sup V`. Measured at the tightest cell,
+    /// `(23, 0.4583)`: 100k points give 0.997496, 10M give 0.997773 — a
+    /// shortfall of 2.77e-4 against a true margin of 2.23e-3, i.e. 12.4% of it.
+    /// Eightfold headroom, nothing hidden — but a cell whose margin fell below
+    /// ~1e-3 would need a finer lattice before this test could be believed about
+    /// it.
+    fn worst_ratios(h: &BtrsHat) -> (f64, Option<f64>) {
         const STEPS: usize = 100_000;
-        let (mut worst_v, mut worst_squeeze) = (0.0f64, f64::NEG_INFINITY);
+        /// Relative distances above `V` at which the squeeze must already
+        /// reject. The finest rung sets the resolution: the tightest squeeze
+        /// margin in `DOMAIN` is `v_r/V = 0.99303` at `(8.75e6, 2.2e-5)`, so
+        /// probing at `V·(1 + 1e-12)` detects any widening of the comparison
+        /// beyond a factor of 1.0071.
+        const OVERSHOOT: &[f64] = &[1e-12, 1e-9, 1e-6, 1e-3, 1e-2, 1e-1];
+
+        let mut worst_v = 0.0f64;
+        let mut worst_overshoot: Option<f64> = None;
         for i in 0..STEPS {
             let u = -0.5 + (i as f64 + 0.5) / STEPS as f64;
             let us = BtrsHat::us_of(u);
@@ -1107,11 +1146,13 @@ mod btrs_tests {
             if v > worst_v {
                 worst_v = v;
             }
-            if us >= SQUEEZE_US_MIN {
-                worst_squeeze = worst_squeeze.max(h.v_r - v);
+            for &d in OVERSHOOT {
+                if h.squeeze_accepts(v * (1.0 + d), us) {
+                    worst_overshoot = Some(worst_overshoot.map_or(d, |w: f64| w.max(d)));
+                }
             }
         }
-        (worst_v, worst_squeeze)
+        (worst_v, worst_overshoot)
     }
 
     /// BTRS must fit the exact pmf — and so must BTPE, on the same grid with the
@@ -1511,16 +1552,17 @@ mod btrs_tests {
                 "DOMAIN entry ({n}, {p}) is outside what btrs_binomial is handed"
             );
             let h = BtrsHat::new(n, p);
-            let (worst_v, worst_squeeze) = worst_ratios(&h);
+            let (worst_v, overshoot) = worst_ratios(&h);
             assert!(
                 worst_v <= 1.0,
                 "n={n} p={p}: hat does NOT dominate (max V = {worst_v:.6} > 1) — \
                  the sampler is not exact here"
             );
             assert!(
-                worst_squeeze <= 0.0,
-                "n={n} p={p}: the squeeze accepts where the slow test rejects \
-                 (v_r exceeds V by {worst_squeeze:.6}) — the fast path is biased"
+                overshoot.is_none(),
+                "n={n} p={p}: `squeeze_accepts` took v = V·(1 + {:.0e}), a draw the \
+                 slow test rejects — the fast path is biased",
+                overshoot.unwrap_or(0.0)
             );
         }
     }
