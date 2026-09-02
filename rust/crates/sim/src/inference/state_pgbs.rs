@@ -38,6 +38,34 @@
 
 use rayon::prelude::*;
 
+/// Which latent-trajectory representation the PGAS stage conditions on.
+/// `Innovation` is today's kernel family (the retained object carries flows
+/// and noise; ancestor sampling splices with the exact suffix correction).
+/// `State` conditions on the Markov state path `Z = (X, A)` with innovations
+/// marginalized by the state-transition density — the experimental
+/// representation of the 2026-09-02 spike note. Selecting `state` changes the
+/// sampled draws, so it is identity-bearing: it serializes into the stage
+/// payload (the default does not, keeping pre-field payloads byte-identical).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryRepresentation {
+    #[default]
+    Innovation,
+    State,
+}
+
+/// Which trajectory update runs on that representation. `AncestorSampling`
+/// is the LJS move (innovation representation only); `Backward` is
+/// backward simulation over stored particle states (state representation
+/// only). Unsupported combinations are refused loudly at config validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryKernel {
+    #[default]
+    AncestorSampling,
+    Backward,
+}
+
 use crate::chain_binomial::{step_one, StepScratch};
 use crate::compiled_model::CompiledModel;
 use crate::error::SimError;
