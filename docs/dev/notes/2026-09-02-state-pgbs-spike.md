@@ -253,3 +253,30 @@ What survives, and the repair direction this measurement points at:
 - The measured innovation-PGAS numbers above (AS worth 0.091 vs 0.056 early
   renewal at N = 2,400 on the sigma0 model — a larger AS contribution than the
   overdispersed model showed at this N) are a useful baseline regardless.
+
+### The causal story, directly demonstrated (upstream-requested diagnostics)
+
+Two diagnostic-only checks requested in review, run over 208 backward levels of
+the C configuration (temporary instrumentation, not landed):
+
+1. **The unique finite backward candidate IS the stored forward-resampling
+   parent — 208/208 levels.** Asserted against the recorded ancestry, not
+   inferred from the trace equality.
+2. **Linear consistency with and without the accumulator rows:**
+
+   | system                | consistent candidates per level (of 2,400) |
+   | --------------------- | ------------------------------------------ |
+   | `[S; H]` (Z = (X, A)) | mean 1.25 (min 1, max 11)                  |
+   | `S` only (X-only)     | **2,400 — every candidate, every level**   |
+
+   Without `H`, the counts system alone is consistent for the ENTIRE cloud (the
+   collapsed S-nullspace has enough freedom to absorb any cross-particle counts
+   delta; non-negativity and rate support would trim that toward the cross-run
+   proxy's ~25% feasible, i.e. hundreds per level). With `H`, it collapses to
+   essentially the parent alone.
+
+So the closure is exact: **the accumulator rows, specifically, destroy the
+backward connectivity** — from all 2,400 candidates to ~1. `Z = (X, A)` is a
+dead end for mixing; `Z = X` with bin-marginalized observation factors remains
+open, at materially higher derivation cost, as a separate authorization
+decision.
