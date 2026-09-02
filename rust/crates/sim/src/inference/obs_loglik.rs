@@ -40,6 +40,10 @@ pub(crate) fn gamma_multiplier_log_density(shape: f64, scale: f64, g: f64) -> f6
 /// d/d(mu) = y/mu - (y+k)/(mu+k)
 /// d/d(k) = ψ(y+k) - ψ(k) + ln(k/(k+mu)) + 1 - (y+k)/(k+mu)
 pub fn negbin_logpmf_grad(y: f64, mu: f64, k: f64) -> (f64, f64) {
+    // See the value sibling: NaN passes every `<=` guard. Return the zero
+    // gradient of the -inf floor rather than a NaN that would poison the
+    // NUTS Hamiltonian.
+    if y.is_nan() || mu.is_nan() || k.is_nan() { return (0.0, 0.0); }
     if mu <= 0.0 || k <= 0.0 { return (0.0, 0.0); }
     let y = y.round().max(0.0);
     let d_mu = y / mu - (y + k) / (mu + k);
@@ -65,6 +69,10 @@ pub fn negbin_logpmf_grad(y: f64, mu: f64, k: f64) -> (f64, f64) {
 /// matching the value function's `NEG_INFINITY` clamp — the gradient of a
 /// constant `-inf` floor is zero, consistent with the other helpers.
 pub fn beta_binomial_logpmf_grad(k: f64, n: f64, alpha: f64, beta: f64) -> (f64, f64) {
+    // See the value sibling: NaN passes every `<=` guard. Return the zero
+    // gradient of the -inf floor rather than a NaN that would poison the
+    // NUTS Hamiltonian.
+    if alpha.is_nan() || beta.is_nan() || k.is_nan() || n.is_nan() { return (0.0, 0.0); }
     if alpha <= 0.0 || beta <= 0.0 || k > n { return (0.0, 0.0); }
     let k = k.round().max(0.0);
     let psi_apb = digamma(alpha + beta);
@@ -81,6 +89,8 @@ pub fn beta_binomial_logpmf_grad(k: f64, n: f64, alpha: f64, beta: f64) -> (f64,
 /// other helpers. `!(sigma > 0.0)` rather than `sigma <= 0.0` so a NaN scale is
 /// caught too (gh#645; a NaN comparison is false, so `<=` let it through).
 pub fn normal_logpdf_grad(y: f64, mu: f64, sigma: f64) -> (f64, f64) {
+    // gh#645 guarded the SCALE. A NaN location is the same defect.
+    if y.is_nan() || mu.is_nan() { return (0.0, 0.0); }
     if !(sigma > 0.0) { return (0.0, 0.0); }
     let d_mu = (y - mu) / (sigma * sigma);
     let d_sigma = ((y - mu).powi(2) - sigma * sigma)
@@ -118,6 +128,10 @@ pub fn normal_logpdf_grad(y: f64, mu: f64, sigma: f64) -> (f64, f64) {
 pub fn discretized_normal_logpmf_grad(
     y: f64, mu: f64, variance: f64, tol: f64,
 ) -> (f64, f64) {
+    // Pairs with the value sibling. Without this the value floors to a finite
+    // number while the gradient returns NaN — the gh#197/gh#200 divergence
+    // class, straight into a NUTS momentum update.
+    if y.is_nan() || mu.is_nan() { return (0.0, 0.0); }
     if !variance.is_finite() || variance <= 0.0 {
         return (0.0, 0.0);
     }
@@ -169,6 +183,8 @@ pub fn discretized_normal_logpmf_grad(
 
 /// Gradient of poisson_logpmf w.r.t. rate.
 pub fn poisson_logpmf_grad(k: f64, lambda: f64) -> f64 {
+    // See the value sibling: NaN passes the `<=` guard.
+    if k.is_nan() || lambda.is_nan() { return 0.0; }
     if lambda <= 0.0 { return 0.0; }
     k / lambda - 1.0
 }
@@ -181,6 +197,12 @@ pub fn poisson_logpmf_grad(k: f64, lambda: f64) -> f64 {
 /// log p(y | mu, k) = lgamma(y+k) - lgamma(y+1) - lgamma(k)
 ///                   + k·log(k/(k+mu)) + y·log(mu/(k+mu))
 pub fn negbin_logpmf(y: f64, mu: f64, k: f64) -> f64 {
+    // gh#645's rule, applied to this family: a NaN argument is FALSE for
+    // every `<=` / `<` comparison below, so without this it walks past the
+    // domain guard into lgamma/ln and returns NaN. A NaN poisons every
+    // downstream sum; the -inf floor kills one particle. Checked FIRST
+    // because a zero has its own meaning in the guards that follow.
+    if y.is_nan() || mu.is_nan() || k.is_nan() { return f64::NEG_INFINITY; }
     if mu <= 0.0 {
         return if y.round() == 0.0 { 0.0 } else { f64::NEG_INFINITY };
     }
@@ -213,6 +235,13 @@ fn log_add_exp(la: f64, lb: f64) -> f64 {
 /// excursion (e.g. an MH proposal stepping slightly out of range before the
 /// chain concentrates) cannot produce a NaN log-probability.
 pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
+    // The mixture cannot inherit the base's rejection: at `y = 0` it computes
+    // `log_add_exp(ln pi, ln(1-pi) + base)`, and a `-inf` base leaves the
+    // finite `ln pi` — a plausible score for an invalid parameter. So the
+    // domain check belongs HERE as well as in the base, not only in it.
+    // (`pi.clamp` below does NOT screen a NaN: `f64::clamp` returns NaN for
+    // NaN. The `pi > 0.0` / `pi < 1.0` comparisons below are what reject it.)
+    if y.is_nan() || mu.is_nan() || k.is_nan() { return f64::NEG_INFINITY; }
     let pi = pi.clamp(0.0, 1.0);
     let base = negbin_logpmf(y, mu, k); // log f_NB(y)
     if y.round() == 0.0 {
@@ -259,6 +288,10 @@ pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
 /// `tests/zinb_oracle.rs`; regenerate the fixture with
 /// `scripts/gen_zinb_gradient_fixture.R`.
 pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64) {
+    // Matches the value sibling's rejection, so the pair cannot disagree: a
+    // constant -inf floor has a zero gradient in every coordinate, including
+    // d/d(pi), which the `mu <= 0.0` guard below leaves nonzero for a NaN.
+    if y.is_nan() || mu.is_nan() || k.is_nan() { return (0.0, 0.0, 0.0); }
     // Cap on the log of the `d/d(pi)` ratio `(1 - f0)/S`. When both `pi` and
     // `f0` underflow in linear space, `log S` stays finite but the ratio's
     // true value exceeds `f64::MAX`; forming it uncapped yields `+inf`, and
@@ -328,6 +361,8 @@ pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64
 /// not a score at all, and one that compares false against every threshold
 /// downstream instead of being rejected (gh#645).
 pub fn normal_logpdf(y: f64, mu: f64, sigma: f64) -> f64 {
+    // gh#645 guarded the SCALE. A NaN location is the same defect.
+    if y.is_nan() || mu.is_nan() { return f64::NEG_INFINITY; }
     if !(sigma > 0.0) { return f64::NEG_INFINITY; }
     -0.5 * ((y - mu) / sigma).powi(2) - sigma.ln() - 0.5 * (2.0 * PI).ln()
 }
@@ -385,6 +420,11 @@ pub fn discretized_normal_logpmf(y: f64, mean: f64, variance: f64) -> f64 {
 /// `sd = sigma_rel · projected` form (`ocaml/golden/surveillance_
 /// likelihoods.camdl`) is exactly zero at zero projected incidence.
 pub fn discretized_normal_logpmf_tol(y: f64, mean: f64, variance: f64, tol: f64) -> f64 {
+    // A NaN mean is LAUNDERED by the `p.max(tol)` floor below — `f64::max`
+    // returns the non-NaN operand, so an invalid mean scores a finite
+    // `ln(tol)` rather than rejecting. That is worse than a NaN: it is a
+    // plausible number. Reject here, before the floor can see it.
+    if y.is_nan() || mean.is_nan() { return f64::NEG_INFINITY; }
     if !variance.is_finite() || variance <= 0.0 {
         return f64::NEG_INFINITY;
     }
@@ -448,6 +488,11 @@ pub fn discretized_normal_logpmf_tol(y: f64, mean: f64, variance: f64, tol: f64)
 ///
 /// Used by PGAS for transition density evaluation.
 pub fn binom_logpmf(k: u64, n: u64, p: f64) -> f64 {
+    // gh#645's rule: a NaN `p` is FALSE for the `<=` / `>=` comparisons
+    // below, so without this it walks past them into ln and returns NaN.
+    // Checked FIRST because `p == 0.0` and `p == 1.0` have their own
+    // meanings in the guards that follow. (`k > n` is u64 and unaffected.)
+    if p.is_nan() { return f64::NEG_INFINITY; }
     if k > n { return f64::NEG_INFINITY; }
     if p <= 0.0 { return if k == 0 { 0.0 } else { f64::NEG_INFINITY }; }
     if p >= 1.0 { return if k == n { 0.0 } else { f64::NEG_INFINITY }; }
@@ -470,6 +515,12 @@ pub fn binom_logpmf(k: u64, n: u64, p: f64) -> f64 {
 /// a `log::warn!` + `-inf` stub that made every BetaBinomial
 /// observation corrupt the fit.
 pub fn beta_binomial_logpmf(k: u64, n: u64, alpha: f64, beta: f64) -> f64 {
+    // gh#645's rule, applied to this family: a NaN argument is FALSE for
+    // every `<=` / `<` comparison below, so without this it walks past the
+    // domain guard into lgamma/ln and returns NaN. A NaN poisons every
+    // downstream sum; the -inf floor kills one particle. (No zero branch
+    // here, unlike negbin/poisson/binomial — a zero shape is simply -inf.)
+    if alpha.is_nan() || beta.is_nan() { return f64::NEG_INFINITY; }
     if k > n { return f64::NEG_INFINITY; }
     if alpha <= 0.0 || beta <= 0.0 { return f64::NEG_INFINITY; }
     let lbeta = |a: f64, b: f64| lgamma(a) + lgamma(b) - lgamma(a + b);
@@ -489,6 +540,12 @@ pub fn beta_binomial_logpmf(k: u64, n: u64, alpha: f64, beta: f64) -> f64 {
 /// (not a `k`-of-`n` count — that is [`beta_binomial_logpmf`]). Returns
 /// `NEG_INFINITY` outside the open unit interval or for a non-positive shape.
 pub fn beta_logpdf(x: f64, mean: f64, concentration: f64) -> f64 {
+    // gh#645's rule, applied to this family: a NaN argument is FALSE for
+    // every `<=` / `<` comparison below, so without this it walks past the
+    // domain guard into lgamma/ln and returns NaN. A NaN poisons every
+    // downstream sum; the -inf floor kills one particle. (No zero branch
+    // here — a zero shape is simply -inf.)
+    if mean.is_nan() || concentration.is_nan() { return f64::NEG_INFINITY; }
     if !(x > 0.0 && x < 1.0) {
         return f64::NEG_INFINITY;
     }
@@ -516,7 +573,8 @@ pub fn beta_logpdf(x: f64, mean: f64, concentration: f64) -> f64 {
 pub fn beta_logpdf_grad(x: f64, mean: f64, concentration: f64) -> (f64, f64) {
     let a = mean * concentration;
     let b = (1.0 - mean) * concentration;
-    if !(x > 0.0 && x < 1.0) || a <= 0.0 || b <= 0.0 {
+    if !(x > 0.0 && x < 1.0) || !(a > 0.0) || !(b > 0.0) {
+        // `!(a > 0.0)` rather than `a <= 0.0` so a NaN shape is caught.
         return (0.0, 0.0);
     }
     let lx = x.ln();
@@ -533,6 +591,12 @@ pub fn beta_logpdf_grad(x: f64, mean: f64, concentration: f64) -> (f64, f64) {
 ///
 /// log p(y | lambda) = y·log(lambda) - lambda - lgamma(y+1)
 pub fn poisson_logpmf(y: f64, lambda: f64) -> f64 {
+    // gh#645's rule, applied to this family: a NaN argument is FALSE for
+    // every `<=` / `<` comparison below, so without this it walks past the
+    // domain guard into lgamma/ln and returns NaN. A NaN poisons every
+    // downstream sum; the -inf floor kills one particle. Checked FIRST
+    // because a zero has its own meaning in the guards that follow.
+    if y.is_nan() || lambda.is_nan() { return f64::NEG_INFINITY; }
     if lambda <= 0.0 {
         return if y.round() == 0.0 { 0.0 } else { f64::NEG_INFINITY };
     }
@@ -1099,5 +1163,79 @@ mod tests {
         assert_eq!(beta_binomial_logpmf_grad(5.0, 10.0, 0.0, 3.0), (0.0, 0.0)); // α ≤ 0
         assert_eq!(beta_binomial_logpmf_grad(5.0, 10.0, 2.0, -1.0), (0.0, 0.0)); // β ≤ 0
         assert_eq!(beta_binomial_logpmf_grad(11.0, 10.0, 2.0, 3.0), (0.0, 0.0)); // k > n
+    }
+}
+
+#[cfg(test)]
+mod nan_parameter_guards {
+    use super::*;
+
+    /// A NaN likelihood parameter must score `-inf`, never `NaN`.
+    ///
+    /// gh#645 established the rule and fixed it for `normal`: a domain guard
+    /// written `x <= 0.0` is FALSE for a NaN, so a NaN argument walks past it
+    /// into `ln`/`lgamma` and the log-likelihood comes back NaN. A NaN
+    /// propagates through `log_sum_exp` and poisons the whole filter, where
+    /// `-inf` merely kills the particle that produced it.
+    ///
+    /// The fix landed for `normal` only. This pins the rest of the family.
+    /// Reachable from ordinary models: an observation mean written
+    /// `k * projected / denom` is NaN wherever `denom` is 0, which surveillance
+    /// data carries whenever no tests were run that day.
+    #[test]
+    fn a_nan_parameter_scores_neg_infinity_not_nan() {
+        let nan = f64::NAN;
+        let cases: Vec<(&str, f64)> = vec![
+            ("negbin_logpmf(mean = NaN)",        negbin_logpmf(3.0, nan, 2.0)),
+            ("negbin_logpmf(r = NaN)",           negbin_logpmf(3.0, 5.0, nan)),
+            ("poisson_logpmf(rate = NaN)",       poisson_logpmf(3.0, nan)),
+            ("binom_logpmf(p = NaN)",            binom_logpmf(2, 10, nan)),
+            ("beta_binomial_logpmf(alpha = NaN)", beta_binomial_logpmf(2, 10, nan, 2.5)),
+            ("beta_binomial_logpmf(beta = NaN)",  beta_binomial_logpmf(2, 10, 2.5, nan)),
+            ("beta_logpdf(x = NaN)",             beta_logpdf(nan, 0.5, 10.0)),
+            ("beta_logpdf(mean = NaN)",          beta_logpdf(0.3, nan, 10.0)),
+            ("beta_logpdf(concentration = NaN)", beta_logpdf(0.3, 0.5, nan)),
+            // The mixture must not inherit a -inf base as a finite ln(pi).
+            ("zi_negbin_logpmf(mu = NaN, y = 0)", zi_negbin_logpmf(0.0, nan, 2.0, 0.3)),
+            ("zi_negbin_logpmf(k = NaN, y = 0)",  zi_negbin_logpmf(0.0, 5.0, nan, 0.3)),
+            ("zi_negbin_logpmf(mu = NaN, y > 0)", zi_negbin_logpmf(3.0, nan, 2.0, 0.3)),
+            // gh#645 guarded the scale; the location was left open.
+            ("normal_logpdf(mu = NaN)",           normal_logpdf(3.0, nan, 1.0)),
+            // `p.max(tol)` launders a NaN mean into a finite ln(tol).
+            ("discretized_normal_logpmf(mu=NaN)", discretized_normal_logpmf(5.0, nan, 4.0)),
+            ("poisson_logpmf_grad(rate = NaN)",   poisson_logpmf_grad(3.0, nan)),
+        ];
+        let grads: Vec<(&str, (f64, f64))> = vec![
+            ("negbin_logpmf_grad(mean = NaN)",  negbin_logpmf_grad(3.0, nan, 2.0)),
+            ("negbin_logpmf_grad(r = NaN)",     negbin_logpmf_grad(3.0, 5.0, nan)),
+            ("beta_binomial_logpmf_grad(a=NaN)", beta_binomial_logpmf_grad(2.0, 10.0, nan, 2.5)),
+            ("beta_logpdf_grad(mean = NaN)",    beta_logpdf_grad(0.3, nan, 10.0)),
+            ("discretized_normal_logpmf_grad(mu=NaN)", discretized_normal_logpmf_grad(5.0, nan, 4.0, 1e-30)),
+            ("beta_binomial_logpmf_grad(k=NaN)", beta_binomial_logpmf_grad(nan, 10.0, 2.5, 2.5)),
+        ];
+        let zi_g = zi_negbin_logpmf_grad(0.0, nan, 2.0, 0.3);
+        let grads = { let mut g = grads; g.push(("zi_negbin_logpmf_grad(mu=NaN) d_mu/d_k", (zi_g.0, zi_g.1)));
+                      g.push(("zi_negbin_logpmf_grad(mu=NaN) d_pi", (zi_g.2, 0.0))); g };
+        let mut cases = cases;
+        cases.extend(grads.iter().flat_map(|(n, (a, b))| {
+            [(*n, *a), (*n, *b)]
+        }));
+        // Assert the FLOOR, not merely "not NaN". gh#645's lesson is that the
+        // dangerous outcome is an invalid region scoring FINITELY: a NaN is
+        // loud, a plausible number is not. `beta_logpdf_grad`'s pair is the
+        // zero-gradient floor; every value kernel here is -inf.
+        let bad: Vec<String> = cases.iter()
+            .filter(|(name, v)| {
+                if name.contains("_grad") { *v != 0.0 } else { *v != f64::NEG_INFINITY }
+            })
+            .map(|(name, v)| format!("{name} = {v}"))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "a NaN parameter must score the -inf floor (gradient: 0.0). These did \
+             not — a NaN poisons every downstream sum, and a FINITE score is worse \
+             still, since it is indistinguishable from a real fit:\n  {}",
+            bad.join("\n  ")
+        );
     }
 }
