@@ -202,6 +202,14 @@ impl BtrsHat {
     /// Whether a candidate `k` is in `[0, n]`, tested in f64 BEFORE any integer
     /// cast. Shared with the sweep for the same reason as [`Self::us_of`].
     ///
+    /// **Both edges are CLOSED, and both are load-bearing.** `k = 0` and `k = n`
+    /// are ordinary binomial outcomes, so tightening either comparison
+    /// (`k > count` to `k >= count`, or `k < 0.0` to `k <= 0.0`) deletes a real
+    /// cell from the distribution while every χ² in the suite pools it away.
+    /// Under `binomial`'s `p > 0.5` reflection a lost `k = n` reappears as a
+    /// lost `k = 0`, where `P(K = 0)` reaches 3.5e-5 at `(200, 0.05)` — mass a
+    /// fit sees. `btrs_tests::the_support_is_closed_at_both_ends` pins both.
+    ///
     /// Note this is deliberately NOT NaN-tolerant — for `k = NaN` both
     /// comparisons are false and it answers "in support". The NaN case is
     /// excluded upstream by `binomial`'s `!p.is_finite()` guard, which is where
@@ -1623,6 +1631,69 @@ mod btrs_tests {
             "expected the hat to FAIL below the threshold (n·p = 7), got max V = \
              {worst:.6}. If this now passes, the domination region is wider than \
              assumed — re-derive it before touching BINV_THRESHOLD."
+        );
+    }
+
+    /// `in_support` decides the support in f64 before the integer cast, so its
+    /// two comparisons ARE the support boundary — and neither edge was pinned.
+    /// `k > count` → `k >= count` (the sampler can never return `k = n`) and
+    /// `k < 0.0` → `k <= 0.0` (never `k = 0`) both left the suite green:
+    /// `draws_stay_in_support_including_the_squeeze_return` asserts only
+    /// `d <= n`, and `chi_square` pools both end cells into their neighbours
+    /// before the statistic is formed (gh#802).
+    ///
+    /// Three assertions, in increasing distance from the comparison itself: the
+    /// predicate at each edge; the shipped proposal path at the `u` that
+    /// actually proposes each edge; and a draw-level witness at the lower edge,
+    /// which is the only one observable — `P(K = n) = p^n` is 1e-6 at the
+    /// smallest routed cell, so seeing it would take ~1e7 draws, while
+    /// `P(K = 0) = 3.5e-5` at `(200, 0.05)`.
+    #[test]
+    fn the_support_is_closed_at_both_ends() {
+        for &(n, p) in DOMAIN {
+            let h = BtrsHat::new(n, p);
+            assert!(h.in_support(0.0), "n={n} p={p}: k = 0 is a binomial outcome");
+            assert!(h.in_support(h.count), "n={n} p={p}: k = n is a binomial outcome");
+            assert!(!h.in_support(-1.0), "n={n} p={p}: k = −1 is not");
+            assert!(!h.in_support(h.count + 1.0), "n={n} p={p}: k = n+1 is not");
+        }
+
+        // The same two edges on the shipped path. `(20, 0.5)` is the smallest
+        // routed cell, so its hat reaches both ends of the support within the
+        // lattice; `v` is set to half the acceptance ratio there, i.e. squarely
+        // inside the accept region, so the only thing that can refuse the
+        // candidate is the support check.
+        let h = BtrsHat::new(20, 0.5);
+        for edge in [0.0f64, h.count] {
+            let mut probed = None;
+            for i in 0..1_000_000usize {
+                let u = -0.5 + (i as f64 + 0.5) / 1_000_000.0;
+                if h.k_of(u, BtrsHat::us_of(u)) == edge {
+                    probed = Some(u);
+                    break;
+                }
+            }
+            let u = probed.unwrap_or_else(|| panic!("the hat never proposes k = {edge}"));
+            let v = h.accept_ratio(BtrsHat::us_of(u), edge) * 0.5;
+            assert_eq!(
+                h.propose(u, v),
+                Some(edge as u64),
+                "the candidate k = {edge} at u={u} was refused — the support \
+                 check has closed an edge that is a legitimate outcome"
+            );
+        }
+
+        // And the lower edge as a draw, where it carries mass a fit sees:
+        // `P(K = 0) = 0.95^200 = 3.5e-5`, so 400k draws expect ~14.
+        let (n, p) = (200u64, 0.05);
+        let zeros = draw(BinomialAlgorithm::Btrs, n, p, 400_000, 20_260_901)
+            .iter()
+            .filter(|&&d| d == 0)
+            .count();
+        assert!(
+            zeros > 0,
+            "no draw of {n} at p={p} came back 0 in 400k tries, against ~14 \
+             expected — the sampler cannot reach the bottom of its own support"
         );
     }
 
