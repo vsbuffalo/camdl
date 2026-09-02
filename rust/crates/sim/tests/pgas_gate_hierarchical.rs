@@ -158,6 +158,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
 
     let config = PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
         n_particles: 50,
         n_sweeps: 5,
         burn_in: 2,

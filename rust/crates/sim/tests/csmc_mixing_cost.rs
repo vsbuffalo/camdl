@@ -193,6 +193,7 @@ fn report_the_mixing_cost_of_the_ancestor_sampling_gate() {
             &obs_at_substep,
             EffectFiring::default(),
             sim::rng::BinomialAlgorithm::Btpe,
+            true,
         )
         .expect("csmc_as");
         renewal_sum += d.trajectory_renewal;

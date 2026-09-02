@@ -296,6 +296,7 @@ fn mu_param() -> EstimatedParam {
 fn pgas_config() -> PGASConfig {
     PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
         n_particles: N_PARTICLES,
         n_sweeps: N_SWEEPS,
         burn_in: 0,

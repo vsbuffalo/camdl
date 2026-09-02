@@ -2468,6 +2468,7 @@ restarting mid-schedule is statistically incoherent.
 | `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                             |
 | `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                             |
 | `use_nuts`             | `true`  | `false` falls back to MH-within-Gibbs for θ\|X.                                                |
+| `ancestor_sampling`    | `true`  | `false` runs plain particle Gibbs without the ancestor-sampling move (diagnostic control).     |
 
 **`pmmh`** — `chains`, `particles`, `iterations` required.
 

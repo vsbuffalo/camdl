@@ -145,6 +145,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
 
     let config = PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
         n_particles: 100,
         n_sweeps: 100,
         burn_in: 30,
@@ -268,6 +269,7 @@ fn smoke_pgas_nuts_estimates_rho() {
 
     let config = PGASConfig {
         binomial: sim::rng::BinomialAlgorithm::Btpe,
+        ancestor_sampling: true,
         n_particles: 100,
         n_sweeps: 100,
         burn_in: 30,

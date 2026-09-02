@@ -243,6 +243,7 @@ impl Fixture {
         let priors = vec![Prior::Fixed(Density::Flat)];
         let config = PGASConfig {
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            ancestor_sampling: true,
             n_particles: N_PARTICLES,
             n_sweeps: 2,
             burn_in: 1,

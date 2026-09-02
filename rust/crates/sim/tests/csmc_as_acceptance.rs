@@ -174,6 +174,7 @@ fn tally(interval: bool, sweeps: u64) -> AsTally {
             &compiled, &params, &obs, &reference, 32, DT, &obs_model,
             SEED + seed, &obs_at_substep, EffectFiring::default(),
             sim::rng::BinomialAlgorithm::Btpe,
+            true,
         )
         .expect("csmc_as");
         t.proposed += diag.n_as_proposed;
