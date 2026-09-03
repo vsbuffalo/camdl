@@ -108,8 +108,9 @@ method**, and reading the wrong symptom sends you to the wrong fix.
   **poor R̂ and a renewal profile that is flat near zero over the early part of
   the series** — never a noisy loglik. Read the **profile**, not the aggregate
   (`path_renewal` in `pgas_summary.json`, printed at the end of every PGAS
-  stage). gh#685 will add per-chain filter ESS next to it, which is the direct
-  reading.
+  stage). The **filter ESS** block beneath it (`filter_ess`, table
+  `filter_ess.tsv`) is the direct reading: it says, per observation, how many
+  particles the resample actually drew from.
 
 **Read the profile, not `trajectory_renewal` alone.** The aggregate is a
 weighted mean over ten equal time bins, and its late bins are high in most runs:
@@ -241,6 +242,40 @@ persist at a particle count where renewal has recovered point at the model
 instead — a state the data do not constrain, held wherever the initial filter
 draw put it. The ESS here is over the saved paths (`n_trajectories`), not every
 sweep; save more paths if it is the number you need.
+
+**Filter ESS: the one number renewal and R̂ cannot see.** Renewal and the
+latent-path block read the _output_ of each sweep. The filter ESS block
+(`filter_ess` in `pgas_summary.json`, printed under the two above, per-chain
+table `filter_ess.tsv`) reads the sweep's _inside_: at every observation, the
+effective sample size $(\sum w)^2 / \sum w^2$ of the particle weights the
+resample draws from, pooled as a mean and a minimum over the retained sweeps of
+every chain. The `trace.tsv` columns `collapsed_windows` and `min_alive` count
+particles whose weight is _finite_, and a finite weight can be negligible. On a
+19,200-particle single-province Ebola fit every sweep reported `min_alive`
+between 4,357 and 19,166 — nothing collapsed, on that reading — while at one
+observation, a re-issued cumulative count that had been floored to zero, the
+filter's ESS was between 2 and 3 in every sweep. A handful of particles could
+reach a zero; every other particle scored a density near $e^{-25}$; the resample
+copied those few into every slot, and the whole path through that day was one of
+two or three draws, sweep after sweep. The renewal profile and the parameter R̂
+both read as healthy, because they were: the sampler was mixing fine over a
+likelihood that had a hole in it.
+
+The block reports the minimum, 10% quantile and median of the per-observation
+mean ESS, and lists the **starved** observations — mean ESS below 1% of the
+particle count — worst first, with their times. That threshold is deliberate:
+the bootstrap filter's own bail floor (an ESS of 2) would have passed 2.2, and
+the prequential collapse rule (a tenth of N) fires on the healthy peak of an
+epidemic, where an ESS of 4% of N is ordinary. One percent separates "small"
+from "a handful". When something is starved, go to the data row at that time
+before touching the model: a starved observation is usually a value the model
+cannot reach — a floored re-issue, a decimal-shifted count, a stream that
+changed definition — and the fix is to the data or to the observation model's
+dispersion, not to the particle count. Add particles only if a 4× re-run moves
+the mean ESS at that observation by about 4× too; if it stays at a handful, no N
+reaches it. The per-sweep minimum and where it fell are also in `trace.tsv`
+(`min_ess`, `min_ess_t`), so a single bad sweep can be told apart from a bad
+observation.
 
 **If you are running PGAS, this is your bullet — do not read past it into (b).**
 The fix for a starved CSMC is particles, and it looks nothing like the fix for
