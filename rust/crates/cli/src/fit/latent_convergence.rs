@@ -72,6 +72,9 @@ pub const LATENT_CONVERGENCE_TSV: &str = "latent_convergence.tsv";
 /// structures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChainPaths {
+    /// The chain's label as its directory and the per-chain tables carry it
+    /// (`chain_N`, 1-based).
+    pub chain: usize,
     pub n_draws: usize,
     pub n_substeps: usize,
     pub n_cols: usize,
@@ -144,13 +147,108 @@ impl ChainPaths {
             }
         }
         let times = first.path.snapshots.iter().map(|s| s.t).collect();
-        Ok(Some(ChainPaths { n_draws: draws.len(), n_substeps, n_cols, times, values }))
+        Ok(Some(ChainPaths { chain: first.chain + 1, n_draws: draws.len(), n_substeps, n_cols, times, values }))
+    }
+
+    /// Read one chain's saved paths back from its `trajectories.tsv`, with
+    /// the data column names in file order.
+    ///
+    /// The columns are whatever the header names beyond the `chain draw time
+    /// [date]` key — the file is the authority on its own layout, so no model
+    /// is needed to score it. Rows are grouped by `draw` in file order (sweep
+    /// order), and every draw must span the same substeps as the first, in the
+    /// same order; anything else is a corrupt record and is refused.
+    /// `Ok(None)` is a file with a header and no rows.
+    pub fn from_trajectories_tsv(path: &Path) -> Result<Option<(Self, Vec<String>)>, String> {
+        let txt = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
+        let header: Vec<&str> = lines
+            .next()
+            .ok_or_else(|| format!("empty trajectories file: {}", path.display()))?
+            .split('\t')
+            .collect();
+        let pos = |name: &str| {
+            header.iter().position(|h| *h == name).ok_or_else(|| {
+                format!("{}: no `{name}` column in the header", path.display())
+            })
+        };
+        let (chain_i, draw_i, time_i) = (pos("chain")?, pos("draw")?, pos("time")?);
+        let key = |h: &str| matches!(h, "chain" | "draw" | "time" | "date");
+        let data_i: Vec<usize> = (0..header.len()).filter(|&i| !key(header[i])).collect();
+        let columns: Vec<String> = data_i.iter().map(|&i| header[i].to_string()).collect();
+        let n_cols = columns.len();
+
+        // One entry per saved draw, in file order; the draw index only has to
+        // change to start a new path (the writer emits each path contiguously).
+        let mut draws: Vec<(usize, Vec<f64>, Vec<f64>)> = Vec::new();
+        // The file's `chain` column is the 0-based id the writer received;
+        // the label is the 1-based one its directory carries.
+        let mut chain: Option<usize> = None;
+        for (lineno, line) in lines.enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split('\t').collect();
+            let field = |i: usize| {
+                f.get(i).ok_or_else(|| {
+                    format!("{}: row {} has {} fields, header has {}",
+                        path.display(), lineno + 1, f.len(), header.len())
+                })
+            };
+            let num = |i: usize| -> Result<f64, String> {
+                field(i)?.parse::<f64>().map_err(|e| {
+                    format!("{}: row {} column `{}`: {e}", path.display(), lineno + 1, header[i])
+                })
+            };
+            let draw: usize = field(draw_i)?.parse().map_err(|e| {
+                format!("{}: row {} `draw`: {e}", path.display(), lineno + 1)
+            })?;
+            let t = num(time_i)?;
+            let c: usize = field(chain_i)?.parse().map_err(|e| {
+                format!("{}: row {} `chain`: {e}", path.display(), lineno + 1)
+            })?;
+            match chain {
+                None => chain = Some(c + 1),
+                Some(prev) if prev != c + 1 => {
+                    return Err(format!(
+                        "{}: row {} is chain {c}, the file's first row chain {}",
+                        path.display(), lineno + 1, prev - 1
+                    ));
+                }
+                Some(_) => {}
+            }
+            if draws.last().map_or(true, |(d, _, _)| *d != draw) {
+                draws.push((draw, Vec::new(), Vec::new()));
+            }
+            let (_, times, values) = draws.last_mut().expect("just pushed");
+            times.push(t);
+            for &i in &data_i {
+                values.push(num(i)?);
+            }
+        }
+        let Some((_, times, _)) = draws.first() else { return Ok(None) };
+        let n_substeps = times.len();
+        let times = times.clone();
+        let mut values = Vec::with_capacity(draws.len() * n_substeps * n_cols);
+        for (draw, t, v) in &draws {
+            if *t != times {
+                return Err(format!(
+                    "{}: draw {draw} spans {} substeps, the first draw {}; the paths do not share one substep grid",
+                    path.display(), t.len(), n_substeps
+                ));
+            }
+            values.extend_from_slice(v);
+        }
+        let chain = chain.expect("a row was read");
+        Ok(Some((ChainPaths { chain, n_draws: draws.len(), n_substeps, n_cols, times, values }, columns)))
     }
 
     /// A dense block from already-flattened values; `values` is
     /// `[draw][substep][column]`.
     #[cfg(test)]
     pub fn from_values(
+        chain: usize,
         n_draws: usize,
         n_substeps: usize,
         n_cols: usize,
@@ -159,7 +257,7 @@ impl ChainPaths {
     ) -> Self {
         assert_eq!(values.len(), n_draws * n_substeps * n_cols, "dense block shape");
         assert_eq!(times.len(), n_substeps, "one time per substep");
-        ChainPaths { n_draws, n_substeps, n_cols, times, values }
+        ChainPaths { chain, n_draws, n_substeps, n_cols, times, values }
     }
 
     #[inline]
@@ -233,6 +331,9 @@ pub struct LatentBin {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LatentConvergence {
     pub n_chains: usize,
+    /// Which chains, by their `chain_N` label — a refused start has no saved
+    /// path and is not among them.
+    pub chain_ids: Vec<usize>,
     /// Draws used per chain — the smallest saved count across chains; each
     /// chain keeps its first `n_draws` (the convention
     /// `super::row_convergence::partition_by_chain` uses, for the same reason:
@@ -368,6 +469,7 @@ pub fn latent_convergence(
             });
         }
     }
+    let chain_ids: Vec<usize> = chains.iter().map(|c| c.chain).collect();
     let chain_n_saved: Vec<usize> = chains.iter().map(|c| c.n_draws).collect();
     let n_draws = chain_n_saved.iter().copied().min().unwrap_or(0);
     if n_draws < 4 {
@@ -412,6 +514,7 @@ pub fn latent_convergence(
     let agree_from = agree_from(&cells, n_substeps);
     Ok(LatentConvergence {
         n_chains,
+        chain_ids,
         n_draws,
         chain_n_saved,
         n_substeps,
@@ -420,6 +523,43 @@ pub fn latent_convergence(
         bins,
         agree_from,
     })
+}
+
+/// Every chain's saved paths in a finished PGAS stage, read back from
+/// `chain_N/trajectories.tsv` in chain order, with the shared column names —
+/// the input [`latent_convergence`] takes, so a stage that ran before the
+/// block existed (or whose report scrolled by) can be scored from what it
+/// wrote. Chains without a `trajectories.tsv` (a refused start, or a stage
+/// that saved no paths) are skipped, as the stage skips them; `Ok(None)` is a
+/// stage with no such file at all. Chains whose headers disagree are refused.
+pub fn read_stage_paths(stage_dir: &Path) -> Result<Option<(Vec<ChainPaths>, Vec<String>)>, String> {
+    let mut files: Vec<(usize, std::path::PathBuf)> = std::fs::read_dir(stage_dir)
+        .map_err(|e| format!("cannot read {}: {e}", stage_dir.display()))?
+        .flatten()
+        .filter_map(|e| {
+            let n: usize = e.file_name().to_str()?.strip_prefix("chain_")?.parse().ok()?;
+            let p = e.path().join("trajectories.tsv");
+            p.is_file().then_some((n, p))
+        })
+        .collect();
+    files.sort_by_key(|(n, _)| *n);
+    let mut chains = Vec::new();
+    let mut columns: Option<Vec<String>> = None;
+    for (n, p) in files {
+        let Some((block, cols)) = ChainPaths::from_trajectories_tsv(&p)? else { continue };
+        match &columns {
+            None => columns = Some(cols),
+            Some(prev) if *prev != cols => {
+                return Err(format!(
+                    "chain {n}: {} names columns {:?}, chain {}'s names {:?}",
+                    p.display(), cols, chains.len(), prev
+                ));
+            }
+            Some(_) => {}
+        }
+        chains.push(block);
+    }
+    Ok(columns.map(|c| (chains, c)))
 }
 
 fn reduce_bins(cells: &[LatentCell], n_substeps: usize, n_chains: usize) -> Vec<LatentBin> {
@@ -501,7 +641,7 @@ impl LatentConvergence {
         let frac = |v: f64| if v.is_finite() { Some(v) } else { None };
         let labels: Vec<String> = (0..RENEWAL_BINS).map(|b| format!("    b{b}")).collect();
         let mut s = format!(
-            "\nlatent-path convergence (gh#822; {} chain(s) × {} saved path(s), {} substeps × {} columns):\n\
+            "\nlatent-path convergence (gh#822; {} chain(s) [{}] × {} saved path(s), {} substeps × {} columns):\n\
              \x20 bin              {}\n\
              \x20 frozen-disagree  {}\n\
              \x20 constant         {}\n\
@@ -509,6 +649,7 @@ impl LatentConvergence {
              \x20 R̂ max (mixed)    {}\n\
              \x20 ESS min (mixed)  {}\n",
             self.n_chains,
+            self.chain_ids.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", "),
             self.n_draws,
             self.n_substeps,
             self.columns.len(),
@@ -578,6 +719,7 @@ impl LatentConvergence {
         let frac = |x: f64| if x.is_finite() { serde_json::json!(x) } else { serde_json::Value::Null };
         serde_json::json!({
             "n_chains": self.n_chains,
+            "chain_ids": self.chain_ids,
             "n_draws": self.n_draws,
             "chain_n_saved": self.chain_n_saved,
             "n_substeps": self.n_substeps,
@@ -667,7 +809,7 @@ mod tests {
                     }
                 }
                 let times = (0..n_substeps).map(|s| s as f64).collect();
-                ChainPaths::from_values(n_draws, n_substeps, n_cols, times, values)
+                ChainPaths::from_values(c + 1, n_draws, n_substeps, n_cols, times, values)
             })
             .collect()
     }
@@ -925,5 +1067,99 @@ mod tests {
         let report = lc.report();
         assert!(report.contains("chains agree from substep 2 of 5"));
         assert!(report.contains("widest frozen disagreement: `c0` at substep"));
+    }
+
+    /// A `trajectories.tsv` as the writer lays it out: comment line, key
+    /// columns (with `date`), then the data columns; each draw contiguous.
+    fn traj_tsv(chain: usize, draws: &[(usize, &[(f64, [f64; 2])])]) -> String {
+        let mut s = String::from("# camdl-trajectories v1\tmodel=x\tmethod=pgas\tgranularity=substep\n");
+        s.push_str("chain\tdraw\ttime\tdate\tS\tflow_a\n");
+        for (d, rows) in draws {
+            for (t, v) in rows.iter() {
+                s.push_str(&format!("{chain}\t{d}\t{t}\t2026-01-01\t{}\t{}\n", v[0], v[1]));
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn trajectories_tsv_reads_back_as_the_dense_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("trajectories.tsv");
+        std::fs::write(&p, traj_tsv(3, &[
+            (10, &[(0.0, [9.0, 0.0]), (0.5, [8.0, 1.0]), (1.0, [6.0, 2.0])]),
+            (20, &[(0.0, [9.0, 0.0]), (0.5, [7.0, 2.0]), (1.0, [7.0, 0.0])]),
+        ])).unwrap();
+        let (block, cols) = ChainPaths::from_trajectories_tsv(&p).unwrap().unwrap();
+        assert_eq!(cols, vec!["S".to_string(), "flow_a".to_string()]);
+        assert_eq!(block.chain, 4, "the file's 0-based chain id, labelled as its `chain_N` directory");
+        assert_eq!((block.n_draws, block.n_substeps, block.n_cols), (2, 3, 2));
+        assert_eq!(block.times, vec![0.0, 0.5, 1.0]);
+        assert_eq!(block.value(0, 2, 0), 6.0);
+        assert_eq!(block.value(1, 1, 1), 2.0);
+        assert_eq!(block.value(1, 2, 0), 7.0);
+
+        // Header only: a chain that saved no path.
+        std::fs::write(&p, "chain\tdraw\ttime\tS\n").unwrap();
+        assert!(ChainPaths::from_trajectories_tsv(&p).unwrap().is_none());
+
+        // A draw on a different substep grid is refused, not padded.
+        std::fs::write(&p, traj_tsv(1, &[
+            (10, &[(0.0, [1.0, 0.0]), (1.0, [1.0, 0.0])]),
+            (20, &[(0.0, [1.0, 0.0])]),
+        ])).unwrap();
+        let e = ChainPaths::from_trajectories_tsv(&p).unwrap_err();
+        assert!(e.contains("draw 20 spans 1 substeps"), "{e}");
+
+        // No `draw` column: not a trajectories file.
+        std::fs::write(&p, "chain\ttime\tS\n1\t0\t1\n").unwrap();
+        assert!(ChainPaths::from_trajectories_tsv(&p).unwrap_err().contains("`draw`"));
+
+        // Two chains in one file is not one chain's file.
+        let mut two = traj_tsv(0, &[(10, &[(0.0, [1.0, 0.0])])]);
+        two.push_str("1\t10\t0\t2026-01-01\t1\t0\n");
+        std::fs::write(&p, two).unwrap();
+        assert!(ChainPaths::from_trajectories_tsv(&p).unwrap_err().contains("is chain 1"));
+    }
+
+    #[test]
+    fn stage_paths_come_in_chain_order_and_skip_chains_without_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows: &[(f64, [f64; 2])] = &[(0.0, [1.0, 0.0]), (1.0, [2.0, 1.0])];
+        // chain_10 must sort after chain_2; chain_3 refused its start and has
+        // no trajectories.tsv; chain_4 wrote a header only.
+        for (n, s) in [(10usize, 10.0), (2, 2.0), (1, 1.0)] {
+            let d = dir.path().join(format!("chain_{n}"));
+            std::fs::create_dir(&d).unwrap();
+            let rows: Vec<(f64, [f64; 2])> = rows.iter().map(|(t, v)| (*t, [v[0] * s, v[1]])).collect();
+            // The writer puts the 0-based id in the file under a 1-based dir.
+            std::fs::write(d.join("trajectories.tsv"),
+                traj_tsv(n - 1, &[(5, &rows), (6, &rows), (7, &rows), (8, &rows)])).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("chain_3")).unwrap();
+        std::fs::write(dir.path().join("chain_3/trace.tsv"), "sweep\tloglik\n").unwrap();
+        std::fs::create_dir(dir.path().join("chain_4")).unwrap();
+        std::fs::write(dir.path().join("chain_4/trajectories.tsv"), "chain\tdraw\ttime\tS\tflow_a\n").unwrap();
+
+        let (chains, cols) = read_stage_paths(dir.path()).unwrap().unwrap();
+        assert_eq!(cols, vec!["S".to_string(), "flow_a".to_string()]);
+        let first_s: Vec<f64> = chains.iter().map(|c| c.value(0, 1, 0)).collect();
+        assert_eq!(first_s, vec![2.0, 4.0, 20.0], "chain_1, chain_2, chain_10");
+        let labels: Vec<usize> = chains.iter().map(|c| c.chain).collect();
+        assert_eq!(labels, vec![1, 2, 10]);
+        let lc = latent_convergence(&chains, &cols).unwrap();
+        assert_eq!(lc.chain_ids, vec![1, 2, 10]);
+        assert!(lc.report().contains("3 chain(s) [1, 2, 10]"), "{}", lc.report());
+        assert_eq!(lc.summary_block()["chain_ids"], serde_json::json!([1, 2, 10]));
+
+        // A chain whose header names other columns is refused.
+        std::fs::write(dir.path().join("chain_4/trajectories.tsv"),
+            "chain\tdraw\ttime\tS\tflow_b\n4\t5\t0\t1\t0\n").unwrap();
+        assert!(read_stage_paths(dir.path()).unwrap_err().contains("chain 4"));
+
+        // No chain wrote a path at all.
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::create_dir(empty.path().join("chain_1")).unwrap();
+        assert!(read_stage_paths(empty.path()).unwrap().is_none());
     }
 }

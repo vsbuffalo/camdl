@@ -373,4 +373,25 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
     let latent_at = stderr.find("latent-path convergence").expect("latent profile printed");
     assert!(latent_at > renewal_at, "the two profiles are read together: latent under renewal");
     assert!(stderr.contains("frozen-disagree"), "stderr was:\n{stderr}");
+
+    // ── `fit summary` recomputes the same block from the paths on disk ────
+    // The six profile lines (title through `ESS min`), compared trimmed: the
+    // summary indents them into its own section.
+    fn profile_lines(text: &str) -> Vec<String> {
+        text.lines()
+            .skip_while(|l| !l.contains("latent-path convergence ("))
+            .take(6)
+            .map(|l| l.trim().to_string())
+            .collect()
+    }
+    let s = Command::new(&bin)
+        .arg("fit").arg("summary").arg(&fit)
+        .output().expect("spawn camdl");
+    assert!(s.status.success(),
+        "fit summary failed: {}", String::from_utf8_lossy(&s.stderr));
+    let summary = String::from_utf8_lossy(&s.stdout);
+    let at_stage_end = profile_lines(&stderr);
+    let in_summary = profile_lines(&summary);
+    assert_eq!(at_stage_end.len(), 6, "stage-end profile:\n{stderr}");
+    assert_eq!(in_summary, at_stage_end, "fit summary output:\n{summary}");
 }
