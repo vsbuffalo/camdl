@@ -166,6 +166,79 @@ is 0.402 too. That run is caught by the aggregate rule (`trajectory_renewal`
 below 0.10) and not by the gradient. **The two readings cover different cases;
 read both.**
 
+**Renewal says whether the path moved; it cannot say whether the chains agree
+about the states that did not move.** A frozen prefix is benign if the data pin
+those states — every chain would hold the same values, and the sampler's failure
+to revisit them costs nothing. It is not benign if each chain is holding one
+draw from a wide posterior, because then θ is being conditioned on a prefix the
+sampler never revisits and the parameter R̂ is measuring agreement between chains
+that were never in the same place. The **latent-path convergence** block
+(printed directly under the renewal profile when a stage has at least two chains
+and four saved paths per chain; `latent_convergence` in `pgas_summary.json`,
+per-cell table `latent_convergence.tsv`) answers that question. It runs every
+(state, substep) cell of the saved paths — compartments, `flow_*`, `inc_*` —
+through the same rank-normalised R̂ the parameter table uses, and classifies
+each: **constant** (the pooled draws never moved: structurally zero, or pinned),
+**frozen-disagree** (every chain internally constant _and_ the chains differ:
+one draw per chain, R̂ undefined), or **mixed** (R̂ and ESS computed). The rows
+are the same tenths as the renewal profile, so they read together. Measured on a
+three-province Ebola model (42 compartments, 12 observation streams, 19,200
+particles, 4 chains, 100 sweeps, all 100 paths saved):
+
+```text
+path renewal:
+  bin         b0    b1    b2    b3    b4    b5    b6    b7    b8    b9
+  renewal  0.003 0.003 0.005 0.007 0.007 0.012 0.020 0.036 0.262 0.926
+
+latent-path convergence (4 chains × 100 saved paths, 106 substeps × 99 columns):
+  bin                  b0     b1     b2     b3     b4     b5     b6     b7     b8     b9
+  frozen-disagree   0.191  0.163  0.147  0.064  0.034  0.014  0.005  0.000  0.000  0.000
+  constant          0.176  0.113  0.088  0.082  0.071  0.060  0.050  0.034  0.015  0.003
+  chains frozen     0.808  0.796  0.790  0.620  0.570  0.430  0.239  0.050  0.018  0.011
+  R̂ max (mixed)    22.782 22.782 22.782 23.895 26.372 25.828  9.983  6.346  3.569  2.658
+  ESS min (mixed)       4      4      4      4      4      4      4      5      5      5
+  chains agree from substep 73 of 106: before it some state is one draw per chain
+```
+
+Read the two blocks as one. Renewal 0.003 in `b0` says the first tenth of the
+path changed in a third of a percent of sweeps; the latent rows say what that
+cost. A fifth of the early cells are one draw per chain outright, and the
+`chains frozen` row says the "mixed" majority is barely better: over the
+non-constant cells of the first tenth, 81% of chains never moved. That row
+exists because a cell counts as mixed the moment one chain moves once, and
+`frac_mixed` alone would read 0.63 there. R̂ up to 23 with an ESS of 4 on 400
+saved paths is four chains at four different values. The table has the concrete
+row: the exposed count in one province at day 5 is held at 198, 153 and 152 in
+three chains for the whole run (`n_frozen_chains` = 3), and the fourth chain
+moved exactly once, at sweep 7, from 187 to 110; between-chain SD 34 against
+within-chain SD 10. That is the row to look at before reading the parameter R̂ of
+anything whose likelihood lives in the early path. `agree_from` is the horizon:
+after substep 73 no state is one draw per chain, so the chains' paths mix over
+the last third of the series and whatever the tail identifies — the
+observation-model parameters, here — is being estimated from a posterior the
+chains actually share.
+
+One signature is worth knowing. The same R̂ (22.782) recurs at dozens of cells
+over the first thirty substeps. That is not a coincidence: rank-normalised R̂ is
+computed from the ranks of the draws, not their values, and when the early path
+renews at all it renews as a block — an accepted ancestor splice shifts every
+later state of that sweep's path at once — so every state in the prefix shares
+one pattern of "which chain changed, at which sweep" and hence one R̂. Here it is
+the single sweep-7 splice in one chain, visible at every one of those cells. A
+run of identical R̂ values along the series is the whole-prefix renewal event
+seen from the state side.
+
+What it changes: the numbers are reported without a verdict, because the
+threshold question for latent R̂ is open, but the reading is the same as for
+parameters — an R̂ far above 1 with an ESS near the chain count is not a
+posterior. A frozen-disagree fraction that falls to zero only late, with the
+renewal profile flat over the same bins, is the particle-limited case above:
+raise the particle count and re-read both blocks. Frozen-disagree cells that
+persist at a particle count where renewal has recovered point at the model
+instead — a state the data do not constrain, held wherever the initial filter
+draw put it. The ESS here is over the saved paths (`n_trajectories`), not every
+sweep; save more paths if it is the number you need.
+
 **If you are running PGAS, this is your bullet — do not read past it into (b).**
 The fix for a starved CSMC is particles, and it looks nothing like the fix for
 geometry.
