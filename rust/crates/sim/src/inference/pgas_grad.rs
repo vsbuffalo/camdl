@@ -189,6 +189,24 @@ pub fn log_transition_density_grad(
         // (n-k)/(1-p), which we keep — the clamp at least avoids the
         // worst cancellation).
         let (p_total, _q) = super::numerics::prob_q_from_rate_dt_clamped(total_rate, dt, BINOM_PROB_EPS);
+        // gh#811: the value and the gradient must agree about the rejected
+        // region. `binom_logpmf` scores a non-finite `p` as -inf (gh#810); the
+        // hand-rolled `dbinom_dp` below would evaluate `k/NaN - (n-k)/(1-NaN)`
+        // to NaN. That pair is the gh#197/gh#200 divergence class: the -inf
+        // kills one particle, the NaN poisons the NUTS momentum update.
+        //
+        // Reachable, though not by the route first suspected. Parameters are
+        // guarded at `propensity.rs:532` and computed propensities at `:651`,
+        // so a NaN cannot arrive through the rate expression. It arrives
+        // through the GAMMA multipliers, which `:160` above multiplies into the
+        // rate with no finiteness check and which are REPLAYED from a stored
+        // trajectory (`--resume`, `--init-state`) rather than freshly drawn.
+        // Only `overdispersed()` transitions carry them.
+        //
+        // Same floor the branch below already returns for an impossible flow.
+        if !p_total.is_finite() {
+            return Ok((f64::NEG_INFINITY, vec![0.0; d]));
+        }
         let n_exit: u64 = probs.iter().map(|&(tr_idx, _, _)| flows[tr_idx]).sum();
         log_p += binom_logpmf(n_exit, n_src as u64, p_total);
 
@@ -219,6 +237,10 @@ pub fn log_transition_density_grad(
                 // Last category: no density contribution (remainder)
             } else if remaining > 0 && rate_remaining > 0.0 {
                 let p_split = (eff_rate / rate_remaining).clamp(BINOM_PROB_EPS, 1.0 - BINOM_PROB_EPS);
+                // gh#811, the split-draw sibling: same divergence, same floor.
+                if !p_split.is_finite() {
+                    return Ok((f64::NEG_INFINITY, vec![0.0; d]));
+                }
                 let flow_k = flows[tr_idx];
                 log_p += binom_logpmf(flow_k, remaining, p_split);
 
