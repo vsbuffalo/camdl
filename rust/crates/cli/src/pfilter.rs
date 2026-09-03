@@ -848,6 +848,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         eprintln!(
             "prequential trace written: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
             trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
+        eprint!("{}", crate::prequential_out::surprise_table(&trace));
     }
 
     // Save filtering marginals (--save-filtering PATH): per-step
