@@ -3440,6 +3440,36 @@ than buried — a real run needs thousands of sweeps. The `pfilter` stage writes
 `prequential.tsv` and `prequential.json`; the JSON is what `camdl compare` reads
 to score fits against each other.
 
+Beneath the `prequential:` line, whenever at least one observation was scored,
+the stage prints the **surprise table**: the five worst-scored observations of
+the trace, worst first (`camdl pfilter --save-prequential` prints the same table
+after its own `prequential trace written:` line). The elpd is a sum, and a sum
+hides which terms carry it; the table is the answer to "which observations did
+the model find hardest?" without opening `prequential.tsv`. From a five-patch
+spatial model with two streams bound:
+
+```
+worst-scored observations (5 of 53 scored; together 12.3% of elpd -562.3):
+         t stream             y_obs      pred q05–q95      log_score   share   pit      ess
+       126 cases_p2            1088        [261, 844]   -15.3 (-9.9)    2.7%  0.98    106.1
+       287 cases_p2             600        [182, 532]   -13.8 (-8.1)    2.5%  0.96    143.7
+       119 cases_p2             411       [426, 1322]   -13.5 (-7.4)    2.4%  0.11    168.8
+       238 cases_p2             258         [86, 232]   -13.3 (-7.0)    2.4%  0.97    117.7
+       294 cases_p1             579        [178, 568]   -13.2 (-7.5)    2.3%  0.88    156.6
+```
+
+Rows are ranked by the step's joint log score; `share` is that score as a
+fraction of the elpd, and the header gives the five rows' combined share. On a
+multi-stream model the joint `y_obs` would be a cross-stream sum, so each row
+names the step's worst stream and shows _that_ stream's observed value, 5–95%
+predictive band and (in parentheses) its own log score — the row a reader can
+look up in the data. `ess` is the filter's effective sample size at the step
+(see `filter_ess` under PGAS). Here the shares are flat at 2–3%, which is the
+healthy reading: no single observation dominates. A row carrying a tenth of the
+elpd by itself, with `pit` at 0 or 1 and `ess` in the single digits, is one
+observation the filter could not explain — check the data row at that `t` before
+anything else.
+
 Once a Bayesian stage exists, `fit predict` replays the posterior forward and
 writes the predicted-vs-observed pair:
 

@@ -515,6 +515,25 @@ of held-out points?). This is exactly what separated the overconfident
 shared-`k` fit (U-shaped PIT) from the well-calibrated hierarchical-`k` fit in
 §3(c).
 
+**Then read the surprise table before trusting any of the aggregates.** The
+elpd, the mean CRPS and the PIT coverage are all sums or averages over
+observations, and an average hides which terms carry it. Wherever camdl prints
+the elpd — the `pfilter` stage of `fit run`, `camdl pfilter --save-prequential`
+— it prints beneath it the five worst-scored observations of the trace, worst
+first, each with its share of the elpd, its PIT, and the filter's ESS at that
+step. The Ebola case that earned this table: an elpd of a few hundred nats over
+103 days read as ordinary, and so did the CRPS and the coverage; one day — a
+cumulative count re-issued and floored to zero — carried a log score of −26.6 on
+its own, a PIT of 0 and a filter ESS of 3, and stood only as one row of
+`prequential.tsv` that nobody opened. The reading is by shape. Shares that are
+flat at a few percent each say no observation dominates and the aggregates mean
+what they say. One row an order of magnitude below the rest, with `pit` pinned
+at 0 or 1 and `ess` in the single digits, is one observation the filter could
+not explain, and the first move is the data row at that `t`, not the model —
+that is also the observation `filter_ess` (§3) will have flagged if you ran
+PGAS. Several bad rows sharing a stream point at that stream's observation
+model; several sharing a window point at the transition model over that window.
+
 ## 6. Read the MLE for "compensation" signatures
 
 A point estimate can be a symptom rather than an answer. Watch for:
