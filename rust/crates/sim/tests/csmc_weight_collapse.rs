@@ -259,13 +259,63 @@ fn a_collapsed_sweep_and_a_legitimate_reference_kept_sweep_are_distinguishable()
     assert_eq!(live_wc.first_substep, None, "no window collapsed");
     assert_eq!(live_wc.min_alive, 1, "exactly the reference was alive at the observation");
     assert!(!live_wc.final_draw_fell_back, "the final draw selected the reference, not fell back");
+    // gh#685: one finite weight is an ESS of exactly 1, and the profile
+    // locates it at the observation that produced it — index 0 of the
+    // observation slice the sweep was given.
+    assert_eq!(live_wc.ess_by_obs.len(), live.obs.len(), "one slot per observation");
+    let (live_at, live_ess) = live_wc.min_ess().expect("one observation was scored");
+    assert!((live_ess - 1.0).abs() < 1e-12, "one live particle is an ESS of 1, got {live_ess}");
+    assert_eq!(live_at, 0);
 
     // The collapsed arm: nothing was alive, and the sweep says so.
     let dead_wc = &dead_diag.weight_collapse;
     assert_eq!(dead_wc.n_windows, 1, "the one observation window collapsed");
     assert_eq!(dead_wc.first_substep, Some(0), "and it was substep 0");
     assert_eq!(dead_wc.min_alive, 0, "no particle carried a finite weight");
+    assert_eq!(dead_wc.min_ess(), Some((0, 0.0)), "a dead vector is an ESS of 0");
     assert!(dead_wc.final_draw_fell_back, "the final draw had nothing to select");
+}
+
+/// gh#685. The ESS sees what the alive count cannot. Every weight here is
+/// finite, so `min_alive` reads the full swarm at every window; at the second,
+/// one particle carries all of the mass and the following resample would copy
+/// it into every slot. The profile reads ~1 there and `min_ess` names that
+/// observation. Observation 1 is never scored — the grid dropped it — and
+/// stays `NaN`, which `min_ess` skips rather than treating as a minimum.
+#[test]
+fn ess_profile_locates_a_collapse_that_leaves_every_weight_finite() {
+    let mut tally = WeightCollapseTally::new(4, 4);
+    tally.record(0, 0, &[0.0, 0.0, 0.0, 0.0]);
+    tally.record(3, 2, &[0.0, -30.0, -30.0, -30.0]);
+    tally.record(5, 3, &[0.0, -1.0, 0.0, -1.0]);
+    let wc = tally.finish(false);
+
+    assert_eq!(wc.n_windows, 0, "no window was dead");
+    assert_eq!(wc.min_alive, 4, "every weight was finite at every window");
+    assert_eq!(wc.ess_by_obs.len(), 4, "one slot per observation");
+    assert_eq!(wc.ess_by_obs[0], 4.0, "uniform weights are the full swarm");
+    assert!(wc.ess_by_obs[1].is_nan(), "an unscored observation stays NaN");
+    let (worst_at, worst_ess) = wc.min_ess().expect("three windows were scored");
+    assert!((worst_ess - 1.0).abs() < 1e-9, "one particle held the mass, got {worst_ess}");
+    assert_eq!(worst_at, 2);
+}
+
+/// A tie names the earliest observation, and an unscored sweep names none.
+#[test]
+fn min_ess_breaks_ties_toward_the_earliest_window() {
+    let mut tally = WeightCollapseTally::new(3, 3);
+    tally.record(2, 1, &[0.0, 0.0, 0.0]);
+    tally.record(4, 2, &[0.0, 0.0, 0.0]);
+    let wc = tally.finish(false);
+    assert_eq!(wc.min_ess(), Some((1, 3.0)));
+
+    let unscored = sim::inference::pgas::WeightCollapse::none(3);
+    assert!(unscored.ess_by_obs.is_empty());
+    assert!(unscored.min_ess().is_none());
+
+    let never_scored = WeightCollapseTally::new(3, 2).finish(false);
+    assert_eq!(never_scored.ess_by_obs.len(), 2);
+    assert!(never_scored.min_ess().is_none(), "all-NaN is not a minimum of 0");
 }
 
 /// The `unwrap_or(j_ref)` at the final draw cannot be the only detector: a
