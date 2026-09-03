@@ -126,7 +126,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // Built before the initial state because drawing x₀ is a draw from a
     // particle's own stream; `init_particle_rngs` consumes nothing, so the
     // streams the propagation loop sees below are unchanged.
-    let mut rngs = init_particle_rngs(seed, n_particles, 0);
+    let mut rngs = init_particle_rngs(seed, n_particles, 0, crate::rng::BinomialAlgorithm::Btpe);
 
     // x₀ is drawn PER PARTICLE — particle j from its OWN stream `rngs[j]`
     // (gh#732). For a model whose `init {}` declares a law, that spread is what
@@ -160,7 +160,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // Process RNG streams must be identical whether or not predictions are computed.
     // Offset by 2^62 so process-RNG and diag-RNG streams never overlap
     // (u64 stream id is 64 bits; 2^62 is a comfortable gap from low-indexed streams).
-    let mut diag_rngs = init_particle_rngs(seed, n_particles, 1u64 << 62);
+    let mut diag_rngs = init_particle_rngs(seed, n_particles, 1u64 << 62, crate::rng::BinomialAlgorithm::Btpe);
 
     // Double-buffer for resampling (avoids clone allocation)
     let mut states_buf: Vec<ParticleState> = (0..n_particles)

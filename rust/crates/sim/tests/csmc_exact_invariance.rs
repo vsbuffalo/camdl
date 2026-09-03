@@ -417,6 +417,7 @@ fn check_invariance(
             0x5eed_0000_0000_0000u64.wrapping_add(i as u64),
             &f.obs_at_substep,
             EffectFiring::default(),
+            sim::rng::BinomialAlgorithm::Btpe,
         )
         .expect("csmc_as");
         n_proposed += diag.n_as_proposed;

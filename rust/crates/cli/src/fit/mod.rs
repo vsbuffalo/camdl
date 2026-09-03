@@ -272,6 +272,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         no_dt_check:          a.no_dt_check,
         dt_check_halvings:    a.dt_check_halvings,
         dt_check_strict:      a.dt_check_strict,
+        binomial:             a.binomial,
         record_ancestry:      a.record_ancestry,
         record_prequential:   a.record_prequential,
     };

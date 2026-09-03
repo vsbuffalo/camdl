@@ -343,15 +343,33 @@ fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
 /// mechanism (gh#322): a head run clones out its final RNG so a resumed tail can
 /// restore the exact stream position and reproduce a byte-identical continuation.
 #[derive(Clone)]
-pub struct StatefulRng(ChaCha8Rng);
+pub struct StatefulRng {
+    inner: ChaCha8Rng,
+    /// Which accept/reject scheme [`Self::binomial`] uses above
+    /// `BINV_THRESHOLD`. Carried ON THE RNG rather than threaded as a
+    /// parameter, because the RNG already reaches every draw site — the
+    /// chain-binomial step, the initial-state law, quantities, and the
+    /// observation sampler — while a parameter would have to be added to
+    /// `step_one`'s ten arguments and five other signatures.
+    ///
+    /// It also makes the choice immune to the hazard that killed the
+    /// thread-local: PGAS draws on rayon workers inside a nested `par_iter`,
+    /// so a per-thread setting reaches whichever particles that worker happens
+    /// to steal. A per-RNG setting is fixed at construction and travels with
+    /// the particle.
+    algo: BinomialAlgorithm,
+}
 
 /// Which accept/reject scheme [`StatefulRng::binomial`] uses above
 /// `BINV_THRESHOLD`. Below it, BINV is used regardless — that branch is not
 /// part of this choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default,
+         serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BinomialAlgorithm {
     /// `rand_distr` 0.4.3's BTPE (Kachitvichyanukul & Schmeiser 1988). The
     /// production default, and the oracle the BTRS suite is calibrated against.
+    #[default]
     Btpe,
     /// [`btrs_binomial`] — Hörmann (1993). Faster; not bit-compatible with
     /// `Btpe` (a different rejection scheme accepts different draws from the
@@ -360,64 +378,61 @@ pub enum BinomialAlgorithm {
     Btrs,
 }
 
-thread_local! {
-    /// Per-thread test/bench override of the sampler. `None` → [`DEFAULT_BINOMIAL`].
-    static BINOMIAL_OVERRIDE: std::cell::Cell<Option<BinomialAlgorithm>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// The production choice. BTRS is not selectable from any user-facing input: the
-/// knob has been DECIDED — a typed `binomial` field on `Stage::PGAS`, riding
-/// `Stage::identity_payload`'s include-by-default subtraction, per
-/// `docs/dev/proposals/2026-08-24-faster-binomial-sampler.md` §1 — but is not
-/// built yet. An environment variable was considered and rejected: one that
-/// changed draws without entering the run address would serve one sampler's
-/// posterior from the other's cache leaf.
+/// The production default. Selecting the other sampler CHANGES DRAWS, so it
+/// arrives through `Stage::PGAS.binomial` — a typed field that enters the run
+/// address — and travels on the RNG itself (`StatefulRng::with_binomial`).
 ///
-/// Until the typed field lands, the thread-local below is the only door, so no
-/// stored run can disagree with its own address. Note what that door CANNOT be
-/// when the field does land: the draws happen on rayon workers inside
-/// `pgas.rs`'s nested `par_iter`, not on the thread that reads the config, so a
-/// thread-local set once per chain reaches almost none of them. The resolved
-/// value has to be threaded to `step_one` as a value.
+/// An environment variable was considered and rejected: one that changed draws
+/// without entering the run address would serve one sampler's posterior from
+/// the other's cache leaf. gh#241 removed `CAMDL_PF_WALLCLOCK_TIMEOUT_S` for
+/// the same reason rather than hashing it. See
+/// `docs/dev/proposals/2026-08-24-faster-binomial-sampler.md`.
 const DEFAULT_BINOMIAL: BinomialAlgorithm = BinomialAlgorithm::Btpe;
 
-fn binomial_algorithm() -> BinomialAlgorithm {
-    BINOMIAL_OVERRIDE.with(|c| c.get()).unwrap_or(DEFAULT_BINOMIAL)
+impl std::str::FromStr for BinomialAlgorithm {
+    type Err = String;
+    /// Accepts the same spellings serde does, so a `fit.toml` value and a CLI
+    /// flag cannot disagree about what `btrs` means.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "btpe" => Ok(BinomialAlgorithm::Btpe),
+            "btrs" => Ok(BinomialAlgorithm::Btrs),
+            other  => Err(format!(
+                "unknown binomial sampler '{other}' (expected 'btpe' or 'btrs')")),
+        }
+    }
 }
 
-/// Which sampler this thread would use. Exists so the invariant "the sampler
-/// that ran equals the one that was hashed" is expressible from outside this
-/// module — without it the seam is write-only and unauditable.
-pub fn active_binomial_algorithm() -> BinomialAlgorithm {
-    binomial_algorithm()
-}
-
-/// Test/bench hook: force this thread's binomial sampler. Mirrors
-/// [`crate::resolved_expr::set_binding_cache_disabled`] — a per-thread override
-/// exists so both arms can be compared **in one process**, which is what makes
-/// an interleaved A/B possible and keeps a two-process timing comparison (and
-/// its between-process noise) out of the measurement.
-///
-/// **Not a production input channel.** It cannot be `#[cfg(test)]` — the bench is
-/// a separate crate and could not see it — so containment rests on there being
-/// no production caller, which
-/// `nothing_outside_tests_and_benches_selects_a_sampler` asserts. If you are
-/// reaching for this from `cli` or from non-test `sim` code, you want the typed
-/// stage field instead; selecting a sampler changes results and must enter the
-/// run address.
-#[doc(hidden)]
-pub fn set_binomial_algorithm(algo: BinomialAlgorithm) {
-    BINOMIAL_OVERRIDE.with(|c| c.set(Some(algo)));
+impl std::fmt::Display for BinomialAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self { BinomialAlgorithm::Btpe => "btpe",
+                                 BinomialAlgorithm::Btrs => "btrs" })
+    }
 }
 
 impl StatefulRng {
     /// Access the underlying RNG for use with rand_distr distributions.
-    pub fn inner_mut(&mut self) -> &mut ChaCha8Rng { &mut self.0 }
+    pub fn inner_mut(&mut self) -> &mut ChaCha8Rng { &mut self.inner }
+
+    /// Select the binomial sampler this RNG uses. Builder rather than setter so
+    /// the choice is fixed where the RNG is built and cannot drift mid-run.
+    ///
+    /// Selecting `Btrs` CHANGES DRAWS — a different rejection scheme accepts
+    /// different values from the same stream — so it must arrive from an input
+    /// that enters the run address. `Stage::PGAS.binomial` is that input; see
+    /// `docs/dev/proposals/2026-08-24-faster-binomial-sampler.md`.
+    pub fn with_binomial(mut self, algo: BinomialAlgorithm) -> Self {
+        self.algo = algo;
+        self
+    }
+
+    /// Which sampler this RNG will use. Exists so "the sampler that ran equals
+    /// the one that was hashed" is assertable from outside this module.
+    pub fn binomial_algorithm(&self) -> BinomialAlgorithm { self.algo }
 
     pub fn new(seed: u64) -> Self {
         let seed_bytes = expand_u64_to_seed(seed.wrapping_add(0xdeadbeef_cafebabe));
-        StatefulRng(ChaCha8Rng::from_seed(seed_bytes))
+        StatefulRng { inner: ChaCha8Rng::from_seed(seed_bytes), algo: DEFAULT_BINOMIAL }
     }
 
     /// Per-stream derivation for embarrassingly parallel paths like
@@ -433,14 +448,14 @@ impl StatefulRng {
         let seed_bytes = expand_u64_to_seed(seed.wrapping_add(0xdeadbeef_cafebabe));
         let mut rng = ChaCha8Rng::from_seed(seed_bytes);
         rng.set_stream(stream);
-        StatefulRng(rng)
+        StatefulRng { inner: rng, algo: DEFAULT_BINOMIAL }
     }
 
     pub fn poisson(&mut self, lambda: f64) -> u64 {
         if lambda <= 0.0 { return 0; }
         let lambda = lambda.min(1e15);
         match Poisson::new(lambda) {
-            Ok(p) => p.sample(&mut self.0) as u64,
+            Ok(p) => p.sample(&mut self.inner) as u64,
             Err(_) => lambda.round() as u64, // fallback to deterministic
         }
     }
@@ -448,7 +463,7 @@ impl StatefulRng {
     pub fn exp(&mut self, rate: f64) -> f64 {
         if rate <= 0.0 { return f64::INFINITY; }
         match Exp::new(rate) {
-            Ok(e) => e.sample(&mut self.0),
+            Ok(e) => e.sample(&mut self.inner),
             Err(_) => 1.0 / rate, // fallback to mean
         }
     }
@@ -476,7 +491,7 @@ impl StatefulRng {
         }
         let scale = sigma_sq / dt;
         let g = match Gamma::new(shape, scale) {
-            Ok(g) => g.sample(&mut self.0),
+            Ok(g) => g.sample(&mut self.inner),
             Err(_) => 1.0, // fallback: no overdispersion
         };
         self.poisson(mean * g)
@@ -500,7 +515,7 @@ impl StatefulRng {
         // Unit-mean Gamma(k, 1/k) mixed into a Poisson: E[G] = 1,
         // Var[G] = 1/k, so Var[count] = mu + mu²/k.
         let g = match Gamma::new(k, 1.0 / k) {
-            Ok(g) => g.sample(&mut self.0),
+            Ok(g) => g.sample(&mut self.inner),
             Err(_) => 1.0,
         };
         self.poisson(mean * g)
@@ -522,7 +537,7 @@ impl StatefulRng {
         if shape < 1e-6 { return 1.0; }
         let scale = sigma_sq / dt;
         match Gamma::new(shape, scale) {
-            Ok(g) => g.sample(&mut self.0),
+            Ok(g) => g.sample(&mut self.inner),
             Err(_) => 1.0,
         }
     }
@@ -623,7 +638,7 @@ impl StatefulRng {
         // BINV values here are sound (chi2 18.6 at n*p = 4.4).
         let p_flipped = if p <= 0.5 { p } else { 1.0 - p };
         if (n as f64) * p_flipped < BINV_THRESHOLD {
-            let u: f64 = rand::Rng::gen(&mut self.0);
+            let u: f64 = rand::Rng::gen(&mut self.inner);
             let k = binv_inverse_cdf(n, p_flipped, u);
             return if p_flipped != p { n - k } else { k };
         }
@@ -636,7 +651,7 @@ impl StatefulRng {
         // including its own huge-`n` fallback. Resolved BEFORE the match so the
         // match stays exhaustive over the enum: a third algorithm must not be
         // able to reach the hot path through a `_` arm.
-        let algo = match binomial_algorithm() {
+        let algo = match self.algo {
             BinomialAlgorithm::Btrs if n > BTRS_MAX_N => BinomialAlgorithm::Btpe,
             other => other,
         };
@@ -647,11 +662,11 @@ impl StatefulRng {
             // own flipping internally, and routing around that would change the
             // draw on the production path.
             BinomialAlgorithm::Btrs => {
-                let k = btrs_binomial(n, p_flipped, &mut self.0);
+                let k = btrs_binomial(n, p_flipped, &mut self.inner);
                 if p_flipped != p { n - k } else { k }
             }
             BinomialAlgorithm::Btpe => match Binomial::new(n, p.clamp(0.0, 1.0)) {
-                Ok(b) => b.sample(&mut self.0),
+                Ok(b) => b.sample(&mut self.inner),
                 Err(_) => {
                     crate::eval_stats::inc_binomial_fallback();
                     if p > 0.5 { n } else { 0 }
@@ -662,13 +677,13 @@ impl StatefulRng {
 
     /// Standard normal draw N(0, 1). Used for IF2 parameter perturbations.
     pub fn normal(&mut self) -> f64 {
-        StandardNormal.sample(&mut self.0)
+        StandardNormal.sample(&mut self.inner)
     }
 
     /// Uniform [0, 1) — used for Gillespie event selection.
     pub fn uniform(&mut self) -> f64 {
         use rand::Rng;
-        self.0.gen()
+        self.inner.gen()
     }
 }
 
@@ -838,9 +853,9 @@ mod binomial_termination_tests {
             for seed in 0..8u64 {
                 let base = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
 
-                let mut ours = StatefulRng(base.clone());
+                let mut ours = StatefulRng { inner: base.clone(), algo: DEFAULT_BINOMIAL };
                 let got = ours.binomial(n, p);
-                let ours_pos = ours.0.get_word_pos();
+                let ours_pos = ours.inner.get_word_pos();
 
                 let mut theirs = base.clone();
                 let want = Binomial::new(n, p).unwrap().sample(&mut theirs);
@@ -1042,36 +1057,12 @@ mod btrs_tests {
         (500, 0.8),
     ];
 
-    /// Restores the previous selection on drop, so a test that selects BTRS
-    /// cannot leak that choice to a later test sharing the thread and silently
-    /// retarget `binomial_termination_tests`' `rand_distr` oracle at BTRS.
-    ///
-    /// The leak is not reachable through libtest today — it spawns a fresh
-    /// thread per test even at `--test-threads=1`, so an earlier version of this
-    /// comment was wrong to name that flag as the trigger. Keep the guard
-    /// anyway: that is an implementation detail of the harness, not a guarantee,
-    /// and the exposure is one `#[test]` calling `rng.binomial` on a pool thread
-    /// away. Use it at EVERY call site — a bare `set_binomial_algorithm` in a
-    /// test is the bug this type exists to make impossible.
-    struct AlgoGuard(Option<BinomialAlgorithm>);
-
-    impl AlgoGuard {
-        fn set(algo: BinomialAlgorithm) -> Self {
-            let prev = BINOMIAL_OVERRIDE.with(|c| c.get());
-            set_binomial_algorithm(algo);
-            AlgoGuard(prev)
-        }
-    }
-
-    impl Drop for AlgoGuard {
-        fn drop(&mut self) {
-            BINOMIAL_OVERRIDE.with(|c| c.set(self.0));
-        }
-    }
-
+    /// Draw under a chosen sampler. The choice rides on the RNG, so there is
+    /// no cross-test leakage to guard against — the `AlgoGuard` this used to
+    /// need went away with the thread-local it protected.
     fn draw(algo: BinomialAlgorithm, n: u64, p: f64, count: usize, seed: u64) -> Vec<u64> {
-        let _guard = AlgoGuard::set(algo);
-        let mut rng = StatefulRng(ChaCha8Rng::seed_from_u64(seed));
+        let mut rng = StatefulRng { inner: ChaCha8Rng::seed_from_u64(seed), algo: DEFAULT_BINOMIAL }
+            .with_binomial(algo);
         (0..count).map(|_| rng.binomial(n, p)).collect()
     }
 
@@ -1268,8 +1259,8 @@ mod btrs_tests {
     /// never derived for them, which is how those two defects presented.
     #[test]
     fn pathological_inputs_still_route_to_binv_under_btrs() {
-        let _guard = AlgoGuard::set(BinomialAlgorithm::Btrs);
-        let mut rng = StatefulRng(ChaCha8Rng::seed_from_u64(11));
+        let mut rng = StatefulRng { inner: ChaCha8Rng::seed_from_u64(11), algo: DEFAULT_BINOMIAL }
+            .with_binomial(BinomialAlgorithm::Btrs);
         for (n, p) in [(u64::MAX / 2, 1e-18f64), (2_147_483_648, 1e-12), (6_300_000, 1e-9)] {
             assert!((n as f64) * p < BINV_THRESHOLD, "precondition: this is the BINV regime");
             for _ in 0..500 {
@@ -1294,50 +1285,6 @@ mod btrs_tests {
     /// which sampler produced it.
     ///
     /// Asserted as a whitelist of FILES rather than by parsing `#[cfg(test)]`
-    /// regions, which is not something a textual scan can do reliably.
-    #[test]
-    fn nothing_outside_tests_and_benches_selects_a_sampler() {
-        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crates/sim has a parent")
-            .to_path_buf();
-        const ALLOWED: &[&str] = &["sim/src/rng.rs", "sim/benches/binomial_ab.rs"];
-
-        let mut offenders = Vec::new();
-        let mut stack = vec![crates.clone()];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("readable crate dir").flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    // `target/` under a crate would be build output, not source.
-                    if path.file_name().is_some_and(|n| n == "target") { continue; }
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    let rel = path.strip_prefix(&crates).unwrap_or(&path).to_string_lossy()
-                        .replace('\\', "/");
-                    if ALLOWED.contains(&rel.as_str()) { continue; }
-                    let src = std::fs::read_to_string(&path).unwrap_or_default();
-                    if src.contains("set_binomial_algorithm") {
-                        offenders.push(rel);
-                    }
-                }
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "set_binomial_algorithm is reachable from non-test code: {offenders:?}. \
-             Selecting a sampler changes draws, so it must arrive through an input \
-             that enters the run address — see DEFAULT_BINOMIAL."
-        );
-
-        // The other half: the shipped default is BTPE. An accidental flip here
-        // would move every stored posterior without re-keying anything.
-        assert_eq!(
-            active_binomial_algorithm(),
-            BinomialAlgorithm::Btpe,
-            "a thread that set no override must see the production default"
-        );
-    }
 
     /// A non-finite `p` must return, under either sampler.
     ///
@@ -1355,8 +1302,8 @@ mod btrs_tests {
     #[test]
     fn a_non_finite_p_returns_under_both_samplers() {
         for algo in [BinomialAlgorithm::Btpe, BinomialAlgorithm::Btrs] {
-            let _guard = AlgoGuard::set(algo);
-            let mut rng = StatefulRng(ChaCha8Rng::seed_from_u64(7));
+            let mut rng = StatefulRng { inner: ChaCha8Rng::seed_from_u64(7), algo: DEFAULT_BINOMIAL }
+                .with_binomial(algo);
             for p in [f64::NAN, -f64::NAN] {
                 assert_eq!(rng.binomial(1_000, p), 0, "{algo:?}: NaN p must return 0");
             }

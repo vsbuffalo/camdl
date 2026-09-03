@@ -119,6 +119,7 @@ pub fn initial_reference_trajectory(
 ) -> Result<(PGASTrajectory, InitSource), SimError> {
     let fallback = match unconditional_smc_pass(
         model, params, grid, n_particles, dt, obs_model, seed, obs_at_substep, firing,
+        forward_rng.binomial_algorithm(),
     )? {
         UnconditionalPass::Path(traj) => {
             let ll = complete_data_loglik(
@@ -184,6 +185,9 @@ pub fn unconditional_smc_pass(
     seed: u64,
     obs_at_substep: &ObsAtSubstep,
     firing: EffectFiring<'_>,
+    // gh#747: the init pass draws too, so it must use the same sampler the
+    // sweeps will -- otherwise a `btrs`-addressed run seeds itself with BTPE.
+    binomial: crate::rng::BinomialAlgorithm,
 ) -> Result<UnconditionalPass, SimError> {
     assert!(n_particles > 0, "unconditional init pass needs at least one particle");
     let t_start = model.model.simulation.t_start;
@@ -199,7 +203,7 @@ pub fn unconditional_smc_pass(
     let fire_steps = model.resolve_fire_steps(dt, params);
 
     let seed = seed ^ INIT_SEED_SALT;
-    let mut rngs = init_particle_rngs(seed, n_particles, 0);
+    let mut rngs = init_particle_rngs(seed, n_particles, 0, binomial);
     let mut resample_rng = StatefulRng::new_stream(seed, RESAMPLE_RNG_STREAM);
 
     // Each particle draws its own x₀ through the same seam the CSMC free

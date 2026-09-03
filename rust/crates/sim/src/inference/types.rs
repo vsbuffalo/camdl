@@ -251,9 +251,14 @@ pub fn init_particle_rngs(
     seed: u64,
     n: usize,
     stream_offset: u64,
+    // gh#747: stamped onto every particle's RNG at construction. This is why the
+    // choice cannot be lost to work-stealing: it rides on the particle, not on
+    // whichever rayon worker happens to pick it up.
+    algo: crate::rng::BinomialAlgorithm,
 ) -> Vec<crate::rng::StatefulRng> {
     (0..n)
-        .map(|i| crate::rng::StatefulRng::new_stream(seed, stream_offset | (i as u64)))
+        .map(|i| crate::rng::StatefulRng::new_stream(seed, stream_offset | (i as u64))
+                     .with_binomial(algo))
         .collect()
 }
 

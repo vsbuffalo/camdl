@@ -1066,6 +1066,15 @@ impl FixedParams {
 /// 2026-05-04-ode-inference-three-phase.md §"Tuple schema" for the
 /// rationale (algorithm and backend used to be smuggled together as
 /// `method = "if2"` implying chain_binomial).
+/// Serialisation predicate for `Stage::PGAS.binomial`.
+///
+/// Deliberately named for the VALUE, not for the default: absence in a stored
+/// payload means BTPE, permanently, because that is what every run predating
+/// the field used. If the default flips (gh#761) this must NOT follow it.
+fn is_btpe(a: &sim::rng::BinomialAlgorithm) -> bool {
+    matches!(a, sim::rng::BinomialAlgorithm::Btpe)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "algorithm")]
 pub enum Stage {
@@ -1143,6 +1152,35 @@ pub enum Stage {
         chains: usize,
         particles: usize,
         sweeps: usize,
+        /// gh#747: which binomial sampler the chain-binomial draws use.
+        /// `btpe` (default) or `btrs`.
+        ///
+        /// Selecting `btrs` CHANGES DRAWS — a different rejection scheme
+        /// accepts different values from the same stream — so this field is
+        /// deliberately part of the stage's identity. `identity_payload` is
+        /// subtractive, so it is hashed by being here; two runs differing only
+        /// in this field get different addresses and cannot be served from one
+        /// another's leaf. That is why it is a typed field and not an
+        /// environment variable (gh#241 removed the last of those rather than
+        /// hash it).
+        ///
+        /// `serde(default)` is load-bearing: without it every existing
+        /// `fit.toml` that predates this field fails to deserialize.
+        ///
+        /// `skip_serializing_if` keeps a `btpe` stage's payload BYTE-IDENTICAL
+        /// to what it was before this field existed, so adding the field
+        /// orphans no stored leaf and breaks no in-flight `--resume`. Only a
+        /// `btrs` stage serialises it, and so only a `btrs` stage gets a new
+        /// address — which is the only place the guarantee is needed.
+        ///
+        /// The predicate tests `== Btpe`, NOT `== default()`, and the
+        /// difference bites exactly once: if the default ever becomes `Btrs`
+        /// (gh#761), a default-tracking predicate would silently make ABSENCE
+        /// mean `btrs`, retroactively changing what every already-stored
+        /// address asserts. Absence must mean BTPE forever, because that is
+        /// what every run predating this field actually used.
+        #[serde(default, skip_serializing_if = "is_btpe")]
+        binomial: sim::rng::BinomialAlgorithm,
         /// Toml-side spelling renamed from `starts_from` to `init_mle`
         /// per proposal 2026-05-25-cli-init-and-params-ux §"fit.toml schema".
         #[serde(default, rename = "init_mle")]
@@ -1760,7 +1798,7 @@ impl Stage {
         match self {
             Stage::PGAS {
                 tempering, max_tree_depth, trajectory_warmup,
-                csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts, ..
+                csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts, binomial, ..
             } => {
                 if let Some(t) = &cli.tempering { *tempering = t.clone(); }
                 if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
@@ -1769,6 +1807,11 @@ impl Stage {
                 if let Some(n) = cli.n_trajectories { *n_trajectories = n; }
                 if cli.diagonal_mass { *dense_mass = false; }
                 if cli.no_nuts { *use_nuts = false; }
+                // gh#747: resolved INTO the stage, so the flag is keyed into
+                // the stage's identity rather than acting as an untracked
+                // side channel. Two runs differing only here get different
+                // addresses.
+                if let Some(b) = cli.binomial { *binomial = b; }
             }
             Stage::Nuts { max_tree_depth, dense_mass, .. } => {
                 if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
@@ -1861,6 +1904,9 @@ pub struct CliStageOverrides {
     /// leaf-byte-neutral abort policy, but it selects the stored verdict and
     /// threshold whenever the TOML leaves `threshold_nats` unset.
     pub dt_check_strict: bool,
+    /// gh#747: `--binomial`. `None` leaves the stage's own value (or its
+    /// `serde(default)`) untouched.
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
     /// `--record-ancestry` (PFilter): one-way override to true; adds the
     /// ancestor trace to the stored leaf.
     pub record_ancestry: bool,
@@ -6808,6 +6854,7 @@ decibans_thresh = 100.0
             n_trajectories: 200,
             dense_mass: true,
             use_nuts: true,
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
         }
     }
 
@@ -6845,6 +6892,7 @@ decibans_thresh = 100.0
                     survey_path, survey_top_k_n,
                     burn_in, thin,
                     tempering, max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
+                        binomial: sim::rng::BinomialAlgorithm::Btpe,
                     n_trajectories, dense_mass, use_nuts },
             _ => unreachable!(),
         };
@@ -7006,6 +7054,64 @@ decibans_thresh = 100.0
         let s_short = make_pmmh_stage(1000);
         let s_long = make_pmmh_stage(8000);
         assert_eq!(s_short.identity_payload(), s_long.identity_payload());
+    }
+
+    /// gh#747: the two samplers must not collide in the store.
+    ///
+    /// This is the assertion the whole design turns on, and it is deliberately
+    /// written against the PAYLOAD rather than the attribute: it survives any
+    /// future serde mistake in either direction — a `skip_serializing_if` that
+    /// starts skipping `btrs`, or one that stops skipping `btpe`.
+    #[test]
+    fn binomial_sampler_is_in_the_stage_identity() {
+        let mut btpe = make_pgas_stage(1000);
+        let mut btrs = make_pgas_stage(1000);
+        if let Stage::PGAS { ref mut binomial, .. } = btrs {
+            *binomial = sim::rng::BinomialAlgorithm::Btrs;
+        }
+        if let Stage::PGAS { ref mut binomial, .. } = btpe {
+            *binomial = sim::rng::BinomialAlgorithm::Btpe;
+        }
+        let a = serde_json::to_string(&btpe.identity_payload()).unwrap();
+        let b = serde_json::to_string(&btrs.identity_payload()).unwrap();
+        assert_ne!(a, b,
+            "btpe and btrs stages produced the SAME identity payload — the two \
+             samplers would share one address, and one sampler's posterior \
+             would be served from the other's leaf. That is the exact failure \
+             an environment variable would have caused, and the reason this is \
+             a typed field.");
+        assert!(b.contains(r#""binomial":"btrs""#),
+            "a btrs stage's payload must NAME the sampler; got {b}");
+        // NOTE the key form, not the bare substring: `"backend":"chain_binomial"`
+        // contains "binomial" and made the naive check fail.
+        assert!(!a.contains(r#""binomial":"#),
+            "a btpe stage's payload must stay byte-identical to the pre-field \
+             format, so adding this field orphans no stored leaf. Absence means \
+             BTPE — permanently, and NOT 'whatever the default is'. If the \
+             default ever flips (gh#761), `is_btpe` must not follow it. Got {a}");
+    }
+
+    /// gh#747: the TOML spelling round-trips, and an absent field is BTPE.
+    #[test]
+    fn binomial_sampler_parses_from_stage_toml() {
+        let with_btrs: Stage = toml::from_str(
+            "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 4\n\
+             particles = 100\nsweeps = 1000\nbinomial = \"btrs\"\n").unwrap();
+        match with_btrs {
+            Stage::PGAS { binomial, .. } =>
+                assert_eq!(binomial, sim::rng::BinomialAlgorithm::Btrs),
+            _ => panic!("expected a PGAS stage"),
+        }
+        // Absent -> BTPE. Every fit.toml written before this field relies on it.
+        let absent: Stage = toml::from_str(
+            "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 4\n\
+             particles = 100\nsweeps = 1000\n").unwrap();
+        match absent {
+            Stage::PGAS { binomial, .. } =>
+                assert_eq!(binomial, sim::rng::BinomialAlgorithm::Btpe,
+                    "an absent `binomial` must mean BTPE"),
+            _ => panic!("expected a PGAS stage"),
+        }
     }
 
     #[test]

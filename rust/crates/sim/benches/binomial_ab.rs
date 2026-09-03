@@ -7,7 +7,7 @@
 //! the median-of-9 convention the flat-evaluator note established. Both arms run
 //! in ONE process, INTERLEAVED per rep with the order alternating by rep parity,
 //! so background load, thermal drift and any within-rep warming hit them
-//! equally; that is the whole reason `set_binomial_algorithm` is a thread-local
+//! equally; the selection rides on the RNG, so both arms run in one process
 //! override rather than an env var.
 //!
 //! Three things this bench deliberately does NOT do:
@@ -48,7 +48,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use sim::rng::{set_binomial_algorithm, BinomialAlgorithm, StatefulRng};
+use sim::rng::{BinomialAlgorithm, StatefulRng};
 
 const DRAWS: usize = 400_000;
 const REPS: usize = 9;
@@ -115,8 +115,10 @@ const BINV_ROUTED: &[Cell] = &[cell("export_e  n=190  np≈0.1", 190, 6e-4, 3.0)
 
 /// One timed measurement: `DRAWS` draws at `(n, p)` under `algo`, in ns/draw.
 fn time_one(algo: BinomialAlgorithm, n: u64, p: f64, seed: u64) -> f64 {
-    set_binomial_algorithm(algo);
-    let mut rng = StatefulRng::new(seed);
+    // The selection rides on the RNG (gh#747). The thread-local this used to
+    // set is gone: it could not reach rayon workers, which is the whole reason
+    // the choice moved onto the RNG.
+    let mut rng = StatefulRng::new(seed).with_binomial(algo);
     // Warm the branch predictor and the ChaCha8 block buffer. Outside the timed
     // region, as is `StatefulRng::new` and the selection itself.
     for _ in 0..10_000 {

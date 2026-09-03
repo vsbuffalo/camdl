@@ -183,6 +183,7 @@ fn sweep(f: &Fixture) -> (PGASTrajectory, CSMCDiagnostics) {
         SEED,
         &f.obs_at_substep,
         EffectFiring::default(),
+        sim::rng::BinomialAlgorithm::Btpe,
     )
     .expect("csmc_as")
 }

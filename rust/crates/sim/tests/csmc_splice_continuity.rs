@@ -132,6 +132,7 @@ fn csmc_returns_a_continuous_path() {
             SEED + seed,
             &obs_at_substep,
             EffectFiring::default(),
+            sim::rng::BinomialAlgorithm::Btpe,
         )
         .expect("csmc_as");
         sweeps += 1;

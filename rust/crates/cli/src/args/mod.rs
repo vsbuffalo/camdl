@@ -1010,6 +1010,21 @@ pub struct FitRunArgs {
     #[arg(long, requires = "stage")]
     pub dt_check_strict: bool,
 
+    /// Binomial sampler for a PGAS stage's chain-binomial draws: `btpe`
+    /// (default) or `btrs` (Hörmann 1993; faster, gh#747).
+    ///
+    /// Requires --stage, and for the same reason as the flags above: the two
+    /// samplers are NOT bit-compatible — a different rejection scheme accepts
+    /// different draws from the same stream — so this is resolved into the
+    /// stage's `binomial` field and keyed into its identity. Two runs differing
+    /// only in this flag get different addresses and cannot be served from one
+    /// another's leaf. It is a flag rather than an environment variable for
+    /// exactly that reason (gh#241 removed the last env-var input rather than
+    /// hash it).
+    #[arg(long, requires = "stage", value_name = "SAMPLER",
+          value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
+
     /// Override `n_halvings` on the dt-check (gh#52). Default 2
     /// (evaluates at dt_fit, dt_fit/2, dt_fit/4 — 7× the
     /// loglik-eval cost). Use 3 for ambiguous cases at 15×.
