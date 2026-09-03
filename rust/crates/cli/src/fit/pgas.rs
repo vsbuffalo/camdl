@@ -673,6 +673,15 @@ pub fn run_stage(
     let chain_saved_sweeps: std::sync::Mutex<Vec<Vec<usize>>> =
         std::sync::Mutex::new(vec![Vec::new(); n_chains]);
 
+    // Each chain's saved posterior paths, flattened, retained past the chain's
+    // own `trajectories.tsv` write so the stage can reduce them ACROSS chains
+    // (`latent_convergence`). Indexed by chain_id, filled inside the parallel
+    // closure (the pattern `chain_nuts` uses); `None` for a chain that saved
+    // no path. Chains run in parallel, so holding every chain's block at once
+    // does not raise the peak beyond what the writers already held.
+    let chain_paths: std::sync::Mutex<Vec<Option<super::latent_convergence::ChainPaths>>> =
+        std::sync::Mutex::new((0..n_chains).map(|_| None).collect());
+
     // gh#785. Each chain's representative `(θ, x)` draw for the cross-chain
     // path/parameter compatibility matrix, indexed by chain_id and filled
     // inside the parallel closure (the pattern `chain_nuts` uses). `None` for a
@@ -724,6 +733,14 @@ pub fn run_stage(
     let traj_date_origin: Option<(String, String)> = config.model.origin.as_ref()
         .map(|o| (o.clone(), config.model.time_unit.clone()));
     let traj_calendar = io::CalendarMeta::from_model(&config.model);
+    // The column layout of every chain's `trajectories.tsv` and of the dense
+    // block `latent_convergence` reduces across chains — chain-invariant, so
+    // built once and named once.
+    let traj_columns = {
+        let incidence_stream_names: Vec<String> = config.build_obs_model()
+            .incidence_streams().iter().map(|(n, _)| n.clone()).collect();
+        TrajColumnSpec::from_model(&config.compiled.model, &incidence_stream_names)
+    };
 
     // Run chains in parallel (each chain is independent: own seed, own
     // trajectory, own RNG). Same pattern as PMMH.
@@ -858,10 +875,7 @@ pub fn run_stage(
             // finite-difference of compartment counts (unsafe under
             // event/balance, gh#264).
             let incidence_streams = obs_model.incidence_streams();
-            let incidence_stream_names: Vec<String> =
-                incidence_streams.iter().map(|(n, _)| n.clone()).collect();
-            let traj_columns =
-                TrajColumnSpec::from_model(&config.compiled.model, &incidence_stream_names);
+            let traj_columns = &traj_columns;
             // Accumulate saved draws; the callback runs once per sweep, in order,
             // within this chain (rayon parallelism is across chains), so a
             // single-threaded RefCell accumulator is sound.
@@ -1099,6 +1113,12 @@ pub fn run_stage(
                     calendar: traj_calendar.clone(),
                 };
                 let _ = manifest.write(&chain_dir.join("trajectories.json"));
+
+                // The writer above already validated every draw's shape, so a
+                // refusal here is a defect, not a data condition.
+                let flat = super::latent_convergence::ChainPaths::from_draws(&draws, &traj_columns)
+                    .map_err(|e| format!("pgas chain {}: {}", chain_id + 1, e))?;
+                chain_paths.lock().unwrap()[chain_id] = flat;
             }
 
             let chain_elapsed = chain_start.elapsed();
@@ -1264,6 +1284,30 @@ pub fn run_stage(
         eprint!("{}", pr.report());
     }
 
+    // R̂/ESS of every latent state at every substep across the chains' saved
+    // paths, printed directly under the renewal profile so the two rows of
+    // tenths read together: renewal says where the sampler did not move, this
+    // says whether the chains disagree about the states it did not move. A
+    // refusal (one chain with paths, fewer than four saved paths) is reported
+    // on stderr and the block is omitted, never nulled.
+    let latent_convergence = {
+        let blocks: Vec<super::latent_convergence::ChainPaths> =
+            chain_paths.into_inner().unwrap().into_iter().flatten().collect();
+        match super::latent_convergence::latent_convergence(
+            &blocks, &traj_columns.data_column_names(),
+        ) {
+            Ok(lc) => {
+                eprint!("{}", lc.report());
+                lc.write_tsv(&stage_dir.join(super::latent_convergence::LATENT_CONVERGENCE_TSV))?;
+                Some(lc)
+            }
+            Err(e) => {
+                eprintln!("  latent-path convergence not computed: {e}");
+                None
+            }
+        }
+    };
+
     // gh#audit-C7 + audit-H4. NUTS / tempering diagnostics surfaced from
     // PGASResult fields. Thresholds:
     //   - DivergentTransitions: ANY post-burn-in divergence (Stan
@@ -1392,7 +1436,7 @@ pub fn run_stage(
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
     write_summary(stage_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
-        n_trajectories, &diagnostics, path_renewal.as_ref())?;
+        n_trajectories, &diagnostics, path_renewal.as_ref(), latent_convergence.as_ref())?;
 
     // No-op resume: every chain already reached the target sweep count
     // before this invocation. There are no new sweeps to aggregate
@@ -1763,6 +1807,7 @@ fn write_summary(
     n_trajectories: usize,
     diagnostics: &StageConvergence,
     path_renewal: Option<&super::path_renewal::PathRenewal>,
+    latent_convergence: Option<&super::latent_convergence::LatentConvergence>,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<Vec<f64>> = results.iter()
         .map(|(_, _, rates)| rates.clone())
@@ -1800,6 +1845,13 @@ fn write_summary(
             .map_err(|e| format!("cannot serialize the path-renewal profile: {e}"))?;
         summary.as_object_mut().expect("json! built an object")
             .insert(super::path_renewal::PATH_RENEWAL_KEY.to_string(), block);
+    }
+    // Latent-path convergence: the per-bin reduction and the agreement
+    // horizon; the per-cell table is `latent_convergence.tsv`. Omitted, not
+    // nulled, when the stage could not compute it.
+    if let Some(lc) = latent_convergence {
+        summary.as_object_mut().expect("json! built an object")
+            .insert(super::latent_convergence::LATENT_CONVERGENCE_KEY.to_string(), lc.summary_block());
     }
     // Every convergence key comes from one producer, so a statistic cannot be
     // live in this summary and silently absent from pmmh's or nuts's.
