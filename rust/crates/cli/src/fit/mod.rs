@@ -83,6 +83,7 @@ pub mod chain_diagnostics;  // gh#406: per-chain loglik outlier z-scores (read-s
 pub mod cross_chain_compat; // gh#785: log p(x_j | θ_i) across the path-augmented chains
 pub mod path_renewal;       // gh#791: trajectory renewal resolved in time, and its two scalars
 pub mod latent_convergence; // gh#822: R̂/ESS of every latent state at every substep across chains
+pub mod filter_ess;         // gh#685: the conditional filter's ESS at every observation, pooled over sweeps
 pub mod row_convergence;    // gh#794: R̂/ESS of the value in one predictive/quantity row
 pub mod dt_check;
 pub mod init;

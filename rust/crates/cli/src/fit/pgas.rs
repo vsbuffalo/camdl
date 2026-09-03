@@ -815,7 +815,7 @@ pub fn run_stage(
                 .map(|n| super::loglik::trace_col_obs_ll_stream(n))
                 .collect();
             let mut trace_columns: Vec<&str> =
-                Vec::with_capacity(RENEWAL_BINS + 15 + obs_ll_stream_columns.len());
+                Vec::with_capacity(RENEWAL_BINS + 17 + obs_ll_stream_columns.len());
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
             // gh#783: `collapsed_windows` is how many of the sweep's
@@ -829,6 +829,13 @@ pub fn run_stage(
             // says whether the path moved, these say whether the selection had
             // anything to choose from.
             trace_columns.extend(["collapsed_windows", "min_alive"]);
+            // gh#685: `min_ess` is the smallest effective sample size the
+            // filter's weights had at any observation of the sweep, and
+            // `min_ess_t` the observation time it happened at. `min_alive`
+            // counts finite weights and a finite weight can be negligible;
+            // this is the number the resample after that observation actually
+            // drew from. `NA` when the sweep scored no observation.
+            trace_columns.extend(["min_ess", "min_ess_t"]);
             // gh#718: `as_opportunity` is how many substeps in the sweep drew
             // an ancestry, which is the only place an ancestor move is legal.
             // It is NOT the observation count: the weights an observation
@@ -905,6 +912,17 @@ pub fn run_stage(
                 let collapsed_windows_str =
                     result.csmc_diag.weight_collapse.n_windows.to_string();
                 let min_alive_str = result.csmc_diag.weight_collapse.min_alive.to_string();
+                // gh#685: the worst filter ESS of the sweep and the observation
+                // it happened at, keyed back to a time through the same slice
+                // the sweep scored.
+                let (min_ess_str, min_ess_t_str) =
+                    match result.csmc_diag.weight_collapse.min_ess() {
+                        Some((obs_idx, ess)) => (
+                            format!("{ess:.2}"),
+                            crate::quantile::fmt_time(observations[obs_idx].time),
+                        ),
+                        None => ("NA".to_string(), "NA".to_string()),
+                    };
                 // gh#607 follow-up: the ancestor-sampling Metropolis acceptance
                 // rate, with its denominator alongside. `NA` means the step
                 // never ran (no alternative ancestor was admissible), which is
@@ -934,10 +952,11 @@ pub fn run_stage(
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
                 let mut extra: Vec<&str> =
-                    Vec::with_capacity(RENEWAL_BINS + 15 + obs_ll_stream_strs.len());
+                    Vec::with_capacity(RENEWAL_BINS + 17 + obs_ll_stream_strs.len());
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
                 extra.extend([collapsed_windows_str.as_str(), min_alive_str.as_str()]);
+                extra.extend([min_ess_str.as_str(), min_ess_t_str.as_str()]);
                 extra.extend([
                     as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
@@ -1284,6 +1303,28 @@ pub fn run_stage(
         eprint!("{}", pr.report());
     }
 
+    // gh#685. The conditional filter's ESS at every observation, pooled over
+    // the same retained sweeps. Printed directly under the renewal profile:
+    // renewal says whether the path moved, this says how many particles the
+    // move had to choose from at each observation — and it is the reading
+    // `min_alive` cannot give, because a finite weight can be negligible. The
+    // whole per-chain profile goes to a table; the block carries the pooled
+    // summary and the starved observations, worst first.
+    let filter_ess = {
+        let mut acc = super::filter_ess::FilterEssAccum::new(
+            n_particles,
+            config.observations.iter().map(|o| o.time).collect(),
+        );
+        for (chain_id, sweeps, _) in &all_results {
+            acc.add_chain(*chain_id, sweeps.iter().map(|s| &s.csmc_diag.weight_collapse))?;
+        }
+        acc.finish()
+    };
+    if let Some(fe) = &filter_ess {
+        eprint!("{}", fe.summary.report());
+        fe.write_tsv(&stage_dir.join(super::filter_ess::FILTER_ESS_TSV))?;
+    }
+
     // R̂/ESS of every latent state at every substep across the chains' saved
     // paths, printed directly under the renewal profile so the two rows of
     // tenths read together: renewal says where the sampler did not move, this
@@ -1424,6 +1465,13 @@ pub fn run_stage(
         collector.push(d);
     }
 
+    // gh#685. The starvation finding, once per stage over the pooled profile
+    // printed above and written into the summary. A warning that gates
+    // nothing: the profile is the diagnostic, this points at it.
+    if let Some(d) = filter_ess.as_ref().and_then(|fe| fe.summary.starvation_finding()) {
+        collector.push(d);
+    }
+
     // Write summary JSON. gh#727: the saved-vs-forkable counts go in with it,
     // measured from the sweeps each chain wrote rather than re-derived from the
     // stride, so the artifact records what happened.
@@ -1436,7 +1484,8 @@ pub fn run_stage(
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
     write_summary(stage_dir, &all_results, &config, thin, &traj_plan, &saved_paths,
-        n_trajectories, &diagnostics, path_renewal.as_ref(), latent_convergence.as_ref())?;
+        n_trajectories, &diagnostics, path_renewal.as_ref(),
+        filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
 
     // No-op resume: every chain already reached the target sweep count
     // before this invocation. There are no new sweeps to aggregate
@@ -1807,6 +1856,7 @@ fn write_summary(
     n_trajectories: usize,
     diagnostics: &StageConvergence,
     path_renewal: Option<&super::path_renewal::PathRenewal>,
+    filter_ess: Option<&super::filter_ess::FilterEss>,
     latent_convergence: Option<&super::latent_convergence::LatentConvergence>,
 ) -> Result<(), String> {
     let acceptance_rates: Vec<Vec<f64>> = results.iter()
@@ -1845,6 +1895,13 @@ fn write_summary(
             .map_err(|e| format!("cannot serialize the path-renewal profile: {e}"))?;
         summary.as_object_mut().expect("json! built an object")
             .insert(super::path_renewal::PATH_RENEWAL_KEY.to_string(), block);
+    }
+    // gh#685. The filter's ESS at every observation, pooled: the summary
+    // scalars and the starved observations; the per-chain profile is
+    // `filter_ess.tsv`. Omitted, not nulled, when no sweep scored anything.
+    if let Some(fe) = filter_ess {
+        summary.as_object_mut().expect("json! built an object")
+            .insert(super::filter_ess::FILTER_ESS_KEY.to_string(), fe.summary_block());
     }
     // Latent-path convergence: the per-bin reduction and the agreement
     // horizon; the per-cell table is `latent_convergence.tsv`. Omitted, not

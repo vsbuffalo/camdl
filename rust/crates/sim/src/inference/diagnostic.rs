@@ -231,6 +231,31 @@ pub enum DiagnosticKind {
         /// Collapsed observation windows summed over those sweeps.
         n_windows: usize,
     },
+    /// gh#685. Observations at which the conditional filter's effective
+    /// sample size, averaged over the retained sweeps, is below a small
+    /// fraction of the particle count. Distinct from `FilterWeightCollapse`:
+    /// there every weight was zero, here the weights are finite and one or a
+    /// few particles carry all of the mass — which `min_alive` reads as the
+    /// full swarm. The following resample copies those few particles into
+    /// every slot, so the path through that observation is drawn from a
+    /// handful of candidates, sweep after sweep.
+    ///
+    /// One finding per stage over the pooled profile; the threshold and its
+    /// argument live with the accumulator (`cli::fit::filter_ess`).
+    FilterStarved {
+        /// Observations whose mean ESS is below the bar.
+        n_starved: usize,
+        /// Observations scored by at least one retained sweep.
+        n_obs: usize,
+        /// Particles per sweep.
+        n_particles: usize,
+        /// The bar: the fraction of `n_particles` a mean ESS is under.
+        starved_below: f64,
+        /// The worst observation's time, mean ESS and smallest ESS.
+        worst_time: f64,
+        worst_mean: f64,
+        worst_min: f64,
+    },
     GammaDensityDisabled {
         reason: String,
     },
@@ -442,6 +467,17 @@ impl DiagnosticKind {
                          trajectory explaining the data at those parameters, and the \
                          sweep returned the reference.",
                     n_sweeps, n_total_sweeps, n_windows),
+            Self::FilterStarved {
+                n_starved, n_obs, n_particles, starved_below, worst_time, worst_mean, worst_min,
+            } =>
+                format!("At {}/{} observations the filter's mean ESS over the retained \
+                         sweeps is below {:.0} of {} particles; the worst is t={:.0}: \
+                         mean ESS {:.1}, minimum {:.1}. The resample there draws every \
+                         particle from that handful, so the path through the \
+                         observation is not being explored — and min_alive does not \
+                         show it, because the other weights are finite.",
+                    n_starved, n_obs, starved_below, n_particles,
+                    worst_time, worst_mean, worst_min),
             Self::GammaDensityDisabled { reason } =>
                 format!("Gamma density disabled: {}", reason),
             Self::AcceptanceRateUnhealthy { rate, param, kernel } => {
@@ -553,6 +589,21 @@ impl DiagnosticKind {
                  cannot reach: check for a projection of exactly 0 scored \
                  against a positive count",
                 "Increase particles so the swarm can reach the observation",
+            ],
+            Self::FilterStarved { .. } => vec![
+                "Read filter_ess.tsv in the stage directory: one row per chain \
+                 and observation, mean and minimum ESS over the retained sweeps. \
+                 The trough names the data row",
+                "Look at that observation in the data before touching the model: \
+                 a count re-issued as zero, a revision, a stream switching \
+                 definition mid-series. Starvation at one observation is usually \
+                 a data point the model cannot reach, not a particle budget",
+                "If the observation is real, the observation model is too tight \
+                 there: an overdispersed or zero-inflated stream, or a wider \
+                 reporting noise, gives the particles a density to survive on",
+                "More particles help only when the ESS scales with them. Compare \
+                 the mean ESS at that observation across two particle counts; if \
+                 it stays at a handful, the swarm is not the limit",
             ],
             _ => vec![],
         }
