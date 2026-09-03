@@ -288,6 +288,61 @@ impl PrequentialTrace {
 
     /// Number of scored steps (T - t0).
     pub fn n_scored(&self) -> usize { self.steps.len() }
+
+    /// The `k` worst-scored steps, worst first: the observations the
+    /// predictive found most surprising, ranked by the joint `log_score`.
+    ///
+    /// The elpd is a sum, and a sum hides which terms carry it. One
+    /// observation the model cannot reach — a count floored to zero on a
+    /// re-issue, a decimal-shifted value — contributes a log score tens of
+    /// nats below its neighbours and moves the total by itself, while every
+    /// aggregate the trace reports (elpd, mean CRPS, PIT coverage) reads as
+    /// ordinary. This is the lookup the aggregates cannot do: which rows of
+    /// the data the score is about.
+    ///
+    /// A non-finite log score (`-inf`: no particle could produce the value;
+    /// `NaN`: a scoring failure) is the worst outcome available and sorts
+    /// first, `-inf` before `NaN` so a real "unreachable" precedes a defect.
+    /// Ties break toward the earlier step. `k` larger than the trace
+    /// returns every step.
+    pub fn worst_scored(&self, k: usize) -> Vec<&PrequentialStep> {
+        let mut idx: Vec<usize> = (0..self.steps.len()).collect();
+        idx.sort_by(|&a, &b| {
+            worse_first(self.steps[a].log_score, self.steps[b].log_score).then(a.cmp(&b))
+        });
+        idx.into_iter().take(k).map(|i| &self.steps[i]).collect()
+    }
+}
+
+/// Order two log scores worst first: `-inf`, then `NaN`, then ascending.
+/// The one ordering behind [`PrequentialTrace::worst_scored`] and
+/// [`PrequentialStep::worst_stream`], so a step and its streams cannot
+/// rank a non-finite score differently.
+fn worse_first(a: f64, b: f64) -> std::cmp::Ordering {
+    let key = |v: f64| -> (u8, f64) {
+        if v == f64::NEG_INFINITY {
+            (0, 0.0)
+        } else if v.is_nan() {
+            (1, 0.0)
+        } else {
+            (2, v)
+        }
+    };
+    let (ka, va) = key(a);
+    let (kb, vb) = key(b);
+    ka.cmp(&kb).then(va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+impl PrequentialStep {
+    /// The stream this step scored worst, by its own log score — `None`
+    /// when the step carries no per-stream breakdown (a single-stream
+    /// model, or a v1 trace). Non-finite scores sort first as in
+    /// [`PrequentialTrace::worst_scored`]; ties break toward the first
+    /// stream. On a multi-stream model the joint `y_obs` is a cross-stream
+    /// sum, so this is the row a reader can actually look up in the data.
+    pub fn worst_stream(&self) -> Option<&StreamScore> {
+        self.per_stream.iter().min_by(|a, b| worse_first(a.log_score, b.log_score))
+    }
 }
 
 // ── Scoring-rule kernels ────────────────────────────────────────────
@@ -807,6 +862,53 @@ mod tests {
         assert!(caveat.contains("plug-in"));
         assert!(!caveat.contains("in-sample"),
             "held-out conditioning must not be called in-sample: {caveat}");
+    }
+
+    fn scored_step(t: f64, log_score: f64, streams: &[(&str, f64)]) -> PrequentialStep {
+        PrequentialStep {
+            t, y_obs: 0.0, y_pred_samples: vec![], log_score, crps: 0.0, pit: 0.5,
+            ess: 10.0, interval: PredInterval::default(),
+            per_stream: streams.iter().map(|(name, ls)| StreamScore {
+                stream: name.to_string(), y_obs: 0.0, y_pred_samples: vec![],
+                log_score: *ls, crps: 0.0, pit: 0.5, interval: PredInterval::default(),
+            }).collect(),
+        }
+    }
+
+    #[test]
+    fn worst_scored_ranks_unreachable_then_defective_then_ascending() {
+        let t = PrequentialTrace {
+            schema_version: 3, t0: 0,
+            provenance: Provenance::PlugIn,
+            conditioning: Conditioning::InSample,
+            steps: vec![
+                scored_step(1.0, -3.0, &[]),
+                scored_step(2.0, -30.0, &[]),
+                scored_step(3.0, -1.0, &[]),
+                scored_step(4.0, f64::NEG_INFINITY, &[]),
+                scored_step(5.0, f64::NAN, &[]),
+                scored_step(6.0, -30.0, &[]),
+            ],
+            warnings: vec![], score_from: None, pit_randomization_seed: None,
+        };
+        let order: Vec<f64> = t.worst_scored(10).iter().map(|s| s.t).collect();
+        // -inf (no particle reached it) precedes NaN (a scoring defect);
+        // the tied -30s keep step order; the best score is last.
+        assert_eq!(order, vec![4.0, 5.0, 2.0, 6.0, 1.0, 3.0]);
+        let top: Vec<f64> = t.worst_scored(2).iter().map(|s| s.t).collect();
+        assert_eq!(top, vec![4.0, 5.0], "k truncates after ranking, not before");
+        assert!(PrequentialTrace { steps: vec![], ..t.clone() }.worst_scored(3).is_empty());
+    }
+
+    #[test]
+    fn worst_stream_is_the_lowest_per_stream_score_or_none() {
+        let s = scored_step(1.0, -9.0, &[("a", -2.0), ("b", -7.0), ("c", -7.0)]);
+        assert_eq!(s.worst_stream().map(|w| w.stream.as_str()), Some("b"),
+            "ties break toward the first stream");
+        let s = scored_step(1.0, -9.0, &[("a", -2.0), ("b", f64::NEG_INFINITY)]);
+        assert_eq!(s.worst_stream().map(|w| w.stream.as_str()), Some("b"));
+        assert!(scored_step(1.0, -9.0, &[]).worst_stream().is_none(),
+            "a single-stream or v1 trace has no per-stream breakdown");
     }
 
     #[test]
