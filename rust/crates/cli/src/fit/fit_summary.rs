@@ -1284,6 +1284,7 @@ impl Formatter {
         // are independent — so the counts must be readable side by side.
         if matches!(view, BayesianView::Pgas(_)) {
             s.push_str(&self.saved_path_table(stage_dir));
+            s.push_str(&self.filter_ess_table(stage_dir));
             s.push_str(&self.latent_path_table(stage_dir));
         }
 
@@ -1388,6 +1389,40 @@ impl Formatter {
                  incoherent records",
                 report.draw_stride.map_or("—".to_string(), |v| v.to_string()),
                 report.thin))));
+        }
+        s.push('\n');
+        s
+    }
+
+    /// The conditional filter's ESS at every observation (gh#685), read from
+    /// the `filter_ess` block of `pgas_summary.json` through that module's
+    /// own reader, so producer and consumer cannot drift. Quiet for a stage
+    /// that wrote no block — one that predates it, or in which no sweep
+    /// scored an observation. The stage-end block is printed as it was, with
+    /// the starved observations marked.
+    fn filter_ess_table(&self, stage_dir: &Path) -> String {
+        use super::filter_ess::FilterEss;
+        let path = stage_dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
+        let Some(fe) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .as_ref()
+            .and_then(FilterEss::read)
+        else {
+            return String::new();
+        };
+        let mut s = String::new();
+        for line in fe.report().trim_start_matches('\n').lines() {
+            s.push_str("  ");
+            s.push_str(line);
+            s.push('\n');
+        }
+        if fe.n_starved > 0 {
+            s.push_str(&format!("    {}\n", self.warn(&format!(
+                "the path through {} starved observation(s) is drawn from a handful of \
+                 particles every sweep; look at the data at t={} before the model",
+                fe.n_starved,
+                fe.worst.first().map_or("?".to_string(), |o| crate::quantile::fmt_time(o.time))))));
         }
         s.push('\n');
         s
