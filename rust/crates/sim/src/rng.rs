@@ -120,8 +120,20 @@ fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
     x
 }
 
-/// The Stirling-series tail correction `ln(k!) − ln(√(2πk)·(k/e)^k)`, used by
-/// [`btrs_binomial`]'s final acceptance test.
+/// The Stirling-series tail correction, used by [`btrs_binomial`]'s final
+/// acceptance test.
+///
+/// **Read the argument convention before touching this.** Writing
+/// `δ(j) = ln(j!) − ln(√(2πj)·(j/e)^j)`, this function returns `δ(k + 1)`, not
+/// `δ(k)`: `TAIL[0] = 0.0810614667953272` is `δ(1) = 1 − ½·ln(2π)`, and the
+/// series branch evaluates at `k + 1`. The shift is deliberate and
+/// LOAD-BEARING: [`BtrsHat::log_bound`] is derived under it, so "correcting"
+/// this function to return `δ(k)` while leaving `log_bound` alone takes the
+/// spread of `log_bound − log_pmf` at `(20, 0.5)` from ~1e-11 to **0.121**, and
+/// the sampler then draws from a visibly wrong distribution. It is the
+/// reference's convention, not an error in transcription.
+/// `log_bound_is_proportional_to_the_exact_pmf` catches the substitution, which
+/// is the only reason this is a trap for a reader and not for the build.
 ///
 /// Exact tabulated values below `k = 10`, where the asymptotic series has not
 /// yet converged; the series above. Transcribed from TensorFlow's
@@ -129,7 +141,8 @@ fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
 /// license as this project. See [`btrs_binomial`] for the full attribution.
 fn stirling_approx_tail(k: f64) -> f64 {
     debug_assert!(k >= 0.0 && k.fract() == 0.0, "tail wants a non-negative integer, got {k}");
-    /// `ln(k!) − Stirling(k)` for k = 0..=9.
+    /// `δ(k+1) = ln((k+1)!) − Stirling(k+1)` for k = 0..=9 — note the shift,
+    /// documented above.
     const TAIL: [f64; 10] = [
         0.081_061_466_795_327_2,
         0.041_340_695_955_409_2,
@@ -202,6 +215,14 @@ impl BtrsHat {
     /// Whether a candidate `k` is in `[0, n]`, tested in f64 BEFORE any integer
     /// cast. Shared with the sweep for the same reason as [`Self::us_of`].
     ///
+    /// **Both edges are CLOSED, and both are load-bearing.** `k = 0` and `k = n`
+    /// are ordinary binomial outcomes, so tightening either comparison
+    /// (`k > count` to `k >= count`, or `k < 0.0` to `k <= 0.0`) deletes a real
+    /// cell from the distribution while every χ² in the suite pools it away.
+    /// Under `binomial`'s `p > 0.5` reflection a lost `k = n` reappears as a
+    /// lost `k = 0`, where `P(K = 0)` reaches 3.5e-5 at `(200, 0.05)` — mass a
+    /// fit sees. `btrs_tests::the_support_is_closed_at_both_ends` pins both.
+    ///
     /// Note this is deliberately NOT NaN-tolerant — for `k = NaN` both
     /// comparisons are false and it answers "in support". The NaN case is
     /// excluded upstream by `binomial`'s `!p.is_finite()` guard, which is where
@@ -230,6 +251,68 @@ impl BtrsHat {
         (v * self.alpha / (self.a / (us * us) + self.b)).ln() <= self.log_bound(k)
     }
 
+    /// The squeeze: the fast accept, taken where the hat is tight enough to
+    /// return `k` without touching the density at all. This is the branch BTRS
+    /// wins on.
+    ///
+    /// A method rather than an inline comparison against `v_r`, for exactly the
+    /// reason [`SQUEEZE_US_MIN`] is a named constant. The sampler runs this
+    /// comparison and `btrs_tests::hat_dominates_and_squeeze_is_valid` certifies
+    /// it; as two copies they can drift, and then the sweep certifies a squeeze
+    /// the sampler does not use. Widening the shipped comparison by a factor of
+    /// 1.10 is a 4.3% relative pmf error at `(6.3e6, 3.05e-5)` and used to leave
+    /// the entire suite green (gh#802).
+    #[inline]
+    fn squeeze_accepts(&self, v: f64, us: f64) -> bool {
+        us >= SQUEEZE_US_MIN && v <= self.v_r
+    }
+
+    /// One BTRS proposal: `Some(k)` if the pair `(u, v)` is accepted, `None` if
+    /// it must be redrawn. The whole body of [`btrs_binomial`]'s loop, as a
+    /// method on the hat.
+    ///
+    /// Separated for the same reason [`Self::us_of`] and [`Self::in_support`]
+    /// are methods, but one level up: the support guard below is a DELIBERATE
+    /// DEVIATION from the reference, and in the routed domain it is a no-op —
+    /// the hat's geometry keeps every squeeze-region candidate inside `[0, n]`
+    /// (it takes `n·p < 1.3` to break that, and the routing predicate requires
+    /// `n·p ≥ 10`). So no draw can distinguish the guard's presence, and
+    /// deleting it was green under `--release`, where the `debug_assert!` below
+    /// is compiled out and the gate never builds this module optimised (gh#802).
+    /// A test can hand this method a hat the sampler would never construct;
+    /// `btrs_tests::an_out_of_support_candidate_is_redrawn_not_returned` does.
+    #[inline(always)]
+    fn propose(&self, u: f64, v: f64) -> Option<u64> {
+        let us = Self::us_of(u);
+        let k = self.k_of(u, us);
+
+        // The reference does this check only AFTER the squeeze, and so returns
+        // `k` from the squeeze unchecked, on the strength of the hat's
+        // in-support guarantee. Hoisting it is a no-op wherever that guarantee
+        // holds — `hat_dominates_and_squeeze_is_valid` asserts it holds across
+        // the routed domain — and where it might not, this redraws instead of
+        // handing the caller a `k > n` that the `p > 0.5` reflection would turn
+        // into a `u64` underflow of ~1.8e19, or a negative `k` that the
+        // saturating `as u64` below would turn into a silent zero count.
+        if !self.in_support(k) {
+            return None;
+        }
+        let k_int = k as u64;
+        debug_assert!(
+            (k_int as f64) <= self.count,
+            "k={k} escaped the f64 support check at n={}",
+            self.count
+        );
+
+        if self.squeeze_accepts(v, us) {
+            return Some(k_int);
+        }
+        if self.slow_accepts(v, us, k) {
+            return Some(k_int);
+        }
+        None
+    }
+
     /// The acceptance ratio `V(u)`: the slow test accepts exactly when
     /// `v ≤ V(u)`. **This is what BTRS's exactness is.** The scheme is a valid
     /// rejection sampler iff `V ≤ 1` everywhere (the hat dominates the pmf), and
@@ -248,8 +331,12 @@ impl BtrsHat {
 /// A rejection sampler: the accepted values are distributed `Binomial(n, p)` up
 /// to the floating-point accuracy of the acceptance test, whose density is
 /// evaluated through [`stirling_approx_tail`]'s table-plus-truncated-series
-/// makes, so it is not a regression — but it is why this doc says "up to
-/// floating point" and not "exact".
+/// correction rather than through exact factorials. The BTPE branch does the
+/// same — `rand_distr` 0.4.3's final acceptance test calls its own truncated
+/// Stirling series (`binomial.rs:266`, five terms in `1/a²` and no table for
+/// small `a`) in the same `+f(m+1)+f(n−m+1)−f(k+1)−f(n−k+1)` arrangement — so
+/// this is not a regression on the sampler it replaces. But it is why this doc
+/// says "up to floating point" and not "exact".
 ///
 /// **Measured, against a 60-digit reference for `ln(k!)`** — an earlier version
 /// of this comment said "~1e-15" and "at machine precision", which were wrong by
@@ -284,10 +371,10 @@ impl BtrsHat {
 /// routing predicate in [`StatefulRng::binomial`] is what keeps this sampler
 /// valid at the bottom, and [`BTRS_MAX_N`] is what keeps it valid at the top.
 ///
-/// Flipping first also keeps `k > n` unreachable at `n > 2^53`, where `n as f64`
-/// rounds up and `n − k` could underflow `u64`. Note that is a SEPARATE hazard
-/// from the `O(n·ε)` precision loss above, which is the one that actually bites
-/// at large `n` and which `BTRS_MAX_N` fences.
+/// A `k > n` reaching the caller would underflow `n − k` to ~1.8e19 under the
+/// `p > 0.5` reflection. What prevents that is the support check in
+/// [`BtrsHat::propose`] — not the flip, and not [`BTRS_MAX_N`], whose job is the
+/// `O(n·ε)` precision loss described above and nothing else.
 ///
 /// **Source.** Transcribed from TensorFlow's `random_binomial_op.cc` (`btrs`),
 /// Apache-2.0 — the same license as this project. This is deliberately the
@@ -305,35 +392,15 @@ fn btrs_binomial<R: rand::Rng + ?Sized>(n: u64, p: f64, rng: &mut R) -> u64 {
 
     loop {
         // `u ∈ [−0.5, 0.5)`, so `us ∈ (0, 0.5]`. At `u == −0.5` exactly (one draw
-        // in 2^53) `us == 0`, `2a/us` is `+∞` and `k` is `−∞` — which the support
-        // check below rejects in f64, BEFORE any integer cast. That order is
-        // load-bearing: `(−∞) as u64` saturates to 0 in Rust, so casting first
-        // would silently return a zero count instead of redrawing.
+        // in 2^53) `us == 0`, `2a/us` is `+∞` and `k` is `−∞` — which
+        // [`BtrsHat::propose`]'s support check rejects in f64, BEFORE any integer
+        // cast. That order is load-bearing: `(−∞) as u64` saturates to 0 in Rust,
+        // so casting first would silently return a zero count instead of
+        // redrawing.
         let u: f64 = rng.gen::<f64>() - 0.5;
         let v: f64 = rng.gen();
-        let us = BtrsHat::us_of(u);
-        let k = h.k_of(u, us);
-
-        // DELIBERATE DEVIATION from the reference, which does this check only
-        // AFTER the squeeze and so returns `k` from the squeeze unchecked, on the
-        // strength of the hat's in-support guarantee. Hoisting it is a no-op
-        // wherever that guarantee holds — `hat_dominates_and_squeeze_is_valid`
-        // asserts it holds across the routed domain — and where it might not, this
-        // redraws instead of handing the caller a `k > n` that the `p > 0.5`
-        // reflection would turn into a `u64` underflow of ~1.8e19.
-        if !h.in_support(k) {
-            continue;
-        }
-        let k_int = k as u64;
-        debug_assert!(k_int <= n, "k={k} escaped the f64 support check at n={n}");
-
-        // The squeeze: where the hat is tight enough to accept without touching
-        // the density. This is the branch BTRS wins on.
-        if us >= SQUEEZE_US_MIN && v <= h.v_r {
-            return k_int;
-        }
-        if h.slow_accepts(v, us, k) {
-            return k_int;
+        if let Some(k) = h.propose(u, v) {
+            return k;
         }
     }
 }
@@ -1025,12 +1092,22 @@ mod btrs_tests {
         (chi2, cells.len().saturating_sub(1))
     }
 
-    /// χ² critical value at ≈6σ on the `Normal(df, 2·df)` approximation. Loose
-    /// on purpose: every test here uses a FIXED seed, so a pass/fail is
-    /// deterministic and cannot flake, and the headroom means an unrelated
-    /// change to RNG consumption order does not turn into a red here. That the
-    /// looseness has NOT cost the suite its power is not asserted — it is
-    /// demonstrated by `chi_square_rejects_a_one_percent_bias` below.
+    /// χ² critical value, six standard deviations out on the `Normal(df, 2·df)`
+    /// approximation to the χ² distribution.
+    ///
+    /// **That is not a 6σ test.** The approximation is much lighter in the tail
+    /// than the χ² itself, so the true rejection level is milder than the "6"
+    /// suggests: the upper-tail probability at this cutoff is 1.8e-5 at
+    /// `df = 18` and 3.2e-7 at `df = 130`, i.e. 4.13σ and 4.98σ in normal terms.
+    /// Over the `df` this grid actually produces — 18 at `(24, 0.5)` up to 128
+    /// at `(1000, 0.5)` — the test runs at 4.1σ to 5.0σ. The direction is
+    /// benign (it under-rejects, so it cannot manufacture a red) and every test
+    /// here uses a FIXED seed, so a pass/fail is deterministic and cannot flake.
+    ///
+    /// Loose on purpose, so that an unrelated change to RNG consumption order
+    /// does not turn into a red here. That the looseness has NOT cost the suite
+    /// its power is not asserted — it is demonstrated by
+    /// `chi_square_rejects_a_one_percent_bias` below.
     fn critical(df: usize) -> f64 {
         df as f64 + 6.0 * (2.0 * df as f64).sqrt()
     }
@@ -1090,12 +1167,37 @@ mod btrs_tests {
         (22, 0.4997), (752, 0.0135), (23, 0.4583),
     ];
 
-    /// The worst (largest) acceptance ratio over a deterministic lattice in `u`,
-    /// and the worst squeeze shortfall (`v_r − V`, positive means the squeeze
-    /// accepts where the slow test would reject).
-    fn worst_ratios(h: &BtrsHat) -> (f64, f64) {
+    /// The worst (largest) acceptance ratio `V` over a deterministic lattice in
+    /// `u`, and the worst squeeze overshoot: the largest relative distance above
+    /// `V` at which [`BtrsHat::squeeze_accepts`] still accepts. `None` means it
+    /// never did, which is what squeeze validity is.
+    ///
+    /// The overshoot is PROBED through the sampler's own predicate rather than
+    /// computed as `v_r − V`. The squeeze accepts a half-line in `v`, so "it
+    /// never accepts a `v` the slow test rejects" is decided by evaluating the
+    /// shipped comparison just above `V`; reading `v_r` off the struct instead
+    /// certifies the field while leaving the comparison that uses it untested,
+    /// which is how a 10% widening of that comparison stayed green (gh#802).
+    ///
+    /// **This lattice is a SAMPLE, not a proof**, and its bias has a known
+    /// direction: a maximum over a subset of `u` is at most the maximum over all
+    /// of it, so it UNDERSTATES `sup V`. Measured at the tightest cell,
+    /// `(23, 0.4583)`: 100k points give 0.997496, 10M give 0.997773 — a
+    /// shortfall of 2.77e-4 against a true margin of 2.23e-3, i.e. 12.4% of it.
+    /// Eightfold headroom, nothing hidden — but a cell whose margin fell below
+    /// ~1e-3 would need a finer lattice before this test could be believed about
+    /// it.
+    fn worst_ratios(h: &BtrsHat) -> (f64, Option<f64>) {
         const STEPS: usize = 100_000;
-        let (mut worst_v, mut worst_squeeze) = (0.0f64, f64::NEG_INFINITY);
+        /// Relative distances above `V` at which the squeeze must already
+        /// reject. The finest rung sets the resolution: the tightest squeeze
+        /// margin in `DOMAIN` is `v_r/V = 0.99303` at `(8.75e6, 2.2e-5)`, so
+        /// probing at `V·(1 + 1e-12)` detects any widening of the comparison
+        /// beyond a factor of 1.0071.
+        const OVERSHOOT: &[f64] = &[1e-12, 1e-9, 1e-6, 1e-3, 1e-2, 1e-1];
+
+        let mut worst_v = 0.0f64;
+        let mut worst_overshoot: Option<f64> = None;
         for i in 0..STEPS {
             let u = -0.5 + (i as f64 + 0.5) / STEPS as f64;
             let us = BtrsHat::us_of(u);
@@ -1107,11 +1209,13 @@ mod btrs_tests {
             if v > worst_v {
                 worst_v = v;
             }
-            if us >= SQUEEZE_US_MIN {
-                worst_squeeze = worst_squeeze.max(h.v_r - v);
+            for &d in OVERSHOOT {
+                if h.squeeze_accepts(v * (1.0 + d), us) {
+                    worst_overshoot = Some(worst_overshoot.map_or(d, |w: f64| w.max(d)));
+                }
             }
         }
-        (worst_v, worst_squeeze)
+        (worst_v, worst_overshoot)
     }
 
     /// BTRS must fit the exact pmf — and so must BTPE, on the same grid with the
@@ -1381,7 +1485,15 @@ mod btrs_tests {
                 let ratio = h.accept_ratio(us, k);
                 // Probe both sides of the boundary, and skip a narrow band
                 // around it where the two forms may legitimately round apart.
-                for scale in [0.5f64, 0.9, 1.1, 2.0] {
+                //
+                // The 0.999/1.001 rungs are what give this test its resolution.
+                // With only ±0.5 and ±10% probes, the two forms could disagree
+                // by any factor `f ∈ (0.909, 1.111)` without a single probe
+                // straddling the boundary: a 9% bias in `slow_accepts` passed
+                // (total variation 3.5e-3, 3.5% max relative pmf error) and 12%
+                // was the first caught (gh#802). At ±0.1% the blind window
+                // closes to `f ∈ (0.999, 1.001)`.
+                for scale in [0.5f64, 0.9, 0.999, 1.001, 1.1, 2.0] {
                     let v = ratio * scale;
                     if !(v > 0.0 && v.is_finite()) {
                         continue;
@@ -1511,16 +1623,17 @@ mod btrs_tests {
                 "DOMAIN entry ({n}, {p}) is outside what btrs_binomial is handed"
             );
             let h = BtrsHat::new(n, p);
-            let (worst_v, worst_squeeze) = worst_ratios(&h);
+            let (worst_v, overshoot) = worst_ratios(&h);
             assert!(
                 worst_v <= 1.0,
                 "n={n} p={p}: hat does NOT dominate (max V = {worst_v:.6} > 1) — \
                  the sampler is not exact here"
             );
             assert!(
-                worst_squeeze <= 0.0,
-                "n={n} p={p}: the squeeze accepts where the slow test rejects \
-                 (v_r exceeds V by {worst_squeeze:.6}) — the fast path is biased"
+                overshoot.is_none(),
+                "n={n} p={p}: `squeeze_accepts` took v = V·(1 + {:.0e}), a draw the \
+                 slow test rejects — the fast path is biased",
+                overshoot.unwrap_or(0.0)
             );
         }
     }
@@ -1546,6 +1659,200 @@ mod btrs_tests {
              {worst:.6}. If this now passes, the domination region is wider than \
              assumed — re-derive it before touching BINV_THRESHOLD."
         );
+    }
+
+    /// `in_support` decides the support in f64 before the integer cast, so its
+    /// two comparisons ARE the support boundary — and neither edge was pinned.
+    /// `k > count` → `k >= count` (the sampler can never return `k = n`) and
+    /// `k < 0.0` → `k <= 0.0` (never `k = 0`) both left the suite green:
+    /// `draws_stay_in_support_including_the_squeeze_return` asserts only
+    /// `d <= n`, and `chi_square` pools both end cells into their neighbours
+    /// before the statistic is formed (gh#802).
+    ///
+    /// Three assertions, in increasing distance from the comparison itself: the
+    /// predicate at each edge; the shipped proposal path at the `u` that
+    /// actually proposes each edge; and a draw-level witness at the lower edge,
+    /// which is the only one observable — `P(K = n) = p^n` is 1e-6 at the
+    /// smallest routed cell, so seeing it would take ~1e7 draws, while
+    /// `P(K = 0) = 3.5e-5` at `(200, 0.05)`.
+    #[test]
+    fn the_support_is_closed_at_both_ends() {
+        for &(n, p) in DOMAIN {
+            let h = BtrsHat::new(n, p);
+            assert!(h.in_support(0.0), "n={n} p={p}: k = 0 is a binomial outcome");
+            assert!(h.in_support(h.count), "n={n} p={p}: k = n is a binomial outcome");
+            assert!(!h.in_support(-1.0), "n={n} p={p}: k = −1 is not");
+            assert!(!h.in_support(h.count + 1.0), "n={n} p={p}: k = n+1 is not");
+        }
+
+        // The same two edges on the shipped path. `(20, 0.5)` is the smallest
+        // routed cell, so its hat reaches both ends of the support within the
+        // lattice; `v` is set to half the acceptance ratio there, i.e. squarely
+        // inside the accept region, so the only thing that can refuse the
+        // candidate is the support check.
+        let h = BtrsHat::new(20, 0.5);
+        for edge in [0.0f64, h.count] {
+            let mut probed = None;
+            for i in 0..1_000_000usize {
+                let u = -0.5 + (i as f64 + 0.5) / 1_000_000.0;
+                if h.k_of(u, BtrsHat::us_of(u)) == edge {
+                    probed = Some(u);
+                    break;
+                }
+            }
+            let u = probed.unwrap_or_else(|| panic!("the hat never proposes k = {edge}"));
+            let v = h.accept_ratio(BtrsHat::us_of(u), edge) * 0.5;
+            assert_eq!(
+                h.propose(u, v),
+                Some(edge as u64),
+                "the candidate k = {edge} at u={u} was refused — the support \
+                 check has closed an edge that is a legitimate outcome"
+            );
+        }
+
+        // And the lower edge as a draw, where it carries mass a fit sees:
+        // `P(K = 0) = 0.95^200 = 3.5e-5`, so 400k draws expect ~14.
+        let (n, p) = (200u64, 0.05);
+        let zeros = draw(BinomialAlgorithm::Btrs, n, p, 400_000, 20_260_901)
+            .iter()
+            .filter(|&&d| d == 0)
+            .count();
+        assert!(
+            zeros > 0,
+            "no draw of {n} at p={p} came back 0 in 400k tries, against ~14 \
+             expected — the sampler cannot reach the bottom of its own support"
+        );
+    }
+
+    /// The support guard at the top of [`BtrsHat::propose`] is a deviation from
+    /// the reference, which checks the support only after the squeeze. In the
+    /// routed domain the guard is a no-op — that is the point of it — so no
+    /// draw can distinguish its presence, and deleting it left the suite GREEN
+    /// under `--release`. Five tests went red in debug, but only through the
+    /// `debug_assert!` beside it, and the gate never builds this module
+    /// optimised, which is the build every fit runs (gh#802).
+    ///
+    /// So test the guard at the level it is written at: hand `propose` a hat
+    /// whose geometry puts a squeeze-region candidate outside `[0, n]` and
+    /// require the answer to be "redraw". Without the guard the squeeze returns
+    /// that candidate — below zero it becomes 0 through the saturating
+    /// `as u64`, and above `n` it becomes a `k > n` that `binomial`'s `p > 0.5`
+    /// reflection turns into an `n − k` underflow of ~1.8e19.
+    #[test]
+    fn an_out_of_support_candidate_is_redrawn_not_returned() {
+        // Not a routed hat: `a` is inflated so the candidate leaves `[0, n]`
+        // while `us` is still inside the squeeze region. The shipped constants
+        // make that impossible above `n·p ≈ 1.3`, and the routing predicate
+        // admits nothing below `n·p = 10` — which is why no draw can reach here.
+        let h = BtrsHat {
+            count: 20.0,
+            b: 1.0,
+            a: 2.0,
+            c: 10.0,
+            v_r: 0.5,
+            r: 1.0,
+            alpha: 1.0,
+            m: 10.0,
+        };
+        let v = 0.1; // below v_r, so the squeeze is what would fire
+
+        for (u, edge) in [(0.42f64, "above n"), (-0.42, "below 0")] {
+            let us = BtrsHat::us_of(u);
+            let k = h.k_of(u, us);
+            // The fixture has to actually pose the question, or this test is
+            // vacuous: the candidate must be out of support AND the squeeze
+            // must be live at this `us`.
+            assert!(
+                !h.in_support(k),
+                "fixture is wrong: k={k} is in support, so the guard is not \
+                 exercised {edge}"
+            );
+            assert!(
+                h.squeeze_accepts(v, us),
+                "fixture is wrong: the squeeze does not fire at us={us}, so the \
+                 guard is not what decides the outcome {edge}"
+            );
+            assert_eq!(
+                h.propose(u, v),
+                None,
+                "a candidate {edge} (k={k}) was RETURNED instead of redrawn — \
+                 the hoisted support check is what stands between the squeeze \
+                 and a saturating `as u64`"
+            );
+        }
+    }
+
+    /// The mirror of `the_hat_stops_dominating_below_the_routing_threshold`, for
+    /// the other end. [`BTRS_MAX_N`] is a correctness fence, and until this test
+    /// existed nothing pinned it: raising it from 1e12 to 1e15, or to 1e18, left
+    /// all 24 tests green while the hat stopped dominating and the sampler
+    /// silently returned a wrong distribution.
+    /// `btrs_de_selects_itself_above_its_max_n` reads the constant symbolically,
+    /// so it follows the mutation rather than catching it.
+    ///
+    /// Two halves, and both are needed. At the fence the hat must still
+    /// dominate — that is what fails if the constant is raised. Above it the hat
+    /// must FAIL to dominate — that is what says the fence is doing work rather
+    /// than being a decoration, and its `n > BTRS_MAX_N` precondition is what
+    /// fails if the constant is raised past these cells instead.
+    ///
+    /// Measured `sup V` on the shipped lattice, over `p ∈ {1e-6 … 0.5}`:
+    /// 0.9951–0.9955 at 1e12, 0.9963–0.9967 at 1e13, 1.102–1.140 at 1e15,
+    /// 3.59–8.20 at 1e16, 2.4e75–9.1e81 at 1e18. The crossing is between 1e13
+    /// and 1e15; 1e12 sits a decade inside it, per the constant's own docstring.
+    ///
+    /// **These cells are deliberately NOT in [`DOMAIN`].** Domination is only
+    /// the first of the three exactness conditions, and the second —
+    /// `log_bound_is_proportional_to_the_exact_pmf` — is already violated here:
+    /// its `spread < 1e-7` bar is crossed at `n ≈ 4.6e8` (measured spread
+    /// 1.02e-7 there, 2.22e-4 at 1e12). That is the SEPARATE, open defect in
+    /// gh#802 — the fence is derived from domination but pmf proportionality
+    /// binds ~2000× lower — and choosing between the `ln_1p` repair, a lower
+    /// fence, and accepting it is a maintainer decision, not something this test
+    /// should pre-empt by turning a DOMAIN cell red.
+    #[test]
+    fn the_hat_stops_dominating_above_btrs_max_n() {
+        // At the fence itself, on both edges of the `p` range the router can
+        // hand BTRS at this `n`.
+        for &p in &[1e-6f64, 0.5] {
+            assert!(
+                (BTRS_MAX_N as f64) * p >= BINV_THRESHOLD,
+                "precondition: (BTRS_MAX_N, {p}) must reach the BTRS branch"
+            );
+            let (worst, overshoot) = worst_ratios(&BtrsHat::new(BTRS_MAX_N, p));
+            assert!(
+                worst <= 1.0,
+                "at BTRS_MAX_N = {BTRS_MAX_N} with p={p} the hat does NOT dominate \
+                 (max V = {worst:.6} > 1) — the fence is above the range the hat \
+                 is valid on, so every draw at the top of the routed domain comes \
+                 from the wrong distribution"
+            );
+            assert!(
+                overshoot.is_none(),
+                "at BTRS_MAX_N = {BTRS_MAX_N} with p={p} the squeeze accepts \
+                 v = V·(1 + {:.0e})",
+                overshoot.unwrap_or(0.0)
+            );
+        }
+        // And above it, where the fence exists precisely because it does not.
+        for &(n, p) in &[
+            (1_000_000_000_000_000u64, 1e-6f64),
+            (10_000_000_000_000_000, 1e-6),
+            (1_000_000_000_000_000_000, 1e-6),
+        ] {
+            assert!(
+                n > BTRS_MAX_N,
+                "n={n} is no longer above BTRS_MAX_N = {BTRS_MAX_N}: the fence has \
+                 been raised into the region where the hat is known to fail"
+            );
+            let (worst, _) = worst_ratios(&BtrsHat::new(n, p));
+            assert!(
+                worst > 1.0,
+                "expected the hat to FAIL above the fence at n={n}, got max V = \
+                 {worst:.6}. If it now dominates here, the `(n+1)·ln(…)` precision \
+                 loss has been repaired — re-derive BTRS_MAX_N before raising it."
+            );
+        }
     }
 
     /// The margin at the boundary is small enough to be worth pinning: if a
