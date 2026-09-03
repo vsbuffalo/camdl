@@ -419,6 +419,31 @@ pub struct WeightCollapse {
     /// (`min_alive == 1`) is indistinguishable from a healthy one on every
     /// other field, and that near miss is what the boolean discards.
     pub min_alive: usize,
+    /// gh#685. The filter's effective sample size at every observation of this
+    /// sweep — `(Σw)²/Σw²` over the normalised weights, as
+    /// [`ess_from_log_weights`] computes it — indexed like the observation
+    /// slice `csmc_as` was given, so `ess_by_obs[i]` is the ESS of the weight
+    /// vector `observations[i]` produced. `NaN` at an observation the sweep did
+    /// not score (one the substep grid dropped, such as an observation at
+    /// `t_start`); empty when the sweep scored nothing at all.
+    ///
+    /// Indexed by observation rather than carrying a time per entry because
+    /// every retained sweep keeps its profile and the consumer already holds
+    /// the observation slice: one `f64` per observation per sweep is the
+    /// whole cost.
+    ///
+    /// `min_alive` counts particles whose weight is *finite*, and a finite
+    /// weight can still be negligible: an observation that leaves one particle
+    /// at relative weight 1 and the rest at e⁻²⁵ reads as "every particle
+    /// alive" there, while the following resample copies that one particle
+    /// into every slot. The ESS is what that resample actually draws from. An
+    /// ESS of two or three out of thousands, sweep after sweep at the same
+    /// observation, is the signature of a data point the model cannot reach —
+    /// a re-issued count, a zero-floored revision — and it is invisible to
+    /// `min_alive`. The whole profile is kept, not its minimum alone, because
+    /// starvation concentrates at a few observations and the reader's question
+    /// is *which*.
+    pub ess_by_obs: Vec<f64>,
     /// The sweep's final trajectory draw found no positive weight and fell back
     /// to the reference slot's index.
     ///
@@ -440,27 +465,52 @@ impl WeightCollapse {
             n_windows: 0,
             first_substep: None,
             min_alive: n_particles,
+            ess_by_obs: Vec::new(),
             final_draw_fell_back: false,
         }
+    }
+
+    /// The observation at which the filter's ESS was smallest, as
+    /// `(observation index, ess)` — the first such observation on a tie, so
+    /// the first one to reduce the swarm to that size is the one named.
+    /// Unscored (`NaN`) entries are skipped; `None` when nothing was scored.
+    pub fn min_ess(&self) -> Option<(usize, f64)> {
+        self.ess_by_obs
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.is_nan())
+            .fold(None, |best: Option<(usize, f64)>, (i, &e)| match best {
+                Some((_, b)) if b <= e => best,
+                _ => Some((i, e)),
+            })
     }
 }
 
 /// Accumulator for [`WeightCollapse`] over a sweep's observation substeps.
 ///
-/// A type rather than three loose counters in `csmc_as`, for the same reason
+/// A type rather than loose counters in `csmc_as`, for the same reason
 /// [`RenewalBins`] is one: the predicate "how many particles can this weight
-/// vector be sampled from" is then written once, and the three fields cannot
-/// be updated out of step with each other.
+/// vector be sampled from" is then written once, and the fields cannot be
+/// updated out of step with each other.
 #[derive(Clone, Debug)]
 pub struct WeightCollapseTally {
     n_windows: usize,
     first_substep: Option<usize>,
     min_alive: usize,
+    ess_by_obs: Vec<f64>,
 }
 
 impl WeightCollapseTally {
-    pub fn new(n_particles: usize) -> Self {
-        WeightCollapseTally { n_windows: 0, first_substep: None, min_alive: n_particles }
+    /// `n_obs` is the length of the observation slice the sweep scores from;
+    /// the profile starts as `NaN` there and each scored observation fills
+    /// its own slot.
+    pub fn new(n_particles: usize, n_obs: usize) -> Self {
+        WeightCollapseTally {
+            n_windows: 0,
+            first_substep: None,
+            min_alive: n_particles,
+            ess_by_obs: vec![f64::NAN; n_obs],
+        }
     }
 
     /// How many entries of `log_weights` a categorical draw has anything to
@@ -474,17 +524,25 @@ impl WeightCollapseTally {
         log_weights.iter().filter(|w| w.is_finite()).count()
     }
 
-    /// Record the weight vector produced at observation substep `s`. Call only
-    /// at a substep carrying an observation: between observations the weights
-    /// are uniform by construction, and folding those in would report a swarm
-    /// that was never scored.
-    pub fn record(&mut self, s: usize, log_weights: &[f64]) {
+    /// Record the weight vector produced at substep `s` by scoring observation
+    /// `obs_idx`. Call only at a substep carrying an observation: between
+    /// observations the weights are uniform by construction, and folding those
+    /// in would report a swarm that was never scored.
+    ///
+    /// The ESS is taken here, where the vector is produced, for the same reason
+    /// the alive count is: the following resample replaces the vector with a
+    /// uniform one and leaves no trace of how few particles it drew from.
+    pub fn record(&mut self, s: usize, obs_idx: usize, log_weights: &[f64]) {
         let alive = Self::n_alive(log_weights);
         self.min_alive = self.min_alive.min(alive);
         if alive == 0 {
             self.n_windows += 1;
             self.first_substep.get_or_insert(s);
         }
+        // A fully dead vector reads 0.0 from `ess_from_log_weights`, so the
+        // profile agrees with `n_windows` on the collapsed case without a
+        // special branch.
+        self.ess_by_obs[obs_idx] = super::types::ess_from_log_weights(log_weights);
     }
 
     /// Close the tally with the outcome of the sweep's final trajectory draw.
@@ -497,6 +555,7 @@ impl WeightCollapseTally {
             n_windows: self.n_windows,
             first_substep: self.first_substep,
             min_alive: self.min_alive,
+            ess_by_obs: self.ess_by_obs,
             final_draw_fell_back,
         }
     }
@@ -2236,7 +2295,9 @@ pub(crate) fn draw_free_particle_initial_state(
 pub fn csmc_as(
     model: &CompiledModel,
     params: &[f64],
-    _observations: &[Observation],
+    // Read only for its length, which sizes the per-observation ESS profile
+    // (gh#685); the values are scored through `obs_model`.
+    observations: &[Observation],
     reference: &PGASTrajectory,
     n_particles: usize,
     dt: f64,
@@ -2369,7 +2430,7 @@ pub fn csmc_as(
     // substeps where no ancestor could reach the reference; this counts
     // observation substeps where no particle could explain the data. Counters
     // only, consuming no RNG, so trajectories stay bit-identical.
-    let mut weight_collapse = WeightCollapseTally::new(n_particles);
+    let mut weight_collapse = WeightCollapseTally::new(n_particles, observations.len());
 
     // Pre-allocated buffer for ancestor sampling weights (reused each substep)
     let mut ancestor_log_w = vec![f64::NEG_INFINITY; n_particles];
@@ -2679,8 +2740,9 @@ pub fn csmc_as(
             // not at the final draw: a vector that collapses anywhere but the
             // last weight-setting substep is consumed by the next resample,
             // which replaces it with a uniform distribution and leaves no
-            // trace of the collapse by the end of the sweep.
-            weight_collapse.record(s, &log_weights);
+            // trace of the collapse by the end of the sweep. Keyed by the
+            // observation's index, so the diagnostic names a row of the data.
+            weight_collapse.record(s, obs_idx, &log_weights);
         } else {
             // Non-observation substep: uniform weights
             log_weights.fill(0.0);
