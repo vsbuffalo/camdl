@@ -2010,6 +2010,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         });
                     eprintln!("  prequential: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
                         trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
+                    eprint!("{}", crate::prequential_out::surprise_table(trace));
                 }
                 stage_best_loglik = Some(mean_ll);
             }
