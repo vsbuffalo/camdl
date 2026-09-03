@@ -4443,10 +4443,10 @@ order. A real PGAS-with-NUTS trace header, from a two-stream fit estimating
 `beta` and `gamma`:
 
 ```
-sweep	log_complete_data_ll	log_posterior	trajectory_renewal	renewal_b0	renewal_b1	renewal_b2	renewal_b3	renewal_b4	renewal_b5	renewal_b6	renewal_b7	renewal_b8	renewal_b9	as_opportunity	as_accept	as_proposed	transition_ll	obs_ll	initial_state_ll	obs_ll_cases	obs_ll_confirmations	tree_depth	n_leapfrog	step_size	accept_stat	n_divergent	energy	beta	gamma
+sweep	log_complete_data_ll	log_posterior	trajectory_renewal	renewal_b0	renewal_b1	renewal_b2	renewal_b3	renewal_b4	renewal_b5	renewal_b6	renewal_b7	renewal_b8	renewal_b9	collapsed_windows	min_alive	min_ess	min_ess_t	as_opportunity	as_accept	as_proposed	transition_ll	obs_ll	initial_state_ll	obs_ll_cases	obs_ll_confirmations	tree_depth	n_leapfrog	step_size	accept_stat	n_divergent	energy	beta	gamma
 ```
 
-Two of PGAS's diagnostic blocks need reading before the positions make sense,
+Three of PGAS's diagnostic blocks need reading before the positions make sense,
 and one of them varies in width with the model — so a reader must take the
 header as authoritative rather than assume fixed column positions:
 
@@ -4454,6 +4454,18 @@ header as authoritative rather than assume fixed column positions:
   in time, one bin per tenth of the substep series. A bin holding no substep
   renders `NA`, not `0.0`: "no substep fell here" and "no substep here was
   renewed" are different diagnoses.
+- `collapsed_windows`, `min_alive`, `min_ess`, `min_ess_t` — the sweep's filter
+  health, read together with renewal: renewal says whether the path moved, these
+  say whether the selection had anything to choose from. `collapsed_windows` is
+  how many observation windows left _every_ particle at zero density and
+  `min_alive` the fewest particles any window left with a finite weight
+  (gh#783). A finite weight can be negligible, so `min_ess` is the smallest
+  effective sample size `(Σw)²/Σw²` the weights had at any observation of the
+  sweep and `min_ess_t` the observation time it fell at (gh#685) — the number
+  the resample after that observation actually drew from. `NA` when the sweep
+  scored no observation. A sweep with `min_alive` in the thousands and `min_ess`
+  of 3 is the case `min_alive` cannot see: every weight finite, one handful of
+  them carrying all the mass.
 - `obs_ll_<stream>` — the observation term `obs_ll` resolved by declared
   observation stream, one column per stream, each summing over that stream's own
   observation times and (for an indexed stream) its strata. A row is a sweep and
@@ -4568,17 +4580,18 @@ An optimizer stage (IF2, NLopt) additionally writes:
 
 A sampler stage (PGAS, PMMH, NUTS, MH) additionally writes:
 
-| file                        | content                                                                                                                                                                                                                                                                                    |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `draws.tsv`                 | the thinned posterior cloud (§10.3)                                                                                                                                                                                                                                                        |
-| `chain_N/trace.tsv`         | per-chain trace (§10.4)                                                                                                                                                                                                                                                                    |
-| `chain_N/resume_state.bin`  | bincode resume state, guarded by its own config hash (§9.4)                                                                                                                                                                                                                                |
-| `chain_N/trajectories.tsv`  | PGAS only — the smoothed latent paths, tidy/long, keyed `chain draw time [date]`, with a `# camdl-trajectories v1` header line                                                                                                                                                             |
-| `chain_N/trajectories.json` | the matching manifest (`format`, `version`, `method`, `granularity`, `n_chains`, `n_draws`, `columns`, `model_hash`, `conditioned`, `calendar`, …)                                                                                                                                         |
-| `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at stage end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822) |
-| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared                                                                                                                                                       |
-| `diagnostics.json`          | R̂ / ESS / divergence diagnostics                                                                                                                                                                                                                                                           |
-| `progress.json`             | sampler progress, written live                                                                                                                                                                                                                                                             |
+| file                        | content                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `draws.tsv`                 | the thinned posterior cloud (§10.3)                                                                                                                                                                                                                                                                                                                                                                      |
+| `chain_N/trace.tsv`         | per-chain trace (§10.4)                                                                                                                                                                                                                                                                                                                                                                                  |
+| `chain_N/resume_state.bin`  | bincode resume state, guarded by its own config hash (§9.4)                                                                                                                                                                                                                                                                                                                                              |
+| `chain_N/trajectories.tsv`  | PGAS only — the smoothed latent paths, tidy/long, keyed `chain draw time [date]`, with a `# camdl-trajectories v1` header line                                                                                                                                                                                                                                                                           |
+| `chain_N/trajectories.json` | the matching manifest (`format`, `version`, `method`, `granularity`, `n_chains`, `n_draws`, `columns`, `model_hash`, `conditioned`, `calendar`, …)                                                                                                                                                                                                                                                       |
+| `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at stage end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                               |
+| `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
+| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared                                                                                                                                                                                                                                                                     |
+| `diagnostics.json`          | R̂ / ESS / divergence diagnostics                                                                                                                                                                                                                                                                                                                                                                         |
+| `progress.json`             | sampler progress, written live                                                                                                                                                                                                                                                                                                                                                                           |
 
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
 `{name}={value:.12}\0` pairs, truncated to 8 hex — so a hand-edited parameter
