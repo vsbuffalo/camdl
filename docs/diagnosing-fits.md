@@ -175,7 +175,10 @@ sampler never revisits and the parameter R̂ is measuring agreement between chai
 that were never in the same place. The **latent-path convergence** block
 (printed directly under the renewal profile when a stage has at least two chains
 and four saved paths per chain; `latent_convergence` in `pgas_summary.json`,
-per-cell table `latent_convergence.tsv`) answers that question. It runs every
+per-cell table `latent_convergence.tsv`) answers that question. It is also
+recomputed from `chain_N/trajectories.tsv` by `camdl fit summary <fit>` for any
+finished PGAS stage, so a fit that ran before the block existed gets it without
+a re-run (the table is written once if the stage has none). It runs every
 (state, substep) cell of the saved paths — compartments, `flow_*`, `inc_*` —
 through the same rank-normalised R̂ the parameter table uses, and classifies
 each: **constant** (the pooled draws never moved: structurally zero, or pinned),

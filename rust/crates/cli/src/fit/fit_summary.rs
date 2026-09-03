@@ -1284,6 +1284,7 @@ impl Formatter {
         // are independent — so the counts must be readable side by side.
         if matches!(view, BayesianView::Pgas(_)) {
             s.push_str(&self.saved_path_table(stage_dir));
+            s.push_str(&self.latent_path_table(stage_dir));
         }
 
         // Posterior parameter table.
@@ -1387,6 +1388,57 @@ impl Formatter {
                  incoherent records",
                 report.draw_stride.map_or("—".to_string(), |v| v.to_string()),
                 report.thin))));
+        }
+        s.push('\n');
+        s
+    }
+
+    /// Convergence of the latent path itself (gh#822): R̂/ESS of every state at
+    /// every substep across the chains, recomputed here from the chains'
+    /// `trajectories.tsv` rather than read from `pgas_summary.json`, so a
+    /// stage that finished before the block existed reports it too and the
+    /// number is always the one the paths on disk give. Chains without a saved
+    /// path (a refused start) are skipped, as the stage skips them. Quiet when
+    /// no chain saved a path; a refusal (one chain, fewer than four saved
+    /// paths) is named.
+    ///
+    /// The per-cell table is the one the stage writes; when the stage did not
+    /// (it predates the block), it is written now, once — the same bytes a
+    /// re-run would leave — and the block says so.
+    fn latent_path_table(&self, stage_dir: &Path) -> String {
+        use super::latent_convergence::{latent_convergence, read_stage_paths, LATENT_CONVERGENCE_TSV};
+        let mut s = String::new();
+        let (chains, columns) = match read_stage_paths(stage_dir) {
+            Ok(Some(read)) => read,
+            Ok(None) => return s,
+            Err(e) => {
+                s.push_str(&format!("  {}\n", self.bold("latent-path convergence")));
+                s.push_str(&format!("    {}\n\n", self.warn(&format!("not computed: {e}"))));
+                return s;
+            }
+        };
+        match latent_convergence(&chains, &columns) {
+            Ok(lc) => {
+                // The stage-end block, indented into this section.
+                for line in lc.report().trim_start_matches('\n').lines() {
+                    s.push_str("  ");
+                    s.push_str(line);
+                    s.push('\n');
+                }
+                let table = stage_dir.join(LATENT_CONVERGENCE_TSV);
+                if !table.is_file() {
+                    match lc.write_tsv(&table) {
+                        Ok(()) => s.push_str(&format!("    {}\n", self.dim(&format!(
+                            "the stage predates this block; {LATENT_CONVERGENCE_TSV} written now from its saved paths")))),
+                        Err(e) => s.push_str(&format!("    {}\n", self.dim(&format!(
+                            "the stage predates this block and the table could not be written: {e}")))),
+                    }
+                }
+            }
+            Err(e) => {
+                s.push_str(&format!("  {}\n", self.bold("latent-path convergence")));
+                s.push_str(&format!("    {}\n", self.dim(&format!("not computed: {e}"))));
+            }
         }
         s.push('\n');
         s
