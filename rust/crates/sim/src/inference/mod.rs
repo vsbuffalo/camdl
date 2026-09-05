@@ -51,7 +51,7 @@ pub use traits::{ProcessModel, DensityProcess, ObservationModel, Resettable, SMC
 pub use chain_binomial_process::ChainBinomialProcess;
 pub use multi_stream_obs::{
     dense_cells, BindReport, BoundObs, Finding, MultiStreamObsModel, NullObsModel, ObsCell,
-    Severity,
+    Period, Severity, StreamTimes,
 };
 pub use prior::Prior;
 pub use ode_loglik::compute_ode_loglik;

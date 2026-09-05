@@ -1025,6 +1025,13 @@ fn parse_column_cells<'a>(
 /// enforces this at compile); this surfaces a clear error if a malformed IR
 /// (no time column) somehow reaches the loader.
 pub fn obs_time_column(obs: &ir::observation::ObservationModel) -> Result<&str, String> {
+    // A windowed stream anchors on its CLOSING boundary — the proposal's "the
+    // fit time source for a windowed stream is `window_stop`" — so every
+    // downstream "observation time" consumer keeps the position it has for an
+    // unwindowed stream (gh#833).
+    if let Some(c) = column_with_role(obs, &ir::observation::ColumnRole::WindowStop) {
+        return Ok(c);
+    }
     obs.columns.iter()
         .find(|c| c.role == ir::observation::ColumnRole::Time)
         .map(|c| c.name.as_str())
@@ -1032,6 +1039,119 @@ pub fn obs_time_column(obs: &ir::observation::ObservationModel) -> Result<&str, 
             "observation stream '{}' declares no `: time` column in `columns {{ }}` \
              — cannot determine the time axis to bind.",
             obs.name))
+}
+
+/// The name of the column carrying `role`, if the stream declares one.
+fn column_with_role<'a>(
+    obs: &'a ir::observation::ObservationModel,
+    role: &ir::observation::ColumnRole,
+) -> Option<&'a str> {
+    obs.columns.iter().find(|c| &c.role == role).map(|c| c.name.as_str())
+}
+
+/// Read one named column of an observation file as raw cells, reusing the
+/// strict by-name parser. The parser wants a time column, so the target column
+/// is passed as both and the unused half discarded — the same trick
+/// [`load_stream_aux`] uses.
+fn read_column_raw<'a>(
+    content: &'a str,
+    path: &str,
+    column: &str,
+) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
+    parse_column_cells(content, path, column, column)
+}
+
+/// Build the [`StreamTimes`] for one stream: what its rows cover, per its
+/// `covers` declaration (gh#833).
+///
+/// `label_times` are the already-converted values of the stream's own anchor
+/// column — the `: time` column, or `window_stop` for a windowed stream.
+///
+/// An UNDECLARED stream keeps today's reading exactly: its schedule is the row
+/// times and the window is whatever the spacing happens to be. A declared one
+/// gets real periods, and its scoring boundary moves accordingly — for a daily
+/// file labelled by the day the count describes, one bucket later, which is the
+/// correction this exists to make.
+pub fn stream_times_for(
+    obs: &ir::observation::ObservationModel,
+    projection: &sim::inference::multi_stream_obs::StreamProjection,
+    label_times: &[f64],
+    path: &str,
+    opts: &TimeOpts,
+) -> Result<sim::inference::StreamTimes, String> {
+    use ir::observation::{Covers, CoversSpan};
+    use sim::inference::{Period, StreamTimes};
+
+    let Some(covers) = &obs.covers else {
+        return Ok(StreamTimes::undeclared_for(projection, label_times.to_vec()));
+    };
+
+    // A per-row width comes from a declared column, read independently of the
+    // aux path: aux is cleared on a hole, and a hole still has a period.
+    let span_values = |span: &CoversSpan| -> Result<Vec<f64>, String> {
+        match span {
+            CoversSpan::Const(d) => Ok(vec![*d; label_times.len()]),
+            CoversSpan::Column(col) => {
+                let content = std::fs::read_to_string(path)
+                    .map_err(|e| format!("{}: {}", path, e))?;
+                let (_t, cells, rows) = read_column_raw(&content, path, col)?;
+                if cells.len() != label_times.len() {
+                    return Err(format!(
+                        "observation stream '{}': the `covers` width column '{}' in '{}' \
+                         has {} data rows but the time column has {} — every column of a \
+                         stream's file must have the same rows",
+                        obs.name, col, path, cells.len(), label_times.len()));
+                }
+                cells.iter().enumerate().map(|(i, c)| c.ok_or_else(|| format!(
+                    "observation stream '{}', line {}: the `covers` width column '{}' is \
+                     NA. A row's width says what span its count refers to, so it cannot be \
+                     missing — an unobserved row still covers a period. Write the width \
+                     and mark the VALUE as NA.",
+                    obs.name, rows.get(i).copied().unwrap_or(0), col))).collect()
+            }
+        }
+    };
+
+    let periods = match covers {
+        Covers::From { offset, span } => {
+            let spans = span_values(span)?;
+            label_times.iter().zip(spans).map(|(&t, d)| {
+                let start = t + offset;
+                Period::new(start, start + d)
+            }).collect::<Result<Vec<_>, _>>()
+        }
+        Covers::Until { offset, span } => {
+            let spans = span_values(span)?;
+            label_times.iter().zip(spans).map(|(&t, d)| {
+                let stop = t + offset;
+                Period::new(stop - d, stop)
+            }).collect::<Result<Vec<_>, _>>()
+        }
+        Covers::WindowColumns => {
+            let start_col = column_with_role(obs, &ir::observation::ColumnRole::WindowStart)
+                .ok_or_else(|| format!(
+                    "observation stream '{}' is declared with per-row windows but has no \
+                     `window_start` column", obs.name))?;
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("{}: {}", path, e))?;
+            let (raw, _v, rows) = read_column_raw(&content, path, start_col)?;
+            let row_offset = rows.first().copied().unwrap_or(2);
+            let starts = convert_time_column(&raw, opts, row_offset)?;
+            if starts.len() != label_times.len() {
+                return Err(format!(
+                    "observation stream '{}': '{}' has {} data rows but the window_stop \
+                     column has {}", obs.name, start_col, starts.len(), label_times.len()));
+            }
+            starts.iter().zip(label_times).map(|(&a, &b)| Period::new(a, b))
+                .collect::<Result<Vec<_>, _>>()
+        }
+    };
+
+    // `Period::new` reports one bad row; name the stream so the message says
+    // which file to look in.
+    let periods = periods.map_err(|e| format!(
+        "observation stream '{}' ({}): {}", obs.name, path, e))?;
+    Ok(StreamTimes::Intervals(periods))
 }
 
 /// Load observations from a TSV by NAME: both `time_column` (the time axis)
