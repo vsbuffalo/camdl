@@ -12747,6 +12747,158 @@ let test_a5_shadowed_binder_still_e283 () =
   compile_expect_error_code ~code:"E283" ~contains:"shadows"
     (reduction_binder_model ~body:"sum(a in age, sum(a in age, I[a,p] / N[a,p]))")
 
+(* -- gh#833: `covers`, and the window-column temporal anchor -------------- *)
+
+(* One incidence stream + one prevalence stream are both reachable through
+   this shell; [obs] is spliced verbatim into `observations { }`. *)
+let covers_model_with obs = Printf.sprintf {|
+time_unit = 'days
+compartments { S, I }
+let N = S + I
+parameters { beta : rate  N0 : count  I0 : count }
+observations {
+%s
+}
+transitions { infection : S --> I @ beta * S * I / N }
+init { S = N0 - I0  I = I0 }
+simulate { from = 0 'days  to = 10 'days }
+|} obs
+
+let cases_stream extra = Printf.sprintf {|  cases {
+    columns       { time : time, cases : count }
+%s    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = projected)
+  }|} extra
+
+(* The declared period of the model's single observation stream. *)
+let covers_of (m : Ir.model) =
+  match m.Ir.observations with
+  | [o] -> o.Ir.covers
+  | os  -> Alcotest.failf "expected exactly one stream, got %d" (List.length os)
+
+let test_covers_day_lowers_to_a_one_day_span () =
+  let m = compile_expect_ok
+    (covers_model_with (cases_stream "    covers        = day(time)\n")) in
+  (* `day` is sugar: it lowers to the same offset-anchored form as
+     `starting_on(time, 1 'days)`, with no separate IR variant. *)
+  match covers_of m with
+  | Some (Ir.CoversFrom (offset, Ir.SpanConst d)) ->
+    Alcotest.(check (float 1e-12)) "opens at the label" 0.0 offset;
+    Alcotest.(check (float 1e-12)) "one day on a 'days axis" 1.0 d
+  | _ -> Alcotest.fail "day(time) did not lower to a start-anchored period"
+
+let test_covers_ending_on_opens_before_the_label () =
+  (* "week ending D" includes D, so the period CLOSES one day after the label
+     and opens seven days before that close -- the off-by-one the named form
+     exists to hide. *)
+  let m = compile_expect_ok
+    (covers_model_with
+       (cases_stream "    covers        = ending_on(time, 7 'days)\n")) in
+  match covers_of m with
+  | Some (Ir.CoversUntil (offset, Ir.SpanConst d)) ->
+    Alcotest.(check (float 1e-12)) "closes one day after the label" 1.0 offset;
+    Alcotest.(check (float 1e-12)) "seven days wide" 7.0 d
+  | _ -> Alcotest.fail "ending_on did not lower to a stop-anchored period"
+
+let test_covers_span_may_name_a_column () =
+  (* The per-row width form: a file carrying its own `days_covered`. The
+     column is USED by being the width, so the dead-column check (E277) must
+     not reject it. *)
+  let m = compile_expect_ok
+    (covers_model_with {|  cases {
+    columns       { time : time, days_covered : count, cases : count }
+    covers        = ending_on(time, days_covered)
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = projected)
+  }|}) in
+  match covers_of m with
+  | Some (Ir.CoversUntil (_, Ir.SpanColumn c)) ->
+    Alcotest.(check string) "names the width column" "days_covered" c
+  | _ -> Alcotest.fail "a per-row width did not lower to a column span"
+
+let test_window_columns_are_the_declaration () =
+  let m = compile_expect_ok
+    (covers_model_with {|  cases {
+    columns       { onset_from : window_start, onset_stop : window_stop, cases : count }
+    projected     = incidence(infection)
+    cases         ~ poisson(rate = projected)
+  }|}) in
+  match covers_of m with
+  | Some Ir.CoversWindowColumns -> ()
+  | _ -> Alcotest.fail "a window pair did not lower to CoversWindowColumns"
+
+let test_undeclared_stream_still_compiles_with_no_covers () =
+  (* Transitional: declaring is not yet required, and an undeclared stream
+     must carry no period rather than a guessed one. *)
+  let m = compile_expect_ok (covers_model_with (cases_stream "")) in
+  Alcotest.(check bool) "no declared period" true (covers_of m = None)
+
+let test_covers_on_a_prevalence_stream_is_rejected () =
+  compile_expect_error_code ~code:"E348" ~contains:"instant"
+    (covers_model_with {|  prev {
+    columns   { time : time, prev : count }
+    covers    = day(time)
+    projected = prevalence(I)
+    prev      ~ poisson(rate = projected)
+  }|})
+
+let test_window_columns_on_a_prevalence_stream_are_rejected () =
+  compile_expect_error_code ~code:"E348" ~contains:"instant"
+    (covers_model_with {|  prev {
+    columns   { a : window_start, b : window_stop, prev : count }
+    projected = prevalence(I)
+    prev      ~ poisson(rate = projected)
+  }|})
+
+let test_half_a_window_pair_is_rejected () =
+  compile_expect_error_code ~code:"E347" ~contains:"window_stop"
+    (covers_model_with {|  cases {
+    columns   { a : window_start, cases : count }
+    projected = incidence(infection)
+    cases     ~ poisson(rate = projected)
+  }|})
+
+let test_two_temporal_anchors_are_rejected () =
+  compile_expect_error_code ~code:"E347" ~contains:"anchor"
+    (covers_model_with {|  cases {
+    columns   { time : time, a : window_start, b : window_stop, cases : count }
+    projected = incidence(infection)
+    cases     ~ poisson(rate = projected)
+  }|})
+
+let test_covers_alongside_window_columns_is_rejected () =
+  compile_expect_error_code ~code:"E347" ~contains:"BOTH"
+    (covers_model_with {|  cases {
+    columns   { a : window_start, b : window_stop, cases : count }
+    covers    = day(time)
+    projected = incidence(infection)
+    cases     ~ poisson(rate = projected)
+  }|})
+
+let test_covers_naming_another_column_is_rejected () =
+  compile_expect_error_code ~code:"E347" ~contains:"time column"
+    (covers_model_with (cases_stream "    covers        = day(onset)\n"))
+
+let test_day_with_a_width_is_rejected () =
+  compile_expect_error_code ~code:"E349" ~contains:"already one day"
+    (covers_model_with
+       (cases_stream "    covers        = day(time, 7 'days)\n"))
+
+let test_starting_on_without_a_width_is_rejected () =
+  compile_expect_error_code ~code:"E349" ~contains:"width"
+    (covers_model_with (cases_stream "    covers        = starting_on(time)\n"))
+
+let test_unknown_covers_form_is_rejected () =
+  compile_expect_error_code ~code:"E349" ~contains:"fortnight"
+    (covers_model_with (cases_stream "    covers        = fortnight(time)\n"))
+
+let test_covers_width_naming_a_non_column_is_rejected () =
+  compile_expect_error_code ~code:"E349" ~contains:"not a declared value column"
+    (covers_model_with
+       (cases_stream "    covers        = ending_on(time, nope)\n"))
+
 let () =
   Alcotest.run "compiler" [
     "unused_reduction_binder_a5", [
@@ -13751,5 +13903,37 @@ let () =
         `Quick test_projection_indexed_let_count_ok;
       Alcotest.test_case "indexed let-family projection compiles (proportion family)"
         `Quick test_projection_indexed_let_prop_ok;
+    ];
+    "covers_gh833", [
+      Alcotest.test_case "day(time) lowers to a one-day span"
+        `Quick test_covers_day_lowers_to_a_one_day_span;
+      Alcotest.test_case "ending_on closes one day after the label"
+        `Quick test_covers_ending_on_opens_before_the_label;
+      Alcotest.test_case "a per-row width may name a column"
+        `Quick test_covers_span_may_name_a_column;
+      Alcotest.test_case "window columns are themselves the declaration"
+        `Quick test_window_columns_are_the_declaration;
+      Alcotest.test_case "an undeclared stream carries no period"
+        `Quick test_undeclared_stream_still_compiles_with_no_covers;
+      Alcotest.test_case "covers on a prevalence stream is E348"
+        `Quick test_covers_on_a_prevalence_stream_is_rejected;
+      Alcotest.test_case "window columns on a prevalence stream are E348"
+        `Quick test_window_columns_on_a_prevalence_stream_are_rejected;
+      Alcotest.test_case "half a window pair is E347"
+        `Quick test_half_a_window_pair_is_rejected;
+      Alcotest.test_case "a time column AND a window pair is E347"
+        `Quick test_two_temporal_anchors_are_rejected;
+      Alcotest.test_case "covers alongside window columns is E347"
+        `Quick test_covers_alongside_window_columns_is_rejected;
+      Alcotest.test_case "covers naming another column is E347"
+        `Quick test_covers_naming_another_column_is_rejected;
+      Alcotest.test_case "day() given a width is E349"
+        `Quick test_day_with_a_width_is_rejected;
+      Alcotest.test_case "starting_on without a width is E349"
+        `Quick test_starting_on_without_a_width_is_rejected;
+      Alcotest.test_case "an unknown covers form is E349"
+        `Quick test_unknown_covers_form_is_rejected;
+      Alcotest.test_case "a width naming a non-column is E349"
+        `Quick test_covers_width_naming_a_non_column_is_rejected;
     ];
   ]

@@ -7977,6 +7977,135 @@ let validate_reactive_streams ctx (model : Ir.model) =
 
 (* ── Observation model expansion ─────────────────────────────────────────── *)
 
+(* Does this projection accumulate a flow over an interval, or read state at an
+   instant? Only the former has a window to state. Mirrors the Rust
+   `Projection::temporal_kind` — the single source of the distinction on each
+   side; a stream's `covers` must agree with it. *)
+let projection_accumulates (p : Ir.projection) =
+  match p with
+  | Ir.CumulativeFlow _ | Ir.CumulativeFlowSum _ -> true
+  | Ir.CurrentPop _ | Ir.CurrentPopSum _ | Ir.DerivedExpr _ -> false
+
+(* Lower `covers = <form>(<time column>[, <span>])`, or a `window_start` /
+   `window_stop` pair, to [Ir.covers] (gh#833).
+
+   All calendar arithmetic happens HERE: the three uniform forms collapse to an
+   offset and a span, both already in the model's axis units, so the runtime
+   never needs to know how long a day is on this axis. `one_day` below is one
+   civil day expressed in axis units — 1.0 on a `'days` axis, 1/7 on `'weeks`. *)
+let lower_covers ctx (od : obs_decl) (columns : obs_column list)
+      (projection : Ir.projection) : Ir.covers option =
+  let od_loc = diag_loc_of_ast_ctx ctx od.oloc in
+  let accumulates = projection_accumulates projection in
+  let has_role r = List.exists (fun c -> c.oc_role = r) columns in
+  let windowed = has_role ColWindowStart && has_role ColWindowStop in
+  (* A window pair on a stream that reads an instant: the columns ARE the
+     declaration, so this is the same error as a `covers =` line there. *)
+  if windowed && not accumulates then begin
+    Diagnostics.error ctx.diags ~code:"E348" ~loc:od_loc
+      ~message:(Printf.sprintf
+        "observation '%s': `window_start`/`window_stop` columns declare the \
+         period each row covers, but this stream's `projected` reads state at \
+         an instant rather than accumulating a flow over an interval"
+        od.oname)
+      ~hint:"a state reading has no window — drop the window columns and \
+             declare a single `: time` column" ();
+    None
+  end else
+  match od.ocovers with
+  | None -> if windowed then Some Ir.CoversWindowColumns else None
+  | Some cv ->
+    let cv_loc = diag_loc_of_ast_ctx ctx cv.ocv_loc in
+    if not accumulates then begin
+      Diagnostics.error ctx.diags ~code:"E348" ~loc:cv_loc
+        ~message:(Printf.sprintf
+          "observation '%s': `covers` states the period each row covers, but \
+           this stream's `projected` reads state at an instant rather than \
+           accumulating a flow over an interval" od.oname)
+        ~hint:"a state reading has no window — remove the `covers` line" ();
+      None
+    end else if windowed then begin
+      Diagnostics.error ctx.diags ~code:"E347" ~loc:cv_loc
+        ~message:(Printf.sprintf
+          "observation '%s' declares BOTH `covers` and a \
+           `window_start`/`window_stop` pair" od.oname)
+        ~hint:"the window columns are already the declaration — keep one or \
+               the other, not both" ();
+      None
+    end else begin
+      (* The named column must be the stream's own time column. Catches
+         `covers = day(onset)` on a stream whose time column is `report`,
+         which would otherwise read as a second, silent time axis. *)
+      let time_cols =
+        List.filter_map (fun c ->
+          if c.oc_role = ColTime then Some c.oc_name else None) columns in
+      (match time_cols with
+       | [t] when t <> cv.ocv_col && cv.ocv_col <> "" ->
+         Diagnostics.error ctx.diags ~code:"E347" ~loc:cv_loc
+           ~message:(Printf.sprintf
+             "observation '%s': `covers = %s(%s)` names '%s', but this \
+              stream's time column is '%s'"
+             od.oname cv.ocv_form cv.ocv_col cv.ocv_col t)
+           ~hint:(Printf.sprintf
+             "`covers` describes the stream's own time column — write \
+              `%s(%s)`" cv.ocv_form t) ()
+       | _ -> ());
+      (* One civil day in axis units. *)
+      let one_day = 1.0 /. days_per ctx.time_unit in
+      (* The span: a bare identifier names a per-row width column; anything
+         else must fold to a compile-time constant duration. *)
+      let span_of e =
+        match e with
+        | EIdent (name, _) when List.exists (fun c ->
+            c.oc_name = name
+            && (match c.oc_role with ColValue _ -> true | _ -> false)) columns ->
+          Some (Ir.SpanColumn name)
+        | EIdent (name, _) ->
+          Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
+            ~message:(Printf.sprintf
+              "observation '%s': `covers` names '%s' as its width, but '%s' is \
+               not a declared value column of this stream" od.oname name name)
+            ~hint:"a per-row width must be a column declared in `columns { }`, \
+                   e.g. `days_covered : count`; a fixed width is a duration \
+                   like `7 'days`" ();
+          None
+        | _ -> Some (Ir.SpanConst (eval_const_expr ctx e))
+      in
+      match cv.ocv_form, cv.ocv_span with
+      | "day", None -> Some (Ir.CoversFrom (0.0, Ir.SpanConst one_day))
+      | "day", Some _ ->
+        Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
+          ~message:(Printf.sprintf
+            "observation '%s': `covers = day(...)` takes only the time column \
+             — a day is already one day wide" od.oname)
+          ~hint:"for another width write `starting_on(time, <duration>)` or \
+                 `ending_on(time, <duration>)`" ();
+        None
+      | "starting_on", Some e ->
+        Option.map (fun s -> Ir.CoversFrom (0.0, s)) (span_of e)
+      | "ending_on", Some e ->
+        (* "week ending D" means D is the LAST INCLUDED day, so the period
+           closes one day after the label and opens `span` before that. *)
+        Option.map (fun s -> Ir.CoversUntil (one_day, s)) (span_of e)
+      | ("starting_on" | "ending_on"), None ->
+        Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
+          ~message:(Printf.sprintf
+            "observation '%s': `covers = %s(...)` needs a width as its second \
+             argument" od.oname cv.ocv_form)
+          ~hint:(Printf.sprintf
+            "write `%s(%s, 7 'days)`, or name a per-row width column"
+            cv.ocv_form (if cv.ocv_col = "" then "time" else cv.ocv_col)) ();
+        None
+      | "", _ -> None  (* the parser already reported a malformed shape *)
+      | other, _ ->
+        Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
+          ~message:(Printf.sprintf
+            "observation '%s': unknown `covers` form '%s'" od.oname other)
+          ~hint:"the forms are `day(t)`, `starting_on(t, d)` and \
+                 `ending_on(t, d)`" ();
+        None
+    end
+
 let expand_observations ctx =
   List.concat_map (fun od ->
     let od_loc = diag_loc_of_ast_ctx ctx od.oloc in
@@ -8020,21 +8149,48 @@ let expand_observations ctx =
        coherence checks (E276/E277), which would be spurious noise. *)
     let has_real_measurement = od.omeasurement <> None && meas_v.om_scored <> "" in
     let () =
-      (* exactly one `: time` column *)
+      (* Exactly one TEMPORAL ANCHOR — either a `: time` column or a complete
+         `window_start`/`window_stop` pair, never both and never half a pair
+         (gh#833). The single-time-column rule generalizes rather than relaxes:
+         a stream still names exactly one time axis, but a windowed stream
+         names it as two boundaries. *)
       let time_cols = List.filter (fun c -> c.oc_role = ColTime) columns_v in
-      (match time_cols with
-       | [] when od.ocolumns <> None ->
+      let starts = List.filter (fun c -> c.oc_role = ColWindowStart) columns_v in
+      let stops  = List.filter (fun c -> c.oc_role = ColWindowStop) columns_v in
+      let n_time = List.length time_cols in
+      let n_start = List.length starts and n_stop = List.length stops in
+      (match n_time, n_start, n_stop with
+       | 1, 0, 0 -> ()                 (* time-anchored *)
+       | 0, 1, 1 -> ()                 (* window-anchored *)
+       | 0, 0, 0 when od.ocolumns <> None ->
          Diagnostics.error ctx.diags ~code:"E275" ~loc:od_loc
            ~message:(Printf.sprintf
              "observation '%s': `columns { }` declares no `: time` column" od.oname)
-           ~hint:"every stream needs exactly one time axis, e.g. `time : time`" ()
-       | _ :: _ :: _ ->
+           ~hint:"every stream needs exactly one time axis, e.g. `time : time` \
+                  — or, to give each row its own period, a \
+                  `window_start`/`window_stop` pair" ()
+       | _, 0, 0 when n_time > 1 ->
          Diagnostics.error ctx.diags ~code:"E275" ~loc:od_loc
            ~message:(Printf.sprintf
              "observation '%s': `columns { }` declares %d `: time` columns; exactly one is allowed"
-             od.oname (List.length time_cols))
+             od.oname n_time)
            ~hint:"a stream has a single time axis" ()
-       | _ -> ());
+       | 0, _, _ when (n_start = 1) <> (n_stop = 1) ->
+         Diagnostics.error ctx.diags ~code:"E347" ~loc:od_loc
+           ~message:(Printf.sprintf
+             "observation '%s': `columns { }` declares %d `window_start` and \
+              %d `window_stop` column(s) — a per-row period needs exactly one \
+              of each" od.oname n_start n_stop)
+           ~hint:"a period is two boundaries; declare both, or use a single \
+                  `: time` column with a `covers = ...` line" ()
+       | _ ->
+         Diagnostics.error ctx.diags ~code:"E347" ~loc:od_loc
+           ~message:(Printf.sprintf
+             "observation '%s': `columns { }` declares more than one temporal \
+              anchor (%d `: time`, %d `window_start`, %d `window_stop`)"
+             od.oname n_time n_start n_stop)
+           ~hint:"a stream anchors its rows in time exactly once: either a \
+                  `: time` column, or a `window_start`/`window_stop` pair" ());
       (* the `~` LHS (scored) must be a declared value column *)
       let value_cols = List.filter_map (fun c ->
         match c.oc_role with ColValue _ -> Some c.oc_name | _ -> None) columns_v in
@@ -8068,13 +8224,24 @@ let expand_observations ctx =
         | LikZeroInflatedNegBinomial k ->
           List.concat_map (fun (_, e) -> names_of e) k
       in
+      (* A column named as a `covers` per-row width is USED, even though it is
+         neither the scored outcome nor referenced in the likelihood (gh#833).
+         Without this a file carrying its own `days_covered` — the whole point
+         of the per-row width form — is rejected as declaring a dead column. *)
+      let covers_width_col =
+        match od.ocovers with
+        | Some { ocv_span = Some (EIdent (n, _)); _ } -> [n]
+        | _ -> []
+      in
       if has_real_measurement && od.ocolumns <> None then
         List.iter (fun vc ->
-          if vc <> meas_v.om_scored && not (List.mem vc rhs_names) then
+          if vc <> meas_v.om_scored && not (List.mem vc rhs_names)
+             && not (List.mem vc covers_width_col) then
             Diagnostics.error ctx.diags ~code:"E277" ~loc:od_loc
               ~message:(Printf.sprintf
                 "observation '%s': value column '%s' is declared but never used \
-                 (neither the scored outcome nor referenced in the likelihood)"
+                 (neither the scored outcome, nor referenced in the likelihood, \
+                 nor a `covers` width)"
                 od.oname vc)
               ~hint:"remove the dead column, or reference it in the `~` RHS" ()
         ) value_cols;
@@ -8804,9 +8971,11 @@ let expand_observations ctx =
     let ir_columns = List.map (fun c ->
       { Ir.col_name = c.oc_name;
         Ir.col_role = (match c.oc_role with
-          | ColTime    -> Ir.RoleTime
-          | ColDim d   -> Ir.RoleDim d
-          | ColValue k -> Ir.RoleValue (ir_param_kind_of_ast k)); }
+          | ColTime        -> Ir.RoleTime
+          | ColWindowStart -> Ir.RoleWindowStart
+          | ColWindowStop  -> Ir.RoleWindowStop
+          | ColDim d       -> Ir.RoleDim d
+          | ColValue k     -> Ir.RoleValue (ir_param_kind_of_ast k)); }
     ) columns_v in
     Some { Ir.name        = obs_name;
       Ir.obs_source     = source;
@@ -8814,7 +8983,7 @@ let expand_observations ctx =
       Ir.scored        = meas_v.om_scored;
       Ir.emit_schedule = emit_schedule;
       Ir.stratum;
-      Ir.covers        = None;
+      Ir.covers        = lower_covers ctx od columns_v projection;
       Ir.projection;
       Ir.projection_state_grad = [];
       Ir.likelihood;
