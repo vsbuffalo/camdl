@@ -16,12 +16,13 @@ issue: TBD
 
 > **Status (2026-06-07):** under active implementation (Tier 0 landed; see the
 > [tiered TODO](../lifecycle-consolidation-todo.md)). Refined by an external
-> [design review](../reviews/2026-06-07-lifecycle-design-review.md): the lifecycle is
-> a closure-taking driver (no trait), the i64/f64 seam is a `CountStoreMut` state-view,
-> tau-leap folds by extracting one shared kernel, and the 6-layer framing tightens into
-> a 4-seam target (`Schedule/Clock` · `EffectAgenda` · `Lifecycle` · `Kernel`). A **v2
-> proposal superseding this one** is written when the timeline-tightening tier begins;
-> until then this remains the design map, read alongside the review and the TODO.
+> [design review](../reviews/2026-06-07-lifecycle-design-review.md): the
+> lifecycle is a closure-taking driver (no trait), the i64/f64 seam is a
+> `CountStoreMut` state-view, tau-leap folds by extracting one shared kernel,
+> and the 6-layer framing tightens into a 4-seam target (`Schedule/Clock` ·
+> `EffectAgenda` · `Lifecycle` · `Kernel`). A **v2 proposal superseding this
+> one** is written when the timeline-tightening tier begins; until then this
+> remains the design map, read alongside the review and the TODO.
 
 ## Executive summary
 

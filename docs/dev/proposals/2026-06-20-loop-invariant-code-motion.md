@@ -1,8 +1,8 @@
 # Loop-invariant code motion: per-eval staging of param/table-only subexpressions
 
-Date: 2026-06-20 Status: Implemented and **default-on** (ODE/forward + stochastic
-inference; `--no-licm` / `CAMDL_NO_LICM` is the escape hatch) Issue: gh#272
-Schema: 0.18 → 0.19 (adds `per_eval_bindings` + `Expr::PerEvalRef`)
+Date: 2026-06-20 Status: Implemented and **default-on** (ODE/forward +
+stochastic inference; `--no-licm` / `CAMDL_NO_LICM` is the escape hatch) Issue:
+gh#272 Schema: 0.18 → 0.19 (adds `per_eval_bindings` + `Expr::PerEvalRef`)
 
 The runtime half is **Design C — a staged per-eval scratch threaded as data on
 `EvalCtx`** (`per_eval: Option<&[f64]>`, the sibling of `int_float_override`).
@@ -14,12 +14,12 @@ The staged scratch is threaded through every backend AND every stochastic
 inference producer (PF / IF2 / PGAS / PMMH), so the in-model fittable kernel
 reaches fixed-kernel parity on the production Bayesian path, not just the ODE
 skeleton. **LICM is on by default** (mirroring `constant_fold`); `--no-licm` /
-`CAMDL_NO_LICM` is the escape hatch. The flip was golden-neutral — no golden model
-has hoistable structure, so `make update-golden` under LICM-on changed zero files;
-run identity re-keys only for models that actually hoist (a user in-model kernel),
-which is the intended behaviour, and a non-hoisting model's IR is byte-identical
-to pre-flip (so existing CAS entries stay valid). Remaining follow-ons: the
-flat-eval per-eval tape and the strength-reduction peephole.
+`CAMDL_NO_LICM` is the escape hatch. The flip was golden-neutral — no golden
+model has hoistable structure, so `make update-golden` under LICM-on changed
+zero files; run identity re-keys only for models that actually hoist (a user
+in-model kernel), which is the intended behaviour, and a non-hoisting model's IR
+is byte-identical to pre-flip (so existing CAS entries stay valid). Remaining
+follow-ons: the flat-eval per-eval tape and the strength-reduction peephole.
 
 ## Problem
 

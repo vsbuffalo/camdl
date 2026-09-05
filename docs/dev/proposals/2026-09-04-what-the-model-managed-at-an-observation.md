@@ -237,6 +237,58 @@ adding a parallel mechanism.
 **No dry-run pre-flight subcommand.** A short probe config at the real particle
 count answers the same question.
 
+## Where the evidence lives, and how it reaches JSON
+
+Today structure is destroyed in the middle of the path:
+
+```
+pgas_init.rs:359   InitFallback::SwarmCollapsed { obs_index, substep }
+                       │   a value returned in Ok(...), not an error
+                       │   carried on SimError::NonFiniteChainStart
+                       ▼
+error.rs:346       Display → "every particle scored -inf at observation 16 (substep 96)"
+                       │   ← all structure is lost here
+                       ▼
+pgas.rs:1033       DiagnosticKind::BadInit { chain_id, params, reason: String }
+                       ▼
+                   diagnostics.json   (serde, tag = "type", snake_case)
+```
+
+`InitFallback` derives `Debug, Clone, PartialEq` only (`error.rs:326`) and never
+reaches JSON; `DiagnosticKind` is the serialization boundary
+(`diagnostic.rs:94`). So the observation index leaves the crate inside prose,
+and a regex over `reason` is not a consumer's preference but the only available
+interface.
+
+The evidence must ride on `InitFallback`: the collapse is detected in `sim`, the
+diagnostic is built in `cli` (`pgas.rs:1033`, `pmmh.rs:640`, `runner.rs:2326`),
+and the error is the only carrier between them.
+
+**Both ends change, in one step.**
+
+- `InitFallback::SwarmCollapsed` gains `attempts: Vec<StreamAttempt>`. Not a
+  sibling variant — two variants for one condition would force every match site
+  to handle both, which is the fork `.claude/rules/rust-conventions.md` warns
+  against.
+- `DiagnosticKind::BadInit` gains `attempts: Vec<StreamAttempt>`.
+- `reason` stays, and is **rendered from that same data** so the prose and the
+  fields cannot drift. Shipping the prose first and the fields later would mean
+  writing the rendering twice.
+
+Consequences, stated so the implementer does not rediscover them:
+
+- `Serialize` is needed on `InitFallback` and `StreamAttempt`. `SimError` is
+  `Debug + thiserror::Error` today (`error.rs:1`), so this adds a serde surface
+  to the error module that does not exist yet.
+- `InitFallback`'s derived `PartialEq` is not reflexive over the NaN a
+  projection can produce. Every external use is in
+  `sim/tests/gh784_unconditional_init.rs:456,469,501` and is a `matches!` or a
+  destructure on `obs_index`; none compares a whole `InitFallback`. Keep the
+  derive with the caveat documented, or drop it — nothing depends on it.
+- Adding a field to `BadInit` is additive. `cli/tests/pgas_bad_init_skip.rs:270`
+  matches on `kind.type` and clones the whole object, so it is undisturbed. It
+  is still a schema change to a consumed artifact.
+
 ## Staging
 
 1. The score/check/reset split, alone, gated on a byte-identical A/B at a fixed

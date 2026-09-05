@@ -257,9 +257,8 @@ a future pickup is accurate:
   hash is the hand-written positional match in `runid/src/ir_hash.rs`, decoupled
   from enum declaration order — a bare `probs` must be hashed _explicitly_
   there, as Binomial/BetaBinomial `n` is, or two models differing only in
-  `probs` collide).
-  Cross-language contract is the **name** `"multinomial"`, not declaration
-  order. Bump `ir/VERSION` (now 0.30).
+  `probs` collide). Cross-language contract is the **name** `"multinomial"`, not
+  declaration order. Bump `ir/VERSION` (now 0.30).
 - Scoring-only, if it ships that way: bare `Expr` arguments, and a refusal in
   `gradient_capability.rs`. There is no longer a family to copy this from —
   `ZeroInflatedNegBinomial` was the last scoring-only likelihood and is now

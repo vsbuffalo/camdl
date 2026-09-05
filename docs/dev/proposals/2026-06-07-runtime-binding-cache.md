@@ -10,7 +10,7 @@ gate: ../../rust/crates/sim/tests/gate_binding_cache_ab.rs
 
 This is a **Rust** runtime change (the propensity evaluator). The OCaml compiler
 already emits the shared bindings (`N[l]`, `I_agg[l]`, …) via Fix-B hoisting;
-nothing OCaml-side changes. The win is purely in how the runtime *re-uses* them.
+nothing OCaml-side changes. The win is purely in how the runtime _re-uses_ them.
 
 ## Problem
 
@@ -25,7 +25,7 @@ In a spatially-coupled model the per-source aggregates `N[q]` (population) and
 `I_agg[q]` (infectious) appear once per destination stratum in the FOI
 `sum(q, W[l,q] * I_agg[q] / N[q])`. On a dense P=44, A=21 model that is **945
 references each**, and every reference re-runs the binding's PopSum from scratch
-*within a single propensity-vector evaluation*:
+_within a single propensity-vector evaluation_:
 
 ```
 cost report (gen_spatial P=44 dense):
@@ -37,8 +37,8 @@ The profile lands the cost exactly there: on the simulation thread,
 `sim::resolved_expr::eval_resolved` is **46–54% of compute** (46% on this P=44
 model; 54% on a national-scale model), dominated by these redundant `BindingRef`
 re-evaluations. Hoisting more bindings does **not** help on its own — a
-`BindingRef` is recomputed on every reference, so the saving only exists once the
-cache does.
+`BindingRef` is recomputed on every reference, so the saving only exists once
+the cache does.
 
 ## Design
 
@@ -78,38 +78,40 @@ ctx.gen.set(ctx.gen.get().wrapping_add(1));
 ```
 
 Notes that keep it correct:
+
 - Bindings are topologically ordered (a `BindingRef` only references earlier
   ones), so a miss that recursively evals a body hits the earlier slots' caches.
 - The cache is **per cell/particle propensity eval** and `Cell` is `!Sync`, so
-  parallelism must stay *across* cells/particles (each owning its own
-  `bind_val`/`bind_gen`), never *within* one propensity vector — which is already
-  how the backends batch. Confirm this before wiring the construction sites.
+  parallelism must stay _across_ cells/particles (each owning its own
+  `bind_val`/`bind_gen`), never _within_ one propensity vector — which is
+  already how the backends batch. Confirm this before wiring the construction
+  sites.
 - A generation stamp (not `clear()`) makes invalidation O(1) regardless of
   binding count.
 
 ### As built (deviation from the sketch above)
 
 The sketch threads `bind_val`/`bind_gen`/`gen` through `EvalCtx`. As built, the
-cache is a **thread-local** (`BindingCache` in `resolved_expr.rs`) entered via an
-RAII `CacheScope` in `eval_propensities`, *not* `EvalCtx` fields.
+cache is a **thread-local** (`BindingCache` in `resolved_expr.rs`) entered via
+an RAII `CacheScope` in `eval_propensities`, _not_ `EvalCtx` fields.
 
 Reason: the `EvalCtx`-fields form changes the `eval_resolved(expr, &EvalCtx)`
 signature transitively and forces every `EvalCtx` construction site (propensity,
 gradient, obs-likelihood) to allocate and pass the cache buffers, even the ones
 that don't want caching. The thread-local keeps the signature untouched and
 scopes the cache to exactly the one site that benefits (`eval_propensities`),
-falling through to on-demand eval everywhere else — which is *why* gradient and
+falling through to on-demand eval everywhere else — which is _why_ gradient and
 obs-likelihood evals stay byte-identical to the pre-cache path. Correctness
 properties (topological order, per-step generation stamp, cross-particle
 isolation via thread-locality) are unchanged.
 
-Cost of the deviation: a thread-local access (`LocalKey::with` + `_tlv_get_addr`)
-on every `BindingRef`, ~12% of the after-profile busy thread. The `EvalCtx`-by-
-reference form was subsequently built and benchmarked to reclaim it — and a
-controlled binary A/B measured **no speedup** (the eliminated thread-local
-samples re-attribute to `eval_resolved`; total work is unchanged). The
-thread-local form is therefore the final design. See the negative-result writeup
-in `../notes/2026-06-07-runtime-binding-cache.md`.
+Cost of the deviation: a thread-local access (`LocalKey::with` +
+`_tlv_get_addr`) on every `BindingRef`, ~12% of the after-profile busy thread.
+The `EvalCtx`-by- reference form was subsequently built and benchmarked to
+reclaim it — and a controlled binary A/B measured **no speedup** (the eliminated
+thread-local samples re-attribute to `eval_resolved`; total work is unchanged).
+The thread-local form is therefore the final design. See the negative-result
+writeup in `../notes/2026-06-07-runtime-binding-cache.md`.
 
 ## Expected speedup
 
@@ -119,7 +121,8 @@ collapses 945 evals → 1 per binding per step. The irreducible FOI sum (P²
 multiply-adds) and the non-rate fraction (RNG, output, alloc) remain.
 
 The conservative pre-implementation estimate (~1.5×) was anchored on a **short
-365-day run**, where setup/IO dilutes `eval_resolved` to ~46% of the busy thread:
+365-day run**, where setup/IO dilutes `eval_resolved` to ~46% of the busy
+thread:
 
 ```
 eval_resolved 3× faster → 1/(0.46 + 0.54/3) = 1.56× overall   ← short-run estimate
@@ -159,9 +162,9 @@ prediction is the cache's own cost, visible in the after profile:
 `thread::local::LocalKey::with` 12.4% + `_tlv_get_addr` — the thread-local
 indirection on every `BindingRef`. Passing the cache by reference through
 `EvalCtx` (the original sketch above) was tried to reclaim that and a controlled
-A/B measured **no speedup** — the eliminated thread-local samples re-attribute to
-`eval_resolved` rather than disappearing (negative-result writeup in the note).
-The thread-local form stands. Profile artifacts:
+A/B measured **no speedup** — the eliminated thread-local samples re-attribute
+to `eval_resolved` rather than disappearing (negative-result writeup in the
+note). The thread-local form stands. Profile artifacts:
 `docs/dev/notes/assets/2026-06-07-binding-cache-{before,after}.json.gz` (+
 `.syms.json` sidecars).
 
