@@ -220,6 +220,7 @@ fn check_invariance(f: &Fixture, paths: &[PGASTrajectory], pi: &[f64],
             &f.obs_at_substep,
             EffectFiring::default(),
             &f.analysis,
+            sim::rng::BinomialAlgorithm::Btpe,
         )
         .expect("csmc_bs");
         renewal_sum += diag.trajectory_renewal;

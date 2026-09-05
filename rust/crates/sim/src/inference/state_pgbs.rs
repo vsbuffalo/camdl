@@ -118,6 +118,12 @@ pub fn csmc_bs(
     obs_at_substep: &ObsAtSubstep,
     firing: EffectFiring<'_>,
     analysis: &StateTransitionAnalysis,
+    // gh#747: threaded through for the same reason `csmc_as` takes it -- the
+    // selection is stamped onto each particle's RNG at construction, so it
+    // cannot be lost to work-stealing. Defaulting it here would make
+    // `--binomial btrs` a silent no-op on the backward-kernel path, which is
+    // the unreachable-selection defect gh#747 closed.
+    binomial: crate::rng::BinomialAlgorithm,
 ) -> Result<(PGASTrajectory, BsDiagnostics), SimError> {
     let t_start = model.model.simulation.t_start;
     let n_substeps = reference.substeps.len();
@@ -163,7 +169,7 @@ pub fn csmc_bs(
     }
 
     // ── Forward conditional filter ──
-    let mut rngs = init_particle_rngs(seed, n_particles, 0);
+    let mut rngs = init_particle_rngs(seed, n_particles, 0, binomial);
     let mut counts: Vec<Vec<i64>> = (0..n_particles)
         .map(|j| -> Result<Vec<i64>, SimError> {
             if j == j_ref {

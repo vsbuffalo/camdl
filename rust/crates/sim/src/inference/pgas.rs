@@ -3849,6 +3849,7 @@ pub fn run_pgas(
                         model, &rungs[rung].params, &rungs[rung].trajectory,
                         config.n_particles, config.dt, obs_model,
                         csmc_seed, &obs_at_substep, firing, analysis,
+                        config.binomial,
                     )?;
                     let d = bs_diag_to_csmc(&bs, config.n_particles);
                     (traj, d)
@@ -4148,6 +4149,7 @@ pub fn run_pgas(
                         model, &rungs[rung].params, &rungs[rung].trajectory,
                         config.n_particles, config.dt, obs_model,
                         csmc_seed, &obs_at_substep, firing, analysis,
+                        config.binomial,
                     )?;
                     // The in-kernel candidate instrument (spike note): these
                     // numbers supersede the cross-run proxy. `info` level so a

@@ -162,6 +162,7 @@ fn selected_sampler_reaches_csmc_free_particles() {
             &obs_at_substep,
             EffectFiring::default(),
             algo,
+            true,
         )
         .expect("csmc_as");
         traj

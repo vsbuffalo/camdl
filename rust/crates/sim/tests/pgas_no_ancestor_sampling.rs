@@ -125,6 +125,7 @@ fn sweep(f: &Fixture, ancestor_sampling: bool, seed: u64) -> sim::inference::pga
         seed,
         &f.obs_at_substep,
         EffectFiring::default(),
+        sim::rng::BinomialAlgorithm::Btpe,
         ancestor_sampling,
     )
     .expect("csmc_as");
