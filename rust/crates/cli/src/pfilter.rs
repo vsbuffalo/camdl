@@ -1143,6 +1143,30 @@ pub fn stream_times_for(
             }
         }
     }
+
+    // A gap between consecutive periods means different things under
+    // different forms, and only the loader can see the form. Under a UNIFORM
+    // form (`day` / `starting_on` / `ending_on`) every row's window is
+    // implied by its label, so a gap can only mean a row is MISSING — and a
+    // missing row is exactly the shape that used to widen the next bin
+    // silently. Refuse it, naming both boundaries. A row with no observation
+    // belongs in the file as `NA`; a window that genuinely spans several days
+    // belongs in the per-row form. Under `window_start`/`window_stop` a gap
+    // is a statement and is legal: the binder discards the uncovered flow.
+    if matches!(covers, Covers::From { .. } | Covers::Until { .. }) {
+        if let Some(w) = periods.windows(2).find(|w| w[1].start() > w[0].stop()) {
+            return Err(format!(
+                "observation stream '{}' ({}): consecutive rows cover [{}, {}) and \
+                 [{}, {}), leaving {} to {} covered by neither — under a uniform \
+                 `covers` form that means a row is missing, which would silently \
+                 change what the next row is scored against.\n  \
+                 Fix: keep every scheduled row and write an unobserved one as NA; \
+                 or, if one row genuinely covers the whole span, state its window \
+                 with `window_start`/`window_stop` columns.",
+                obs.name, path, w[0].start(), w[0].stop(), w[1].start(), w[1].stop(),
+                w[0].stop(), w[1].start()));
+        }
+    }
     Ok(StreamTimes::Intervals(periods))
 }
 
@@ -1734,6 +1758,77 @@ mod tests {
             t_start: 0.0,
             format: TimeFormat::Auto,
         }
+    }
+
+    // ── gh#833: a gap under a UNIFORM covers form is a missing row ───────
+
+    /// An incidence stream declaring `covers = day(time)` in its lowered form
+    /// (open at the label, one day wide).
+    fn daily_incidence_stream() -> ir::observation::ObservationModel {
+        use ir::observation::*;
+        ObservationModel {
+            name: "cases".into(),
+            source: "cases".into(),
+            columns: vec![
+                ObsColumn { name: "time".into(), role: ColumnRole::Time },
+                ObsColumn { name: "cases".into(), role: ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "cases".into(),
+            emit_schedule: None,
+            stratum: vec![],
+            covers: Some(Covers::From { offset: 0.0, span: 1.0 }),
+            projection: Projection::CumulativeFlow("infection".into()),
+            projection_state_grad: Default::default(),
+            likelihood: Likelihood::Poisson(PoissonLikelihood {
+                rate: ir::Diffable::new(ir::expr::Expr::Projected(ir::expr::ProjectedExpr { projected: () })),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_missing_row_under_a_uniform_covers_form_is_refused_naming_both_boundaries() {
+        // Proposal Testing item 1. Labels 3, 4, 6 under `day(time)` imply
+        // windows [3,4), [4,5), [6,7): row 5 is missing, so (5,6) is covered by
+        // neither. Under a uniform form that can only be a mistake — before
+        // this arc it silently widened the next bin to (4,6].
+        let obs = daily_incidence_stream();
+        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
+        let err = stream_times_for(&obs, &proj, &[3.0, 4.0, 6.0], "cases.tsv", &numeric_opts())
+            .expect_err("a missing row under a uniform form must be refused");
+        assert!(err.contains("[4, 5)") && err.contains("[6, 7)"),
+            "must name the two periods either side of the gap: {err}");
+        assert!(err.contains("5 to 6"), "must name the uncovered span: {err}");
+        assert!(err.contains("NA") && err.contains("window_start"),
+            "must point at both remedies — an NA row, or the per-row form: {err}");
+    }
+
+    #[test]
+    fn contiguous_labels_under_a_uniform_covers_form_build_shifted_periods() {
+        let obs = daily_incidence_stream();
+        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
+        let times = stream_times_for(&obs, &proj, &[3.0, 4.0, 5.0], "cases.tsv", &numeric_opts())
+            .expect("contiguous labels are fine");
+        let periods = times.periods().expect("a declared stream carries periods");
+        assert_eq!(periods.len(), 3);
+        assert_eq!((periods[0].start(), periods[0].stop()), (3.0, 4.0));
+        assert_eq!((periods[2].start(), periods[2].stop()), (5.0, 6.0),
+            "day(D) covers [D, D+1): the last row closes one day AFTER its label");
+    }
+
+    #[test]
+    fn a_first_period_opening_before_t_start_is_refused() {
+        let obs = daily_incidence_stream();
+        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
+        let mut opts = numeric_opts();
+        opts.t_start = 4.0;
+        let err = stream_times_for(&obs, &proj, &[3.0, 4.0], "cases.tsv", &opts)
+            .expect_err("a period opening before the run starts must be refused");
+        assert!(err.contains("opens at 3") && err.contains("t_start = 4"),
+            "must name both the period start and t_start: {err}");
+        // Opening exactly AT t_start is fine — the bin is already empty there.
+        opts.t_start = 3.0;
+        stream_times_for(&obs, &proj, &[3.0, 4.0], "cases.tsv", &opts)
+            .expect("a period opening at t_start is legal");
     }
 
     #[test]

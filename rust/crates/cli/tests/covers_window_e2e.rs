@@ -90,6 +90,61 @@ fn write_counts(path: &Path, shift: f64) {
     std::fs::write(path, s).unwrap();
 }
 
+/// The fixture with the time column REPLACED by a `window_start`/`window_stop`
+/// pair and `covers` set to `window_columns` — the per-row form, the only one
+/// that can state a gap. Nothing else about the stream changes.
+fn windowed_model(dir: &Path) -> PathBuf {
+    let src = std::fs::read_to_string(seed_timing_ir()).unwrap();
+    let with_roles = src.replacen(
+        "{ \"name\": \"time\", \"role\": \"time\" },",
+        "{ \"name\": \"win_start\", \"role\": \"window_start\" },\n          \
+         { \"name\": \"win_stop\", \"role\": \"window_stop\" },",
+        1,
+    );
+    assert!(with_roles.contains("window_stop"), "window role injection failed");
+    let injected = with_roles.replacen(
+        "\"projection\":",
+        "\"covers\":{\"kind\":\"window_columns\"},\"projection\":",
+        1,
+    );
+    assert!(injected.contains("window_columns"), "covers injection failed");
+    let p = dir.join("windowed.ir.json");
+    std::fs::write(&p, injected).unwrap();
+    p
+}
+
+/// Daily one-day windows [D, D+1) for D in 3..43, with the row for
+/// `[skip, skip+1)` OMITTED — a stated gap, legal under the per-row form.
+fn write_window_counts(path: &Path, skip: u32) {
+    let mut s = String::from("win_start\twin_stop\tcases\n");
+    for k in 0..40u32 {
+        let d = 3 + k;
+        if d == skip {
+            continue;
+        }
+        let v = if k >= 20 { (k - 19) * 3 } else { 0 };
+        s.push_str(&format!("{d}\t{}\t{v}\n", d + 1));
+    }
+    std::fs::write(path, s).unwrap();
+}
+
+/// The undeclared reading of the same counts: labels shifted +1 (an
+/// undeclared row closes AT its label), with the row that closes the gap
+/// present as `NA` — a hole, which closes the bin without scoring it.
+fn write_counts_with_hole(path: &Path, hole_label: u32) {
+    let mut s = String::from("time\tcases\n");
+    for k in 0..40u32 {
+        let label = 4 + k;
+        let v = if k >= 20 { (k - 19) * 3 } else { 0 };
+        if label == hole_label {
+            s.push_str(&format!("{label}\tNA\n"));
+        } else {
+            s.push_str(&format!("{label}\t{v}\n"));
+        }
+    }
+    std::fs::write(path, s).unwrap();
+}
+
 const BASE_PARAMS: &[&str] = &[
     "--param", "beta=0.6",
     "--param", "gamma=0.2",
@@ -173,6 +228,55 @@ fn a_declared_day_window_scores_one_bucket_later_and_opens_at_its_own_start() {
         "the declared stream's first period must open at its own start (3), not \
          at t_start; agreeing with the un-conditioned shifted reading means the \
          first bin spans the whole warm-up",
+    );
+}
+
+/// Proposal Testing item 4 through the real loader and filter. A stream stating
+/// its windows per row, with the window [10,11) simply absent, is a declared
+/// GAP: the flow over (10,11) belongs to no bin and is discarded. Stated as an
+/// equivalence with the undeclared machinery:
+///
+///   windowed, [10,11) omitted  ==  undeclared, labels +1, row 11 present as NA,
+///                                  `condition_from` opening at 3
+///
+/// On the undeclared side the NA row is a hole: no likelihood term, but it
+/// closes the bin at 11 without scoring it — discarding exactly (10,11). Both
+/// sides then reset at 3, score at 4..10 and 12..43, and discard the same span,
+/// so the numbers agree EXACTLY.
+#[test]
+fn a_stated_gap_under_window_columns_discards_exactly_that_span() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("gap");
+
+    let windowed = tmp.join("windowed.tsv");
+    let holed = tmp.join("holed.tsv");
+    write_window_counts(&windowed, 10);
+    write_counts_with_hole(&holed, 11);
+
+    let declared_gap = pfilter_loglik(&camdl, &windowed_model(&tmp), &windowed, &[]);
+    let undeclared_equiv = pfilter_loglik(
+        &camdl, &undeclared_model(&tmp), &holed,
+        &["--condition-from", "first_obs - 1 days"],
+    );
+    assert_eq!(
+        declared_gap, undeclared_equiv,
+        "a stated gap must discard exactly the uncovered span — the same numbers \
+         as an NA row closing that bin unscored (declared={declared_gap}, \
+         equivalent={undeclared_equiv})",
+    );
+
+    // Non-vacuous: without the hole the undeclared side scores (10,11] against
+    // a real count, so the gap genuinely removes a term.
+    let plain = tmp.join("plain.tsv");
+    write_counts_with_hole(&plain, u32::MAX);
+    let undeclared_no_hole = pfilter_loglik(
+        &camdl, &undeclared_model(&tmp), &plain,
+        &["--condition-from", "first_obs - 1 days"],
+    );
+    assert_ne!(
+        declared_gap, undeclared_no_hole,
+        "the gap must change the scoring; agreeing with the gapless reading means \
+         the omitted window was not discarded",
     );
 }
 

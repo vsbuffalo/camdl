@@ -676,6 +676,22 @@ convention about whether the labelled day is included in the count — which is
 the off-by-one this whole section exists to remove. One way to state a window,
 stated explicitly.
 
+### A gap between rows
+
+The window columns are also the only form that can leave a span **uncovered**.
+If the row `2026-07-14 → 2026-07-15` is simply absent from the file above, the
+flow over that day belongs to no row and is discarded — nothing is scored
+against it, and the next row's bin opens at its own `window_start`. That is the
+same reading an `NA` row gets (see the next section): no likelihood term, and
+the window is kept.
+
+Under the three uniform forms a gap is refused. Every row's window follows from
+its label, so consecutive rows whose windows do not touch can only mean a row is
+**missing** — and a missing row is exactly what used to widen the next bin
+silently. The error names both windows and the uncovered span between them. Keep
+every scheduled row and write the unobserved one as `NA`; if one row genuinely
+covers the whole span, state that with the window columns.
+
 ### What this changes for an existing file
 
 Nothing about the file; everything about how it is read. A stream that declared

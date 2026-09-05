@@ -69,6 +69,16 @@ stated window) and W329 is not emitted (the window it would infer has been
 stated). A first period opening _before_ `simulate.from` is an error — that time
 is never simulated.
 
+**A gap between rows means different things under different forms.** Under `day`
+/ `starting_on` / `ending_on` every row's window follows from its label, so two
+consecutive rows whose windows do not touch can only mean a row is missing — and
+a missing row is exactly what used to widen the next bin silently. It is now
+refused, naming both windows and the uncovered span; write the unobserved row as
+`NA` (a hole: no likelihood term, but the window is kept). Under
+`window_start`/`window_stop` a gap is a statement: the flow over the uncovered
+span belongs to no row and is discarded, the same as an `NA` row closing that
+bin unscored.
+
 **Diagnostics.** `E347` — more than one temporal anchor (a `: time` column and
 window columns together, half a window pair, `covers` alongside window columns),
 or `covers` naming a column that is not the stream's time column. `E348` —
