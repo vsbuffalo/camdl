@@ -396,67 +396,63 @@ fn no_dates_flag_is_unchanged() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// §9.7 multi-timezone civil-date alignment: a TSV whose cells carry mixed
-/// trailing offsets loads to the *same* internal time as the offset-stripped
-/// sibling — the offset is discarded, every row maps to the same civil date.
+/// gh#846: a time cell carrying a timezone offset is a hard error, not a
+/// silently-stripped civil date. camdl models civil calendar dates and has no
+/// timezone semantics, so an offset is information it has chosen not to
+/// represent — accepting the cell and deleting the offset is the one response
+/// that cannot be right. Each offset form (`+HH:MM`, `-HH:MM`, `Z`) must be
+/// refused, and the diagnostic must name the cell, the offset and the line.
 #[test]
-fn multitz_offsets_collapse_to_civil_date() {
+fn timezone_offset_in_a_time_cell_is_refused() {
     let camdl = camdl_bin();
-    let tmp = tempdir("multitz");
+    let tmp = tempdir("tzrefuse");
     let model = model_with_origin(&tmp, "2020-02-28");
 
-    // The dates land in the seeded epidemic window (the model seeds at
-    // tau=30), so the filter is non-degenerate and the loglik is finite
-    // AND date-sensitive. Earlier this fixture put all five rows on one
-    // *pre-seeding* civil date (2020-03-15): the filter degenerated to
-    // -inf, and comparing two -inf values is vacuous — it would pass even
-    // if the offsets were parsed wrongly. (gh#110's watchdog later turned
-    // that silent -inf into a hard error, surfacing the latent problem.)
-    //
-    // Each row carries a different tz-offset form (+01:00, +06:00, -03:00,
-    // Z, +05:45). A daily-cadence loader must DROP the offset and keep the
-    // civil date, so the offset-bearing file and the naive file resolve to
-    // the same internal times and the same loglik. origin = 2020-02-28;
-    // day-numbers: 2020-04-06→38, -11→43, -16→48, -21→53, -26→58.
-    let tz = tmp.join("tz.tsv");
-    std::fs::write(&tz,
-        "time\tcases\n\
-         2020-04-06+01:00\t4\n\
-         2020-04-11+06:00\t64\n\
-         2020-04-16-03:00\t174\n\
-         2020-04-21Z\t144\n\
-         2020-04-26+05:45\t75\n").unwrap();
-    let naive = tmp.join("naive.tsv");
-    std::fs::write(&naive,
-        "time\tcases\n2020-04-06\t4\n2020-04-11\t64\n2020-04-16\t174\n\
-         2020-04-21\t144\n2020-04-26\t75\n").unwrap();
-    // Negative control: one civil date shifted a single day. Used only to
-    // prove the loglik genuinely depends on the parsed dates — so the
-    // tz == naive equality below is meaningful, not a vacuous -inf == -inf.
-    let shifted = tmp.join("shifted.tsv");
-    std::fs::write(&shifted,
-        "time\tcases\n2020-04-07\t4\n2020-04-11\t64\n2020-04-16\t174\n\
-         2020-04-21\t144\n2020-04-26\t75\n").unwrap();
+    // The bare-date sibling of every case below loads and scores fine
+    // (dates land in the seeded epidemic window, tau=30), so a failure here
+    // is attributable to the offset alone and not to a degenerate filter.
+    // origin = 2020-02-28; 2020-04-06 -> day 38, -11 -> 43, -16 -> 48.
+    let bare = tmp.join("bare.tsv");
+    std::fs::write(&bare,
+        "time\tcases\n2020-04-06\t4\n2020-04-11\t64\n2020-04-16\t174\n").unwrap();
+    let ok = pfilter_loglik(&camdl, &model, &bare, &COND);
+    assert!(ok.status.success(),
+        "control: the offset-free sibling must load, else this test cannot \
+         attribute the failures below to the offset. STDERR: {}",
+        String::from_utf8_lossy(&ok.stderr));
+    assert!(parse_loglik(&ok).is_finite(), "control loglik must be finite");
 
-    let ll_tz = parse_loglik(&pfilter_loglik(&camdl, &model, &tz, &COND));
-    let ll_naive = parse_loglik(&pfilter_loglik(&camdl, &model, &naive, &COND));
-    let ll_shifted = parse_loglik(&pfilter_loglik(&camdl, &model, &shifted, &COND));
+    // Each offset form, on a different row, so the line number in the
+    // message is a real locator rather than a constant.
+    for (offset, cell, line) in [
+        ("+01:00", "2020-04-06+01:00", "line 2"),
+        ("+05:45", "2020-04-11+05:45", "line 3"),
+        ("-03:00", "2020-04-16-03:00", "line 4"),
+        ("Z", "2020-04-16Z", "line 4"),
+    ] {
+        let rows: Vec<String> = ["2020-04-06\t4", "2020-04-11\t64", "2020-04-16\t174"]
+            .iter()
+            .map(|r| {
+                let date = r.split('\t').next().unwrap();
+                if cell.starts_with(date) { format!("{cell}\t{}", r.split('\t').nth(1).unwrap()) }
+                else { (*r).to_string() }
+            })
+            .collect();
+        let data = tmp.join(format!("tz{}.tsv", offset.replace([':', '+', '-'], "")));
+        std::fs::write(&data, format!("time\tcases\n{}\n", rows.join("\n"))).unwrap();
 
-    // Anti-vacuity guard 1: the loglik must be finite, else the equality
-    // below proves nothing (any two -inf are equal).
-    assert!(ll_naive.is_finite(),
-        "loglik must be finite for the offset-collapse check to be \
-         meaningful; got {ll_naive}");
-    // The property under test: tz offsets are dropped, civil dates kept, so
-    // the offset-bearing data scores identically to the naive sibling.
-    assert_eq!(ll_tz, ll_naive,
-        "offset-bearing dates must collapse to the same civil date as the \
-         naive sibling");
-    // Anti-vacuity guard 2: shifting a date by one day *does* change the
-    // loglik — so the equality above is a real test of date resolution.
-    assert_ne!(ll_shifted, ll_naive,
-        "a one-day date shift must change the loglik; if it doesn't, the \
-         loglik is insensitive to dates and the equality above is vacuous");
+        let out = pfilter_loglik(&camdl, &model, &data, &COND);
+        assert!(!out.status.success(),
+            "a '{offset}' offset must be refused, not silently stripped; \
+             the run succeeded with STDOUT: {}",
+            String::from_utf8_lossy(&out.stdout));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(offset), "must name the offset '{offset}': {stderr}");
+        assert!(stderr.contains(cell), "must echo the offending cell '{cell}': {stderr}");
+        assert!(stderr.contains(line), "must locate the row ({line}): {stderr}");
+        assert!(stderr.contains("timezone"),
+            "must say what the rule is, in the user's words: {stderr}");
+    }
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

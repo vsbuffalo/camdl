@@ -15,7 +15,7 @@
 #
 # Columns (tab-separated):
 #   origin       ISO origin date (anchored t=0)
-#   date         ISO date to convert (may carry a zone designator / surrounding whitespace)
+#   date         ISO date to convert (may carry surrounding whitespace)
 #   time_unit    days | weeks | months | years
 #   expect       accept | reject
 #   delta_days   integer rata_die(date) - rata_die(origin); "-" for reject rows
@@ -52,11 +52,16 @@ origin	date	time_unit	expect	delta_days	t
 2020-01-01	2021-01-01	years	accept	366	1.002073965
 # Operational anchor used by the SIA golden models (2013 origin).
 2013-01-01	2013-11-01	days	accept	304	304
-# ── Zone designators are accepted and DISCARDED (a bare date is a civil day) ─
-# Trailing Z: 2020-03-15 is 74 days after 2020-01-01 (31 + 29 + 14).
-2020-01-01	2020-03-15Z	days	accept	74	74
-# Numeric offset +HH:MM is also discarded.
-2020-01-01	2020-03-15+06:00	days	accept	74	74
+# ── Zone designators MUST be rejected (gh#846) ────────────────────
+# A bare date is already a civil day with no timezone semantics, so an
+# offset is information camdl does not model. Both parsers refuse it rather
+# than discarding it, which would silently change what the cell says.
+2020-01-01	2020-03-15Z	days	reject	-	-
+2020-01-01	2020-03-15+06:00	days	reject	-	-
+2020-01-01	2020-03-15-03:00	days	reject	-	-
+# The civil date the rejected cells reduce to is of course still accepted:
+# 2020-03-15 is 74 days after 2020-01-01 (31 + 29 + 14).
+2020-01-01	2020-03-15	days	accept	74	74
 # ── Surrounding whitespace is trimmed ────────────────────────────────────
 2020-01-01	 2020-07-01 	days	accept	182	182
 # ── Out-of-range / malformed dates MUST be rejected (gh#98 C6) ───────────
