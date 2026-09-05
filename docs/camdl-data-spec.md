@@ -685,6 +685,13 @@ early**. Declaring `covers = day(time)` moves the scoring to the day the label
 names. That is a real change in the fitted numbers, and it is the correction,
 not a regression.
 
+The declaration also settles where scoring _begins_. Undeclared, the first bin
+runs from `simulate.from` to the first row — the whole warm-up scored against
+one count — and `condition_from` is how you cut it. Declared, the first period
+opens where it says; the warm-up before it is simulated but not scored, and no
+`condition_from` is needed or accepted. A first period that opens before
+`simulate.from` is an error, since that time is never simulated.
+
 ## Missing observations: `NA` is a hole, not a zero
 
 In an **observation** file, the token `NA` in a value column marks a **hole**: a

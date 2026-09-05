@@ -1123,6 +1123,26 @@ pub fn stream_times_for(
     // which file to look in.
     let periods = periods.map_err(|e| format!(
         "observation stream '{}' ({}): {}", obs.name, path, e))?;
+
+    // A period may not open before the run does: time before `t_start` is
+    // never simulated, so the period would be scored against flow that does
+    // not exist. Opening exactly AT `t_start` is fine — the accumulator is
+    // already empty there. Opening after it is the normal warm-up shape and is
+    // handled by resetting the bin at the period's start (gh#833). A
+    // non-finite `t_start` means no fit window is in force; nothing to check.
+    if opts.t_start.is_finite() {
+        if let Some(first) = periods.first() {
+            if first.start() < opts.t_start - 1e-9 {
+                return Err(format!(
+                    "observation stream '{}' ({}): its first declared period opens at {} but \
+                     the run starts at t_start = {} — time before t_start is never simulated, \
+                     so the period would be scored against flow that does not exist.\n  \
+                     Fix: move `simulate.from` back to {} or earlier, or drop the rows the \
+                     model cannot cover.",
+                    obs.name, path, first.start(), opts.t_start, first.start()));
+            }
+        }
+    }
     Ok(StreamTimes::Intervals(periods))
 }
 
