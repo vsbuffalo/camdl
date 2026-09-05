@@ -1458,14 +1458,14 @@ impl Formatter {
         let total_forkable: u64 = report.per_chain.iter().map(|c| c.n_forkable).sum();
         s.push_str(&format!("    {:6} {:>10} {:>10} {:>10}\n",
             "chain", "written", "forkable", "unusable"));
-        for (i, c) in report.per_chain.iter().enumerate() {
+        for c in report.per_chain.iter() {
             let lost = c.n_saved.saturating_sub(c.n_forkable);
             // Pad before coloring — the ANSI bytes would otherwise count
             // toward the field width and break the column.
             let cell = format!("{:>10}", lost);
             let lost_cell = if lost == 0 { self.dim(&cell).to_string() } else { self.warn(&cell) };
             s.push_str(&format!("    {:6} {:>10} {:>10}{}\n",
-                i + 1, c.n_saved, c.n_forkable, lost_cell));
+                c.chain, c.n_saved, c.n_forkable, lost_cell));
         }
         if total_forkable < total_saved {
             s.push_str(&format!("    {}\n", self.warn(&format!(
@@ -3606,12 +3606,14 @@ mod tests {
     // ── gh#727: saved-vs-forkable latent paths in the summary ────────────
 
     /// Write a `pgas_summary.json` carrying just the gh#727 `trajectories`
-    /// block — the only key `saved_path_table` reads.
+    /// block — the only key `saved_path_table` reads. `per_chain` rows are
+    /// `(chain id, written, forkable)`; the id is written because a stage that
+    /// refused a chain at its start has survivors whose ids are not `1..n`.
     fn write_traj_summary(
         dir: &std::path::Path,
         draw_stride: u64,
         thin: u64,
-        per_chain: &[(u64, u64)],
+        per_chain: &[(u64, u64, u64)],
     ) {
         let summary = serde_json::json!({
             "stage": "pgas",
@@ -3619,8 +3621,9 @@ mod tests {
             "trajectories": {
                 "draw_stride": draw_stride,
                 "thin": thin,
-                "n_saved": per_chain.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
-                "n_forkable": per_chain.iter().map(|(_, b)| *b).collect::<Vec<_>>(),
+                "chain_id": per_chain.iter().map(|(c, _, _)| *c).collect::<Vec<_>>(),
+                "n_saved": per_chain.iter().map(|(_, a, _)| *a).collect::<Vec<_>>(),
+                "n_forkable": per_chain.iter().map(|(_, _, b)| *b).collect::<Vec<_>>(),
             },
         });
         std::fs::write(dir.join("pgas_summary.json"),
@@ -3638,7 +3641,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Two chains, one path every 28 retained draws at thin 5; chain 1 had
         // 200 of its 250 records skipped as incoherent, chain 2 none.
-        write_traj_summary(&dir, 28, 5, &[(250, 50), (250, 250)]);
+        write_traj_summary(&dir, 28, 5, &[(1, 250, 50), (2, 250, 250)]);
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
         let t = fmt.saved_path_table(&dir);
         assert!(t.contains("saved latent paths"), "header present:\n{t}");
@@ -3660,7 +3663,7 @@ mod tests {
     fn saved_path_table_is_quiet_when_every_path_is_forkable() {
         let dir = crate::test_support::unique_temp_dir("summary_gh727_clean");
         std::fs::create_dir_all(&dir).unwrap();
-        write_traj_summary(&dir, 36, 5, &[(200, 200), (200, 200)]);
+        write_traj_summary(&dir, 36, 5, &[(1, 200, 200), (2, 200, 200)]);
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
         let t = fmt.saved_path_table(&dir);
         assert!(t.contains("saved latent paths"), "header still present:\n{t}");
@@ -3687,11 +3690,12 @@ mod tests {
 
     // ── the rendered grid, against adversarial input ─────────────────────
     //
-    // The defect these pin is INPUT-dependent: on a corpus of short names the
-    // old code rendered correctly, so reading the format strings could not
-    // show it. The fixture therefore carries what a real fit carries — a
-    // stratified name past the old column width and means six orders of
-    // magnitude apart — and the rendered text is compared whole.
+    // Both defects these pin are INPUT-dependent: on a corpus of short names
+    // and contiguous chains the old code rendered correctly, so reading the
+    // format strings could not show either. The fixture therefore carries what
+    // a real fit carries — a stratified name past the old column width, means
+    // six orders of magnitude apart, and a chain set whose surviving ids are
+    // not `1..n` — and the rendered text is compared whole.
 
     /// The block a `bayesian_block` renders under `header`, up to its first
     /// blank line. Comparing the block whole is the point: an alignment defect
@@ -3830,6 +3834,61 @@ mod tests {
             "the ituri row must still be identifiable by its suffix:\n{table}");
         assert!(table.contains("_zone_nord_kivu "),
             "the nord_kivu row must still be identifiable by its suffix:\n{table}");
+    }
+
+    /// gh#727 follow-up: the `chain` column of the saved-path table is the
+    /// CHAIN, not the row number.
+    ///
+    /// The two coincide whenever every chain survives its start, which is why
+    /// the defect was invisible on the test corpus. Here chains 4, 7, 9 and 13
+    /// are the survivors (gh#607 refused the rest), so a positional index
+    /// would print 1..4 and send a reader inspecting "chain 1" to a chain that
+    /// contributed nothing — while the latent-path block a few lines below
+    /// prints the true ids.
+    #[test]
+    fn saved_path_table_names_the_chain_not_the_row() {
+        let dir = crate::test_support::unique_temp_dir("summary_saved_path_ids");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_traj_summary(&dir, 600, 1,
+            &[(4, 10, 10), (7, 10, 10), (9, 10, 10), (13, 10, 10)]);
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        assert_eq!(fmt.saved_path_table(&dir), concat!(
+"  saved latent paths\n",
+"    chain     written   forkable   unusable\n",
+"         4         10         10         0\n",
+"         7         10         10         0\n",
+"         9         10         10         0\n",
+"        13         10         10         0\n",
+"\n",
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A `trajectories` block written before the chain ids were recorded
+    /// cannot say which chain a row is, and the row's position is not an
+    /// answer. It is read as no report at all rather than rendered against a
+    /// positional guess, so an existing fit loses this table until it is
+    /// re-run. That is the deliberate cost of never printing a wrong chain id;
+    /// pinned here so no positional fallback creeps back in.
+    #[test]
+    fn saved_path_table_is_empty_when_the_block_has_no_chain_ids() {
+        let dir = crate::test_support::unique_temp_dir("summary_saved_path_no_ids");
+        std::fs::create_dir_all(&dir).unwrap();
+        let summary = serde_json::json!({
+            "stage": "pgas",
+            "thin": 1,
+            "trajectories": {
+                "draw_stride": 600,
+                "thin": 1,
+                "n_saved": [10, 10],
+                "n_forkable": [10, 10],
+            },
+        });
+        std::fs::write(dir.join("pgas_summary.json"),
+            serde_json::to_string_pretty(&summary).unwrap()).unwrap();
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        assert_eq!(fmt.saved_path_table(&dir), "");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

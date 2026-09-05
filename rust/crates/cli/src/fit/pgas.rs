@@ -142,6 +142,13 @@ impl TrajectoryStridePlan {
 /// goes into `pgas_summary.json`, so the artifact records what happened rather
 /// than what was planned.
 pub(crate) struct SavedPathCounts {
+    /// Which chain each row describes, 1-based to match the `chain_N/`
+    /// directories (the convention
+    /// [`CHAIN_NUMBERING`](super::cross_chain_compat::CHAIN_NUMBERING) states
+    /// in the artifact). Recorded rather than left implicit in the row order: a
+    /// chain refused at its start (gh#607) never reaches this list, so the
+    /// rows are the SURVIVORS and their positions are not their ids.
+    pub chain_id: Vec<usize>,
     /// Written paths, one entry per chain in `results` order.
     pub n_saved: Vec<usize>,
     /// Of those, the ones whose sweep is also a retained draw.
@@ -158,16 +165,18 @@ impl SavedPathCounts {
         retained: &[(usize, Vec<usize>)],
         saved_sweeps: &[Vec<usize>],
     ) -> Self {
+        let mut chain_id = Vec::with_capacity(retained.len());
         let mut n_saved = Vec::with_capacity(retained.len());
         let mut n_forkable = Vec::with_capacity(retained.len());
-        for (chain_id, retained_sweeps) in retained {
+        for (chain_id_0, retained_sweeps) in retained {
             let kept: std::collections::HashSet<usize> =
                 retained_sweeps.iter().copied().collect();
-            let saved = saved_sweeps.get(*chain_id).map(Vec::as_slice).unwrap_or(&[]);
+            let saved = saved_sweeps.get(*chain_id_0).map(Vec::as_slice).unwrap_or(&[]);
+            chain_id.push(chain_id_0 + 1);
             n_saved.push(saved.len());
             n_forkable.push(saved.iter().filter(|s| kept.contains(s)).count());
         }
-        SavedPathCounts { n_saved, n_forkable }
+        SavedPathCounts { chain_id, n_saved, n_forkable }
     }
 }
 
@@ -1838,6 +1847,11 @@ pub(crate) const TRAJECTORIES_KEY: &str = "trajectories";
 
 /// One chain's row of the `trajectories` block.
 pub(crate) struct ChainSavedPaths {
+    /// Which chain this row is, 1-based, matching the `chain_N/` directories.
+    /// Read from the artifact rather than inferred from the row's position:
+    /// the rows are the chains that survived their start (gh#607), so on a
+    /// stage where any chain was refused the two differ.
+    pub chain: u64,
     /// Latent paths this chain wrote.
     pub n_saved: u64,
     /// Of those, the ones whose sweep is also a retained draw.
@@ -1858,7 +1872,13 @@ pub(crate) struct SavedPathReport {
 /// Read the `trajectories` block back out of a stage summary JSON. `None` for
 /// a summary that carries no such block — a PMMH / NUTS stage saves no latent
 /// paths at all, and neither does a PGAS stage written before gh#727 — and for
-/// one whose two per-chain arrays disagree in length, which is not a report.
+/// one whose per-chain arrays disagree in length, which is not a report.
+///
+/// `chain_id` is required, not defaulted. A block without it cannot say which
+/// chain each row is, and the row's position is not an answer: a stage that
+/// refused a chain at its start has survivors whose ids are not `1..n`. A
+/// stage predating `chain_id` is therefore read as no report at all rather
+/// than rendered against a positional guess.
 pub(crate) fn read_saved_path_counts(
     summary: &serde_json::Value,
 ) -> Option<SavedPathReport> {
@@ -1869,16 +1889,25 @@ pub(crate) fn read_saved_path_counts(
             .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
             .unwrap_or_default()
     };
+    // Required, not defaulted: `?` here is the whole point. A block with no
+    // `chain_id` is not a report, because nothing else in it says which chain
+    // a row is.
+    t.get("chain_id")?;
+    let chain_id = arr("chain_id");
     let saved = arr("n_saved");
     let forkable = arr("n_forkable");
-    if saved.len() != forkable.len() {
+    // A short `chain_id` would otherwise be absorbed by `zip`, which stops at
+    // the shorter side and would silently drop the trailing chains.
+    if saved.len() != forkable.len() || chain_id.len() != saved.len() {
         return None;
     }
     Some(SavedPathReport {
         draw_stride: t.get("draw_stride").and_then(|v| v.as_u64()),
         thin: t.get("thin").and_then(|v| v.as_u64())?,
-        per_chain: saved.into_iter().zip(forkable)
-            .map(|(n_saved, n_forkable)| ChainSavedPaths { n_saved, n_forkable })
+        per_chain: chain_id.into_iter().zip(saved).zip(forkable)
+            .map(|((chain, n_saved), n_forkable)| {
+                ChainSavedPaths { chain, n_saved, n_forkable }
+            })
             .collect(),
     })
 }
@@ -1918,6 +1947,11 @@ fn write_summary(
             "n_trajectories": n_trajectories,
             "draw_stride": traj_plan.draw_stride,
             "thin": thin,
+            // Which chain each row is. The rows are the chains that survived
+            // their start, so a row's POSITION is not its chain id whenever
+            // one was refused (gh#607) — the id is recorded, never inferred.
+            "chain_id": saved_paths.chain_id,
+            "chain_numbering": super::cross_chain_compat::CHAIN_NUMBERING,
             "n_saved": saved_paths.n_saved,
             "n_forkable": saved_paths.n_forkable,
         },
@@ -2036,6 +2070,51 @@ mod tests {
         let opts = PgasStageOpts::from_stage(&stage)
             .expect("single-rung [1.0] must validate");
         assert_eq!(opts.tempering, vec![1.0]);
+    }
+
+    /// The `trajectories` reader's contract on chain ids. Rendering cannot
+    /// test this: an empty `per_chain` and no report at all both render as
+    /// nothing, so the discriminating assertions belong here.
+    #[test]
+    fn a_trajectories_block_without_usable_chain_ids_is_not_a_report() {
+        let block = |extra: serde_json::Value| -> serde_json::Value {
+            let mut t = serde_json::json!({
+                "thin": 1,
+                "draw_stride": 600,
+                "n_saved": [10, 10],
+                "n_forkable": [10, 8],
+            });
+            for (k, v) in extra.as_object().expect("object").iter() {
+                t[k] = v.clone();
+            }
+            serde_json::json!({ TRAJECTORIES_KEY: t })
+        };
+
+        // Complete: the ids are read back as written, not as positions.
+        let got = read_saved_path_counts(&block(serde_json::json!({"chain_id": [4, 7]})))
+            .expect("a complete block is a report");
+        assert_eq!(
+            got.per_chain.iter().map(|c| (c.chain, c.n_saved, c.n_forkable))
+                .collect::<Vec<_>>(),
+            vec![(4, 10, 10), (7, 10, 8)],
+            "each row keeps its own chain id and both counts"
+        );
+
+        // Absent: a stage written before the ids were recorded. Reading it as
+        // `1..n` would be a guess, and on a stage that refused a chain at its
+        // start it would be a wrong one.
+        assert!(
+            read_saved_path_counts(&block(serde_json::json!({}))).is_none(),
+            "a block with no chain_id is not a report"
+        );
+
+        // Present but short. `zip` stops at the shorter side, so without the
+        // length check this would render as a one-chain table -- a silently
+        // truncated report, which is worse than none.
+        assert!(
+            read_saved_path_counts(&block(serde_json::json!({"chain_id": [4]}))).is_none(),
+            "a chain_id array shorter than the counts is not a report"
+        );
     }
 
     // ── gh#727: latent paths are spaced over retained draws ──────────────
