@@ -375,12 +375,20 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
     assert!(stderr.contains("frozen-disagree"), "stderr was:\n{stderr}");
 
     // ── `fit summary` recomputes the same block from the paths on disk ────
-    // The six profile lines (title through `ESS min`), compared trimmed: the
-    // summary indents them into its own section.
+    // The five reduction rows (`bin` through `R̂ max`), compared trimmed. The
+    // summary heads its section differently — the rows sit under a `latent
+    // paths` rule rather than under the block's own title — but the NUMBERS
+    // are recomputed from the saved paths and must be the stage's own. That
+    // agreement is the property; the title never was.
     fn profile_lines(text: &str) -> Vec<String> {
+        // Anchor on `frozen-disagree`, not on `bin`: the path-renewal profile
+        // prints its own `bin` row first, so a `bin` anchor reads the WRONG
+        // block out of stderr and compares it against the right one. The
+        // trailing space excludes the glossary sentence, which opens
+        // `frozen-disagree:` with a colon.
         text.lines()
-            .skip_while(|l| !l.contains("latent-path convergence ("))
-            .take(6)
+            .skip_while(|l| !l.trim_start().starts_with("frozen-disagree "))
+            .take(5)
             .map(|l| l.trim().to_string())
             .collect()
     }
@@ -392,6 +400,8 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
     let summary = String::from_utf8_lossy(&s.stdout);
     let at_stage_end = profile_lines(&stderr);
     let in_summary = profile_lines(&summary);
-    assert_eq!(at_stage_end.len(), 6, "stage-end profile:\n{stderr}");
+    assert_eq!(at_stage_end.len(), 5, "stage-end profile:\n{stderr}");
+    assert!(at_stage_end[3].starts_with("R\u{302} max"),
+        "the anchored block must be the LATENT one, not path renewal: {at_stage_end:?}");
     assert_eq!(in_summary, at_stage_end, "fit summary output:\n{summary}");
 }

@@ -204,8 +204,9 @@ init = "single"
     let summary_txt = String::from_utf8_lossy(&summary.stdout);
     assert!(summary_txt.contains("ESS/iter"),
         "nuts fit summary must report ESS/iter off the posterior:\n{summary_txt}");
-    assert!(summary_txt.contains("[nuts]"),
-        "nuts fit summary must render the nuts posterior block:\n{summary_txt}");
+    assert!(summary_txt.contains(" · nuts · "),
+        "the stage's identity line must name the sampler that produced \
+         it:\n{summary_txt}");
 
     // The `RhatHigh` findings are pushed as a side effect of RENDERING the
     // convergence block, and nuts never rendered one — so `diagnostics.json`
