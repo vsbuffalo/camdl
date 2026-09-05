@@ -1597,6 +1597,7 @@ mod tests {
             perturb_only_at_t0_params: vec![],
             chain_logliks: vec![-3810.0, -3805.0, -3812.0, -3804.9],
             chain_eval_logliks: vec![-3810.0, -3805.0, -3812.0, -3804.9],
+            chain_eval_ids: Vec::new(),
             chain_eval_ses: vec![1.0, 1.0, 1.0, 1.0],
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
