@@ -1,6 +1,9 @@
 # Observation time as a sum type
 
-- **Status:** Draft
+- **Status:** Accepted — spec, implement against this. Steps 0–2 landed (the
+  runtime `Period`/`StreamTimes`, the `ir/VERSION` 0.38 bump, the `covers` DSL
+  surface and the loader); the migration that makes the declaration REQUIRED,
+  gap support, `compare`'s window gate and the output columns are outstanding.
 - **Issue:** gh#833
 - **Supersedes:** `2026-09-04-explicit-observation-windows.md`
 - **Area:** IR (`ObservationModel`, observation rows), runtime

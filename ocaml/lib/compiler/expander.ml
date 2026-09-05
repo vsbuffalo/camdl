@@ -8052,27 +8052,27 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
        | _ -> ());
       (* One civil day in axis units. *)
       let one_day = 1.0 /. days_per ctx.time_unit in
-      (* The span: a bare identifier names a per-row width column; anything
-         else must fold to a compile-time constant duration. *)
+      (* The span is a compile-time constant duration. A width that varies row
+         to row is NOT spelled here: `window_start`/`window_stop` already
+         states both boundaries outright, and a duration column would be a
+         second way to say the same thing — one that needs its own convention
+         about whether the labelled day is included, which is the off-by-one
+         class this work removes. *)
       let span_of e =
         match e with
-        | EIdent (name, _) when List.exists (fun c ->
-            c.oc_name = name
-            && (match c.oc_role with ColValue _ -> true | _ -> false)) columns ->
-          Some (Ir.SpanColumn name)
         | EIdent (name, _) ->
           Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
             ~message:(Printf.sprintf
-              "observation '%s': `covers` names '%s' as its width, but '%s' is \
-               not a declared value column of this stream" od.oname name name)
-            ~hint:"a per-row width must be a column declared in `columns { }`, \
-                   e.g. `days_covered : count`; a fixed width is a duration \
-                   like `7 'days`" ();
+              "observation '%s': `covers` names '%s' as its width, but a width \
+               must be a fixed duration like `7 'days`" od.oname name)
+            ~hint:"for a width that varies row to row, give the file \
+                   `window_start` and `window_stop` columns — they state both \
+                   boundaries per row, with no convention to get wrong" ();
           None
-        | _ -> Some (Ir.SpanConst (eval_const_expr ctx e))
+        | _ -> Some (eval_const_expr ctx e)
       in
       match cv.ocv_form, cv.ocv_span with
-      | "day", None -> Some (Ir.CoversFrom (0.0, Ir.SpanConst one_day))
+      | "day", None -> Some (Ir.CoversFrom (0.0, one_day))
       | "day", Some _ ->
         Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
           ~message:(Printf.sprintf
@@ -8224,24 +8224,13 @@ let expand_observations ctx =
         | LikZeroInflatedNegBinomial k ->
           List.concat_map (fun (_, e) -> names_of e) k
       in
-      (* A column named as a `covers` per-row width is USED, even though it is
-         neither the scored outcome nor referenced in the likelihood (gh#833).
-         Without this a file carrying its own `days_covered` — the whole point
-         of the per-row width form — is rejected as declaring a dead column. *)
-      let covers_width_col =
-        match od.ocovers with
-        | Some { ocv_span = Some (EIdent (n, _)); _ } -> [n]
-        | _ -> []
-      in
       if has_real_measurement && od.ocolumns <> None then
         List.iter (fun vc ->
-          if vc <> meas_v.om_scored && not (List.mem vc rhs_names)
-             && not (List.mem vc covers_width_col) then
+          if vc <> meas_v.om_scored && not (List.mem vc rhs_names) then
             Diagnostics.error ctx.diags ~code:"E277" ~loc:od_loc
               ~message:(Printf.sprintf
                 "observation '%s': value column '%s' is declared but never used \
-                 (neither the scored outcome, nor referenced in the likelihood, \
-                 nor a `covers` width)"
+                 (neither the scored outcome nor referenced in the likelihood)"
                 od.oname vc)
               ~hint:"remove the dead column, or reference it in the `~` RHS" ()
         ) value_cols;

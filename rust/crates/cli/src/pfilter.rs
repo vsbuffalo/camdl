@@ -1079,52 +1079,24 @@ pub fn stream_times_for(
     path: &str,
     opts: &TimeOpts,
 ) -> Result<sim::inference::StreamTimes, String> {
-    use ir::observation::{Covers, CoversSpan};
+    use ir::observation::Covers;
     use sim::inference::{Period, StreamTimes};
 
     let Some(covers) = &obs.covers else {
         return Ok(StreamTimes::undeclared_for(projection, label_times.to_vec()));
     };
 
-    // A per-row width comes from a declared column, read independently of the
-    // aux path: aux is cleared on a hole, and a hole still has a period.
-    let span_values = |span: &CoversSpan| -> Result<Vec<f64>, String> {
-        match span {
-            CoversSpan::Const(d) => Ok(vec![*d; label_times.len()]),
-            CoversSpan::Column(col) => {
-                let content = std::fs::read_to_string(path)
-                    .map_err(|e| format!("{}: {}", path, e))?;
-                let (_t, cells, rows) = read_column_raw(&content, path, col)?;
-                if cells.len() != label_times.len() {
-                    return Err(format!(
-                        "observation stream '{}': the `covers` width column '{}' in '{}' \
-                         has {} data rows but the time column has {} — every column of a \
-                         stream's file must have the same rows",
-                        obs.name, col, path, cells.len(), label_times.len()));
-                }
-                cells.iter().enumerate().map(|(i, c)| c.ok_or_else(|| format!(
-                    "observation stream '{}', line {}: the `covers` width column '{}' is \
-                     NA. A row's width says what span its count refers to, so it cannot be \
-                     missing — an unobserved row still covers a period. Write the width \
-                     and mark the VALUE as NA.",
-                    obs.name, rows.get(i).copied().unwrap_or(0), col))).collect()
-            }
-        }
-    };
-
     let periods = match covers {
         Covers::From { offset, span } => {
-            let spans = span_values(span)?;
-            label_times.iter().zip(spans).map(|(&t, d)| {
+            label_times.iter().map(|&t| {
                 let start = t + offset;
-                Period::new(start, start + d)
+                Period::new(start, start + span)
             }).collect::<Result<Vec<_>, _>>()
         }
         Covers::Until { offset, span } => {
-            let spans = span_values(span)?;
-            label_times.iter().zip(spans).map(|(&t, d)| {
+            label_times.iter().map(|&t| {
                 let stop = t + offset;
-                Period::new(stop - d, stop)
+                Period::new(stop - span, stop)
             }).collect::<Result<Vec<_>, _>>()
         }
         Covers::WindowColumns => {

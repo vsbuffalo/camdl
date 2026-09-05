@@ -46,7 +46,7 @@ use ir::model::{
     SimulationConfig,
 };
 use ir::observation::{
-    ColumnRole, Covers, CoversSpan, Likelihood, ObsColumn, ObservationModel, ObservationSchedule,
+    ColumnRole, Covers, Likelihood, ObsColumn, ObservationModel, ObservationSchedule,
     Projection, RegularSchedule, StratumKey,
 };
 use ir::ode_equation::OdeEquation;
@@ -653,23 +653,6 @@ impl ContentAddressed for ColumnRole {
     }
 }
 
-impl ContentAddressed for CoversSpan {
-    fn hash_into(&self, h: &mut CanonicalHasher) {
-        header(h, "ir::observation::CoversSpan");
-        // Permanent variant indices (run-id stability) — new spans append.
-        match self {
-            CoversSpan::Const(d) => {
-                h.write_u32(0);
-                h.write_f64_bits(*d);
-            }
-            CoversSpan::Column(c) => {
-                h.write_u32(1);
-                h.write_str(c);
-            }
-        }
-    }
-}
-
 impl ContentAddressed for Covers {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::observation::Covers");
@@ -678,12 +661,12 @@ impl ContentAddressed for Covers {
             Covers::From { offset, span } => {
                 h.write_u32(0);
                 h.write_f64_bits(*offset);
-                span.hash_into(h);
+                h.write_f64_bits(*span);
             }
             Covers::Until { offset, span } => {
                 h.write_u32(1);
                 h.write_f64_bits(*offset);
-                span.hash_into(h);
+                h.write_f64_bits(*span);
             }
             Covers::WindowColumns => h.write_u32(2),
         }

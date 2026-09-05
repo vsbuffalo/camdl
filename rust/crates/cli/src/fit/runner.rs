@@ -1599,6 +1599,13 @@ pub(crate) fn apply_conditioning_windows(
     for s in streams.iter_mut() {
         let label = s.obs_model_ir.source.as_str();
         let kind = s.projection.temporal_kind();
+        // W329 infers a stream's window from the spacing between its rows and
+        // flags a leading gap that looks too wide. A stream that DECLARES what
+        // its rows cover has already answered that question, so inferring it
+        // again is at best noise and at worst contradicts the declaration — a
+        // lint must not second-guess an explicit statement (gh#833). The check
+        // stays exactly as it is for an undeclared stream.
+        let declared = s.times.periods().is_some();
         let first_obs_s = s.data.iter()
             .map(|o| o.time)
             .fold(f64::INFINITY, f64::min);
@@ -1632,7 +1639,7 @@ pub(crate) fn apply_conditioning_windows(
                 // escape hatch out of W329, NOT a no-op to hide: on
                 // a WIDE incidence window (the gh#134 shape) say so
                 // loudly so the choice is visible, not silent.
-                if kind == TemporalKind::Interval {
+                if kind == TemporalKind::Interval && !declared {
                     let obs_times: Vec<f64> =
                         s.data.iter().map(|o| o.time).collect();
                     if let Some(anomaly) =
@@ -1663,8 +1670,9 @@ pub(crate) fn apply_conditioning_windows(
                 // soft-warns (free-running drift the first datum
                 // corrects).
                 let obs_times: Vec<f64> = s.data.iter().map(|o| o.time).collect();
-                if let Some(anomaly) =
-                    crate::util::check_first_interval_window(t_start, &obs_times)
+                if let Some(anomaly) = (!declared)
+                    .then(|| crate::util::check_first_interval_window(t_start, &obs_times))
+                    .flatten()
                 {
                     match kind {
                         TemporalKind::Interval => {

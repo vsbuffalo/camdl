@@ -70,7 +70,7 @@ fn declared_model(dir: &Path) -> PathBuf {
     let src = std::fs::read_to_string(seed_timing_ir()).unwrap();
     let injected = src.replacen(
         "\"projection\":",
-        "\"covers\":{\"kind\":\"from\",\"offset\":0.0,\"span\":{\"const\":1.0}},\"projection\":",
+        "\"covers\":{\"kind\":\"from\",\"offset\":0.0,\"span\":1.0},\"projection\":",
         1,
     );
     assert!(injected.contains("\"covers\""), "covers injection failed");

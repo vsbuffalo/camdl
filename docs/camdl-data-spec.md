@@ -655,27 +655,26 @@ The **stop is the stream's fit time source**. Everything downstream that asks
 reads the closing boundary, so a windowed stream sits on the axis exactly where
 an unwindowed one does.
 
-### A per-row width
+### A width that varies row to row
 
-Some files carry their own width: a `days_covered` column saying how many days
-each row actually represents. The duration argument accepts a column name as
-well as a constant, so that needs no upstream arithmetic:
-
-```camdl
-covers = ending_on(time, days_covered)
-```
+Some files carry their own width — a `days_covered` column saying how many days
+each row actually represents, because publication slipped. That is what the
+window columns are for, and the conversion is one subtraction done once where
+the file is built:
 
 ```tsv
-time	days_covered	cases
-2026-07-07	1	12
-2026-07-08	1	9
-2026-07-13	5	61
+window_start	window_stop	cases
+2026-07-07	2026-07-08	12
+2026-07-08	2026-07-09	9
+2026-07-09	2026-07-14	61
 ```
 
-The last row is a five-day total ending on 13 July, so it covers
-`[9 Jul, 14 Jul)`. Converting that upstream — into either a `window_start`
-column or deleted rows — is what puts the arithmetic back in a build script,
-which is where this class of defect lives.
+The last row is a five-day total. Note there is deliberately **no** form that
+takes the width as a duration column (`ending_on(time, days_covered)`). It would
+say exactly what the two columns above say, and to do so it would need its own
+convention about whether the labelled day is included in the count — which is
+the off-by-one this whole section exists to remove. One way to state a window,
+stated explicitly.
 
 ### What this changes for an existing file
 

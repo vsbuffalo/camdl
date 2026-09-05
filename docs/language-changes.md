@@ -35,17 +35,16 @@ cases {
 | `covers = ending_on(time, 7 'days)`    | `[D−6 days, D+1 day)`   |
 | `window_start` + `window_stop` columns | exactly `[start, stop)` |
 
-The duration may also name a data column, for a file carrying its own per-row
-width:
-
-```camdl
-covers = ending_on(time, days_covered)
-```
+The width in `starting_on` / `ending_on` is a fixed duration. A width that
+varies row to row is stated with the window columns instead — there is
+deliberately no form taking the width as a data column, since that would say the
+same thing while needing its own convention about whether the labelled day is
+counted.
 
 `window_start` / `window_stop` are new `columns { }` roles. They are the
 declaration on their own — a stream carrying them does not also write
 `covers = ...` — and they are the only form that can state a gap between
-consecutive rows.
+consecutive rows, or a width that changes row to row.
 
 **Migration.** Nothing is required yet: a stream that declares nothing still
 compiles and is scored exactly as before. Declaring is currently optional and
@@ -65,8 +64,8 @@ window columns together, half a window pair, `covers` alongside window columns),
 or `covers` naming a column that is not the stream's time column. `E348` —
 `covers` or window columns on a stream whose `projected` reads an instant; a
 state reading has no window. `E349` — a malformed form: unknown name, `day(...)`
-given a width, `starting_on`/`ending_on` missing one, or a per-row width naming
-something that is not a declared value column.
+given a width, `starting_on`/`ending_on` missing one, or a width naming a data
+column rather than a duration (use the window columns for that).
 
 ---
 
