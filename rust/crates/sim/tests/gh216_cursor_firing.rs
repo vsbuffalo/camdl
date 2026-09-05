@@ -675,6 +675,7 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
         observations: dense_cells(values),
         obs_times: obs_times.to_vec(),
         aux: vec![],
+        covers: None,
     };
     MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap()
 }

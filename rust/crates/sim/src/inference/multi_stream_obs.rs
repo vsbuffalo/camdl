@@ -673,6 +673,81 @@ impl BoundObs {
                     ),
                 });
             }
+            // (3b) gh#833: a declared `covers` must agree with the stream's
+            // own kind and schedule. Three checks, each naming the stream:
+            // - only an Interval (incidence / `FlowSum`) stream may declare
+            //   periods — an Instant/prevalence stream has no window to
+            //   state (proposal's rule 6, enforced here as defense-in-depth
+            //   ahead of the DSL-level diagnostic).
+            // - one period per observation, each ending exactly where the
+            //   stream's own schedule says (`covers[i].stop() ==
+            //   obs_times[i]`) — `covers` describes the SAME observations,
+            //   not a parallel schedule.
+            // - CONTIGUOUS: `covers[i].start() == covers[i-1].stop()`. A
+            //   gap is refused here rather than silently discarding the
+            //   uncovered flow: today's `reset_due_acc` resets an Interval
+            //   stream's accumulator exactly where it next scores, so a
+            //   reset at a boundary with NO observation of its own — what a
+            //   genuine gap needs — has nowhere to hang in the current
+            //   union-axis walk. Wiring that (a per-slot reset schedule
+            //   independent of the score schedule, and the union axis
+            //   admitting a reset-only boundary) is the harder remainder of
+            //   gh#833 step 1 and is not yet done; the per-row
+            //   `window_start`/`window_stop` DSL form (the only form the
+            //   proposal allows a gap under) must not compile against this
+            //   binder until it lands.
+            if let Some(periods) = &spec.covers {
+                if spec.projection.temporal_kind() != ir::observation::TemporalKind::Interval {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        message: format!(
+                            "observation stream '{}' declares a period for each \
+                             observation (`covers`), but its projection reads an \
+                             instant (prevalence / a derived expression), not an \
+                             accumulated interval — only an incidence stream has a \
+                             window to state.",
+                            spec.ir_model.name
+                        ),
+                    });
+                } else if periods.len() != spec.obs_times.len() {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        message: format!(
+                            "observation stream '{}': {} declared periods but {} \
+                             observation times (internal binder error — `covers` must \
+                             have one period per observation)",
+                            spec.ir_model.name, periods.len(), spec.obs_times.len()
+                        ),
+                    });
+                } else {
+                    for (i, (p, &t)) in periods.iter().zip(spec.obs_times.iter()).enumerate() {
+                        if p.stop() != t {
+                            findings.push(Finding {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "observation stream '{}' row {}: declared period \
+                                     [{}, {}) does not end at this row's own observation \
+                                     time {} (internal binder error — a period's stop must \
+                                     equal the observation it covers)",
+                                    spec.ir_model.name, i, p.start(), p.stop(), t
+                                ),
+                            });
+                        }
+                        if i > 0 && p.start() != periods[i - 1].stop() {
+                            findings.push(Finding {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "observation stream '{}': declared period {} starts at \
+                                     {} but period {} ends at {} — periods must be \
+                                     contiguous (a gap needs the per-row `window_start`/ \
+                                     `window_stop` form, not yet supported by this binder)",
+                                    spec.ir_model.name, i, p.start(), i - 1, periods[i - 1].stop()
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
         }
         // (4) Heterogeneous schedules are now SUPPORTED: streams on different
         // cadences merge to the union axis below (multi-cadence Phase 1). The
@@ -889,6 +964,55 @@ impl BoundObs {
     }
 }
 
+/// A half-open observation period, `[start, stop)`, on the model's internal
+/// time axis. Constructed only through [`Period::new`], which is the single
+/// place the invariants (`stop > start`, both finite) hold — so a `Period` in
+/// hand is proof of a non-empty, correctly-ordered window.
+///
+/// Part of the observation-time-as-a-sum-type arc (gh#833,
+/// `docs/dev/proposals/2026-09-05-observation-time-as-a-sum-type.md`). A
+/// stream's `Instant` vs `Interval` kind is already load-bearing via
+/// [`StreamProjection::temporal_kind`]; `Period` is what an `Interval` stream
+/// carries per observation once it declares what its rows cover
+/// (`StreamSpec::covers`), rather than the runtime inferring a window from
+/// row spacing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Period {
+    start: f64,
+    stop: f64,
+}
+
+impl Period {
+    /// The only constructor. Rejects a non-finite endpoint or `stop <= start`
+    /// (zero- or negative-width), naming both endpoints.
+    pub fn new(start: f64, stop: f64) -> Result<Self, String> {
+        if !start.is_finite() || !stop.is_finite() {
+            return Err(format!(
+                "a period's endpoints must be finite (got start={start}, stop={stop})"
+            ));
+        }
+        if !(stop > start) {
+            return Err(format!(
+                "a period must have positive width (stop > start); got \
+                 [{start}, {stop})"
+            ));
+        }
+        Ok(Period { start, stop })
+    }
+
+    pub fn start(&self) -> f64 {
+        self.start
+    }
+
+    pub fn stop(&self) -> f64 {
+        self.stop
+    }
+
+    pub fn width(&self) -> f64 {
+        self.stop - self.start
+    }
+}
+
 /// One observation stream.
 struct Stream {
     /// IR-level observation block name. Used by `stream_names()` for
@@ -971,13 +1095,27 @@ pub struct StreamSpec {
     /// fills this; dense call sites pass empties via [`StreamSpec::dense`].
     /// INVARIANT (checked in `bind`): `aux.len() == observations.len()`.
     pub aux: Vec<Vec<(String, f64)>>,
+    /// The declared period each observation covers (gh#833). `None` — every
+    /// existing caller, today — means the stream has not declared what its
+    /// rows cover; an `Interval`-kind (`FlowSum`) stream is then scored under
+    /// the historical, undeclared `(previous, this]` convention, UNCHANGED
+    /// from before this field existed. `Some(periods)` requires
+    /// `spec.projection.temporal_kind() == Interval`, `periods.len() ==
+    /// obs_times.len()`, `periods[i].stop() == obs_times[i]`, and — for now —
+    /// CONTIGUITY (`periods[i].start() == periods[i-1].stop()`); a declared
+    /// gap is refused rather than silently discarding the uncovered flow,
+    /// because that needs the accumulator to reset at a boundary with no
+    /// observation of its own, which is not yet wired (see the doc comment on
+    /// the contiguity check in `BoundObs::bind`). Checked in `bind`.
+    pub covers: Option<Vec<Period>>,
 }
 
 impl StreamSpec {
-    /// Build a spec with NO auxiliary data — the common scalar-outcome stream
-    /// (no binomial denominator / offset). The aux vector is all-empty,
-    /// length-matched to `observations`. Dense and aux-free call sites use this
-    /// so they need not spell out the empty `aux`.
+    /// Build a spec with NO auxiliary data and no declared `covers` — the
+    /// common scalar-outcome stream under today's undeclared convention. The
+    /// aux vector is all-empty, length-matched to `observations`. Dense and
+    /// aux-free call sites use this so they need not spell out the empty
+    /// `aux`.
     pub fn dense(
         projection: StreamProjection,
         ir_model: ir::observation::ObservationModel,
@@ -985,7 +1123,7 @@ impl StreamSpec {
         obs_times: Vec<f64>,
     ) -> Self {
         let aux = vec![Vec::new(); observations.len()];
-        StreamSpec { projection, ir_model, observations, obs_times, aux }
+        StreamSpec { projection, ir_model, observations, obs_times, aux, covers: None }
     }
 }
 
@@ -1941,7 +2079,7 @@ mod bind_tests {
     /// Minimal IR observation block. `bind`'s validation runs before any
     /// likelihood resolution, so the likelihood here only has to be
     /// constructible — it is never resolved in these checks.
-    fn ir_obs(name: &str) -> IrObservationModel {
+    pub(super) fn ir_obs(name: &str) -> IrObservationModel {
         use ir::observation::{ColumnRole, ObsColumn};
         IrObservationModel {
             name: name.into(),
@@ -1961,7 +2099,7 @@ mod bind_tests {
         }
     }
 
-    fn spec(name: &str, obs_times: Vec<f64>, observations: Vec<f64>) -> StreamSpec {
+    pub(super) fn spec(name: &str, obs_times: Vec<f64>, observations: Vec<f64>) -> StreamSpec {
         StreamSpec::dense(
             StreamProjection::FlowSum(vec![0]),
             ir_obs(name),
@@ -2122,6 +2260,149 @@ mod bind_tests {
         }
         assert_eq!(bound.streams[0].cells, dense_cells(vec![10.0, 11.0, 12.0]));
         assert_eq!(bound.streams[1].cells, dense_cells(vec![20.0, 21.0, 22.0]));
+    }
+}
+
+#[cfg(test)]
+mod period_and_covers_tests {
+    //! gh#833 step 1 (the contiguous-only slice — see `StreamSpec::covers`'s
+    //! doc comment for the deferred gap case): `Period::new`'s own invariants,
+    //! and `BoundObs::bind`'s validation of a declared `covers`.
+    use super::{
+        bind_tests::spec, dense_cells, BoundObs, Period, StreamProjection, StreamSpec,
+    };
+    use ir::observation::{
+        ColumnRole, Likelihood, ObsColumn, ObservationModel as IrObservationModel,
+        ObservationSchedule, PoissonLikelihood, Projection,
+    };
+    use ir::expr::{Expr, ProjectedExpr};
+
+    fn expect_fatal(
+        r: Result<(BoundObs, super::BindReport), super::BindReport>,
+        ctx: &str,
+    ) -> super::BindReport {
+        match r {
+            Ok(_) => panic!("{ctx}"),
+            Err(report) => report,
+        }
+    }
+
+    #[test]
+    fn period_new_rejects_zero_and_negative_width_and_non_finite() {
+        assert!(Period::new(1.0, 1.0).is_err(), "zero width rejected");
+        assert!(Period::new(2.0, 1.0).is_err(), "negative width rejected");
+        assert!(Period::new(f64::NAN, 1.0).is_err(), "non-finite start rejected");
+        assert!(Period::new(0.0, f64::INFINITY).is_err(), "non-finite stop rejected");
+
+        let p = Period::new(1.0, 2.0).expect("positive width accepted");
+        assert_eq!(p.start(), 1.0);
+        assert_eq!(p.stop(), 2.0);
+        assert_eq!(p.width(), 1.0);
+    }
+
+    /// A prevalence (`Instant`-kind) stream, for the kind-mismatch check.
+    fn spec_prevalence(name: &str, obs_times: Vec<f64>, observations: Vec<f64>) -> StreamSpec {
+        let ir_model = IrObservationModel {
+            name: name.into(),
+            source: name.into(),
+            columns: vec![
+                ObsColumn { name: "time".into(), role: ColumnRole::Time },
+                ObsColumn { name: name.into(), role: ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: name.into(),
+            emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
+            stratum: vec![],
+            projection: Projection::CurrentPop("I".into()),
+            projection_state_grad: Default::default(),
+            likelihood: Likelihood::Poisson(PoissonLikelihood {
+                rate: ir::Diffable::new(Expr::Projected(ProjectedExpr { projected: () })),
+            }),
+        };
+        StreamSpec::dense(
+            StreamProjection::IntCompSum(vec![0]),
+            ir_model,
+            dense_cells(observations),
+            obs_times,
+        )
+    }
+
+    #[test]
+    fn covers_on_an_instant_stream_is_fatal() {
+        let mut s = spec_prevalence("prev", vec![1.0, 2.0], vec![5.0, 6.0]);
+        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(1.0, 2.0).unwrap()]);
+        let report = expect_fatal(
+            BoundObs::bind(vec![s]),
+            "a declared period on a prevalence/Instant stream must be rejected",
+        );
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("prev") && f.message.contains("instant")),
+            "message must name the stream and explain why: {:?}", report.findings());
+    }
+
+    #[test]
+    fn covers_length_mismatch_is_fatal() {
+        let mut s = spec("cases", vec![1.0, 2.0, 3.0], vec![0.0, 0.0, 0.0]);
+        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(1.0, 2.0).unwrap()]);
+        let report = expect_fatal(
+            BoundObs::bind(vec![s]),
+            "covers.len() != obs_times.len() must be rejected",
+        );
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("cases") && f.message.contains("2 declared periods")),
+            "message must name the stream and the count mismatch: {:?}", report.findings());
+    }
+
+    #[test]
+    fn covers_stop_must_equal_the_observation_time() {
+        let mut s = spec("cases", vec![1.0, 2.0], vec![0.0, 0.0]);
+        // Second period's stop (2.5) does not match its own obs_times[1] (2.0).
+        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(1.0, 2.5).unwrap()]);
+        let report = expect_fatal(
+            BoundObs::bind(vec![s]),
+            "a period whose stop disagrees with its own observation time must be rejected",
+        );
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("cases") && f.message.contains("row 1")),
+            "message must name the stream and the row: {:?}", report.findings());
+    }
+
+    #[test]
+    fn a_gap_between_declared_periods_is_fatal() {
+        let mut s = spec("cases", vec![1.0, 3.0], vec![0.0, 0.0]);
+        // period 0 = [0,1), period 1 = [2,3): a one-unit gap, not contiguous.
+        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(2.0, 3.0).unwrap()]);
+        let report = expect_fatal(
+            BoundObs::bind(vec![s]),
+            "a gap between declared periods must be rejected (not yet supported)",
+        );
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("cases") && f.message.contains("contiguous")),
+            "message must name the stream and the contiguity rule: {:?}", report.findings());
+    }
+
+    #[test]
+    fn contiguous_covers_binds_byte_identical_to_undeclared() {
+        // The no-change-for-the-common-case claim (proposal Testing item 2):
+        // a stream that declares contiguous covers matching its own row
+        // spacing produces the IDENTICAL union axis and `at_union` as the
+        // same stream with `covers: None` — declaring what was already true
+        // changes nothing about how it is scored.
+        let undeclared = spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]);
+        let mut declared = spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]);
+        declared.covers = Some(vec![
+            Period::new(0.0, 1.0).unwrap(),
+            Period::new(1.0, 2.0).unwrap(),
+            Period::new(2.0, 3.0).unwrap(),
+        ]);
+
+        let (bound_u, report_u) = BoundObs::bind(vec![undeclared]).expect("undeclared binds");
+        let (bound_d, report_d) = BoundObs::bind(vec![declared]).expect("declared covers binds");
+
+        assert!(!report_u.is_fatal() && !report_d.is_fatal());
+        assert_eq!(report_u.verdict(), report_d.verdict());
+        assert_eq!(bound_u.times(), bound_d.times());
+        assert_eq!(bound_u.streams[0].at_union, bound_d.streams[0].at_union);
+        assert_eq!(bound_u.streams[0].cells, bound_d.streams[0].cells);
     }
 }
 

@@ -65,6 +65,7 @@ fn build_obs_model(
             observations: dense_cells(per_stream_data[si].clone()),
             obs_times: obs_times.to_vec(),
             aux: vec![],
+            covers: None,
         }
     }).collect();
     MultiStreamObsModel::new(BoundObs::bind(specs).unwrap().0, compiled).unwrap()

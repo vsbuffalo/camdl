@@ -154,6 +154,7 @@ fn attempt_nuts_fit_with(
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

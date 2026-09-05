@@ -198,6 +198,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -306,6 +307,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

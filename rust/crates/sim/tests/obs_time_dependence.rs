@@ -119,6 +119,7 @@ fn time_varying_obs(compiled: &Arc<CompiledModel>, obs_times: Vec<f64>, observat
             observations: dense_cells(observations),
             obs_times,
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap()

@@ -204,6 +204,7 @@ mod tests {
                     observations: dense_cells(per_stream[si].clone()),
                     obs_times: obs_times.to_vec(),
                     aux: vec![],
+                    covers: None,
                 }
             })
             .collect();
@@ -791,6 +792,7 @@ mod tests {
                 observations: dense_cells(data.clone()),
                 obs_times: times.to_vec(),
                 aux: vec![],
+                covers: None,
             })
             .collect();
         let obs_model =

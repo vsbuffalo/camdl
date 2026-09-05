@@ -141,6 +141,7 @@ fn test_obs_param_changes_loglik() {
             observations: dense_cells(obs_values),
             obs_times,
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -198,6 +199,7 @@ fn test_obs_param_from_flows() {
             observations: dense_cells(vec![8.0]),
             obs_times: vec![10.0],
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -237,6 +239,7 @@ fn test_obs_model_consistency() {
             observations: dense_cells(vec![8.0, 7.0]),
             obs_times: vec![10.0, 20.0],
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

@@ -513,6 +513,7 @@ mod tests {
             observations: dense_cells(data),
             obs_times: obs_times.clone(),
             aux: vec![],
+            covers: None,
         };
         let obs_model =
             MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, cm.clone()).unwrap();
@@ -604,7 +605,7 @@ mod tests {
         let projection = StreamProjection::from_ir(&om.projection, &cm, &om.name).unwrap();
         let spec = StreamSpec {
             projection, ir_model: om, observations: dense_cells(data),
-            obs_times: obs_times.clone(), aux: vec![],
+            obs_times: obs_times.clone(), aux: vec![], covers: None,
         };
         let obs_model =
             MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, cm.clone()).unwrap();

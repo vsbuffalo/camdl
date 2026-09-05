@@ -129,6 +129,7 @@ fn obs_model(compiled: Arc<CompiledModel>, cells: Vec<Option<ObsCell>>, obs_time
         observations: cells,
         obs_times,
         aux: vec![],
+        covers: None,
     };
     MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, compiled).unwrap()
 }

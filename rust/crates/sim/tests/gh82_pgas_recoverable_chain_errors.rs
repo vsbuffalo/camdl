@@ -251,6 +251,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
+            covers: None,
         }])
         .unwrap()
         .0,
