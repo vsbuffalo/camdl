@@ -13,6 +13,45 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-09-04 — a timezone offset on a date is _rejected_, not discarded
+
+**What.** A trailing zone designator on an ISO date — `Z`, `z`, `+HH:MM`,
+`-HH:MM` — used to be accepted and silently dropped, reducing the string to its
+civil date. It is now a hard error, in a `date()` literal, in `origin`, and in a
+`--data` time column alike:
+
+```
+origin = date("2026-07-01+01:00")   # was: origin = 2026-07-01.  Now: E223
+```
+
+```
+time              cases
+2026-07-02+01:00  22               # was: read as 2026-07-02.  Now: a load error
+```
+
+camdl models civil calendar dates and has no timezone semantics. A bare date is
+already zone-free and unambiguous, so an offset is information camdl has chosen
+not to represent — and accepting the cell while deleting the offset is the one
+response that cannot be right, because it changes what the data says without
+telling anyone.
+
+**Migration.** Strip the offset and supply the civil date you mean:
+`2026-07-02+01:00` → `2026-07-02`. If rows in one file carry different offsets,
+decide upstream which civil day each observation belongs to; camdl cannot make
+that call for you, which is precisely why it now refuses to guess. Nothing about
+multi-country pooling changes — civil dates from any set of zones still align on
+one axis, they just have to arrive as civil dates.
+
+**Diagnostic.** `E223` for a model-side `date()` / `origin`; a located loader
+error naming the line, the cell and the offset for a `--data` column. Both name
+the offset and the civil date to write instead.
+
+**Not `+0.25d`.** The fractional-day suffix in camdl's own `--dates` output is a
+different trailer with a different future (gh#839); it is not a zone designator
+and does not get this message.
+
+---
+
 ## 2026-08-25 — a `#'` block at the top of a file documents the MODEL
 
 **What.** A `#'` doc comment had to attach to a declaration; at file scope it

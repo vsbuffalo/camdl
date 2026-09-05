@@ -13,19 +13,29 @@
 //! convert identically. Both are pinned by the golden table in
 //! `ir/golden/caltime.tsv`, checked by a Rust test here and an OCaml test.
 //!
-//! v1 scope: **dates only** (`YYYY-MM-DD`), naive (no timezone semantics — a
-//! trailing zone designator is *discarded*, reducing to the civil date). Times
-//! of day (`…THH:MM:SS`) are rejected; they are deferred (proposal F2).
+//! v1 scope: **dates only** (`YYYY-MM-DD`), naive (no timezone semantics). A
+//! bare civil date is already zone-free and unambiguous, so a trailing zone
+//! designator supplies information this module has chosen not to model and is
+//! *refused*, never discarded (gh#846). Times of day (`…THH:MM:SS`) are
+//! likewise rejected; they are deferred (proposal F2).
 
 /// Error parsing or converting a calendar instant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalError {
-    /// Not a `YYYY-MM-DD` date (with an optional discarded zone designator).
+    /// Not a `YYYY-MM-DD` date.
     BadFormat(String),
     /// Month not in 1..=12, or day not valid for the month/year.
     OutOfRange(String),
     /// A time-of-day component (`T…` / space + time) — deferred to F2.
     DatetimeUnsupported(String),
+    /// A trailing timezone designator (`Z`, `+HH:MM`, `-HH:MM`) on an
+    /// otherwise well-formed date. camdl models civil calendar dates and has
+    /// no timezone semantics, so the offset is information it cannot
+    /// represent; silently dropping it is the one response that cannot be
+    /// right, so it is refused instead (gh#846). `date` is the civil date the
+    /// cell reduces to, `zone` the designator that was refused — carried
+    /// separately so the diagnostic can name both.
+    ZoneUnsupported { date: String, zone: String },
     /// `time_unit` is not a recognised calendar unit.
     UnknownUnit(String),
 }
@@ -33,9 +43,16 @@ pub enum CalError {
 impl std::fmt::Display for CalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CalError::BadFormat(s) => write!(
+            CalError::BadFormat(s) => {
+                write!(f, "expected an ISO date 'YYYY-MM-DD', got '{s}'")
+            }
+            CalError::ZoneUnsupported { date, zone } => write!(
                 f,
-                "expected an ISO date 'YYYY-MM-DD' (optionally with a discarded zone), got '{s}'"
+                "'{date}{zone}' carries a timezone offset '{zone}', but camdl \
+                 models civil calendar dates and has no timezone semantics. \
+                 The offset cannot be honoured, and dropping it silently would \
+                 change what the data says, so it is refused: if '{date}' is \
+                 the civil day you mean, write it without the offset."
             ),
             CalError::OutOfRange(s) => write!(f, "date out of range: '{s}'"),
             CalError::DatetimeUnsupported(s) => write!(
@@ -94,10 +111,11 @@ fn days_in_month(y: i64, m: i64) -> i64 {
 
 /// Parse an ISO calendar date `YYYY-MM-DD`, returning `(year, month, day)`.
 ///
-/// Accepts a trailing **zone designator** (`Z`, `+HH:MM`, `-HH:MM`) and
-/// **discards** it (a bare date denotes a civil-calendar day, zone-independent —
-/// proposal §6.8). Rejects time-of-day forms (`T…` / space + time) as
-/// `DatetimeUnsupported` (v1). Validates month and day (leap-aware).
+/// Rejects a trailing **zone designator** (`Z`, `+HH:MM`, `-HH:MM`) as
+/// `ZoneUnsupported`: a bare date already denotes a civil-calendar day with no
+/// timezone semantics, so an offset is information camdl does not model and
+/// must not silently delete (gh#846). Rejects time-of-day forms (`T…` / space +
+/// time) as `DatetimeUnsupported` (v1). Validates month and day (leap-aware).
 pub fn parse_iso_date(s: &str) -> Result<(i64, i64, i64), CalError> {
     let s = s.trim();
     // The date portion is the first 10 chars: YYYY-MM-DD.
@@ -106,8 +124,11 @@ pub fn parse_iso_date(s: &str) -> Result<(i64, i64, i64), CalError> {
     }
     let (date_part, rest) = s.split_at(10);
 
-    // Classify the remainder: empty or a bare zone designator → discard;
-    // a time-of-day (T/space then digits) → datetime, rejected in v1.
+    // Classify the remainder: a bare zone designator → refused, naming the
+    // offset (gh#846); a time-of-day (T/space then digits) → datetime,
+    // rejected in v1. The `is_zone` shape is deliberately narrow, so camdl's
+    // own fractional-day `--dates` suffix (`+0.25d`, gh#839) does not match
+    // it and keeps its own diagnostic.
     if !rest.is_empty() {
         let is_zone = rest == "Z"
             || rest == "z"
@@ -116,10 +137,14 @@ pub fn parse_iso_date(s: &str) -> Result<(i64, i64, i64), CalError> {
                 && rest.as_bytes()[3] == b':'
                 && rest[1..3].chars().all(|c| c.is_ascii_digit())
                 && rest[4..6].chars().all(|c| c.is_ascii_digit()));
-        if !is_zone {
-            // A `T` or space followed by time-of-day, or any other trailer.
-            return Err(CalError::DatetimeUnsupported(s.to_string()));
+        if is_zone {
+            return Err(CalError::ZoneUnsupported {
+                date: date_part.to_string(),
+                zone: rest.to_string(),
+            });
         }
+        // A `T` or space followed by time-of-day, or any other trailer.
+        return Err(CalError::DatetimeUnsupported(s.to_string()));
     }
 
     let bytes = date_part.as_bytes();
@@ -362,11 +387,25 @@ mod tests {
     }
 
     #[test]
-    fn grammar_accepts_zone_discards_it() {
-        // Trailing zone designators are accepted and reduced to the civil date.
-        for s in ["2020-03-15", "2020-03-15Z", "2020-03-15+06:00", "2020-03-15-03:00", "2020-03-15+05:45"] {
-            assert_eq!(parse_iso_date(s).unwrap(), (2020, 3, 15), "for {s}");
+    fn grammar_rejects_zone_designators(){
+        // gh#846: camdl has no timezone semantics, so an offset is information
+        // it cannot represent. It is refused rather than discarded, and the
+        // message names the offset so the user can see what was rejected.
+        for (s, zone) in [
+            ("2020-03-15Z", "Z"),
+            ("2020-03-15z", "z"),
+            ("2020-03-15+06:00", "+06:00"),
+            ("2020-03-15-03:00", "-03:00"),
+            ("2020-03-15+05:45", "+05:45"),
+        ] {
+            let e = parse_iso_date(s).expect_err(&format!("must reject '{s}'"));
+            assert!(matches!(e, CalError::ZoneUnsupported { .. }), "for {s}: {e:?}");
+            let msg = e.to_string();
+            assert!(msg.contains(zone), "message must name the offset: {msg}");
+            assert!(msg.contains(s), "message must echo the cell: {msg}");
         }
+        // The bare civil date it reduces to is still accepted.
+        assert_eq!(parse_iso_date("2020-03-15").unwrap(), (2020, 3, 15));
     }
 
     #[test]
@@ -384,20 +423,22 @@ mod tests {
         assert!(matches!(parse_iso_date("2020-00-10"), Err(CalError::OutOfRange(_))));
     }
 
-    /// Multi-timezone civil-date alignment: same date, different offsets → same t;
-    /// genuinely different dates → consecutive integer t (proposal §9.7).
+    /// Civil dates are the whole of the time axis: a bare date is already
+    /// zone-free and unambiguous, so distinct dates give consecutive integer
+    /// `t` and an offset-bearing string never converts at all (gh#846).
     #[test]
-    fn timezone_independent_civil_dates() {
-        let same: Vec<f64> = ["2020-03-15+01:00", "2020-03-15+06:00", "2020-03-15-03:00", "2020-03-15+05:45", "2020-03-15Z"]
-            .iter()
-            .map(|s| date_to_internal("2020-03-01", s, "days").unwrap())
-            .collect();
-        assert!(same.iter().all(|&t| t == same[0]), "offsets must collapse to one civil date");
+    fn civil_dates_convert_and_offsets_do_not() {
         // distinct civil dates → consecutive integers
         let t15 = date_to_internal("2020-03-01", "2020-03-15", "days").unwrap();
         let t16 = date_to_internal("2020-03-01", "2020-03-16", "days").unwrap();
         let t17 = date_to_internal("2020-03-01", "2020-03-17", "days").unwrap();
         assert_eq!((t15, t16, t17), (14.0, 15.0, 16.0));
+        // An offset is refused on either side of the conversion, so a zone can
+        // never reach the internal axis through the origin either.
+        for s in ["2020-03-15+01:00", "2020-03-15Z"] {
+            assert!(date_to_internal("2020-03-01", s, "days").is_err(), "date {s}");
+            assert!(date_to_internal(s, "2020-03-15", "days").is_err(), "origin {s}");
+        }
     }
 
     /// Consolidation guard (2026-06-22 quality review, finding X-1): the
