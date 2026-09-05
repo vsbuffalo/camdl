@@ -23,15 +23,22 @@ open Ir
    the compiler-side mapping pattern-match exhaustively. *)
 type severity = Warning
 
+(* The declaration a lint concerns, so the compiler can resolve it back to a
+   source loc — Lint runs on the IR, which has no spans. Mirrors
+   [Dimcheck.subject], which serves the same purpose for the dimension pass;
+   one variant per declaration kind a lint can point at, so a lint cannot name
+   a compartment and a stream at once. *)
+type subject =
+  | SCompartment of string
+  | SObservation of string
+
 type diagnostic = {
   severity : severity;
   code     : string;
   message  : string;
   detail   : string option;
   hint     : string option;
-  (* The compartment a compartment-scoped lint (L402) concerns, so the compiler
-     can resolve it to a source loc. Lint runs on the IR, which has no spans. *)
-  compartment : string option;
+  subject  : subject option;
 }
 
 type result = {
@@ -207,7 +214,7 @@ let check_dead_compartments (m : model) : diagnostic list =
       detail = None;
       hint =
         Some "remove it, or wire it into a transition / init / observation";
-      compartment = Some name;
+      subject = Some (SCompartment name);
     }
   ) dead
 
