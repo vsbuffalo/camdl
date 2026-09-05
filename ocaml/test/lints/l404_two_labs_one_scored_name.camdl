@@ -1,0 +1,66 @@
+# The LEGITIMATE side of L404, pinned as a fixture because it is the property
+# most likely to regress. Two laboratories report on the same incidence
+# through their own ascertainment fractions (`rho_a`, `rho_b`), each from its
+# own file — but both files publish the measured quantity under the same
+# column header, `cases`. Same projection, same scored name, so the lint
+# fires; and these are two distinct observation processes on one latent
+# quantity, so the joint likelihood is CORRECT and this model must keep
+# working.
+#
+# camdl cannot tell this apart from the duplicated-file case in
+# `l404_one_series_two_resolutions.camdl`: whether two files hold the same
+# measurements is a fact about how the data was produced, not about the
+# model. So L404 fires here too — and must stay a Warning. The expectation
+# below is the assertion that matters: exactly one L404, at Warning severity,
+# and NO error, so the model still compiles. (The corpus check/compile parity
+# test independently pins that neither pipeline turns it into a rejection.)
+#
+# The hint tells such a modeler what to do: keep both, and distinct scored
+# column names would make the independence visible.
+#
+# expect: L404 Warning
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate        in [0.001, 2.0]
+  gamma : rate        in [0.001, 1.0]
+  rho_a : probability in [0.0,   1.0]
+  rho_b : probability in [0.0,   1.0]
+  N0    : count       in [100,   100000]
+  I0    : count       in [1,     1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+observations {
+  lab_a from lab_a {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho_a * projected)
+  }
+
+  lab_b from lab_b {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho_b * projected)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}

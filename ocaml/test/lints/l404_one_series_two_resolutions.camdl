@@ -1,0 +1,58 @@
+# Shared-measurement lint (L404), the shape it exists for. The model is a
+# well-formed SIR that compiles and runs, but it declares TWO observation
+# streams that are one case series at two resolutions: `cases_weekly` and
+# `cases_daily` read the same latent flow (`incidence(infection)`) and score
+# it under the same measurement name (`cases`), differing only in which file
+# they bind. That is the reported instance — a weekly case file and a daily
+# case file publishing one quantity under one column header.
+#
+# The joint observation log-likelihood sums over bound streams, so binding
+# data to both scores that measurement twice: no count doubles, the posterior
+# just concentrates as if there were twice the data. The linter flags it at
+# Warning severity; compilation succeeds.
+#
+# expect: L404 Warning
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate        in [0.001, 2.0]
+  gamma : rate        in [0.001, 1.0]
+  rho   : probability in [0.0,   1.0]
+  N0    : count       in [100,   100000]
+  I0    : count       in [1,     1000]
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+
+observations {
+  cases_weekly from cases_weekly {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+
+  cases_daily from cases_daily {
+    columns       { time : time, cases : count }
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = rho * projected)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}

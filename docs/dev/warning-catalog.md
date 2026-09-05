@@ -397,12 +397,12 @@ infrastructure with `Wxxx` warnings; the `Lxxx` prefix marks them as lints
 rather than compiler-internal warnings, which clarifies their intent for users
 (a lint is asking "did you mean this?", not "this is suspicious internally").
 
-| Code | Severity | Category       | Summary                                                                                                                            |
-| ---- | -------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| L401 | Warning  | discretization | discretization-correction pattern uses fixed time literal — likely meant `dt` (gh#54)                                              |
-| L402 | Warning  | dead-code      | compartment declared but referenced nowhere — likely a leftover (gh#168)                                                           |
-| L403 | Warning  | forcing-units  | a per-time forcing (already rescaled at load) is manually re-divided by a time-conversion constant — double conversion (gh#13)     |
-| L404 | Warning  | obs-model      | two or more observation streams share one resolved projection — bound together, their evidence is counted once per stream (gh#853) |
+| Code | Severity | Category       | Summary                                                                                                                                                                    |
+| ---- | -------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L401 | Warning  | discretization | discretization-correction pattern uses fixed time literal — likely meant `dt` (gh#54)                                                                                      |
+| L402 | Warning  | dead-code      | compartment declared but referenced nowhere — likely a leftover (gh#168)                                                                                                   |
+| L403 | Warning  | forcing-units  | a per-time forcing (already rescaled at load) is manually re-divided by a time-conversion constant — double conversion (gh#13)                                             |
+| L404 | Warning  | obs-model      | two or more observation streams score one measurement — same resolved projection AND same scored column — so bound together their evidence counts once per stream (gh#853) |
 
 ### L401 — fixed-time-literal in Euler-correction pattern
 
@@ -544,11 +544,12 @@ can validate it.
 The lint lives in `ocaml/lib/compiler/expander.ml` (`lint_l403`, mirroring
 `lint_l401`), emitted during `expand_detail` after bindings are collected.
 
-### L404 — two observation streams reading one latent quantity
+### L404 — two observation streams scoring one measurement
 
-**Fires when:** two or more observation streams in the expanded model have an
-_identical resolved projection_. One diagnostic per collision group, naming
-every stream in it (three streams on one flow give one report, not three pairs).
+**Fires when:** two or more observation streams in the expanded model share
+_both_ an identical resolved projection _and_ an identical `scored` column name.
+One diagnostic per collision group, naming every stream in it (three streams on
+one measurement give one report, not three pairs).
 
 **Why:** the joint observation log-likelihood is a plain sum over bound streams
 (`rust/crates/sim/src/inference/multi_stream_obs.rs`, `score_streams`). Two
@@ -558,23 +559,32 @@ fit does not look wrong, it looks **more certain**. No count doubles, no
 diagnostic fires; the posterior concentrates as though the data were duplicated,
 because in likelihood terms it was. Every convergence diagnostic reads clean.
 
-It is reachable because surveillance sources routinely publish one quantity
-several ways. The two instances that prompted the lint: a weekly case file and a
-daily case file that are one case series at two resolutions; and a
-province-level care census that is the same quantity a national series
-publishes, read from a different page of the same report (gh#853).
+**Both halves of the key are load-bearing, and the projection alone is far too
+broad.** `scored` is the `~` LHS — the declared value column the likelihood
+consumes — so that name _is_ the quantity being measured, not merely the latent
+state behind it. Two streams scoring the same named quantity off one projection
+are reading one measurement twice; two streams scoring _different_ named
+quantities off one projection are two observation processes on one latent state,
+which is correct and extremely common. Measured on a 98-model surveillance
+corpus, a projection-only key fired on **58 models / 63 collision groups, every
+one of them a false positive** — cases against lab positives, cases against
+deaths, cases against six lab-run splits, all off one confirmation flow, each
+with its own reporting multiplier and its own dispersion. Not one group in that
+corpus repeated a scored name. A lint that fires on three models in five teaches
+people to ignore its code, so the predicate is the conjunction.
+`ocaml/test/lints/clean_cases_and_deaths_one_flow.camdl` pins that shape as
+emitting nothing.
 
-**Warning, never an error — and it fires on correct models too.** Two streams
-legitimately sharing a projection is normal and must keep working: two
-laboratories reporting one incidence with different ascertainment, a confirmed
-and a suspected pipeline onto one latent flow, a national tile alongside a
-genuinely independent survey. Those are distinct observation processes on one
-latent quantity and the joint likelihood is right. What is wrong is the same
-_measurements_ entering twice — and camdl cannot know that from the model,
-because it is a fact about how the data files were produced. So the lint asks
-the question and leaves the answer to the modeler; it must never refuse.
-`ocaml/test/lints/l404_two_labs_one_incidence.camdl` pins the legitimate case as
-compiling with the warning and no error.
+**Warning, never an error — and it still fires on some correct models.** Two
+streams sharing a projection _and_ a scored name can be legitimate: two
+laboratories that both publish their count under a column called `cases`. That
+is two distinct observation processes on one latent quantity and the joint
+likelihood is right. What is wrong is the same _measurements_ entering twice —
+and camdl cannot know that from the model, because it is a fact about how the
+data files were produced. So the lint asks the question and leaves the answer to
+the modeler; it must never refuse.
+`ocaml/test/lints/l404_two_labs_one_scored_name.camdl` pins the legitimate case
+as compiling with the warning and no error.
 
 **Resolved projections, not source text.** The check runs on the expanded IR,
 after stratification expansion, index resolution and binder substitution,
@@ -589,6 +599,11 @@ incidence. That last shape is L404's, and a syntactic check on what the modeler
 wrote would see none of it. This is the reasoning gh#678 established for the
 within-projection case, applied one layer out.
 
+The narrowed key keeps that shape: `scored` is the source `~` LHS token, taken
+once per _declaration_ and copied to every expanded leaf, so the leaves of one
+stratified stream share a scored name by construction — and when the projection
+ignores the binder they share a projection too.
+
 **What counts as the same projection.** A projection's identity is its canonical
 form: the two sum variants (`CumulativeFlowSum` / `CurrentPopSum`) are sorted,
 since a sum is commutative and term order is not part of the quantity, and
@@ -597,24 +612,34 @@ collapsed to the scalar form at length one. `DerivedExpr` is compared
 conservative otherwise — a commuted rewrite of one derived expression (`S + I`
 against `I + S`) is a known miss, but the lint never invents a collision.
 
-**False positives (explicitly NOT flagged):** distinct projection heads over the
-same compartment (incidence `CumulativeFlow` vs prevalence `CurrentPop` — a flow
-accumulated over the reporting interval is not the state at the instant); the
-ordinary stratified stream, where each leaf projects its own stratum's flow; and
-disjoint pools over one family.
+**Not flagged (by design):** different measured quantities off one projection —
+cases and deaths, or cases and lab positives, driven off one confirmation flow,
+which is the dominant multi-stream shape in real surveillance models; distinct
+projection heads over the same compartment (incidence `CumulativeFlow` vs
+prevalence `CurrentPop` — a flow accumulated over the reporting interval is not
+the state at the instant); the ordinary stratified stream, where each leaf
+projects its own stratum's flow; and disjoint pools over one family.
 
-**Known scope limit — declared, not bound.** The lint runs in the compiler, so
-it sees every _declared_ stream. Which streams a given fit actually binds is a
-fit-time fact (`--data label=file`), so a model that declares both a weekly and
-a daily variant and deliberately binds one at a time still warns on every
-compile. That is the conservative direction: the advice ("bind only one") is
-what such a modeler is already doing, and the alternative — deferring the check
-to the fit — would say nothing at `camdlc check`, where the model is being
-written.
+**Known scope limit — this lint cannot see the reported instances.** It runs in
+the compiler, so it sees every _declared_ stream, and nothing about which files
+a given fit binds. Both instances that prompted gh#853 turn out to live entirely
+on the binding side: in the corpus that reported them, the weekly/daily case
+duality is one declared stream (`cases_national`) pointed at either
+`cases_national.tsv` or `cases_daily_national.tsv` by a fit config's `[data]`
+block, and the care-census duality is the same. Neither is two declared streams,
+so **L404 fires on neither** — measured, 0 hits across all 98 models of that
+corpus, all of which compile clean and therefore reach the lint.
+
+What L404 does catch is the model-level form of the same defect: two streams
+_declared_ on one measurement, and the stratified stream whose projection
+ignores its binder. Closing the reported hazard needs a check over the streams a
+fit actually binds, which is a different surface from this one — the compiler
+cannot reach it.
 
 **Fix:** bind only one of the streams if they are one quantity at two
 resolutions or one page read twice; keep both if they really are independent
-observation processes on the same latent quantity.
+observation processes on the same latent quantity, where distinct scored column
+names would also make the independence visible.
 
 The lint lives in `ocaml/lib/ir/lint.ml` (`check_shared_projections`), beside
 L402 in the same `Lint.check_model` registry, and is routed to a non-blocking
