@@ -109,12 +109,6 @@ impl ObsCellState {
             ObsCellState::Hole | ObsCellState::NotScheduled => None,
         }
     }
-
-    /// True when a likelihood factor was evaluated here. `Hole` and
-    /// `NotScheduled` contribute none.
-    pub fn is_scored(&self) -> bool {
-        matches!(self, ObsCellState::Scored { .. })
-    }
 }
 
 /// Which `−∞` guard the observation likelihood took, for one live particle.
