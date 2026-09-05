@@ -641,7 +641,9 @@ inverts into one instruction, and it is the instruction most often got wrong:
 A pipeline that drops bad days is doing the natural thing — a filter is how you
 remove data you cannot trust. But for an `incidence(...)` stream a filter does
 not remove a day; it _merges_ that day into the next observation's window, while
-the surviving row's count still covers only its own day.
+the surviving row's count still covers only the one day it was reported for. The
+window widens; the count does not. (For which calendar day a dated row covers,
+see `camdl docs dates`, "What a dated row covers".)
 
 **What that costs, from a real case.** A daily lab stream whose unusable days
 were filtered rather than nulled left the retained rows up to **13 days apart**.
