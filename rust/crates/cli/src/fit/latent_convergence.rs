@@ -640,6 +640,27 @@ impl LatentConvergence {
             _ => "    NA".to_string(),
         };
         let frac = |v: f64| if v.is_finite() { Some(v) } else { None };
+        // Below `MIN_DRAWS_FOR_INFORMATIVE_ESS` the estimator returns
+        // `n_chains * (n_draws / 2)` for ANY input: it splits each chain in
+        // half and a half that short cannot run its autocorrelation
+        // truncation. The row would print one constant across every bin and
+        // say nothing about mixing, so it is omitted rather than printed with
+        // a disclaimer — a number beside R-hat reads as a measurement however
+        // it is captioned. R-hat is unaffected; it uses no autocorrelation.
+        let ess_row = if self.n_draws >= MIN_DRAWS_FOR_INFORMATIVE_ESS {
+            format!("\x20 ESS min (mixed)  {}\n",
+                self.bins.iter().map(|b| match b.ess_bulk_min {
+                    Some(e) => format!("{e:>6.0}"),
+                    None => "    NA".to_string(),
+                }).collect::<Vec<_>>().join(" "))
+        } else {
+            format!(
+                "\x20 (ESS omitted: {} saved path(s) per chain is below the {} the \
+                 estimator needs; it would report {} in every bin whatever the paths did. \
+                 Raise n_trajectories.)\n",
+                self.n_draws, MIN_DRAWS_FOR_INFORMATIVE_ESS,
+                self.n_chains * (self.n_draws / 2))
+        };
         let labels: Vec<String> = (0..RENEWAL_BINS).map(|b| format!("    b{b}")).collect();
         let mut s = format!(
             "\nlatent-path convergence (gh#822; {} chain(s) [{}] × {} saved path(s), {} substeps × {} columns):\n\
@@ -647,8 +668,7 @@ impl LatentConvergence {
              \x20 frozen-disagree  {}\n\
              \x20 constant         {}\n\
              \x20 chains frozen    {}\n\
-             \x20 R̂ max (mixed)    {}\n\
-             \x20 ESS min (mixed)  {}\n",
+             \x20 R̂ max (mixed)    {}\n{}",
             self.n_chains,
             self.chain_ids.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", "),
             self.n_draws,
@@ -659,10 +679,7 @@ impl LatentConvergence {
             self.bins.iter().map(|b| cell(frac(b.frac_constant))).collect::<Vec<_>>().join(" "),
             self.bins.iter().map(|b| cell(b.frozen_chain_frac)).collect::<Vec<_>>().join(" "),
             self.bins.iter().map(|b| cell(b.rhat_max)).collect::<Vec<_>>().join(" "),
-            self.bins.iter().map(|b| match b.ess_bulk_min {
-                Some(e) => format!("{e:>6.0}"),
-                None => "    NA".to_string(),
-            }).collect::<Vec<_>>().join(" "),
+            ess_row,
         );
         s.push_str(
             "  frozen-disagree: fraction of (state, substep) cells where every chain is \
@@ -707,26 +724,6 @@ impl LatentConvergence {
             "  ESS is over the {} saved path(s) per chain, not every sweep; table: {}\n",
             self.n_draws, LATENT_CONVERGENCE_TSV
         ));
-        // At this many saved paths the ESS estimator returns a constant, so
-        // the row above says the same number in every bin no matter what the
-        // paths did. Printing it beside R-hat without saying so invites the
-        // reader to treat it as a measurement of mixing (gh#822).
-        if self.n_draws < MIN_DRAWS_FOR_INFORMATIVE_ESS {
-            s.push_str(&format!(
-                "  ESS min (mixed) is {} in every bin because it measures nothing at {} \
-                 saved path(s) per chain: the estimator splits each chain in half, and a \
-                 half of {} draw(s) is too short to run its autocorrelation truncation, so \
-                 every cell reports {} chains x ({}/2) draws whatever the paths did\n\
-                 \x20 save {} or more paths per chain (n_trajectories) for an ESS that \
-                 responds to them; R-hat above is unaffected — it uses no autocorrelation\n",
-                self.n_chains * (self.n_draws / 2),
-                self.n_draws,
-                self.n_draws / 2,
-                self.n_chains,
-                self.n_draws,
-                MIN_DRAWS_FOR_INFORMATIVE_ESS,
-            ));
-        }
         s
     }
 
@@ -906,7 +903,7 @@ mod tests {
     /// implementation and is left alone; what the block owes the reader is the
     /// sentence saying so.
     #[test]
-    fn the_ess_row_says_when_it_is_a_constant_rather_than_a_measurement() {
+    fn the_ess_row_is_omitted_when_it_would_be_a_constant_not_a_measurement() {
         // The shape the real stage had: 8 chains, 10 saved paths each.
         let chains = block(8, 10, 12, 2, cloud);
         let lc = latent_convergence(&chains, &names(2)).unwrap();
@@ -918,12 +915,11 @@ mod tests {
         assert!(ess.iter().all(|&e| e == 40.0),
             "every mixed cell reports 8 x (10/2) = 40 whatever the paths did: {ess:?}");
         let report = lc.report();
-        assert!(
-            report.contains(
-                "ESS min (mixed) is 40 in every bin because it measures nothing at 10 \
-                 saved path(s) per chain"),
-            "the block must say the row is a constant, and which constant:\n{report}");
-        assert!(report.contains("save 12 or more paths per chain (n_trajectories)"),
+        assert!(!report.contains("ESS min (mixed)"),
+            "a row that reports 40 whatever the paths did is not printed:\n{report}");
+        assert!(report.contains("ESS omitted: 10 saved path(s) per chain"),
+            "the omission is stated, with the count that caused it:\n{report}");
+        assert!(report.contains("Raise n_trajectories"),
             "and what to change to get a measurement:\n{report}");
 
         // At the threshold the estimator runs, so the caveat must NOT fire —
@@ -932,8 +928,10 @@ mod tests {
         let enough = block(8, MIN_DRAWS_FOR_INFORMATIVE_ESS, 12, 2, cloud);
         let lc = latent_convergence(&enough, &names(2)).unwrap();
         let report = lc.report();
-        assert!(!report.contains("measures nothing"),
-            "with enough saved paths the ESS is a measurement:\n{report}");
+        assert!(report.contains("ESS min (mixed)"),
+            "with enough saved paths the row is a measurement and is printed:\n{report}");
+        assert!(!report.contains("ESS omitted"),
+            "and the omission notice must not fire:\n{report}");
         let ess: Vec<f64> = lc.cells.iter()
             .filter_map(|c| c.conv.as_ref())
             .map(|c| c.ess_bulk)
