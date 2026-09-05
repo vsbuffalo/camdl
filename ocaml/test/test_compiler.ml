@@ -9055,6 +9055,28 @@ let test_typed_time_e321_hint_span_matches_unit () =
   Alcotest.(check bool) "years hint does not carry the months span"
     false (contains_substring ~needle:"152 'days" years)
 
+(* gh#843, the other half of the same sentence: the calendar-exact
+   suggestion must name the primitive matching the literal's unit. A
+   modeller told `add_calendar_months(d, N)` for `5 'years` who pastes
+   it gets five months — the identical 12x-short horizon the affine
+   span fix above exists to prevent, in the neighbouring clause. *)
+let test_typed_time_e321_hint_exact_fn_matches_unit () =
+  let months = e321_error_for ~offset:"5 'months" in
+  let years  = e321_error_for ~offset:"5 'years" in
+  Alcotest.(check bool) "months hint names add_calendar_months"
+    true (contains_substring ~needle:"add_calendar_months(d, N)" months);
+  Alcotest.(check bool) "years hint names add_calendar_years"
+    true (contains_substring ~needle:"add_calendar_years(d, N)" years);
+  (* The months primitive must not appear in the years hint at all —
+     naming it is the paste that costs twelve months. *)
+  Alcotest.(check bool) "years hint does not name add_calendar_months"
+    false (contains_substring ~needle:"add_calendar_months" years);
+  (* A mixed offset has no single right primitive, so it keeps the
+     months default rather than guessing. *)
+  let mixed = e321_error_for ~offset:"(1 'years + 2 'months)" in
+  Alcotest.(check bool) "mixed offset keeps the months default"
+    true (contains_substring ~needle:"add_calendar_months(d, N)" mixed)
+
 (* The count is derived too, not just the unit: a frozen hint answered
    every month-valued offset with the same 152 days. *)
 let test_typed_time_e321_hint_span_matches_count () =
@@ -13579,6 +13601,8 @@ let () =
         `Quick test_typed_time_e321_hint_span_matches_unit;
       Alcotest.test_case "E321 hint span follows the literal's count (gh#843)"
         `Quick test_typed_time_e321_hint_span_matches_count;
+      Alcotest.test_case "E321 hint names the primitive for the unit (gh#843)"
+        `Quick test_typed_time_e321_hint_exact_fn_matches_unit;
       Alcotest.test_case "E321 hint span folds through a let binding (gh#843)"
         `Quick test_typed_time_e321_hint_span_through_let;
       Alcotest.test_case "E321 hint invents no span for a non-constant (gh#843)"

@@ -10003,7 +10003,9 @@ let check_surface_time_typing ctx =
           ~message:(Printf.sprintf
             "calendar duration `%s` cannot translate an instant in %s"
             rendered context)
-          ~hint:(Time_typing.hint_calendar_plus_instant (calendar_span_days bad))
+          ~hint:(Time_typing.hint_calendar_plus_instant
+                  ~exact_fn:(Time_typing.calendar_exact_fn bad)
+                  (calendar_span_days bad))
           ())
   in
 
