@@ -1610,6 +1610,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     chain_logliks: chain_results.results.iter()
                         .map(|(_, r)| r.final_loglik).collect(),
                     chain_eval_logliks: chain_results.chain_eval_logliks(),
+                    chain_eval_ids: chain_results.chain_eval_ids(),
                     chain_eval_ses: chain_results.chain_eval_ses(),
                     // Persist the gate / clean-eval config that was
                     // *actually in force* — `effective_gate` and

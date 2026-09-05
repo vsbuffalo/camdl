@@ -442,6 +442,7 @@ pub fn run_stage(
         perturb_only_at_t0_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
+        chain_eval_ids: Vec::new(),
         chain_eval_ses: Vec::new(),
         resolved_gate: None,
         resolved_loglik_eval: None,

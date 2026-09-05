@@ -1026,6 +1026,7 @@ pub fn run_stage(
         perturb_only_at_t0_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
+        chain_eval_ids: Vec::new(),
         chain_eval_ses: Vec::new(),
         // Bayesian path — compound gate doesn't apply to PMMH.
         resolved_gate: None,

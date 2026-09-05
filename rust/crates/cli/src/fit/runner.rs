@@ -2601,6 +2601,17 @@ impl ChainResults {
         v.into_iter().map(|(_, ll)| ll).collect()
     }
 
+    /// The chain ids of [`Self::chain_eval_logliks`], in the same order.
+    /// Reported rather than reconstructed from the position: IF2 drops
+    /// PF-degenerate chains, so `per_chain` is a subset and its index is not
+    /// a chain number.
+    pub fn chain_eval_ids(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self.loglik_eval.per_chain.iter()
+            .map(|s| s.chain_id).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Per-chain clean-eval standard errors in chain-id order, parallel
     /// to `chain_eval_logliks`.
     pub fn chain_eval_ses(&self) -> Vec<f64> {
@@ -4616,6 +4627,7 @@ dt = 1.0
             perturb_only_at_t0_params: Vec::new(),
             chain_logliks: Vec::new(),
             chain_eval_logliks: Vec::new(),
+            chain_eval_ids: Vec::new(),
             chain_eval_ses: Vec::new(),
             resolved_gate: None,
             resolved_loglik_eval: None,
@@ -4854,6 +4866,7 @@ dt = 1.0
             perturb_only_at_t0_params: t0_params,
             chain_logliks: vec![-60.2, -60.5],
             chain_eval_logliks: vec![],
+            chain_eval_ids: Vec::new(),
             chain_eval_ses: vec![],
             resolved_gate: None,
             resolved_loglik_eval: None,

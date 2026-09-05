@@ -75,6 +75,18 @@ pub struct FitState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_eval_logliks: Vec<f64>,
 
+    /// The chain ids `chain_eval_logliks` and `chain_eval_ses` belong to,
+    /// parallel to both. Written because those two are built by
+    /// `ChainResults::chain_eval_logliks`, which sorts by chain id and then
+    /// DISCARDS it — and IF2 drops PF-degenerate chains before that point, so
+    /// a position in the vector is not a chain number. Without this the
+    /// summary's per-chain table labelled row `i` as "chain i + 1", which put
+    /// the `<- selected` marker on the wrong chain whenever any chain had been
+    /// dropped. Empty in fit_state files written before this field existed;
+    /// the table is omitted rather than mislabelled when it is missing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain_eval_ids: Vec<usize>,
+
     /// Per-chain clean-eval standard errors, parallel to
     /// `chain_eval_logliks`. `max(SE)` drives the SE-aware decibans
     /// floor: noisier chains get proportionally more tolerance before
@@ -239,6 +251,7 @@ mod tests {
             perturb_only_at_t0_params: vec!["s0".into()],
             chain_logliks: vec![-130.0, -123.45],
             chain_eval_logliks: vec![-128.7, -123.1],
+            chain_eval_ids: vec![1, 2],
             chain_eval_ses: vec![1.5, 0.8],
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),

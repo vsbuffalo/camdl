@@ -453,6 +453,7 @@ mod tests {
                 .map(|s| s.to_string()).collect(),
             chain_logliks: chain_logliks.to_vec(),
             chain_eval_logliks: vec![],
+            chain_eval_ids: Vec::new(),
             chain_eval_ses: vec![],
             resolved_gate: None,
             resolved_loglik_eval: None,

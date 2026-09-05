@@ -1127,6 +1127,20 @@ impl Formatter {
         // fit_state.toml; ESS surfacing in this table waits for a
         // Phase 4 follow-up that loads <stage>_summary.json. Note
         // here so a future reader doesn't think it was forgotten.
+        // The ids are read, never reconstructed from the position.
+        // `ChainResults::chain_eval_logliks` sorts by chain id and then drops
+        // it, and IF2 removes PF-degenerate chains before that, so row `i` is
+        // not chain `i + 1` on any fit where a chain was dropped -- which put
+        // the `<- selected` marker on the wrong chain. A fit_state written
+        // before `chain_eval_ids` existed carries none, and the table is
+        // omitted rather than mislabelled (alpha posture: no fallback).
+        if state.chain_eval_ids.len() != n {
+            s.push_str(&format!("    {}\n", self.dim(
+                "(omitted: this fit_state predates per-chain ids, and a row \
+                 position is not a chain number once a chain has been dropped)")));
+            s.push('\n');
+            return s;
+        }
         s.push_str(&format!("    {:6} {:>12}   {:>6}\n", "chain", "loglik", "± se"));
         for i in 0..n {
             let ll = state.chain_eval_logliks[i];
@@ -1142,7 +1156,7 @@ impl Formatter {
                 String::new()
             };
             s.push_str(&format!("    {:6} {:>12.2}   ± {:>4.2}{}\n",
-                i + 1, ll, se, marker));
+                state.chain_eval_ids[i], ll, se, marker));
         }
         s.push('\n');
         s
@@ -2896,6 +2910,7 @@ mod tests {
                 -3810.5, -3805.1, -3812.0, -3808.7,
                 -3804.9, -3811.2, -3809.0, -3807.6,
             ],
+            chain_eval_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
             chain_eval_ses: vec![1.5, 1.2, 1.8, 1.4, 1.1, 1.6, 1.3, 1.5],
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
@@ -2903,6 +2918,51 @@ mod tests {
             dt_check: None,
             pf_noise: None,
         }
+    }
+
+    /// The per-chain loglik-eval table labelled row `i` as "chain i + 1".
+    /// `ChainResults::chain_eval_logliks` sorts by chain id and then discards
+    /// it, and IF2 drops PF-degenerate chains before that point, so on a fit
+    /// where a chain was dropped the positions are not chain numbers -- and
+    /// the `<- selected` marker, an argmax over positions, named the wrong
+    /// chain. Contiguous ids hide this, which is why the existing fixture
+    /// never caught it.
+    #[test]
+    fn the_loglik_eval_table_names_chains_not_row_positions() {
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let mut state = synthetic_fit_state();
+        // Chains 2, 5 and 7 died in the filter and never reached the eval.
+        state.chain_eval_ids = vec![1, 3, 4, 6, 8];
+        state.chain_eval_logliks = vec![-3810.5, -3812.0, -3808.7, -3804.9, -3807.6];
+        state.chain_eval_ses = vec![1.5, 1.8, 1.4, 1.1, 1.5];
+        let out = fmt.chain_loglik_eval_table(&state);
+
+        for id in ["    1 ", "    3 ", "    4 ", "    6 ", "    8 "] {
+            assert!(out.contains(id), "surviving chain {id:?} must be named:\n{out}");
+        }
+        assert!(!out.contains("    5 "), "chain 5 died and must not appear:\n{out}");
+
+        // The best loglik (-3804.9) is chain 6, the FOURTH row. Keyed on
+        // position the marker would have said chain 4.
+        let marked: Vec<&str> = out.lines().filter(|l| l.contains("selected")).collect();
+        assert_eq!(marked.len(), 1, "exactly one chain is selected:\n{out}");
+        assert!(marked[0].trim_start().starts_with("6 "),
+            "the marker belongs to chain 6, not row position 4:\n{}", marked[0]);
+    }
+
+    /// A fit_state written before `chain_eval_ids` existed carries none. The
+    /// table is omitted rather than falling back to positions -- the
+    /// mislabelling the field exists to prevent.
+    #[test]
+    fn the_loglik_eval_table_is_omitted_without_ids_rather_than_mislabelled() {
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let mut state = synthetic_fit_state();
+        state.chain_eval_ids = Vec::new();
+        let out = fmt.chain_loglik_eval_table(&state);
+        assert!(out.contains("predates per-chain ids"),
+            "the omission is stated and explained:\n{out}");
+        assert!(!out.contains("selected"),
+            "and no chain is marked on evidence we cannot attribute:\n{out}");
     }
 
     #[test]
