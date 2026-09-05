@@ -732,21 +732,30 @@ impl BoundObs {
             // must not reach this binder until that lands.
             if let Some(periods) = spec.times.periods() {
                 for (i, w) in periods.windows(2).enumerate() {
-                    if w[1].start() != w[0].stop() {
-                        findings.push(Finding {
-                            severity: Severity::Error,
-                            message: format!(
-                                "observation stream '{}': declared period {} covers \
-                                 [{}, {}) but period {} starts at {} — periods must be \
-                                 contiguous, leaving no unscored gap between them. A \
-                                 stated gap needs the per-row \
-                                 `window_start`/`window_stop` form, which this binder \
-                                 does not yet support.",
-                                spec.ir_model.name, i, w[0].start(), w[0].stop(),
-                                i + 1, w[1].start()
-                            ),
-                        });
+                    if w[1].start() == w[0].stop() {
+                        continue;
                     }
+                    // Overlap and gap are different mistakes and deserve
+                    // different messages: an overlap would score the shared
+                    // span TWICE, a gap would discard the flow between them.
+                    let detail = if w[1].start() < w[0].stop() {
+                        "they overlap, so the flow in the shared span would be \
+                         scored twice. Check the declared width against the \
+                         spacing between rows"
+                    } else {
+                        "the flow between them is covered by neither. A stated \
+                         gap needs the per-row `window_start`/`window_stop` \
+                         form, which this binder does not yet support"
+                    };
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        message: format!(
+                            "observation stream '{}': declared period {} covers \
+                             [{}, {}) but period {} starts at {} — {}.",
+                            spec.ir_model.name, i, w[0].start(), w[0].stop(),
+                            i + 1, w[1].start(), detail
+                        ),
+                    });
                 }
             }
         }
@@ -2493,8 +2502,30 @@ mod period_and_covers_tests {
             "a gap between declared periods must be rejected (not yet supported)",
         );
         assert!(report.findings().iter().any(|f|
-            f.message.contains("cases") && f.message.contains("contiguous")),
-            "message must name the stream and the contiguity rule: {:?}", report.findings());
+            f.message.contains("cases") && f.message.contains("covered by neither")),
+            "message must name the stream and the gap: {:?}", report.findings());
+    }
+
+    #[test]
+    fn overlapping_declared_periods_are_fatal_and_named_as_overlap() {
+        // period 0 = [0,3), period 1 = [1,4). The flow in [1,3) belongs to
+        // both, so it would be scored twice. A different mistake from a gap,
+        // and the message has to say which — the usual cause is a declared
+        // width wider than the spacing between rows.
+        let s = spec_covering(
+            "cases",
+            vec![Period::new(0.0, 3.0).unwrap(), Period::new(1.0, 4.0).unwrap()],
+            vec![0.0, 0.0],
+        );
+        let report = expect_fatal(
+            BoundObs::bind(vec![s]),
+            "overlapping declared periods must be rejected",
+        );
+        assert!(report.findings().iter().any(|f|
+            f.message.contains("cases") && f.message.contains("scored twice")),
+            "message must name the stream and the overlap: {:?}", report.findings());
+        assert!(!report.findings().iter().any(|f| f.message.contains("covered by neither")),
+            "an overlap must not be reported as a gap: {:?}", report.findings());
     }
 
     #[test]

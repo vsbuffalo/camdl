@@ -47,6 +47,44 @@ pub struct ObsStream {
     /// reads by `Expr::ObsColumnRef`. Empty inner vec when the likelihood
     /// references no aux column or the cell is a hole. (§3, §6.1.)
     pub aux: Vec<Vec<(String, f64)>>,
+    /// What this stream's rows cover (gh#833) — declared periods when the
+    /// model states them, otherwise the transitional undeclared form whose
+    /// window is the row spacing. Built once by the loader, from the same file
+    /// read that produced `data`, so a row's window and its scoring boundary
+    /// cannot come from two different places.
+    pub times: sim::inference::StreamTimes,
+}
+
+impl ObsStream {
+    /// Keep the rows where `keep[i]`, across EVERY per-row vector at once.
+    ///
+    /// A stream carries four vectors indexed by the same row — `data`,
+    /// `cells`, `aux` and `times` — and `bind` rejects any disagreement in
+    /// their lengths. Holdout truncation used to filter three of them by hand,
+    /// which silently went stale when `times` was added (gh#833) and surfaced
+    /// as an internal binder length mismatch. Mutating them through one method
+    /// makes updating a subset impossible rather than merely discouraged.
+    pub(crate) fn retain_rows(&mut self, keep: &[bool]) {
+        debug_assert_eq!(keep.len(), self.data.len(), "keep mask must cover every row");
+        let filtered = |n: usize| -> Vec<usize> {
+            (0..n).filter(|&i| keep.get(i).copied().unwrap_or(false)).collect()
+        };
+        let idx = filtered(self.data.len());
+        self.data = idx.iter().map(|&i| self.data[i].clone()).collect();
+        self.cells = idx.iter().map(|&i| self.cells[i].clone()).collect();
+        self.aux = idx.iter().map(|&i| self.aux[i].clone()).collect();
+        self.times = match &self.times {
+            sim::inference::StreamTimes::Intervals(ps) =>
+                sim::inference::StreamTimes::Intervals(
+                    idx.iter().map(|&i| ps[i]).collect()),
+            sim::inference::StreamTimes::Instants(ts) =>
+                sim::inference::StreamTimes::Instants(
+                    idx.iter().map(|&i| ts[i]).collect()),
+            sim::inference::StreamTimes::InferredIntervals(ts) =>
+                sim::inference::StreamTimes::InferredIntervals(
+                    idx.iter().map(|&i| ts[i]).collect()),
+        };
+    }
 }
 
 pub struct FitRunConfig {
@@ -1252,6 +1290,20 @@ pub(crate) fn load_observations(
     Ok((observations, cells, aux))
 }
 
+/// What one stream's rows cover, from its `covers` declaration and its own
+/// file (gh#833). Split from [`load_observations`] rather than folded into its
+/// return tuple because the long-form (stratified) path builds its times a
+/// different way, and both need this same lowering.
+pub(crate) fn load_stream_times(
+    path: &str,
+    obs_model: &ir::observation::ObservationModel,
+    projection: &sim::inference::multi_stream_obs::StreamProjection,
+    label_times: &[f64],
+    opts: &crate::caltime_load::TimeOpts,
+) -> Result<sim::inference::StreamTimes, String> {
+    crate::pfilter::stream_times_for(obs_model, projection, label_times, path, opts)
+}
+
 /// Convert a resolved data-binding list (`resolve_data_specs` for the CLI
 /// `--data NAME=PATH` form, or `load_data_observations_from_fit_toml` for the
 /// fit-toml `[data.observations]` form) into the by-SOURCE `effective` map that
@@ -1477,6 +1529,46 @@ pub(crate) fn stream_condition_window(
 /// (gh#621): the fixed-θ scorers must score the SAME window the fit scores,
 /// or their logliks are incomparable and a −inf is ambiguous (a bad θ vs. an
 /// unconstrainable leading window).
+/// Open a stream's first SCORED bin at `cond_from` by prepending a leading
+/// reset-only hole — the whole mechanism of `condition_from`.
+///
+/// The one place this is done. `fit predict` used to carry its own copy,
+/// commented "the same three-line prepend `apply_conditioning_windows` makes",
+/// and the copy silently went stale the moment a stream grew a fourth parallel
+/// vector (`times`, gh#833): `cells` and `data` gained the boundary row and
+/// `times` did not, surfacing as an internal binder length mismatch rather
+/// than anything a user could act on.
+///
+/// Refuses on a stream that DECLARED what its rows cover. Conditioning
+/// redefines where the first bin opens, which for an undeclared stream is the
+/// entire point and for a declared one silently truncates a stated window —
+/// two sources disagreeing about one period.
+pub(crate) fn prepend_conditioning_boundary(
+    s: &mut ObsStream,
+    cond_from: f64,
+) -> Result<(), String> {
+    if s.times.periods().is_some() {
+        return Err(format!(
+            "observation stream '{}' declares what each of its rows covers, and \
+             `condition_from` would open its first scored bin at {} instead — a \
+             stated window must not be silently truncated.\n  \
+             Fix: drop `condition_from` for this stream, or state the shorter \
+             first period in the data itself with `window_start`/`window_stop` \
+             columns.",
+            s.name, cond_from));
+    }
+    // `cells` is authoritative for scoring; the `data` row's 0.0 is a
+    // never-read placeholder.
+    s.data.insert(0, Observation { time: cond_from, value: 0.0 });
+    s.cells.insert(0, None);
+    s.aux.insert(0, Vec::new());
+    s.times = sim::inference::StreamTimes::undeclared_for(
+        &s.projection,
+        s.data.iter().map(|o| o.time).collect(),
+    );
+    Ok(())
+}
+
 pub(crate) fn apply_conditioning_windows(
     streams: &mut [ObsStream],
     condition_from: Option<&crate::fit::config_v2::ConditionFrom>,
@@ -1528,12 +1620,7 @@ pub(crate) fn apply_conditioning_windows(
                     s.name
                 );
                 // Prepend the per-stream leading reset-only hole.
-                // The `cells` are authoritative for scoring; the
-                // `data` row's value (0.0) is a never-read
-                // placeholder.
-                s.data.insert(0, Observation { time: cond_from, value: 0.0 });
-                s.cells.insert(0, None);
-                s.aux.insert(0, Vec::new());
+                prepend_conditioning_boundary(s, cond_from)?;
                 union_inserts.push(cond_from);
             }
             StreamWindow::AtOrigin => {
@@ -1699,6 +1786,13 @@ pub(crate) fn resolve_and_load_obs_streams(
             )?;
         }
 
+        let times = load_stream_times(
+            data_path,
+            &obs_model,
+            &projection,
+            &obs.iter().map(|o| o.time).collect::<Vec<f64>>(),
+            time_opts,
+        )?;
         streams.push(ObsStream {
             name: stream_name,
             projection,
@@ -1706,6 +1800,7 @@ pub(crate) fn resolve_and_load_obs_streams(
             data: obs,
             cells,
             aux,
+            times,
         });
     }
     Ok(streams)
@@ -1725,10 +1820,10 @@ pub(crate) fn stream_specs_from_obs_streams(
 ) -> Vec<sim::inference::multi_stream_obs::StreamSpec> {
     streams.iter()
         .map(|s| sim::inference::multi_stream_obs::StreamSpec {
-            times: sim::inference::multi_stream_obs::StreamTimes::undeclared_for(
-                &s.projection,
-                s.data.iter().map(|o| o.time).collect(),
-            ),
+            // What this stream's rows cover, as the loader built it from the
+            // model's declaration — NOT re-derived from `s.data`'s times, which
+            // would silently reinstate the row-spacing inference this replaces.
+            times: s.times.clone(),
             projection: s.projection.clone(),
             ir_model: s.obs_model_ir.clone(),
             // Authoritative per-grid-time cells (holes = `None`). A hole
@@ -1835,12 +1930,7 @@ pub(crate) fn apply_holdout_declaration(
             let keep: Vec<bool> =
                 s.data.iter().map(|o| o.time <= tau + TIME_TIE_EPS).collect();
             withheld += keep.iter().filter(|k| !**k).count();
-            let mut ki = keep.iter();
-            s.data.retain(|_| *ki.next().unwrap());
-            let mut ki = keep.iter();
-            s.cells.retain(|_| *ki.next().unwrap());
-            let mut ki = keep.iter();
-            s.aux.retain(|_| *ki.next().unwrap());
+            s.retain_rows(&keep);
         }
         eprintln!(
             "  \x1b[36mholdout:\x1b[0m training window [{t_start}, {tau}]; \

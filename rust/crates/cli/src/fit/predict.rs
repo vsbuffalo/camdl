@@ -3247,6 +3247,13 @@ fn one_step_bands(
         let (obs, cells, aux) =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
         let projection = StreamProjection::from_ir(&obs_model.projection, &compiled, &obs_model.name)?;
+        let times = crate::fit::runner::load_stream_times(
+            data_path,
+            obs_model,
+            &projection,
+            &obs.iter().map(|o| o.time).collect::<Vec<f64>>(),
+            &time_opts,
+        )?;
         obs_streams.push(ObsStream {
             name: obs_model.name.clone(),
             projection,
@@ -3254,6 +3261,7 @@ fn one_step_bands(
             data: obs,
             cells,
             aux,
+            times,
         });
         bound_leaves.push(obs_model);
     }
@@ -3299,15 +3307,9 @@ fn one_step_bands(
                 dt,
             )?;
             if let Some(cond_from) = window.boundary() {
-                // The same three-line prepend `apply_conditioning_windows`
-                // makes: `cells` is authoritative for scoring, and the `data`
-                // row's 0.0 is a never-read placeholder.
-                s.data.insert(
-                    0,
-                    sim::inference::particle_filter::Observation { time: cond_from, value: 0.0 },
-                );
-                s.cells.insert(0, None);
-                s.aux.insert(0, Vec::new());
+                // The shared seam, not a second copy — see its doc comment for
+                // what the copy cost.
+                crate::fit::runner::prepend_conditioning_boundary(s, cond_from)?;
                 boundary_by_leaf.insert(s.name.clone(), cond_from);
             }
         }
