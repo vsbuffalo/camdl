@@ -552,11 +552,18 @@ struct BoundStream {
     /// no term, and in Phase 2 no reset). INVARIANT (`bind`):
     /// `at_union.len() == BoundObs.times.len()`.
     at_union: Vec<Option<usize>>,
+    /// Where this stream's accumulator RESETS, per union index — a schedule
+    /// independent of where it SCORES (gh#833). For a declared interval stream
+    /// it is the set of period starts, which includes a leading boundary no
+    /// observation closes; for an undeclared one it is its score positions,
+    /// exactly today's reset-after-scoring; for an instant stream it is empty,
+    /// there being no accumulator. INVARIANT (`bind`):
+    /// `reset_at_union.len() == BoundObs.times.len()`.
+    reset_at_union: Vec<bool>,
     /// What this stream's observations are — instants, declared periods, or a
     /// still-undeclared interval stream. Carried past validation so a declared
     /// window survives into the model rather than being checked and dropped:
-    /// the reset schedule for a gapped stream, the output columns, and the
-    /// `t`-in-likelihood refusal all read it (gh#833).
+    /// the output columns and the `t`-in-likelihood refusal read it (gh#833).
     times: StreamTimes,
     /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
     /// person-time offset), indexed by THIS stream's own observation index,
@@ -598,12 +605,15 @@ impl BoundObs {
     /// no requirement that one stream's `obs_times` equal another's.
     ///
     /// On any `Error` finding the result is `Err(report)` and NO `BoundObs`
-    /// escapes. Otherwise it merges every stream's schedule to the
-    /// sorted-unique union axis and returns `Ok((bound, report))`, with each
-    /// stream's `at_union` recording its own local cell index at every union
-    /// time it is scheduled at (`None` where only a sibling is). A homogeneous
-    /// model is the special case where every stream is scheduled at every
-    /// union time.
+    /// escapes. Otherwise it merges every stream's schedule — and every
+    /// declared period's start — to the sorted-unique union axis and returns
+    /// `Ok((bound, report))`. Each stream carries two maps over that axis:
+    /// `at_union`, its own local cell index where it SCORES (`None` where it
+    /// does not), and `reset_at_union`, where its accumulator RESETS. The two
+    /// coincide for an undeclared stream; for a declared one the first
+    /// period's start is a boundary where nothing scores and one bin resets
+    /// (gh#833). A homogeneous, undeclared model is the special case where
+    /// every stream is scheduled at every union time.
     pub fn bind(mut streams: Vec<StreamSpec>) -> Result<(BoundObs, BindReport), BindReport> {
         let mut findings: Vec<Finding> = Vec::new();
 
@@ -916,12 +926,25 @@ impl BoundObs {
             return Err(report);
         }
 
-        // Union axis: the sorted-unique merge of every stream's schedule.
-        // Identity is EXACT f64 — one deterministic time parser gives one value
-        // per calendar instant (§3.2), so no tolerance is needed (and none is
-        // used). A homogeneous model yields a union equal to the shared axis.
-        let mut times: Vec<f64> =
-            streams.iter().flat_map(|s| s.times.closes()).collect();
+        // Union axis: the sorted-unique merge of every boundary the integrator
+        // must stop at — every stream's schedule (where it SCORES), plus every
+        // declared period's start (where its bin RESETS). For contiguous
+        // periods each start after the first coincides with the previous stop
+        // and dedups away; the FIRST start is the one new boundary, the one
+        // that lets the first bin open where the declaration says instead of
+        // at `t_start` (gh#833). Identity is EXACT f64 — one deterministic
+        // time parser gives one value per calendar instant (§3.2), so no
+        // tolerance is needed (and none is used).
+        let mut times: Vec<f64> = streams
+            .iter()
+            .flat_map(|s| {
+                let mut b = s.times.closes();
+                if let Some(ps) = s.times.periods() {
+                    b.extend(ps.iter().map(Period::start));
+                }
+                b
+            })
+            .collect();
         // Finiteness is enforced by the per-stream validation above (a
         // non-finite time is a fatal finding → early return before this sort),
         // so `partial_cmp` never returns `None` here.
@@ -950,11 +973,48 @@ impl BoundObs {
                     local, closes.len(),
                     "every stream observation time must appear in the union",
                 );
+                // Where this stream's bin RESETS — its own schedule, distinct
+                // from where it scores.
+                let reset_at_union: Vec<bool> = match spec.times.periods() {
+                    // Declared: the bin opens at each period's START. Starts are
+                    // strictly increasing (contiguity checked above) and every
+                    // one was merged into the union, so the same two-pointer
+                    // walk that built `at_union` applies. Notably NOT at the
+                    // final stop: no period opens there.
+                    Some(periods) => {
+                        let starts: Vec<f64> = periods.iter().map(Period::start).collect();
+                        let mut out = Vec::with_capacity(times.len());
+                        let mut k = 0usize;
+                        for &ut in &times {
+                            if k < starts.len() && starts[k] == ut {
+                                out.push(true);
+                                k += 1;
+                            } else {
+                                out.push(false);
+                            }
+                        }
+                        debug_assert_eq!(
+                            k, starts.len(),
+                            "every declared period start must appear in the union",
+                        );
+                        out
+                    }
+                    None => match spec.times.temporal_kind() {
+                        // Undeclared interval: today's schedule exactly — reset
+                        // right after scoring, at every stop.
+                        ir::observation::TemporalKind::Interval =>
+                            at_union.iter().map(|o| o.is_some()).collect(),
+                        // Instant: no accumulator, so nothing ever resets. Kept
+                        // honest rather than borrowing the score map.
+                        ir::observation::TemporalKind::Instant => vec![false; times.len()],
+                    },
+                };
                 BoundStream {
                     ir_model: spec.ir_model,
                     projection: spec.projection,
                     cells: spec.observations,
                     at_union,
+                    reset_at_union,
                     times: spec.times,
                     aux: spec.aux,
                 }
@@ -981,6 +1041,12 @@ impl BoundObs {
     #[cfg(test)]
     pub(crate) fn at_union_for_test(&self, stream_idx: usize) -> &[Option<usize>] {
         &self.streams[stream_idx].at_union
+    }
+
+    /// Test-only: where a stream's accumulator resets, over the union axis.
+    #[cfg(test)]
+    pub(crate) fn reset_at_union_for_test(&self, stream_idx: usize) -> &[bool] {
+        &self.streams[stream_idx].reset_at_union
     }
 }
 
@@ -1140,6 +1206,11 @@ struct Stream {
     /// `observations`/`aux`), `None` if not scheduled (a sibling's cadence —
     /// no term). For a homogeneous model `at_union[i] == Some(i)`.
     at_union: Vec<Option<usize>>,
+    /// Where this stream's accumulator resets, per union index — its own
+    /// schedule, distinct from `at_union` (gh#833). Moved into the stream's
+    /// [`IntervalSlot`], which is what `reset_due_acc` reads; kept here so the
+    /// slot is built from the bound stream in one place.
+    reset_at_union: Vec<bool>,
     /// Per-observation cells indexed by THIS stream's own observation index
     /// (NOT the union index — resolve via `at_union`). `None` is a hole: no
     /// likelihood term (the incidence reset still fires at its grid index —
@@ -1181,6 +1252,13 @@ pub struct MultiStreamObsModel {
 struct IntervalSlot {
     stream_idx: usize,
     flow_indices: Vec<usize>,
+    /// Per union index, does this bin zero here? The reset schedule is the
+    /// bin's own, NOT the stream's score schedule: a declared period opens at
+    /// its start, which for the first period is a boundary where nothing is
+    /// scored at all. Reading `at_union` here instead is the defect gh#833's
+    /// leading-window fix removes — it let the first bin span
+    /// `[t_start, stop_0)` however far `start_0` sat inside it.
+    reset_at_union: Vec<bool>,
 }
 
 /// Specification for building one observation stream.
@@ -1290,6 +1368,7 @@ impl MultiStreamObsModel {
                 projection_state_grad,
                 resolved,
                 at_union: spec.at_union,
+                reset_at_union: spec.reset_at_union,
                 observations: spec.cells,
                 aux: spec.aux,
             });
@@ -1308,6 +1387,7 @@ impl MultiStreamObsModel {
                     interval_slots.push(IntervalSlot {
                         stream_idx: si,
                         flow_indices: idxs.clone(),
+                        reset_at_union: s.reset_at_union.clone(),
                     });
                 }
                 StreamProjection::IntCompSum(_) | StreamProjection::Expr(_) => {
@@ -1413,13 +1493,13 @@ impl MultiStreamObsModel {
         }
     }
 
-    /// Zero the `acc` bins for the Interval streams scheduled at union index
-    /// `union_idx` (`at_union[union_idx].is_some()`). A stream not scheduled
-    /// here keeps its running bin toward its own next observation.
+    /// Zero the `acc` bins whose RESET schedule fires at union index
+    /// `union_idx`. A bin not due here keeps accumulating toward its own next
+    /// boundary. The schedule is the slot's own, not the stream's score
+    /// positions — see [`IntervalSlot::reset_at_union`].
     pub fn reset_due_acc(&self, union_idx: usize, acc: &mut [u64]) {
         for (k, slot) in self.interval_slots.iter().enumerate() {
-            let si = slot.stream_idx;
-            if self.streams[si].at_union[union_idx].is_some() {
+            if slot.reset_at_union[union_idx] {
                 acc[k] = 0;
             }
         }
@@ -1437,8 +1517,7 @@ impl MultiStreamObsModel {
     /// delegates here so the due-predicate is evaluated in exactly one place.
     pub fn reset_due_acc_real_blocks(&self, union_idx: usize, acc: &mut [f64], width: usize) {
         for (k, slot) in self.interval_slots.iter().enumerate() {
-            let si = slot.stream_idx;
-            if self.streams[si].at_union[union_idx].is_some() {
+            if slot.reset_at_union[union_idx] {
                 acc[k * width..(k + 1) * width].fill(0.0);
             }
         }
@@ -2554,8 +2633,17 @@ mod period_and_covers_tests {
         assert!(!report_d.is_fatal(), "a contiguous declaration is valid: {:?}", report_d.findings());
 
         assert_eq!(bound_u.times(), &[1.0, 2.0, 3.0], "undeclared closes at the row labels");
-        assert_eq!(bound_d.times(), &[2.0, 3.0, 4.0], "day(D) closes at D+1, one bucket later");
-        assert_ne!(bound_u.times(), bound_d.times(), "the declaration must MOVE the scoring boundary");
+        // The declared axis carries the first period's START (1) as a boundary
+        // where nothing scores and the bin opens, then closes one bucket later
+        // than the labels.
+        assert_eq!(bound_d.times(), &[1.0, 2.0, 3.0, 4.0],
+            "day(D) opens at the first label and closes each row at D+1");
+        assert_eq!(bound_d.at_union_for_test(0), &[None, Some(0), Some(1), Some(2)],
+            "rows SCORE at 2,3,4 — one bucket later; nothing scores at the opening boundary");
+        assert_eq!(bound_d.reset_at_union_for_test(0), &[true, true, true, false],
+            "the bin opens at 1 and at each subsequent start; no period opens at the last stop");
+        assert_ne!(bound_u.at_union_for_test(0), bound_d.at_union_for_test(0),
+            "the declaration must MOVE the scoring boundary");
     }
 
     #[test]
@@ -2569,13 +2657,51 @@ mod period_and_covers_tests {
         );
         let (bound, report) = BoundObs::bind(vec![s]).expect("a weekly declaration binds");
         assert!(!report.is_fatal());
-        assert_eq!(bound.times(), &[7.0, 14.0], "a weekly row is scored at its window's stop");
+        assert_eq!(bound.times(), &[0.0, 7.0, 14.0],
+            "the first week OPENS at 0 (a reset-only boundary); each row is scored at its stop");
+        assert_eq!(bound.at_union_for_test(0), &[None, Some(0), Some(1)]);
 
         // The periods SURVIVE binding — they are not validated and dropped.
         let periods = bound.stream_times(0).periods().expect("declared periods survive bind");
         assert_eq!(periods.len(), 2);
         assert_eq!(periods[0].width(), 7.0);
         assert_eq!(periods[1].width(), 7.0);
+    }
+
+    #[test]
+    fn a_declared_first_period_opens_at_its_own_start_not_at_t_start() {
+        // THE leading-window defect. A stream declaring [5,6),[6,7) must reset
+        // its accumulator at 5 — a boundary no observation closes — so the bin
+        // scored at 6 holds one unit of flow, not everything since t_start.
+        // That needs 5 on the union axis and a reset schedule that fires
+        // there; today the axis is the stops alone and reset borrows the score
+        // positions, so the first bin silently spans [t_start, 6).
+        let s = spec_covering(
+            "cases",
+            vec![Period::new(5.0, 6.0).unwrap(), Period::new(6.0, 7.0).unwrap()],
+            vec![3.0, 4.0],
+        );
+        let (bound, report) = BoundObs::bind(vec![s]).expect("a contiguous declaration binds");
+        assert!(!report.is_fatal());
+
+        assert_eq!(bound.times(), &[5.0, 6.0, 7.0],
+            "the first period's START is a boundary the integrator must stop at");
+        assert_eq!(bound.at_union_for_test(0), &[None, Some(0), Some(1)],
+            "nothing is SCORED at 5; the two rows score at their stops");
+        assert_eq!(bound.reset_at_union_for_test(0), &[true, true, false],
+            "the bin resets where each period OPENS (5 and 6), never at the final stop");
+    }
+
+    #[test]
+    fn an_undeclared_stream_still_resets_where_it_scores() {
+        // The transitional variant keeps today's exact schedule: reset right
+        // after scoring, at every stop. Pinned so the fix to declared streams
+        // cannot leak into unmigrated ones.
+        let (bound, _) = BoundObs::bind(vec![
+            spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
+        ]).expect("binds");
+        assert_eq!(bound.times(), &[1.0, 2.0, 3.0]);
+        assert_eq!(bound.reset_at_union_for_test(0), &[true, true, true]);
     }
 
     #[test]

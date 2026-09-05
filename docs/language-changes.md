@@ -59,6 +59,16 @@ uniform form closes strictly after the row's label, so none of them reproduces
 the undeclared reading. If you need the old numbers exactly, shift the file's
 time column back one period rather than looking for a form that preserves them.
 
+**A declared first period opens where it says, not at `simulate.from`.** An
+undeclared stream's first bin runs from the start of the run to the first row —
+the whole warm-up scored against one datum, which is what W329 warns about and
+`condition_from` exists to cut. A declared stream needs neither: its first bin
+opens at the first period's start and the warm-up before it is discarded. So on
+a declared stream `condition_from` is refused (it would silently truncate a
+stated window) and W329 is not emitted (the window it would infer has been
+stated). A first period opening _before_ `simulate.from` is an error — that time
+is never simulated.
+
 **Diagnostics.** `E347` — more than one temporal anchor (a `: time` column and
 window columns together, half a window pair, `covers` alongside window columns),
 or `covers` naming a column that is not the stream's time column. `E348` —

@@ -2,8 +2,12 @@
 
 - **Status:** Accepted — spec, implement against this. Steps 0–2 landed (the
   runtime `Period`/`StreamTimes`, the `ir/VERSION` 0.39 bump, the `covers` DSL
-  surface and the loader); the migration that makes the declaration REQUIRED,
-  gap support, `compare`'s window gate and the output columns are outstanding.
+  surface and the loader), and the reset/score split for the LEADING edge — a
+  declared first period opens at its own start via a reset-only union boundary,
+  so the accumulator no longer spans the warm-up. Outstanding: interior gaps
+  (the same mechanism, behind lifting the contiguity refusal, with its own
+  oracle), the migration that makes the declaration REQUIRED, `compare`'s window
+  gate and the output columns.
 - **Issue:** gh#833
 - **Supersedes:** `2026-09-04-explicit-observation-windows.md`
 - **Area:** IR (`ObservationModel`, observation rows), runtime
