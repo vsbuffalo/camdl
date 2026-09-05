@@ -332,7 +332,21 @@ pub fn unconditional_smc_pass(
         }
 
         // ── 4. Weight ──
+        //
+        // SCORE → CHECK → RESET, in three passes rather than one closure. The
+        // reset used to run in the same closure that scores, so by the time the
+        // collapse check below read the swarm, every particle's `acc` had
+        // already been zeroed and the evidence for WHAT the model managed at
+        // this observation was gone. The three passes are equivalent
+        // arithmetic in a different order: every slot is particle-local
+        // (`log_weights`, `cum_flows`, `acc`, `counts`, `deaths` are zipped
+        // index-wise), nothing between the passes mutates `acc` or `cum_flows`,
+        // and the check is a read-only reduction. Pinned byte-for-byte by
+        // `tests/gate_unconditional_pass_ab.rs`.
         if let Some(&obs_idx) = obs_at_substep.get(&s) {
+            // SCORE. `fold_into_acc` stays HERE, not in the reset pass: it
+            // accumulates (`acc[k] += bin`), so deferring it past the score
+            // would silently score against an unclosed interval.
             log_weights
                 .par_iter_mut()
                 .zip(cum_flows.par_iter_mut())
@@ -341,7 +355,7 @@ pub fn unconditional_smc_pass(
                 .zip(deaths.as_slice().par_iter())
                 .for_each(|((((lw, cflows), a), cnt), &dead)| {
                     // FOLD (Phase 2a): close the interval's per-transition flows
-                    // into the per-stream bins BEFORE scoring, then reset — the
+                    // into the per-stream bins BEFORE scoring — the
                     // per-transition tally blanket, the per-stream bins only for
                     // the Interval streams scheduled at this union index.
                     obs_model.fold_into_acc(cflows, a);
@@ -350,17 +364,24 @@ pub fn unconditional_smc_pass(
                     } else {
                         obs_model.log_likelihood_from_flows_and_counts(a, cnt, obs_idx, params)
                     };
-                    for f in cflows.iter_mut() {
-                        *f = 0;
-                    }
-                    obs_model.reset_due_acc(obs_idx, a);
                 });
+            // CHECK, while `acc` and `counts` still hold what was scored.
             if !log_weights.iter().any(|w| w.is_finite()) {
                 return Ok(UnconditionalPass::NoSupport(InitFallback::SwarmCollapsed {
                     obs_index: obs_idx,
                     substep: s,
                 }));
             }
+            // RESET.
+            cum_flows
+                .par_iter_mut()
+                .zip(acc.par_iter_mut())
+                .for_each(|(cflows, a)| {
+                    for f in cflows.iter_mut() {
+                        *f = 0;
+                    }
+                    obs_model.reset_due_acc(obs_idx, a);
+                });
         } else {
             for (lw, &dead) in log_weights.iter_mut().zip(deaths.as_slice()) {
                 *lw = if dead { f64::NEG_INFINITY } else { 0.0 };
