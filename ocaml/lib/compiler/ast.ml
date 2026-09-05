@@ -418,11 +418,29 @@ type obs_col_role =
   | ColTime
   | ColDim   of string
   | ColValue of param_type
+  (* gh#833: the opening / closing boundary of the period this row covers.
+     Declared as a PAIR and mutually exclusive with [ColTime] — a stream
+     names exactly one temporal anchor, either a time column or a window
+     pair. [ColWindowStop] doubles as the stream's fit time source. *)
+  | ColWindowStart
+  | ColWindowStop
 
 (* A declared file column: header name + role. *)
 type obs_column = {
   oc_name : string;
   oc_role : obs_col_role;
+}
+
+(* `covers = <form>(<time column>, <duration>?)` (gh#833), as written. The
+   form name and the column are kept verbatim so the expander can check the
+   column against the stream's declared time column and report the author's
+   own spelling; the duration stays an [expr] so it reuses ordinary unit
+   handling (`7 'days`) and may also name a data column for a per-row width. *)
+type obs_covers = {
+  ocv_form : string;        (* "day" | "starting_on" | "ending_on" *)
+  ocv_col  : string;        (* the time column named in the call *)
+  ocv_span : expr option;   (* absent for `day(t)` *)
+  ocv_loc  : loc;
 }
 
 type obs_decl = {
@@ -447,6 +465,12 @@ type obs_decl = {
      `simulate --obs` writes synthetic rows. Optional and never consulted by
      the fit path (the data file's `time` column drives there). *)
   oschedule   : schedule_core option;
+  (* `covers = day(t) | starting_on(t, d) | ending_on(t, d)` (gh#833): what
+     each row covers. Surface-level and unlowered — the expander converts the
+     duration to axis units and picks the anchor. [None] is either a stream
+     that declared nothing (transitional) or one carrying window columns,
+     which ARE the declaration and need no `covers =` line. *)
+  ocovers     : obs_covers option;
   odoc        : doc option;   (* `#'` doc block (non-semantic; inspect only) *)
   oloc        : loc;
 }

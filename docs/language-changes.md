@@ -13,6 +13,63 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-09-05 — an observation stream can state what each row covers
+
+**What.** An incidence stream can now declare the period each of its rows
+covers, rather than having one inferred from the spacing between rows. Four
+forms, and `covers` becomes a reserved word:
+
+```camdl
+cases {
+  columns   { time : time, cases : count }
+  covers    = day(time)                    # row D covers [D, D+1)
+  projected = incidence(infection)
+  cases     ~ poisson(rate = projected)
+}
+```
+
+| form                                   | the row covers          |
+| -------------------------------------- | ----------------------- |
+| `covers = day(time)`                   | `[D, D+1 day)`          |
+| `covers = starting_on(time, 7 'days)`  | `[D, D+7 days)`         |
+| `covers = ending_on(time, 7 'days)`    | `[D−6 days, D+1 day)`   |
+| `window_start` + `window_stop` columns | exactly `[start, stop)` |
+
+The duration may also name a data column, for a file carrying its own per-row
+width:
+
+```camdl
+covers = ending_on(time, days_covered)
+```
+
+`window_start` / `window_stop` are new `columns { }` roles. They are the
+declaration on their own — a stream carrying them does not also write
+`covers = ...` — and they are the only form that can state a gap between
+consecutive rows.
+
+**Migration.** Nothing is required yet: a stream that declares nothing still
+compiles and is scored exactly as before. Declaring is currently optional and
+will become required, because no default is right — the same date column means
+three different spans depending on the source.
+
+**Declaring CHANGES YOUR NUMBERS, and that is the point.** An undeclared stream
+is scored over `(previous row, this row]` — a window nobody wrote down, which
+for a file labelled by the day the count describes reads it one day early.
+`covers = day(time)` moves the scoring onto the day the label names. Every
+uniform form closes strictly after the row's label, so none of them reproduces
+the undeclared reading. If you need the old numbers exactly, shift the file's
+time column back one period rather than looking for a form that preserves them.
+
+**Diagnostics.** `E347` — more than one temporal anchor (a `: time` column and
+window columns together, half a window pair, `covers` alongside window columns),
+or `covers` naming a column that is not the stream's time column. `E348` —
+`covers` or window columns on a stream whose `projected` reads an instant; a
+state reading has no window. `E349` — a malformed form: unknown name, `day(...)`
+given a width, `starting_on`/`ending_on` missing one, or a per-row width naming
+something that is not a declared value column.
+
+---
+
 ## 2026-09-04 — a timezone offset on a date is _rejected_, not discarded
 
 **What.** A trailing zone designator on an ISO date — `Z`, `z`, `+HH:MM`,

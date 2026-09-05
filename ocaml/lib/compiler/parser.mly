@@ -114,22 +114,58 @@
         ~msg:(Printf.sprintf "unknown likelihood '%s': expected one of neg_binomial, poisson, normal, binomial, beta_binomial, beta, bernoulli, diagnostic_test, zero_inflated" s);
       LikPoisson args
 
+  (* Destructure `covers = <form>(<time column>[, <span>])` (gh#833) out of a
+     parsed expression. Shape only — whether the form NAME is one of the three,
+     whether the column matches the stream's declared time column, and what the
+     span means in axis units are all the expander's to judge, since only it
+     knows the stream and the model's time unit. On a malformed shape we report
+     and return a placeholder so parsing continues and the author sees the rest
+     of their errors. *)
+  let build_covers e ~sp ~ep =
+    let loc = Parser_errors.ast_loc_of ~sp ~ep in
+    let bad msg =
+      Parser_errors.push_error_hint ~sp ~ep
+        ~code:"E349"
+        ~msg:(Printf.sprintf "invalid `covers` declaration: %s" msg)
+        ~hint:"write `covers = day(<time column>)`, \
+               `covers = starting_on(<time column>, <duration>)`, or \
+               `covers = ending_on(<time column>, <duration>)`";
+      { ocv_form = ""; ocv_col = ""; ocv_span = None; ocv_loc = loc }
+    in
+    match e with
+    | EFuncCall (form, [("", EIdent (col, _))]) ->
+      { ocv_form = form; ocv_col = col; ocv_span = None; ocv_loc = loc }
+    | EFuncCall (form, [("", EIdent (col, _)); ("", span)]) ->
+      { ocv_form = form; ocv_col = col; ocv_span = Some span; ocv_loc = loc }
+    | EFuncCall (_, (_ :: _ as args))
+      when List.exists (fun (k, _) -> k <> "") args ->
+      bad "its arguments are positional, not keyword — write `day(time)`, \
+           not `day(column = time)`"
+    | EFuncCall (form, args) ->
+      bad (Printf.sprintf
+             "`%s` takes the stream's time column and (except for `day`) a \
+              duration; got %d argument(s)" form (List.length args))
+    | _ ->
+      bad "it must be a call naming the form"
+
   let build_obs_decl name ibs src kvs ~doc ~sp ~ep =
-    let cols  = ref None in
-    let sched = ref None in
-    let proj  = ref None in
-    let meas  = ref None in
+    let cols   = ref None in
+    let sched  = ref None in
+    let proj   = ref None in
+    let meas   = ref None in
+    let covers = ref None in
     List.iter (function
-      | `Columns c     -> cols  := Some c
-      | `Schedule s    -> sched := Some s
-      | `Proj p        -> proj  := Some p
-      | `Measurement m -> meas  := Some m
-      | `Lik l         -> meas  := Some { om_scored = ""; om_lik = l }
+      | `Columns c     -> cols   := Some c
+      | `Schedule s    -> sched  := Some s
+      | `Proj p        -> proj   := Some p
+      | `Covers c      -> covers := Some c
+      | `Measurement m -> meas   := Some m
+      | `Lik l         -> meas   := Some { om_scored = ""; om_lik = l }
     ) kvs;
     { oname = name; oindices = ibs;
       osource = src; ocolumns = !cols;
       omeasurement = !meas; oprojection = !proj;
-      oschedule = !sched; odoc = doc;
+      oschedule = !sched; ocovers = !covers; odoc = doc;
       oloc = Parser_errors.ast_loc_of ~sp ~ep }
 
   (* A doc line whose first non-space character is `@` is a tag line; split it
@@ -307,7 +343,7 @@
 %token CONSECUTIVE IN BY DIMENSIONS ONLY REAL INTEGER RATE PROBABILITY POSITIVE COUNT
 %token INSTANT DURATION
 %token AND OR NOT IF THEN ELSE EVERY UNTIL AT_KW FORMAT DESCRIPTION NULL TRANSFER LIKELIHOOD ORIGIN BALANCE EVENTS ADD AT_DAY
-%token COLUMNS EMIT_SCHEDULE
+%token COLUMNS EMIT_SCHEDULE COVERS
 %token QUANTITIES   (* proposal 2026-06-25: generated quantities *)
 %token CONTRASTS   (* counterfactual contrasts, proposal 2026-06-25 *)
 %token REACTIVE_INTERVENTIONS WHEN ACTION   (* gh#204 *)
@@ -924,6 +960,16 @@ obs_kv:
      (§2.5). NOTE the literal form `every N` / `at [...]` (no inner `=`),
      distinct from the `every = ...` field form used by output/interventions. *)
   | EMIT_SCHEDULE EQ s = emit_schedule_spec { `Schedule s }
+  (* `covers = day(t) | starting_on(t, d) | ending_on(t, d)` — what each row
+     covers (gh#833). Parsed as an ordinary expression and destructured in
+     [build_covers], the same shape `origin = date("...")` uses: a dedicated
+     production for each arity collides with `expr`'s own call rule and makes
+     menhir resolve a conflict arbitrarily. Going through `expr` also means
+     the duration reuses the unit handling `emit_schedule = every 7 'days`
+     already goes through, and leaves `day` / `starting_on` / `ending_on`
+     usable as ordinary identifiers elsewhere — only `covers` is reserved. *)
+  | COVERS EQ e = expr
+      { `Covers (build_covers e ~sp:$startpos ~ep:$endpos) }
   (* `<scored_col> ~ Dist(kw = ..., ...)` — the measurement model (§2.1).
      The `| dim` pooling suffix (legal on a prior `~`) is meaningless here and
      is rejected by [obs_measurement_pooled] below. *)
@@ -992,15 +1038,18 @@ obs_likelihood:
 obs_column:
   | name = IDENT COLON role = IDENT comma_opt
       { let r = match role with
-          | "time" -> ColTime
-          | "dim"  -> ColDim name
+          | "time"         -> ColTime
+          | "window_start" -> ColWindowStart
+          | "window_stop"  -> ColWindowStop
+          | "dim"          -> ColDim name
           | other  ->
             Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
               ~code:"E274"
               ~msg:(Printf.sprintf
                 "column '%s': unknown role '%s'" name other)
-              ~hint:"role must be `time`, `dim`, or a value type \
-                     (count, real, probability, positive)";
+              ~hint:"role must be `time`, `window_start`, `window_stop`, \
+                     `dim`, or a value type (count, real, probability, \
+                     positive)";
             ColValue PReal
         in { oc_name = name; oc_role = r } }
   | name = IDENT COLON pk = param_kind comma_opt

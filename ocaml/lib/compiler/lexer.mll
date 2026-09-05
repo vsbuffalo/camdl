@@ -122,6 +122,7 @@
       "origin",        ORIGIN;
       "columns",       COLUMNS;
       "emit_schedule", EMIT_SCHEDULE;
+      "covers",        COVERS;
     ];
     t
 
