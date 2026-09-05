@@ -53,6 +53,7 @@
 use io::trajectories::{PosteriorDraw, TrajColumnSpec};
 use sim::inference::convergence::{
     rank_convergence, ConvergenceError, RankConvergence, DEGENERATE_REL_TOL,
+    MIN_DRAWS_FOR_INFORMATIVE_ESS,
 };
 use sim::inference::pgas::RENEWAL_BINS;
 use sim::state::Flows;
@@ -706,6 +707,26 @@ impl LatentConvergence {
             "  ESS is over the {} saved path(s) per chain, not every sweep; table: {}\n",
             self.n_draws, LATENT_CONVERGENCE_TSV
         ));
+        // At this many saved paths the ESS estimator returns a constant, so
+        // the row above says the same number in every bin no matter what the
+        // paths did. Printing it beside R-hat without saying so invites the
+        // reader to treat it as a measurement of mixing (gh#822).
+        if self.n_draws < MIN_DRAWS_FOR_INFORMATIVE_ESS {
+            s.push_str(&format!(
+                "  ESS min (mixed) is {} in every bin because it measures nothing at {} \
+                 saved path(s) per chain: the estimator splits each chain in half, and a \
+                 half of {} draw(s) is too short to run its autocorrelation truncation, so \
+                 every cell reports {} chains x ({}/2) draws whatever the paths did\n\
+                 \x20 save {} or more paths per chain (n_trajectories) for an ESS that \
+                 responds to them; R-hat above is unaffected — it uses no autocorrelation\n",
+                self.n_chains * (self.n_draws / 2),
+                self.n_draws,
+                self.n_draws / 2,
+                self.n_chains,
+                self.n_draws,
+                MIN_DRAWS_FOR_INFORMATIVE_ESS,
+            ));
+        }
         s
     }
 
@@ -874,6 +895,51 @@ mod tests {
         assert!((mixed.between_sd - b).abs() < 1e-12);
         assert!((mixed.within_sd - w).abs() < 1e-12);
         assert!((mixed.mean - gm).abs() < 1e-12);
+    }
+
+    /// `ESS min (mixed)` read exactly 40 in all ten bins of a real 8-chain,
+    /// 10-path PGAS stage. That is not a coincidence and not a floor the
+    /// reduction imposes: below
+    /// [`MIN_DRAWS_FOR_INFORMATIVE_ESS`] the estimator returns
+    /// `n_chains * (n_draws / 2)` for any input at all, so the row counts
+    /// draws and says nothing about mixing. The number matches the reference
+    /// implementation and is left alone; what the block owes the reader is the
+    /// sentence saying so.
+    #[test]
+    fn the_ess_row_says_when_it_is_a_constant_rather_than_a_measurement() {
+        // The shape the real stage had: 8 chains, 10 saved paths each.
+        let chains = block(8, 10, 12, 2, cloud);
+        let lc = latent_convergence(&chains, &names(2)).unwrap();
+        let ess: Vec<f64> = lc.cells.iter()
+            .filter_map(|c| c.conv.as_ref())
+            .map(|c| c.ess_bulk)
+            .collect();
+        assert!(!ess.is_empty(), "the fixture must produce assessable cells");
+        assert!(ess.iter().all(|&e| e == 40.0),
+            "every mixed cell reports 8 x (10/2) = 40 whatever the paths did: {ess:?}");
+        let report = lc.report();
+        assert!(
+            report.contains(
+                "ESS min (mixed) is 40 in every bin because it measures nothing at 10 \
+                 saved path(s) per chain"),
+            "the block must say the row is a constant, and which constant:\n{report}");
+        assert!(report.contains("save 12 or more paths per chain (n_trajectories)"),
+            "and what to change to get a measurement:\n{report}");
+
+        // At the threshold the estimator runs, so the caveat must NOT fire —
+        // otherwise it would read as a permanent disclaimer rather than a
+        // statement about this stage.
+        let enough = block(8, MIN_DRAWS_FOR_INFORMATIVE_ESS, 12, 2, cloud);
+        let lc = latent_convergence(&enough, &names(2)).unwrap();
+        let report = lc.report();
+        assert!(!report.contains("measures nothing"),
+            "with enough saved paths the ESS is a measurement:\n{report}");
+        let ess: Vec<f64> = lc.cells.iter()
+            .filter_map(|c| c.conv.as_ref())
+            .map(|c| c.ess_bulk)
+            .collect();
+        assert!(ess.iter().any(|&e| e != ess[0]),
+            "and it varies across cells: {ess:?}");
     }
 
     #[test]

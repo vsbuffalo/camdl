@@ -216,6 +216,29 @@ impl std::error::Error for ConvergenceError {}
 /// `degenerate_w_threshold` already used for the IF2 chain-agreement statistic.
 pub const DEGENERATE_REL_TOL: f64 = 1e-12;
 
+/// Draws per chain below which the bulk and tail ESS of
+/// [`rank_convergence`] are a CONSTANT rather than a measurement: exactly half
+/// the pooled draw count, whatever the draws happen to be.
+///
+/// The estimator splits every chain in half before estimating the effective
+/// sample size, and Geyer's initial-positive-sequence truncation cannot take
+/// even its first step unless a half holds more than five draws. Below that
+/// the estimated integrated autocorrelation time -- the factor by which
+/// within-chain autocorrelation inflates the variance of a chain mean --
+/// falls back to its `-1 + 2*rho_0 + rho_0 = 2` default, so ESS comes out as
+/// `n_chains * (n_draws / 2)` for every input (integer division: an odd draw
+/// count loses its middle draw to the split). Twelve draws per chain is the
+/// smallest count whose halves (six) clear the threshold; below six draws a
+/// half is under the three the autocovariance needs and ESS is `NaN` instead.
+///
+/// `posterior::ess_bulk` behaves the same way; this is a property of the
+/// reference estimator, not a camdl deviation, and the oracle case
+/// `two_chains_short` (2 chains x 8 draws, ESS 8) pins it. The number is
+/// therefore not wrong and must not be "corrected" -- but a report that prints
+/// it beside real diagnostics has to say that it measures nothing, or a reader
+/// will read mixing into a quantity that only counts draws.
+pub const MIN_DRAWS_FOR_INFORMATIVE_ESS: usize = 12;
+
 /// The rank-normalized convergence statistics for one parameter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RankConvergence {
@@ -670,6 +693,50 @@ mod tests {
 
     fn ramp(n: usize, start: f64, step: f64) -> Vec<f64> {
         (0..n).map(|i| start + step * i as f64).collect()
+    }
+
+    /// `MIN_DRAWS_FOR_INFORMATIVE_ESS` is a claim about the estimator, so it
+    /// is pinned against the estimator rather than left as a comment.
+    ///
+    /// Below the threshold, bulk-ESS is exactly half the split draw count for
+    /// two datasets that share nothing but their shape -- one strongly
+    /// autocorrelated, one strongly antithetic -- which is what "measures
+    /// nothing" means. At the threshold the two separate. This is the
+    /// mechanism behind
+    /// `ESS min (mixed)` reading the same number in every bin of the
+    /// latent-path convergence block when a stage saves ten paths per chain.
+    #[test]
+    fn ess_below_the_informative_threshold_is_half_the_draws_whatever_the_draws() {
+        // Deterministic, reproducible, and deliberately unalike: `sticky`
+        // repeats each value (near-perfect positive autocorrelation), `mixed`
+        // alternates far apart (strongly antithetic).
+        let sticky = |c: usize, n: usize| -> Vec<Vec<f64>> {
+            (0..c).map(|k| (0..n)
+                .map(|i| k as f64 + (i / 2) as f64 * 0.5).collect()).collect()
+        };
+        let mixed = |c: usize, n: usize| -> Vec<Vec<f64>> {
+            (0..c).map(|k| (0..n)
+                .map(|i| k as f64 + if i % 2 == 0 { 1.0 } else { -1.0 } + i as f64 * 1e-3)
+                .collect()).collect()
+        };
+        for n in 6..MIN_DRAWS_FOR_INFORMATIVE_ESS {
+            let a = rank_convergence(&sticky(8, n)).expect("statistics defined");
+            let b = rank_convergence(&mixed(8, n)).expect("statistics defined");
+            // The split drops an odd middle draw, so the pinned value is
+            // `n_chains * (n_draws / 2)`, not `n_chains * n_draws / 2`.
+            let pinned = (8 * (n / 2)) as f64;
+            assert_eq!(a.ess_bulk, pinned,
+                "{n} draws/chain: bulk-ESS is pinned at half the split draws");
+            assert_eq!(b.ess_bulk, pinned,
+                "{n} draws/chain: two unlike datasets give the same ESS");
+        }
+        // At the threshold the truncation runs and the two datasets separate.
+        let n = MIN_DRAWS_FOR_INFORMATIVE_ESS;
+        let a = rank_convergence(&sticky(8, n)).expect("statistics defined");
+        let b = rank_convergence(&mixed(8, n)).expect("statistics defined");
+        assert_ne!(a.ess_bulk, b.ess_bulk,
+            "at {n} draws/chain ESS must respond to the draws: {} vs {}",
+            a.ess_bulk, b.ess_bulk);
     }
 
     /// Every refusal must survive the trip to `*_summary.json` and back with
