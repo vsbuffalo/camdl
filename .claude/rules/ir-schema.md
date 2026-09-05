@@ -42,7 +42,8 @@ autodiff a compact pattern match in `ocaml/lib/ir/autodiff.ml`.
 Both language implementations must change atomically.
 
 1. Update `ir/schema.json` + bump `ir/VERSION`
-2. Update OCaml types in `ocaml/lib/ir/` (ir.ml, serialize.ml, deserialize.ml)
+2. Update OCaml types in `ocaml/lib/ir/` (`ir.ml` for the types, `serde.ml` for
+   both directions — there is no `serialize.ml`/`deserialize.ml`)
 3. Update Rust types in `rust/crates/ir/src/`
 4. `make test-fast` — fix type errors (then full `make test` before the commit)
 5. `make update-golden` — regenerate all golden files, then re-capture any gate
