@@ -124,6 +124,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -248,6 +249,7 @@ fn smoke_pgas_nuts_estimates_rho() {
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

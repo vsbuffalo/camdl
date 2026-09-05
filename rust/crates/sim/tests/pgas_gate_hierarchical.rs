@@ -121,6 +121,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
             obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
+            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     )

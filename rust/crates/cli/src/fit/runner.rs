@@ -1733,6 +1733,7 @@ pub(crate) fn stream_specs_from_obs_streams(
             observations: s.cells.clone(),
             obs_times: s.data.iter().map(|o| o.time).collect(),
             aux: s.aux.clone(),
+            covers: None,
         })
         .collect()
 }
