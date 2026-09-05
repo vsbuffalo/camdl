@@ -637,8 +637,12 @@ pub fn run_stage(
                                     chain_starts[chain_id][spec.index],
                                 ))
                                 .collect();
+                        // A PF degeneracy, not a swarm that lost support at
+                        // a named measurement: nothing re-scored an observation
+                        // here, so there is no `StreamAttempt` to carry.
                         collector.push(DiagnosticKind::BadInit {
                             chain_id, params, reason: reason.clone(),
+                            attempts: Vec::new(),
                         });
                         eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
                             chain_id + 1, reason);

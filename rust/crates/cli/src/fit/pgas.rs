@@ -1051,6 +1051,15 @@ pub fn run_stage(
                          (log-likelihood terms: transition {:.4}, observation \
                          {:.4}, ivp {:.4}; log prior {:.4}); {}",
                         log_posterior, transition, observation, ivp, log_prior, init);
+                    // The structured half of that prose. `init`'s Display
+                    // renders from these same records, so the sentence a user
+                    // reads and the fields a tool parses cannot disagree — and a
+                    // consumer never has to regex `reason` to recover which
+                    // measurement refused.
+                    let attempts = init
+                        .fallback()
+                        .map(|fb| fb.attempts().to_vec())
+                        .unwrap_or_default();
                     // gh#513: report the start THIS chain ran from, not the
                     // configured one. `chain_starts[chain_id]` is the same
                     // vector handed to `run_pgas` above and the same one
@@ -1064,7 +1073,7 @@ pub fn run_stage(
                             ))
                             .collect();
                     collector.push(DiagnosticKind::BadInit {
-                        chain_id, params, reason: reason.clone(),
+                        chain_id, params, reason: reason.clone(), attempts,
                     });
                     eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
                         chain_id + 1, reason);

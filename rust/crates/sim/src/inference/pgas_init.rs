@@ -367,9 +367,26 @@ pub fn unconditional_smc_pass(
                 });
             // CHECK, while `acc` and `counts` still hold what was scored.
             if !log_weights.iter().any(|w| w.is_finite()) {
+                // Reduce over LIVE particles only. A particle killed earlier by
+                // the process model carries `-inf` without the observation model
+                // having been consulted (the score pass never calls it for a
+                // dead particle), so pooling the two would report a
+                // process-model failure as a unanimous observation refusal —
+                // exactly the confusion this record exists to remove. `n_dead`
+                // is reported beside the live reductions instead.
+                let live: Vec<(&[u64], &[i64])> = acc
+                    .iter()
+                    .zip(counts.iter())
+                    .zip(deaths.as_slice())
+                    .filter(|(_, &dead)| !dead)
+                    .map(|((a, cnt), _)| (a.as_slice(), cnt.as_slice()))
+                    .collect();
+                let attempts =
+                    obs_model.stream_attempts(obs_idx, &live, deaths.count(), params);
                 return Ok(UnconditionalPass::NoSupport(InitFallback::SwarmCollapsed {
                     obs_index: obs_idx,
                     substep: s,
+                    attempts,
                 }));
             }
             // RESET.

@@ -18,6 +18,7 @@ use crate::inference::obs_loglik::{
     negbin_logpmf_grad, discretized_normal_logpmf_grad, poisson_logpmf_grad,
     beta_binomial_logpmf_grad, beta_logpdf, beta_logpdf_grad,
 };
+use crate::inference::obs_attempt::NegInfCause;
 use crate::inference::types::LOG_PROB_FLOOR;
 use ir::observation::ObservationModel;
 use rand::prelude::Distribution;
@@ -151,6 +152,192 @@ pub(crate) fn eval_likelihood_resolved(
             let p = eval_resolved(pi, &ctx(projected));
             zi_negbin_logpmf(observed, m, k, p)
         }
+    }
+}
+
+/// Say WHICH `−∞` guard [`eval_likelihood_resolved`] took, for one particle at
+/// one stream.
+///
+/// Call only when that function has already returned `−∞`: this is the
+/// explanation, not the decision. The value function stays the sole authority
+/// on whether a term is `−∞`; if the guard walk here ever drifts from it the
+/// result is [`NegInfCause::Unclassified`], never a wrong log-density.
+///
+/// Failure-path only (`pgas_init`'s collapse report). It re-evaluates each
+/// likelihood argument through the same `EvalCtx` the value function builds, so
+/// the arguments it classifies are the ones that were scored.
+///
+/// The guards are walked in each family's own order, because the order is
+/// load-bearing: `beta_binomial_logpmf` checks `n == 0` FIRST, before the shape
+/// parameters are read, so a zero-effort survey row is exactly `0.0` whatever
+/// the shapes are.
+// Signature deliberately mirrors `eval_likelihood_resolved` argument for
+// argument: the two must be handed the same inputs or the explanation is not
+// about the term that was scored.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn explain_likelihood_neg_inf(
+    likelihood: &ResolvedLikelihood,
+    t: f64,
+    projected: f64,
+    observed: f64,
+    aux: &[(String, f64)],
+    params: &[f64],
+    compiled: &CompiledModel,
+    int_s: &IntState,
+    real_s: &RealState,
+) -> NegInfCause {
+    let ctx = |proj: f64| EvalCtx {
+        model: compiled, int_s, real_s, params, t, dt: 0.0, projected: Some(proj),
+        aux: Some(aux), int_float_override: None, per_eval: None,
+    };
+    let nan = |arg: &str| NegInfCause::ArgumentNaN { arg: arg.to_string() };
+    let domain = |arg: &str, value: f64| NegInfCause::ArgumentOutOfDomain {
+        arg: arg.to_string(),
+        value,
+    };
+    let outside = NegInfCause::ObservedOutsideSupport { observed };
+
+    if observed.is_nan() {
+        return NegInfCause::ObservationNotFinite;
+    }
+
+    // The count families round the observed value and the denominator into
+    // `u64` before the guards see them, so the explanation must too.
+    let k_of = |y: f64| y.round().max(0.0) as u64;
+
+    match likelihood {
+        ResolvedLikelihood::Poisson { rate, .. } => {
+            let r = eval_resolved(rate, &ctx(projected));
+            if r.is_nan() {
+                nan("rate")
+            } else if r <= 0.0 && observed.round() != 0.0 {
+                outside
+            } else {
+                NegInfCause::Unclassified
+            }
+        }
+        ResolvedLikelihood::NegBinomial { mean, dispersion, .. } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let d = eval_resolved(dispersion, &ctx(projected));
+            if m.is_nan() {
+                nan("mean")
+            } else if d.is_nan() {
+                nan("dispersion")
+            } else if m <= 0.0 && observed.round() != 0.0 {
+                outside
+            } else if d <= 0.0 {
+                domain("dispersion", d)
+            } else {
+                NegInfCause::Unclassified
+            }
+        }
+        ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi, .. } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let d = eval_resolved(dispersion, &ctx(projected));
+            let p = eval_resolved(pi, &ctx(projected));
+            if m.is_nan() {
+                nan("mean")
+            } else if d.is_nan() {
+                nan("dispersion")
+            } else if p.is_nan() {
+                // `f64::clamp` returns NaN for NaN, and every `pi > 0` /
+                // `pi < 1` comparison below it is then false, so the mixture
+                // falls through to `-inf`. It is a model argument, not data.
+                nan("pi")
+            } else if observed.round() != 0.0 && p.clamp(0.0, 1.0) >= 1.0 {
+                // All mass at zero: a positive count is impossible.
+                domain("pi", p)
+            } else if m <= 0.0 && observed.round() != 0.0 {
+                outside
+            } else if d <= 0.0 {
+                domain("dispersion", d)
+            } else {
+                NegInfCause::Unclassified
+            }
+        }
+        ResolvedLikelihood::Normal { mean, sd, .. } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let s = eval_resolved(sd, &ctx(projected));
+            if m.is_nan() {
+                nan("mean")
+            } else if s.is_nan() {
+                nan("sd")
+            } else if !(s * s).is_finite() || s * s <= 0.0 {
+                domain("sd", s)
+            } else {
+                // Past the domain guard the discretized-Normal probability is
+                // floored at `tol`, so it never reaches `-inf`.
+                NegInfCause::Unclassified
+            }
+        }
+        ResolvedLikelihood::Binomial { n, p, .. } => {
+            let n_val = eval_resolved(n, &ctx(projected));
+            let p_val = eval_resolved(p, &ctx(projected));
+            let k = k_of(observed);
+            let n_int = k_of(n_val);
+            if n_val.is_nan() {
+                // Checked BEFORE the zero-trials guard: `NaN.round().max(0.0)`
+                // is `0.0` (`f64::max` returns the non-NaN operand), so a NaN
+                // denominator reaches the value function's `n == 0` branch and
+                // would otherwise be reported as a data-only zero-trials row.
+                nan("n")
+            } else if n_int == 0 && k != 0 {
+                NegInfCause::ZeroTrialsPositiveCount
+            } else if p_val.is_nan() {
+                nan("p")
+            } else if k > n_int {
+                NegInfCause::CountExceedsTrials
+            } else if (p_val <= 0.0 && k != 0) || (p_val >= 1.0 && k != n_int) {
+                outside
+            } else {
+                NegInfCause::Unclassified
+            }
+        }
+        ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
+            let n_val = eval_resolved(n, &ctx(projected));
+            let a = eval_resolved(alpha, &ctx(projected));
+            let b = eval_resolved(beta, &ctx(projected));
+            let k = k_of(observed);
+            let n_int = k_of(n_val);
+            if n_val.is_nan() {
+                nan("n")
+            } else if n_int == 0 && k != 0 {
+                NegInfCause::ZeroTrialsPositiveCount
+            } else if a.is_nan() {
+                nan("alpha")
+            } else if b.is_nan() {
+                nan("beta")
+            } else if k > n_int {
+                NegInfCause::CountExceedsTrials
+            } else if a <= 0.0 {
+                domain("alpha", a)
+            } else if b <= 0.0 {
+                domain("beta", b)
+            } else {
+                NegInfCause::Unclassified
+            }
+        }
+        ResolvedLikelihood::Beta { mean, concentration, .. } => {
+            let m = eval_resolved(mean, &ctx(projected));
+            let c = eval_resolved(concentration, &ctx(projected));
+            if m.is_nan() {
+                nan("mean")
+            } else if c.is_nan() {
+                nan("concentration")
+            } else if !(observed > 0.0 && observed < 1.0) {
+                outside
+            } else if c <= 0.0 {
+                domain("concentration", c)
+            } else if !(m > 0.0 && m < 1.0) {
+                // `a = mean·φ` or `b = (1−mean)·φ` non-positive.
+                domain("mean", m)
+            } else {
+                NegInfCause::Unclassified
+            }
+        }
+        // `p` is clamped into `[0, 1]` and floored at `LOG_PROB_FLOOR` before
+        // the log, so this family has no `-inf` route at all.
+        ResolvedLikelihood::Bernoulli { .. } => NegInfCause::Unclassified,
     }
 }
 
