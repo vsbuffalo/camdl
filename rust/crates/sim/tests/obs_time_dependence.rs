@@ -27,7 +27,7 @@ use sim::{
     compiled_model::CompiledModel,
     inference::{
         BoundObs, ParticleState, ObservationModel, MultiStreamObsModel, dense_cells,
-        multi_stream_obs::{StreamSpec, StreamProjection},
+        multi_stream_obs::{StreamSpec, StreamProjection, StreamTimes},
         obs_loglik::poisson_logpmf,
     },
 };
@@ -99,6 +99,7 @@ fn time_varying_obs(compiled: &Arc<CompiledModel>, obs_times: Vec<f64>, observat
     }});
     MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![0]), obs_times),
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: ir::observation::ObservationModel {
                 name: "cases".into(),
@@ -117,9 +118,7 @@ fn time_varying_obs(compiled: &Arc<CompiledModel>, obs_times: Vec<f64>, observat
                 ),
             },
             observations: dense_cells(observations),
-            obs_times,
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap()

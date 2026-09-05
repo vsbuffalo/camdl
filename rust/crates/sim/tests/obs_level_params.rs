@@ -24,7 +24,7 @@ use sim::{
     inference::{
         BoundObs,
         dense_cells,
-        multi_stream_obs::{MultiStreamObsModel, StreamSpec},
+        multi_stream_obs::{MultiStreamObsModel, StreamSpec, StreamTimes},
         traits::ObservationModel,
         ParticleState,
     },
@@ -136,12 +136,11 @@ fn test_obs_param_changes_loglik() {
     let obs_values = vec![8.0, 7.0, 5.0]; // some observed death counts
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), obs_times),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(obs_values),
-            obs_times,
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -194,12 +193,11 @@ fn test_obs_param_from_flows() {
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), vec![10.0]),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![8.0]),
-            obs_times: vec![10.0],
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -234,12 +232,11 @@ fn test_obs_model_consistency() {
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), vec![10.0, 20.0]),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![8.0, 7.0]),
-            obs_times: vec![10.0, 20.0],
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

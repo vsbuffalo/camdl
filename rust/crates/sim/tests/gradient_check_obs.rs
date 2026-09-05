@@ -22,7 +22,7 @@ use sim::compiled_model::CompiledModel;
 use sim::inference::pgas::{simulate_reference, complete_data_loglik, build_obs_at_substep};
 use sim::inference::pgas_grad::complete_data_loglik_grad;
 use sim::inference::{BoundObs, MultiStreamObsModel, dense_cells};
-use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, eval_stream_projection};
+use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes, eval_stream_projection};
 use sim::inference::particle_filter::Observation;
 use sim::rng::StatefulRng;
 use sim::state::{IntState, RealState};
@@ -60,12 +60,11 @@ fn build_obs_model(
     let specs: Vec<StreamSpec> = model.observations.iter().enumerate().map(|(si, om)| {
         let projection = StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap();
         StreamSpec {
+            times: StreamTimes::undeclared_for(&projection, obs_times.to_vec()),
             projection,
             ir_model: om.clone(),
             observations: dense_cells(per_stream_data[si].clone()),
-            obs_times: obs_times.to_vec(),
             aux: vec![],
-            covers: None,
         }
     }).collect();
     MultiStreamObsModel::new(BoundObs::bind(specs).unwrap().0, compiled).unwrap()

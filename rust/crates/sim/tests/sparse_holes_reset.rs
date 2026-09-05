@@ -39,7 +39,7 @@ use sim::{
         bootstrap_filter, dense_cells,
         ChainBinomialProcess, BoundObs, MultiStreamObsModel, ObsCell,
         traits::SMCConfig,
-        multi_stream_obs::{StreamProjection, StreamSpec},
+        multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes},
     },
 };
 
@@ -124,12 +124,11 @@ fn obs_model(compiled: Arc<CompiledModel>, cells: Vec<Option<ObsCell>>, obs_time
     let inflow = compiled.model.transitions.iter()
         .position(|t| t.name == "inflow").unwrap();
     let spec = StreamSpec {
+        times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![inflow]), obs_times),
         projection: StreamProjection::FlowSum(vec![inflow]),
         ir_model: compiled.model.observations[0].clone(),
         observations: cells,
-        obs_times,
         aux: vec![],
-        covers: None,
     };
     MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, compiled).unwrap()
 }

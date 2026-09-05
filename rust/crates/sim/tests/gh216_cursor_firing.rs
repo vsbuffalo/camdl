@@ -54,7 +54,7 @@ use sim::{
     inference::{
         correlated_pf::{bootstrap_filter_correlated, PFRandomState},
         if2::{run_if2, EstimatedParam, IF2Config, Transform},
-        multi_stream_obs::{dense_cells, BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec},
+        multi_stream_obs::{dense_cells, BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec, StreamTimes},
         obs_loglik::poisson_logpmf,
         particle_filter::{bootstrap_filter, Observation},
         pgas::{build_substep_grid, run_pgas, simulate_reference_on_grid, PGASConfig},
@@ -673,9 +673,8 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
             stratum: vec![],
         },
         observations: dense_cells(values),
-        obs_times: obs_times.to_vec(),
+        times: StreamTimes::Instants(obs_times.to_vec()),
         aux: vec![],
-        covers: None,
     };
     MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap()
 }

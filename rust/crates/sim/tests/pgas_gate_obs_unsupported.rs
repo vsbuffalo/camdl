@@ -28,7 +28,7 @@ use sim::error::SimError;
 use sim::inference::if2::{EstimatedParam, Transform};
 use sim::inference::BoundObs;
 use sim::inference::dense_cells;
-use sim::inference::multi_stream_obs::{MultiStreamObsModel, StreamSpec, StreamProjection};
+use sim::inference::multi_stream_obs::{MultiStreamObsModel, StreamSpec, StreamProjection, StreamTimes};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{run_pgas, simulate_reference, PGASConfig};
 use sim::inference::pmmh::Prior;
@@ -149,12 +149,11 @@ fn attempt_nuts_fit_with(
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&stream_proj, obs.iter().map(|o| o.time).collect()),
             projection: stream_proj,
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
-            obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

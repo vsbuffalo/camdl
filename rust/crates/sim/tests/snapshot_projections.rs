@@ -29,7 +29,7 @@ use sim::{
     inference::{
         BoundObs,
         dense_cells,
-        multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec},
+        multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec, StreamTimes},
         traits::ObservationModel,
         ParticleState,
     },
@@ -109,12 +109,11 @@ fn build_obs_model(compiled: &Arc<CompiledModel>, projection: StreamProjection, 
     let obs_ir = compiled.model.observations[0].clone();
     MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&projection, vec![5.0]),
             projection,
             ir_model: obs_ir,
             observations: dense_cells(vec![observed]),
-            obs_times: vec![5.0],
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap()
@@ -157,12 +156,11 @@ fn current_pop_sum_from_ir_resolves_stratified_compartments() {
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&projection, vec![5.0]),
             projection,
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![20.0]),
-            obs_times: vec![5.0],
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();
@@ -417,12 +415,11 @@ fn snapshot_reads_post_intervention_state() {
     ).unwrap();
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&projection, vec![5.0]),
             projection,
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![500.0]),
-            obs_times: vec![5.0],
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     ).unwrap();

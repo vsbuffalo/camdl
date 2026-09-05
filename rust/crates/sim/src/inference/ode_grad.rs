@@ -89,7 +89,7 @@ pub fn det_grad(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec};
+    use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes};
     use crate::inference::{compute_ode_loglik, dense_cells, BoundObs, MultiStreamObsModel};
     use ir::deriv::DerivEntry;
     use ir::expr::{BinOp, ConstExpr, Expr, ParamExpr, ProjectedExpr};
@@ -199,12 +199,11 @@ mod tests {
             .map(|(si, om)| {
                 let projection = StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap();
                 StreamSpec {
+                    times: StreamTimes::undeclared_for(&projection, obs_times.to_vec()),
                     projection,
                     ir_model: om.clone(),
                     observations: dense_cells(per_stream[si].clone()),
-                    obs_times: obs_times.to_vec(),
                     aux: vec![],
-                    covers: None,
                 }
             })
             .collect();
@@ -787,12 +786,11 @@ mod tests {
             .iter()
             .zip([(&data_a, times_a), (&data_b, times_b)])
             .map(|(om, (data, times))| StreamSpec {
+                times: StreamTimes::undeclared_for(&StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap(), times.to_vec()),
                 projection: StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap(),
                 ir_model: om.clone(),
                 observations: dense_cells(data.clone()),
-                obs_times: times.to_vec(),
                 aux: vec![],
-                covers: None,
             })
             .collect();
         let obs_model =
