@@ -557,3 +557,44 @@ install-nvim-ts:
 clean:
 	cd ocaml && dune clean
 	cd rust && cargo clean
+
+# Agent worktrees under .claude/worktrees/ each carry their own rust/target.
+# Nothing reaps them, so they accumulate: 26 worktrees reached 260 GB and filled
+# the disk mid-gate (`ld: write() failed, errno=28`). Only build cache is
+# touched -- never a worktree, never source, never a branch. DAYS guards against
+# deleting under a running build; raise it if agents are working slowly.
+.PHONY: reap-caches reap-caches-force
+
+# Worktrees live under the MAIN checkout, so derive it from the common git
+# dir rather than the cwd -- run from a linked worktree, a relative path
+# silently finds nothing and reports success.
+MAIN_ROOT := $(patsubst %/.git,%,$(shell git rev-parse --path-format=absolute --git-common-dir))
+WORKTREES := $(MAIN_ROOT)/.claude/worktrees
+DAYS      ?= 2
+
+reap-caches:
+	@test -d "$(WORKTREES)" || { echo "no worktree dir at $(WORKTREES) — nothing to reap"; exit 0; }
+	@echo "Build caches under $(WORKTREES)/ idle more than $(DAYS) day(s):"
+	@found=0; total=0; \
+	for t in $$(find $(WORKTREES) -mindepth 3 -maxdepth 3 -type d -path '*/rust/target' 2>/dev/null); do \
+	  if [ -z "$$(find $$t -maxdepth 1 -newermt "-$(DAYS) days" -print -quit 2>/dev/null)" ]; then \
+	    sz=$$(du -sk "$$t" 2>/dev/null | cut -f1); total=$$((total+sz)); found=$$((found+1)); \
+	    printf "  %6s  %s\n" "$$(du -sh "$$t" 2>/dev/null | cut -f1)" "$$t"; \
+	  fi; \
+	done; \
+	if [ $$found -eq 0 ]; then echo "  (none)"; else \
+	  echo "  ---"; echo "  $$found cache(s), $$((total/1024/1024)) GB reclaimable"; \
+	  echo "  Run 'make reap-caches-force' to delete, or raise DAYS=<n> to be stricter."; \
+	fi
+
+reap-caches-force:
+	@test -d "$(WORKTREES)" || { echo "no worktree dir at $(WORKTREES) — nothing to reap"; exit 0; }
+	@if pgrep -qf 'cargo (build|test|check|clippy)' 2>/dev/null; then \
+	  echo "refusing: a cargo build is running — wait for it, or reap by hand"; exit 1; fi
+	@freed=0; \
+	for t in $$(find $(WORKTREES) -mindepth 3 -maxdepth 3 -type d -path '*/rust/target' 2>/dev/null); do \
+	  if [ -z "$$(find $$t -maxdepth 1 -newermt "-$(DAYS) days" -print -quit 2>/dev/null)" ]; then \
+	    sz=$$(du -sk "$$t" 2>/dev/null | cut -f1); rm -rf "$$t" && freed=$$((freed+sz)) && echo "  removed $$t"; \
+	  fi; \
+	done; \
+	echo "freed $$((freed/1024/1024)) GB"
