@@ -80,7 +80,9 @@ fn is_numeric_cell(cell: &str) -> bool {
     cell.trim().parse::<f64>().is_ok()
 }
 
-/// Whether a cell parses as an ISO date (zone discarded, civil date).
+/// Whether a cell parses as a bare ISO civil date. A cell carrying a timezone
+/// offset is *not* a date cell (gh#846) — it fails detection and is reported
+/// by `detect_kind` with its own diagnostic.
 fn is_date_cell(cell: &str) -> bool {
     ir::caltime::parse_iso_date(cell.trim()).is_ok()
 }
@@ -112,7 +114,17 @@ fn detect_kind(cells: &[&str], row_offset: usize) -> Result<ColKind, String> {
         } else {
             // Neither numeric nor a valid date: surface the date parse
             // error (the more informative of the two) at this row.
-            let why = ir::caltime::parse_iso_date(c)
+            let why = ir::caltime::parse_iso_date(c);
+            // A timezone offset is a well-formed date carrying a component
+            // camdl does not model, so "neither a number nor an ISO date"
+            // would misdescribe it. Its own message already names the cell,
+            // the offset and the remedy — locate it and pass it through, so
+            // detection and the `--time-format date` path (which reaches the
+            // same error via `date_to_internal`) read identically (gh#846).
+            if let Err(e @ ir::caltime::CalError::ZoneUnsupported { .. }) = why {
+                return Err(format!("line {}: {}", row_offset + i, e));
+            }
+            let why = why
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "unparseable".to_string());
@@ -380,6 +392,46 @@ mod tests {
         assert!(err.contains("mixed"), "{err}");
         assert!(err.contains("line 2"), "should name numeric row: {err}");
         assert!(err.contains("line 4"), "should name date row: {err}");
+    }
+
+    /// gh#846: a timezone offset is refused, and the message names the cell,
+    /// the offset and the line. Both entry paths must produce it — detection
+    /// (`Auto`, where the cell is neither numeric nor a valid date) and the
+    /// explicit `--time-format date` override (which converts directly).
+    #[test]
+    fn timezone_offset_is_a_located_error_naming_the_offset() {
+        for fmt in [TimeFormat::Auto, TimeFormat::Date] {
+            for (cells, offset, line) in [
+                (["2020-03-01", "2020-03-08+01:00"], "+01:00", "line 3"),
+                (["2020-03-01", "2020-03-08-03:00"], "-03:00", "line 3"),
+                (["2020-03-01", "2020-03-08+05:45"], "+05:45", "line 3"),
+                (["2020-03-01Z", "2020-03-08"], "Z", "line 2"),
+            ] {
+                let mut o = opts_days(Some("2020-03-01"));
+                o.format = fmt;
+                let err = convert_time_column(&cells, &o, 2).unwrap_err();
+                assert!(err.contains(line), "must locate the row ({fmt:?}): {err}");
+                assert!(err.contains(offset), "must name the offset ({fmt:?}): {err}");
+                assert!(err.contains("timezone"), "must name the rule ({fmt:?}): {err}");
+                let bad = if line == "line 2" { cells[0] } else { cells[1] };
+                assert!(err.contains(bad), "must echo the cell ({fmt:?}): {err}");
+            }
+        }
+    }
+
+    /// gh#846 must not widen to gh#839. `+0.25d` is camdl's own fractional-day
+    /// `--dates` suffix, not a zone designator; the loader already rejects it
+    /// (that rejection is gh#839's subject). Pin that it keeps its own
+    /// diagnostic rather than being mislabelled a timezone offset — the two
+    /// issues want opposite eventual outcomes, so the messages must not merge.
+    #[test]
+    fn fractional_day_suffix_is_not_reported_as_a_timezone() {
+        let cells = ["2020-03-01", "2020-03-08+0.25d"];
+        let o = opts_days(Some("2020-03-01"));
+        let err = convert_time_column(&cells, &o, 2).unwrap_err();
+        assert!(!err.contains("timezone"),
+            "a fractional-day suffix is not a zone designator (gh#839): {err}");
+        assert!(err.contains("line 3"), "must still locate the row: {err}");
     }
 
     #[test]

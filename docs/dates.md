@@ -251,13 +251,16 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
 A bare ISO date is a **civil-calendar label**, not an absolute instant — its day
 number is computed straight from `(Y, M, D)`, with no timezone. So:
 
-- A trailing zone designator (`Z`, `+06:00`, `-03:00`, `+05:45`) is
-  **discarded**: `2020-03-15+06:00` and `2020-03-15-03:00` both map to the same
-  `t`. Pooling surveillance from many countries aligns correctly by civil date
-  onto one axis.
+- A trailing zone designator (`Z`, `+06:00`, `-03:00`, `+05:45`) is a **hard
+  error**, naming the offset and the cell, in both a `date()` literal and a
+  `--data` time column. camdl does not model time zones, so an offset is
+  information it cannot represent; accepting the cell and deleting the offset
+  would silently change what the data says. Strip the offset upstream and supply
+  the civil date you mean — `2020-03-15+06:00` becomes `2020-03-15`.
 - This is _timezone-independent_, not "assume UTC": two modelers in any two
-  zones who write `2020-03-15` get the same internal time. (Whether two
-  locations' outbreaks _started_ at the same time is a modeling question —
+  zones who write `2020-03-15` get the same internal time, and pooling
+  surveillance from many countries aligns by civil date onto one axis. (Whether
+  two locations' outbreaks _started_ at the same time is a modeling question —
   per-location seed times `τ_i` — not a calendar one.)
 - camdl trusts the civil date as written; if an upstream export mislabeled a
   late-night local event to the wrong civil day, that is an upstream concern no

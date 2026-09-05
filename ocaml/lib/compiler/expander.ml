@@ -304,9 +304,10 @@ let days_in_month y m =
     side produces a different internal time than the Rust runtime computes.
     Concretely:
       - leading/trailing whitespace is trimmed,
-      - a trailing zone designator (`Z`, `+HH:MM`, `-HH:MM`) is accepted
-        and discarded (a bare date denotes a civil-calendar day,
-        zone-independent — proposal §6.8),
+      - a trailing zone designator (`Z`, `+HH:MM`, `-HH:MM`) is refused
+        rather than discarded: a bare date already denotes a civil-calendar
+        day with no timezone semantics, so an offset is information camdl
+        does not model and must not silently delete (gh#846),
       - month is validated in 1..12 and day in 1..days_in_month(y, m)
         (leap-aware), so `date("2020-02-30")` and `date("2020-13-01")` are
         rejected rather than silently shifting to a garbage day offset.
@@ -322,10 +323,13 @@ let parse_iso_date (raw : string) : (int * int * int, string) result =
   else
     let date_part = String.sub s 0 10 in
     let rest = String.sub s 10 (String.length s - 10) in
-    (* Classify the remainder: empty or a bare zone designator → discard;
-       anything else (a `T`/space time-of-day, or junk) → reject. *)
+    (* Classify the remainder: empty → a bare civil date; a zone designator →
+       refused, naming the offset (gh#846); anything else (a `T`/space
+       time-of-day, or junk) → rejected. The zone shape is deliberately narrow,
+       so camdl's own fractional-day suffix (`+0.25d`, gh#839) does not match
+       it and keeps its own message. *)
     let is_zone =
-      rest = "" || rest = "Z" || rest = "z" ||
+      rest = "Z" || rest = "z" ||
       ((String.length rest = 6)
        && (rest.[0] = '+' || rest.[0] = '-')
        && rest.[3] = ':'
@@ -335,10 +339,18 @@ let parse_iso_date (raw : string) : (int * int * int, string) result =
                (if not (c >= '0' && c <= '9') then ok := false)) rest;
            !ok))
     in
-    if not is_zone then
+    if is_zone then
+      Error (Printf.sprintf
+        "date '%s%s' carries a timezone offset '%s', but camdl models civil \
+         calendar dates and has no timezone semantics. The offset cannot be \
+         honoured, and dropping it silently would change what the date says, \
+         so it is refused: if '%s' is the civil day you mean, write it \
+         without the offset."
+        date_part rest rest date_part)
+    else if rest <> "" then
       Error (Printf.sprintf
         "date '%s' carries an unsupported trailer (time-of-day is not \
-         supported; use a bare YYYY-MM-DD or a zone designator)" raw)
+         supported; use a bare YYYY-MM-DD)" raw)
     else begin
       let digits a b =
         let ok = ref true in
