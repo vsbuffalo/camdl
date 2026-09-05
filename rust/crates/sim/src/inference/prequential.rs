@@ -15,6 +15,8 @@
 
 use serde::{Serialize, Deserialize};
 
+pub use super::multi_stream_obs::Coverage;
+
 /// Provenance of the predictive used to compute scores — the
 /// parameter-treatment optimism axis (#295), orthogonal to
 /// [`Conditioning`]. Externally tagged like `Conditioning`, so `plug_in`
@@ -94,6 +96,14 @@ pub struct StreamScore {
     /// `#[serde(default)]`: v1 traces (no interval) still deserialize.
     #[serde(default)]
     pub interval: PredInterval,
+    /// What `y_obs` was accumulated over — a declared or inferred period, or
+    /// an instant — so two traces can be checked to have scored the same
+    /// QUANTITY at this step and not merely at the same time (gh#833;
+    /// `compare`'s window gate). `#[serde(default)]`: a trace written before
+    /// schema 4 reads as `Unrecorded`, which the gate treats as unverifiable
+    /// rather than as agreeing.
+    #[serde(default)]
+    pub coverage: Coverage,
 }
 
 /// A single step's record: observation, predictive samples, and
@@ -466,6 +476,7 @@ pub fn build_trace(
     recorded: &super::particle_filter::PrequentialRecorded,
     y_obs: &[f64],
     per_stream_observed: &[Vec<f64>],
+    per_stream_coverage: &[Vec<Option<Coverage>>],
     ess_trace: &[f64],
     t0: usize,
     pit_seed: u64,
@@ -476,6 +487,8 @@ pub fn build_trace(
         "y_obs must align 1:1 with recorded obs_times");
     assert_eq!(recorded.obs_times.len(), per_stream_observed.len(),
         "per_stream_observed must align 1:1 with recorded obs_times");
+    assert_eq!(recorded.obs_times.len(), per_stream_coverage.len(),
+        "per_stream_coverage must align 1:1 with recorded obs_times");
     assert_eq!(recorded.obs_times.len(), ess_trace.len(),
         "ess_trace must align 1:1 with recorded obs_times");
 
@@ -554,6 +567,10 @@ pub fn build_trace(
                 crps: crps_sample_fair(samp_s, y_s),
                 pit: pit_sample_randomized(samp_s, y_s, pit_rng.uniform()),
                 interval: PredInterval::from_samples(samp_s),
+                // A finite observed value means the stream is scheduled here,
+                // and a scheduled row always has a coverage.
+                coverage: per_stream_coverage[idx][si].expect(
+                    "a stream with an observed value at this step is scheduled at it"),
             });
         }
 
@@ -579,10 +596,11 @@ pub fn build_trace(
 
     PrequentialTrace {
         // v3 (gh#585): score_from + pit_randomization_seed + the
-        // Conditioning struct variants. All additions serde-defaulted, so
-        // v1/v2 traces still read; they read as InSample/PlugIn, which is
-        // factually what they are.
-        schema_version: 3,
+        // Conditioning struct variants. v4 (gh#833): per-stream `coverage`.
+        // All additions serde-defaulted, so older traces still read; they
+        // read as InSample/PlugIn/Unrecorded, which is factually what they
+        // are.
+        schema_version: 4,
         t0,
         // This builder scores a single filter pass at one θ over the full data:
         // plug-in + in-sample. The posterior / LFO producers (#295) stamp their
@@ -723,6 +741,7 @@ mod tests {
         ];
         let y_obs = vec![14.0, 11.0, 0.0];
         let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
+                                &interval_coverage(&recorded.obs_times, 2),
                                 &[100.0, 100.0, 100.0], 0, 7, true, None);
 
         assert_eq!(trace.steps.len(), 2, "the all-hole step is omitted");
@@ -742,6 +761,66 @@ mod tests {
     use super::*;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool { (a - b).abs() < tol }
+
+    /// Every stream an interval closing at its step time, opening at the
+    /// previous one (the first at 0) — the shape of an undeclared incidence
+    /// stream. Enough for the tests that are not about coverage.
+    fn interval_coverage(obs_times: &[f64], n_streams: usize) -> Vec<Vec<Option<Coverage>>> {
+        obs_times.iter().enumerate().map(|(k, &t)| {
+            let start = if k == 0 { 0.0 } else { obs_times[k - 1] };
+            vec![Some(Coverage::Interval { start, stop: t }); n_streams]
+        }).collect()
+    }
+
+    /// gh#833: each per-stream score records what its value was accumulated
+    /// over, straight from the coverage the obs model supplies — an interval
+    /// stream's period, an instant stream's `Instant` — and the record survives
+    /// the JSON round trip in the tagged form `compare` reads. A score written
+    /// before schema 4 carries no `coverage` key and reads as `Unrecorded`, so
+    /// an old trace cannot masquerade as an agreeing one.
+    #[test]
+    fn build_trace_records_what_each_scored_value_covers() {
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![7.0, 14.0],
+            log_liks: vec![vec![-2.0, -2.0]; 2],
+            y_pred_samples: vec![vec![13.0, 15.0]; 2],
+            stream_names: vec!["inc".into(), "prev".into()],
+            per_stream_log_liks: vec![vec![vec![-1.0, -1.0], vec![-1.0, -1.0]]; 2],
+            per_stream_samples: vec![vec![vec![10.0, 12.0], vec![3.0, 3.0]]; 2],
+        };
+        // Step 1: the incidence stream is a hole (scheduled, no value).
+        let per_stream_observed = vec![vec![11.0, 3.0], vec![f64::NAN, 3.0]];
+        let inc0 = Coverage::Interval { start: 0.0, stop: 7.0 };
+        let inc1 = Coverage::Interval { start: 7.0, stop: 14.0 };
+        let coverage = vec![
+            vec![Some(inc0), Some(Coverage::Instant)],
+            vec![Some(inc1), Some(Coverage::Instant)],
+        ];
+        let trace = build_trace(&recorded, &[14.0, 3.0], &per_stream_observed, &coverage,
+                                &[100.0, 100.0], 0, 7, true, None);
+
+        assert_eq!(trace.schema_version, 4, "coverage is the schema-4 addition");
+        let s0 = &trace.steps[0].per_stream;
+        assert_eq!((s0[0].stream.as_str(), s0[0].coverage), ("inc", inc0));
+        assert_eq!((s0[1].stream.as_str(), s0[1].coverage), ("prev", Coverage::Instant));
+        let s1 = &trace.steps[1].per_stream;
+        assert_eq!(s1.len(), 1, "the hole has no score and so no coverage entry");
+        assert_eq!((s1[0].stream.as_str(), s1[0].coverage), ("prev", Coverage::Instant));
+
+        let json = serde_json::to_value(&s0[0]).unwrap();
+        assert_eq!(json["coverage"],
+            serde_json::json!({"kind": "interval", "start": 0.0, "stop": 7.0}),
+            "the tagged form on disk: {json}");
+        assert_eq!(serde_json::to_value(&s0[1]).unwrap()["coverage"],
+            serde_json::json!({"kind": "instant"}));
+
+        // A pre-schema-4 record: no `coverage` key.
+        let mut old = serde_json::to_value(&s0[0]).unwrap();
+        old.as_object_mut().unwrap().remove("coverage");
+        let back: StreamScore = serde_json::from_value(old).unwrap();
+        assert_eq!(back.coverage, Coverage::Unrecorded,
+            "an old trace says nothing, and must not read as agreeing");
+    }
 
     #[test]
     fn old_prequential_json_without_conditioning_reads_as_in_sample() {
@@ -1120,10 +1199,11 @@ mod tests {
         };
         let y_obs = vec![2.0];  // ties with two samples → v matters
         let per_stream_observed = vec![vec![2.0]];
+        let cov = interval_coverage(&recorded.obs_times, 1);
         let ess = vec![100.0];
-        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true, None);
-        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 11, true, None);
-        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 12, true, None);
+        let a = build_trace(&recorded, &y_obs, &per_stream_observed, &cov, &ess, 0, 11, true, None);
+        let b = build_trace(&recorded, &y_obs, &per_stream_observed, &cov, &ess, 0, 11, true, None);
+        let c = build_trace(&recorded, &y_obs, &per_stream_observed, &cov, &ess, 0, 12, true, None);
         assert_eq!(a.pit_randomization_seed, Some(11));
         assert_eq!(a.steps[0].pit, b.steps[0].pit, "same seed must reproduce");
         assert_ne!(a.steps[0].pit, c.steps[0].pit,
@@ -1191,7 +1271,8 @@ mod tests {
         // 4 particles ⇒ collapse threshold 0.1·4 = 0.4; second step below it.
         let ess = vec![100.0, 0.3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 0, 7, true, None);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
+                                &interval_coverage(&recorded.obs_times, 1), &ess, 0, 7, true, None);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 0);
 
@@ -1213,7 +1294,7 @@ mod tests {
 
         // gh#269: one stream, so the single per-stream score equals the joint
         // (same per-particle log-liks + samples + observed value).
-        assert_eq!(trace.schema_version, 3);
+        assert_eq!(trace.schema_version, 4);
         assert_eq!(trace.steps[0].per_stream.len(), 1);
         assert_eq!(trace.steps[0].per_stream[0].stream, "s0");
         assert!(approx_eq(trace.steps[0].per_stream[0].log_score,
@@ -1240,13 +1321,14 @@ mod tests {
         };
         let y_obs = vec![1.25; 2];
         let per_stream_observed = vec![vec![1.25]; 2];
+        let cov = interval_coverage(&recorded.obs_times, 1);
 
-        let healthy = build_trace(&recorded, &y_obs, &per_stream_observed,
+        let healthy = build_trace(&recorded, &y_obs, &per_stream_observed, &cov,
                                   &[4.0, 4.0], 0, 7, true, None);
         assert!(healthy.warnings.is_empty(),
             "full survival at small N must not warn: {:?}", healthy.warnings);
 
-        let collapsed = build_trace(&recorded, &y_obs, &per_stream_observed,
+        let collapsed = build_trace(&recorded, &y_obs, &per_stream_observed, &cov,
                                     &[4.0, 0.3], 0, 7, true, None);
         match collapsed.warnings.as_slice() {
             [PrequentialWarning::EssCollapse { step_count, threshold }] => {
@@ -1273,19 +1355,20 @@ mod tests {
         };
         let y_obs = vec![1.25; 2];
         let obs = vec![vec![1.25]; 2];
+        let cov = interval_coverage(&recorded.obs_times, 1);
         let ess = vec![100.0; 2];
 
-        let bare = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, false, None);
+        let bare = build_trace(&recorded, &y_obs, &obs, &cov, &ess, 0, 7, false, None);
         assert!(bare.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "t0=0 without a warm-up must warn: {:?}", bare.warnings);
 
-        let warmed = build_trace(&recorded, &y_obs, &obs, &ess, 0, 7, true, None);
+        let warmed = build_trace(&recorded, &y_obs, &obs, &cov, &ess, 0, 7, true, None);
         assert!(!warmed.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "a conditioning window places the boundary deliberately");
 
-        let skipped = build_trace(&recorded, &y_obs, &obs, &ess, 1, 7, false, None);
+        let skipped = build_trace(&recorded, &y_obs, &obs, &cov, &ess, 1, 7, false, None);
         assert!(!skipped.warnings.iter()
             .any(|w| matches!(w, PrequentialWarning::StartsAtPrior)),
             "t0 >= 1 assimilates before scoring");
@@ -1309,7 +1392,8 @@ mod tests {
         let per_stream_observed = vec![vec![1.25]; 3];
         let ess = vec![100.0; 3];
 
-        let trace = build_trace(&recorded, &y_obs, &per_stream_observed, &ess, 1, 7, true, None);
+        let trace = build_trace(&recorded, &y_obs, &per_stream_observed,
+                                &interval_coverage(&recorded.obs_times, 1), &ess, 1, 7, true, None);
         assert_eq!(trace.steps.len(), 2);
         assert_eq!(trace.t0, 1);
         assert_eq!(trace.steps[0].t, 2.0);

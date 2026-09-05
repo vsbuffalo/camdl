@@ -40,7 +40,7 @@ use sim::{
         compute_ode_loglik, dense_cells,
         multi_stream_obs::{StreamProjection, StreamSpec},
         obs_loglik::poisson_logpmf,
-        BoundObs, MultiStreamObsModel, Period,
+        BoundObs, Coverage, MultiStreamObsModel, Period,
     },
     simulate::Simulate,
     OdeSim,
@@ -211,6 +211,34 @@ fn a_declared_gap_discards_the_flow_in_the_uncovered_span() {
          {ll_correct}; a second bin widened to swallow the gap would give {ll_swallowed}"
     );
     assert!((ll - ll_swallowed).abs() > 1e-6, "non-vacuous: the two readings must differ");
+}
+
+/// gh#833, `compare`'s window gate: the obs model reports what each scored
+/// value covered, per union index and stream, straight from the bound
+/// schedule. For declared periods [2,3) and [5,6) the union axis is
+/// `[2, 3, 5, 6]`; the stream is scheduled at 3 and 6 only, and those two
+/// entries carry the declared periods — not the union spacing, which would
+/// read the second as `[3, 6)` and hide the gap.
+#[test]
+fn the_obs_model_reports_the_declared_period_each_value_covered() {
+    let compiled = model();
+    let recovery = compiled.model.transitions.iter().position(|t| t.name == "recovery").unwrap();
+    let spec = StreamSpec::dense_covering(
+        StreamProjection::FlowSum(vec![recovery]),
+        compiled.model.observations[0].clone(),
+        dense_cells(vec![1.0, 1.0]),
+        vec![Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap()],
+    );
+    let (bound, _) = BoundObs::bind(vec![spec]).expect("binds");
+    let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
+
+    let cov = obs_model.per_stream_coverage(0.0);
+    assert_eq!(cov, vec![
+        vec![None],
+        vec![Some(Coverage::Interval { start: 2.0, stop: 3.0 })],
+        vec![None],
+        vec![Some(Coverage::Interval { start: 5.0, stop: 6.0 })],
+    ]);
 }
 
 #[test]

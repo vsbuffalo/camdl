@@ -1171,6 +1171,46 @@ impl StreamTimes {
             TemporalKind::Interval => StreamTimes::InferredIntervals(times),
         }
     }
+
+    /// What row `k` was accumulated over. `run_start` is the simulation's
+    /// `t_start`: an undeclared interval stream's first row has no boundary of
+    /// its own before it, so its bin runs from there — which is exactly what
+    /// the filter accumulates (the accumulator starts empty at `t_start` and
+    /// first resets where the stream first scores). A declared period answers
+    /// from its own endpoints; an instant has no span.
+    pub fn coverage(&self, k: usize, run_start: f64) -> Coverage {
+        match self {
+            StreamTimes::Instants(_) => Coverage::Instant,
+            StreamTimes::Intervals(ps) => {
+                Coverage::Interval { start: ps[k].start(), stop: ps[k].stop() }
+            }
+            StreamTimes::InferredIntervals(ts) => Coverage::Interval {
+                start: if k == 0 { run_start } else { ts[k - 1] },
+                stop: ts[k],
+            },
+        }
+    }
+}
+
+/// What a scored value was accumulated over — the answer a [`StreamTimes`]
+/// gives for one of its rows, recorded on every per-stream prequential score so
+/// a comparison can check that two traces scored the *same quantity* at a
+/// step, not merely at the same time (gh#833; `compare`'s window gate).
+///
+/// A tagged sum type rather than an `Option<(f64, f64)>` because "no span" has
+/// two meanings that must not be confused: an instant reading genuinely has
+/// none, and a trace written before this was recorded simply does not say.
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Coverage {
+    /// The trace predates coverage recording (prequential schema < 4); nothing
+    /// is known about what its rows covered.
+    #[default]
+    Unrecorded,
+    /// A state read at an instant — prevalence, a compartment count. No span.
+    Instant,
+    /// The flow accumulated over `[start, stop)`.
+    Interval { start: f64, stop: f64 },
 }
 
 /// One observation stream.
@@ -1200,6 +1240,11 @@ struct Stream {
     /// [`IntervalSlot`], which is what `reset_due_acc` reads; kept here so the
     /// slot is built from the bound stream in one place.
     reset_at_union: Vec<bool>,
+    /// What this stream's observations are — instants, declared periods, or a
+    /// still-undeclared interval stream — carried from the bound stream so
+    /// [`MultiStreamObsModel::per_stream_coverage`] can say what each scored
+    /// value was accumulated over (gh#833).
+    times: StreamTimes,
     /// Per-observation cells indexed by THIS stream's own observation index
     /// (NOT the union index — resolve via `at_union`). `None` is a hole: no
     /// likelihood term (the incidence reset still fires at its grid index —
@@ -1358,6 +1403,7 @@ impl MultiStreamObsModel {
                 resolved,
                 at_union: spec.at_union,
                 reset_at_union: spec.reset_at_union,
+                times: spec.times,
                 observations: spec.cells,
                 aux: spec.aux,
             });
@@ -1609,6 +1655,22 @@ impl MultiStreamObsModel {
                         },
                         None => f64::NAN,
                     })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Sibling of [`per_stream_observed`] for what each value was accumulated
+    /// over: `[obs_idx][stream]`, `None` where the stream is not scheduled at
+    /// that union index. `run_start` is the filter's `t_start` (see
+    /// [`StreamTimes::coverage`]). Feeds the per-stream prequential record
+    /// that `compare`'s window gate reads (gh#833).
+    pub fn per_stream_coverage(&self, run_start: f64) -> Vec<Vec<Option<Coverage>>> {
+        (0..self.obs_times.len())
+            .map(|union_idx| {
+                self.streams
+                    .iter()
+                    .map(|s| s.at_union[union_idx].map(|local| s.times.coverage(local, run_start)))
                     .collect()
             })
             .collect()
@@ -2450,11 +2512,13 @@ mod bind_tests {
 
 #[cfg(test)]
 mod period_and_covers_tests {
-    //! gh#833 step 1 (the contiguous-only slice — see `StreamSpec::covers`'s
-    //! doc comment for the deferred gap case): `Period::new`'s own invariants,
-    //! and `BoundObs::bind`'s validation of a declared `covers`.
+    //! gh#833: `Period::new`'s own invariants, `StreamTimes`' derived schedule
+    //! and coverage, and `BoundObs::bind`'s validation of a declared stream —
+    //! kind agreement, ordering, no overlap, and the reset-only boundaries a
+    //! declared start (leading or interior) puts on the union axis.
     use super::{
-        bind_tests::spec, dense_cells, BoundObs, Period, StreamProjection, StreamSpec, StreamTimes,
+        bind_tests::spec, dense_cells, BoundObs, Coverage, Period, StreamProjection, StreamSpec,
+        StreamTimes,
     };
     use ir::observation::{
         ColumnRole, Likelihood, ObsColumn, ObservationModel as IrObservationModel,
@@ -2470,6 +2534,31 @@ mod period_and_covers_tests {
             Ok(_) => panic!("{ctx}"),
             Err(report) => report,
         }
+    }
+
+    /// What each variant says a row covered (gh#833, `compare`'s window
+    /// gate). An instant has no span; a declared period answers from its own
+    /// endpoints — including across a gap, where the union spacing would lie;
+    /// an undeclared row runs from the previous row, the first from the run's
+    /// start, which is exactly what the filter's accumulator spans.
+    #[test]
+    fn coverage_follows_the_variant() {
+        let iv = |s: f64, e: f64| Coverage::Interval { start: s, stop: e };
+
+        let inst = StreamTimes::Instants(vec![1.0, 2.0]);
+        assert_eq!(inst.coverage(0, 0.0), Coverage::Instant);
+        assert_eq!(inst.coverage(1, 0.0), Coverage::Instant);
+
+        let decl = StreamTimes::Intervals(vec![
+            Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap(),
+        ]);
+        assert_eq!(decl.coverage(0, 0.0), iv(2.0, 3.0));
+        assert_eq!(decl.coverage(1, 0.0), iv(5.0, 6.0), "not [3, 6): the gap is not covered");
+
+        let undecl = StreamTimes::InferredIntervals(vec![3.0, 4.0, 6.0]);
+        assert_eq!(undecl.coverage(0, 0.5), iv(0.5, 3.0), "the first row runs from t_start");
+        assert_eq!(undecl.coverage(1, 0.5), iv(3.0, 4.0));
+        assert_eq!(undecl.coverage(2, 0.5), iv(4.0, 6.0), "a missing row widens the undeclared bin");
     }
 
     #[test]

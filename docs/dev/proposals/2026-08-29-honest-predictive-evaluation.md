@@ -551,6 +551,7 @@ check:
 | Horizon          | `T_score` equal (existing)                                        | —     | `--allow-mismatched-horizon` |
 | Observation axis | per-step times equal (existing)                                   | —     | none (meaningless if bent)   |
 | Stream set       | per-step per-stream name sets equal (gh#570)                      | 1     | none                         |
+| Window           | per-step per-stream `coverage` equal (gh#833; schema 4)           | —     | none                         |
 | Data             | bound-stream content digests equal across fits (gh#713)           | 1     | `--allow-data-mismatch`      |
 | Backend/process  | derive refuses a backend the filter can't honestly score (gh#729) | 1     | none (until gh#312)          |
 | Conditioning     | all rows same `Conditioning` kind                                 | 3     | none                         |
