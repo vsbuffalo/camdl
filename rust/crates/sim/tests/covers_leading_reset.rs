@@ -167,6 +167,52 @@ fn reported_recovery_flow(compiled: &CompiledModel, params: &[f64]) -> HashMap<u
         .collect()
 }
 
+/// Proposal Testing item 4: a declared gap discards the flow in the uncovered
+/// span, checked against a run where that span carries known flow. Periods
+/// [2,3) and [5,6): row 0 scores against the flow over (2,3] alone, row 1
+/// against (5,6] alone, and the flow over (3,5] — real, and large enough to
+/// matter — appears in neither. The alternative reading, where the second bin
+/// silently widens to swallow the gap (what deleting a row does to an
+/// undeclared stream), is the number this must NOT produce.
+#[test]
+fn a_declared_gap_discards_the_flow_in_the_uncovered_span() {
+    let compiled = model();
+    let params = compiled.default_params.clone();
+    let recovery = compiled.model.transitions.iter().position(|t| t.name == "recovery").unwrap();
+
+    let flows = reported_recovery_flow(&compiled, &params);
+    let expect0 = flows[&3];
+    let expect1 = flows[&6];
+    let uncovered: f64 = flows[&4] + flows[&5];
+    assert!(uncovered > 1.0,
+        "vacuous fixture: the gap must carry real flow to discard (got {uncovered})");
+
+    let y0 = expect0.round().max(1.0);
+    let y1 = expect1.round().max(1.0);
+    let spec = StreamSpec::dense_covering(
+        StreamProjection::FlowSum(vec![recovery]),
+        compiled.model.observations[0].clone(),
+        dense_cells(vec![y0, y1]),
+        vec![Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap()],
+    );
+    let (bound, report) = BoundObs::bind(vec![spec]).expect("a per-row gap binds");
+    assert!(!report.is_fatal(), "{:?}", report.findings());
+    let union = bound.times().to_vec();
+    let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
+
+    let ll = compute_ode_loglik(&compiled, &obs_model, &union, 1.0, &params, 1.0)
+        .expect("ode loglik");
+
+    let ll_correct = poisson_logpmf(y0, expect0) + poisson_logpmf(y1, expect1);
+    let ll_swallowed = poisson_logpmf(y0, expect0) + poisson_logpmf(y1, uncovered + expect1);
+    assert!(
+        (ll - ll_correct).abs() < 1e-9,
+        "each row must be scored against its own window only: got {ll}, expected \
+         {ll_correct}; a second bin widened to swallow the gap would give {ll_swallowed}"
+    );
+    assert!((ll - ll_swallowed).abs() > 1e-6, "non-vacuous: the two readings must differ");
+}
+
 #[test]
 fn a_declared_first_period_is_scored_against_its_own_window_only() {
     let compiled = model();

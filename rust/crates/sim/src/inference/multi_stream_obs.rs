@@ -722,50 +722,39 @@ impl BoundObs {
                     ),
                 });
             }
-            // A declared period must be CONTIGUOUS with its predecessor.
+            // Declared periods must be ORDERED and must not OVERLAP: an overlap
+            // would score the shared span twice. A GAP is legal here — the
+            // flow between two periods belongs to no bin, and the
+            // start-anchored reset schedule discards it without a special
+            // case: the bin scores at the earlier stop, keeps accumulating
+            // through the gap with nothing reading it, and is zeroed when the
+            // next period OPENS. Whether a gap is *intended* is a question
+            // about the FORM (a missing row under `covers = day(t)` is a
+            // mistake; a stated gap under `window_start`/`window_stop` is
+            // the point), and this binder cannot see the form — the loader,
+            // which can, enforces that rule (gh#833).
             //
             // Note this deliberately does NOT require a period to end at the
             // row's own label: `covers = day(D)` closes at `D + 1`, which is
             // exactly the one-bucket correction gh#833 exists to make. The
             // schedule is DERIVED from the stops (`StreamTimes::closes`), so
             // there is no second time vector for a window to disagree with.
-            //
-            // A gap is refused rather than silently discarding the uncovered
-            // flow: today's `reset_due_acc` zeroes an interval stream's
-            // accumulator exactly where it next scores, so a reset at a
-            // boundary with no observation of its own — what a gap needs —
-            // has nowhere to hang on the union axis. Wiring that (a per-slot
-            // reset schedule independent of the score schedule, and a union
-            // axis admitting a reset-only boundary) is the remaining hard
-            // part of gh#833 step 1. The per-row `window_start`/`window_stop`
-            // form is the only form the proposal allows a gap under, and it
-            // must not reach this binder until that lands.
             if let Some(periods) = spec.times.periods() {
                 for (i, w) in periods.windows(2).enumerate() {
-                    if w[1].start() == w[0].stop() {
-                        continue;
+                    if w[1].start() < w[0].stop() {
+                        findings.push(Finding {
+                            severity: Severity::Error,
+                            message: format!(
+                                "observation stream '{}': declared period {} covers \
+                                 [{}, {}) but period {} starts at {} — they overlap, \
+                                 so the flow in the shared span would be scored \
+                                 twice. Check the declared width against the spacing \
+                                 between rows.",
+                                spec.ir_model.name, i, w[0].start(), w[0].stop(),
+                                i + 1, w[1].start()
+                            ),
+                        });
                     }
-                    // Overlap and gap are different mistakes and deserve
-                    // different messages: an overlap would score the shared
-                    // span TWICE, a gap would discard the flow between them.
-                    let detail = if w[1].start() < w[0].stop() {
-                        "they overlap, so the flow in the shared span would be \
-                         scored twice. Check the declared width against the \
-                         spacing between rows"
-                    } else {
-                        "the flow between them is covered by neither. A stated \
-                         gap needs the per-row `window_start`/`window_stop` \
-                         form, which this binder does not yet support"
-                    };
-                    findings.push(Finding {
-                        severity: Severity::Error,
-                        message: format!(
-                            "observation stream '{}': declared period {} covers \
-                             [{}, {}) but period {} starts at {} — {}.",
-                            spec.ir_model.name, i, w[0].start(), w[0].stop(),
-                            i + 1, w[1].start(), detail
-                        ),
-                    });
                 }
             }
         }
@@ -2566,23 +2555,26 @@ mod period_and_covers_tests {
     }
 
     #[test]
-    fn a_gap_between_declared_periods_is_fatal() {
-        // period 0 = [0,1), period 1 = [2,3): a one-unit gap. The flow in
-        // [1,2) is covered by nothing, which needs a reset at a boundary no
-        // observation closes — not yet wired, so refuse rather than silently
-        // fold that flow into a neighbour.
+    fn a_declared_gap_binds_and_the_uncovered_span_belongs_to_no_bin() {
+        // Periods [2,3) and [5,6): the flow over (3,5) is covered by neither
+        // row and must be DISCARDED, not folded into a neighbour. With
+        // start-anchored resets that needs no new mechanism: the bin scores
+        // at 3, keeps accumulating (3,5) with nothing reading it, and is
+        // zeroed at 5 when the second period OPENS — so the span vanishes.
+        // Both starts and both stops are boundaries the integrator stops at.
         let s = spec_covering(
             "cases",
-            vec![Period::new(0.0, 1.0).unwrap(), Period::new(2.0, 3.0).unwrap()],
-            vec![0.0, 0.0],
+            vec![Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap()],
+            vec![3.0, 4.0],
         );
-        let report = expect_fatal(
-            BoundObs::bind(vec![s]),
-            "a gap between declared periods must be rejected (not yet supported)",
-        );
-        assert!(report.findings().iter().any(|f|
-            f.message.contains("cases") && f.message.contains("covered by neither")),
-            "message must name the stream and the gap: {:?}", report.findings());
+        let (bound, report) = BoundObs::bind(vec![s])
+            .expect("a gap stated by per-row periods is legal (proposal rules table)");
+        assert!(!report.is_fatal(), "{:?}", report.findings());
+        assert_eq!(bound.times(), &[2.0, 3.0, 5.0, 6.0]);
+        assert_eq!(bound.at_union_for_test(0), &[None, Some(0), None, Some(1)],
+            "rows score at their stops, 3 and 6; nothing scores at 2 or 5");
+        assert_eq!(bound.reset_at_union_for_test(0), &[true, false, true, false],
+            "the bin opens at 2 and again at 5 — the reset at 5 is what discards (3,5)");
     }
 
     #[test]
