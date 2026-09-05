@@ -257,6 +257,60 @@ impl ParamConvergence {
         }
     }
 
+    /// The **location** half of `max(rhat_bulk, rhat_folded)`: rank-normalized
+    /// split-R̂ without the fold. `Undefined` when the parameter was never
+    /// scored, or on a fit written before the halves were stored.
+    pub fn rhat_bulk(&self) -> Stat {
+        match self {
+            Self::Scored { rhat_bulk, .. } => *rhat_bulk,
+            Self::NotScored { .. } => Stat::Undefined,
+        }
+    }
+
+    /// The **spread** half: the same statistic on `|x − median(x)|`.
+    /// `Undefined` on the same two conditions as [`rhat_bulk`](Self::rhat_bulk),
+    /// and additionally whenever `|x − median(x)|` is constant.
+    pub fn rhat_folded(&self) -> Stat {
+        match self {
+            Self::Scored { rhat_folded, .. } => *rhat_folded,
+            Self::NotScored { .. } => Stat::Undefined,
+        }
+    }
+
+    /// Gelman & Rubin (1992), unsplit and on the raw scale. Kept beside the
+    /// headline because the rank-normalized statistic is bounded and so cannot
+    /// express severity, while this one can — a large gap between them says the
+    /// disagreement lives in the tails.
+    pub fn rhat_classic(&self) -> Stat {
+        match self {
+            Self::Scored { rhat_classic, .. } => *rhat_classic,
+            Self::NotScored { .. } => Stat::Undefined,
+        }
+    }
+
+    /// Which of the two halves set the headline, as a value rather than a
+    /// sentence — the column a table shows beside both numbers. `None` when
+    /// either half is undefined, so there is no comparison to report.
+    pub fn rhat_driver(&self) -> Option<RhatDriver> {
+        let Self::Scored { rhat_bulk, rhat_folded, .. } = self else {
+            return None;
+        };
+        RhatDriver::of(rhat_bulk.finite()?, rhat_folded.finite()?)
+    }
+
+    /// Per-chain Geyer ESS, one entry per chain, in chain order.
+    ///
+    /// Empty for an unscored parameter and on a fit written before it was
+    /// stored. The spread is the point — similar large values mean each chain
+    /// mixes well inside its own mode, one small value means that chain is
+    /// stuck, and those call for different fixes.
+    pub fn ess_per_chain(&self) -> &[f64] {
+        match self {
+            Self::Scored { ess_per_chain, .. } => ess_per_chain,
+            Self::NotScored { .. } => &[],
+        }
+    }
+
     /// One clause saying why this parameter carries no usable R̂, or `None`
     /// when it carries one.
     ///
@@ -278,57 +332,6 @@ impl ParamConvergence {
             ),
             Self::Scored { .. } => None,
         }
-    }
-
-    /// Which half of `max(rhat_bulk, rhat_folded)` set this parameter's R̂,
-    /// and what that means — the answer to "why is R̂ high". `None` when the
-    /// parameter was not scored, or when the fit predates the two halves being
-    /// stored, or when either half is undefined.
-    ///
-    /// The classic Gelman & Rubin statistic rides along because the
-    /// rank-normalized one is BOUNDED — ceiling ≈1.85 for two chains, ≈4.5 for
-    /// eight — and so cannot express severity. Across thirteen orders of
-    /// magnitude of within-chain movement, from chains frozen to
-    /// floating-point resolution to chains that genuinely explore, it reads
-    /// between 1.81 and 1.90; the classic one separates those by fourteen
-    /// orders of magnitude
-    /// (`docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`).
-    pub fn rhat_decomposition(&self) -> Option<String> {
-        let Self::Scored { rhat_bulk, rhat_folded, rhat_classic, .. } = self else {
-            return None;
-        };
-        let (b, f) = (rhat_bulk.finite()?, rhat_folded.finite()?);
-        let driver = RhatDriver::of(b, f)?;
-        let classic = match rhat_classic {
-            Stat::Value(v) => format!(", classic {v:.3}"),
-            Stat::Infinite => ", classic ∞".to_string(),
-            Stat::Undefined => String::new(),
-        };
-        Some(format!(
-            "R̂ = max(bulk {:.3}, folded {:.3}){}; the {} half is larger — {}",
-            b, f, classic, driver.half(), driver.describe(),
-        ))
-    }
-
-    /// The per-chain ESS as one clause, for a parameter whose chains disagree.
-    ///
-    /// `None` when there is nothing to say: fewer than two chains' worth of
-    /// values, or a fit written before they were stored. The spread is the
-    /// point — similar large values mean each chain is mixing well inside its
-    /// own mode, one small value means that chain is stuck, and those call for
-    /// different fixes.
-    pub fn per_chain_ess(&self) -> Option<String> {
-        let Self::Scored { ess_per_chain, .. } = self else {
-            return None;
-        };
-        if ess_per_chain.len() < 2 {
-            return None;
-        }
-        let cells: Vec<String> = ess_per_chain
-            .iter()
-            .map(|e| if e.is_finite() { format!("{e:.0}") } else { "—".to_string() })
-            .collect();
-        Some(format!("per-chain ESS [{}]", cells.join(", ")))
     }
 
     /// Whether this parameter is evidence the sampler MISBEHAVED, as opposed to
@@ -2072,18 +2075,23 @@ mod tests {
             "ess_per_chain": { "beta": [410.0, 388.0, 9.0] },
         });
         let per_param = ConvergenceMaps::read(&summary).per_param();
-        let note = per_param["beta"]
-            .per_chain_ess()
-            .expect("three chains' worth of values is something to say");
-        assert!(note.contains("410") && note.contains("388") && note.contains("9"),
-            "every chain's value is shown — the SPREAD is the diagnosis: {note}");
+        assert_eq!(
+            per_param["beta"].ess_per_chain(),
+            &[410.0, 388.0, 9.0],
+            "every chain's value survives, in chain order — the SPREAD is the \
+             diagnosis, so one dropped cell changes the reading"
+        );
 
-        // A single chain has no spread to report, so there is nothing to say.
-        let one = serde_json::json!({
-            "rhat": { "beta": 2.4 },
-            "ess_per_chain": { "beta": [410.0] },
+        // A parameter the estimator refused carries no per-chain values at
+        // all, which is a different statement from "all its chains mixed".
+        let refused = serde_json::json!({
+            "rhat_not_reported": { "beta": "too_few_chains" },
         });
-        assert_eq!(ConvergenceMaps::read(&one).per_param()["beta"].per_chain_ess(), None);
+        assert!(
+            ConvergenceMaps::read(&refused).per_param()["beta"].ess_per_chain().is_empty(),
+            "a refusal carries no per-chain ESS, which is not the same fact as \
+             a parameter whose chains all mixed"
+        );
     }
 
     /// A parameter whose R̂ is `∞` — every chain frozen at its own value — is a
