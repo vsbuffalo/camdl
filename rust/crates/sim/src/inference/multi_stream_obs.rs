@@ -1483,7 +1483,7 @@ impl MultiStreamObsModel {
         params: &[f64],
     ) -> Vec<StreamAttempt> {
         let n_streams = self.streams.len();
-        let t = self.obs_times[obs_idx];
+        let t = self.obs_time(obs_idx);
         let date = self.obs_date(obs_idx);
         let cells: Vec<ObsCellState> =
             (0..n_streams).map(|si| self.cell_state(si, obs_idx)).collect();
@@ -1504,7 +1504,7 @@ impl MultiStreamObsModel {
                 if matches!(cells[si], ObsCellState::NotScheduled) {
                     continue;
                 }
-                let projected = self.project_stream_from_acc(si, acc, counts, params, t);
+                let projected = self.project_stream(si, acc, counts, params, obs_idx);
                 if projected.is_nan() {
                     n_nan[si] += 1;
                 } else {
@@ -1513,16 +1513,14 @@ impl MultiStreamObsModel {
                     }
                     projections[si].push(projected);
                 }
-                let ObsCellState::Scored { .. } = cells[si] else { continue };
+                // A `Hole` has no value to score against, so it can neither
+                // refuse nor be explained.
+                let Some(observed) = cells[si].y_obs() else { continue };
                 if scores[si] != f64::NEG_INFINITY {
                     continue;
                 }
                 let s = &self.streams[si];
-                let local = s.at_union[obs_idx].expect("scheduled cell has a local index");
-                let observed = match s.observations[local] {
-                    Some(ObsCell::Scalar(v)) => v,
-                    None => continue,
-                };
+                let local = s.at_union[obs_idx].expect("a scored cell has a local index");
                 let cause = with_scratch_int_from_counts(counts, |int_s| {
                     explain_likelihood_neg_inf(
                         &s.resolved, t, projected, observed, &s.aux[local], params,

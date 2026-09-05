@@ -985,6 +985,4 @@ fn a_hole_is_not_an_observed_zero() {
     assert_ne!(Some(ObsCell::Scalar(0.0)), None::<ObsCell>);
     assert_eq!(ObsCellState::Hole.y_obs(), None);
     assert_eq!(ObsCellState::Scored { y_obs: 0.0 }.y_obs(), Some(0.0));
-    assert!(!ObsCellState::Hole.is_scored());
-    assert!(ObsCellState::Scored { y_obs: 0.0 }.is_scored());
 }
