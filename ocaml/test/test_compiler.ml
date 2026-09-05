@@ -12783,7 +12783,7 @@ let test_covers_day_lowers_to_a_one_day_span () =
   (* `day` is sugar: it lowers to the same offset-anchored form as
      `starting_on(time, 1 'days)`, with no separate IR variant. *)
   match covers_of m with
-  | Some (Ir.CoversFrom (offset, Ir.SpanConst d)) ->
+  | Some (Ir.CoversFrom (offset, d)) ->
     Alcotest.(check (float 1e-12)) "opens at the label" 0.0 offset;
     Alcotest.(check (float 1e-12)) "one day on a 'days axis" 1.0 d
   | _ -> Alcotest.fail "day(time) did not lower to a start-anchored period"
@@ -12796,27 +12796,10 @@ let test_covers_ending_on_opens_before_the_label () =
     (covers_model_with
        (cases_stream "    covers        = ending_on(time, 7 'days)\n")) in
   match covers_of m with
-  | Some (Ir.CoversUntil (offset, Ir.SpanConst d)) ->
+  | Some (Ir.CoversUntil (offset, d)) ->
     Alcotest.(check (float 1e-12)) "closes one day after the label" 1.0 offset;
     Alcotest.(check (float 1e-12)) "seven days wide" 7.0 d
   | _ -> Alcotest.fail "ending_on did not lower to a stop-anchored period"
-
-let test_covers_span_may_name_a_column () =
-  (* The per-row width form: a file carrying its own `days_covered`. The
-     column is USED by being the width, so the dead-column check (E277) must
-     not reject it. *)
-  let m = compile_expect_ok
-    (covers_model_with {|  cases {
-    columns       { time : time, days_covered : count, cases : count }
-    covers        = ending_on(time, days_covered)
-    projected     = incidence(infection)
-    emit_schedule = every 1 'days
-    cases         ~ poisson(rate = projected)
-  }|}) in
-  match covers_of m with
-  | Some (Ir.CoversUntil (_, Ir.SpanColumn c)) ->
-    Alcotest.(check string) "names the width column" "days_covered" c
-  | _ -> Alcotest.fail "a per-row width did not lower to a column span"
 
 let test_window_columns_are_the_declaration () =
   let m = compile_expect_ok
@@ -12894,10 +12877,19 @@ let test_unknown_covers_form_is_rejected () =
   compile_expect_error_code ~code:"E349" ~contains:"fortnight"
     (covers_model_with (cases_stream "    covers        = fortnight(time)\n"))
 
-let test_covers_width_naming_a_non_column_is_rejected () =
-  compile_expect_error_code ~code:"E349" ~contains:"not a declared value column"
-    (covers_model_with
-       (cases_stream "    covers        = ending_on(time, nope)\n"))
+let test_covers_width_naming_a_column_is_rejected () =
+  (* The column-valued width form was removed: `window_start`/`window_stop`
+     already states a per-row window exactly, and a duration column would be a
+     second spelling needing its own included-endpoint convention. The error
+     has to point at the primitive, not just refuse. *)
+  compile_expect_error_code ~code:"E349" ~contains:"window_start"
+    (covers_model_with {|  cases {
+    columns       { time : time, days_covered : count, cases : count }
+    covers        = ending_on(time, days_covered)
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = projected)
+  }|})
 
 let () =
   Alcotest.run "compiler" [
@@ -13909,8 +13901,6 @@ let () =
         `Quick test_covers_day_lowers_to_a_one_day_span;
       Alcotest.test_case "ending_on closes one day after the label"
         `Quick test_covers_ending_on_opens_before_the_label;
-      Alcotest.test_case "a per-row width may name a column"
-        `Quick test_covers_span_may_name_a_column;
       Alcotest.test_case "window columns are themselves the declaration"
         `Quick test_window_columns_are_the_declaration;
       Alcotest.test_case "an undeclared stream carries no period"
@@ -13933,7 +13923,7 @@ let () =
         `Quick test_starting_on_without_a_width_is_rejected;
       Alcotest.test_case "an unknown covers form is E349"
         `Quick test_unknown_covers_form_is_rejected;
-      Alcotest.test_case "a width naming a non-column is E349"
-        `Quick test_covers_width_naming_a_non_column_is_rejected;
+      Alcotest.test_case "a column-valued width is E349, pointing at window columns"
+        `Quick test_covers_width_naming_a_column_is_rejected;
     ];
   ]

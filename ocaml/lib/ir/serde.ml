@@ -1008,35 +1008,18 @@ let obs_column_role_of_json j =
     fail "column role must be \"time\"/\"window_start\"/\"window_stop\" or \
           {dim:…}/{value:…}"
 
-let covers_span_to_json (s : covers_span) : Yojson.Safe.t =
-  match s with
-  | SpanConst d  -> obj [("const", `Float d)]
-  | SpanColumn c -> obj [("column", str c)]
-
-let covers_span_of_json j =
-  match member_opt "const" j, member_opt "column" j with
-  | Some d, None -> SpanConst (as_float d)
-  | None, Some c -> SpanColumn (as_string c)
-  | _ -> fail "covers span must be {const:…} or {column:…}"
-
 let covers_to_json (c : covers) : Yojson.Safe.t =
   match c with
   | CoversFrom (offset, span) ->
-    obj [("kind", str "from"); ("offset", `Float offset);
-         ("span", covers_span_to_json span)]
+    obj [("kind", str "from"); ("offset", `Float offset); ("span", `Float span)]
   | CoversUntil (offset, span) ->
-    obj [("kind", str "until"); ("offset", `Float offset);
-         ("span", covers_span_to_json span)]
+    obj [("kind", str "until"); ("offset", `Float offset); ("span", `Float span)]
   | CoversWindowColumns -> obj [("kind", str "window_columns")]
 
 let covers_of_json j =
   match as_string (member "kind" j) with
-  | "from" ->
-    CoversFrom (as_float (member "offset" j),
-                covers_span_of_json (member "span" j))
-  | "until" ->
-    CoversUntil (as_float (member "offset" j),
-                 covers_span_of_json (member "span" j))
+  | "from"  -> CoversFrom  (as_float (member "offset" j), as_float (member "span" j))
+  | "until" -> CoversUntil (as_float (member "offset" j), as_float (member "span" j))
   | "window_columns" -> CoversWindowColumns
   | k -> fail "unknown covers kind '%s'" k
 

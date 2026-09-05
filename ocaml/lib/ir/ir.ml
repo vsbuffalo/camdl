@@ -533,35 +533,37 @@ type obs_column = {
   col_role: obs_column_role;
 }
 
-(* How wide the period a row covers is (gh#833): a compile-time constant in
-   AXIS units, or a per-row width read from a declared data column (a file
-   carrying its own `days_covered`). *)
-type covers_span =
-  | SpanConst  of float
-  | SpanColumn of string
-
 (* What each row of an interval stream covers (gh#833).
 
    The FULLY-EXPANDED form — every surface spelling lowers here and the
    expander does all the calendar arithmetic, so the Rust runtime never needs
-   to know how long a day is in the model's axis units. With [t] the row's own
-   label and [one_day] already converted to axis units:
+   to know how long a day is in the model's axis units. [offset] and [span]
+   are already in AXIS units. With [t] the row's own label and [one_day]
+   converted likewise:
 
-     covers = day(t)        ->  CoversFrom  (0.,      SpanConst one_day)
+     covers = day(t)        ->  CoversFrom  (0.,      one_day)
      starting_on (t, d)     ->  CoversFrom  (0.,      d)
      ending_on   (t, d)     ->  CoversUntil (one_day, d)
      window_start/_stop     ->  CoversWindowColumns
 
-   Two anchors rather than one because a per-row span attaches to whichever
-   end the label pins: [ending_on] fixes the row's CLOSE and measures
-   backwards, so with a column span its start moves row by row. *)
+   Two anchors rather than one because the label pins a different end in each
+   case: [ending_on] fixes the row's CLOSE and measures backwards, which is
+   what "week ending 11 July" means.
+
+   A uniform form's span is a CONSTANT. A width that varies row to row is
+   expressible as [CoversWindowColumns], which states both boundaries
+   outright; a second spelling for it (a duration naming a data column) says
+   the same thing as the primitive and would need its own convention about
+   whether the labelled day is included — the exact off-by-one class this
+   work exists to remove. *)
 type covers =
   (* start = t + offset ; stop = start + span *)
-  | CoversFrom  of float * covers_span
+  | CoversFrom  of float * float
   (* stop = t + offset ; start = stop - span *)
-  | CoversUntil of float * covers_span
+  | CoversUntil of float * float
   (* start and stop are read per row from the window columns. The only form
-     that can state a gap between consecutive rows. *)
+     that can state a gap between consecutive rows, or a width that varies
+     row to row. *)
   | CoversWindowColumns
 
 type observation_model = {

@@ -240,46 +240,41 @@ pub struct StratumKey {
     pub level: String,
 }
 
-/// How wide the period a row covers is (gh#833): a compile-time constant in
-/// AXIS units, or a per-row width read from a declared data column.
-///
-/// The column form is what a file carrying its own `days_covered` needs — a
-/// width that varies row to row, which no constant can express and which
-/// converting upstream would push back into a build script.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CoversSpan {
-    Const(f64),
-    Column(String),
-}
-
 /// What each row of an interval stream covers (gh#833).
 ///
 /// This is the FULLY-EXPANDED form: every surface spelling lowers here, and
 /// all calendar arithmetic is done by the expander, so the runtime never needs
-/// to know how long a day is in the model's axis units. With `t` the row's own
-/// label and `one_day` already converted to axis units:
+/// to know how long a day is in the model's axis units. `offset` and `span`
+/// are already in AXIS units. With `t` the row's own label and `one_day`
+/// converted likewise:
 ///
 /// | surface              | lowers to                            |
 /// | -------------------- | ------------------------------------ |
 /// | `covers = day(t)`    | `From  { offset: 0, span: one_day }` |
 /// | `starting_on(t, d)`  | `From  { offset: 0, span: d }`       |
-/// | `ending_on(t, d)`    | `Until { offset: one_day, span: d }`  |
-/// | window columns       | `WindowColumns`                       |
+/// | `ending_on(t, d)`    | `Until { offset: one_day, span: d }` |
+/// | window columns       | `WindowColumns`                      |
 ///
-/// Two anchors rather than one because a per-row span has to attach to the end
-/// the label pins: `ending_on` fixes the row's CLOSE and measures backwards, so
-/// with a `days_covered` column its start moves row by row.
+/// Two anchors rather than one because the label pins a different end in each
+/// case: `ending_on` fixes the row's CLOSE and measures backwards, which is
+/// what "week ending 11 July" means.
+///
+/// A uniform form's span is a CONSTANT. A width that varies row to row is
+/// expressible — as `WindowColumns`, which states both boundaries outright.
+/// A second spelling for it (a duration naming a data column) was considered
+/// and rejected: it says the same thing as the primitive, needs its own
+/// convention about whether the labelled day is included, and that convention
+/// is the exact off-by-one class this proposal exists to remove.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Covers {
     /// `start = t + offset`, `stop = start + span`.
-    From { offset: f64, span: CoversSpan },
+    From { offset: f64, span: f64 },
     /// `stop = t + offset`, `start = stop − span`.
-    Until { offset: f64, span: CoversSpan },
+    Until { offset: f64, span: f64 },
     /// `start` and `stop` are read per row from the columns carrying the
     /// `window_start` / `window_stop` roles. The only form that can state a
-    /// gap between consecutive rows.
+    /// gap between consecutive rows, or a width that varies row to row.
     WindowColumns,
 }
 

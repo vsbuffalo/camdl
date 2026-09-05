@@ -901,7 +901,7 @@
     },
 
     "covers": {
-      "comment": "gh#833: what each row of an interval stream covers, fully expanded — the expander does the calendar arithmetic, so `offset` and a `const` span are already in AXIS units. With `t` the row's own label: `from` gives [t+offset, t+offset+span); `until` gives [t+offset-span, t+offset). `window_columns` reads both boundaries per row from the columns carrying the window_start/window_stop roles, and is the only form that can state a gap.",
+      "comment": "gh#833: what each row of an interval stream covers, fully expanded — the expander does the calendar arithmetic, so `offset` and `span` are already in AXIS units. With `t` the row's own label: `from` gives [t+offset, t+offset+span); `until` gives [t+offset-span, t+offset). `window_columns` reads both boundaries per row from the columns carrying the window_start/window_stop roles, and is the only form that can state a gap, or a width that varies row to row.",
       "oneOf": [
         {
           "type": "object",
@@ -909,7 +909,7 @@
           "properties": {
             "kind": { "type": "string", "enum": ["from", "until"] },
             "offset": { "type": "number" },
-            "span": { "$ref": "#/definitions/covers_span" }
+            "span": { "type": "number" }
           },
           "additionalProperties": false
         },
@@ -917,24 +917,6 @@
           "type": "object",
           "required": ["kind"],
           "properties": { "kind": { "type": "string", "enum": ["window_columns"] } },
-          "additionalProperties": false
-        }
-      ]
-    },
-
-    "covers_span": {
-      "comment": "How wide the period is: a compile-time constant in axis units, or a per-row width read from a named data column (a file carrying its own days_covered).",
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["const"],
-          "properties": { "const": { "type": "number" } },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": ["column"],
-          "properties": { "column": { "type": "string" } },
           "additionalProperties": false
         }
       ]
