@@ -5454,10 +5454,13 @@ Pairing guidance:
 `t = t_start` has a zero-width accumulation window, so its expected count is
 identically 0; a positive count against it scores `−∞`, which is
 indistinguishable from a degenerate filter. The check
-(`rust/crates/cli/src/util.rs:1473`) rejects it before the filter runs and names
+(`rust/crates/cli/src/util.rs:1526`) rejects it before the filter runs and names
 three fixes: drop the origin row, date each row at the _end_ of its accumulation
-window, or move the model origin earlier. A zero count at the origin is
-consistent with the zero-width window and is allowed.
+window, or move the model origin earlier. None changes the convention, which is
+always `(previous observation, this observation]` (`docs/dates.md`, "What a
+dated row covers") — and the second is a no-op on data already dated at window
+ends, which is the common case. A zero count at the origin is consistent with
+the zero-width window and is allowed.
 
 **The startup block prints the pairing — on three of the stage types.** `pgas`,
 `pmmh`, and `nuts` stages print each stream's projection kind and likelihood

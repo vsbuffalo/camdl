@@ -291,6 +291,13 @@ with a diagnostic naming the convention and the three remedies:
 - move the model origin earlier so the first observation has a full preceding
   interval.
 
+None of these changes the window convention, which is always
+`(previous observation, this observation]` — see `camdl docs dates`, "What a
+dated row covers". Note that the second applies only if your source dates each
+row at the _start_ of its accumulation window; if it already dates rows at the
+end (the common case for surveillance data), re-dating is a no-op and you need
+the first or the third.
+
 A zero count at the origin is consistent with the zero-width window and is
 accepted. (Prevalence observations — `current_pop` — read state at the instant
 and are unaffected: there is no accumulation window.)
