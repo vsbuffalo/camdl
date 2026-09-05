@@ -6,8 +6,10 @@
   opens at its own start via a reset-only union boundary, so neither the warm-up
   nor the span between two non-adjacent periods reaches a bin. The gap rule in
   the table below is enforced where the form is visible (the loader), not in the
-  binder. Outstanding: the migration that makes the declaration required,
-  `compare`'s window gate and the output columns.
+  binder. Step 3 landed: every per-stream prequential score records what its
+  value covered (`coverage`, trace schema 4) and `compare` refuses two traces
+  that scored one stream over different windows at the same time. Outstanding:
+  the migration that makes the declaration required, and the output columns.
 - **Issue:** gh#833
 - **Supersedes:** `2026-09-04-explicit-observation-windows.md`
 - **Area:** IR (`ObservationModel`, observation rows), runtime
@@ -345,7 +347,19 @@ built cleanly on the current representation.
 - **`compare` gains a window-equality gate.** Two fits of one file differing
   only in declared period have identical observation times and different
   likelihoods; without the gate `paired_delta` reports that as a
-  model-comparison result.
+  model-comparison result. The gate reads a record the trace itself carries:
+  each per-stream score has a `coverage` — `Instant`, `Interval {start, stop}`,
+  or `Unrecorded` for a trace older than schema 4 — supplied by the obs model
+  from the bound `StreamTimes` (an undeclared row's first bin runs from
+  `t_start`, which is what the filter accumulates). A tagged sum type rather
+  than an optional pair, because "no span" means two different things — an
+  instant genuinely has none; an old trace does not say — and the gate treats
+  the second as unverifiable, not as agreeing. The check is on the _window_, not
+  on declared-vs-undeclared: a migration that preserves every window (the
+  per-row form closing exactly where the undeclared rows closed, with
+  `condition_from` opening the first bin where the first `window_start` does)
+  scores the same quantities and is legitimately comparable, so Testing item 8
+  is met by refusing exactly the pairs whose windows differ.
 
 ### Rules the type does not carry
 

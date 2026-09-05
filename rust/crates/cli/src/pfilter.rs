@@ -829,8 +829,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
                 (t0, Some(t))
             }
         };
+        // gh#833: what each scored value was accumulated over, so `compare`
+        // can refuse to difference two traces that scored different windows
+        // at the same times.
+        let per_stream_cov = obs_model.per_stream_coverage(smc_config.t_start);
         let mut trace = sim::inference::prequential::build_trace(
-            recorded, &y_obs, &per_stream_obs, &result.ess_trace, t0, seed,
+            recorded, &y_obs, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
             condition_from.is_some(), score_from_time);
         if !save_samples {
             for step in &mut trace.steps {

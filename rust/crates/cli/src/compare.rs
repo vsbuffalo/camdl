@@ -553,12 +553,15 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
                      Δelpd pairs observations by position, so differencing these \
                      would compare unlike times.\n       \
                      Re-score both models on the same observation set \
-                     (check for a hole in one series, or a different t0).",
+                     (check for a hole in one series, a different t0, or a \
+                     different `covers` declaration — a declared period is scored \
+                     at its stop, one bucket after the undeclared reading).",
                     first.name, r.name, k + 1, a.t, first.name, b.t, r.name,
                 ));
             }
             let (sa, sb) = (step_streams(a), step_streams(b));
             if sa == sb {
+                check_shared_coverage(first, r, a, b)?;
                 continue;
             }
             // A v1 trace carries no `per_stream` at all. Two such traces have
@@ -591,6 +594,68 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The stream sets agree at this step; do the values scored agree on what they
+/// COVER? (gh#833.) Two fits of one file that differ only in what a row is
+/// declared to cover — a gapped window against a merged one, a stream read as
+/// an instant against the same name read as a flow — score at the same times
+/// and produce different likelihoods, and nothing else in the pipeline can tell
+/// that apart from a model difference: the times agree, the stream names agree,
+/// the data hashes agree. Only the per-stream coverage record does not.
+///
+/// An `Unrecorded` side (a trace older than schema 4) is treated as the v1
+/// per-stream case is: two such traces have nothing to check and pass, one of
+/// each cannot be checked and is refused, because an unverifiable window is not
+/// a verified one.
+fn check_shared_coverage(
+    first: &Row,
+    r: &Row,
+    a: &sim::inference::prequential::PrequentialStep,
+    b: &sim::inference::prequential::PrequentialStep,
+) -> Result<(), String> {
+    use sim::inference::Coverage;
+    for sa in &a.per_stream {
+        let Some(sb) = b.per_stream.iter().find(|s| s.stream == sa.stream) else { continue };
+        if sa.coverage == sb.coverage {
+            continue;
+        }
+        if sa.coverage == Coverage::Unrecorded || sb.coverage == Coverage::Unrecorded {
+            let (without, with, known) = if sa.coverage == Coverage::Unrecorded {
+                (&first.name, &r.name, sb.coverage)
+            } else {
+                (&r.name, &first.name, sa.coverage)
+            };
+            return Err(format!(
+                "'{}' and '{}' cannot be shown to score the same quantity for '{}' at \
+                 t={}: '{without}' does not record what its rows cover, so its score \
+                 cannot be shown to span the same window as '{with}' ({}).\n       \
+                 Re-derive '{without}' — a `prequential.json` older than schema 4 \
+                 predates the coverage record.",
+                first.name, r.name, sa.stream, a.t, fmt_coverage(known),
+            ));
+        }
+        return Err(format!(
+            "'{}' and '{}' score '{}' over different windows at t={}: {} in '{}' and \
+             {} in '{}'.\n       \
+             The two were scored at the same time but not against the same quantity — \
+             a different `covers` declaration or different window columns — and \
+             Δelpd would report that as a model difference.\n       \
+             Re-fit both with the same declaration of what each row covers.",
+            first.name, r.name, sa.stream, a.t,
+            fmt_coverage(sa.coverage), first.name, fmt_coverage(sb.coverage), r.name,
+        ));
+    }
+    Ok(())
+}
+
+fn fmt_coverage(c: sim::inference::Coverage) -> String {
+    use sim::inference::Coverage;
+    match c {
+        Coverage::Unrecorded => "unrecorded".into(),
+        Coverage::Instant => "an instant reading".into(),
+        Coverage::Interval { start, stop } => format!("the flow over [{start}, {stop})"),
+    }
 }
 
 /// Refuse a comparison whose fits were bound to different observed data
@@ -1321,7 +1386,7 @@ fn combine_scored_traces(
                 a.t == b.t
                     && a.per_stream.len() == b.per_stream.len()
                     && a.per_stream.iter().zip(&b.per_stream)
-                        .all(|(x, y)| x.stream == y.stream)
+                        .all(|(x, y)| x.stream == y.stream && x.coverage == y.coverage)
             });
         if !same_axis {
             return Err(
@@ -1368,6 +1433,7 @@ fn combine_scored_traces(
                 pit: pit_sample_randomized(&pooled_s, ss0.y_obs, pit_rng.uniform()),
                 interval: PredInterval::from_samples(&pooled_s),
                 y_pred_samples: pooled_s,
+                coverage: ss0.coverage,
             });
         }
 
@@ -2754,9 +2820,82 @@ mod tests {
                 crps: 0.5,
                 pit: 0.5,
                 interval: Default::default(),
+                coverage: Default::default(),
             }).collect();
         }
         row
+    }
+
+    /// A trace scoring one stream at every one of `times`, recording what each
+    /// value covered (`coverage[k]` at `times[k]`).
+    fn row_covering(
+        name: &str,
+        times: &[f64],
+        stream: &str,
+        coverage: &[sim::inference::Coverage],
+    ) -> Row {
+        assert_eq!(times.len(), coverage.len());
+        let mut row = row_with_streams(name, times, &[stream]);
+        for (step, c) in row.trace.steps.iter_mut().zip(coverage) {
+            step.per_stream[0].coverage = *c;
+        }
+        row
+    }
+
+    /// gh#833. Equal times and equal stream sets still permit two traces to
+    /// have scored DIFFERENT QUANTITIES: the same file read with its windows
+    /// gapped in one fit and merged in the other, or a stream read as an
+    /// instant in one and as a flow in the other. The times agree, the names
+    /// agree, the data hashes agree; only what each value covered differs, and
+    /// Δelpd would report the difference as evidence about the models.
+    #[test]
+    fn refuses_traces_that_scored_the_same_stream_over_different_windows() {
+        use sim::inference::Coverage;
+        let iv = |s: f64, e: f64| Coverage::Interval { start: s, stop: e };
+        // Rows closing at 4, 6, 7. Gapped: [5,6) with (4,5) covered by
+        // nothing. Merged: [4,6) as one two-day row. Same stops, same count of
+        // scored steps — the ambiguity a missing row used to hide.
+        let t = [4.0, 6.0, 7.0];
+        let gapped = [iv(3.0, 4.0), iv(5.0, 6.0), iv(6.0, 7.0)];
+        let merged = [iv(3.0, 4.0), iv(4.0, 6.0), iv(6.0, 7.0)];
+
+        let a = row_covering("a", &t, "cases", &gapped);
+        let b = row_covering("b", &t, "cases", &gapped);
+        check_shared_observation_axis(&[a, b]).expect("identical windows compare");
+
+        let a = row_covering("a", &t, "cases", &gapped);
+        let b = row_covering("b", &t, "cases", &merged);
+        let err = check_shared_observation_axis(&[a, b])
+            .expect_err("a gapped reading may not be differenced against a merged one");
+        assert!(err.contains("[5, 6)") && err.contains("[4, 6)"),
+            "names both windows: {err}");
+        assert!(err.contains("'a'") && err.contains("'b'") && err.contains("'cases'"),
+            "names both traces and the stream: {err}");
+        assert!(err.contains("t=6"), "and the step where they diverge: {err}");
+        assert!(err.contains("covers"), "and points at the declaration: {err}");
+
+        // The same name read as an instant in one trace and a flow in the
+        // other is not the same quantity either.
+        let a = row_covering("a", &t, "cases", &gapped);
+        let b = row_covering("b", &t, "cases", &[Coverage::Instant; 3]);
+        let err = check_shared_observation_axis(&[a, b])
+            .expect_err("an instant reading is not a flow");
+        assert!(err.contains("instant") && err.contains("[3, 4)"), "{err}");
+
+        // Two traces that never recorded coverage carry nothing to check.
+        let a = row_with_streams("a", &t, &["cases"]);
+        let b = row_with_streams("b", &t, &["cases"]);
+        check_shared_observation_axis(&[a, b])
+            .expect("two traces with no coverage record are not a mismatch");
+
+        // One recorded, one not: unverifiable, and the message says which
+        // side to re-derive rather than inventing a window mismatch.
+        let a = row_covering("a", &t, "cases", &gapped);
+        let b = row_with_streams("b", &t, &["cases"]);
+        let err = check_shared_observation_axis(&[a, b])
+            .expect_err("an unverifiable window is not a verified one");
+        assert!(err.contains("does not record what its rows cover") && err.contains("Re-derive 'b'"),
+            "{err}");
     }
 
     /// gh#241 G3: `deny_unknown_fields` — a typo'd compare.toml key must ERROR.

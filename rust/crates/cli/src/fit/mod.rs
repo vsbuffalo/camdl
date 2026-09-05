@@ -1966,8 +1966,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             // gh#269: per-stream observed values for the
                             // per-district score breakdown.
                             let per_stream_obs = obs_model.per_stream_observed();
+                            // gh#833: what each value was accumulated over,
+                            // for `compare`'s window gate.
+                            let per_stream_cov =
+                                obs_model.per_stream_coverage(smc_config.t_start);
                             preq_trace = Some(sim::inference::prequential::build_trace(
-                                recorded, &y_obs, &per_stream_obs, &result.ess_trace, 0,
+                                recorded, &y_obs, &per_stream_obs, &per_stream_cov,
+                                &result.ess_trace, 0,
                                 pf_seed, sweep_config.condition_from.is_some(), None));
                         }
                     }
