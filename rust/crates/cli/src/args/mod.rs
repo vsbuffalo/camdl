@@ -1175,6 +1175,23 @@ Examples:
   # Strict mode for CI: exit non-zero on provenance mismatch.
   # Auto-enabled when CI=true or CI=1 in the environment.
   camdl fit summary fit/he2010 --strict
+
+  # The model's parameter legend — priors, citations, caveats
+  camdl fit summary fit/he2010 --parameters
+
+  # Define each section's terms under its own table
+  camdl fit summary fit/he2010 --explain
+
+The text layout, top to bottom: the fit and how it was sampled, then the
+verdict, then four sections —
+
+  posterior      the estimates, worst R̂ first
+  convergence    both R̂ halves, the classic statistic, per-chain ESS
+  chains         per-chain log-likelihood, outlier score, saved latent paths
+  latent paths   whether the sampled paths themselves mixed (PGAS only)
+
+Nothing is hidden behind a verbosity flag: every section carries its full
+table. `--parameters` and `--explain` only ADD to it.
 "))]
 pub struct FitSummaryArgs {
     /// The fit, by handle: `@label`, a fit-level hash prefix, a fit results
@@ -1225,6 +1242,24 @@ pub struct FitSummaryArgs {
     /// chain average, so there is nothing to subset).
     #[arg(long, value_name = "IDS", conflicts_with = "params_only")]
     pub exclude_chains: Option<String>,
+
+    /// Print the model's parameter legend — each parameter's symbol, prior,
+    /// citations and caveats, from the model's `#'` docs. Off by default: it
+    /// is reference material a modeller reads deliberately, and on a
+    /// well-documented model it runs to dozens of lines before the first
+    /// number appears. `--format text` only.
+    #[arg(long, conflicts_with = "params_only")]
+    pub parameters: bool,
+
+    /// After each section's table, add a short prose block defining that
+    /// section's terms — R̂ and its two halves, the per-chain log-likelihood
+    /// columns, what a forkable draw is, what a frozen latent cell is. Each
+    /// term is defined once, under the section it is primarily read in.
+    /// This interleaves prose with the tables, so the text output stops being
+    /// cleanly machine-readable under it; use `--format json` for that.
+    /// `--format text` only.
+    #[arg(long, conflicts_with = "params_only")]
+    pub explain: bool,
 }
 
 #[derive(Args)]
