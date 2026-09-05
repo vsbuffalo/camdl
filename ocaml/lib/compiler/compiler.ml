@@ -586,14 +586,18 @@ let annotate_quantity_dims
 (** Run the model linter on a compiled model and route its results into
     the diagnostic context as non-blocking warnings. Lints (L4xx) flag
     semantically valid but discouraged patterns (e.g. L402 dead
-    compartment); they render with hint text but never set [has_errors],
-    so the build does not fail on a lint. Runs right after dimcheck in
-    [run_analysis], so both `camdlc compile` and `camdlc check` run it. *)
+    compartment, L404 two streams projecting one quantity); they render
+    with hint text but never set [has_errors], so the build does not fail
+    on a lint. Each lint tags itself with the declaration it concerns
+    ([Lint.subject]), which we resolve to that declaration's source loc.
+    Runs right after dimcheck in [run_analysis], so both `camdlc compile`
+    and `camdlc check` run it. *)
 let run_lint (d : compile_detail) : Diagnostics.diagnostic list =
   List.map (fun (l : Lint.diagnostic) ->
-    let loc = match l.compartment with
-      | Some c -> Expander.compartment_loc d.ctx c
-      | None   -> Diagnostics.no_loc
+    let loc = match l.subject with
+      | Some (Lint.SCompartment c) -> Expander.compartment_loc d.ctx c
+      | Some (Lint.SObservation n) -> Expander.obs_loc         d.ctx n
+      | None                       -> Diagnostics.no_loc
     in
     match l.severity with
     | Lint.Warning ->
