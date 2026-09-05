@@ -237,12 +237,32 @@ and walk_subexprs env ~on_hit (e : expr) : unit =
 
 (* ── Public diagnostic hints ────────────────────────────────────────── *)
 
-let hint_calendar_plus_instant =
-  "calendar months/years aren't invertible spans \
-   (e.g. date(\"2021-01-31\") + 1 month = date(\"2021-02-28\") because \
-   day-31 clamps to day-28 in Feb 2021). \
-   For a calendar-exact date use add_calendar_months(d, N). \
-   For an explicit affine span use 152 'days (≈ 5 months)."
+(* [span] is the affine day-equivalent of the offending calendar
+   duration paired with a rendering of the duration itself — e.g.
+   [(1826, "5 'years")]. The caller folds it, because the days-per-unit
+   constants live with the expander's unit conversion and must not be
+   restated here.
+
+   [None] when the duration is not a compile-time constant. The hint
+   then states the rule without a span: a suggestion the modeller can
+   paste has to be *this* model's span, and a guessed one is worse than
+   none — pasting a wrong span yields a model that compiles and runs
+   over the wrong horizon. *)
+let hint_calendar_plus_instant (span : (int * string) option) =
+  let rule =
+    "calendar months/years aren't invertible spans \
+     (e.g. date(\"2021-01-31\") + 1 month = date(\"2021-02-28\") because \
+     day-31 clamps to day-28 in Feb 2021). \
+     For a calendar-exact date use add_calendar_months(d, N)."
+  in
+  match span with
+  | Some (days, rendered) ->
+    Printf.sprintf
+      "%s For an explicit affine span use %d 'days (≈ %s)."
+      rule days rendered
+  | None ->
+    rule ^ " For an explicit affine span state the offset in 'days or \
+            'weeks, which are fixed spans."
 
 let hint_time_unit_months_with_origin =
   "constant-day axis required for calendar-anchored models. \
