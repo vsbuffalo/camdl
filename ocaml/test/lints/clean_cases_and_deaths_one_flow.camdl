@@ -1,0 +1,67 @@
+# The negative control that set L404's predicate: cases and deaths driven off
+# ONE confirmation flow. Both streams project `incidence(confirm)`, but they
+# measure different quantities — `cases` and `deaths` — each with its own
+# reporting multiplier and its own dispersion parameter. Two observation
+# processes on one latent state; the joint likelihood is correct and nothing
+# is double-counted.
+#
+# This is ordinary multi-stream modelling, and it is common: keying L404 on
+# the shared projection alone fired on 58 of 98 models in a real surveillance
+# corpus, essentially all of them this shape. The lint keys on the projection
+# AND the scored column name, so this model must emit NOTHING.
+#
+# expect: (none)
+time_unit = 'days
+
+compartments { S, E, I, D, R }
+
+let N = S + E + I + R
+
+parameters {
+  beta    : rate        in [0.001, 2.0]
+  sigma   : rate        in [0.01,  1.0]
+  gamma   : rate        in [0.001, 1.0]
+  cfr     : probability in [0.0,   1.0]
+  rho     : probability in [0.0,   1.0]
+  rho_d   : probability in [0.0,   1.0]
+  k_cases : real        in [0.1,   100.0]
+  k_deaths : real       in [0.1,   100.0]
+  N0      : count       in [100,   100000]
+  I0      : count       in [1,     1000]
+}
+
+transitions {
+  confirm  : S --> E  @ beta * S * (I / N)
+  progress : E --> I  @ sigma * E
+  die      : I --> D  @ cfr * gamma * I
+  recover  : I --> R  @ (1.0 - cfr) * gamma * I
+}
+
+observations {
+  # Confirmed cases: the confirmation flow, thinned by reporting.
+  cases_national {
+    columns        { time : time, cases : count }
+    projected      = incidence(confirm)
+    emit_schedule  = every 7 'days
+    cases          ~ neg_binomial(mean = rho * projected, r = k_cases)
+  }
+
+  # Confirmed deaths: the SAME confirmation flow, through a different
+  # measurement pipeline with its own multiplier and its own dispersion.
+  deaths_national {
+    columns        { time : time, deaths : count }
+    projected      = incidence(confirm)
+    emit_schedule  = every 7 'days
+    deaths         ~ neg_binomial(mean = rho_d * projected, r = k_deaths)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 80 'days
+}

@@ -12,7 +12,7 @@
 
    `check_model` runs a LIST of individual lint-check functions, so a
    future lint (unused-parameter, dead-transition) is a one-line append.
-   Today: the dead-compartment check (L402) and the shared-projection
+   Today: the dead-compartment check (L402) and the shared-measurement
    check (L404). *)
 
 open Ir
@@ -219,13 +219,29 @@ let check_dead_compartments (m : model) : diagnostic list =
     }
   ) dead
 
-(* ── Lint L404: two streams reading one latent quantity ─────────────────── *)
+(* ── Lint L404: two streams scoring one measurement ─────────────────────── *)
 
 (* The joint observation log-likelihood is a plain sum over bound streams, so
    two streams that read the same underlying measurements contribute that
    evidence twice. Nothing else notices: the counts are never doubled, so the
    posterior simply concentrates as though there were twice the data, and
    every convergence diagnostic reads clean.
+
+   A shared PROJECTION alone is not that condition, and keying on it is far too
+   broad: driving cases and deaths off one confirmation flow, with their own
+   multipliers and their own dispersion, is ordinary multi-stream modelling.
+   Measured on a 98-model surveillance corpus, a projection-only key fired on
+   58 models / 63 collision groups, and not ONE of those groups repeated a
+   scored column name — every one was a false positive. A lint that fires on
+   three models in five teaches people to ignore its code.
+
+   The condition is a shared projection AND a shared SCORED COLUMN. `scored` is
+   the `~` LHS, the declared value column the likelihood consumes; that name is
+   the quantity being measured, not merely the latent state behind it. Two
+   streams scoring the same named quantity off one projection are reading one
+   measurement twice; two streams scoring DIFFERENT named quantities off one
+   projection are two observation processes on one latent state, which is
+   correct and common.
 
    This runs on the EXPANDED model — after stratification expansion, index
    resolution and binder substitution — because two different SPELLINGS become
@@ -259,6 +275,15 @@ let projection_key (p : projection) : projection_key =
   | CurrentPopSum cs     -> KPop (canon cs)
   | DerivedExpr e        -> KExpr e
 
+(* A stream's measurement identity: the latent quantity its projection reads,
+   paired with the name of the column its likelihood scores. Both halves are
+   load-bearing — see the header comment for why the projection alone is not
+   the condition. *)
+type measurement_key = projection_key * string
+
+let measurement_key (o : observation_model) : measurement_key =
+  (projection_key o.projection, o.scored)
+
 (* What the shared projection reads, in the words a modeller would use. *)
 let projection_phrase (k : projection_key) : string =
   let quoted names = String.concat " + " (List.map (Printf.sprintf "'%s'") names) in
@@ -278,21 +303,21 @@ let stream_list (names : string list) : string =
   | last :: rev_init ->
     String.concat ", " (List.rev rev_init) ^ " and " ^ last
 
-(* Group the streams by resolved projection and report every group of two or
+(* Group the streams by measurement identity and report every group of two or
    more — ONE diagnostic per group, naming all its streams, so three streams
-   on one flow give one report rather than three pairs. Groups are keyed by
-   an association list rather than a hashtable because the key carries an
+   on one measurement give one report rather than three pairs. Groups are keyed
+   by an association list rather than a hashtable because the key carries an
    `expr`, and iteration follows declaration order, so the output is
    deterministic. *)
 let check_shared_projections (m : model) : diagnostic list =
-  let groups : (projection_key * string list ref) list ref = ref [] in
+  let groups : (measurement_key * string list ref) list ref = ref [] in
   List.iter (fun (o : observation_model) ->
-    let k = projection_key o.projection in
+    let k = measurement_key o in
     match List.assoc_opt k !groups with
     | Some names -> names := o.name :: !names
     | None       -> groups := (k, ref [o.name]) :: !groups
   ) m.observations;
-  List.filter_map (fun (k, names) ->
+  List.filter_map (fun ((proj, scored), names) ->
     match List.rev !names with
     | ([] | [_]) -> None
     | streams ->
@@ -301,22 +326,24 @@ let check_shared_projections (m : model) : diagnostic list =
           code = "L404";
           message =
             Printf.sprintf
-              "observation streams %s project the same quantity"
-              (stream_list streams);
+              "observation streams %s score the same quantity '%s'"
+              (stream_list streams) scored;
           detail =
             Some (Printf.sprintf
-              "%s, and the joint log-likelihood is a sum over bound streams — \
-               so data bound to all of them adds that evidence once per stream. \
-               No count doubles and no convergence diagnostic fires; the \
-               posterior just concentrates as if there were that many times the \
-               data."
-              (projection_phrase k));
+              "%s, and each scores it as '%s' — one latent quantity read one \
+               way, under one measurement name. The joint log-likelihood is a \
+               sum over bound streams, so data bound to all of them adds that \
+               evidence once per stream. No count doubles and no convergence \
+               diagnostic fires; the posterior just concentrates as if there \
+               were that many times the data."
+              (projection_phrase proj) scored);
           hint =
-            Some "if these files are one quantity at two resolutions, or one \
-                  page read twice, bind only one of them. If they really are \
+            Some "if these are one quantity at two resolutions, or one page \
+                  read twice, bind only one of them. If they really are \
                   independent observation processes on the same latent quantity \
                   — two laboratories, a confirmed and a suspected pipeline — \
-                  this is correct and the joint is right; keep both.";
+                  the joint is right; keep both, and distinct scored column \
+                  names make that visible.";
           (* Point at the first stream of the group; the message names the rest.
              `obs_loc` maps an expanded leaf back to its base declaration, so a
              stratified collision lands on the declaration line. *)

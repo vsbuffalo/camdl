@@ -148,16 +148,19 @@ let recovery_tr =
 
 let n_binding : binding = { bname = "N"; bexpr = pop "S" +. pop "I" +. pop "R" }
 
-(* An observation stream over [projection]. [source] is the `from <label>`
-   data-source key (defaults to the stream name); [rate] is the Poisson mean,
-   which defaults to the bare projection but is overridden where a test needs
-   two streams to differ in ascertainment while sharing one projection. *)
-let mk_obs ?source ?rate ?(stratum = []) name projection : observation_model =
+(* An observation stream over [projection]. [scored] is the `~` LHS — the
+   declared value column the likelihood consumes, i.e. the NAME of the quantity
+   being measured — and defaults to the stream name. [source] is the
+   `from <label>` data-source key (also defaulting to the stream name); [rate]
+   is the Poisson mean, which defaults to the bare projection but is overridden
+   where a test needs two streams to differ in ascertainment. *)
+let mk_obs ?source ?scored ?rate ?(stratum = []) name projection : observation_model =
+  let scored = match scored with Some s -> s | None -> name in
   { name;
     obs_source = (match source with Some s -> s | None -> name);
     columns = [{ col_name = "time"; col_role = RoleTime };
-               { col_name = name;   col_role = RoleValue Count }];
-    scored = name;
+               { col_name = scored; col_role = RoleValue Count }];
+    scored;
     emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
     stratum;
     projection;
@@ -315,27 +318,34 @@ let obs_model observations =
     ~observations
     ()
 
-(* The reported instance from gh#853: a weekly case file and a daily case
-   file are ONE case series at two resolutions, so both streams accumulate
-   the same flow. Bound together, `infection` is scored twice. *)
-let test_two_streams_one_flow_flagged () =
+(* The reported instance from gh#853, and the shape the lint exists for: a
+   weekly case file and a daily case file are ONE case series at two
+   resolutions. Two streams, two `from` labels so they bind different files —
+   but one projection and, decisively, ONE scored column name, because both
+   files publish the same measured quantity under the same header. Bound
+   together, every case is counted twice. *)
+let test_one_series_two_resolutions_flagged () =
   let r = Lint.check_model (obs_model [
-    mk_obs "cases_weekly" (CumulativeFlow "infection");
-    mk_obs "cases_daily"  (CumulativeFlow "infection");
+    mk_obs "cases_weekly" ~source:"cases_weekly" ~scored:"cases"
+      (CumulativeFlow "infection");
+    mk_obs "cases_daily"  ~source:"cases_daily"  ~scored:"cases"
+      (CumulativeFlow "infection");
   ]) in
   Alcotest.(check int) "exactly one L404" 1 (lint_count "L404" r);
   Alcotest.(check bool) "names the first stream"  true
     (has_lint_for "L404" "cases_weekly" r);
   Alcotest.(check bool) "names the second stream" true
-    (has_lint_for "L404" "cases_daily" r)
+    (has_lint_for "L404" "cases_daily" r);
+  Alcotest.(check bool) "names the scored quantity" true
+    (has_lint_for "L404" "cases" r)
 
-(* Three streams on one flow collapse to ONE diagnostic naming all three,
-   not to a diagnostic per pair. *)
+(* Three streams on one measurement collapse to ONE diagnostic naming all
+   three, not to a diagnostic per pair. *)
 let test_three_streams_one_group () =
   let r = Lint.check_model (obs_model [
-    mk_obs "a" (CumulativeFlow "infection");
-    mk_obs "b" (CumulativeFlow "infection");
-    mk_obs "c" (CumulativeFlow "infection");
+    mk_obs "a" ~scored:"cases" (CumulativeFlow "infection");
+    mk_obs "b" ~scored:"cases" (CumulativeFlow "infection");
+    mk_obs "c" ~scored:"cases" (CumulativeFlow "infection");
   ]) in
   Alcotest.(check int) "one diagnostic for the whole group" 1 (lint_count "L404" r);
   List.iter (fun n ->
@@ -348,60 +358,87 @@ let test_three_streams_one_group () =
    established for the within-stream case. *)
 let test_flow_sum_order_insensitive () =
   let r = Lint.check_model (obs_model [
-    mk_obs "pooled_a" (CumulativeFlowSum ["infection_north"; "infection_south"]);
-    mk_obs "pooled_b" (CumulativeFlowSum ["infection_south"; "infection_north"]);
+    mk_obs "pooled_a" ~scored:"cases"
+      (CumulativeFlowSum ["infection_north"; "infection_south"]);
+    mk_obs "pooled_b" ~scored:"cases"
+      (CumulativeFlowSum ["infection_south"; "infection_north"]);
   ]) in
   Alcotest.(check int) "commuted flow sums are one projection" 1 (lint_count "L404" r)
 
 (* A one-element sum and the scalar form name the same single flow. *)
 let test_singleton_sum_equals_scalar () =
   let r = Lint.check_model (obs_model [
-    mk_obs "scalar"    (CumulativeFlow "infection");
-    mk_obs "singleton" (CumulativeFlowSum ["infection"]);
+    mk_obs "scalar"    ~scored:"cases" (CumulativeFlow "infection");
+    mk_obs "singleton" ~scored:"cases" (CumulativeFlowSum ["infection"]);
   ]) in
   Alcotest.(check int) "singleton sum ≡ scalar flow" 1 (lint_count "L404" r);
   let r = Lint.check_model (obs_model [
-    mk_obs "scalar"    (CurrentPop "I");
-    mk_obs "singleton" (CurrentPopSum ["I"]);
+    mk_obs "scalar"    ~scored:"prev" (CurrentPop "I");
+    mk_obs "singleton" ~scored:"prev" (CurrentPopSum ["I"]);
   ]) in
   Alcotest.(check int) "singleton pop sum ≡ scalar pop" 1 (lint_count "L404" r)
 
 (* The gh#678 shape lifted to the stream layer: a stratified stream whose
-   projection never mentions its own binder expands to one leaf per
-   stratum, every leaf projecting the SAME flow. Each patch's data rows
-   are then scored against the north patch's incidence. *)
+   projection never mentions its own binder expands to one leaf per stratum,
+   every leaf projecting the SAME flow. Each patch's data rows are then scored
+   against the north patch's incidence.
+
+   The narrowed key must not lose this. `scored` is the source `~` LHS token,
+   taken once per DECLARATION and copied to every expanded leaf (expander.ml,
+   `Ir.scored = meas_v.om_scored`), so the leaves of one stratified stream
+   share a scored name by construction — and here they share a projection too,
+   which is the defect. *)
 let test_stratified_stream_ignoring_its_binder () =
   let r = Lint.check_model (obs_model [
-    mk_obs "cases_north" ~source:"cases" ~stratum:["patch", "north"]
+    mk_obs "cases_north" ~source:"cases" ~scored:"cases" ~stratum:["patch", "north"]
       (CumulativeFlow "infection_north");
-    mk_obs "cases_south" ~source:"cases" ~stratum:["patch", "south"]
+    mk_obs "cases_south" ~source:"cases" ~scored:"cases" ~stratum:["patch", "south"]
       (CumulativeFlow "infection_north");
   ]) in
   Alcotest.(check int) "leaves of one stream sharing a flow are flagged"
     1 (lint_count "L404" r)
 
-(* Identical derived expressions over the state are one projection. *)
+(* Identical derived expressions over the state, scored under one name. *)
 let test_identical_derived_expr_flagged () =
   let prevalence () = DerivedExpr (pop "I" /. (pop "S" +. pop "I" +. pop "R")) in
   let r = Lint.check_model (obs_model [
-    mk_obs "prev_survey" (prevalence ());
-    mk_obs "prev_sentinel" (prevalence ());
+    mk_obs "prev_survey"   ~scored:"prevalence" (prevalence ());
+    mk_obs "prev_sentinel" ~scored:"prevalence" (prevalence ());
   ]) in
   Alcotest.(check int) "identical derived exprs are one projection" 1 (lint_count "L404" r)
 
 (* ── L404 negative controls ──────────────────────────────────────────── *)
 
-(* The property most likely to regress: two streams that legitimately
-   share one latent quantity — two laboratories reporting the same
-   incidence through different ascertainment — must keep compiling. camdl
-   cannot distinguish them from a duplicated file (that is a fact about
-   the data files, not the model), so L404 DOES fire; what it must never
-   do is escalate. Pin the severity, which is what keeps the model
-   runnable. *)
-let test_two_labs_one_incidence_warns_never_errors () =
+(* The case that forced the predicate to narrow, measured on a real
+   surveillance corpus: cases and deaths driven off ONE confirmation flow,
+   each with its own multiplier and its own dispersion, each scoring its own
+   named quantity. Two observation processes on one latent state — ordinary
+   multi-stream modelling, and the joint is correct. A projection-only key
+   fired on 58 of 98 models in that corpus, essentially all of them this
+   shape. *)
+let test_cases_and_deaths_off_one_flow_not_shared () =
   let r = Lint.check_model (obs_model [
-    mk_obs "lab_a" ~rate:(param "rho_a" *. Projected) (CumulativeFlow "infection");
-    mk_obs "lab_b" ~rate:(param "rho_b" *. Projected) (CumulativeFlow "infection");
+    mk_obs "cases"  ~scored:"cases"
+      ~rate:(param "rho" *. Projected)       (CumulativeFlow "confirm");
+    mk_obs "deaths" ~scored:"deaths"
+      ~rate:(param "rho_d" *. Projected)     (CumulativeFlow "confirm");
+  ]) in
+  Alcotest.(check int) "distinct measured quantities on one flow" 0
+    (lint_count "L404" r)
+
+(* The property most likely to regress: two streams that legitimately share
+   one latent quantity AND publish it under one column name — two
+   laboratories both reporting a column called `cases` — must keep compiling.
+   camdl cannot distinguish that from a duplicated file (whether two files
+   hold the same measurements is a fact about how they were produced, not
+   about the model), so L404 DOES fire here; what it must never do is
+   escalate. Pin the severity, which is what keeps the model runnable. *)
+let test_two_labs_one_scored_name_warns_never_errors () =
+  let r = Lint.check_model (obs_model [
+    mk_obs "lab_a" ~source:"lab_a" ~scored:"cases"
+      ~rate:(param "rho_a" *. Projected) (CumulativeFlow "infection");
+    mk_obs "lab_b" ~source:"lab_b" ~scored:"cases"
+      ~rate:(param "rho_b" *. Projected) (CumulativeFlow "infection");
   ]) in
   Alcotest.(check int) "the legitimate case still warns" 1 (lint_count "L404" r);
   Alcotest.(check bool) "every L404 is a Warning, never blocking" true
@@ -413,19 +450,23 @@ let test_two_labs_one_incidence_warns_never_errors () =
    state read at the instant. *)
 let test_flow_and_pop_not_shared () =
   let r = Lint.check_model (obs_model [
-    mk_obs "cases"      (CumulativeFlow "infection");
-    mk_obs "prevalence" (CurrentPop "I");
+    mk_obs "cases"      ~scored:"burden" (CumulativeFlow "infection");
+    mk_obs "prevalence" ~scored:"burden" (CurrentPop "I");
   ]) in
   Alcotest.(check int) "incidence and prevalence are distinct" 0 (lint_count "L404" r)
 
 (* The ordinary stratified stream: one leaf per patch, each projecting its
-   OWN patch's flow. This is the shape every spatial model has, and a
-   false positive here would fire on most of the corpus. *)
+   OWN patch's flow. This is the shape every spatial model has, and a false
+   positive here would fire on most of the corpus.
+
+   Note both leaves carry ONE scored name, as the expander produces — so this
+   test isolates the projection half of the key: it is the differing
+   projections, and nothing else, that keep it quiet. *)
 let test_distinct_strata_not_shared () =
   let r = Lint.check_model (obs_model [
-    mk_obs "cases_north" ~source:"cases" ~stratum:["patch", "north"]
+    mk_obs "cases_north" ~source:"cases" ~scored:"cases" ~stratum:["patch", "north"]
       (CumulativeFlow "infection_north");
-    mk_obs "cases_south" ~source:"cases" ~stratum:["patch", "south"]
+    mk_obs "cases_south" ~source:"cases" ~scored:"cases" ~stratum:["patch", "south"]
       (CumulativeFlow "infection_south");
   ]) in
   Alcotest.(check int) "per-stratum leaves are distinct" 0 (lint_count "L404" r)
@@ -433,22 +474,27 @@ let test_distinct_strata_not_shared () =
 (* Disjoint pools over the same family are different quantities. *)
 let test_disjoint_flow_sums_not_shared () =
   let r = Lint.check_model (obs_model [
-    mk_obs "north_pool" (CumulativeFlowSum ["infection_n1"; "infection_n2"]);
-    mk_obs "south_pool" (CumulativeFlowSum ["infection_s1"; "infection_s2"]);
+    mk_obs "north_pool" ~scored:"cases"
+      (CumulativeFlowSum ["infection_n1"; "infection_n2"]);
+    mk_obs "south_pool" ~scored:"cases"
+      (CumulativeFlowSum ["infection_s1"; "infection_s2"]);
   ]) in
   Alcotest.(check int) "disjoint pools are distinct" 0 (lint_count "L404" r)
 
 (* Different derived expressions are different quantities. *)
 let test_distinct_derived_exprs_not_shared () =
   let r = Lint.check_model (obs_model [
-    mk_obs "prev_i" (DerivedExpr (pop "I" /. (pop "S" +. pop "I" +. pop "R")));
-    mk_obs "prev_r" (DerivedExpr (pop "R" /. (pop "S" +. pop "I" +. pop "R")));
+    mk_obs "prev_i" ~scored:"frac"
+      (DerivedExpr (pop "I" /. (pop "S" +. pop "I" +. pop "R")));
+    mk_obs "prev_r" ~scored:"frac"
+      (DerivedExpr (pop "R" /. (pop "S" +. pop "I" +. pop "R")));
   ]) in
   Alcotest.(check int) "distinct derived exprs" 0 (lint_count "L404" r)
 
 (* A single stream, and a model with no observations at all, are clean. *)
 let test_single_and_zero_streams_clean () =
-  let r = Lint.check_model (obs_model [mk_obs "cases" (CumulativeFlow "infection")]) in
+  let r = Lint.check_model (obs_model [
+    mk_obs "cases" ~scored:"cases" (CumulativeFlow "infection")]) in
   Alcotest.(check int) "one stream cannot collide" 0 (lint_count "L404" r);
   let r = Lint.check_model (obs_model []) in
   Alcotest.(check int) "no streams, no lint" 0 (lint_count "L404" r)
@@ -465,14 +511,15 @@ let () =
       Alcotest.test_case "init-target-only is not dead"      `Quick test_init_target_only_not_dead;
       Alcotest.test_case "clean SIR has no lint"             `Quick test_clean_sir_no_lint;
     ];
-    "shared_projection", [
-      Alcotest.test_case "two streams, one flow"             `Quick test_two_streams_one_flow_flagged;
+    "shared_measurement", [
+      Alcotest.test_case "one series at two resolutions"     `Quick test_one_series_two_resolutions_flagged;
       Alcotest.test_case "three streams, one diagnostic"     `Quick test_three_streams_one_group;
       Alcotest.test_case "flow sum is order-insensitive"     `Quick test_flow_sum_order_insensitive;
       Alcotest.test_case "singleton sum ≡ scalar"            `Quick test_singleton_sum_equals_scalar;
       Alcotest.test_case "stratified stream ignoring binder" `Quick test_stratified_stream_ignoring_its_binder;
       Alcotest.test_case "identical derived exprs"           `Quick test_identical_derived_expr_flagged;
-      Alcotest.test_case "two labs warn, never error"        `Quick test_two_labs_one_incidence_warns_never_errors;
+      Alcotest.test_case "cases and deaths off one flow"     `Quick test_cases_and_deaths_off_one_flow_not_shared;
+      Alcotest.test_case "two labs warn, never error"        `Quick test_two_labs_one_scored_name_warns_never_errors;
       Alcotest.test_case "incidence vs prevalence"           `Quick test_flow_and_pop_not_shared;
       Alcotest.test_case "per-stratum leaves are distinct"   `Quick test_distinct_strata_not_shared;
       Alcotest.test_case "disjoint flow sums"                `Quick test_disjoint_flow_sums_not_shared;
