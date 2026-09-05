@@ -62,7 +62,7 @@ use sim::{
         particle_filter::Observation,
         pgas::{build_obs_at_substep, complete_data_loglik, run_pgas, simulate_reference, PGASConfig},
         pmmh::Prior,
-        multi_stream_obs::StreamSpec,
+        multi_stream_obs::{StreamSpec, StreamTimes},
         BoundObs, MultiStreamObsModel, dense_cells,
     },
     rng::StatefulRng,
@@ -218,6 +218,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
     let obs = observations();
     MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), obs.iter().map(|o| o.time).collect()),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: ir::observation::ObservationModel {
                 name: "cases".into(),
@@ -249,9 +250,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
                 ),
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
-            obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
-            covers: None,
         }])
         .unwrap()
         .0,

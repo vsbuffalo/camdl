@@ -1725,15 +1725,17 @@ pub(crate) fn stream_specs_from_obs_streams(
 ) -> Vec<sim::inference::multi_stream_obs::StreamSpec> {
     streams.iter()
         .map(|s| sim::inference::multi_stream_obs::StreamSpec {
+            times: sim::inference::multi_stream_obs::StreamTimes::undeclared_for(
+                &s.projection,
+                s.data.iter().map(|o| o.time).collect(),
+            ),
             projection: s.projection.clone(),
             ir_model: s.obs_model_ir.clone(),
             // Authoritative per-grid-time cells (holes = `None`). A hole
             // contributes no likelihood term but its obs time stays in the grid,
             // so the per-obs-index incidence reset still fires at it.
             observations: s.cells.clone(),
-            obs_times: s.data.iter().map(|o| o.time).collect(),
             aux: s.aux.clone(),
-            covers: None,
         })
         .collect()
 }

@@ -26,7 +26,7 @@ use sim::error::SimError;
 use sim::inference::if2::{EstimatedParam, Transform};
 use sim::inference::BoundObs;
 use sim::inference::dense_cells;
-use sim::inference::multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec};
+use sim::inference::multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec, StreamTimes};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{run_pgas, simulate_reference, PGASConfig};
 use sim::inference::pmmh::Prior;
@@ -116,12 +116,11 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(vec![StreamSpec {
+            times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![0]), obs.iter().map(|o| o.time).collect()),
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
-            obs_times: obs.iter().map(|o| o.time).collect(),
             aux: vec![],
-            covers: None,
         }]).unwrap().0,
         compiled.clone(),
     )

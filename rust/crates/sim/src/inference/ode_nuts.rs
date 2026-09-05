@@ -409,7 +409,7 @@ pub fn run_ode_nuts_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec};
+    use crate::inference::multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes};
     use crate::inference::types::Transform;
     use crate::inference::{dense_cells, BoundObs};
     use ir::deriv::DerivEntry;
@@ -508,12 +508,11 @@ mod tests {
         let om = cm.model.observations[0].clone();
         let projection = StreamProjection::from_ir(&om.projection, &cm, &om.name).unwrap();
         let spec = StreamSpec {
+            times: StreamTimes::undeclared_for(&projection, obs_times.clone()),
             projection,
             ir_model: om,
             observations: dense_cells(data),
-            obs_times: obs_times.clone(),
             aux: vec![],
-            covers: None,
         };
         let obs_model =
             MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, cm.clone()).unwrap();
@@ -604,8 +603,8 @@ mod tests {
         let om = cm.model.observations[0].clone();
         let projection = StreamProjection::from_ir(&om.projection, &cm, &om.name).unwrap();
         let spec = StreamSpec {
-            projection, ir_model: om, observations: dense_cells(data),
-            obs_times: obs_times.clone(), aux: vec![], covers: None,
+            times: StreamTimes::undeclared_for(&projection, obs_times.clone()),
+            projection, ir_model: om, observations: dense_cells(data), aux: vec![],
         };
         let obs_model =
             MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, cm.clone()).unwrap();

@@ -552,6 +552,12 @@ struct BoundStream {
     /// no term, and in Phase 2 no reset). INVARIANT (`bind`):
     /// `at_union.len() == BoundObs.times.len()`.
     at_union: Vec<Option<usize>>,
+    /// What this stream's observations are — instants, declared periods, or a
+    /// still-undeclared interval stream. Carried past validation so a declared
+    /// window survives into the model rather than being checked and dropped:
+    /// the reset schedule for a gapped stream, the output columns, and the
+    /// `t`-in-likelihood refusal all read it (gh#833).
+    times: StreamTimes,
     /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
     /// person-time offset), indexed by THIS stream's own observation index,
     /// each a name→value list the likelihood reads by `Expr::ObsColumnRef`
@@ -615,10 +621,15 @@ impl BoundObs {
         // strictly-increasing (gh#188) checks run per stream. Findings
         // accumulate; the union is built only from validated schedules below.
         for spec in &streams {
+            // The stream's schedule — the boundary each observation is SCORED
+            // at. Derived from `spec.times` (a declared period closes at its
+            // own stop, not at the row's label), so every check below is
+            // against the one authority rather than a parallel time vector.
+            let closes = spec.times.closes();
             // (2) Empty observation series — a header row but no data rows.
-            // Left unchecked this panics downstream (`obs_times[0]` on a
+            // Left unchecked this panics downstream (`closes[0]` on a
             // zero-length vec).
-            if spec.obs_times.is_empty() {
+            if closes.is_empty() {
                 findings.push(Finding {
                     severity: Severity::Error,
                     message: format!(
@@ -635,7 +646,7 @@ impl BoundObs {
             // would panic the sort. (The CLI time-column parser also guards
             // this at the source with a located message; this is the
             // defense-in-depth so `bind` never panics on garbage input.)
-            if let Some(bad) = spec.obs_times.iter().find(|t| !t.is_finite()) {
+            if let Some(bad) = closes.iter().find(|t| !t.is_finite()) {
                 findings.push(Finding {
                     severity: Severity::Error,
                     message: format!(
@@ -648,7 +659,7 @@ impl BoundObs {
             }
             // (3) gh#188: each stream's own observation times must be strictly
             // increasing.
-            if let Some(w) = spec.obs_times.windows(2).find(|w| w[1] <= w[0]) {
+            if let Some(w) = closes.windows(2).find(|w| w[1] <= w[0]) {
                 findings.push(Finding {
                     severity: Severity::Error,
                     message: format!(
@@ -662,89 +673,79 @@ impl BoundObs {
             // cells are per-stream-local, indexed by this stream's own
             // schedule: `cells.len() == obs_times.len()` (the at_union walk
             // indexes `cells[local]` for each scheduled union time).
-            if spec.observations.len() != spec.obs_times.len() {
+            if spec.observations.len() != closes.len() {
                 findings.push(Finding {
                     severity: Severity::Error,
                     message: format!(
                         "observation stream '{}': {} cells but {} observation times \
                          (internal binder error — cells must match the stream's own \
                          schedule length)",
-                        spec.ir_model.name, spec.observations.len(), spec.obs_times.len()
+                        spec.ir_model.name, spec.observations.len(), closes.len()
                     ),
                 });
             }
-            // (3b) gh#833: a declared `covers` must agree with the stream's
-            // own kind and schedule. Three checks, each naming the stream:
-            // - only an Interval (incidence / `FlowSum`) stream may declare
-            //   periods — an Instant/prevalence stream has no window to
-            //   state (proposal's rule 6, enforced here as defense-in-depth
-            //   ahead of the DSL-level diagnostic).
-            // - one period per observation, each ending exactly where the
-            //   stream's own schedule says (`covers[i].stop() ==
-            //   obs_times[i]`) — `covers` describes the SAME observations,
-            //   not a parallel schedule.
-            // - CONTIGUOUS: `covers[i].start() == covers[i-1].stop()`. A
-            //   gap is refused here rather than silently discarding the
-            //   uncovered flow: today's `reset_due_acc` resets an Interval
-            //   stream's accumulator exactly where it next scores, so a
-            //   reset at a boundary with NO observation of its own — what a
-            //   genuine gap needs — has nowhere to hang in the current
-            //   union-axis walk. Wiring that (a per-slot reset schedule
-            //   independent of the score schedule, and the union axis
-            //   admitting a reset-only boundary) is the harder remainder of
-            //   gh#833 step 1 and is not yet done; the per-row
-            //   `window_start`/`window_stop` DSL form (the only form the
-            //   proposal allows a gap under) must not compile against this
-            //   binder until it lands.
-            if let Some(periods) = &spec.covers {
-                if spec.projection.temporal_kind() != ir::observation::TemporalKind::Interval {
-                    findings.push(Finding {
-                        severity: Severity::Error,
-                        message: format!(
-                            "observation stream '{}' declares a period for each \
-                             observation (`covers`), but its projection reads an \
-                             instant (prevalence / a derived expression), not an \
-                             accumulated interval — only an incidence stream has a \
-                             window to state.",
-                            spec.ir_model.name
-                        ),
-                    });
-                } else if periods.len() != spec.obs_times.len() {
-                    findings.push(Finding {
-                        severity: Severity::Error,
-                        message: format!(
-                            "observation stream '{}': {} declared periods but {} \
-                             observation times (internal binder error — `covers` must \
-                             have one period per observation)",
-                            spec.ir_model.name, periods.len(), spec.obs_times.len()
-                        ),
-                    });
-                } else {
-                    for (i, (p, &t)) in periods.iter().zip(spec.obs_times.iter()).enumerate() {
-                        if p.stop() != t {
-                            findings.push(Finding {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "observation stream '{}' row {}: declared period \
-                                     [{}, {}) does not end at this row's own observation \
-                                     time {} (internal binder error — a period's stop must \
-                                     equal the observation it covers)",
-                                    spec.ir_model.name, i, p.start(), p.stop(), t
-                                ),
-                            });
-                        }
-                        if i > 0 && p.start() != periods[i - 1].stop() {
-                            findings.push(Finding {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "observation stream '{}': declared period {} starts at \
-                                     {} but period {} ends at {} — periods must be \
-                                     contiguous (a gap needs the per-row `window_start`/ \
-                                     `window_stop` form, not yet supported by this binder)",
-                                    spec.ir_model.name, i, p.start(), i - 1, periods[i - 1].stop()
-                                ),
-                            });
-                        }
+            // (3b) gh#833: the `times` variant must agree with what the
+            // projection reads. The variant is not independent information —
+            // an accumulating projection reads an interval and a state read
+            // reads an instant, so a disagreement is an illegal state rather
+            // than a choice (the proposal's rule 6, enforced here as
+            // defense-in-depth ahead of the DSL-level diagnostic).
+            if spec.times.temporal_kind() != spec.projection.temporal_kind() {
+                use ir::observation::TemporalKind;
+                let (carries, reads) = match spec.projection.temporal_kind() {
+                    TemporalKind::Interval => (
+                        "instant readings",
+                        "accumulates a flow over an interval (incidence)",
+                    ),
+                    TemporalKind::Instant => (
+                        "periods to accumulate over",
+                        "reads state at an instant (prevalence, or a derived expression)",
+                    ),
+                };
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    message: format!(
+                        "observation stream '{}' carries {}, but its projection {} — \
+                         only an accumulating projection has a window to state, and \
+                         only a state read is an instant.",
+                        spec.ir_model.name, carries, reads
+                    ),
+                });
+            }
+            // A declared period must be CONTIGUOUS with its predecessor.
+            //
+            // Note this deliberately does NOT require a period to end at the
+            // row's own label: `covers = day(D)` closes at `D + 1`, which is
+            // exactly the one-bucket correction gh#833 exists to make. The
+            // schedule is DERIVED from the stops (`StreamTimes::closes`), so
+            // there is no second time vector for a window to disagree with.
+            //
+            // A gap is refused rather than silently discarding the uncovered
+            // flow: today's `reset_due_acc` zeroes an interval stream's
+            // accumulator exactly where it next scores, so a reset at a
+            // boundary with no observation of its own — what a gap needs —
+            // has nowhere to hang on the union axis. Wiring that (a per-slot
+            // reset schedule independent of the score schedule, and a union
+            // axis admitting a reset-only boundary) is the remaining hard
+            // part of gh#833 step 1. The per-row `window_start`/`window_stop`
+            // form is the only form the proposal allows a gap under, and it
+            // must not reach this binder until that lands.
+            if let Some(periods) = spec.times.periods() {
+                for (i, w) in periods.windows(2).enumerate() {
+                    if w[1].start() != w[0].stop() {
+                        findings.push(Finding {
+                            severity: Severity::Error,
+                            message: format!(
+                                "observation stream '{}': declared period {} covers \
+                                 [{}, {}) but period {} starts at {} — periods must be \
+                                 contiguous, leaving no unscored gap between them. A \
+                                 stated gap needs the per-row \
+                                 `window_start`/`window_stop` form, which this binder \
+                                 does not yet support.",
+                                spec.ir_model.name, i, w[0].start(), w[0].stop(),
+                                i + 1, w[1].start()
+                            ),
+                        });
                     }
                 }
             }
@@ -911,7 +912,7 @@ impl BoundObs {
         // per calendar instant (§3.2), so no tolerance is needed (and none is
         // used). A homogeneous model yields a union equal to the shared axis.
         let mut times: Vec<f64> =
-            streams.iter().flat_map(|s| s.obs_times.iter().copied()).collect();
+            streams.iter().flat_map(|s| s.times.closes()).collect();
         // Finiteness is enforced by the per-stream validation above (a
         // non-finite time is a fatal finding → early return before this sort),
         // so `partial_cmp` never returns `None` here.
@@ -925,10 +926,11 @@ impl BoundObs {
         let bound_streams = streams
             .into_iter()
             .map(|spec| {
+                let closes = spec.times.closes();
                 let mut at_union = Vec::with_capacity(times.len());
                 let mut local = 0usize;
                 for &ut in &times {
-                    if local < spec.obs_times.len() && spec.obs_times[local] == ut {
+                    if local < closes.len() && closes[local] == ut {
                         at_union.push(Some(local));
                         local += 1;
                     } else {
@@ -936,7 +938,7 @@ impl BoundObs {
                     }
                 }
                 debug_assert_eq!(
-                    local, spec.obs_times.len(),
+                    local, closes.len(),
                     "every stream observation time must appear in the union",
                 );
                 BoundStream {
@@ -944,6 +946,7 @@ impl BoundObs {
                     projection: spec.projection,
                     cells: spec.observations,
                     at_union,
+                    times: spec.times,
                     aux: spec.aux,
                 }
             })
@@ -955,6 +958,14 @@ impl BoundObs {
     /// The union observation axis (sorted-unique over all streams' schedules).
     pub fn times(&self) -> &[f64] {
         &self.times
+    }
+
+    /// What stream `stream_idx`'s observations are — the declared periods, if
+    /// it declared any. The scoring window a consumer needs to label a flow
+    /// column, decide a reset schedule, or refuse a `t`-referencing likelihood
+    /// on a multi-step window (gh#833).
+    pub fn stream_times(&self, stream_idx: usize) -> &StreamTimes {
+        &self.streams[stream_idx].times
     }
 
     /// Test-only: a stream's `at_union` membership over the union axis.
@@ -1010,6 +1021,91 @@ impl Period {
 
     pub fn width(&self) -> f64 {
         self.stop - self.start
+    }
+}
+
+/// When a stream's observations happen (gh#833). The variant is fixed by the
+/// stream's projection: an accumulating projection (`incidence(...)`,
+/// `FlowSum`) reads an interval, a state read (`prevalence(...)`) reads an
+/// instant. `bind` rejects a variant that disagrees with the projection.
+///
+/// The point of the type is that the **closing boundaries are derived, never
+/// stored alongside** the periods: [`Self::closes`] is the single source of
+/// truth for a stream's schedule, so a declared window and the time it is
+/// scored at cannot disagree.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StreamTimes {
+    /// Read the state at each instant. One boundary per observation.
+    Instants(Vec<f64>),
+    /// Accumulate over each declared half-open period. The row's own label is
+    /// no longer its scoring time: `covers = day(D)` puts row `D` in the
+    /// bucket closing at `D + 1`, which is the one-bucket correction gh#833
+    /// exists to make.
+    Intervals(Vec<Period>),
+    /// An interval stream that has NOT declared what its rows cover, scored
+    /// under the historical convention: row `k` covers `(t[k-1], t[k]]`, so
+    /// its window is whatever the row spacing happens to be.
+    ///
+    /// TRANSITIONAL. This is the state gh#833 exists to abolish, and it is a
+    /// variant rather than an `Option` so that "undeclared" is visible at
+    /// every match site instead of hiding behind a `None`. It disappears when
+    /// the DSL requires a declaration (step 2) and every model migrates;
+    /// nothing new should construct it.
+    InferredIntervals(Vec<f64>),
+}
+
+impl StreamTimes {
+    /// The stream's schedule: the boundary each observation is scored at. For
+    /// an instant reading that is the instant itself; for a declared period it
+    /// is the period's **stop** (the proposal's "the fit time source for a
+    /// windowed stream is `window_stop`"); for an undeclared interval it is
+    /// the row's own time, as today.
+    pub fn closes(&self) -> Vec<f64> {
+        match self {
+            StreamTimes::Instants(ts) | StreamTimes::InferredIntervals(ts) => ts.clone(),
+            StreamTimes::Intervals(ps) => ps.iter().map(Period::stop).collect(),
+        }
+    }
+
+    /// One entry per observation, in every variant.
+    pub fn len(&self) -> usize {
+        match self {
+            StreamTimes::Instants(ts) | StreamTimes::InferredIntervals(ts) => ts.len(),
+            StreamTimes::Intervals(ps) => ps.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The declared periods, or `None` for an instant / undeclared stream.
+    pub fn periods(&self) -> Option<&[Period]> {
+        match self {
+            StreamTimes::Intervals(ps) => Some(ps),
+            _ => None,
+        }
+    }
+
+    /// The kind this variant claims, for agreement-checking against the
+    /// stream's projection.
+    pub fn temporal_kind(&self) -> ir::observation::TemporalKind {
+        use ir::observation::TemporalKind;
+        match self {
+            StreamTimes::Instants(_) => TemporalKind::Instant,
+            StreamTimes::Intervals(_) | StreamTimes::InferredIntervals(_) => TemporalKind::Interval,
+        }
+    }
+
+    /// Build the undeclared form appropriate to `projection` — an `Instants`
+    /// reading for a prevalence projection, an `InferredIntervals` for an
+    /// incidence one. The bridge for every call site that predates `covers`.
+    pub fn undeclared_for(projection: &StreamProjection, times: Vec<f64>) -> Self {
+        use ir::observation::TemporalKind;
+        match projection.temporal_kind() {
+            TemporalKind::Instant => StreamTimes::Instants(times),
+            TemporalKind::Interval => StreamTimes::InferredIntervals(times),
+        }
     }
 }
 
@@ -1088,34 +1184,25 @@ pub struct StreamSpec {
     pub projection: StreamProjection,
     pub ir_model: ir::observation::ObservationModel,
     pub observations: Vec<Option<ObsCell>>,
-    pub obs_times: Vec<f64>,
+    /// When this stream's observations happen — instants, declared periods, or
+    /// (transitionally) an interval stream that has not declared what its rows
+    /// cover. The single source of truth for the stream's schedule: the
+    /// boundary each observation is scored at is [`StreamTimes::closes`], never
+    /// a separately-stored time that could disagree with a declared window.
+    pub times: StreamTimes,
     /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
-    /// person-time offset), indexed by observation-time index — each a
-    /// name→value list the likelihood reads by name (§3, §6.1). The loader
-    /// fills this; dense call sites pass empties via [`StreamSpec::dense`].
+    /// person-time offset), indexed by observation index — each a name→value
+    /// list the likelihood reads by name (§3, §6.1). The loader fills this;
+    /// dense call sites pass empties via [`StreamSpec::dense`].
     /// INVARIANT (checked in `bind`): `aux.len() == observations.len()`.
     pub aux: Vec<Vec<(String, f64)>>,
-    /// The declared period each observation covers (gh#833). `None` — every
-    /// existing caller, today — means the stream has not declared what its
-    /// rows cover; an `Interval`-kind (`FlowSum`) stream is then scored under
-    /// the historical, undeclared `(previous, this]` convention, UNCHANGED
-    /// from before this field existed. `Some(periods)` requires
-    /// `spec.projection.temporal_kind() == Interval`, `periods.len() ==
-    /// obs_times.len()`, `periods[i].stop() == obs_times[i]`, and — for now —
-    /// CONTIGUITY (`periods[i].start() == periods[i-1].stop()`); a declared
-    /// gap is refused rather than silently discarding the uncovered flow,
-    /// because that needs the accumulator to reset at a boundary with no
-    /// observation of its own, which is not yet wired (see the doc comment on
-    /// the contiguity check in `BoundObs::bind`). Checked in `bind`.
-    pub covers: Option<Vec<Period>>,
 }
 
 impl StreamSpec {
-    /// Build a spec with NO auxiliary data and no declared `covers` — the
-    /// common scalar-outcome stream under today's undeclared convention. The
-    /// aux vector is all-empty, length-matched to `observations`. Dense and
-    /// aux-free call sites use this so they need not spell out the empty
-    /// `aux`.
+    /// Build a spec with NO auxiliary data, under today's undeclared
+    /// convention — the common scalar-outcome stream. The `times` variant
+    /// follows the projection's kind ([`StreamTimes::undeclared_for`]). The
+    /// aux vector is all-empty, length-matched to `observations`.
     pub fn dense(
         projection: StreamProjection,
         ir_model: ir::observation::ObservationModel,
@@ -1123,7 +1210,27 @@ impl StreamSpec {
         obs_times: Vec<f64>,
     ) -> Self {
         let aux = vec![Vec::new(); observations.len()];
-        StreamSpec { projection, ir_model, observations, obs_times, aux, covers: None }
+        let times = StreamTimes::undeclared_for(&projection, obs_times);
+        StreamSpec { projection, ir_model, observations, times, aux }
+    }
+
+    /// Build a spec whose stream DECLARES the period each row covers — the
+    /// gh#833 form. The schedule is derived from the periods' stops, so a
+    /// row's label and the boundary it is scored at can no longer disagree.
+    pub fn dense_covering(
+        projection: StreamProjection,
+        ir_model: ir::observation::ObservationModel,
+        observations: Vec<Option<ObsCell>>,
+        periods: Vec<Period>,
+    ) -> Self {
+        let aux = vec![Vec::new(); observations.len()];
+        StreamSpec {
+            projection,
+            ir_model,
+            observations,
+            times: StreamTimes::Intervals(periods),
+            aux,
+        }
     }
 }
 
@@ -2269,7 +2376,7 @@ mod period_and_covers_tests {
     //! doc comment for the deferred gap case): `Period::new`'s own invariants,
     //! and `BoundObs::bind`'s validation of a declared `covers`.
     use super::{
-        bind_tests::spec, dense_cells, BoundObs, Period, StreamProjection, StreamSpec,
+        bind_tests::spec, dense_cells, BoundObs, Period, StreamProjection, StreamSpec, StreamTimes,
     };
     use ir::observation::{
         ColumnRole, Likelihood, ObsColumn, ObservationModel as IrObservationModel,
@@ -2326,13 +2433,27 @@ mod period_and_covers_tests {
         )
     }
 
+    /// An incidence stream that DECLARES what each row covers.
+    fn spec_covering(name: &str, periods: Vec<Period>, observations: Vec<f64>) -> StreamSpec {
+        StreamSpec::dense_covering(
+            StreamProjection::FlowSum(vec![0]),
+            super::bind_tests::ir_obs(name),
+            dense_cells(observations),
+            periods,
+        )
+    }
+
     #[test]
-    fn covers_on_an_instant_stream_is_fatal() {
+    fn periods_on_a_prevalence_stream_are_fatal() {
+        // A state read has no window to state.
         let mut s = spec_prevalence("prev", vec![1.0, 2.0], vec![5.0, 6.0]);
-        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(1.0, 2.0).unwrap()]);
+        s.times = StreamTimes::Intervals(vec![
+            Period::new(0.0, 1.0).unwrap(),
+            Period::new(1.0, 2.0).unwrap(),
+        ]);
         let report = expect_fatal(
             BoundObs::bind(vec![s]),
-            "a declared period on a prevalence/Instant stream must be rejected",
+            "declared periods on a prevalence stream must be rejected",
         );
         assert!(report.findings().iter().any(|f|
             f.message.contains("prev") && f.message.contains("instant")),
@@ -2340,37 +2461,31 @@ mod period_and_covers_tests {
     }
 
     #[test]
-    fn covers_length_mismatch_is_fatal() {
-        let mut s = spec("cases", vec![1.0, 2.0, 3.0], vec![0.0, 0.0, 0.0]);
-        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(1.0, 2.0).unwrap()]);
+    fn instant_readings_on_an_incidence_stream_are_fatal() {
+        // The other direction: an accumulating projection cannot be read at an
+        // instant. Without this check the mismatch is silently scored.
+        let mut s = spec("cases", vec![1.0, 2.0], vec![5.0, 6.0]);
+        s.times = StreamTimes::Instants(vec![1.0, 2.0]);
         let report = expect_fatal(
             BoundObs::bind(vec![s]),
-            "covers.len() != obs_times.len() must be rejected",
+            "instant readings on an incidence stream must be rejected",
         );
         assert!(report.findings().iter().any(|f|
-            f.message.contains("cases") && f.message.contains("2 declared periods")),
-            "message must name the stream and the count mismatch: {:?}", report.findings());
-    }
-
-    #[test]
-    fn covers_stop_must_equal_the_observation_time() {
-        let mut s = spec("cases", vec![1.0, 2.0], vec![0.0, 0.0]);
-        // Second period's stop (2.5) does not match its own obs_times[1] (2.0).
-        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(1.0, 2.5).unwrap()]);
-        let report = expect_fatal(
-            BoundObs::bind(vec![s]),
-            "a period whose stop disagrees with its own observation time must be rejected",
-        );
-        assert!(report.findings().iter().any(|f|
-            f.message.contains("cases") && f.message.contains("row 1")),
-            "message must name the stream and the row: {:?}", report.findings());
+            f.message.contains("cases") && f.message.contains("accumulates")),
+            "message must name the stream and explain why: {:?}", report.findings());
     }
 
     #[test]
     fn a_gap_between_declared_periods_is_fatal() {
-        let mut s = spec("cases", vec![1.0, 3.0], vec![0.0, 0.0]);
-        // period 0 = [0,1), period 1 = [2,3): a one-unit gap, not contiguous.
-        s.covers = Some(vec![Period::new(0.0, 1.0).unwrap(), Period::new(2.0, 3.0).unwrap()]);
+        // period 0 = [0,1), period 1 = [2,3): a one-unit gap. The flow in
+        // [1,2) is covered by nothing, which needs a reset at a boundary no
+        // observation closes — not yet wired, so refuse rather than silently
+        // fold that flow into a neighbour.
+        let s = spec_covering(
+            "cases",
+            vec![Period::new(0.0, 1.0).unwrap(), Period::new(2.0, 3.0).unwrap()],
+            vec![0.0, 0.0],
+        );
         let report = expect_fatal(
             BoundObs::bind(vec![s]),
             "a gap between declared periods must be rejected (not yet supported)",
@@ -2381,28 +2496,70 @@ mod period_and_covers_tests {
     }
 
     #[test]
-    fn contiguous_covers_binds_byte_identical_to_undeclared() {
-        // The no-change-for-the-common-case claim (proposal Testing item 2):
-        // a stream that declares contiguous covers matching its own row
-        // spacing produces the IDENTICAL union axis and `at_union` as the
-        // same stream with `covers: None` — declaring what was already true
-        // changes nothing about how it is scored.
+    fn a_declared_window_moves_the_scoring_boundary() {
+        // THE correction gh#833 exists to make. A file labels its rows 1, 2, 3
+        // and `covers = day(time)` says row D covers [D, D+1). So the rows are
+        // scored in the buckets closing at 2, 3, 4 — one bucket LATER than the
+        // undeclared reading, which closes them at 1, 2, 3 and therefore reads
+        // the file a day early.
+        //
+        // This is asserted, not assumed: if the schedule were still taken from
+        // the row labels, both axes below would read [1, 2, 3].
         let undeclared = spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]);
-        let mut declared = spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]);
-        declared.covers = Some(vec![
-            Period::new(0.0, 1.0).unwrap(),
-            Period::new(1.0, 2.0).unwrap(),
-            Period::new(2.0, 3.0).unwrap(),
-        ]);
+        let declared = spec_covering(
+            "cases",
+            vec![
+                Period::new(1.0, 2.0).unwrap(),
+                Period::new(2.0, 3.0).unwrap(),
+                Period::new(3.0, 4.0).unwrap(),
+            ],
+            vec![10.0, 11.0, 12.0],
+        );
 
-        let (bound_u, report_u) = BoundObs::bind(vec![undeclared]).expect("undeclared binds");
-        let (bound_d, report_d) = BoundObs::bind(vec![declared]).expect("declared covers binds");
+        let (bound_u, _) = BoundObs::bind(vec![undeclared]).expect("undeclared binds");
+        let (bound_d, report_d) = BoundObs::bind(vec![declared]).expect("declared binds");
+        assert!(!report_d.is_fatal(), "a contiguous declaration is valid: {:?}", report_d.findings());
 
-        assert!(!report_u.is_fatal() && !report_d.is_fatal());
-        assert_eq!(report_u.verdict(), report_d.verdict());
-        assert_eq!(bound_u.times(), bound_d.times());
-        assert_eq!(bound_u.streams[0].at_union, bound_d.streams[0].at_union);
-        assert_eq!(bound_u.streams[0].cells, bound_d.streams[0].cells);
+        assert_eq!(bound_u.times(), &[1.0, 2.0, 3.0], "undeclared closes at the row labels");
+        assert_eq!(bound_d.times(), &[2.0, 3.0, 4.0], "day(D) closes at D+1, one bucket later");
+        assert_ne!(bound_u.times(), bound_d.times(), "the declaration must MOVE the scoring boundary");
+    }
+
+    #[test]
+    fn a_multi_day_window_scores_at_its_stop_and_keeps_its_width() {
+        // The count that could not be stated at all before: a weekly row
+        // covering seven days. Its schedule is the stop; its width is 7.
+        let s = spec_covering(
+            "weekly",
+            vec![Period::new(0.0, 7.0).unwrap(), Period::new(7.0, 14.0).unwrap()],
+            vec![100.0, 120.0],
+        );
+        let (bound, report) = BoundObs::bind(vec![s]).expect("a weekly declaration binds");
+        assert!(!report.is_fatal());
+        assert_eq!(bound.times(), &[7.0, 14.0], "a weekly row is scored at its window's stop");
+
+        // The periods SURVIVE binding — they are not validated and dropped.
+        let periods = bound.stream_times(0).periods().expect("declared periods survive bind");
+        assert_eq!(periods.len(), 2);
+        assert_eq!(periods[0].width(), 7.0);
+        assert_eq!(periods[1].width(), 7.0);
+    }
+
+    #[test]
+    fn an_undeclared_interval_stream_is_unchanged() {
+        // The transitional variant: every model today. Its schedule is still
+        // the row's own time, so nothing about an unmigrated model moves.
+        let (bound, report) = BoundObs::bind(vec![
+            spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
+        ]).expect("an undeclared interval stream still binds");
+        assert!(!report.is_fatal());
+        assert_eq!(bound.times(), &[1.0, 2.0, 3.0]);
+        assert_eq!(
+            bound.stream_times(0),
+            &StreamTimes::InferredIntervals(vec![1.0, 2.0, 3.0]),
+            "an incidence stream with no declaration is InferredIntervals, not Instants",
+        );
+        assert!(bound.stream_times(0).periods().is_none(), "nothing to report as declared");
     }
 }
 
