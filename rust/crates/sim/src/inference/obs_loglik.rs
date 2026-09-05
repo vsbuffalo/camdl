@@ -496,6 +496,12 @@ pub fn binom_logpmf(k: u64, n: u64, p: f64) -> f64 {
     // meanings in the guards that follow. (`k > n` is u64 and unaffected.)
     if p.is_nan() { return f64::NEG_INFINITY; }
     if k > n { return f64::NEG_INFINITY; }
+    // Both endpoints are in-domain for a probability, so each returns its
+    // limiting value rather than refusing: `p == 0` admits only `k == 0`,
+    // `p == 1` only `k == n`. Stan agrees -- `binomial_lpmf.hpp` validates
+    // theta with `check_bounded(..., 0.0, 1.0)`, which is inclusive. This is
+    // the boundary `beta_binomial_logpmf` deliberately does *not* mirror at its
+    // own zero shapes; the comment on that guard says why.
     if p <= 0.0 { return if k == 0 { 0.0 } else { f64::NEG_INFINITY }; }
     if p >= 1.0 { return if k == n { 0.0 } else { f64::NEG_INFINITY }; }
     lgamma(n as f64 + 1.0) - lgamma(k as f64 + 1.0) - lgamma((n - k) as f64 + 1.0)
@@ -536,9 +542,38 @@ pub fn beta_binomial_logpmf(k: u64, n: u64, alpha: f64, beta: f64) -> f64 {
     // every `<=` / `<` comparison below, so without this it walks past the
     // domain guard into lgamma/ln and returns NaN. A NaN poisons every
     // downstream sum; the -inf floor kills one particle. (No zero branch
-    // here, unlike negbin/poisson/binomial — a zero shape is simply -inf.)
+    // here, unlike negbin/poisson/binomial — a zero shape is out of domain,
+    // not a boundary value; see the guard below.)
     if alpha.is_nan() || beta.is_nan() { return f64::NEG_INFINITY; }
     if k > n { return f64::NEG_INFINITY; }
+    // Why this refuses where `n == 0` above returns a value, which reads as an
+    // inconsistency until you see that the two boundaries are different kinds.
+    //
+    // `n` is a count: `n == 0` is inside the domain, one outcome is possible,
+    // and the density there is exactly 1. `alpha`/`beta` are Beta shape
+    // parameters: `Beta(a, 0)` is improper, so a zero shape is outside the
+    // domain and the value only exists as a limit (as `beta -> 0+` the
+    // beta-binomial tends to a point mass at `k == n`). We do not evaluate that
+    // limit, because a model reaching it is stating a certainty it cannot
+    // support -- most often a `mean` written as a ratio whose denominator lost
+    // a term, which is a modelling defect worth surfacing rather than smoothing
+    // over.
+    //
+    // Stan draws the same line with two different validators, in
+    // `stan/math/prim/prob/beta_binomial_lpmf.hpp` (verified at tag v4.8.1):
+    // `check_nonnegative(..., "Population size parameter", N_ref)` admits
+    // `N == 0`, while `check_positive_finite(..., alpha_ref)` and the matching
+    // `beta_ref` call exclude zero and raise a domain error. Its sibling
+    // `binomial_lpmf.hpp` uses `check_bounded(..., theta_ref, 0.0, 1.0)`, which
+    // is inclusive -- so `p == 1` is in-domain there, which is why
+    // `binom_logpmf` below returns the limit at that boundary and this function
+    // does not at its own. The `n == 0` branch above matches Stan on the first
+    // of these (gh#812, which measured it against CmdStan 2.39.0 rather than
+    // reading the source); this guard matches Stan on the second.
+    //
+    // We return -inf where Stan raises. In a particle filter that is the
+    // gentler form: it kills one particle and lets resampling continue, where
+    // an exception would tear down the run.
     if alpha <= 0.0 || beta <= 0.0 { return f64::NEG_INFINITY; }
     let lbeta = |a: f64, b: f64| lgamma(a) + lgamma(b) - lgamma(a + b);
     lgamma(n as f64 + 1.0) - lgamma(k as f64 + 1.0) - lgamma((n - k) as f64 + 1.0)
