@@ -1235,7 +1235,9 @@ pub struct FitSummaryArgs {
     /// Recompute the posterior diagnostics (R̂ / ESS / mean) over a SUBSET of
     /// the MCMC chains, dropping the named 1-based chain ids (comma-separated,
     /// e.g. `--exclude-chains 3,5`). A view only — nothing on disk changes. The
-    /// header then reads `chains: K of N (excluded 3,5)`. Post-hoc exclusion
+    /// stage's identity line then reads `K of N chains (excluded 3,5)`, and the
+    /// verdict's forkable count says it is over the retained chains. Post-hoc
+    /// exclusion
     /// BIASES the posterior toward the retained mode and always prints a
     /// warning; a chain id not in the fit, or excluding every chain, is a hard
     /// error. Incompatible with `--params-only` (a single winner θ̂ is not a
