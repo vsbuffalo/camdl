@@ -227,6 +227,7 @@ let test_observation_only_not_dead () =
       scored = "recovered";
       emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
       stratum = [];
+      covers = None;
       projection = CurrentPop "R";
       projection_state_grad = [];
       likelihood = Poisson { rate = { expr = Projected; grad = []; proj_grad = None } } } in
@@ -255,6 +256,7 @@ let test_derived_observation_only_not_dead () =
       scored = "frac_recovered";
       emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
       stratum = [];
+      covers = None;
       projection = DerivedExpr (pop "R" /. (pop "S" +. pop "I" +. pop "R"));
       projection_state_grad = [];
       likelihood = Normal { mean = { expr = Projected; grad = []; proj_grad = None };

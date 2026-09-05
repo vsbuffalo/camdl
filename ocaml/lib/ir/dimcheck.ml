@@ -1071,7 +1071,9 @@ let check_model (m : model) : result =
       List.iter (fun (c : obs_column) ->
         match c.col_role with
         | RoleValue k -> Hashtbl.replace st.obs_col_dims c.col_name (param_dim_of_kind st (Some k))
-        | RoleTime | RoleDim _ -> ()
+        (* A window boundary carries a time, not an observed value, so it
+           contributes no observation-column dimension — same as RoleTime. *)
+        | RoleTime | RoleWindowStart | RoleWindowStop | RoleDim _ -> ()
       ) obs.columns;
       (* The Projected leaf in this likelihood stands for the projection's
          value, so it carries the projection's dimension: a population count

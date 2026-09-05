@@ -65,6 +65,7 @@ fn build_poisson_obs_block() -> ir::observation::ObservationModel {
         scored: "weekly_cases".into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection: Projection::CumulativeFlow("infection".into()),
         projection_state_grad: Default::default(),
         likelihood: Likelihood::Poisson(PoissonLikelihood {

@@ -85,6 +85,7 @@ fn obs_block(kind: &Kind) -> ir::observation::ObservationModel {
         scored: "y".into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection: match kind {
             Kind::Interval => Projection::CumulativeFlow("infection".into()),
             Kind::Prevalence => Projection::CurrentPop("I".into()),

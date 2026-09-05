@@ -592,6 +592,100 @@ with `dims → scalar` tables, the `dimensions {}` block, and the existing
 
 ---
 
+## What a row covers: `covers` and the window columns
+
+A date in an observation file does not say what it means. `2026-07-08` is the
+day 7 July in a file labelled by the day the count describes, the week 8–14 July
+in a week-starting file, and the week 2–8 July in a week-ending one. The same
+cell, three different spans. No rule gets all three right, so **an incidence
+stream states its period rather than having one inferred from row spacing.**
+
+A stream that reads an _instant_ — `prevalence(...)`, a compartment reading, a
+serosurvey — needs none of this. It has a time column and nothing else; there is
+no window to state, and declaring one is an error.
+
+### Four ways to say it
+
+Three forms take the stream's own time column and a rule. With `D` the label in
+a row's time column:
+
+| you write                             | the row covers        | for                              |
+| ------------------------------------- | --------------------- | -------------------------------- |
+| `covers = day(time)`                  | `[D, D+1 day)`        | daily counts                     |
+| `covers = starting_on(time, 7 'days)` | `[D, D+7 days)`       | a week LABELLED BY ITS FIRST DAY |
+| `covers = ending_on(time, 7 'days)`   | `[D−6 days, D+1 day)` | "week ending D" — ISO/MMWR       |
+
+`ending_on` is the one that earns a named form. "Week ending Saturday 11 July"
+means 11 July is the **last included day**, so the span runs `[5 Jul, 12 Jul)` —
+it starts six days _before_ the label and ends one day _after_ it. That
+off-by-one is what the constructor exists to hide.
+
+The fourth form puts both boundaries in the file, one pair per row:
+
+```camdl
+cases_ituri {
+  columns     { onset_from : window_start, onset_stop : window_stop,
+                cases_ituri : count }
+  projected   = incidence(confirm[ituri])
+  cases_ituri ~ neg_binomial(mean = p_report * projected, r = k)
+}
+```
+
+```tsv
+onset_from	onset_stop	cases_ituri
+2026-07-01	2026-07-08	31
+2026-07-08	2026-07-15	44
+2026-07-15	2026-07-29	96
+```
+
+The third row covers a fortnight because publication was suspended for a week.
+That is the case with no expression at all under row-spacing inference — the
+only way to widen a window was to delete the intervening row, which this
+document separately forbids.
+
+### One temporal anchor, either kind
+
+`columns {}` requires exactly one temporal anchor. That is either a `time`
+column _or_ a `window_start`/`window_stop` pair — never both, and never half a
+pair. A stream declaring window columns does not also write `covers =`; the
+columns are the declaration.
+
+The **stop is the stream's fit time source**. Everything downstream that asks
+"when is this observation" — output rows, `--score-from`, a forecast grid —
+reads the closing boundary, so a windowed stream sits on the axis exactly where
+an unwindowed one does.
+
+### A per-row width
+
+Some files carry their own width: a `days_covered` column saying how many days
+each row actually represents. The duration argument accepts a column name as
+well as a constant, so that needs no upstream arithmetic:
+
+```camdl
+covers = ending_on(time, days_covered)
+```
+
+```tsv
+time	days_covered	cases
+2026-07-07	1	12
+2026-07-08	1	9
+2026-07-13	5	61
+```
+
+The last row is a five-day total ending on 13 July, so it covers
+`[9 Jul, 14 Jul)`. Converting that upstream — into either a `window_start`
+column or deleted rows — is what puts the arithmetic back in a build script,
+which is where this class of defect lives.
+
+### What this changes for an existing file
+
+Nothing about the file; everything about how it is read. A stream that declared
+nothing was scored over `(previous row, this row]` — a window nobody wrote down,
+which for a daily file labelled by the day the count describes is **one day
+early**. Declaring `covers = day(time)` moves the scoring to the day the label
+names. That is a real change in the fitted numbers, and it is the correction,
+not a regression.
+
 ## Missing observations: `NA` is a hole, not a zero
 
 In an **observation** file, the token `NA` in a value column marks a **hole**: a
@@ -622,6 +716,21 @@ Both forms are therefore legitimate and mean different things:
 | `2026-07-14  NA`       | scheduled, unobserved — no term, interval closes |
 | `2026-07-14  0`        | observed zero — scored as a zero count           |
 | (no row at 2026-07-14) | not scheduled — the next row's interval spans it |
+
+**Under a declared `covers`, a hole needs no separate rule.** The two properties
+above were a consequence of inference: the accumulator reset on row spacing, so
+a hole had to close a bin to stop the next row's window swallowing it. With the
+period stated, an `NA` row is simply a row whose period scores nothing — it
+opens and closes exactly where it says, and the row after it opens where its own
+declaration says. The behaviour is unchanged; it stops being a convention.
+
+This also settles a case that had no defined answer before: a row whose window
+reaches back across an earlier `NA` row. Under inference that was ambiguous —
+the hole had already closed the accumulator, so the later row would be scored
+against less flow than its window claimed, silently. Under declaration it is
+simply two overlapping periods, which is an error naming both rows. A stream
+whose rows genuinely overlap is not expressible, because the flow in the shared
+span would be scored twice.
 
 **A warning for downstream consumers.** `NA` is not a null token in every tool.
 In polars it does not parse as null by default, so one `NA` turns a numeric

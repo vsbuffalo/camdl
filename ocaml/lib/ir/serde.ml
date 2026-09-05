@@ -985,13 +985,17 @@ let obs_schedule_of_json j =
 
 let obs_column_role_to_json (r : obs_column_role) : Yojson.Safe.t =
   match r with
-  | RoleTime    -> `String "time"
-  | RoleDim d   -> obj [("dim", str d)]
-  | RoleValue k -> obj [("value", str (param_kind_name k))]
+  | RoleTime        -> `String "time"
+  | RoleWindowStart -> `String "window_start"
+  | RoleWindowStop  -> `String "window_stop"
+  | RoleDim d       -> obj [("dim", str d)]
+  | RoleValue k     -> obj [("value", str (param_kind_name k))]
 
 let obs_column_role_of_json j =
   match j with
-  | `String "time" -> RoleTime
+  | `String "time"         -> RoleTime
+  | `String "window_start" -> RoleWindowStart
+  | `String "window_stop"  -> RoleWindowStop
   | `Assoc _ -> (
     match member_opt "dim" j, member_opt "value" j with
     | Some d, None -> RoleDim (as_string d)
@@ -1000,7 +1004,41 @@ let obs_column_role_of_json j =
        | Some k -> RoleValue k
        | None   -> fail "unknown column value type '%s'" (as_string v))
     | _ -> fail "column role object must be {dim:…} or {value:…}")
-  | _ -> fail "column role must be \"time\" or {dim:…}/{value:…}"
+  | _ ->
+    fail "column role must be \"time\"/\"window_start\"/\"window_stop\" or \
+          {dim:…}/{value:…}"
+
+let covers_span_to_json (s : covers_span) : Yojson.Safe.t =
+  match s with
+  | SpanConst d  -> obj [("const", `Float d)]
+  | SpanColumn c -> obj [("column", str c)]
+
+let covers_span_of_json j =
+  match member_opt "const" j, member_opt "column" j with
+  | Some d, None -> SpanConst (as_float d)
+  | None, Some c -> SpanColumn (as_string c)
+  | _ -> fail "covers span must be {const:…} or {column:…}"
+
+let covers_to_json (c : covers) : Yojson.Safe.t =
+  match c with
+  | CoversFrom (offset, span) ->
+    obj [("kind", str "from"); ("offset", `Float offset);
+         ("span", covers_span_to_json span)]
+  | CoversUntil (offset, span) ->
+    obj [("kind", str "until"); ("offset", `Float offset);
+         ("span", covers_span_to_json span)]
+  | CoversWindowColumns -> obj [("kind", str "window_columns")]
+
+let covers_of_json j =
+  match as_string (member "kind" j) with
+  | "from" ->
+    CoversFrom (as_float (member "offset" j),
+                covers_span_of_json (member "span" j))
+  | "until" ->
+    CoversUntil (as_float (member "offset" j),
+                 covers_span_of_json (member "span" j))
+  | "window_columns" -> CoversWindowColumns
+  | k -> fail "unknown covers kind '%s'" k
 
 let obs_column_to_json (c : obs_column) : Yojson.Safe.t =
   obj [
@@ -1036,7 +1074,15 @@ let observation_model_to_json (om : observation_model) : Yojson.Safe.t =
     | [] -> []
     | ss -> [("stratum", arr (List.map stratum_key_to_json ss))]
   in
-  obj (base @ sched @ stratum
+  (* Omit `covers` when undeclared — mirrors the Rust
+     `skip_serializing_if = "Option::is_none"`, so a stream that has not
+     stated what its rows cover serialises byte-identically to before the
+     field existed. *)
+  let covers = match om.covers with
+    | None   -> []
+    | Some c -> [("covers", covers_to_json c)]
+  in
+  obj (base @ sched @ stratum @ covers
        @ [("projection", projection_to_json om.projection)]
        @ grad_field "projection_state_grad" om.projection_state_grad
        @ [("likelihood", likelihood_to_json om.likelihood)])
@@ -1052,6 +1098,9 @@ let observation_model_of_json j =
     stratum       = (match member_opt "stratum" j with
                      | Some `Null | None -> []
                      | Some s -> List.map stratum_key_of_json (as_list s));
+    covers        = (match member_opt "covers" j with
+                     | Some `Null | None -> None
+                     | Some c -> Some (covers_of_json c));
     projection    = projection_of_json  (member "projection" j);
     projection_state_grad = (match member_opt "projection_state_grad" j with
                              | Some `Null | None -> []

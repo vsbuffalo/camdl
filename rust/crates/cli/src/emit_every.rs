@@ -293,6 +293,7 @@ mod tests {
             scored: name.to_string(),
             emit_schedule: sched,
             stratum: Vec::new(),
+            covers: None,
             projection: Projection::CurrentPop("I".into()),
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {

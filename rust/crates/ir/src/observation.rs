@@ -213,6 +213,15 @@ pub enum ColumnRole {
     /// An observed value of the given DSL type (count/real/probability/…) —
     /// either the `~` LHS (scored) or RHS-referenced auxiliary data.
     Value(ParamKind),
+    /// The opening boundary of the period this row covers (gh#833). Paired
+    /// with exactly one [`ColumnRole::WindowStop`], and mutually exclusive
+    /// with [`ColumnRole::Time`]: a stream declares exactly ONE temporal
+    /// anchor, either a time column or a window pair.
+    WindowStart,
+    /// The closing boundary of the period this row covers. Also the stream's
+    /// fit time source, so every downstream "observation time" consumer keeps
+    /// the position it has today.
+    WindowStop,
 }
 
 /// One declared file column: header name + role.
@@ -229,6 +238,49 @@ pub struct ObsColumn {
 pub struct StratumKey {
     pub dim:   String,
     pub level: String,
+}
+
+/// How wide the period a row covers is (gh#833): a compile-time constant in
+/// AXIS units, or a per-row width read from a declared data column.
+///
+/// The column form is what a file carrying its own `days_covered` needs — a
+/// width that varies row to row, which no constant can express and which
+/// converting upstream would push back into a build script.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoversSpan {
+    Const(f64),
+    Column(String),
+}
+
+/// What each row of an interval stream covers (gh#833).
+///
+/// This is the FULLY-EXPANDED form: every surface spelling lowers here, and
+/// all calendar arithmetic is done by the expander, so the runtime never needs
+/// to know how long a day is in the model's axis units. With `t` the row's own
+/// label and `one_day` already converted to axis units:
+///
+/// | surface              | lowers to                            |
+/// | -------------------- | ------------------------------------ |
+/// | `covers = day(t)`    | `From  { offset: 0, span: one_day }` |
+/// | `starting_on(t, d)`  | `From  { offset: 0, span: d }`       |
+/// | `ending_on(t, d)`    | `Until { offset: one_day, span: d }`  |
+/// | window columns       | `WindowColumns`                       |
+///
+/// Two anchors rather than one because a per-row span has to attach to the end
+/// the label pins: `ending_on` fixes the row's CLOSE and measures backwards, so
+/// with a `days_covered` column its start moves row by row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Covers {
+    /// `start = t + offset`, `stop = start + span`.
+    From { offset: f64, span: CoversSpan },
+    /// `stop = t + offset`, `start = stop − span`.
+    Until { offset: f64, span: CoversSpan },
+    /// `start` and `stop` are read per row from the columns carrying the
+    /// `window_start` / `window_stop` roles. The only form that can state a
+    /// gap between consecutive rows.
+    WindowColumns,
 }
 
 // ── Observation model ─────────────────────────────────────────────────────────
@@ -257,6 +309,20 @@ pub struct ObservationModel {
     /// whose `stratum` matches the row's `: dim` column values BY NAME.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stratum:       Vec<StratumKey>,
+    /// What each row covers (gh#833) — the `covers = …` declaration, or
+    /// [`Covers::WindowColumns`] when the stream carries a `window_start` /
+    /// `window_stop` pair instead. `None` is a stream that has not declared,
+    /// scored under the historical convention where a row's window is
+    /// whatever its spacing from the previous row happens to be.
+    ///
+    /// `None` is transitional and disappears when the declaration becomes
+    /// required. It is NOT a default: no default is right, because the same
+    /// date column means three different spans depending on the source.
+    ///
+    /// Meaningful only for an accumulating projection — a state read has no
+    /// window, and declaring one for it is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers:        Option<Covers>,
     pub projection:    Projection,
     /// ∂projection/∂compartment for a `DerivedExpr` (nonlinear) projection — the
     /// WrtPop differentiation the ODE observation gradient's factor-2 chain

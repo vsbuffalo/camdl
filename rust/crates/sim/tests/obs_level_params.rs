@@ -78,6 +78,7 @@ fn model_with_obs_param() -> (Arc<CompiledModel>, Vec<f64>) {
                 scored: "cases".into(),
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
+                covers: None,
                 projection: Projection::CumulativeFlow("death".into()),
                 projection_state_grad: Default::default(),
                 likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {

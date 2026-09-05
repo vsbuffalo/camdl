@@ -610,6 +610,7 @@ mod tests {
             scored: "cases".into(),
             emit_schedule: None,
             stratum: vec![],
+            covers: None,
             projection: Projection::CumulativeFlow("infection".into()),
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {

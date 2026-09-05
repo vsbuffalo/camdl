@@ -46,8 +46,8 @@ use ir::model::{
     SimulationConfig,
 };
 use ir::observation::{
-    ColumnRole, Likelihood, ObsColumn, ObservationModel, ObservationSchedule, Projection,
-    RegularSchedule, StratumKey,
+    ColumnRole, Covers, CoversSpan, Likelihood, ObsColumn, ObservationModel, ObservationSchedule,
+    Projection, RegularSchedule, StratumKey,
 };
 use ir::ode_equation::OdeEquation;
 use ir::parameter::{
@@ -647,6 +647,45 @@ impl ContentAddressed for ColumnRole {
                 h.write_u32(2);
                 k.hash_into(h);
             }
+            ColumnRole::WindowStart => h.write_u32(3),
+            ColumnRole::WindowStop => h.write_u32(4),
+        }
+    }
+}
+
+impl ContentAddressed for CoversSpan {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::observation::CoversSpan");
+        // Permanent variant indices (run-id stability) — new spans append.
+        match self {
+            CoversSpan::Const(d) => {
+                h.write_u32(0);
+                h.write_f64_bits(*d);
+            }
+            CoversSpan::Column(c) => {
+                h.write_u32(1);
+                h.write_str(c);
+            }
+        }
+    }
+}
+
+impl ContentAddressed for Covers {
+    fn hash_into(&self, h: &mut CanonicalHasher) {
+        header(h, "ir::observation::Covers");
+        // Permanent variant indices (run-id stability) — new forms append.
+        match self {
+            Covers::From { offset, span } => {
+                h.write_u32(0);
+                h.write_f64_bits(*offset);
+                span.hash_into(h);
+            }
+            Covers::Until { offset, span } => {
+                h.write_u32(1);
+                h.write_f64_bits(*offset);
+                span.hash_into(h);
+            }
+            Covers::WindowColumns => h.write_u32(2),
         }
     }
 }
@@ -678,7 +717,7 @@ impl ContentAddressed for ObservationModel {
         // Exhaustive destructure: a new IR field must not silently escape the
         // model hash — add it below, or bind it `_` with the reason.
         let ObservationModel {
-            name, source, columns, scored, emit_schedule, stratum, projection,
+            name, source, columns, scored, emit_schedule, stratum, covers, projection,
             projection_state_grad: _, likelihood,
         } = self;
         header(h, "ir::observation::ObservationModel");
@@ -696,6 +735,16 @@ impl ContentAddressed for ObservationModel {
         // empty, churning every existing id; guard against that.)
         if !stratum.is_empty() {
             stratum.hash_into(h);
+        }
+        // `covers` (gh#833) changes WHAT THE LIKELIHOOD SCORES — the same file
+        // read as daily windows and as week-ending windows gives different
+        // numbers — so two fits differing only in it must not share an
+        // address. Hashed only when declared, for the same reason `stratum`
+        // is: an undeclared stream writes nothing, so run_ids stored before
+        // the declaration existed stay valid. Once the declaration is
+        // required this guard becomes dead and goes.
+        if let Some(c) = covers {
+            c.hash_into(h);
         }
         projection.hash_into(h);
         // projection_state_grad (∂projection/∂compartment, gh#275 §1h) is the

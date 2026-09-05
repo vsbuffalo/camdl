@@ -891,10 +891,53 @@
           "default": [],
           "items": { "$ref": "#/definitions/stratum_key" }
         },
+        "covers": { "$ref": "#/definitions/covers" },
         "projection": { "$ref": "#/definitions/projection" },
+        "comment": "projection_state_grad is the compiler-emitted WrtPop gradient of a DerivedExpr projection (gh#275 §1h). It is serialized whenever non-empty, so `additionalProperties: false` rejected valid IR without it declared here.",
+        "projection_state_grad": { "type": "object" },
         "likelihood": { "$ref": "#/definitions/likelihood" }
       },
       "additionalProperties": false
+    },
+
+    "covers": {
+      "comment": "gh#833: what each row of an interval stream covers, fully expanded — the expander does the calendar arithmetic, so `offset` and a `const` span are already in AXIS units. With `t` the row's own label: `from` gives [t+offset, t+offset+span); `until` gives [t+offset-span, t+offset). `window_columns` reads both boundaries per row from the columns carrying the window_start/window_stop roles, and is the only form that can state a gap.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "offset", "span"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["from", "until"] },
+            "offset": { "type": "number" },
+            "span": { "$ref": "#/definitions/covers_span" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": { "kind": { "type": "string", "enum": ["window_columns"] } },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "covers_span": {
+      "comment": "How wide the period is: a compile-time constant in axis units, or a per-row width read from a named data column (a file carrying its own days_covered).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["const"],
+          "properties": { "const": { "type": "number" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["column"],
+          "properties": { "column": { "type": "string" } },
+          "additionalProperties": false
+        }
+      ]
     },
 
     "stratum_key": {
@@ -914,7 +957,7 @@
         "name": { "type": "string" },
         "role": {
           "oneOf": [
-            { "type": "string", "enum": ["time"] },
+            { "type": "string", "enum": ["time", "window_start", "window_stop"] },
             {
               "type": "object",
               "required": ["dim"],
