@@ -1018,8 +1018,8 @@ fn pmmh_with_rho_runs_on_a_model_that_draws_its_initial_state() {
     let n_source_groups = compiled.source_groups.len();
     let compiled = Arc::new(compiled);
 
-    let observations: Vec<sim::inference::if2::Observation> = LAW_OBS.iter()
-        .map(|&t| sim::inference::if2::Observation { time: t, value: 55.0 })
+    let observations: Vec<sim::inference::particle_filter::Observation> = LAW_OBS.iter()
+        .map(|&t| sim::inference::particle_filter::Observation { time: t, value: 55.0 })
         .collect();
     let config = PMMHConfig {
         n_steps: 30,

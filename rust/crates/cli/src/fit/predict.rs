@@ -3304,7 +3304,7 @@ fn one_step_bands(
                 // row's 0.0 is a never-read placeholder.
                 s.data.insert(
                     0,
-                    sim::inference::if2::Observation { time: cond_from, value: 0.0 },
+                    sim::inference::particle_filter::Observation { time: cond_from, value: 0.0 },
                 );
                 s.cells.insert(0, None);
                 s.aux.insert(0, Vec::new());

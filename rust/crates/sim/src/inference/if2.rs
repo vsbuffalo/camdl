@@ -237,14 +237,6 @@ pub struct IF2Result {
     pub last_loglik: f64,
 }
 
-/// Observation for IF2 (same as particle_filter::Observation).
-/// Kept for backward compatibility with CLI code that constructs observations.
-#[derive(Clone)]
-pub struct Observation {
-    pub time: f64,
-    pub value: f64,
-}
-
 /// Run IF2.
 ///
 /// # Arguments
