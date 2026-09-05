@@ -9964,6 +9964,39 @@ let check_surface_time_typing ctx =
      transition rates (just in case a future model puts a date()
      there), table expressions, ODE derivatives, etc. *)
 
+  (* The affine day-equivalent of the offending calendar duration, for
+     E321's hint. Folded from the literal, so `5 'years` suggests 1826
+     days and `5 'months` suggests 152 (gh#843) — a fixed suggestion
+     silently understates a year-valued offset 12-fold, and the model it
+     produces compiles and runs.
+
+     Folds without emitting: `resolve_float_expr` reports E401 on a
+     non-constant, and a hint must not manufacture a second diagnostic.
+     `let` bindings are followed so the laundered form
+     (`let d = 6 'months`) is suggested as precisely as the literal —
+     the same lookup `Time_typing.classify` used to reach this hit.
+
+     Returns the duration that was folded alongside its day count, so a
+     laundered offset reports `(≈ 6 'months)` rather than `(≈ d)`; the
+     parenthetical exists so a reader can check the conversion, which
+     the binding's name does not let them do. *)
+  let rec calendar_span_days e =
+    match e with
+    | EIdent (name, _) ->
+      (match Hashtbl.find_opt ctx.let_tbl name with
+       | Some lb -> calendar_span_days lb.lbody
+       | None -> None)
+    | _ when is_const_expr e ->
+      (* `eval_const_expr` yields model-time units; the hint is in days. *)
+      let days = eval_const_expr ctx e *. days_per ctx.time_unit in
+      (* Only a span the modeller can actually paste. A sub-day or
+         negative fold has no honest `<n> 'days` spelling. *)
+      if Float.is_finite days && days >= 1.0
+      then Some (int_of_float (Float.round days), Time_typing.show_short e)
+      else None
+    | _ -> None
+  in
+
   let walk_expr_rule1 ~loc ~context e =
     if anchored then
       Time_typing.walk_rule1 env e ~on_hit:(fun ~lhs ~rhs ->
@@ -9975,13 +10008,16 @@ let check_surface_time_typing ctx =
           | _, Time_typing.TCalendar -> rhs
           | _ -> rhs  (* shouldn't happen if walk_rule1 fired *)
         in
+        let rendered = Time_typing.show_short bad in
         Diagnostics.error ctx.diags
           ~code:"E321"
           ~loc
           ~message:(Printf.sprintf
             "calendar duration `%s` cannot translate an instant in %s"
-            (Time_typing.show_short bad) context)
-          ~hint:Time_typing.hint_calendar_plus_instant
+            rendered context)
+          ~hint:(Time_typing.hint_calendar_plus_instant
+                  ~exact_fn:(Time_typing.calendar_exact_fn bad)
+                  (calendar_span_days bad))
           ())
   in
 

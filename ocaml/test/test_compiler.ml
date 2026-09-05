@@ -9009,6 +9009,150 @@ let test_typed_time_e321_hint_text () =
     Alcotest.(check bool) "hint mentions days affine span"
       true (contains_substring ~needle:"'days" e)
 
+(* Compile a model whose only fault is `date(...) + <n> '<unit>`, and
+   return the rendered error text so the hint can be inspected. *)
+let e321_error_for ~offset =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"t" (Printf.sprintf {|
+    time_unit = 'days
+    origin = date("2020-02-24")
+    compartments { S, I, R }
+    parameters {
+      beta : rate  gamma : rate  N0 : count  I0 : count
+    }
+    let landmark = date("2020-02-24") + %s
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} offset) in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.failf "expected E321 for offset %s" offset
+  | Error e -> e
+
+(* gh#843: the affine-span suggestion must be derived from the literal.
+   A frozen suggestion sent a modeller writing `5 'years` a 152-day
+   horizon — 12x short, in a model that then compiles and runs. Both
+   units are asserted here so the two cannot drift apart again. *)
+let test_typed_time_e321_hint_span_matches_unit () =
+  let months = e321_error_for ~offset:"5 'months" in
+  let years  = e321_error_for ~offset:"5 'years" in
+  (* 5 x 365.2425/12 = 152.18 days; 5 x 365.2425 = 1826.21 days. *)
+  Alcotest.(check bool) "months hint suggests 152 'days"
+    true (contains_substring ~needle:"152 'days" months);
+  Alcotest.(check bool) "months hint says what it converted"
+    true (contains_substring ~needle:"5 'months" months);
+  Alcotest.(check bool) "years hint suggests 1826 'days"
+    true (contains_substring ~needle:"1826 'days" years);
+  Alcotest.(check bool) "years hint says what it converted"
+    true (contains_substring ~needle:"5 'years" years);
+  (* The months day-count must not appear in the years hint at all —
+     that substring is exactly what the frozen hint emitted. *)
+  Alcotest.(check bool) "years hint does not carry the months span"
+    false (contains_substring ~needle:"152 'days" years)
+
+(* gh#843, the other half of the same sentence: the calendar-exact
+   suggestion must name the primitive matching the literal's unit. A
+   modeller told `add_calendar_months(d, N)` for `5 'years` who pastes
+   it gets five months — the identical 12x-short horizon the affine
+   span fix above exists to prevent, in the neighbouring clause. *)
+let test_typed_time_e321_hint_exact_fn_matches_unit () =
+  let months = e321_error_for ~offset:"5 'months" in
+  let years  = e321_error_for ~offset:"5 'years" in
+  Alcotest.(check bool) "months hint names add_calendar_months"
+    true (contains_substring ~needle:"add_calendar_months(d, N)" months);
+  Alcotest.(check bool) "years hint names add_calendar_years"
+    true (contains_substring ~needle:"add_calendar_years(d, N)" years);
+  (* The months primitive must not appear in the years hint at all —
+     naming it is the paste that costs twelve months. *)
+  Alcotest.(check bool) "years hint does not name add_calendar_months"
+    false (contains_substring ~needle:"add_calendar_months" years);
+  (* A mixed offset has no single right primitive, so it keeps the
+     months default rather than guessing. *)
+  let mixed = e321_error_for ~offset:"(1 'years + 2 'months)" in
+  Alcotest.(check bool) "mixed offset keeps the months default"
+    true (contains_substring ~needle:"add_calendar_months(d, N)" mixed)
+
+(* The count is derived too, not just the unit: a frozen hint answered
+   every month-valued offset with the same 152 days. *)
+let test_typed_time_e321_hint_span_matches_count () =
+  let two = e321_error_for ~offset:"2 'months" in
+  Alcotest.(check bool) "2 'months suggests 61 'days"
+    true (contains_substring ~needle:"61 'days" two);
+  Alcotest.(check bool) "2 'months does not suggest 152 'days"
+    false (contains_substring ~needle:"152 'days" two)
+
+(* A `let`-laundered offset folds to the same span as the literal, and
+   the parenthetical names the duration rather than the binding — `d`
+   would tell a reader nothing to check the conversion against. *)
+let test_typed_time_e321_hint_span_through_let () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"t" {|
+    time_unit = 'days
+    origin = date("2020-02-24")
+    compartments { S, I, R }
+    parameters {
+      beta : rate  gamma : rate  N0 : count  I0 : count
+    }
+    let d = 6 'months
+    let landmark = date("2020-02-24") + d
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E321"
+  | Error e ->
+    (* 6 x 365.2425/12 = 182.6 days. *)
+    Alcotest.(check bool) "laundered offset still folds to 183 'days"
+      true (contains_substring ~needle:"183 'days" e);
+    Alcotest.(check bool) "parenthetical names the duration, not the binding"
+      true (contains_substring ~needle:"6 'months" e)
+
+(* When the offset is not a compile-time constant there is no span to
+   suggest. The hint must fall back to the rule rather than invent a
+   number: a pasted wrong span compiles and runs. *)
+let test_typed_time_e321_hint_no_span_when_not_constant () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"t" {|
+    time_unit = 'days
+    origin = date("2020-02-24")
+    compartments { S, I, R }
+    parameters {
+      beta : rate  gamma : rate  N0 : count  I0 : count  k : count
+    }
+    let landmark = date("2020-02-24") + k * 1 'months
+    let N = S + I + R
+    transitions {
+      infection : S --> I @ beta * S * I / N
+      recovery  : I --> R @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 120 'days }
+  |} in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> Alcotest.fail "expected E321"
+  | Error e ->
+    Alcotest.(check bool) "E321 still fires"
+      true (contains_substring ~needle:"E321" e);
+    Alcotest.(check bool) "hint suggests no concrete span"
+      false (contains_substring ~needle:"affine span use" e);
+    Alcotest.(check bool) "hint still points at 'days/'weeks"
+      true (contains_substring ~needle:"'days" e);
+    (* Folding for the hint must not emit a second diagnostic. *)
+    Alcotest.(check bool) "no E401 from the hint's fold"
+      false (contains_substring ~needle:"E401" e)
+
 let test_typed_time_e320_time_unit_months_with_origin_rejected () =
   expect_error_code
     ~code:"E320"
@@ -13453,6 +13597,16 @@ let () =
         `Quick test_typed_time_e321_laundered_through_let;
       Alcotest.test_case "E321 hint mentions add_calendar_months + 'days fallback"
         `Quick test_typed_time_e321_hint_text;
+      Alcotest.test_case "E321 hint span follows the literal's unit (gh#843)"
+        `Quick test_typed_time_e321_hint_span_matches_unit;
+      Alcotest.test_case "E321 hint span follows the literal's count (gh#843)"
+        `Quick test_typed_time_e321_hint_span_matches_count;
+      Alcotest.test_case "E321 hint names the primitive for the unit (gh#843)"
+        `Quick test_typed_time_e321_hint_exact_fn_matches_unit;
+      Alcotest.test_case "E321 hint span folds through a let binding (gh#843)"
+        `Quick test_typed_time_e321_hint_span_through_let;
+      Alcotest.test_case "E321 hint invents no span for a non-constant (gh#843)"
+        `Quick test_typed_time_e321_hint_no_span_when_not_constant;
       (* Rule 2 (E320): time_unit = 'months/'years with origin. *)
       Alcotest.test_case "E320 time_unit = 'months with origin rejected"
         `Quick test_typed_time_e320_time_unit_months_with_origin_rejected;

@@ -237,12 +237,58 @@ and walk_subexprs env ~on_hit (e : expr) : unit =
 
 (* ── Public diagnostic hints ────────────────────────────────────────── *)
 
-let hint_calendar_plus_instant =
-  "calendar months/years aren't invertible spans \
-   (e.g. date(\"2021-01-31\") + 1 month = date(\"2021-02-28\") because \
-   day-31 clamps to day-28 in Feb 2021). \
-   For a calendar-exact date use add_calendar_months(d, N). \
-   For an explicit affine span use 152 'days (≈ 5 months)."
+(* [span] is the affine day-equivalent of the offending calendar
+   duration paired with a rendering of the duration itself — e.g.
+   [(1826, "5 'years")]. The caller folds it, because the days-per-unit
+   constants live with the expander's unit conversion and must not be
+   restated here.
+
+   [exact_fn] is the calendar-exact primitive matching the offending
+   literal's unit — [add_calendar_years] for a `'years`-flavoured
+   duration, [add_calendar_months] otherwise. Naming the wrong one
+   reproduces the very failure this hint exists to prevent: a modeller
+   who pastes [add_calendar_months(d, 5)] for `5 'years` gets a horizon
+   twelve times short, in a model that compiles and runs (gh#843).
+
+   [None] when the duration is not a compile-time constant. The hint
+   then states the rule without a span: a suggestion the modeller can
+   paste has to be *this* model's span, and a guessed one is worse than
+   none — pasting a wrong span yields a model that compiles and runs
+   over the wrong horizon. *)
+(* Which calendar-exact primitive matches this duration's unit.
+   `Calendar` arises only from `'months`/`'years` literals, so a
+   duration is years-flavoured iff it mentions `'years` and no
+   `'months`; a mixed expression has no single right answer and keeps
+   the months default. *)
+let calendar_exact_fn (e : expr) : string =
+  let saw_years = ref false and saw_months = ref false in
+  let rec go e =
+    match e with
+    | EUnit (_, Years)  -> saw_years := true
+    | EUnit (_, Months) -> saw_months := true
+    | EBinOp (_, l, r)  -> go l; go r
+    | EUnOp (_, x)      -> go x
+    | _ -> ()
+  in
+  go e;
+  if !saw_years && not !saw_months then "add_calendar_years" else "add_calendar_months"
+
+let hint_calendar_plus_instant ?(exact_fn = "add_calendar_months") (span : (int * string) option) =
+  let rule =
+    Printf.sprintf
+      "calendar months/years aren't invertible spans \
+       (e.g. date(\"2021-01-31\") + 1 month = date(\"2021-02-28\") because \
+       day-31 clamps to day-28 in Feb 2021). \
+       For a calendar-exact date use %s(d, N)." exact_fn
+  in
+  match span with
+  | Some (days, rendered) ->
+    Printf.sprintf
+      "%s For an explicit affine span use %d 'days (≈ %s)."
+      rule days rendered
+  | None ->
+    rule ^ " For an explicit affine span state the offset in 'days or \
+            'weeks, which are fixed spans."
 
 let hint_time_unit_months_with_origin =
   "constant-day axis required for calendar-anchored models. \
