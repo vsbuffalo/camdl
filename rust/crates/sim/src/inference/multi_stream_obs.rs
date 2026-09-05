@@ -584,16 +584,20 @@ impl BoundObs {
     ///
     /// - at least one stream,
     /// - each stream has at least one observation time,
-    /// - stream 0's times are strictly increasing (gh#188),
-    /// - every other stream's `obs_times` equals stream 0's (homogeneous
-    ///   schedule),
+    /// - each stream's own times are strictly increasing (gh#188),
+    /// - per-observation auxiliary data is present-together-or-hole and any
+    ///   binomial denominator is well-formed (§3, §6.1).
+    ///
+    /// Streams may sit on different cadences (multi-cadence Phase 1): there is
+    /// no requirement that one stream's `obs_times` equal another's.
     ///
     /// On any `Error` finding the result is `Err(report)` and NO `BoundObs`
-    /// escapes. Otherwise it collapses the (identical) per-stream schedules to
-    /// one shared `times` and returns `Ok((bound, report))`; the equal-length
-    /// invariant `values.len() == times.len()` then holds by construction.
-    ///
-    /// Reproduces today's dense/homogeneous semantics exactly.
+    /// escapes. Otherwise it merges every stream's schedule to the
+    /// sorted-unique union axis and returns `Ok((bound, report))`, with each
+    /// stream's `at_union` recording its own local cell index at every union
+    /// time it is scheduled at (`None` where only a sibling is). A homogeneous
+    /// model is the special case where every stream is scheduled at every
+    /// union time.
     pub fn bind(mut streams: Vec<StreamSpec>) -> Result<(BoundObs, BindReport), BindReport> {
         let mut findings: Vec<Finding> = Vec::new();
 
