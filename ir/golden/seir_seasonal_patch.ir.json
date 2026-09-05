@@ -1,6 +1,6 @@
 {
-  "ir_version": "0.38",
-  "validated_by": "ocaml-compiler-v0.38",
+  "ir_version": "0.39",
+  "validated_by": "ocaml-compiler-v0.39",
   "model": {
     "name": "seir_seasonal_patch",
     "version": "0.3",
