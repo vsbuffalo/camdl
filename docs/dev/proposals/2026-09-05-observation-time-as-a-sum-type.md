@@ -1,7 +1,7 @@
 # Observation time as a sum type
 
 - **Status:** Accepted — spec, implement against this. Steps 0–2 landed (the
-  runtime `Period`/`StreamTimes`, the `ir/VERSION` 0.38 bump, the `covers` DSL
+  runtime `Period`/`StreamTimes`, the `ir/VERSION` 0.39 bump, the `covers` DSL
   surface and the loader); the migration that makes the declaration REQUIRED,
   gap support, `compare`'s window gate and the output columns are outstanding.
 - **Issue:** gh#833
@@ -388,7 +388,7 @@ confirmation required by `CLAUDE.md` has been given for this change. It touches
 **`make update-golden` covers only half the committed IR.** There are 110
 committed `.ir.json` files; the target regenerates 54 of them. Every one carries
 the version in its envelope, so a bump leaves the rest failing with
-`IR version mismatch: this build expects 0.38, JSON declared 0.37` — as a CLI
+`IR version mismatch: this build expects 0.39, JSON declared 0.38` — as a CLI
 integration failure far from its cause, not as a golden diff. The four
 directories the target does not reach:
 
