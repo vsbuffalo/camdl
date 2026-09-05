@@ -671,6 +671,7 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
                 })),
             }),
             stratum: vec![],
+            covers: None,
         },
         observations: dense_cells(values),
         times: StreamTimes::Instants(obs_times.to_vec()),

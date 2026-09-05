@@ -1879,6 +1879,7 @@ mod tests {
             scored: "cases".into(),
             emit_schedule: None,
             stratum: vec![StratumKey { dim: "patch".into(), level: level.into() }],
+            covers: None,
             projection: Projection::CumulativeFlow(format!("infection_{level}")),
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {

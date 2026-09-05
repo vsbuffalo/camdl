@@ -78,6 +78,7 @@ fn binom_survey_model() -> Arc<CompiledModel> {
             scored: "n_positive".into(),
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
             stratum: vec![],
+            covers: None,
             projection: Projection::CumulativeFlow("inflow".into()),
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Binomial(BinomialLikelihood {

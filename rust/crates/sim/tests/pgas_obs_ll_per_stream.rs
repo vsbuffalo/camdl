@@ -89,6 +89,7 @@ fn ir_incidence_obs(name: &str) -> IrObs {
         scored: name.into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection: Projection::CumulativeFlow("inflow".into()),
         projection_state_grad: Default::default(),
         likelihood: Likelihood::Normal(NormalLikelihood {

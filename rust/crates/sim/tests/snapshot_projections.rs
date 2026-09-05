@@ -70,6 +70,7 @@ fn model_with_obs(
             scored: "obs".into(),
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![5.0])),
             stratum: vec![],
+            covers: None,
             projection,
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
@@ -348,6 +349,7 @@ fn snapshot_reads_post_intervention_state() {
             scored: "obs".into(),
             emit_schedule: Some(ObservationSchedule::AtTimes(vec![5.0])),
             stratum: vec![],
+            covers: None,
             projection: Projection::CurrentPop("S".into()),
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {

@@ -206,6 +206,7 @@ fn poisson_obs_with_grad(param: &str, entry: DerivEntry) -> ir::observation::Obs
         scored: "weekly_cases".into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection: Projection::CumulativeFlow("infection".into()),
         projection_state_grad: Default::default(),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
@@ -226,6 +227,7 @@ fn benign_obs() -> ir::observation::ObservationModel {
         scored: "weekly_cases".into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection: Projection::CumulativeFlow("infection".into()),
         projection_state_grad: Default::default(),
         likelihood: Likelihood::Poisson(PoissonLikelihood {
@@ -438,6 +440,7 @@ fn binomial_obs_with_n(n: ir::expr::Expr, projection: ir::observation::Projectio
         scored: "weekly_cases".into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection,
         projection_state_grad: Default::default(),
         likelihood: Likelihood::Binomial(BinomialLikelihood {

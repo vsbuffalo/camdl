@@ -105,6 +105,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
                 scored: "weekly_cases".into(),
                 emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
+                covers: None,
                 projection: ir::observation::Projection::CumulativeFlow("infection".into()),
                 projection_state_grad: Default::default(),
                 likelihood: ir::observation::Likelihood::NegBinomial(

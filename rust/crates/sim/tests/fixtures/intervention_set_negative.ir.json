@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.37",
+  "ir_version": "0.38",
   "validated_by": "hand-curated-guard-fixture",
   "model": {
     "name": "intervention_set_negative",

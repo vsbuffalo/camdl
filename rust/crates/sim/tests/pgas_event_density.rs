@@ -379,6 +379,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
                 scored: "cases".into(),
                 emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
+                covers: None,
                 projection: ir::observation::Projection::CumulativeFlow("infection".into()),
                 projection_state_grad: Default::default(),
                 likelihood: ir::observation::Likelihood::NegBinomial(

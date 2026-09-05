@@ -54,6 +54,7 @@ fn prevalence_obs_block() -> ir::observation::ObservationModel {
         scored: "prevalence".into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         // CurrentPop is the Instant (prevalence) kind — no accumulation bin.
         projection: Projection::CurrentPop("I".into()),
         projection_state_grad: Default::default(),

@@ -84,6 +84,7 @@ fn model(k_per_unit: f64) -> Arc<CompiledModel> {
                 scored: "cases".into(),
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
+                covers: None,
                 projection: Projection::CumulativeFlow("inflow".into()),
                 projection_state_grad: Default::default(),
                 likelihood: Likelihood::Normal(NormalLikelihood {

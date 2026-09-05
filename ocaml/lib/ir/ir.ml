@@ -521,11 +521,48 @@ type obs_column_role =
   | RoleTime
   | RoleDim   of string
   | RoleValue of param_kind
+  (* gh#833: the opening / closing boundary of the period this row covers.
+     Declared as a PAIR, and mutually exclusive with [RoleTime] — a stream
+     names exactly one temporal anchor, either a time column or a window
+     pair. [RoleWindowStop] doubles as the stream's fit time source. *)
+  | RoleWindowStart
+  | RoleWindowStop
 
 type obs_column = {
   col_name: string;
   col_role: obs_column_role;
 }
+
+(* How wide the period a row covers is (gh#833): a compile-time constant in
+   AXIS units, or a per-row width read from a declared data column (a file
+   carrying its own `days_covered`). *)
+type covers_span =
+  | SpanConst  of float
+  | SpanColumn of string
+
+(* What each row of an interval stream covers (gh#833).
+
+   The FULLY-EXPANDED form — every surface spelling lowers here and the
+   expander does all the calendar arithmetic, so the Rust runtime never needs
+   to know how long a day is in the model's axis units. With [t] the row's own
+   label and [one_day] already converted to axis units:
+
+     covers = day(t)        ->  CoversFrom  (0.,      SpanConst one_day)
+     starting_on (t, d)     ->  CoversFrom  (0.,      d)
+     ending_on   (t, d)     ->  CoversUntil (one_day, d)
+     window_start/_stop     ->  CoversWindowColumns
+
+   Two anchors rather than one because a per-row span attaches to whichever
+   end the label pins: [ending_on] fixes the row's CLOSE and measures
+   backwards, so with a column span its start moves row by row. *)
+type covers =
+  (* start = t + offset ; stop = start + span *)
+  | CoversFrom  of float * covers_span
+  (* stop = t + offset ; start = stop - span *)
+  | CoversUntil of float * covers_span
+  (* start and stop are read per row from the window columns. The only form
+     that can state a gap between consecutive rows. *)
+  | CoversWindowColumns
 
 type observation_model = {
   name:          string;
@@ -549,6 +586,14 @@ type observation_model = {
      stream. The Rust long-form loader routes each data-file row to the leaf
      whose [stratum] matches the row's `: dim` column values BY NAME. *)
   stratum:       (string * string) list;
+  (* What each row covers (gh#833) — the `covers = ...` declaration, or
+     [CoversWindowColumns] when the stream carries a window pair instead.
+     [None] is a stream that has not declared, scored under the historical
+     convention where a row's window is whatever its spacing from the previous
+     row happens to be. Transitional: it disappears when the declaration
+     becomes required. NOT a default — no default is right, because the same
+     date column means three different spans depending on the source. *)
+  covers:        covers option;
   projection:    projection;
   (* ∂projection/∂compartment for a [DerivedExpr] (nonlinear) projection — the
      WrtPop differentiation the ODE observation gradient's factor-2 chain consumes

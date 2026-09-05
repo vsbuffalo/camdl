@@ -8814,6 +8814,7 @@ let expand_observations ctx =
       Ir.scored        = meas_v.om_scored;
       Ir.emit_schedule = emit_schedule;
       Ir.stratum;
+      Ir.covers        = None;
       Ir.projection;
       Ir.projection_state_grad = [];
       Ir.likelihood;

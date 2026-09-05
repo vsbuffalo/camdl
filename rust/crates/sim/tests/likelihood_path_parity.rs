@@ -89,6 +89,7 @@ fn model() -> Arc<CompiledModel> {
                 scored: "cases".into(),
                 emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
+                covers: None,
                 projection: Projection::CurrentPop("I".into()),
                 projection_state_grad: Default::default(),
                 likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {

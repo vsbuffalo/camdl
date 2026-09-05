@@ -131,6 +131,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
                 scored: "cases".into(),
                 emit_schedule: Some(ir::observation::ObservationSchedule::AtTimes(vec![])),
                 stratum: vec![],
+                covers: None,
                 projection: ir::observation::Projection::CumulativeFlow("death".into()),
                 projection_state_grad: Default::default(),
                 likelihood: ir::observation::Likelihood::Poisson(ir::observation::PoissonLikelihood {
