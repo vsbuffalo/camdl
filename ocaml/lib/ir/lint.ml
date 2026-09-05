@@ -12,7 +12,8 @@
 
    `check_model` runs a LIST of individual lint-check functions, so a
    future lint (unused-parameter, dead-transition) is a one-line append.
-   Today only the dead-compartment check (L402) is implemented. *)
+   Today: the dead-compartment check (L402) and the shared-projection
+   check (L404). *)
 
 open Ir
 
@@ -218,12 +219,118 @@ let check_dead_compartments (m : model) : diagnostic list =
     }
   ) dead
 
+(* ── Lint L404: two streams reading one latent quantity ─────────────────── *)
+
+(* The joint observation log-likelihood is a plain sum over bound streams, so
+   two streams that read the same underlying measurements contribute that
+   evidence twice. Nothing else notices: the counts are never doubled, so the
+   posterior simply concentrates as though there were twice the data, and
+   every convergence diagnostic reads clean.
+
+   This runs on the EXPANDED model — after stratification expansion, index
+   resolution and binder substitution — because two different SPELLINGS become
+   one concrete projection strictly later. `resolve_index_order` normalises
+   named indices to declared order and drops the `INamed` label, so
+   `die[child, north]` and `die[patch = north, age = child]` are one flow by
+   the time we see them; and `index_item_to_str env` substitutes the stream's
+   own binder, so a stratified stream whose projection ignores its binder
+   expands to N leaves all naming ONE flow. A syntactic check on what the
+   modeller wrote sees none of this (the reasoning gh#678 established for the
+   within-projection case). *)
+
+(* A projection's identity for the "same latent quantity?" question. The two
+   sum variants are canonicalised — sorted (a sum is commutative, so the term
+   order is not part of the quantity) and collapsed to the scalar form at
+   length one — so the comparison is over the quantity, not the spelling.
+   `KExpr` compares derived projections structurally, which is exact for the
+   spellings the expander produces and conservative otherwise: it can miss a
+   commuted rewrite, never invent a collision. *)
+type projection_key =
+  | KFlow of string list      (* accumulated flows, sorted *)
+  | KPop  of string list      (* compartments read at the instant, sorted *)
+  | KExpr of expr             (* a derived function of the state *)
+
+let projection_key (p : projection) : projection_key =
+  let canon names = List.sort String.compare names in
+  match p with
+  | CumulativeFlow f     -> KFlow [f]
+  | CumulativeFlowSum fs -> KFlow (canon fs)
+  | CurrentPop c         -> KPop [c]
+  | CurrentPopSum cs     -> KPop (canon cs)
+  | DerivedExpr e        -> KExpr e
+
+(* What the shared projection reads, in the words a modeller would use. *)
+let projection_phrase (k : projection_key) : string =
+  let quoted names = String.concat " + " (List.map (Printf.sprintf "'%s'") names) in
+  match k with
+  | KFlow [f]  -> Printf.sprintf "each accumulates the flow '%s'" f
+  | KFlow fs   -> Printf.sprintf "each accumulates the same pooled flows (%s)" (quoted fs)
+  | KPop  [c]  -> Printf.sprintf "each reads the compartment '%s'" c
+  | KPop  cs   -> Printf.sprintf "each reads the same compartments (%s)" (quoted cs)
+  | KExpr _    -> "each evaluates the same derived expression over the state"
+
+(* "'a' and 'b'" / "'a', 'b' and 'c'" — the streams of one collision group. *)
+let stream_list (names : string list) : string =
+  let quoted = List.map (Printf.sprintf "'%s'") names in
+  match List.rev quoted with
+  | []       -> ""
+  | [only]   -> only
+  | last :: rev_init ->
+    String.concat ", " (List.rev rev_init) ^ " and " ^ last
+
+(* Group the streams by resolved projection and report every group of two or
+   more — ONE diagnostic per group, naming all its streams, so three streams
+   on one flow give one report rather than three pairs. Groups are keyed by
+   an association list rather than a hashtable because the key carries an
+   `expr`, and iteration follows declaration order, so the output is
+   deterministic. *)
+let check_shared_projections (m : model) : diagnostic list =
+  let groups : (projection_key * string list ref) list ref = ref [] in
+  List.iter (fun (o : observation_model) ->
+    let k = projection_key o.projection in
+    match List.assoc_opt k !groups with
+    | Some names -> names := o.name :: !names
+    | None       -> groups := (k, ref [o.name]) :: !groups
+  ) m.observations;
+  List.filter_map (fun (k, names) ->
+    match List.rev !names with
+    | ([] | [_]) -> None
+    | streams ->
+      Some
+        { severity = Warning;
+          code = "L404";
+          message =
+            Printf.sprintf
+              "observation streams %s project the same quantity"
+              (stream_list streams);
+          detail =
+            Some (Printf.sprintf
+              "%s, and the joint log-likelihood is a sum over bound streams — \
+               so data bound to all of them adds that evidence once per stream. \
+               No count doubles and no convergence diagnostic fires; the \
+               posterior just concentrates as if there were that many times the \
+               data."
+              (projection_phrase k));
+          hint =
+            Some "if these files are one quantity at two resolutions, or one \
+                  page read twice, bind only one of them. If they really are \
+                  independent observation processes on the same latent quantity \
+                  — two laboratories, a confirmed and a suspected pipeline — \
+                  this is correct and the joint is right; keep both.";
+          (* Point at the first stream of the group; the message names the rest.
+             `obs_loc` maps an expanded leaf back to its base declaration, so a
+             stratified collision lands on the declaration line. *)
+          subject = Some (SObservation (List.hd streams));
+        }
+  ) (List.rev !groups)
+
 (* ── Entry point ────────────────────────────────────────────────────────── *)
 
 (* The registry of lint checks. Each is `model -> diagnostic list`; adding a
    new lint is a one-line append here plus the check function above. *)
 let checks : (model -> diagnostic list) list = [
   check_dead_compartments;
+  check_shared_projections;
 ]
 
 let check_model (m : model) : result =
