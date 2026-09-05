@@ -376,7 +376,8 @@ See `camdl fit <subcommand> --help` for full options."))]
 pub(crate) enum FitCmd {
     /// Run inference stages defined in a fit.toml
     Run(args::FitRunArgs),
-    /// Render a single-fit interpretation summary (Â, gate verdict, MLE table)
+    /// Interpret one fit: the convergence verdict, the estimates, and the
+    /// per-parameter and per-chain diagnostics behind them
     Summary(args::FitSummaryArgs),
     /// Compare two fit.toml configs
     Diff(args::FitDiffArgs),

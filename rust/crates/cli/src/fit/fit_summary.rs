@@ -1536,10 +1536,10 @@ impl Formatter {
         }
         s.push_str(&self.identity_line(lead, stage, method, &extra));
 
-        s.push_str(&self.verdict_block(diag, &facts, forkable));
+        s.push_str(&self.verdict_block(diag, &facts, subset, forkable));
         s.push_str(&self.posterior_section(diag, posterior_mean));
         s.push_str(&self.convergence_section(diag, acceptance_summary));
-        s.push_str(&self.chains_section(stage_dir, diag.n_chains, &facts));
+        s.push_str(&self.chains_section(stage_dir, diag.n_chains, &facts, subset));
         if is_pgas {
             s.push_str(&self.latent_paths_section(stage_dir, &facts));
         }
@@ -1556,6 +1556,7 @@ impl Formatter {
         &self,
         diag: &PosteriorDiagnostics,
         facts: &StageFacts,
+        subset: Option<&SubsetInfo>,
         forkable: Option<&crate::fit::joint::JointEnsemble>,
     ) -> String {
         let mut s = String::from("\n");
@@ -1598,6 +1599,7 @@ impl Formatter {
                         diag.per_param.len()
                     )),
                     facts,
+                    subset,
                     forkable,
                 ));
             }
@@ -1612,6 +1614,7 @@ impl Formatter {
                 s.push_str(&self.verdict_facts(
                     Some("each parameter's reason is under `convergence`".to_string()),
                     facts,
+                    subset,
                     forkable,
                 ));
             }
@@ -1621,34 +1624,47 @@ impl Formatter {
                     "    a between-chain statistic was never possible here: {}\n",
                     reason.describe()
                 ));
-                s.push_str(&self.verdict_facts(None, facts, forkable));
+                s.push_str(&self.verdict_facts(None, facts, subset, forkable));
             }
             MaxRhat::NoParams => {
                 s.push_str(&format!("  {} not assessed\n", self.dim("—")));
                 s.push_str("    no parameter was assessed across chains\n");
-                s.push_str(&self.verdict_facts(None, facts, forkable));
+                s.push_str(&self.verdict_facts(None, facts, subset, forkable));
             }
         }
         s
     }
 
     /// The verdict's third line: the counts that qualify it, dot-separated.
+    ///
     /// A fact with nothing to report is dropped rather than printed as a
     /// zero — "0 outlier chains" and "outliers were never scored" are
     /// different statements and must not share a rendering.
+    ///
+    /// `subset` is present only under `--exclude-chains`, and its job here is
+    /// to say what the outlier count is NOT. R̂ and the parameter counts on the
+    /// lines above are recomputed over the retained chains; the outlier score
+    /// is read from the per-chain traces on disk, which the selection does not
+    /// filter. Standing unlabelled beside recomputed numbers, it would read as
+    /// though it shared their scope.
     fn verdict_facts(
         &self,
         lead: Option<String>,
         facts: &StageFacts,
+        subset: Option<&SubsetInfo>,
         forkable: Option<&crate::fit::joint::JointEnsemble>,
     ) -> String {
         let mut parts: Vec<String> = lead.into_iter().collect();
         if !facts.scores.is_empty() {
             let n = facts.scores.iter().filter(|s| s.is_outlier).count();
+            let scope = match subset {
+                Some(_) => " (over every chain, not the retained subset)",
+                None => "",
+            };
             parts.push(match n {
-                0 => "no outlier chains".to_string(),
-                1 => "1 outlier chain".to_string(),
-                n => format!("{} outlier chains", n),
+                0 => format!("no outlier chains{scope}"),
+                1 => format!("1 outlier chain{scope}"),
+                n => format!("{n} outlier chains{scope}"),
             });
         }
         if let Some(j) = forkable {
@@ -1662,7 +1678,11 @@ impl Formatter {
         if parts.is_empty() {
             return String::new();
         }
-        format!("    {}\n", self.dim(&parts.join(" · ")))
+        let mut s = String::new();
+        for line in wrap(&parts.join(" · "), SECTION_WIDTH - 4) {
+            s.push_str(&format!("    {}\n", self.dim(&line)));
+        }
+        s
     }
 
     /// The estimates, worst R̂ first.
@@ -1855,9 +1875,25 @@ impl Formatter {
         stage_dir: &Path,
         n_chains_expected: usize,
         facts: &StageFacts,
+        subset: Option<&SubsetInfo>,
     ) -> String {
         use super::chain_diagnostics as cd;
         let mut s = self.section(SECTION_CHAINS);
+
+        // `--exclude-chains` recomputes the posterior diagnostics over the
+        // retained chains, but this table is read from the per-chain traces on
+        // disk and the selection does not filter them. Every excluded chain
+        // still has a row, and the mod-z scale is still set by all of them.
+        // That is deliberate — inspecting the chain you dropped is the reason
+        // you dropped it — but it must be SAID, or the rows read as though
+        // they shared the recomputed scope of the tables above.
+        if let Some(info) = subset {
+            s.push_str(&self.note(Tone::Dim, &format!(
+                "(every chain is listed, including the excluded {} — this table \
+                 is read from the traces on disk, and the outlier score is over \
+                 all of them)",
+                info.excluded_csv())));
+        }
 
         // Per-chain path counts, keyed by the chain id the artifact records —
         // never by a row's position, which is not an answer once a chain has
@@ -1901,7 +1937,13 @@ impl Formatter {
                 "(need ≥2 chains with traces for a cross-chain outlier score)")));
             s.push_str(&self.path_only_table(&paths));
         } else {
-            if n_chains_expected != 0 && means.scored.len() != n_chains_expected {
+            // Under a selection `n_chains_expected` is the RETAINED count while
+            // the rows are every chain on disk, so the comparison would read
+            // "found traces for 16 of 6 chains". The note above already says
+            // why the two differ; this line only makes sense unfiltered.
+            if subset.is_none() && n_chains_expected != 0
+                && means.scored.len() != n_chains_expected
+            {
                 s.push_str(&format!("  {}\n", self.dim(&format!(
                     "(found traces for {} of {} chains)",
                     means.scored.len(), n_chains_expected))));
@@ -3365,7 +3407,7 @@ mod tests {
         kind: LoglikType,
     ) -> String {
         let facts = StageFacts::gather(dir, kind, true);
-        fmt.chains_section(dir, n_chains, &facts)
+        fmt.chains_section(dir, n_chains, &facts, None)
     }
 
     /// `bayesian_block` for a test that cares only about the rendered sections:
@@ -4549,6 +4591,52 @@ mod tests {
         for line in without.lines().filter(|l| !l.trim().is_empty()) {
             assert!(with.contains(line), "`--explain` may not remove `{line}`");
         }
+    }
+
+    /// Under `--exclude-chains` the `chains` table and the outlier count keep
+    /// their FULL scope, and both say so.
+    ///
+    /// R̂, ESS and the posterior means above them are recomputed over the
+    /// retained chains; the per-chain table is read from the traces on disk,
+    /// which the selection does not filter, and the modified z-score is scaled
+    /// by all of them. Listing every chain is deliberate — inspecting the
+    /// chain you dropped is usually why you dropped it — but standing
+    /// unlabelled beside recomputed numbers it reads as though it shared their
+    /// scope. That is the silent-wrong reading this labelling exists to stop.
+    #[test]
+    fn an_excluded_chain_still_appears_and_the_scope_is_named() {
+        let dir = crate::test_support::unique_temp_dir("summary_excl_scope");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, ll) in [-50.0_f64, -50.2, -300.0].iter().enumerate() {
+            let cd = dir.join(format!("chain_{}", i + 1));
+            std::fs::create_dir_all(&cd).unwrap();
+            let mut body = String::from("sweep\tlog_likelihood\tlog_posterior\n");
+            for sw in 0..5 {
+                body.push_str(&format!("{sw}\t{ll}\t{}\n", ll - 1.0));
+            }
+            std::fs::write(cd.join("trace.tsv"), body).unwrap();
+        }
+        let info = SubsetInfo { excluded: vec![3], kept: vec![1, 2], n_total: 3 };
+        let fmt = plain_formatter();
+        let facts = StageFacts::gather(&dir, LoglikType::Marginal, false);
+        let section = fmt.chains_section(&dir, 2, &facts, Some(&info));
+
+        assert!(section.contains("including the excluded 3"),
+            "the table must say whose rows it is still showing:\n{section}");
+        assert!(section.contains("the outlier score is over all of them"),
+            "and that the score was not recomputed over the subset:\n{section}");
+        assert!(section.lines().any(|l| l.trim_start().starts_with("3 ")),
+            "chain 3 keeps its row — dropping it would hide the evidence for \
+             the exclusion:\n{section}");
+        assert!(!section.contains("found traces for 3 of 2 chains"),
+            "and the unfiltered/retained mismatch must not render as a count \
+             that reads like a defect:\n{section}");
+
+        // Without a selection the same stage says none of it.
+        let plain = fmt.chains_section(&dir, 3, &facts, None);
+        assert!(!plain.contains("excluded"), "no scope note when nothing was \
+            excluded:\n{plain}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The two flags are independent: together the output carries the legend
