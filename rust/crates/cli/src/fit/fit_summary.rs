@@ -1678,8 +1678,24 @@ impl Formatter {
         if parts.is_empty() {
             return String::new();
         }
+        // Packed at the `·` separators, never inside a fact: word-wrapping this
+        // line splits `80/48000 forkable` across two of them, which reads as a
+        // number and then an orphaned word.
         let mut s = String::new();
-        for line in wrap(&parts.join(" · "), SECTION_WIDTH - 4) {
+        let mut line = String::new();
+        for part in parts {
+            if !line.is_empty() && line.chars().count() + 3 + part.chars().count()
+                > SECTION_WIDTH - 2
+            {
+                s.push_str(&format!("    {}\n", self.dim(&line)));
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push_str(" · ");
+            }
+            line.push_str(&part);
+        }
+        if !line.is_empty() {
             s.push_str(&format!("    {}\n", self.dim(&line)));
         }
         s
