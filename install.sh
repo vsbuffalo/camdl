@@ -70,12 +70,19 @@ cmake_plat() {
 # box that can build OCaml + Rust they are already present. If something is
 # missing we print the exact one-time command and stop.
 ensure_base_tools() {
-    log "Checking base build tools (make, git, curl, tar)..."
+    log "Checking base build tools (make, git, curl, tar, unzip, C compiler)..."
     local missing=()
     local t
-    for t in make git curl tar; do
+    for t in make git curl tar unzip; do
         have "$t" || missing+=("$t")
     done
+    # `unzip` above and a C compiler here are opam's own hard requirements: it
+    # refuses to init without unzip, and the OCaml switch is compiled from
+    # source (cargo also needs cc to link). Checking them HERE is what makes
+    # the failure legible — opam's own error is "Missing dependencies", which
+    # install.sh used to funnel into the bubblewrap/user-namespace hint below,
+    # sending anyone who hit it after the wrong problem entirely.
+    have cc || have gcc || have clang || missing+=("gcc")
     [ ${#missing[@]} -eq 0 ] && return
 
     warn "Missing required tools: ${missing[*]}"
