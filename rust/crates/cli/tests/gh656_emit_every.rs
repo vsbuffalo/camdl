@@ -126,9 +126,16 @@ fn obs_times(path: &Path) -> Vec<f64> {
         .collect()
 }
 
-/// Every dir containing a `run.json`, at any depth — the factored CAS sim path
-/// is several levels deep, and the obs ensemble is a declared `obs/` child below
-/// it (which carries no `run.json` of its own).
+/// Every TRAJECTORY leaf: a dir containing a `run.json`, at any depth, without
+/// descending into `obs/`.
+///
+/// The obs ensemble is a declared `obs/` child, and it now carries a
+/// `run.json` of its own (it used to be a bare directory, so nothing could
+/// validate its bytes). "Every dir with a run.json" therefore counts obs
+/// children too. `camdl list` is unaffected — it gates on artifact kind and
+/// these records are `kind = obs` — and this helper does the equivalent by
+/// stopping at the child boundary, the rule the store's own exact-set scan
+/// already uses.
 fn run_leaves(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -139,7 +146,7 @@ fn run_leaves(root: &Path) -> Vec<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 let p = e.path();
-                if p.is_dir() {
+                if p.is_dir() && e.file_name() != "obs" {
                     stack.push(p);
                 }
             }

@@ -1313,6 +1313,9 @@ impl crate::engine::RunSink for CasSink {
         // obs-child RunRecord identity is a follow-up.
         let mut children: std::collections::BTreeMap<String, Vec<runid::ContentHash>> =
             std::collections::BTreeMap::new();
+        // The declared obs child id, carried to the write site below so the
+        // child's own record and the parent's declaration cannot disagree.
+        let mut obs_child_id: Option<runid::ContentHash> = None;
         let has_obs = self.obs_enabled && !cell.model.observations.is_empty();
         if has_obs {
             let obs_seed = spec.process_seed ^ crate::util::SEED_MIX_OBS;
@@ -1334,6 +1337,7 @@ impl crate::engine::RunSink for CasSink {
                 format!("{}:{}:{}", rt.run_id.to_hex(), obs_seed, obs_hash).as_bytes(),
             );
             children.insert("obs".to_string(), vec![obs_id]);
+            obs_child_id = Some(obs_id);
         }
 
         // Atomic write through the one resolved-writer seam (gh#241 PR D).
@@ -1463,7 +1467,8 @@ impl crate::engine::RunSink for CasSink {
             let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
             if let Err(e) = write_obs_into_cas(
                 &dest, &cell.model, &cell.traj, spec.process_seed, restart_origin,
-                self.emit_every.as_ref(),
+                self.emit_every.as_ref(), &root,
+                obs_child_id.expect("has_obs implies the child id was declared"),
             ) {
                 self.errors.push(format!("scenario={} seed={}: obs ensemble: {}",
                     name, spec.process_seed, e));
@@ -1878,6 +1883,15 @@ fn write_obs_into_cas(
     // the subtree (via `obs_subtree_hash`), so the two cadences coexist under one
     // trajectory leaf instead of one overwriting the other.
     emit: Option<&crate::emit_every::EmitEvery>,
+    // The CAS root — the store's own directory, NOT the parent leaf: staging
+    // and quarantine live there, and rooting a store inside a leaf would put
+    // scratch dirs under an artifact.
+    cas_root: &std::path::Path,
+    // The child id the PARENT declares in its `children` map. Passed rather
+    // than recomputed so the record and the declaration cannot disagree —
+    // recomputing it here from the same formula would be a second answer to
+    // one question, which is the shape this arc exists to remove.
+    obs_id: runid::ContentHash,
 ) -> Result<(), String> {
     use std::io::Write;
 
@@ -1910,8 +1924,11 @@ fn write_obs_into_cas(
     let obs_dir = run_dir.join("obs").join(format!(
         "{}-{}", &obs_hash[..8.min(obs_hash.len())], obs_seed,
     ));
-    std::fs::create_dir_all(&obs_dir)
-        .map_err(|e| format!("cannot create {}: {}", obs_dir.display(), e))?;
+    // Built in memory and committed in one atomic step below, so a failure
+    // part-way through leaves NO subtree rather than a partial one. (The
+    // per-stream preflight above already turned a mid-loop validation error
+    // into no write; this extends the same property to I/O errors.)
+    let mut artifacts = runid::Artifacts::new();
 
     let compiled = std::sync::Arc::new(
         sim::CompiledModel::new(model.clone())
@@ -1936,11 +1953,7 @@ fn write_obs_into_cas(
         let projected =
             crate::project_all_obs_times(traj, obs_ir, model, &obs_times, None)?;
 
-        let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
-        let mut out = std::io::BufWriter::new(
-            std::fs::File::create(&path)
-                .map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
-        );
+        let mut out: Vec<u8> = Vec::new();
         writeln!(out, "time\t{}", obs_ir.name).map_err(|e| e.to_string())?;
         for (ti, &obs_t) in obs_times.iter().enumerate() {
             let snap = crate::snap_at(traj, obs_t);
@@ -1951,7 +1964,7 @@ fn write_obs_into_cas(
                 writeln!(out, "{}\t{:.6}", obs_t, draw).map_err(|e| e.to_string())?;
             }
         }
-        out.flush().map_err(|e| e.to_string())?;
+        artifacts.insert(format!("{}.tsv", obs_ir.name), out);
         stream_names.push(obs_ir.name.clone());
     }
 
@@ -1963,11 +1976,51 @@ fn write_obs_into_cas(
         "streams": stream_names,
         "version": version::VERSION_SHORT,
     });
-    std::fs::write(
-        obs_dir.join("obs.json"),
-        serde_json::to_string_pretty(&obs_meta).unwrap_or_default(),
-    )
-    .map_err(|e| format!("cannot write obs.json: {}", e))?;
+    artifacts.insert(
+        "obs.json".to_string(),
+        serde_json::to_string_pretty(&obs_meta)
+            .map_err(|e| format!("cannot render obs.json: {e}"))?
+            .into_bytes(),
+    );
+
+    // Commit the subtree as a REAL child leaf, through the store.
+    //
+    // `record.rs` promises children are "validated recursively on their own
+    // lookup", but this one had no `RunRecord` at all — the parent declared a
+    // child id computed from a formula, pointing at a directory that carried
+    // no record to check it against, written with raw unsynced `fs::write`. A
+    // torn obs write was therefore invisible: the parent's exact-set scan
+    // stops at the child boundary, so nothing validated these bytes, ever.
+    //
+    // Committing here gives the subtree what every other artifact has: a
+    // manifest with per-file digests, fsync'd writes, an atomic rename as the
+    // commit point, and the divergence check — so re-deriving the same obs
+    // draw with different bytes is a loud error instead of a silent overwrite.
+    //
+    // `levels` is empty on purpose: this leaf is addressed by its PARENT's
+    // path plus the declared child id, not by `store_path`, so it has no
+    // level decomposition to record. `run_id` keeps the id the parent
+    // declares, so existing parents' `children` entries stay valid.
+    let record = runid::RunRecord {
+        format_version: runid::record::FORMAT_VERSION,
+        kind: runid::ArtifactKind::Obs,
+        run_id: obs_id,
+        hash_version: runid::HASH_VERSION,
+        ir_version: ir::IR_VERSION.trim().to_string(),
+        engine_version: version::VERSION_SHORT.to_string(),
+        levels: Vec::new(),
+        deps: Vec::new(),
+        status: runid::record::RunStatus::Running,
+        artifacts: Default::default(),
+        output_schema: Default::default(),
+        children: Default::default(),
+        inputs: obs_meta,
+        provenance: Default::default(),
+    };
+    let store = runid::FsCasStore::new(cas_root);
+    store
+        .commit_atomic(&obs_dir, record, artifacts)
+        .map_err(|e| format!("cannot commit obs child {}: {}", obs_dir.display(), e))?;
 
     Ok(())
 }
