@@ -2174,7 +2174,10 @@ impl Formatter {
             return String::new();
         };
         let mut s = String::new();
+        // Indented into the section with the rows below it; `FilterEss::report`
+        // is written for the stage-end print, which has no section to sit in.
         for line in fe.report().trim_start_matches('\n').lines() {
+            s.push_str("  ");
             s.push_str(line);
             s.push('\n');
         }

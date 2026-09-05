@@ -248,15 +248,15 @@ fn free_forward_convergence_cells(pred_tsv: &str) -> (String, String) {
     panic!("no free_forward row in predictive tsv:\n{pred_tsv}");
 }
 
-/// Parse the `max R̂ = <x>` value from a `fit summary` (text) stdout.
+/// Parse the `max R̂ <x> (<param>), threshold <t>` value from a `fit summary`
+/// (text) stdout — the verdict's second line.
 fn summary_max_rhat(stdout: &str) -> f64 {
     stdout
         .lines()
-        .find(|l| l.contains("max R̂ ="))
-        .and_then(|l| l.split("max R̂ =").nth(1))
+        .find_map(|l| l.trim_start().strip_prefix("max R\u{302} "))
         .and_then(|s| s.split_whitespace().next())
         .and_then(|s| s.parse().ok())
-        .expect("a max R̂ line in the posterior block")
+        .expect("a max R̂ line in the verdict")
 }
 
 /// Parse the `min-param ESS <n>` token from a `fit summary` (text) stdout (the
@@ -505,24 +505,21 @@ fn summary_subset_shows_header_recomputes_and_warns() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    // Header names the subset and what was dropped.
+    // The stage's identity line names the subset and what was dropped.
     assert!(
-        stdout.contains("chains:       3 of 4  (excluded 4)"),
-        "summary header must show the chain subset, got:\n{stdout}"
+        stdout.contains("3 of 4 chains (excluded 4)"),
+        "summary identity line must show the chain subset, got:\n{stdout}"
+    );
+    // And the per-chain table says what the selection did NOT filter, so its
+    // rows are not read as sharing the recomputed scope of the tables above.
+    assert!(
+        stdout.contains("including the excluded 4"),
+        "the chains table must name the scope it kept, got:\n{stdout}"
     );
     // The recomputed R̂ over the three tight chains is finite and below the gate
     // (dropping the outlier is exactly the convergence-fixing move the feature
     // exists for; the stored full-cloud R̂ is replaced by the subset R̂).
-    let rhat_line = stdout
-        .lines()
-        .find(|l| l.contains("max R̂ ="))
-        .expect("a max R̂ line in the posterior block");
-    let rhat: f64 = rhat_line
-        .split("max R̂ =")
-        .nth(1)
-        .and_then(|s| s.split_whitespace().next())
-        .and_then(|s| s.parse().ok())
-        .expect("parse max R̂");
+    let rhat = summary_max_rhat(&stdout);
     assert!(rhat.is_finite() && rhat < 1.1, "subset R̂ recomputed and healthy: {rhat}");
 
     // The loud, non-quietable warning fired to stderr.

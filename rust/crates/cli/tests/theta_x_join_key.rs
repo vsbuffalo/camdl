@@ -196,19 +196,20 @@ fn fit_summary_reports_forkable_draws() {
     assert!(sum.status.success(), "fit summary failed:\nstderr={}", String::from_utf8_lossy(&sum.stderr));
     let text = String::from_utf8_lossy(&sum.stdout);
 
-    assert!(text.contains("(θ, X) forkability"), "summary must show the forkability section; got:\n{text}");
-    // Parse the `forkable draws: N/M` line and assert the join is full here.
+    // The forkable count is a fact about the fit, so it sits in the verdict
+    // beside R̂ rather than in a block of its own at the end: `N/M forkable`.
     let line = text
         .lines()
-        .find(|l| l.contains("forkable draws:"))
-        .unwrap_or_else(|| panic!("no `forkable draws:` line in:\n{text}"));
-    let frac = line.split("forkable draws:").nth(1).unwrap().trim();
-    let nums: &str = frac.split_whitespace().next().unwrap(); // "N/M"
+        .find(|l| l.contains("forkable"))
+        .unwrap_or_else(|| panic!("no `forkable` count in the verdict:\n{text}"));
+    let nums = line
+        .split_whitespace()
+        .find(|w| w.contains('/'))
+        .unwrap_or_else(|| panic!("no `N/M` fraction on the forkable line: {line}"));
     let (n, m) = nums.split_once('/').unwrap_or_else(|| panic!("bad fraction `{nums}`"));
     let (n, m): (usize, usize) = (n.parse().unwrap(), m.parse().unwrap());
     assert!(m > 0, "total draws must be > 0");
     assert_eq!(n, m, "every retained PGAS draw has a saved path here → full join (forkable == total)");
-    assert!(line.contains("(all draws)"), "full join must read `(all draws)`; got: {line}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
