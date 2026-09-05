@@ -143,6 +143,14 @@ pub enum DiagnosticKind {
         /// fallback message. Surface in the diagnostic so the user
         /// can correlate with chain_starts.tsv.
         reason: String,
+        /// What the swarm managed at the observation that lost support,
+        /// one record per declared stream, keyed by stream name and
+        /// observation time. The structured half of `reason`, which is
+        /// rendered from these same fields — so a consumer reads them
+        /// instead of regexing the prose. Empty for a chain whose start
+        /// failed some other way (a PF degeneracy, an all-dead swarm):
+        /// no observation was scored, so there is nothing to report.
+        attempts: Vec<crate::inference::obs_attempt::StreamAttempt>,
     },
 
     // ── NUTS ─────────────────────────────────────────────────────
@@ -419,7 +427,7 @@ impl DiagnosticKind {
                     ess_mean, ess_min, n_particles),
             Self::InitialLoglikInfinite =>
                 "Initial log-likelihood is -inf at starting parameters.".into(),
-            Self::BadInit { chain_id, params, reason } => {
+            Self::BadInit { chain_id, params, reason, .. } => {
                 let pretty = params.iter()
                     .map(|(k, v)| format!("{}={:.4}", k, v))
                     .collect::<Vec<_>>()

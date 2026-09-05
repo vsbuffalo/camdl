@@ -60,7 +60,9 @@ fn with_scratch_int_from_counts<R>(counts: &[i64], f: impl FnOnce(&IntState) -> 
 }
 use super::traits::ObservationModel;
 use super::types::ParticleState;
+use super::obs_attempt::{NegInfCause, ObsCellState, StreamAttempt};
 use super::obs_model::{
+    explain_likelihood_neg_inf,
     resolve_likelihood_from_model, eval_likelihood_resolved,
     eval_likelihood_resolved_grad, dlogp_dprojected,
     sample_obs_resolved, eval_obs_mean_resolved,
@@ -1399,6 +1401,168 @@ impl MultiStreamObsModel {
     ) -> f64 {
         let zeros = vec![0i64; self.compiled.int_local_to_global.len()];
         self.log_likelihood_from_flows_and_counts(acc, &zeros, obs_idx, params)
+    }
+
+    // ── The failure-path diagnostic (what the model managed here) ──────────
+
+    /// Whether stream `stream_idx` had an observation at union index
+    /// `obs_idx`, and if so whether it carried a value.
+    ///
+    /// The three states all contribute `0.0` to the joint log-likelihood, so
+    /// only this accessor can tell them apart from outside.
+    pub fn cell_state(&self, stream_idx: usize, obs_idx: usize) -> ObsCellState {
+        let s = &self.streams[stream_idx];
+        match s.at_union[obs_idx] {
+            None => ObsCellState::NotScheduled,
+            Some(local) => match s.observations[local] {
+                Some(ObsCell::Scalar(v)) => ObsCellState::Scored { y_obs: v },
+                None => ObsCellState::Hole,
+            },
+        }
+    }
+
+    /// One stream's projected quantity for one particle at union index
+    /// `obs_idx` — the value the likelihood family is built on, not the
+    /// family's mean.
+    ///
+    /// The public face of the same fork the scoring path takes: an Interval
+    /// (incidence) stream reads its folded bin `acc[k]`; a prevalence /
+    /// `Instant` stream projects from `counts`. It can be NaN — an `Expr`
+    /// projection such as `I/(S+I+R)` at zero population — and the NaN is
+    /// returned rather than laundered.
+    pub fn project_stream(
+        &self,
+        stream_idx: usize,
+        acc: &[u64],
+        counts: &[i64],
+        params: &[f64],
+        obs_idx: usize,
+    ) -> f64 {
+        let t = self.obs_times[obs_idx];
+        self.project_stream_from_acc(stream_idx, acc, counts, params, t)
+    }
+
+    /// The observation's time on the model axis.
+    pub fn obs_time(&self, obs_idx: usize) -> f64 {
+        self.obs_times[obs_idx]
+    }
+
+    /// The same instant as a calendar label, when the model declares an
+    /// `origin`. Uses the one-to-one renderer, so two observations less than a
+    /// day apart do not collapse onto the same label — the identifier has to
+    /// name ONE measurement to be worth more than the index it replaces.
+    pub fn obs_date(&self, obs_idx: usize) -> Option<String> {
+        let origin = self.compiled.model.origin.as_deref()?;
+        ir::caltime::internal_to_date_hires(
+            origin,
+            self.obs_times[obs_idx],
+            &self.compiled.model.time_unit,
+        )
+        .ok()
+    }
+
+    /// What the ensemble managed at union index `obs_idx`, one record per
+    /// declared stream. **Failure path only** — it re-scores and re-projects,
+    /// and is called when a chain is being abandoned.
+    ///
+    /// `live` carries one `(acc, counts)` pair per LIVE particle, in any order.
+    /// Dead particles must NOT be passed: a particle killed earlier by the
+    /// process model carries `−∞` without the observation model having been
+    /// consulted, so folding it into these counts would report a process-model
+    /// failure as a unanimous observation refusal. Their number is passed
+    /// separately as `n_dead` and reported beside the live reductions.
+    ///
+    /// A stream not scheduled here yields a `NotScheduled` record with no
+    /// projection summary: its accumulator is mid-interval and there is no
+    /// observation to read it against.
+    pub fn stream_attempts(
+        &self,
+        obs_idx: usize,
+        live: &[(&[u64], &[i64])],
+        n_dead: usize,
+        params: &[f64],
+    ) -> Vec<StreamAttempt> {
+        let n_streams = self.streams.len();
+        let t = self.obs_times[obs_idx];
+        let date = self.obs_date(obs_idx);
+        let cells: Vec<ObsCellState> =
+            (0..n_streams).map(|si| self.cell_state(si, obs_idx)).collect();
+
+        let mut projections: Vec<Vec<f64>> = vec![Vec::with_capacity(live.len()); n_streams];
+        let mut n_nan = vec![0usize; n_streams];
+        let mut n_zero = vec![0usize; n_streams];
+        let mut causes: Vec<Vec<(NegInfCause, usize)>> = vec![Vec::new(); n_streams];
+
+        for &(acc, counts) in live {
+            // ONE call to the scoring seam per particle, so the per-stream
+            // terms explained below are the terms the filter actually weighted
+            // with — `score_streams` stays the single authority.
+            let scores = self.score_streams(obs_idx, counts, params, |si, ti| {
+                self.project_stream_from_acc(si, acc, counts, params, ti)
+            });
+            for si in 0..n_streams {
+                if matches!(cells[si], ObsCellState::NotScheduled) {
+                    continue;
+                }
+                let projected = self.project_stream_from_acc(si, acc, counts, params, t);
+                if projected.is_nan() {
+                    n_nan[si] += 1;
+                } else {
+                    if projected == 0.0 {
+                        n_zero[si] += 1;
+                    }
+                    projections[si].push(projected);
+                }
+                let ObsCellState::Scored { .. } = cells[si] else { continue };
+                if scores[si] != f64::NEG_INFINITY {
+                    continue;
+                }
+                let s = &self.streams[si];
+                let local = s.at_union[obs_idx].expect("scheduled cell has a local index");
+                let observed = match s.observations[local] {
+                    Some(ObsCell::Scalar(v)) => v,
+                    None => continue,
+                };
+                let cause = with_scratch_int_from_counts(counts, |int_s| {
+                    explain_likelihood_neg_inf(
+                        &s.resolved, t, projected, observed, &s.aux[local], params,
+                        &self.compiled, int_s, &self.real_s,
+                    )
+                });
+                match causes[si].iter_mut().find(|(c, _)| *c == cause) {
+                    Some((_, n)) => *n += 1,
+                    None => causes[si].push((cause, 1)),
+                }
+            }
+        }
+
+        (0..n_streams)
+            .map(|si| {
+                // `f64::total_cmp` rather than `partial_cmp().unwrap()`: the
+                // NaN projections are already excluded, and a total order can
+                // never panic if one ever slips through.
+                let mut vals = std::mem::take(&mut projections[si]);
+                vals.sort_by(f64::total_cmp);
+                let n_neg_inf: usize = causes[si].iter().map(|(_, n)| *n).sum();
+                StreamAttempt {
+                    stream: self.streams[si].name.clone(),
+                    time: t,
+                    date: date.clone(),
+                    cell: cells[si],
+                    projected_max: vals.last().copied(),
+                    // Lower median, so the reported value is one a particle
+                    // actually held rather than an interpolated fiction.
+                    projected_median: vals.get(vals.len().saturating_sub(1) / 2).copied(),
+                    n_projected_zero: n_zero[si],
+                    n_projected_nan: n_nan[si],
+                    n_neg_inf,
+                    neg_inf_causes: std::mem::take(&mut causes[si]),
+                    n_live: live.len(),
+                    n_dead,
+                    n_particles: live.len() + n_dead,
+                }
+            })
+            .collect()
     }
 
     /// Gradient of `log_likelihood_from_flows_and_counts` w.r.t. estimated

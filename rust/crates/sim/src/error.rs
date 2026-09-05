@@ -323,11 +323,26 @@ impl std::fmt::Display for InitSource {
 /// Every variant is a fact about that pass over that swarm. **None of them
 /// asserts `p(y | θ) = 0`** — gh#784's `STRUCTURALLY_INFEASIBLE` status is
 /// reserved for support logic that can prove infeasibility, which this is not.
-#[derive(Debug, Clone, PartialEq)]
+/// `PartialEq` is derived and is NOT reflexive over the `f64::NAN` a projection
+/// or a density component can carry (`NonFiniteDensity`'s terms,
+/// `StreamAttempt::projected_max`). Nothing compares a whole `InitFallback` —
+/// every use is a `matches!` or a destructure — so the derive is kept for
+/// `InitSource`'s sake with the caveat stated here rather than dropped.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum InitFallback {
     /// At observation index `obs_index` (substep `substep`) every particle
     /// scored `−∞`, so no lineage carries non-zero weight past that point.
-    SwarmCollapsed { obs_index: usize, substep: usize },
+    ///
+    /// `attempts` says WHAT the swarm managed there, one record per declared
+    /// stream, keyed by stream name and observation time rather than by the
+    /// union-axis position `obs_index` names. The index is not a stable
+    /// identifier — unbinding a stream renumbers it — so it is kept for the
+    /// runtime's own bookkeeping while `attempts` is what a modeller reads.
+    SwarmCollapsed {
+        obs_index: usize,
+        substep: usize,
+        attempts: Vec<crate::inference::obs_attempt::StreamAttempt>,
+    },
     /// Every particle hit a recoverable per-particle error (a chain-binomial
     /// overshoot, a numerical collapse) by substep `substep`.
     AllParticlesDied { substep: usize },
@@ -340,14 +355,42 @@ pub enum InitFallback {
     },
 }
 
+impl InitFallback {
+    /// What the swarm managed at the observation that lost support, one record
+    /// per declared stream. Empty for a fallback that is not a swarm collapse —
+    /// no observation was scored, so there is nothing to report.
+    pub fn attempts(&self) -> &[crate::inference::obs_attempt::StreamAttempt] {
+        match self {
+            InitFallback::SwarmCollapsed { attempts, .. } => attempts,
+            InitFallback::AllParticlesDied { .. } | InitFallback::NonFiniteDensity { .. } => &[],
+        }
+    }
+}
+
 impl std::fmt::Display for InitFallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InitFallback::SwarmCollapsed { obs_index, substep } => write!(
-                f,
-                "every particle scored -inf at observation {obs_index} \
-                 (substep {substep})"
-            ),
+            // The prose is RENDERED FROM `attempts`, not written beside it, so
+            // the line a modeller reads first and the fields a tool parses
+            // cannot drift. Streams that scored `-inf` are named first because
+            // they are what refused; the rest are listed so "this stream was
+            // not even scheduled here" is visible rather than inferred.
+            InitFallback::SwarmCollapsed { obs_index, substep, attempts } => {
+                write!(
+                    f,
+                    "every live particle scored -inf at observation {obs_index} \
+                     (substep {substep})"
+                )?;
+                if attempts.is_empty() {
+                    return Ok(());
+                }
+                let (refused, rest): (Vec<_>, Vec<_>) =
+                    attempts.iter().partition(|a| a.n_neg_inf > 0);
+                for a in refused.iter().chain(rest.iter()) {
+                    write!(f, "; {a}")?;
+                }
+                Ok(())
+            }
             InitFallback::AllParticlesDied { substep } => {
                 write!(f, "every particle died by substep {substep}")
             }
@@ -682,6 +725,26 @@ mod tests {
             ivp: 0.0, log_prior: -1.0,
             init: InitSource::ForwardDraw(InitFallback::SwarmCollapsed {
                 obs_index: 38, substep: 275,
+                attempts: vec![crate::inference::obs_attempt::StreamAttempt {
+                    stream: "confirmed_kivu".into(),
+                    time: 96.0,
+                    date: Some("2019-04-12".into()),
+                    cell: crate::inference::obs_attempt::ObsCellState::Scored { y_obs: 18.0 },
+                    projected_max: Some(0.3),
+                    projected_median: Some(0.1),
+                    n_projected_zero: 4,
+                    n_projected_nan: 0,
+                    n_neg_inf: 196,
+                    neg_inf_causes: vec![(
+                        crate::inference::obs_attempt::NegInfCause::ArgumentNaN {
+                            arg: "alpha".into(),
+                        },
+                        196,
+                    )],
+                    n_live: 196,
+                    n_dead: 4,
+                    n_particles: 200,
+                }],
             }),
         };
         let s = format!("{failed}");
@@ -689,6 +752,19 @@ mod tests {
             "a refusal after a FAILED initialization must say so: {s}");
         assert!(s.contains("observation 38"),
             "the fallback reason must name where the swarm lost support: {s}");
+        // The measurement, not only its queue position: the index renumbers
+        // when the bound stream set changes, so it cannot be compared across
+        // ablations. The prose is rendered from `attempts`, so this also pins
+        // that the fields and the sentence cannot drift apart.
+        assert!(s.contains("confirmed_kivu"),
+            "the refusal must name the STREAM that refused: {s}");
+        assert!(s.contains("2019-04-12"),
+            "the refusal must name the observation's DATE: {s}");
+        assert!(s.contains("alpha"),
+            "the refusal must say WHICH -inf guard fired, not only that one did: {s}");
+        assert!(s.contains("4 of 200 particles already dead"),
+            "dead particles never reached the observation model and must be \
+             counted separately: {s}");
         // And it must never be phrased as a claim about theta (gh#784: only
         // STRUCTURALLY_INFEASIBLE may say that, and nothing produces it yet).
         assert!(!s.contains("infeasible"),

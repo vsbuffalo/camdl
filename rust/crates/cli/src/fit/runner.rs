@@ -2323,8 +2323,13 @@ pub fn run_chains_with_per_chain_params(
                         init_specs.iter()
                             .map(|spec| (spec.name.clone(), spec.initial))
                             .collect();
+                    // No observation was scored on this path — the chain is
+                    // skipped for a PF degeneracy, not for a swarm that lost
+                    // support at a named measurement — so there is no
+                    // `StreamAttempt` to carry.
                     collector.push(DiagnosticKind::BadInit {
                         chain_id, params, reason: reason.clone(),
+                        attempts: Vec::new(),
                     });
                     eprintln!("  chain {}: \x1b[31m✗ skipped\x1b[0m — {} ({})",
                         chain_id + 1, label, reason);

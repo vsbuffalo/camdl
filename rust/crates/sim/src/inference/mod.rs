@@ -20,6 +20,7 @@ pub mod particle_filter;
 pub mod ancestor_trace;
 pub mod if2;
 pub mod types;
+pub mod obs_attempt;  // what the ensemble managed at one observation
 pub mod obs_model;
 pub mod multi_stream_obs;
 pub mod chain_binomial_process;
