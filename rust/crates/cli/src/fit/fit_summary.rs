@@ -622,10 +622,12 @@ fn format_text(
                     );
                 }
                 println!("    θ̂ ({} estimated params):", r.theta_hat.len());
+                let w = name_col_width(r.theta_hat.keys().map(String::as_str), 14);
                 for (k, v) in &r.theta_hat {
+                    let shown = fit_name(k, w);
                     match fmt.cal.date_for(k, *v) {
-                        Some(date) => println!("      {:<14} = {}  ({})", k, v, date),
-                        None => println!("      {:<14} = {}", k, v),
+                        Some(date) => println!("      {:<w$} = {}  ({})", shown, v, date),
+                        None => println!("      {:<w$} = {}", shown, v),
                     }
                 }
                 prev_loglik = Some(r.best_loglik);
@@ -725,6 +727,86 @@ struct Formatter {
 struct StageBlock {
     text: String,
     provenance_failed: bool,
+}
+
+/// Significant figures the posterior-mean column carries. Four separates the
+/// values a reader compares across rows (`0.001854` against `240.8`) without
+/// implying a precision the Monte-Carlo error does not support.
+const POSTERIOR_MEAN_SIG_FIGS: usize = 4;
+
+/// Widest a parameter-name column is allowed to grow before names are
+/// ellipsized instead. Stratified names are built by suffixing (`I0_ituri`,
+/// `phi_split_haut_uele`) and a deeply stratified model can reach a width no
+/// terminal helps with; past this point a readable grid is worth more than a
+/// complete name.
+const NAME_COL_MAX: usize = 44;
+
+/// The width a name column must have for every name to fit, bounded by
+/// [`NAME_COL_MAX`] and never narrower than `min` (which keeps a short-named
+/// model's table looking as it always did).
+///
+/// Rust's `{:14}` is a MINIMUM width: it pads a short name and passes a long
+/// one through whole, shoving every later column right. Sizing the column to
+/// the names actually present is what keeps the grid a grid.
+fn name_col_width<'a>(names: impl Iterator<Item = &'a str>, min: usize) -> usize {
+    names
+        .map(|n| n.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(min, NAME_COL_MAX)
+}
+
+/// `name` cut to `width` characters, ellipsized in the MIDDLE.
+///
+/// The head gives way, not the tail: a stratified parameter's distinguishing
+/// part is its suffix (`..._nord_kivu`), so a tail-truncated name would
+/// collapse every stratum of one parameter onto the same unreadable row.
+fn fit_name(name: &str, width: usize) -> String {
+    let n = name.chars().count();
+    if n <= width {
+        return name.to_string();
+    }
+    // One char for the ellipsis; the remainder splits with the extra going to
+    // the tail, which is the half that identifies the row.
+    let keep = width.saturating_sub(1);
+    let head = keep / 2;
+    let tail = keep - head;
+    let chars: Vec<char> = name.chars().collect();
+    let mut out: String = chars[..head].iter().collect();
+    out.push('\u{2026}');
+    out.extend(&chars[n - tail..]);
+    out
+}
+
+/// A number at `sig` significant figures, in the shortest form that keeps
+/// them -- the `%g` rule.
+///
+/// Fixed decimals give every parameter the same ABSOLUTE precision, which is
+/// the wrong invariant when one is a coupling rate near `0.002` and the next
+/// is a seed size near `241`: six decimals is four wasted columns on one and
+/// three meaningless digits on the other. Significant figures give each the
+/// same RELATIVE precision, so the column can be scanned.
+fn sig_figs(v: f64, sig: usize) -> String {
+    debug_assert!(sig >= 1, "at least one significant figure");
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let exp = v.abs().log10().floor() as i32;
+    // `%g`'s own switch. Below the window the fixed form is mostly leading
+    // zeros; above it, the fixed form would print MORE significant digits than
+    // the budget claims (`6322125` asserts seven), which is the failure this
+    // function exists to avoid.
+    if exp < -4 || exp >= sig as i32 {
+        return format!("{:.*e}", sig - 1, v);
+    }
+    let decimals = (sig as i32 - 1 - exp).max(0) as usize;
+    format!("{v:.decimals$}")
 }
 
 /// The max-R̂ cell for the export formats: the number, or a word saying why
@@ -995,6 +1077,9 @@ impl Formatter {
             keys.iter().filter(|k| state.tail_chain_agreement.contains_key(k.as_str()))
                 .copied().collect()
         };
+        // Sized to the names present: `{:12}` was a minimum width, so a
+        // longer name shifted the `=` and every column after it.
+        let w = name_col_width(est_keys.iter().map(|k| k.as_str()), 12);
         for k in est_keys {
             let v = state.start_values[k];
             let agreement = state.tail_chain_agreement.get(k).copied();
@@ -1020,8 +1105,8 @@ impl Formatter {
                 Some(date) => format!("  ({})", date),
                 None => String::new(),
             };
-            s.push_str(&format!("    {:12} = {:<12.6}  {}{}{}\n",
-                k, v, agreement_str, t0_marker, date_marker));
+            s.push_str(&format!("    {:w$} = {:<12.6}  {}{}{}\n",
+                fit_name(k, w), v, agreement_str, t0_marker, date_marker));
         }
         s.push('\n');
         s
@@ -1293,8 +1378,12 @@ impl Formatter {
         if posterior_mean.is_empty() {
             s.push_str(&format!("    {}\n", self.dim("(no posterior parameters)")));
         } else {
+            // The column is sized to the names in THIS table. `{:14}` is a
+            // minimum width, so a name longer than it pushes every later
+            // column right and the grid stops being one.
+            let w = name_col_width(posterior_mean.keys().map(String::as_str), 14);
             s.push_str(&format!(
-                "    {:14} {:>14} {:>10} {:>10} {:>8}\n",
+                "    {:w$} {:>14} {:>10} {:>10} {:>8}\n",
                 "param", "mean", "ESS bulk", "ESS tail", "R̂"
             ));
             for (name, mean) in posterior_mean.iter() {
@@ -1307,9 +1396,9 @@ impl Formatter {
                     None => String::new(),
                 };
                 s.push_str(&format!(
-                    "    {:14} {:>14.6} {} {:>10} {:>8}{}\n",
-                    name,
-                    mean,
+                    "    {:w$} {:>14} {} {:>10} {:>8}{}\n",
+                    fit_name(name, w),
+                    sig_figs(*mean, POSTERIOR_MEAN_SIG_FIGS),
                     ess_str,
                     diag.ess_tail_cell(name, "—"),
                     diag.rhat_cell(name, "—"),
@@ -3594,6 +3683,153 @@ mod tests {
         let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
         assert_eq!(fmt.saved_path_table(&dir), "");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── the rendered grid, against adversarial input ─────────────────────
+    //
+    // The defect these pin is INPUT-dependent: on a corpus of short names the
+    // old code rendered correctly, so reading the format strings could not
+    // show it. The fixture therefore carries what a real fit carries — a
+    // stratified name past the old column width and means six orders of
+    // magnitude apart — and the rendered text is compared whole.
+
+    /// The block a `bayesian_block` renders under `header`, up to its first
+    /// blank line. Comparing the block whole is the point: an alignment defect
+    /// is a property of the WHOLE row, and a `contains` on one cell cannot see
+    /// that the columns after it moved.
+    fn block_under(text: &str, header: &str) -> String {
+        let mut out = String::new();
+        let mut inside = false;
+        for line in text.lines() {
+            if !inside {
+                if line.trim() == header {
+                    inside = true;
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                continue;
+            }
+            if line.trim().is_empty() {
+                break;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        assert!(!out.is_empty(), "no `{header}` block in:\n{text}");
+        out
+    }
+
+    fn wide_range_pgas_result() -> PgasStageResult {
+        use std::collections::BTreeMap;
+        PgasStageResult {
+            diagnostics: PosteriorDiagnostics {
+                per_param: crate::fit::method_result::per_param_from_maps(
+                    BTreeMap::from([
+                        ("I0_ituri".to_string(), 3.481),
+                        ("N0_haut_uele".to_string(), 1.002),
+                        ("iota".to_string(), 1.010),
+                        ("kappa".to_string(), 3.412),
+                        ("phi_split_haut_uele".to_string(), 1.194),
+                    ]),
+                    BTreeMap::from([
+                        ("I0_ituri".to_string(), 9.0),
+                        ("N0_haut_uele".to_string(), 1500.0),
+                        ("iota".to_string(), 1200.0),
+                        ("kappa".to_string(), 9.0),
+                        ("phi_split_haut_uele".to_string(), 28.0),
+                    ]),
+                    BTreeMap::from([
+                        ("I0_ituri".to_string(), 21.0),
+                        ("N0_haut_uele".to_string(), 1800.0),
+                        ("iota".to_string(), 1400.0),
+                        ("kappa".to_string(), 17.0),
+                        ("phi_split_haut_uele".to_string(), 317.0),
+                    ]),
+                ),
+                n_samples: 4800,
+                thin: 1,
+                wall_time_secs: None,
+                n_chains: 8,
+            },
+            // Six orders of magnitude between the smallest and largest mean.
+            posterior_mean: BTreeMap::from([
+                ("I0_ituri".to_string(), 240.759_840),
+                ("N0_haut_uele".to_string(), 6_322_125.1),
+                ("iota".to_string(), 1e-6),
+                ("kappa".to_string(), 0.001_854_2),
+                ("phi_split_haut_uele".to_string(), 59.681_847),
+            ]),
+            posterior_q025: BTreeMap::new(),
+            posterior_q975: BTreeMap::new(),
+            acceptance_per_param: BTreeMap::new(),
+        }
+    }
+
+    /// A parameter name longer than the column width must not shove the four
+    /// numeric columns right, and the mean column must carry significant
+    /// figures rather than six decimals for everything.
+    ///
+    /// `phi_split_haut_uele` is 19 characters against the old `{:14}`, which is
+    /// a MINIMUM width — it padded short names and passed long ones through
+    /// whole. `iota` at `1e-6` and `N0_haut_uele` at `6.3e6` are the two ends
+    /// of the range six fixed decimals cannot serve.
+    #[test]
+    fn posterior_summary_grid_holds_under_long_names_and_a_wide_value_range() {
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let out = fmt.bayesian_block(
+            "posterior", "pgas", no_traces,
+            BayesianView::Pgas(&wide_range_pgas_result()), None,
+            LoglikType::CompleteData,
+        );
+        let table = block_under(&out, "posterior summary");
+        assert_eq!(table, concat!(
+"  posterior summary\n",
+"    param                         mean   ESS bulk   ESS tail       R\u{302}\n",
+"    I0_ituri                     240.8          9         21    3.481\n",
+"    N0_haut_uele               6.322e6       1500       1800    1.002\n",
+"    iota                      1.000e-6       1200       1400    1.010\n",
+"    kappa                     0.001854          9         17    3.412\n",
+"    phi_split_haut_uele          59.68         28        317    1.194\n",
+        ));
+    }
+
+    /// A name past [`NAME_COL_MAX`] is ellipsized in the MIDDLE, so the
+    /// stratum suffix that distinguishes one row from the next survives, and
+    /// the grid still holds.
+    #[test]
+    fn a_name_past_the_column_cap_keeps_its_stratum_suffix() {
+        use std::collections::BTreeMap;
+        let long_a = "incidence_reporting_probability_by_health_zone_ituri";
+        let long_b = "incidence_reporting_probability_by_health_zone_nord_kivu";
+        assert!(long_a.len() > NAME_COL_MAX && long_b.len() > NAME_COL_MAX);
+        let mut r = wide_range_pgas_result();
+        r.posterior_mean = BTreeMap::from([
+            (long_a.to_string(), 0.31),
+            (long_b.to_string(), 0.62),
+        ]);
+        r.diagnostics.per_param = crate::fit::method_result::per_param_from_maps(
+            BTreeMap::from([(long_a.to_string(), 1.01), (long_b.to_string(), 1.02)]),
+            BTreeMap::from([(long_a.to_string(), 100.0), (long_b.to_string(), 200.0)]),
+            BTreeMap::from([(long_a.to_string(), 300.0), (long_b.to_string(), 400.0)]),
+        );
+        let fmt = Formatter { use_color: false, cal: CalendarContext::default() };
+        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let out = fmt.bayesian_block(
+            "posterior", "pgas", no_traces, BayesianView::Pgas(&r), None,
+            LoglikType::CompleteData,
+        );
+        let table = block_under(&out, "posterior summary");
+        for line in table.lines().skip(1) {
+            assert_eq!(line.chars().count(), 4 + NAME_COL_MAX + 1 + 14 + 1 + 10 + 1 + 10 + 1 + 8,
+                "every row is the same width: {line:?}");
+        }
+        assert!(table.contains("incidence_reporting_p\u{2026}"),
+            "the head is what gives way:\n{table}");
+        assert!(table.contains("_zone_ituri "),
+            "the ituri row must still be identifiable by its suffix:\n{table}");
+        assert!(table.contains("_zone_nord_kivu "),
+            "the nord_kivu row must still be identifiable by its suffix:\n{table}");
     }
 
     #[test]
