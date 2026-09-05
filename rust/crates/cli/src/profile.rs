@@ -32,7 +32,8 @@
 use sim::{
     compiled_model::CompiledModel,
     inference::{
-        if2::{run_if2, IF2Config, Observation},
+        if2::{run_if2, IF2Config},
+        particle_filter::Observation,
         pmmh::{run_pmmh, PMMHConfig, Prior},
         BoundObs, ChainBinomialProcess, MultiStreamObsModel,
     },

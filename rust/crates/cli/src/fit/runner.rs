@@ -11,7 +11,8 @@ use rayon::prelude::*;
 use sim::{
     compiled_model::CompiledModel,
     inference::{
-        if2::{run_if2_with_progress, IF2Config, EstimatedParam, IF2Result, Observation, Transform},
+        if2::{run_if2_with_progress, IF2Config, EstimatedParam, IF2Result, Transform},
+        particle_filter::Observation,
         pmmh::Prior,
         prior::{Density, TransformReq},
         diagnostic::{DiagnosticCollector, DiagnosticKind},

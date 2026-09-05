@@ -20,7 +20,7 @@ use serde::{Serialize, Deserialize};
 use crate::rng::StatefulRng;
 use crate::error::SimError;
 use super::types::{EstimatedParam, restore_z_values};
-use super::if2::Observation;
+use super::particle_filter::Observation;
 pub use super::prior::Prior;
 
 // ── Configuration ──────────────────────────────────────────────────
