@@ -634,7 +634,36 @@ fn agree_from(cells: &[LatentCell], n_substeps: usize) -> Option<usize> {
 impl LatentConvergence {
     /// The end-of-stage block, printed directly under the renewal profile so
     /// the two rows of tenths line up.
+    ///
+    /// Composed from the four pieces below rather than written out here, so
+    /// `camdl fit summary` — which reorders them and gates the glossary behind
+    /// `--explain` — reads the same numbers from the same code as the
+    /// end-of-stage print.
     pub fn report(&self) -> String {
+        let mut s = String::from("\n");
+        s.push_str(&self.headline());
+        s.push_str(&self.bins_table());
+        s.push_str(&self.glossary());
+        s.push_str(&self.findings());
+        s
+    }
+
+    /// The one line naming what was scored: how many chains, which, how many
+    /// saved paths each, and the shape of the block.
+    pub fn headline(&self) -> String {
+        format!(
+            "latent-path convergence (gh#822; {} chain(s) [{}] × {} saved path(s), {} substeps × {} columns):\n",
+            self.n_chains,
+            self.chain_ids.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", "),
+            self.n_draws,
+            self.n_substeps,
+            self.columns.len(),
+        )
+    }
+
+    /// The per-bin reduction: one row per statistic, one column per tenth of
+    /// the horizon.
+    pub fn bins_table(&self) -> String {
         let cell = |v: Option<f64>| match v {
             Some(x) if x.is_finite() => format!("{x:>6.3}"),
             _ => "    NA".to_string(),
@@ -662,31 +691,38 @@ impl LatentConvergence {
                 self.n_chains * (self.n_draws / 2))
         };
         let labels: Vec<String> = (0..RENEWAL_BINS).map(|b| format!("    b{b}")).collect();
-        let mut s = format!(
-            "\nlatent-path convergence (gh#822; {} chain(s) [{}] × {} saved path(s), {} substeps × {} columns):\n\
-             \x20 bin              {}\n\
+        format!(
+            "\x20 bin              {}\n\
              \x20 frozen-disagree  {}\n\
              \x20 constant         {}\n\
              \x20 chains frozen    {}\n\
              \x20 R̂ max (mixed)    {}\n{}",
-            self.n_chains,
-            self.chain_ids.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", "),
-            self.n_draws,
-            self.n_substeps,
-            self.columns.len(),
             labels.join(" "),
             self.bins.iter().map(|b| cell(frac(b.frac_frozen_disagree))).collect::<Vec<_>>().join(" "),
             self.bins.iter().map(|b| cell(frac(b.frac_constant))).collect::<Vec<_>>().join(" "),
             self.bins.iter().map(|b| cell(b.frozen_chain_frac)).collect::<Vec<_>>().join(" "),
             self.bins.iter().map(|b| cell(b.rhat_max)).collect::<Vec<_>>().join(" "),
             ess_row,
-        );
-        s.push_str(
+        )
+    }
+
+    /// What the two rows a reader misreads most actually count. Definitions
+    /// only — no number from this fit appears here, which is why `fit summary`
+    /// can hold it behind `--explain` without withholding evidence.
+    pub fn glossary(&self) -> String {
+        String::from(
             "  frozen-disagree: fraction of (state, substep) cells where every chain is \
              constant at its own value — each chain holds one draw there\n\
              \x20 chains frozen: over the non-constant cells, the fraction of chains that \
              never moved — a `mixed` cell may still be all chains but one holding one draw\n",
-        );
+        )
+    }
+
+    /// What this fit's paths actually did: where the chains start agreeing, the
+    /// single worst frozen cell, and the scope the ESS was taken over.
+    /// Findings, not definitions — they are shown whatever `--explain` says.
+    pub fn findings(&self) -> String {
+        let mut s = String::new();
         match self.agree_from {
             Some(0) => s.push_str("  no frozen-disagree cell: the chains' paths mix everywhere\n"),
             Some(a) => s.push_str(&format!(
@@ -938,6 +974,30 @@ mod tests {
             .collect();
         assert!(ess.iter().any(|&e| e != ess[0]),
             "and it varies across cells: {ess:?}");
+    }
+
+    /// The four pieces ARE the end-of-stage block, in that order.
+    ///
+    /// `camdl fit summary` reorders them and holds the glossary behind
+    /// `--explain`; the end-of-stage print must keep emitting exactly what it
+    /// always did. Pinning the composition is what stops one caller's layout
+    /// change from silently rewriting the other's output.
+    #[test]
+    fn the_report_is_exactly_headline_table_glossary_findings() {
+        let chains = block(4, 12, 20, 2, cloud);
+        let lc = latent_convergence(&chains, &names(2)).unwrap();
+        assert_eq!(
+            lc.report(),
+            format!("\n{}{}{}{}", lc.headline(), lc.bins_table(), lc.glossary(), lc.findings()),
+        );
+        // Each piece carries its own content and no other's, so a caller
+        // picking two of them cannot pick up a third by accident.
+        assert!(lc.headline().contains("4 chain(s)"));
+        assert!(lc.bins_table().contains("frozen-disagree  "));
+        assert!(lc.glossary().contains("frozen-disagree: fraction of"));
+        assert!(!lc.glossary().contains("ESS is over the"));
+        assert!(lc.findings().contains("ESS is over the"));
+        assert!(!lc.findings().contains("frozen-disagree: fraction of"));
     }
 
     #[test]
