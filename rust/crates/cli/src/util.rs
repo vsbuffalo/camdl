@@ -1685,11 +1685,13 @@ pub fn check_first_interval_window(
         return None;
     }
 
-    // Modal gap by binning to a relative tolerance, so 28/30/31-day months or
-    // dt-rounding jitter collapse into one "monthly"/"weekly" bin instead of
-    // splintering the mode. Each gap is bucketed by rounding log-space to ~1%
-    // resolution; the winning bucket's representative is the gap that has the
-    // most companions within tolerance of it.
+    // Modal gap under `modal_value`'s ~1% relative tolerance: floating-point /
+    // dt-rounding jitter around one true cadence collapses into a single
+    // mode. A 28/30/31-day calendar-month cadence does NOT collapse — the
+    // gaps differ by up to ~10%, well outside the tolerance, and splinter
+    // into up to three separate modes (gh#837). `modal_gap` is then whichever
+    // month length happens to be most common (or, on a tie, the smallest),
+    // not "the typical spacing" in any stronger sense.
     let modal_gap = modal_value(&gaps);
     if modal_gap <= 0.0 {
         return None;
@@ -1769,6 +1771,40 @@ pub(crate) fn modal_value(xs: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
+mod modal_value_tests {
+    use super::modal_value;
+
+    #[test]
+    fn collapses_dt_rounding_jitter_around_one_cadence() {
+        // Sub-percent floating-point jitter around a true 7-day cadence is
+        // exactly what the ~1% tolerance is for: all four gaps land in one
+        // bucket, so the mode is the shared cadence (~7), not a splinter.
+        let gaps = [7.0, 7.0 + 1e-9, 7.0 - 1e-9, 7.0];
+        assert!((modal_value(&gaps) - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn does_not_collapse_calendar_month_lengths() {
+        // gh#837: 28/30/31-day calendar months differ by up to ~10%, well
+        // outside the ~1% tolerance, so they do NOT collapse into one
+        // "monthly" mode — they splinter into up to three. This pins the
+        // known limitation: widening the tolerance to make this collapse
+        // would also merge a 6-day gap into a 7-day (weekly) series.
+        let gaps = [30.0, 31.0, 28.0, 31.0, 30.0];
+        // 30 and 31 each recur twice; 28 recurs once. Ties break to the
+        // smaller value, so the winner is 30 — a specific month length, not
+        // "the typical monthly cadence".
+        assert!((modal_value(&gaps) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ties_break_toward_the_smaller_value() {
+        let gaps = [7.0, 7.0, 14.0, 14.0];
+        assert!((modal_value(&gaps) - 7.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
 mod first_interval_tests {
     use super::check_first_interval_window;
 
@@ -1830,13 +1866,19 @@ mod first_interval_tests {
     }
 
     #[test]
-    fn modal_gap_is_robust_to_calendar_jitter() {
-        // ~Monthly cadence with 28/30/31-day jitter must collapse to one mode,
-        // and a years-behind origin must still warn against it. Origin at day 0,
-        // first obs ~3 years later.
+    fn far_first_window_still_warns_despite_calendar_month_splintering() {
+        // ~Monthly cadence with 28/30/31-day jitter (gh#837: this does NOT
+        // collapse to one mode under the 1% tolerance — the gaps differ by up
+        // to ~10%). Even the smallest splinter (28) is still far enough below
+        // the ~3-year first window to warn, so the anomaly detection is robust
+        // to the splintering even though `modal_gap` itself is not any single
+        // "typical" month length. Origin at day 0, first obs ~3 years later.
         let obs = [1095.0, 1125.0, 1156.0, 1184.0, 1215.0, 1245.0];
+        // gaps: 30, 31, 28, 31, 30 — 30 and 31 tie at count 2; tie breaks to
+        // the smaller value (see `modal_value`'s doc).
         let a = check_first_interval_window(0.0, &obs)
-            .expect("3-year first window vs monthly cadence must be flagged");
+            .expect("3-year first window vs a splintered monthly cadence must be flagged");
+        assert!((a.modal_gap - 30.0).abs() < 1e-9, "modal gap: {a:?}");
         assert!(a.warn_message().contains("[warn W329]"), "{}", a.warn_message());
     }
 
