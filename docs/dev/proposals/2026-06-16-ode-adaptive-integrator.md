@@ -394,11 +394,11 @@ Three commits, each one thing:
   mutates the model in `resolve_run_model` _before_ the run-id is computed, so
   the choice is captured in the content hash. Tolerances and the **inference
   path** stay model-declared (`simulate { integrator = rk45 { atol, rtol } }`,
-  which `run_ode` honors on the fit path). No `fit run --integrator` / `--atol` /
-  `--rtol`: the integrator changes the numerics, so it belongs to the model's
+  which `run_ode` honors on the fit path). No `fit run --integrator` / `--atol`
+  / `--rtol`: the integrator changes the numerics, so it belongs to the model's
   content identity — a CLI override on the inference path is a second, un-hashed
-  way to change numerics that must be kept consistent with the recorded run-id by
-  hand. The reproducible mechanism is the model-declared block.
+  way to change numerics that must be kept consistent with the recorded run-id
+  by hand. The reproducible mechanism is the model-declared block.
 - **C5.** Internal agreement gate (#4): fixed-RK4(fine dt) vs rk45(tight tol)
   agree on **prevalence and incidence** to tol.
 - **C6.** External rk45 validation vs scipy + deSolve on the canonical models

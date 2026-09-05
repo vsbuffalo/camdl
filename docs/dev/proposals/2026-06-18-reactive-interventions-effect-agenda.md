@@ -3,8 +3,8 @@
 - Date: 2026-06-18
 - Status: Draft implementation RFC
 - Amendment (2026-06-18): the `scope = exogenous | particle` key shown in the
-  examples below was **removed** from the shipped surface (IR 0.17 → 0.18).
-  Only the exogenous (reported-surveillance) behavior is implemented, so a
+  examples below was **removed** from the shipped surface (IR 0.17 → 0.18). Only
+  the exogenous (reported-surveillance) behavior is implemented, so a
   single-value key + an unwired `particle` arm were dead surface; triggers are
   exogenous implicitly. The `scope` key and `AgendaScope` return when
   latent-scope triggers are actually wired (PR4/PR5), at which point the key
@@ -77,9 +77,10 @@ be declared once:
 ```
 
 Default rule: an observation at `t` may trigger a campaign at `t + lag`, where
-`lag >= 0`, but the campaign is enqueued after scoring/inserting the observation.
-It does not change the likelihood or output snapshot at the same `t` unless the
-DSL later adds an explicit `stage = "post_observation_immediate"` feature.
+`lag >= 0`, but the campaign is enqueued after scoring/inserting the
+observation. It does not change the likelihood or output snapshot at the same
+`t` unless the DSL later adds an explicit `stage = "post_observation_immediate"`
+feature.
 
 ## DSL
 
@@ -385,9 +386,9 @@ pub struct PendingEffect {
 ### Schedule integration
 
 The current `Schedule` owns static effect times. Reactive agendas add new
-runtime effect times, so the boundary authority must take both into account.
-Do this by adding a merged query instead of cloning/rebuilding `Schedule` on
-every enqueue:
+runtime effect times, so the boundary authority must take both into account. Do
+this by adding a merged query instead of cloning/rebuilding `Schedule` on every
+enqueue:
 
 ```rust
 pub struct AgendaView<'a> {
@@ -505,8 +506,8 @@ pub struct Particle {
 ```
 
 Resampling must clone agenda state. PGAS ancestor sampling must account for
-agenda history. Correlated PF loses the simple shared-boundary coupling. This
-is supportable, but not phase 1.
+agenda history. Correlated PF loses the simple shared-boundary coupling. This is
+supportable, but not phase 1.
 
 ### PGAS
 
@@ -603,7 +604,8 @@ ODE accepts observed exogenous agenda but rejects latent/root trigger syntax
 ### PR 4 — PF / IF2 shared-exogenous support
 
 - Agenda updates happen after scoring each observation.
-- The schedule for the next window includes newly enqueued concrete effect times.
+- The schedule for the next window includes newly enqueued concrete effect
+  times.
 - Reject particle-local triggers.
 
 Acceptance:
@@ -630,17 +632,17 @@ PGAS baseline without reactive policies remains byte-identical
 
 ## Validation Fixtures
 
-The validation is phased to match the implementation: PR1 pins the **IR shape and
-the rejection**; PR2 pins **behavior** with `reactive_log.tsv` and deterministic
-trajectory expectations on tiny eyeball-able models. The single most important
-fixture is the **equivalence oracle** (PR2 #4): a reactive-derived fire time must
-produce the same trajectory as an ordinary scheduled intervention placed at that
-time.
+The validation is phased to match the implementation: PR1 pins the **IR shape
+and the rejection**; PR2 pins **behavior** with `reactive_log.tsv` and
+deterministic trajectory expectations on tiny eyeball-able models. The single
+most important fixture is the **equivalence oracle** (PR2 #4): a
+reactive-derived fire time must produce the same trajectory as an ordinary
+scheduled intervention placed at that time.
 
 ### PR1 — compiler / IR goldens (runtime still rejects)
 
-Compile-only goldens (the runtime cannot simulate an active reactive policy yet),
-asserted by compiling the `.camdl` and comparing the emitted IR.
+Compile-only goldens (the runtime cannot simulate an active reactive policy
+yet), asserted by compiling the `.camdl` and comparing the emitted IR.
 
 1. **`reactive_sir_observed_threshold.camdl`** — minimal SIR with an observation
    stream and a single reactive policy:
@@ -733,9 +735,9 @@ the fire time, not the trigger time.
 
 ## Phasing / what's next
 
-- **PR1 (this PR, gh#204):** IR `FireSource` ADT, `TriggerExpr`, the DSL surface,
-  compiler validation, and the capability rejection — plus the PR1 fixtures
-  above. Lands the schema/golden break (IR 0.16 → 0.17) in isolation.
+- **PR1 (this PR, gh#204):** IR `FireSource` ADT, `TriggerExpr`, the DSL
+  surface, compiler validation, and the capability rejection — plus the PR1
+  fixtures above. Lands the schema/golden break (IR 0.16 → 0.17) in isolation.
 - **PR2 — forward chain-binomial agenda runtime:** `ReactiveAgenda`, the trigger
   primitives (`observed` / `sum_observed`), evaluate-after-observation +
   enqueue-after-the-boundary, apply through the existing `effects` resolver,
@@ -754,8 +756,8 @@ the fire time, not the trigger time.
 1. **Observed vs latent must be explicit.** Public-health users often mean
    reported cases, not true infections. We should warn a user if latent is used.
 2. **Lag defaults to zero but same-time semantics are post-observation.** An
-   observation-triggered campaign at `t` does not affect scoring at `t`.
-   Zero lag settings also should get a user warning.
+   observation-triggered campaign at `t` does not affect scoring at `t`. Zero
+   lag settings also should get a user warning.
 3. **Cooldown is not once.** `once=true` disables forever; `cooldown` suppresses
    repeated firings temporarily.
 4. **Scope is not optional internally.** The compiler may default to
@@ -788,4 +790,3 @@ If implementing this proposal:
 4. Route all actions through `effects.rs`.
 5. Add capability errors before broadening support.
 6. Treat PGAS as a separate design surface.
-

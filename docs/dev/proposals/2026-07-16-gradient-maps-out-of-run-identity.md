@@ -37,12 +37,13 @@ same class as `output.format`. Drop them from the IR content hash itself
 into `hash_into`: transition `rate_grad` / `rate_state_grad`; each likelihood
 `Diffable`'s `grad` / `proj_grad`; overdispersion `sigma_sq_grad`;
 `projection_state_grad`; model `ic_grad`. Bump the hashing-schema version `SV`
-(the runid-stack version governing *what is hashed*, distinct from `ir/VERSION`).
+(the runid-stack version governing _what is hashed_, distinct from
+`ir/VERSION`).
 
 This lives at the `content_hash` layer rather than
-`resolve.rs::normalize_for_hash` because the batch identity paths (`pfilter_cas`,
-`survey_cas`, `sim_ensemble_cas`) compute their model level via
-`ModelDigest::from_model` on the *raw* model, bypassing `normalize_for_hash`
+`resolve.rs::normalize_for_hash` because the batch identity paths
+(`pfilter_cas`, `survey_cas`, `sim_ensemble_cas`) compute their model level via
+`ModelDigest::from_model` on the _raw_ model, bypassing `normalize_for_hash`
 entirely — a normalize-only strip would leave batch/pfilter/survey
 gradient-dependent, a silent gap. `content_hash` is the shared substrate every
 identity path routes through.

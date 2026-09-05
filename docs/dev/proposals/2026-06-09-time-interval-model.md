@@ -8,9 +8,10 @@
   fit.toml scalar **shipped** (per-stream, in the sparse/multi-cadence
   observation work) and is the current reality; this interval model would
   generalize the lone scalar to an interval, but until `RunWindows` is built it
-  does **not** replace it. The conditioning inference math — the flow-accumulator
-  reset at the boundary, the faithful stochastic warm-up, the per-filter reset
-  sites — is unchanged and lives in the shipped scalar (§7.2 documents it).
+  does **not** replace it. The conditioning inference math — the
+  flow-accumulator reset at the boundary, the faithful stochastic warm-up, the
+  per-filter reset sites — is unchanged and lives in the shipped scalar (§7.2
+  documents it).
 - **Issues:** gh#134 (incidence over-accumulation), gh#143 (output vs dynamics
   end — open), and the CAS horizon-keying fix (the proposal cites gh#142; the
   code comment at `hashing.rs` labels the same fix gh#147 — a citation drift to

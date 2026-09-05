@@ -10,19 +10,21 @@ cross-ref: gh#119 (related; fixed separately — not a capability flag)
 
 # Consolidate the capability gate: one source of truth, one dispatch seam
 
-> **Revision note (v2).** v1 proposed `inference_capabilities(backend) =
-> backend.capabilities() − REAL_COMPARTMENTS`. A four-lens adversarial review
-> showed this is **wrong**: `OdeSim::capabilities()` is `REAL_COMPARTMENTS` only
-> (`ode.rs:34`), so the subtraction zeroes ODE inference — which *does*
-> integrate real compartments (the deterministic-skeleton fit at
-> `nlopt_stage.rs:92` / `survey --eval simulate`), pinned by the existing test
-> `methods.rs:670`. The withholding of `REAL_COMPARTMENTS` is a property of the
-> **chain_binomial stateless filter loops**, not of "inference." v2 fixes the
-> formula (per-(backend, algorithm), declared not blanket-subtracted), enumerates
-> all gate sites (including the *ungated* `survey --eval pfilter` and `pfilter`
-> paths and the *per-stage* fit-run reality), makes RUNTIME_DT position-aware,
-> narrows the Gillespie correction, resolves the LINEAGES seam, and preserves the
-> rich hint text.
+> **Revision note (v2).** v1 proposed
+> `inference_capabilities(backend) =
+> backend.capabilities() − REAL_COMPARTMENTS`.
+> A four-lens adversarial review showed this is **wrong**:
+> `OdeSim::capabilities()` is `REAL_COMPARTMENTS` only (`ode.rs:34`), so the
+> subtraction zeroes ODE inference — which _does_ integrate real compartments
+> (the deterministic-skeleton fit at `nlopt_stage.rs:92` /
+> `survey --eval simulate`), pinned by the existing test `methods.rs:670`. The
+> withholding of `REAL_COMPARTMENTS` is a property of the **chain_binomial
+> stateless filter loops**, not of "inference." v2 fixes the formula
+> (per-(backend, algorithm), declared not blanket-subtracted), enumerates all
+> gate sites (including the _ungated_ `survey --eval pfilter` and `pfilter`
+> paths and the _per-stage_ fit-run reality), makes RUNTIME_DT position-aware,
+> narrows the Gillespie correction, resolves the LINEAGES seam, and preserves
+> the rich hint text.
 
 ## Problem
 
@@ -30,33 +32,35 @@ cross-ref: gh#119 (related; fixed separately — not a capability flag)
 commands, by **two divergent capability definitions**, and the divergence has
 already produced bugs that point in opposite directions.
 
-1. **Real source of truth** — `Simulate::capabilities()`.
-   `ChainBinomialSim` = `OVERDISPERSION | REAL_COMPARTMENTS | BALANCE | LINEAGES`
+1. **Real source of truth** — `Simulate::capabilities()`. `ChainBinomialSim` =
+   `OVERDISPERSION | REAL_COMPARTMENTS | BALANCE | LINEAGES`
    (`chain_binomial.rs:112`); `OdeSim` = `REAL_COMPARTMENTS` (`ode.rs:34`);
    `GillespieSim` = `REAL_COMPARTMENTS | LINEAGES` (`gillespie.rs:43`). Used by
    forward `simulate` (`util.rs:1698`).
 2. **Hand-rolled duplicate** — `check_model_capabilities`
-   (`fit/methods.rs:407`), `match backend { "chain_binomial" => OVERDISPERSION,
-   "ode" => REAL_COMPARTMENTS, … }`. Used by `profile`, `survey --eval simulate`
-   (hardcoding `"ode"`), and `nlopt_stage`.
+   (`fit/methods.rs:407`),
+   `match backend { "chain_binomial" => OVERDISPERSION,
+   "ode" => REAL_COMPARTMENTS, … }`.
+   Used by `profile`, `survey --eval simulate` (hardcoding `"ode"`), and
+   `nlopt_stage`.
 
 The duplicate has **drifted**: it grants chain_binomial only `OVERDISPERSION`,
-omitting `BALANCE` (which the inference path *does* apply, via the same
+omitting `BALANCE` (which the inference path _does_ apply, via the same
 `step_one` kernel). And its error builder (`methods.rs:424-447`) only has
 `features.push` branches for `OVERDISPERSION`/`REAL_COMPARTMENTS`, so an
-unsupported `BALANCE` joins to empty → a blank `  - ` line.
+unsupported `BALANCE` joins to empty → a blank `-` line.
 
 ### The gate sites today (verified on `main`)
 
-| site | gate | verdict on `balance{}` + chain_binomial | gap |
-| --- | --- | --- | --- |
-| `simulate` (forward) | real `backend.capabilities()` (`util.rs:1698`) | ✅ accept (correct verdict) | error msg is bare `{:?}` Debug (worst of all) |
-| `fit run` | **none** (`FitRunConfig::build` + per-stage dispatch call nothing) | ✅ accept | **gh#191 under-gate**; also *per-stage* backends (nlopt scout=ode, pgas refine=chain_binomial) |
-| `profile` | hardcoded `check_model_capabilities` | ❌ **false reject** + blank name | **gh#192** |
-| `survey --eval simulate` | hardcoded, hardcodes `"ode"` (`survey.rs:183`) | n/a (ode path) | only this branch is gated |
-| `survey --eval pfilter` | **none** (`ChainBinomialProcess`, `survey.rs:382`) | ✅ accept | **gh#191 under-gate (missed in v1)** |
-| `survey --eval auto` | `required_capabilities().contains(OVERDISPERSION)` router (`survey.rs:156`) | routes | "model picks backend" logic that must agree with the gate |
-| `pfilter` | **none** (hardcodes `ChainBinomialProcess`, `pfilter.rs:279`) | ✅ accept | **gh#191 under-gate (missed in v1)** |
+| site                     | gate                                                                        | verdict on `balance{}` + chain_binomial | gap                                                                                            |
+| ------------------------ | --------------------------------------------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `simulate` (forward)     | real `backend.capabilities()` (`util.rs:1698`)                              | ✅ accept (correct verdict)             | error msg is bare `{:?}` Debug (worst of all)                                                  |
+| `fit run`                | **none** (`FitRunConfig::build` + per-stage dispatch call nothing)          | ✅ accept                               | **gh#191 under-gate**; also _per-stage_ backends (nlopt scout=ode, pgas refine=chain_binomial) |
+| `profile`                | hardcoded `check_model_capabilities`                                        | ❌ **false reject** + blank name        | **gh#192**                                                                                     |
+| `survey --eval simulate` | hardcoded, hardcodes `"ode"` (`survey.rs:183`)                              | n/a (ode path)                          | only this branch is gated                                                                      |
+| `survey --eval pfilter`  | **none** (`ChainBinomialProcess`, `survey.rs:382`)                          | ✅ accept                               | **gh#191 under-gate (missed in v1)**                                                           |
+| `survey --eval auto`     | `required_capabilities().contains(OVERDISPERSION)` router (`survey.rs:156`) | routes                                  | "model picks backend" logic that must agree with the gate                                      |
+| `pfilter`                | **none** (hardcodes `ChainBinomialProcess`, `pfilter.rs:279`)               | ✅ accept                               | **gh#191 under-gate (missed in v1)**                                                           |
 
 So the same question gets answered too-strict (profile) and too-lax (fit run,
 `survey --eval pfilter`, `pfilter`) for the same model class. A third symptom:
@@ -69,20 +73,20 @@ consolidation it forces"); it has not landed.
 ## Root cause (corrected)
 
 `REAL_COMPARTMENTS` withholding is **not** a property of "inference" — it is a
-property of the **chain_binomial stochastic filter loops**, whose `ParticleState`
-carries no real state, so a real reservoir is frozen at init (gh#191). The **ODE
-deterministic-skeleton** inference path (`compute_ode_loglik` via `nlopt_stage`
-and `survey --eval simulate`) integrates real compartments correctly and must
-keep `REAL_COMPARTMENTS`. The capability profile is therefore
-**per-(backend, algorithm)**, not per-backend, and certainly not a blanket
-subtraction.
+property of the **chain_binomial stochastic filter loops**, whose
+`ParticleState` carries no real state, so a real reservoir is frozen at init
+(gh#191). The **ODE deterministic-skeleton** inference path
+(`compute_ode_loglik` via `nlopt_stage` and `survey --eval simulate`) integrates
+real compartments correctly and must keep `REAL_COMPARTMENTS`. The capability
+profile is therefore **per-(backend, algorithm)**, not per-backend, and
+certainly not a blanket subtraction.
 
 ## Design
 
 ### 1. One Result-returning gate function, in `sim`, that every site calls
 
-The structural anti-fork mechanism is not a test — it is that **all accept/reject
-decisions route through one function**. Define in `sim`:
+The structural anti-fork mechanism is not a test — it is that **all
+accept/reject decisions route through one function**. Define in `sim`:
 
 ```rust
 /// The capability profile a given (backend, algorithm) actually HONORS at run
@@ -98,8 +102,8 @@ fn check_capabilities(
 ) -> Result<(), CapabilityError>;
 ```
 
-Declared profiles (audited per flag, with the gh#191 reason documented at the one
-exclusion site):
+Declared profiles (audited per flag, with the gh#191 reason documented at the
+one exclusion site):
 
 - **chain_binomial filter family** (if2 / pgas / pmmh / pfilter, incl.
   `survey --eval pfilter`): `OVERDISPERSION | BALANCE` (+ `LINEAGES` **only if**
@@ -110,7 +114,7 @@ exclusion site):
   unchanged — **keeps `REAL_COMPARTMENTS`** (preserves the `methods.rs:670`
   invariant; ODE integrates real compartments).
 - **forward `simulate`**: keeps the full `Simulate::capabilities()` trait gate
-  (a real-coupled chain_binomial *forward* sim must still be accepted — guard
+  (a real-coupled chain_binomial _forward_ sim must still be accepted — guard
   against accidentally routing forward sim through the inference profile).
 
 ### 2. Route every site through it (the corrected enumeration)
@@ -119,7 +123,8 @@ exclusion site):
   `backend`/`algorithm` (`config_v2.rs` per-variant `backend` fields; the
   `backend()` accessor exists). Iterate stages, call
   `check_capabilities(required, inference_capabilities(stage.backend,
-  stage.algorithm), …)`; **delete** the redundant hardcoded `nlopt_stage.rs:92`
+  stage.algorithm), …)`;
+  **delete** the redundant hardcoded `nlopt_stage.rs:92`
   `check_model_capabilities("ode", …)`.
 - `profile`, `pfilter`, `survey --eval {simulate, pfilter}`: call the same gate
   with their actual (backend, algorithm). This closes the gh#191 under-gate on
@@ -131,7 +136,7 @@ exclusion site):
 
 ### 3. Error quality: preserve the rich hints; fix the blank structurally
 
-- The blank `  - ` is a **missing-branch** bug, not a missing-name bug. bitflags
+- The blank `-` is a **missing-branch** bug, not a missing-name bug. bitflags
   2.x already gives `iter_names()`; iterate `unsupported.iter_names()` so a flag
   can never render blank — no new `name()` needed.
 - **Preserve the rich hint text.** Move the existing multi-sentence
@@ -140,7 +145,7 @@ exclusion site):
   `Capabilities::hint(flag) -> &'static str` (a const table in `sim`). The gate
   builds its message from `(name, hint)` per unsupported flag.
 - **Upgrade `simulate`'s `{:?}` Debug message** (`util.rs:1702`) to the same
-  builder — a net error-quality *improvement* on every path, regression on none.
+  builder — a net error-quality _improvement_ on every path, regression on none.
 
 ### 4. RUNTIME_DT (gh#15) — position-aware, with a real AST walk
 
@@ -151,12 +156,13 @@ exclusion site):
   **and resolve `BindingRef`** against model bindings.
 - **Position-aware:** raise `RUNTIME_DT` only from `Dt` reachable in
   **rate/transition (and overdispersion σ²)** expressions — NOT from observation
-  or initial-condition expressions, where `Dt` evaluates to a hardcoded `0.0`
-  on *every* backend incl. chain_binomial (`obs_model.rs:71`, `compiled_model.rs
-  :1066`). An IR-wide `any(Dt)` scan would make the gate *falsely accept*
-  `Dt`-in-observation on chain_binomial (which silently yields 0.0) — relocating
-  the very bug we're closing. `Dt`-in-observation/IC, if it is a bug, needs its
-  own diagnostic; flag separately.
+  or initial-condition expressions, where `Dt` evaluates to a hardcoded `0.0` on
+  _every_ backend incl. chain_binomial (`obs_model.rs:71`,
+  `compiled_model.rs
+  :1066`). An IR-wide `any(Dt)` scan would make the gate
+  _falsely accept_ `Dt`-in-observation on chain_binomial (which silently yields
+  0.0) — relocating the very bug we're closing. `Dt`-in-observation/IC, if it is
+  a bug, needs its own diagnostic; flag separately.
 - Declare `RUNTIME_DT` provided by chain_binomial forward + the chain_binomial
   filters (verified: the filters pass the realized `dt_substep` into the
   binomial/gamma densities, `pgas.rs:787`), not by Gillespie/ODE.
@@ -164,9 +170,9 @@ exclusion site):
 ### 5. Gillespie `REAL_COMPARTMENTS` (gh#95) — narrow, don't blanket-withdraw
 
 Blanket withdrawal **over-rejects**: Gillespie samples a real-coupled model
-*correctly* when no transition rate reads a real compartment that moves between
-events (pure accumulators / non-feedback ODE sub-systems). The unsafe set is
-"a transition **rate reads** a between-events-varying real compartment."
+_correctly_ when no transition rate reads a real compartment that moves between
+events (pure accumulators / non-feedback ODE sub-systems). The unsafe set is "a
+transition **rate reads** a between-events-varying real compartment."
 
 - Add `expr_reads_real_compartment` (sibling of `expr_is_time_dependent`) and
   raise a finer `REAL_COUPLED_RATE` requirement only when a rate reads a real
@@ -181,16 +187,16 @@ events (pure accumulators / non-feedback ODE sub-systems). The unsafe set is
 - **Stage 1 (no acceptance change):** `iter_names()` + `Capabilities::hint()`
   table; route `simulate`'s message through it. Kills the blank-name class and
   upgrades simulate's wording. **Re-baseline list:** any test asserting
-  `simulate`'s old `{:?}` string (`util.rs:1703`) or `check_model_capabilities`'s
-  prose (`methods.rs:448`).
+  `simulate`'s old `{:?}` string (`util.rs:1703`) or
+  `check_model_capabilities`'s prose (`methods.rs:448`).
 - **Stage 2 (closes gh#192 + gh#191 — acceptance change on the under-gated
-  paths):** single gate + declared inference profiles; route fit-run (per stage),
-  profile, pfilter, survey paths through it. **Newly rejects** real-compartment
-  models under `pfilter` / `survey --eval pfilter` / `survey --eval auto` /
-  chain_binomial fit stages (the gh#191 fix) with a named error. Re-baseline
-  those. **Green-keepers:** ode/nlopt real-compartment still `Ok`
-  (`methods.rs:670`); forward `simulate` chain_binomial real-compartment still
-  accepts.
+  paths):** single gate + declared inference profiles; route fit-run (per
+  stage), profile, pfilter, survey paths through it. **Newly rejects**
+  real-compartment models under `pfilter` / `survey --eval pfilter` /
+  `survey --eval auto` / chain_binomial fit stages (the gh#191 fix) with a named
+  error. Re-baseline those. **Green-keepers:** ode/nlopt real-compartment still
+  `Ok` (`methods.rs:670`); forward `simulate` chain_binomial real-compartment
+  still accepts.
 - **Stage 3 (acceptance change incl. FORWARD sim — needs migration notes):**
   `REAL_COUPLED_RATE` off Gillespie (gh#95) and `RUNTIME_DT`. Withholding from
   Gillespie changes **forward `simulate`** acceptance via the shared trait gate
@@ -202,22 +208,22 @@ events (pure accumulators / non-feedback ODE sub-systems). The unsafe set is
 ## Testing
 
 - **In-process exhaustive matrix on the ONE gate function** (the commands
-  `process::exit` and have no Result seam, so test the function, not the binary):
-  over (backend × algorithm × feature-model {balance, overdispersed,
+  `process::exit` and have no Result seam, so test the function, not the
+  binary): over (backend × algorithm × feature-model {balance, overdispersed,
   real-accumulator, real-coupled-rate, Dt-in-rate, Dt-in-obs}), assert the
-  accept/reject verdict. The command layer is a thin Err→exit shell, spot-checked
-  by one integration test.
+  accept/reject verdict. The command layer is a thin Err→exit shell,
+  spot-checked by one integration test.
 - **Reachability, not enumeration:** the anti-fork guarantee is that every
   command routes through the one function — not a hand-listed matrix that a new
-  command can silently dodge. (A new ungated command is exactly how this fork was
-  born.)
+  command can silently dodge. (A new ungated command is exactly how this fork
+  was born.)
 - **Red tests:** real-compartment under `pfilter`, under `survey --eval pfilter`
-  / `--eval auto`, and under a chain_binomial fit stage (before: accepted; after:
-  named REAL_COMPARTMENTS error); `balance{}` under `profile` (was the false
-  reject); Stage 3: real-coupled-rate under `simulate --backend gillespie`
+  / `--eval auto`, and under a chain_binomial fit stage (before: accepted;
+  after: named REAL_COMPARTMENTS error); `balance{}` under `profile` (was the
+  false reject); Stage 3: real-coupled-rate under `simulate --backend gillespie`
   (before accepted, after rejected) + a fit config with an ode-nlopt scout +
   chain_binomial-pgas refine on an overdispersed model (must reject naming the
-  *ode* stage, accept once the nlopt stage is removed).
+  _ode_ stage, accept once the nlopt stage is removed).
 - **Green-keepers (regression guards):** `methods.rs:670` ode real-compartment
   `Ok`; forward `simulate` chain_binomial real-compartment accepts.
 - **Hint-text guard:** assert the REAL_COMPARTMENTS message still contains
@@ -228,17 +234,17 @@ events (pure accumulators / non-feedback ODE sub-systems). The unsafe set is
 
 ## Out of scope / cross-references
 
-- gh#95 *sampler* fix (thinning) — its own RFC; here we only correct the
-  capability *declaration* (`REAL_COUPLED_RATE`).
-- gh#191 *full* fix (carry real state in `ParticleState`) — here we only ensure
+- gh#95 _sampler_ fix (thinning) — its own RFC; here we only correct the
+  capability _declaration_ (`REAL_COUPLED_RATE`).
+- gh#191 _full_ fix (carry real state in `ParticleState`) — here we only ensure
   the gate fires on every chain_binomial-filter path. Re-granting
   `REAL_COMPARTMENTS` is that fix's completion criterion.
-- **gh#119** (frozen parameterized caches) — *related, fixed separately*: it is
+- **gh#119** (frozen parameterized caches) — _related, fixed separately_: it is
   not a capability flag (one-line cross-reference only, to avoid implying a flag
   fix this proposal doesn't make).
 - LINEAGES is a **forward-simulate/event-log** request-raised requirement with
   **no inference caller** (verified: zero references in `fit/`, `profile`,
-  `survey`, `pfilter`); it flows through `extra_required` at the *forward* seam
+  `survey`, `pfilter`); it flows through `extra_required` at the _forward_ seam
   (`util.rs:1798`), not the inference profile.
 
 ## Backwards compatibility
