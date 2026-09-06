@@ -600,7 +600,9 @@ impl FitRunConfig {
     }
     pub fn build_obs_model(&self) -> sim::inference::MultiStreamObsModel {
         let specs = stream_specs_from_obs_streams(&self.streams);
-        let (bound, report) = sim::inference::BoundObs::bind(specs).unwrap_or_else(|report| {
+        let (bound, report) = sim::inference::BoundObs::bind(
+            self.compiled.model.simulation.t_start, specs,
+        ).unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
         });
@@ -6364,7 +6366,8 @@ dt = 1.0
                 times.clone(),
             );
             let obs_model = MultiStreamObsModel::new(
-                BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
+                BoundObs::bind(compiled.model.simulation.t_start, vec![spec]).unwrap().0,
+                compiled.clone()).unwrap();
             sim::inference::compute_ode_loglik(&compiled, &obs_model, &times, dt, &params, dt).unwrap()
         };
 

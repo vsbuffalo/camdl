@@ -175,7 +175,7 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
         aux: vec![],
     };
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
+        BoundObs::bind(0.0, vec![spec]).unwrap().0, compiled.clone()).unwrap();
     let params = compiled.default_params.clone();
     (obs_model, compiled, params)
 }

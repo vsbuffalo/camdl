@@ -136,7 +136,7 @@ fn test_obs_param_changes_loglik() {
     let obs_times = vec![10.0, 20.0, 30.0];
     let obs_values = vec![8.0, 7.0, 5.0]; // some observed death counts
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), obs_times),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
@@ -193,7 +193,7 @@ fn test_obs_param_from_flows() {
     let k_idx = *compiled.param_index.get("k").unwrap();
 
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), vec![10.0]),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
@@ -232,7 +232,7 @@ fn test_obs_model_consistency() {
     let (compiled, params) = model_with_obs_param();
 
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), vec![10.0, 20.0]),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),

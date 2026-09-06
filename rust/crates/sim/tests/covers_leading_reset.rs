@@ -195,7 +195,7 @@ fn a_declared_gap_discards_the_flow_in_the_uncovered_span() {
         dense_cells(vec![y0, y1]),
         vec![Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap()],
     );
-    let (bound, report) = BoundObs::bind(vec![spec]).expect("a per-row gap binds");
+    let (bound, report) = BoundObs::bind(0.0, vec![spec]).expect("a per-row gap binds");
     assert!(!report.is_fatal(), "{:?}", report.findings());
     let union = bound.times().to_vec();
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
@@ -229,7 +229,7 @@ fn the_obs_model_reports_the_declared_period_each_value_covered() {
         dense_cells(vec![1.0, 1.0]),
         vec![Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap()],
     );
-    let (bound, _) = BoundObs::bind(vec![spec]).expect("binds");
+    let (bound, _) = BoundObs::bind(0.0, vec![spec]).expect("binds");
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
 
     let cov = obs_model.per_stream_coverage(0.0);
@@ -239,6 +239,56 @@ fn the_obs_model_reports_the_declared_period_each_value_covered() {
         vec![None],
         vec![Some(Coverage::Interval { start: 5.0, stop: 6.0 })],
     ]);
+}
+
+/// IC-free inference (`skip_first_obs_from_loglik`) leaves the FIRST
+/// OBSERVATION out of the log-likelihood — the step that pins `x₀` on `y₁`.
+/// With a declared first period opening after the run's start, union index 0
+/// is a reset-only boundary where nothing is observed; keying the skip on
+/// index 0 would drop a zero and count the real first observation. The check
+/// is an identity on the filter's own increments: the total must be the sum
+/// less the increment at the first observed step, whichever index that is.
+#[test]
+fn ic_free_skips_the_first_observation_not_union_index_zero() {
+    use sim::inference::{bootstrap_filter, ChainBinomialProcess, SMCConfig};
+
+    let compiled = model();
+    let params = compiled.default_params.clone();
+    let recovery = compiled.model.transitions.iter().position(|t| t.name == "recovery").unwrap();
+    let spec = StreamSpec::dense_covering(
+        StreamProjection::FlowSum(vec![recovery]),
+        compiled.model.observations[0].clone(),
+        dense_cells(vec![4.0, 3.0]),
+        vec![Period::new(5.0, 6.0).unwrap(), Period::new(6.0, 7.0).unwrap()],
+    );
+    let (bound, _) = BoundObs::bind(0.0, vec![spec]).expect("binds");
+    assert_eq!(bound.times(), &[5.0, 6.0, 7.0], "index 0 is the reset-only boundary");
+    let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
+    let process = ChainBinomialProcess::new(compiled.clone());
+
+    let config = SMCConfig {
+        n_particles: 64,
+        dt: 1.0,
+        t_start: 0.0,
+        skip_first_obs_from_loglik: true,
+        record_ancestry: false,
+        record_prequential: false,
+        record_predictions: false,
+        max_substeps: u64::MAX,
+    };
+    let result = bootstrap_filter(&process, &obs_model, &params, &config, 7).expect("filter");
+    assert_eq!(result.ll_increments.len(), 3);
+    assert_eq!(result.ll_increments[0], 0.0,
+        "the reset-only boundary carries no likelihood term");
+    let sum: f64 = result.ll_increments.iter().sum();
+    let expected = sum - result.ll_increments[1];
+    assert!(
+        (result.log_likelihood - expected).abs() < 1e-12,
+        "IC-free must leave out the first OBSERVATION's increment (index 1 = t=6): \
+         got {}, expected {expected}; skipping index 0 would give {sum}",
+        result.log_likelihood
+    );
+    assert!(result.ll_increments[1].abs() > 1e-6, "non-vacuous: the skipped term is real");
 }
 
 #[test]
@@ -267,7 +317,7 @@ fn a_declared_first_period_is_scored_against_its_own_window_only() {
         dense_cells(vec![y]),
         vec![Period::new(5.0, 6.0).unwrap()],
     );
-    let (bound, report) = BoundObs::bind(vec![spec]).expect("a declared stream binds");
+    let (bound, report) = BoundObs::bind(0.0, vec![spec]).expect("a declared stream binds");
     assert!(!report.is_fatal(), "{:?}", report.findings());
     let union = bound.times().to_vec();
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();

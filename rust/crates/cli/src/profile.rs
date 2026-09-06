@@ -910,7 +910,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         // union and validates aux — identical to how `fit run` and `pfilter`
         // build their obs model, so an indexed survey family scores identically.
         let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
-        let (bound, report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+        let (bound, report) = BoundObs::bind(compiled.model.simulation.t_start, stream_specs)
+            .unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
         });

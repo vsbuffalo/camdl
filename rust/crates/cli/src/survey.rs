@@ -468,7 +468,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                 obs_times.clone(),
             ));
         }
-        let (bound, _report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+        let (bound, _report) = BoundObs::bind(resolved.compiled.model.simulation.t_start, stream_specs)
+            .unwrap_or_else(|report| {
             eprintln!("error: observation data invalid:\n{}", report.render());
             std::process::exit(1);
         });

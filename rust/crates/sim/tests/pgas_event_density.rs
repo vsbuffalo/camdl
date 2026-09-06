@@ -367,7 +367,7 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
 
     // NegBin obs model.
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             projection: StreamProjection::FlowSum(vec![0]),  // infection
             ir_model: ir::observation::ObservationModel {
                 name: "cases".into(),

@@ -614,7 +614,20 @@ impl BoundObs {
     /// period's start is a boundary where nothing scores and one bin resets
     /// (gh#833). A homogeneous, undeclared model is the special case where
     /// every stream is scheduled at every union time.
-    pub fn bind(mut streams: Vec<StreamSpec>) -> Result<(BoundObs, BindReport), BindReport> {
+    ///
+    /// `run_start` is the simulation's `t_start`. A declared period that opens
+    /// AT the run's start contributes no boundary: every accumulator is empty
+    /// there by construction, so a reset would be a no-op — one that costs a
+    /// zero-length filter step and a resampling draw, moving every Monte Carlo
+    /// estimate off the path the same file takes undeclared. Dropping it is
+    /// what makes `closing_at` bit-identical to the reading it names. A period
+    /// opening BEFORE the run is the loader's error to raise, not this
+    /// function's; one opening after it keeps its boundary, which is the
+    /// leading-edge reset the declaration exists to state.
+    pub fn bind(
+        run_start: f64,
+        mut streams: Vec<StreamSpec>,
+    ) -> Result<(BoundObs, BindReport), BindReport> {
         let mut findings: Vec<Finding> = Vec::new();
 
         // (1) Empty stream list.
@@ -917,19 +930,22 @@ impl BoundObs {
 
         // Union axis: the sorted-unique merge of every boundary the integrator
         // must stop at — every stream's schedule (where it SCORES), plus every
-        // declared period's start (where its bin RESETS). For contiguous
-        // periods each start after the first coincides with the previous stop
-        // and dedups away; the FIRST start is the one new boundary, the one
-        // that lets the first bin open where the declaration says instead of
-        // at `t_start` (gh#833). Identity is EXACT f64 — one deterministic
-        // time parser gives one value per calendar instant (§3.2), so no
-        // tolerance is needed (and none is used).
+        // declared period's start (where its bin RESETS) that lies inside the
+        // run. For contiguous periods each start after the first coincides
+        // with the previous stop and dedups away; the FIRST start is the one
+        // new boundary, the one that lets the first bin open where the
+        // declaration says instead of at `t_start` (gh#833) — unless it IS
+        // `t_start`, where the bin is already empty and a boundary would only
+        // cost a resampling draw (see the doc comment). Identity is EXACT f64
+        // — one deterministic time parser gives one value per calendar instant
+        // (§3.2), so no tolerance is needed (and none is used).
+        let inside_run = |start: f64| start > run_start;
         let mut times: Vec<f64> = streams
             .iter()
             .flat_map(|s| {
                 let mut b = s.times.closes();
                 if let Some(ps) = s.times.periods() {
-                    b.extend(ps.iter().map(Period::start));
+                    b.extend(ps.iter().map(Period::start).filter(|&st| inside_run(st)));
                 }
                 b
             })
@@ -966,12 +982,17 @@ impl BoundObs {
                 // from where it scores.
                 let reset_at_union: Vec<bool> = match spec.times.periods() {
                     // Declared: the bin opens at each period's START. Starts are
-                    // strictly increasing (contiguity checked above) and every
-                    // one was merged into the union, so the same two-pointer
-                    // walk that built `at_union` applies. Notably NOT at the
-                    // final stop: no period opens there.
+                    // strictly increasing (ordering checked above) and every
+                    // one inside the run was merged into the union, so the same
+                    // two-pointer walk that built `at_union` applies. Notably
+                    // NOT at the final stop: no period opens there. A start at
+                    // the run's own start has no boundary and needs no reset.
                     Some(periods) => {
-                        let starts: Vec<f64> = periods.iter().map(Period::start).collect();
+                        let starts: Vec<f64> = periods
+                            .iter()
+                            .map(Period::start)
+                            .filter(|&st| inside_run(st))
+                            .collect();
                         let mut out = Vec::with_capacity(times.len());
                         let mut k = 0usize;
                         for &ut in &times {
@@ -2219,6 +2240,19 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
         MultiStreamObsModel::n_streams(self)
     }
 
+    /// The first union index carrying an observation. Not necessarily 0: a
+    /// declared period opening after the run's start, or a conditioning hole,
+    /// puts a reset-only boundary first, and a stream's own leading rows may
+    /// be holes (gh#833).
+    fn first_observation_idx(&self) -> Option<usize> {
+        (0..self.obs_times.len()).find(|&union_idx| {
+            self.streams.iter().any(|s| match s.at_union[union_idx] {
+                Some(local) => s.observations[local].is_some(),
+                None => false,
+            })
+        })
+    }
+
     fn stream_names(&self) -> Vec<String> {
         MultiStreamObsModel::stream_names(self)
     }
@@ -2370,7 +2404,7 @@ mod bind_tests {
     #[test]
     fn empty_stream_list_is_fatal() {
         let report = expect_fatal(
-            BoundObs::bind(vec![]),
+            BoundObs::bind(0.0, vec![]),
             "an empty stream list must be rejected",
         );
         assert!(report.is_fatal());
@@ -2384,7 +2418,7 @@ mod bind_tests {
         // A header row but no data rows. Left unchecked this panics downstream
         // on `obs_times[0]`.
         let report = expect_fatal(
-            BoundObs::bind(vec![spec("cases", vec![], vec![])]),
+            BoundObs::bind(0.0, vec![spec("cases", vec![], vec![])]),
             "a stream with no observations must be rejected",
         );
         assert!(report.is_fatal());
@@ -2398,7 +2432,7 @@ mod bind_tests {
         // gh#188: [3.0, 3.0] previously passed and silently dropped one
         // likelihood (build_obs_at_substep last-wins; exact grid drops the suffix).
         let dup = expect_fatal(
-            BoundObs::bind(vec![spec(
+            BoundObs::bind(0.0, vec![spec(
                 "cases", vec![1.0, 3.0, 3.0, 6.0], vec![0.0, 0.0, 0.0, 0.0],
             )]),
             "duplicate observation times must be rejected",
@@ -2409,7 +2443,7 @@ mod bind_tests {
             "message must name the stream and the rule: {:?}", dup.findings());
 
         let oo = expect_fatal(
-            BoundObs::bind(vec![spec(
+            BoundObs::bind(0.0, vec![spec(
                 "cases", vec![1.0, 6.0, 3.0], vec![0.0, 0.0, 0.0],
             )]),
             "out-of-order observation times must be rejected",
@@ -2424,7 +2458,7 @@ mod bind_tests {
         // which would `.expect`-panic at the sort if bind did not reject
         // non-finite times first.
         let nan = expect_fatal(
-            BoundObs::bind(vec![spec(
+            BoundObs::bind(0.0, vec![spec(
                 "cases", vec![1.0, f64::NAN, 3.0], vec![0.0, 0.0, 0.0],
             )]),
             "a NaN observation time must be rejected, not panic",
@@ -2435,7 +2469,7 @@ mod bind_tests {
             "message must name the stream and the rule: {:?}", nan.findings());
 
         let inf = expect_fatal(
-            BoundObs::bind(vec![spec(
+            BoundObs::bind(0.0, vec![spec(
                 "cases", vec![1.0, f64::INFINITY], vec![0.0, 0.0],
             )]),
             "an infinite observation time must be rejected",
@@ -2450,7 +2484,7 @@ mod bind_tests {
         // ES-like {5} → union {1,3,5,8}. Each stream's `at_union` records, per
         // union-index, its own local cell index (or None where it is not
         // scheduled — a sibling's time).
-        let (bound, report) = BoundObs::bind(vec![
+        let (bound, report) = BoundObs::bind(0.0, vec![
             spec("afp", vec![1.0, 3.0, 8.0], vec![10.0, 11.0, 12.0]),
             spec("es", vec![5.0], vec![20.0]),
         ]).expect("heterogeneous schedules must bind to the union axis");
@@ -2475,7 +2509,7 @@ mod bind_tests {
 
         // A third stream on yet another cadence also binds (prevalence-family
         // projection — irrelevant to the merge, which is purely on times).
-        let (bound3, _) = BoundObs::bind(vec![
+        let (bound3, _) = BoundObs::bind(0.0, vec![
             spec("afp", vec![1.0, 3.0, 8.0], vec![10.0, 11.0, 12.0]),
             spec("es", vec![5.0], vec![20.0]),
             spec("sero", vec![2.0, 6.0], vec![30.0, 31.0]),
@@ -2488,7 +2522,7 @@ mod bind_tests {
         // Two streams sharing one strictly-increasing schedule: Ok, non-fatal,
         // one shared axis, per-stream values preserved with the equal-length
         // invariant holding by construction.
-        let (bound, report) = BoundObs::bind(vec![
+        let (bound, report) = BoundObs::bind(0.0, vec![
             spec("a", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
             spec("b", vec![1.0, 2.0, 3.0], vec![20.0, 21.0, 22.0]),
         ]).expect("a homogeneous, strictly-increasing multi-stream input must bind");
@@ -2561,6 +2595,29 @@ mod period_and_covers_tests {
         assert_eq!(undecl.coverage(2, 0.5), iv(4.0, 6.0), "a missing row widens the undeclared bin");
     }
 
+    /// A declared first period opening AT the run's start puts no boundary on
+    /// the axis: the accumulator is empty there by construction, and a reset
+    /// would only cost a zero-length step and a resampling draw, taking every
+    /// Monte Carlo estimate off the path the undeclared reading follows. The
+    /// same period opening after the start keeps its boundary — that is the
+    /// leading-edge reset.
+    #[test]
+    fn a_period_opening_at_the_run_start_adds_no_boundary() {
+        let periods = vec![Period::new(0.0, 7.0).unwrap(), Period::new(7.0, 14.0).unwrap()];
+        let s = spec_covering("cases", periods.clone(), vec![3.0, 4.0]);
+        let (bound, _) = BoundObs::bind(0.0, vec![s]).expect("binds");
+        assert_eq!(bound.times(), &[7.0, 14.0], "no boundary at t_start = 0");
+        assert_eq!(bound.at_union_for_test(0), &[Some(0), Some(1)]);
+        assert_eq!(bound.reset_at_union_for_test(0), &[true, false],
+            "resets at 7 (the second period opens) and nowhere else");
+
+        // Run starting earlier: the same declaration now opens inside the run.
+        let s = spec_covering("cases", periods, vec![3.0, 4.0]);
+        let (bound, _) = BoundObs::bind(-3.0, vec![s]).expect("binds");
+        assert_eq!(bound.times(), &[0.0, 7.0, 14.0], "the start is inside the run");
+        assert_eq!(bound.reset_at_union_for_test(0), &[true, true, false]);
+    }
+
     #[test]
     fn period_new_rejects_zero_and_negative_width_and_non_finite() {
         assert!(Period::new(1.0, 1.0).is_err(), "zero width rejected");
@@ -2620,7 +2677,7 @@ mod period_and_covers_tests {
             Period::new(1.0, 2.0).unwrap(),
         ]);
         let report = expect_fatal(
-            BoundObs::bind(vec![s]),
+            BoundObs::bind(0.0, vec![s]),
             "declared periods on a prevalence stream must be rejected",
         );
         assert!(report.findings().iter().any(|f|
@@ -2635,7 +2692,7 @@ mod period_and_covers_tests {
         let mut s = spec("cases", vec![1.0, 2.0], vec![5.0, 6.0]);
         s.times = StreamTimes::Instants(vec![1.0, 2.0]);
         let report = expect_fatal(
-            BoundObs::bind(vec![s]),
+            BoundObs::bind(0.0, vec![s]),
             "instant readings on an incidence stream must be rejected",
         );
         assert!(report.findings().iter().any(|f|
@@ -2656,7 +2713,7 @@ mod period_and_covers_tests {
             vec![Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap()],
             vec![3.0, 4.0],
         );
-        let (bound, report) = BoundObs::bind(vec![s])
+        let (bound, report) = BoundObs::bind(0.0, vec![s])
             .expect("a gap stated by per-row periods is legal (proposal rules table)");
         assert!(!report.is_fatal(), "{:?}", report.findings());
         assert_eq!(bound.times(), &[2.0, 3.0, 5.0, 6.0]);
@@ -2678,7 +2735,7 @@ mod period_and_covers_tests {
             vec![0.0, 0.0],
         );
         let report = expect_fatal(
-            BoundObs::bind(vec![s]),
+            BoundObs::bind(0.0, vec![s]),
             "overlapping declared periods must be rejected",
         );
         assert!(report.findings().iter().any(|f|
@@ -2709,8 +2766,8 @@ mod period_and_covers_tests {
             vec![10.0, 11.0, 12.0],
         );
 
-        let (bound_u, _) = BoundObs::bind(vec![undeclared]).expect("undeclared binds");
-        let (bound_d, report_d) = BoundObs::bind(vec![declared]).expect("declared binds");
+        let (bound_u, _) = BoundObs::bind(0.0, vec![undeclared]).expect("undeclared binds");
+        let (bound_d, report_d) = BoundObs::bind(0.0, vec![declared]).expect("declared binds");
         assert!(!report_d.is_fatal(), "a contiguous declaration is valid: {:?}", report_d.findings());
 
         assert_eq!(bound_u.times(), &[1.0, 2.0, 3.0], "undeclared closes at the row labels");
@@ -2736,11 +2793,12 @@ mod period_and_covers_tests {
             vec![Period::new(0.0, 7.0).unwrap(), Period::new(7.0, 14.0).unwrap()],
             vec![100.0, 120.0],
         );
-        let (bound, report) = BoundObs::bind(vec![s]).expect("a weekly declaration binds");
+        let (bound, report) = BoundObs::bind(0.0, vec![s]).expect("a weekly declaration binds");
         assert!(!report.is_fatal());
-        assert_eq!(bound.times(), &[0.0, 7.0, 14.0],
-            "the first week OPENS at 0 (a reset-only boundary); each row is scored at its stop");
-        assert_eq!(bound.at_union_for_test(0), &[None, Some(0), Some(1)]);
+        assert_eq!(bound.times(), &[7.0, 14.0],
+            "each row is scored at its stop; the first week opens AT the run's start, \
+             where the bin is already empty, so no boundary is added there");
+        assert_eq!(bound.at_union_for_test(0), &[Some(0), Some(1)]);
 
         // The periods SURVIVE binding — they are not validated and dropped.
         let periods = bound.stream_times(0).periods().expect("declared periods survive bind");
@@ -2762,7 +2820,7 @@ mod period_and_covers_tests {
             vec![Period::new(5.0, 6.0).unwrap(), Period::new(6.0, 7.0).unwrap()],
             vec![3.0, 4.0],
         );
-        let (bound, report) = BoundObs::bind(vec![s]).expect("a contiguous declaration binds");
+        let (bound, report) = BoundObs::bind(0.0, vec![s]).expect("a contiguous declaration binds");
         assert!(!report.is_fatal());
 
         assert_eq!(bound.times(), &[5.0, 6.0, 7.0],
@@ -2778,7 +2836,7 @@ mod period_and_covers_tests {
         // The transitional variant keeps today's exact schedule: reset right
         // after scoring, at every stop. Pinned so the fix to declared streams
         // cannot leak into unmigrated ones.
-        let (bound, _) = BoundObs::bind(vec![
+        let (bound, _) = BoundObs::bind(0.0, vec![
             spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
         ]).expect("binds");
         assert_eq!(bound.times(), &[1.0, 2.0, 3.0]);
@@ -2789,7 +2847,7 @@ mod period_and_covers_tests {
     fn an_undeclared_interval_stream_is_unchanged() {
         // The transitional variant: every model today. Its schedule is still
         // the row's own time, so nothing about an unmigrated model moves.
-        let (bound, report) = BoundObs::bind(vec![
+        let (bound, report) = BoundObs::bind(0.0, vec![
             spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
         ]).expect("an undeclared interval stream still binds");
         assert!(!report.is_fatal());
@@ -2967,7 +3025,7 @@ mod hole_scoring_tests {
             obs_times,
         );
         MultiStreamObsModel::new(
-            BoundObs::bind(vec![spec]).expect("bind").0, compiled).unwrap()
+            BoundObs::bind(0.0, vec![spec]).expect("bind").0, compiled).unwrap()
     }
 
     /// gh#268: `joint_observed()` is the per-union-index cross-stream sum used as
@@ -3000,7 +3058,7 @@ mod hole_scoring_tests {
             vec![2.0],
         );
         let m = MultiStreamObsModel::new(
-            BoundObs::bind(vec![spec_a, spec_b]).expect("bind").0, compiled,
+            BoundObs::bind(0.0, vec![spec_a, spec_b]).expect("bind").0, compiled,
         ).unwrap();
         // union axis = [1, 2, 3]:
         //   t=1: a=10 (scheduled+observed), b not scheduled        -> 10
@@ -3131,7 +3189,7 @@ mod hole_scoring_tests {
             StreamProjection::FlowSum(vec![rec]), ir_b,
             dense_cells(vec![40.0, 55.0]), times.clone());
         let m = MultiStreamObsModel::new(
-            BoundObs::bind(vec![spec_a, spec_b]).expect("bind").0, compiled,
+            BoundObs::bind(0.0, vec![spec_a, spec_b]).expect("bind").0, compiled,
         ).unwrap();
 
         let counts = vec![900i64, 40, 60];

@@ -160,6 +160,17 @@ pub trait ObservationModel<S>: Send + Sync {
     /// Observation time at index `obs_idx`.
     fn obs_time(&self, obs_idx: usize) -> f64;
 
+    /// The first index at which some stream actually observes something —
+    /// the step IC-free inference pins `x₀` on and leaves out of the
+    /// log-likelihood (`SMCConfig::skip_first_obs_from_loglik`). It is index
+    /// 0 only when index 0 carries an observation: a reset-only boundary (a
+    /// declared period opening after the run's start) or a leading hole
+    /// carries none, and skipping THAT step would drop a zero and count the
+    /// real first observation (gh#833). `None` when nothing is observed.
+    fn first_observation_idx(&self) -> Option<usize> {
+        (self.n_observations() > 0).then_some(0)
+    }
+
     /// Number of observation streams.
     fn n_streams(&self) -> usize { 1 }
 

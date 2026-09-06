@@ -160,7 +160,7 @@ fn multi_cadence_obs(
         dense_cells(vec![0.0; es_times.len()]),
         es_times,
     );
-    MultiStreamObsModel::new(BoundObs::bind(vec![afp, es]).expect("bind multi-cadence").0, compiled).unwrap()
+    MultiStreamObsModel::new(BoundObs::bind(0.0, vec![afp, es]).expect("bind multi-cadence").0, compiled).unwrap()
 }
 
 /// (i) + (ii): the per-stream fold/reset seam directly.
@@ -339,7 +339,7 @@ fn bootstrap_filter_runs_multi_cadence() {
         es_times,
     );
     let obs = MultiStreamObsModel::new(
-        BoundObs::bind(vec![afp, es]).expect("bind").0, compiled.clone()).unwrap();
+        BoundObs::bind(0.0, vec![afp, es]).expect("bind").0, compiled.clone()).unwrap();
 
     let process = ChainBinomialProcess::new(compiled.clone());
     let cfg = SMCConfig {

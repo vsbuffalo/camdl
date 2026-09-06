@@ -226,6 +226,10 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // dt.min(obs_time - t) exactly. (Substep TIME stays accumulated here — the s*dt
     // convention for the EXACT steppers is deferred, task #14.)
     let obs_times: Vec<f64> = (0..n_obs).map(|i| obs_model.obs_time(i)).collect();
+    // The step IC-free inference leaves out of the log-likelihood: the first
+    // index that carries an observation, which is not index 0 when a
+    // reset-only boundary or a leading hole comes first (gh#833).
+    let first_observation_idx = obs_model.first_observation_idx();
 
     // gh#216: scheduled interventions fire CURSOR-keyed off the timeline's effect
     // boundaries (NOT the `round(t/dt)` key inside step_one), so an off-grid
@@ -523,7 +527,7 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
         //   log L_c(θ | y_1) = Σ_{t=2}^{T} log p(y_t | y_{1:t-1}).
         // See docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
         let ll_increment = log_sum_exp(&swarm.log_weights) - (n_particles as f64).ln();
-        if !(config.skip_first_obs_from_loglik && obs_idx == 0) {
+        if !(config.skip_first_obs_from_loglik && Some(obs_idx) == first_observation_idx) {
             total_loglik += ll_increment;
         }
         ll_increments.push(ll_increment);

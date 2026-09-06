@@ -269,7 +269,7 @@ fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
     assert!(obs.len() >= 3, "need several observation intervals");
 
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             StreamProjection::FlowSum(vec![0]),
             compiled.model.observations[0].clone(),
             dense_cells(obs.iter().map(|o| o.value).collect()),

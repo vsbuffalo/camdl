@@ -677,7 +677,7 @@ fn pgas_obs_model(compiled: &Arc<CompiledModel>, obs_times: &[f64]) -> MultiStre
         times: StreamTimes::Instants(obs_times.to_vec()),
         aux: vec![],
     };
-    MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap()
+    MultiStreamObsModel::new(BoundObs::bind(0.0, vec![spec]).unwrap().0, compiled.clone()).unwrap()
 }
 
 fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str) -> Result<(), sim::SimError> {

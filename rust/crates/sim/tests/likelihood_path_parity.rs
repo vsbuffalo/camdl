@@ -144,7 +144,7 @@ fn pf_and_pgas_likelihood_paths_agree() {
         aux: vec![],
     };
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![spec]).unwrap().0, compiled.clone()).unwrap();
+        BoundObs::bind(0.0, vec![spec]).unwrap().0, compiled.clone()).unwrap();
 
     // Non-zero in BOTH fields so the identity exercises the full
     // ParticleState, not a degenerate all-zero case.

@@ -184,7 +184,7 @@ fn spec(compiled: &CompiledModel, which: usize, times: &[f64], observed: f64) ->
 }
 
 fn bind(compiled: Arc<CompiledModel>, specs: Vec<StreamSpec>) -> MultiStreamObsModel {
-    MultiStreamObsModel::new(BoundObs::bind(specs).expect("bind streams").0, compiled).unwrap()
+    MultiStreamObsModel::new(BoundObs::bind(0.0, specs).expect("bind streams").0, compiled).unwrap()
 }
 
 /// The complete-data components of `trajectory` under `obs` at `params`, with

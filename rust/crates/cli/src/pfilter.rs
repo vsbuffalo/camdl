@@ -355,7 +355,8 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let compiled = std::sync::Arc::new(compiled);
     let process = ChainBinomialProcess::new(compiled.clone());
     let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
-    let (bound, report) = BoundObs::bind(stream_specs).unwrap_or_else(|report| {
+    let (bound, report) = BoundObs::bind(compiled.model.simulation.t_start, stream_specs)
+        .unwrap_or_else(|report| {
         eprintln!("error: observation data invalid:\n{}", report.render());
         std::process::exit(1);
     });
