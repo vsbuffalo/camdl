@@ -625,6 +625,54 @@ fn agree_from(cells: &[LatentCell], n_substeps: usize) -> Option<usize> {
     }
 }
 
+/// The row labels of [`LatentConvergence::bins_table`], in print order. Named
+/// once and padded from this list, so the column the cells start in is derived
+/// from the labels actually printed rather than counted by hand into each
+/// format literal.
+const BIN_TABLE_LABELS: [&str; 6] = [
+    LABEL_BIN, LABEL_FROZEN, LABEL_CONSTANT, LABEL_CHAINS_FROZEN, LABEL_RHAT, LABEL_ESS,
+];
+const LABEL_BIN: &str = "bin";
+const LABEL_FROZEN: &str = "frozen-disagree";
+const LABEL_CONSTANT: &str = "constant";
+const LABEL_CHAINS_FROZEN: &str = "chains frozen";
+const LABEL_RHAT: &str = "R̂ max (mixed)";
+const LABEL_ESS: &str = "ESS min (mixed)";
+
+/// Codepoint ranges [`display_width`] treats as occupying no cell of their own:
+/// the combining diacritical marks (U+0302, the accent in `R̂`) and the
+/// combining marks for symbols.
+const COMBINING_MARKS: [(char, char); 2] = [('\u{0300}', '\u{036F}'), ('\u{20D0}', '\u{20F0}')];
+
+/// How many terminal cells `s` occupies.
+///
+/// `chars().count()` is the wrong measure for these labels: `R̂` is `R`
+/// followed by U+0302 COMBINING CIRCUMFLEX ACCENT — two `char`s the terminal
+/// composes into one cell — so counting `char`s makes that label look one
+/// wider than it prints. Subtracting the combining marks is the whole of the
+/// correction here: the labels are ASCII plus a diacritic, with nothing
+/// double-width in them, so a full Unicode width table would be a dependency
+/// bought for six fixed strings.
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .filter(|c| !COMBINING_MARKS.iter().any(|(lo, hi)| c >= lo && c <= hi))
+        .count()
+}
+
+/// One row of the per-bin table: the label, padded so that every row's cells
+/// begin in the same column, then the cells.
+///
+/// Padding by [`display_width`] rather than by a hand-placed space in the `R̂`
+/// literal is what keeps that true through the next label edit — the failure it
+/// prevents is one row's bin columns sitting a cell left of every other row's,
+/// which reads as a shifted profile rather than as a formatting slip.
+fn row(label: &str, cells: &str) -> String {
+    debug_assert!(BIN_TABLE_LABELS.contains(&label), "unpadded label `{label}`");
+    let w = BIN_TABLE_LABELS.iter().map(|l| display_width(l)).max().unwrap_or(0);
+    let pad = w.saturating_sub(display_width(label));
+    format!("\x20 {label}{:pad$}  {cells}\n", "")
+}
+
 impl LatentConvergence {
     /// The end-of-stage block, printed directly under the renewal profile so
     /// the two rows of tenths line up.
@@ -671,8 +719,8 @@ impl LatentConvergence {
         // a disclaimer — a number beside R-hat reads as a measurement however
         // it is captioned. R-hat is unaffected; it uses no autocorrelation.
         let ess_row = if self.n_draws >= MIN_DRAWS_FOR_INFORMATIVE_ESS {
-            format!("\x20 ESS min (mixed)  {}\n",
-                self.bins.iter().map(|b| match b.ess_bulk_min {
+            row(LABEL_ESS,
+                &self.bins.iter().map(|b| match b.ess_bulk_min {
                     Some(e) => format!("{e:>6.0}"),
                     None => "    NA".to_string(),
                 }).collect::<Vec<_>>().join(" "))
@@ -685,17 +733,16 @@ impl LatentConvergence {
                 self.n_chains * (self.n_draws / 2))
         };
         let labels: Vec<String> = (0..RENEWAL_BINS).map(|b| format!("    b{b}")).collect();
+        let bin_cells = |f: &dyn Fn(&LatentBin) -> Option<f64>| {
+            self.bins.iter().map(|b| cell(f(b))).collect::<Vec<_>>().join(" ")
+        };
         format!(
-            "\x20 bin              {}\n\
-             \x20 frozen-disagree  {}\n\
-             \x20 constant         {}\n\
-             \x20 chains frozen    {}\n\
-             \x20 R̂ max (mixed)    {}\n{}",
-            labels.join(" "),
-            self.bins.iter().map(|b| cell(frac(b.frac_frozen_disagree))).collect::<Vec<_>>().join(" "),
-            self.bins.iter().map(|b| cell(frac(b.frac_constant))).collect::<Vec<_>>().join(" "),
-            self.bins.iter().map(|b| cell(b.frozen_chain_frac)).collect::<Vec<_>>().join(" "),
-            self.bins.iter().map(|b| cell(b.rhat_max)).collect::<Vec<_>>().join(" "),
+            "{}{}{}{}{}{}",
+            row(LABEL_BIN, &labels.join(" ")),
+            row(LABEL_FROZEN, &bin_cells(&|b| frac(b.frac_frozen_disagree))),
+            row(LABEL_CONSTANT, &bin_cells(&|b| frac(b.frac_constant))),
+            row(LABEL_CHAINS_FROZEN, &bin_cells(&|b| b.frozen_chain_frac)),
+            row(LABEL_RHAT, &bin_cells(&|b| b.rhat_max)),
             ess_row,
         )
     }
@@ -922,6 +969,32 @@ mod tests {
         assert!((mixed.between_sd - b).abs() < 1e-12);
         assert!((mixed.within_sd - w).abs() < 1e-12);
         assert!((mixed.mean - gm).abs() < 1e-12);
+    }
+
+    /// Every row of the bin table is the same width, the `R̂` row included.
+    ///
+    /// `R̂ max (mixed)` is `R` followed by U+0302 COMBINING CIRCUMFLEX ACCENT:
+    /// fourteen `char`s occupying thirteen terminal cells. A label column
+    /// padded by `char` count — the obvious way to write it, and what the rest
+    /// of `fit summary` does — leaves that one row a cell short, so its ten bin
+    /// columns sit left of every other row's and the profile reads as shifted
+    /// rather than as misformatted.
+    #[test]
+    fn every_bin_table_row_is_the_same_width_including_the_combining_accent() {
+        let chains = block(8, MIN_DRAWS_FOR_INFORMATIVE_ESS, 12, 2, cloud);
+        let lc = latent_convergence(&chains, &names(2)).unwrap();
+        let table = lc.bins_table();
+        let rows: Vec<&str> = table.lines().collect();
+        assert_eq!(rows.len(), BIN_TABLE_LABELS.len(),
+            "the fixture must print every labelled row:\n{table}");
+        let widths: Vec<usize> = rows.iter().map(|r| display_width(r)).collect();
+        assert!(widths.iter().all(|w| *w == widths[0]),
+            "every row is the same number of cells wide: {widths:?}\n{table}");
+        // The premise, asserted so the check above cannot go vacuous: the R̂
+        // row is the one whose `char` count overstates the space it takes.
+        let rhat = rows.iter().find(|r| r.contains(LABEL_RHAT)).expect("an R̂ row");
+        assert_eq!(rhat.chars().count(), widths[0] + 1,
+            "the accent makes the R̂ row one `char` wider than it prints:\n{rhat}");
     }
 
     /// `ESS min (mixed)` read exactly 40 in all ten bins of a real 8-chain,
