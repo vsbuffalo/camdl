@@ -55,7 +55,7 @@ use sim::inference::convergence::{
     rank_convergence, ConvergenceError, RankConvergence, DEGENERATE_REL_TOL,
     MIN_DRAWS_FOR_INFORMATIVE_ESS,
 };
-use sim::inference::pgas::RENEWAL_BINS;
+use sim::inference::pgas::{PositionBins, RENEWAL_BINS};
 use sim::state::Flows;
 use std::path::Path;
 
@@ -381,12 +381,6 @@ impl std::fmt::Display for LatentError {
     }
 }
 
-/// The bin a substep falls in — the expression `PositionBins::record` uses, so
-/// a renewal bin and a latent bin cover the same substeps.
-fn bin_of(substep: usize, n_substeps: usize) -> usize {
-    (substep * RENEWAL_BINS / n_substeps).min(RENEWAL_BINS - 1)
-}
-
 fn is_constant(v: &[f64]) -> bool {
     let (lo, hi) = v.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| {
         (l.min(x), h.max(x))
@@ -578,7 +572,7 @@ fn reduce_bins(cells: &[LatentCell], n_substeps: usize, n_chains: usize) -> Vec<
         .map(|_| Acc { n: 0, frozen: 0, constant: 0, mixed: 0, frozen_chains: 0, rhat_max: None, ess_min: None })
         .collect();
     for cell in cells {
-        let a = &mut acc[bin_of(cell.substep, n_substeps)];
+        let a = &mut acc[PositionBins::bin_of(cell.substep, n_substeps)];
         a.n += 1;
         if cell.status != LatentStatus::Constant {
             a.frozen_chains += cell.n_frozen_chains;
@@ -1020,24 +1014,24 @@ mod tests {
         }
         // Substeps 0..7 span bins 0..=3 (7*10/23 = 3); bin 0 holds substeps
         // 0,1,2 (3*10/23 = 1 → substep 3 is bin 1).
-        assert_eq!(bin_of(2, 23), 0);
-        assert_eq!(bin_of(3, 23), 1);
-        assert_eq!(bin_of(6, 23), 2);
-        assert_eq!(bin_of(7, 23), 3);
-        assert_eq!(bin_of(22, 23), 9);
+        assert_eq!(PositionBins::bin_of(2, 23), 0);
+        assert_eq!(PositionBins::bin_of(3, 23), 1);
+        assert_eq!(PositionBins::bin_of(6, 23), 2);
+        assert_eq!(PositionBins::bin_of(7, 23), 3);
+        assert_eq!(PositionBins::bin_of(22, 23), 9);
         // Bin 0: substeps 0,1,2 → column 0 frozen (3 cells), column 1 constant (3).
         assert_eq!(lc.bins[0].n_cells, 6);
         assert_eq!(lc.bins[0].frac_frozen_disagree, 0.5);
         assert_eq!(lc.bins[0].frac_constant, 0.5);
         assert_eq!(lc.bins[0].rhat_max, None);
         // Bin 3: substeps 7,8,9 → column 0 mixed, column 1 constant.
-        assert_eq!(bin_of(9, 23), 3);
+        assert_eq!(PositionBins::bin_of(9, 23), 3);
         assert_eq!(lc.bins[3].n_cells, 6);
         assert_eq!(lc.bins[3].frac_frozen_disagree, 0.0);
         assert_eq!(lc.bins[3].frac_mixed, 0.5);
         assert!(lc.bins[3].rhat_max.unwrap().is_finite());
         // Last bin: substeps 21,22 (20*10/23 = 8) → all mixed or constant.
-        assert_eq!(bin_of(20, 23), 8);
+        assert_eq!(PositionBins::bin_of(20, 23), 8);
         assert_eq!(lc.bins[9].n_cells, 4);
         assert_eq!(lc.bins[9].frac_frozen_disagree, 0.0);
     }

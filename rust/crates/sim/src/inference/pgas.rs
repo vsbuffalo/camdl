@@ -327,8 +327,13 @@ pub const RENEWAL_BINS: usize = 10;
 /// The two rows are printed as a pair and read as a pair ("the prefix does not
 /// renew — is that the splice never landing there?"), which is only meaningful
 /// while bin `b` covers the same substeps in both. One type owning the index
-/// arithmetic is what guarantees that, rather than two copies of
+/// arithmetic is what guarantees that, rather than copies of
 /// `(s * RENEWAL_BINS / n_substeps)` that a later edit can move apart.
+///
+/// A third row is read against those two — the per-bin latent-path reduction
+/// in `fit summary`, which keeps its own accumulator because it carries R-hat
+/// and ESS per bin. It bins through [`PositionBins::bin_of`], the same
+/// arithmetic without the counters.
 ///
 /// Fixed-size arrays, so recording is a bounds-checked increment with no
 /// allocation — renewal rides along in the traceback loop, which already walks
@@ -345,12 +350,25 @@ impl PositionBins {
         PositionBins { n_substeps, hits: [0; RENEWAL_BINS], trials: [0; RENEWAL_BINS] }
     }
 
+    /// Which bin substep `s` of an `n_substeps` series falls in — the whole of
+    /// the index arithmetic this type owns, exposed so a consumer that keeps
+    /// its own per-bin accumulator (the `fit summary` latent-path reduction
+    /// carries R-hat and ESS per bin, which `hits`/`trials` cannot hold) bins
+    /// on the same boundaries instead of re-deriving them.
+    ///
+    /// `.min(RENEWAL_BINS - 1)` catches only `s == n_substeps - 1` when the
+    /// division is exact; every other substep lands below it.
+    #[inline]
+    pub fn bin_of(s: usize, n_substeps: usize) -> usize {
+        (s * RENEWAL_BINS / n_substeps).min(RENEWAL_BINS - 1)
+    }
+
     /// Record one trial at substep `s`, `hit` iff it succeeded.
     /// Order-independent — the traceback walks backwards, the sampler forwards.
     #[inline]
     pub fn record(&mut self, s: usize, hit: bool) {
         debug_assert!(s < self.n_substeps, "substep {s} outside the series of {}", self.n_substeps);
-        let b = (s * RENEWAL_BINS / self.n_substeps).min(RENEWAL_BINS - 1);
+        let b = Self::bin_of(s, self.n_substeps);
         self.trials[b] += 1;
         if hit {
             self.hits[b] += 1;
