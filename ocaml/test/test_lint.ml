@@ -163,6 +163,7 @@ let mk_obs ?source ?scored ?rate ?(stratum = []) name projection : observation_m
     scored;
     emit_schedule = Some (ObsRegular { start = 0.0; step = 1.0; end_ = 100.0 });
     stratum;
+    covers = None;
     projection;
     projection_state_grad = [];
     likelihood =

@@ -93,6 +93,7 @@ fn obs_block(name: &str, projection: ir::observation::Projection) -> ir::observa
         scored: name.into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection,
         projection_state_grad: Default::default(),
         likelihood: Likelihood::NegBinomial(NegBinomialLikelihood {

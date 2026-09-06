@@ -45,6 +45,7 @@ fn prevalence_obs_block() -> ir::observation::ObservationModel {
         scored: "prevalence".into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection: Projection::CurrentPop("I".into()),
         projection_state_grad: Default::default(),
         likelihood: Likelihood::Poisson(PoissonLikelihood { rate: ir::Diffable::new(rate) }),

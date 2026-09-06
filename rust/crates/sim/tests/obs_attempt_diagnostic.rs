@@ -38,7 +38,7 @@ use sim::compiled_model::CompiledModel;
 use sim::error::InitFallback;
 use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{
-    BoundObs, MultiStreamObsModel, ObsCell, StreamProjection, StreamSpec,
+    BoundObs, MultiStreamObsModel, ObsCell, StreamProjection, StreamSpec, StreamTimes,
 };
 use sim::inference::obs_attempt::{NegInfCause, ObsCellState, StreamAttempt};
 use sim::inference::particle_filter::Observation;
@@ -102,6 +102,7 @@ fn obs_block(
         scored: name.into(),
         emit_schedule: Some(ObservationSchedule::AtTimes(vec![])),
         stratum: vec![],
+        covers: None,
         projection,
         projection_state_grad: Default::default(),
         likelihood,
@@ -519,7 +520,7 @@ fn nan_shape_parameters_are_reported_as_such_against_a_finite_projection() {
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: block,
             observations: dense_cells(vec![18.0]),
-            obs_times: vec![5.0],
+            times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![0]), vec![5.0]),
             aux: vec![vec![("tested".into(), 40.0), ("denom".into(), 0.0)]],
         }])
         .expect("bind")
@@ -632,7 +633,7 @@ fn a_data_column_denominator_smaller_than_its_count_is_refused_at_bind() {
         projection: StreamProjection::FlowSum(vec![0]),
         ir_model: block,
         observations: dense_cells(vec![50.0]),
-        obs_times: vec![5.0],
+        times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![0]), vec![5.0]),
         // 50 confirmations out of 40 specimens.
         aux: vec![vec![("tested".into(), 40.0)]],
     }]);
@@ -775,7 +776,7 @@ fn the_cell_states_are_distinguishable_and_a_zero_effort_row_is_not_a_failure() 
                 projection: prevalence(),
                 ir_model: zero_effort,
                 observations: dense_cells(vec![0.0]),
-                obs_times: vec![5.0],
+                times: StreamTimes::undeclared_for(&prevalence(), vec![5.0]),
                 aux: vec![vec![("tested".into(), 0.0)]],
             },
         ])

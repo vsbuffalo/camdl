@@ -950,6 +950,7 @@ mod tests {
             per_stream: streams.iter().map(|(name, ls)| StreamScore {
                 stream: name.to_string(), y_obs: 0.0, y_pred_samples: vec![],
                 log_score: *ls, crps: 0.0, pit: 0.5, interval: PredInterval::default(),
+                coverage: Coverage::Unrecorded,
             }).collect(),
         }
     }
