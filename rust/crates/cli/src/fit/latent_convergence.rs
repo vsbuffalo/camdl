@@ -55,6 +55,7 @@ use sim::inference::convergence::{
     rank_convergence, ConvergenceError, RankConvergence, DEGENERATE_REL_TOL,
     MIN_DRAWS_FOR_INFORMATIVE_ESS,
 };
+use super::fit_summary::display_width;
 use sim::inference::pgas::{PositionBins, RENEWAL_BINS};
 use sim::state::Flows;
 use std::path::Path;
@@ -638,26 +639,6 @@ const LABEL_CONSTANT: &str = "constant";
 const LABEL_CHAINS_FROZEN: &str = "chains frozen";
 const LABEL_RHAT: &str = "R̂ max (mixed)";
 const LABEL_ESS: &str = "ESS min (mixed)";
-
-/// Codepoint ranges [`display_width`] treats as occupying no cell of their own:
-/// the combining diacritical marks (U+0302, the accent in `R̂`) and the
-/// combining marks for symbols.
-const COMBINING_MARKS: [(char, char); 2] = [('\u{0300}', '\u{036F}'), ('\u{20D0}', '\u{20F0}')];
-
-/// How many terminal cells `s` occupies.
-///
-/// `chars().count()` is the wrong measure for these labels: `R̂` is `R`
-/// followed by U+0302 COMBINING CIRCUMFLEX ACCENT — two `char`s the terminal
-/// composes into one cell — so counting `char`s makes that label look one
-/// wider than it prints. Subtracting the combining marks is the whole of the
-/// correction here: the labels are ASCII plus a diacritic, with nothing
-/// double-width in them, so a full Unicode width table would be a dependency
-/// bought for six fixed strings.
-fn display_width(s: &str) -> usize {
-    s.chars()
-        .filter(|c| !COMBINING_MARKS.iter().any(|(lo, hi)| c >= lo && c <= hi))
-        .count()
-}
 
 /// One row of the per-bin table: the label, padded so that every row's cells
 /// begin in the same column, then the cells.
