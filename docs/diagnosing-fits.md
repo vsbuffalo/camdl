@@ -387,6 +387,50 @@ the retained sweeps are in the `path_renewal` block of `pgas_summary.json` and
 printed at the end of the stage beside the acceptance rate; the per-sweep values
 are the `trace.tsv` columns above, written as the run proceeds.
 
+**Read the acceptance rate where it happened, not as one number.** The ancestor
+move can behave completely differently at the start of the series and at the
+end, and one rate averaged over the whole sweep hides that. `trace.tsv` carries
+`as_accept_b0 … as_accept_b9` — the acceptance rate among the Metropolis steps
+that ran in each tenth of the substep series, on the **same ten bins** as
+`renewal_b0 … renewal_b9`, so the two rows are read against each other. The
+end-of-stage block prints them as a pair — here the two rows of a 16-sweep,
+32-particle, 80-substep SIR test fixture, small enough that single bins are
+noisy, shown for the layout:
+
+```text
+bin           b0    b1    b2    b3    b4    b5    b6    b7    b8    b9
+renewal    0.477 0.703 0.562 0.562 0.680 0.797 0.867 0.820 0.875 0.922
+as accept  0.500 0.385 0.167 0.000 0.062 0.000 0.000 0.375 0.600 0.875
+```
+
+A bin reads `NA` where no ancestor move was ever proposed in it. That is not an
+acceptance rate of zero, and the difference is the point: "the move was never
+offered here" and "it was offered here and always refused" send you to different
+places.
+
+**A profile that falls toward `b0`** — high over the last tenths of the series,
+near zero over the first — says the splice gets harder the further back it is
+attempted. That is the expected mechanism: re-attaching the reference path at an
+early substep requires everything recorded _after_ that point to stay plausible
+under the new ancestor, and there is more of it the earlier you go. The remedy
+is on the proposal and the update, not on the ratio: more particles (which
+measurably raised the early renewal bins in the probe above), or a proposal that
+uses information from the suffix it will have to keep. The single rate such a
+profile averages to reads as a uniformly mediocre move and sends you looking in
+the wrong place.
+
+**A flat profile** — the same rate in every bin, whatever that rate is — says
+the opposite: position in the series is not what determines whether a splice
+lands. The proposal is mismatched to the target uniformly in time, so the lever
+is the proposal density or the structure of the update (blocking), and adding
+particles will not change the shape. A flat profile at a _low_ rate with a
+healthy `as_ess_post` is the "restructure the update" cell of the table above,
+arrived at from the other direction.
+
+The two shapes are what the sweep-level rate cannot separate: a run accepting
+nothing before the midpoint and everything after it, and a run accepting half of
+everything everywhere, report the identical scalar.
+
 **When you re-run at more particles, compare the profile and the aggregate — not
 the gradient.** The gradient describes a shape, and raising the particle count
 can steepen that shape even as the sampler improves. Measured on one model

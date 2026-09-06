@@ -311,46 +311,62 @@ impl PGASTrajectory {
 /// the series from `b/10` to `(b+1)/10`, whatever `n_substeps` is.
 pub const RENEWAL_BINS: usize = 10;
 
-/// Accumulator for renewal resolved in time: renewed / total substeps per bin.
+/// Accumulator for a per-substep yes/no decision resolved by position in the
+/// trajectory: hits / trials in each of the [`RENEWAL_BINS`] tenths of the
+/// series.
 ///
-/// Fixed-size arrays, so recording a substep is a bounds-checked increment with
-/// no allocation — it rides along in the traceback loop, which already walks
-/// every substep.
+/// Two decisions are recorded through it, and the shared type is what makes
+/// them readable against each other:
+///
+/// - **renewal** ([`CSMCDiagnostics::renewal_by_bin`]) — one trial per substep,
+///   a hit when the traceback took that substep from a non-reference particle;
+/// - **ancestor-sampling acceptance**
+///   ([`CSMCDiagnostics::as_accept_by_bin`]) — one trial per substep where the
+///   Eq.-(21) Metropolis step ran, a hit when it accepted.
+///
+/// The two rows are printed as a pair and read as a pair ("the prefix does not
+/// renew — is that the splice never landing there?"), which is only meaningful
+/// while bin `b` covers the same substeps in both. One type owning the index
+/// arithmetic is what guarantees that, rather than two copies of
+/// `(s * RENEWAL_BINS / n_substeps)` that a later edit can move apart.
+///
+/// Fixed-size arrays, so recording is a bounds-checked increment with no
+/// allocation — renewal rides along in the traceback loop, which already walks
+/// every substep, and acceptance in the ancestor-sampling branch.
 #[derive(Clone, Debug)]
-pub struct RenewalBins {
+pub struct PositionBins {
     n_substeps: usize,
-    renewed: [usize; RENEWAL_BINS],
-    total: [usize; RENEWAL_BINS],
+    hits: [usize; RENEWAL_BINS],
+    trials: [usize; RENEWAL_BINS],
 }
 
-impl RenewalBins {
+impl PositionBins {
     pub fn new(n_substeps: usize) -> Self {
-        RenewalBins { n_substeps, renewed: [0; RENEWAL_BINS], total: [0; RENEWAL_BINS] }
+        PositionBins { n_substeps, hits: [0; RENEWAL_BINS], trials: [0; RENEWAL_BINS] }
     }
 
-    /// Record the traceback's decision at substep `s`: `renewed` iff that
-    /// substep was taken from a non-reference particle. Order-independent —
-    /// the traceback walks backwards.
+    /// Record one trial at substep `s`, `hit` iff it succeeded.
+    /// Order-independent — the traceback walks backwards, the sampler forwards.
     #[inline]
-    pub fn record(&mut self, s: usize, renewed: bool) {
+    pub fn record(&mut self, s: usize, hit: bool) {
         debug_assert!(s < self.n_substeps, "substep {s} outside the series of {}", self.n_substeps);
         let b = (s * RENEWAL_BINS / self.n_substeps).min(RENEWAL_BINS - 1);
-        self.total[b] += 1;
-        if renewed {
-            self.renewed[b] += 1;
+        self.trials[b] += 1;
+        if hit {
+            self.hits[b] += 1;
         }
     }
 
-    /// Per-bin renewal fraction. A bin holding no substep reads `NaN`, not
-    /// `0.0` — the convention [`CSMCDiagnostics::as_accept_rate`] already uses,
-    /// and for the same reason: "no substep fell here" and "no substep here was
-    /// renewed" are different diagnoses, and collapsing them invents a
-    /// degeneracy that was never observed.
+    /// Per-bin hit fraction. A bin with no trial reads `NaN`, not `0.0` — the
+    /// convention [`CSMCDiagnostics::as_accept_rate`] already uses, and for the
+    /// same reason: "nothing was tried here" and "nothing tried here succeeded"
+    /// are different diagnoses, and collapsing them invents a degeneracy that
+    /// was never observed.
     pub fn finish(&self) -> [f64; RENEWAL_BINS] {
         let mut out = [f64::NAN; RENEWAL_BINS];
-        for ((slot, &renewed), &total) in out.iter_mut().zip(&self.renewed).zip(&self.total) {
-            if total > 0 {
-                *slot = renewed as f64 / total as f64;
+        for ((slot, &hits), &trials) in out.iter_mut().zip(&self.hits).zip(&self.trials) {
+            if trials > 0 {
+                *slot = hits as f64 / trials as f64;
             }
         }
         out
@@ -497,7 +513,7 @@ impl WeightCollapse {
 /// Accumulator for [`WeightCollapse`] over a sweep's observation substeps.
 ///
 /// A type rather than loose counters in `csmc_as`, for the same reason
-/// [`RenewalBins`] is one: the predicate "how many particles can this weight
+/// [`PositionBins`] is one: the predicate "how many particles can this weight
 /// vector be sampled from" is then written once, and the fields cannot be
 /// updated out of step with each other.
 #[derive(Clone, Debug)]
@@ -683,6 +699,31 @@ pub struct CSMCDiagnostics {
     /// Of `n_as_proposed`, how many the Metropolis step accepted. Numerator of
     /// the ancestor-sampling acceptance rate.
     pub n_as_accepted: usize,
+    /// gh#864. [`Self::as_accept_rate`] resolved by position in the
+    /// trajectory: bin `b` is the fraction of the Eq.-(21) Metropolis steps
+    /// that ran in the `b`-th tenth of the substep series and accepted. `NaN`
+    /// for a bin where the step never ran — no proposal there is no data, not
+    /// an acceptance rate of zero, and the bins where the move is never even
+    /// offered are the diagnostic ones.
+    ///
+    /// The same ten bins, indexed the same way, as
+    /// [`Self::renewal_by_bin`] — both go through [`PositionBins`] — so the two
+    /// rows describe the same substeps and can be read against each other. That
+    /// pairing is the point: renewal says *where* the path stopped moving, this
+    /// says whether the ancestor move was ever offered there and, if so, whether
+    /// it landed.
+    ///
+    /// The sweep-level [`Self::as_accept_rate`] averages over exactly the
+    /// gradient worth measuring. The mechanistic claim under test is that
+    /// grafting the reference's prefix onto another particle gets harder the
+    /// further back it happens, because more subsequent recorded history has to
+    /// remain plausible under the spliced ancestor — so a profile that *falls*
+    /// toward `b0` is that claim's signature, and a *flat* profile refutes it:
+    /// the same rate everywhere is a proposal mismatched to the target
+    /// uniformly in time, not a suffix that gets harder to keep. One scalar
+    /// cannot separate those, and they have different remedies
+    /// (`docs/diagnosing-fits.md`).
+    pub as_accept_by_bin: [f64; RENEWAL_BINS],
     /// Of `n_as_proposed`, how many were rejected because the EXACT suffix
     /// ratio was zero-density — a candidate the cheap screened weight admitted
     /// but the full ratio refused.
@@ -2562,6 +2603,13 @@ pub fn csmc_as(
     let mut n_as_proposed: usize = 0;
     let mut n_as_accepted: usize = 0;
     let mut n_as_refused_inadmissible: usize = 0;
+    // gh#864: the same acceptance, kept resolved by position in the series. The
+    // sweep-level rate averages over the gradient the ancestor move is expected
+    // to have — grafting is harder the further back it happens — so the scalar
+    // cannot test the claim it is quoted for. Same bins as `renewal_bins`
+    // below, through the same type, so the two profiles line up substep for
+    // substep. Counters only, no RNG.
+    let mut as_accept_bins = PositionBins::new(n_substeps);
 
     // gh#783: the FILTER weights' own degeneracy — a different vector from
     // `ancestor_log_w` below, and a different failure. `n_degenerate` counts
@@ -2856,6 +2904,12 @@ pub fn csmc_as(
                     let log_alpha = log_s_prop - log_s_ref;
                     log_alpha >= 0.0 || resample_rng.uniform().ln() < log_alpha
                 };
+                // gh#864: which tenth of the series this decision fell in.
+                // Recorded for every proposal, including the ones the exact
+                // suffix ratio refused outright — those are rejections of the
+                // move, and dropping them would report an acceptance rate over
+                // a denominator the sweep never had.
+                as_accept_bins.record(s, accept);
                 if accept {
                     n_as_accepted += 1;
                     proposed
@@ -3004,7 +3058,7 @@ pub fn csmc_as(
     // gh#688: the same decision, kept resolved in time. Counters only — no RNG,
     // no effect on the path — and the arrays are stack-allocated, so the loop
     // gains one integer divide and one increment per substep.
-    let mut renewal_bins = RenewalBins::new(n_substeps);
+    let mut renewal_bins = PositionBins::new(n_substeps);
     for s in (0..n_substeps).rev() {
         let renewed = particle != j_ref;
         if !renewed { n_from_ref += 1; }
@@ -3063,6 +3117,9 @@ pub fn csmc_as(
         n_substeps,
         n_as_proposed,
         n_as_accepted,
+        // gh#864. `NaN` in every bin the Metropolis step never ran in, by the
+        // same rule the renewal profile uses for a bin holding no substep.
+        as_accept_by_bin: as_accept_bins.finish(),
         n_as_refused_inadmissible,
         weight_collapse,
         // Means over the AS steps that actually evaluated weights; NaN when
@@ -4256,7 +4313,9 @@ pub fn run_pgas(
             let mut csmc_diag = CSMCDiagnostics {
                 trajectory_renewal: 0.0, renewal_by_bin: [f64::NAN; RENEWAL_BINS],
                 n_degenerate: 0, n_resampled: 0, n_as_skipped_no_resample: 0, n_substeps: 0,
-                n_as_proposed: 0, n_as_accepted: 0, n_as_refused_inadmissible: 0,
+                n_as_proposed: 0, n_as_accepted: 0,
+                as_accept_by_bin: [f64::NAN; RENEWAL_BINS],
+                n_as_refused_inadmissible: 0,
                 weight_collapse: WeightCollapse::none(config.n_particles),
                 as_finite_frac: f64::NAN, as_admissible_frac: f64::NAN,
                 as_ess_pre: f64::NAN, as_ess_post: f64::NAN, n_as_starved: 0,

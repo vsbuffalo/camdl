@@ -36,6 +36,15 @@ const RENEWAL_BIN_COLUMNS: [&str; RENEWAL_BINS] = [
     "renewal_b5", "renewal_b6", "renewal_b7", "renewal_b8", "renewal_b9",
 ];
 
+/// Trace column names for `CSMCDiagnostics::as_accept_by_bin` (gh#864) — the
+/// ancestor-sampling acceptance rate over the same ten tenths of the substep
+/// series as [`RENEWAL_BIN_COLUMNS`], so the two rows describe the same
+/// substeps and `as_accept_b0` is read directly against `renewal_b0`.
+const AS_ACCEPT_BIN_COLUMNS: [&str; RENEWAL_BINS] = [
+    "as_accept_b0", "as_accept_b1", "as_accept_b2", "as_accept_b3", "as_accept_b4",
+    "as_accept_b5", "as_accept_b6", "as_accept_b7", "as_accept_b8", "as_accept_b9",
+];
+
 // ── Which sweeps write a latent path (gh#727) ────────────────────────────────
 //
 // A PGAS chain selects sweeps twice. A **posterior draw** is retained when
@@ -830,7 +839,7 @@ pub fn run_stage(
                 .map(|n| super::loglik::trace_col_obs_ll_stream(n))
                 .collect();
             let mut trace_columns: Vec<&str> =
-                Vec::with_capacity(RENEWAL_BINS + 17 + obs_ll_stream_columns.len());
+                Vec::with_capacity(2 * RENEWAL_BINS + 17 + obs_ll_stream_columns.len());
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
             // gh#783: `collapsed_windows` is how many of the sweep's
@@ -884,7 +893,19 @@ pub fn run_stage(
             // "the density concentrates the draw" and "the guard concentrates
             // it" have different remedies, and the post-mask number alone
             // cannot tell them apart.
-            trace_columns.extend(["as_opportunity", "as_accept", "as_proposed",
+            // `as_accept_b0 … as_accept_b9` (gh#864): the acceptance rate
+            // resolved by position in the trajectory, over the same tenths as
+            // `renewal_b0 … renewal_b9`. The sweep-level `as_accept` averages
+            // over exactly the gradient worth measuring — the claim under test
+            // is that a splice gets harder the further back it happens, because
+            // more subsequent recorded history has to stay plausible under the
+            // new ancestor — so a profile falling toward `b0` supports that
+            // claim and a flat profile refutes it. `NA` for a bin where the
+            // Metropolis step never ran: no proposal is no data, not an
+            // acceptance rate of zero.
+            trace_columns.extend(["as_opportunity", "as_accept", "as_proposed"]);
+            trace_columns.extend(AS_ACCEPT_BIN_COLUMNS);
+            trace_columns.extend([
                   "as_finite_frac", "as_admissible_frac",
                   "as_ess_pre", "as_ess_post", "as_starved",
                   super::loglik::TRACE_COL_TRANSITION_LL,
@@ -975,6 +996,12 @@ pub fn run_stage(
                 };
                 let as_proposed_str = result.csmc_diag.n_as_proposed.to_string();
                 let as_opportunity_str = result.csmc_diag.n_resampled.to_string();
+                // gh#864: the same acceptance resolved by position in the
+                // series. `NA` for a bin where the Metropolis step never ran —
+                // the `renewal_b<n>` convention, and for the same reason.
+                let as_accept_bins: Vec<String> = result.csmc_diag.as_accept_by_bin.iter()
+                    .map(|&r| if r.is_finite() { format!("{r:.4}") } else { "NA".to_string() })
+                    .collect();
                 // Starvation instrument: `NA` when no AS step ran this sweep,
                 // same convention as `as_accept`.
                 let fmt_frac = |v: f64| if v.is_finite() {
@@ -1013,7 +1040,7 @@ pub fn run_stage(
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
                 let mut extra: Vec<&str> =
-                    Vec::with_capacity(RENEWAL_BINS + 19 + obs_ll_stream_strs.len());
+                    Vec::with_capacity(2 * RENEWAL_BINS + 19 + obs_ll_stream_strs.len());
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
                 extra.extend([collapsed_windows_str.as_str(), min_alive_str.as_str()]);
@@ -1021,6 +1048,9 @@ pub fn run_stage(
                 extra.extend([
                     as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
+                ]);
+                extra.extend(as_accept_bins.iter().map(String::as_str));
+                extra.extend([
                     as_finite_frac_str.as_str(), as_admissible_frac_str.as_str(),
                     as_ess_pre_str.as_str(), as_ess_post_str.as_str(),
                     as_starved_str.as_str(),

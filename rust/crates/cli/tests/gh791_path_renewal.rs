@@ -233,6 +233,33 @@ fn profile_from_traces(stage: &Path) -> ([Option<f64>; N_BINS], f64, usize) {
     (bins, agg_sum / n_sweeps as f64, n_sweeps)
 }
 
+/// gh#864: the mean down each `as_accept_b<n>` column over the same retained
+/// post-burn-in sweeps. `NA` — no ancestor move proposed in that bin on that
+/// sweep — is skipped, never counted as an acceptance rate of zero.
+fn as_accept_profile_from_traces(stage: &Path) -> [Option<f64>; N_BINS] {
+    let mut sum = [0.0f64; N_BINS];
+    let mut n = [0usize; N_BINS];
+    for c in 1..=CHAINS {
+        let (header, rows) = trace(stage, c);
+        for row in &rows {
+            let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
+            if sweep < BURN_IN { continue; }
+            for (b, s) in sum.iter_mut().enumerate() {
+                let v = col(&header, row, &format!("as_accept_b{b}"));
+                if v == "NA" { continue; }
+                *s += v.parse::<f64>()
+                    .unwrap_or_else(|e| panic!("as_accept_b{b} = {v:?} ({e})"));
+                n[b] += 1;
+            }
+        }
+    }
+    let mut bins = [None; N_BINS];
+    for (b, slot) in bins.iter_mut().enumerate() {
+        if n[b] > 0 { *slot = Some(sum[b] / n[b] as f64); }
+    }
+    bins
+}
+
 /// gh#864: the per-sweep ancestor-weight ESS columns, over the same retained
 /// post-burn-in sweeps, `NA` skipped. Returns `(pre-mask, post-mask)`.
 ///
@@ -409,11 +436,53 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
         }
     }
 
+    // ── The acceptance rate resolved by position (gh#864) ─────────────────
+    // The scalar `as_accept` above averages over the gradient the ancestor
+    // move is expected to have — a splice is harder the further back it is
+    // attempted — so the block publishes the same rate over the same ten bins
+    // as the renewal profile it sits under.
+    let as_accept_bins: Vec<Option<f64>> =
+        serde_json::from_value(pr["as_accept_bins"].clone()).expect("as_accept_bins");
+    assert_eq!(as_accept_bins.len(), N_BINS,
+        "one acceptance entry per bin, on the same bins as the renewal profile");
+    let from_trace_accept = as_accept_profile_from_traces(&stage);
+    for b in 0..N_BINS {
+        match (as_accept_bins[b], from_trace_accept[b]) {
+            (Some(published), Some(recomputed)) => {
+                assert!((0.0..=1.0).contains(&published),
+                    "bin {b} is an acceptance rate and must lie in [0,1]; got {published}");
+                assert!((published - recomputed).abs() < 1e-4,
+                    "bin {b}: the summary publishes {published}, but the mean of \
+                     the `as_accept_b{b}` column over the retained sweeps of the \
+                     chains' trace.tsv is {recomputed}");
+            }
+            (None, None) => {}
+            (p, t) => panic!(
+                "bin {b}: summary says {p:?} while the traces say {t:?}; a bin is \
+                 null exactly when no retained sweep proposed an ancestor move in \
+                 it — which is not an acceptance rate of 0"),
+        }
+    }
+    // The pooled rate is a weighted mean of the bins it resolves, so it lies
+    // between the smallest and the largest of them. The tie that catches a
+    // profile populated from the wrong decision.
+    if let Some(pooled) = pr["as_accept"].as_f64() {
+        let measured: Vec<f64> = as_accept_bins.iter().flatten().copied().collect();
+        assert!(!measured.is_empty(),
+            "the stage proposed moves, so at least one bin must carry a rate");
+        let lo = measured.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = measured.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(lo - 1e-9 <= pooled && pooled <= hi + 1e-9,
+            "the pooled acceptance {pooled} must lie inside the range of the \
+             bins that resolve it [{lo}, {hi}]; profile {as_accept_bins:?}");
+    }
+
     // ── The aggregate is not replaced ─────────────────────────────────────
     // `trajectory_renewal` is what downstream tools read today, and it stays
     // where they read it.
     let (header, _) = trace(&stage, 1);
     for c in ["trajectory_renewal", "renewal_b0", "renewal_b9", "as_accept",
+              "as_accept_b0", "as_accept_b9",
               "as_ess_pre", "as_ess_post"] {
         assert!(header.iter().any(|h| h == c),
             "trace.tsv must keep the `{c}` column; header was {header:?}");
@@ -427,6 +496,16 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
         "with both derived numbers; stderr was:\n{stderr}");
     assert!(stderr.contains("ancestor-sampling acceptance"),
         "and the ancestor-sampling acceptance rate beside them; stderr was:\n{stderr}");
+    // gh#864: and that rate resolved by position, printed as the row directly
+    // under the renewal profile — the two are only legible as a pair.
+    let lines: Vec<&str> = stderr.lines().collect();
+    let i_renewal = lines.iter().position(|l| l.trim_start().starts_with("renewal "))
+        .unwrap_or_else(|| panic!("no renewal profile row; stderr was:\n{stderr}"));
+    let i_accept = lines.iter().position(|l| l.trim_start().starts_with("as accept"))
+        .unwrap_or_else(|| panic!("no `as accept` profile row; stderr was:\n{stderr}"));
+    assert_eq!(i_accept, i_renewal + 1,
+        "the acceptance profile must print directly under the renewal profile \
+         it is read against; stderr was:\n{stderr}");
     // gh#864: the acceptance rate on its own leaves the reader unable to tell a
     // move that was rejected from a move that had nothing to choose among.
     assert!(stderr.contains("ancestor-weight ESS"),
