@@ -420,6 +420,32 @@ fit.toml would not, which is exactly why it's disallowed.
 extracts R̂, ESS, the MLE table, and any fired diagnostics. Eyeballing trace TSVs
 is for debugging the summary, not for routine inspection.
 
+It leads with the verdict and the estimates; the diagnostics follow, and the
+posterior table is sorted worst-R̂ first so the problems are at the top rather
+than alphabetized among the healthy parameters. Two flags add material that is
+off by default:
+
+```bash
+camdl fit summary <fit-dir>                # verdict, estimates, diagnostics
+camdl fit summary <fit-dir> --explain      # + what each column means
+camdl fit summary <fit-dir> --parameters   # + the model's parameter legend
+```
+
+`--explain` appends a short prose block after each section defining that
+section's terms — R̂ and its bulk/folded halves, the per-chain log-likelihood
+columns, what a forkable draw is, what a frozen latent cell is. Each term is
+defined once, under the section it is read in. **Use it when you are unsure what
+a column means rather than guessing from the name**; several of these (`mod-z`,
+`frozen-disagree`, `chains frozen`) mean something narrower than they sound. It
+interleaves prose with the tables, so under `--explain` the text output is no
+longer cleanly machine-readable — use `--format json` for that.
+
+`--parameters` prints the model's parameter legend: each parameter's symbol,
+prior, citations and caveats, from the `#'` doc comments. It is off by default
+because on a well-documented model it runs to dozens of lines before the first
+number. Reach for it when you need to know what a parameter _means_ or what its
+prior asserts, not when you need its value.
+
 **Derived channels belong in `quantities {}`, not a downstream script.** When
 you want a time-varying quantity the model computes but doesn't carry as a
 compartment — force of infection `λ(t)`, effective reproduction number `Rₑ(t)`,
@@ -497,6 +523,8 @@ camdl list                        # all cached runs (content-addressed leaves)
 camdl show <run>                  # full metadata for one run
 camdl cat  <run>                  # emit its trajectory or observations
 camdl fit summary <fit-dir>       # convergence, gate verdict, MLE table for a fit
+camdl fit summary <fit-dir> --explain      # ... plus what each column means
+camdl fit summary <fit-dir> --parameters   # ... plus the model's parameter legend
 camdl fit table   results/fits/   # one row per fit across a results tree
 camdl fit diff <a.toml> <b.toml>  # diff two fit.toml *configs* (not run hashes)
 ```

@@ -2760,15 +2760,15 @@ bounds-may-narrow-not-loosen rule (`runner.rs:1113`) and `burnin_dt` validity
 `camdl fit` is a group of seven subcommands. One runs inference; three read what
 a run left behind; two work on configs; one is a static capability listing.
 
-| subcommand    | what it does                                                        |
-| ------------- | ------------------------------------------------------------------- |
-| `fit run`     | execute the stages declared in a `fit.toml`                         |
-| `fit summary` | render one fit's convergence verdict, θ̂ table and provenance checks |
-| `fit table`   | walk a results tree and render one row per fit                      |
-| `fit diff`    | compare two `fit.toml` configs                                      |
-| `fit new`     | scaffold a new `fit.toml` derived from an existing one              |
-| `fit predict` | write the posterior-predictive (predicted-vs-observed) artifact     |
-| `fit methods` | list the supported (algorithm, backend) pairs                       |
+| subcommand    | what it does                                                                                                                                           |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fit run`     | execute the stages declared in a `fit.toml`                                                                                                            |
+| `fit summary` | render one fit's convergence verdict, θ̂ table and provenance checks; `--explain` defines each column, `--parameters` adds the model's parameter legend |
+| `fit table`   | walk a results tree and render one row per fit                                                                                                         |
+| `fit diff`    | compare two `fit.toml` configs                                                                                                                         |
+| `fit new`     | scaffold a new `fit.toml` derived from an existing one                                                                                                 |
+| `fit predict` | write the posterior-predictive (predicted-vs-observed) artifact                                                                                        |
+| `fit methods` | list the supported (algorithm, backend) pairs                                                                                                          |
 
 There is no `camdl fit list` and no `camdl fit where`. Browsing every cached run
 — fits, simulations, profiles — is the top-level `camdl list`; attaching or
@@ -2806,6 +2806,8 @@ camdl fit run fits/09_pgas_only.toml --stage posterior \
 camdl fit summary results/fits/01_mle-2030ba2b
 camdl fit summary '@auto rw_sd, take 1'
 camdl fit summary results/fits/01_mle-2030ba2b --params-only
+camdl fit summary results/fits/01_mle-2030ba2b --explain      # define each column
+camdl fit summary results/fits/01_mle-2030ba2b --parameters   # the parameter legend
 camdl fit table results/fits
 camdl fit table results/fits --with-method pgas --format md
 camdl fit diff fits/01_mle.toml fits/02_posterior.toml
