@@ -180,10 +180,22 @@ fn generate_one_dataset(
         // shortened horizon the surplus rows are fabricated, and a recovery
         // study would then fit invented data (gh#561).
         let times = crate::obs_emit_schedule_times(obs_ir, None, model.simulation.t_end, emit)?;
-        // `None` — the synthetic dataset IS the data; nothing to condition on
-        // (gh#702).
-        let projected =
-            crate::project_all_obs_times(&traj, obs_ir, &model, &times, None)?;
+        // The rows the stream's declaration assigns to those times, within the
+        // run (gh#833). This wide file has one `time` column, so a stream that
+        // declares its windows per row cannot be written here.
+        let plan = crate::obs_emit::plan_emission(
+            obs_ir, &times, crate::run_start_of(&traj, &model), model.simulation.t_end,
+        )?;
+        if matches!(plan.columns, crate::obs_emit::TemporalColumns::Window { .. }) {
+            return Err(format!(
+                "observation stream '{}' declares `window_start`/`window_stop` columns, \
+                 which the single wide `[synthetic]` dataset file cannot carry",
+                obs_ir.name
+            ));
+        }
+        let rows = plan.coverages();
+        let projected = crate::project_coverages(&traj, obs_ir, &model, &rows)?;
+        let times = plan.labels();
 
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs_ir, compiled.clone(), &params,

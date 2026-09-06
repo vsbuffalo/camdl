@@ -1,0 +1,187 @@
+//! gh#833, ruling 3: `simulate --obs-dir` writes what the loader reads.
+//!
+//! The emitter follows the stream's declaration: the value goes under the
+//! scored column's name (gh#830), the time under the declared `: time` column,
+//! a windowed stream under its `window_start`/`window_stop` names, and a row
+//! whose period falls outside the run is not written. Under `closing_at` with
+//! a schedule starting at `t_start` that drops the leading row, which was the
+//! zero-width bin the old convention wrote as a count of zero.
+//!
+//! Proposal Testing item 7 is the round trip: a windowed model's emitted file
+//! re-loads under the same model with exactly the periods that were written,
+//! read back off the prequential trace's per-stream `coverage`.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn camdl_bin() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let p = Path::new(&manifest).join("../../target/release/camdl");
+    assert!(p.exists(), "release camdl binary missing: {} - run `make build-rust` or `make test`", p.display());
+    p
+}
+
+fn seed_timing_ir() -> String {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    std::fs::read_to_string(Path::new(&manifest).join("../sim/tests/fixtures/seed_timing.ir.json")).unwrap()
+}
+
+fn tempdir(tag: &str) -> PathBuf {
+    let ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let p = std::env::temp_dir().join(format!("camdl_emit_{}_{}_{}", tag, std::process::id(), ns));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(camdl).args(args).env("CAMDL_SKIP_VERSION_CHECK", "1").output().expect("camdl must invoke")
+}
+
+fn write_model(dir: &Path, name: &str, src: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, src).unwrap();
+    p
+}
+
+/// The fixture with `covers` injected in its lowered form.
+fn with_covers(src: &str, covers_json: &str) -> String {
+    let out = src.replacen("\"projection\":", &format!("\"covers\":{covers_json},\"projection\":"), 1);
+    assert!(out.contains("\"covers\""), "covers injection failed");
+    out
+}
+
+/// The fixture with its `: time` column replaced by a window pair.
+fn with_window_columns(src: &str) -> String {
+    let out = src.replacen(
+        "{ \"name\": \"time\", \"role\": \"time\" },",
+        "{ \"name\": \"win_start\", \"role\": \"window_start\" },\n          \
+         { \"name\": \"win_stop\", \"role\": \"window_stop\" },",
+        1,
+    );
+    assert!(out.contains("window_stop"), "window role injection failed");
+    with_covers(&out, "{\"kind\":\"window_columns\"}")
+}
+
+const PARAMS: &[&str] = &[
+    "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "lambda=2.0", "--param", "w=3.0",
+    "--param", "N0=5000", "--param", "rho=0.5", "--param", "k=20", "--param", "tau=2",
+];
+
+fn emit(camdl: &Path, model: &Path, out_dir: &Path) -> String {
+    let mut args = vec![
+        "simulate", model.to_str().unwrap(), "--backend", "chain_binomial", "--dt", "1",
+        "--seed", "3", "--obs-only-dir", out_dir.to_str().unwrap(),
+    ];
+    args.extend_from_slice(PARAMS);
+    let out = run(camdl, &args);
+    assert!(out.status.success(), "simulate --obs-only-dir failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::read_to_string(out_dir.join("cases.tsv")).expect("cases.tsv written")
+}
+
+fn first_column(line: &str) -> &str {
+    line.split('\t').next().unwrap()
+}
+
+#[test]
+fn closing_at_drops_the_zero_width_leading_row_and_nothing_else() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("closing");
+    let src = seed_timing_ir();
+    let undeclared = write_model(&tmp, "undeclared.ir.json", &src);
+    let closing = write_model(&tmp, "closing.ir.json",
+        &with_covers(&src, "{\"kind\":\"until\",\"offset\":0.0,\"span\":1.0}"));
+
+    let u = emit(&camdl, &undeclared, &tmp.join("u"));
+    let c = emit(&camdl, &closing, &tmp.join("c"));
+    let u_lines: Vec<&str> = u.lines().collect();
+    let c_lines: Vec<&str> = c.lines().collect();
+
+    assert_eq!(u_lines[0], "time\tcases", "the undeclared header is as it always was");
+    assert_eq!(c_lines[0], "time\tcases");
+    assert_eq!(u_lines[1], "0\t0",
+        "the undeclared reading writes the zero-width bin at t_start as a count of zero");
+    // Same rows, minus that one: the labels agree exactly.
+    let u_labels: Vec<&str> = u_lines[2..].iter().map(|l| first_column(l)).collect();
+    let c_labels: Vec<&str> = c_lines[1..].iter().map(|l| first_column(l)).collect();
+    assert_eq!(c_labels, u_labels, "closing_at emits every row the run covers, and only those");
+    assert_ne!(c_lines[1].split('\t').next().unwrap(), "0", "no row for a period the run never simulated");
+}
+
+#[test]
+fn the_value_goes_under_the_scored_column_not_the_stream_name() {
+    // gh#830: a stream named `reported` whose scored column is `cases`.
+    let camdl = camdl_bin();
+    let tmp = tempdir("scored");
+    let src = seed_timing_ir().replacen("\"name\": \"cases\",", "\"name\": \"reported\",", 1);
+    assert!(src.contains("\"name\": \"reported\""), "stream rename failed");
+    let model = write_model(&tmp, "renamed.ir.json", &src);
+    let out_dir = tmp.join("o");
+    let mut args = vec![
+        "simulate", model.to_str().unwrap(), "--backend", "chain_binomial", "--dt", "1",
+        "--seed", "3", "--obs-only-dir", out_dir.to_str().unwrap(),
+    ];
+    args.extend_from_slice(PARAMS);
+    let out = run(&camdl, &args);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = std::fs::read_to_string(out_dir.join("reported.tsv")).expect("one file per STREAM");
+    assert_eq!(text.lines().next().unwrap(), "time\tcases",
+        "the header names the scored column, which is what the loader reads");
+}
+
+/// Proposal Testing item 7. A windowed model emits `win_start`/`win_stop`
+/// under its declared names; `pfilter` reads the file back under the same
+/// model, and the periods it scores — recorded per step as `coverage` in the
+/// prequential trace — are exactly the windows that were written.
+#[test]
+fn a_windowed_stream_round_trips_through_its_own_emitted_file() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("roundtrip");
+    let model = write_model(&tmp, "windowed.ir.json", &with_window_columns(&seed_timing_ir()));
+    let out_dir = tmp.join("o");
+    let text = emit(&camdl, &model, &out_dir);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "win_start\twin_stop\tcases", "the declared window columns, then the scored column");
+    let written: Vec<(f64, f64)> = lines[1..].iter().map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (f[0].parse().unwrap(), f[1].parse().unwrap())
+    }).collect();
+    assert_eq!(written[0], (0.0, 1.0), "contiguous windows from the run's start; no zero-width row");
+    assert!(written.windows(2).all(|w| w[0].1 == w[1].0), "contiguous");
+
+    let stem = tmp.join("preq");
+    let data = out_dir.join("cases.tsv");
+    let mut args = vec![
+        "pfilter", model.to_str().unwrap(), "--particles", "100", "--dt", "1", "--seed", "1",
+        "--data", data.to_str().unwrap(),
+        "--save-prequential", stem.to_str().unwrap(),
+    ];
+    args.extend_from_slice(PARAMS);
+    let out = run(&camdl, &args);
+    assert!(out.status.success(), "the emitted file must re-load under its own model:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{}.json", stem.display())).unwrap()).unwrap();
+    let scored: Vec<(f64, f64)> = trace["steps"].as_array().unwrap().iter().map(|s| {
+        let c = &s["per_stream"][0]["coverage"];
+        assert_eq!(c["kind"], "interval");
+        (c["start"].as_f64().unwrap(), c["stop"].as_f64().unwrap())
+    }).collect();
+    assert_eq!(scored, written, "the periods scored are the periods written — the round trip closes");
+}
+
+#[test]
+fn a_wide_obs_file_refuses_a_windowed_stream_and_names_the_escape() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("wide");
+    let model = write_model(&tmp, "windowed.ir.json", &with_window_columns(&seed_timing_ir()));
+    let wide = tmp.join("wide.tsv");
+    let mut args = vec![
+        "simulate", model.to_str().unwrap(), "--backend", "chain_binomial", "--dt", "1",
+        "--seed", "3", "--obs-only", wide.to_str().unwrap(),
+    ];
+    args.extend_from_slice(PARAMS);
+    let out = run(&camdl, &args);
+    assert!(!out.status.success(), "a single wide file cannot carry two boundaries");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("window_start") && err.contains("--obs-dir"), "{err}");
+}

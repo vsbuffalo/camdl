@@ -1047,7 +1047,7 @@ pub fn obs_time_column(obs: &ir::observation::ObservationModel) -> Result<&str, 
 }
 
 /// The name of the column carrying `role`, if the stream declares one.
-fn column_with_role<'a>(
+pub(crate) fn column_with_role<'a>(
     obs: &'a ir::observation::ObservationModel,
     role: &ir::observation::ColumnRole,
 ) -> Option<&'a str> {
@@ -1092,16 +1092,11 @@ pub fn stream_times_for(
     };
 
     let periods = match covers {
-        Covers::From { offset, span } => {
+        Covers::From { .. } | Covers::Until { .. } => {
             label_times.iter().map(|&t| {
-                let start = t + offset;
-                Period::new(start, start + span)
-            }).collect::<Result<Vec<_>, _>>()
-        }
-        Covers::Until { offset, span } => {
-            label_times.iter().map(|&t| {
-                let stop = t + offset;
-                Period::new(stop - span, stop)
+                let (start, stop) = covers.period_of(t)
+                    .expect("a uniform form assigns every label a period");
+                Period::new(start, stop)
             }).collect::<Result<Vec<_>, _>>()
         }
         Covers::WindowColumns => {
