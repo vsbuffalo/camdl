@@ -244,11 +244,45 @@ pub struct PathRenewal {
     pub n_as_proposed: u64,
     /// Of those, the accepted ones.
     pub n_as_accepted: u64,
+    /// gh#864. The effective sample size of the ancestor weights before the
+    /// `SpliceGuard` mask, pooled over the same sweeps. In particles, not a
+    /// fraction: read it against `as_finite_frac × particles` from `trace.tsv`,
+    /// the candidates it is an effective count of.
+    pub as_ess_pre: AncestorEss,
+    /// gh#864. The same after the mask — the effective number of ancestors the
+    /// categorical draws from. Read against `as_admissible_frac × particles`.
+    ///
+    /// Beside [`Self::as_ess_pre`] rather than replacing it: the guard can
+    /// lower the candidate count and raise this number in the same step, by
+    /// removing a dominant candidate whose splice was backward-infeasible. A
+    /// low value here with a high one there is the guard concentrating the
+    /// draw; low in both is the density doing it, and the remedies differ.
+    pub as_ess_post: AncestorEss,
     /// Retained post-burn-in sweeps the profile was averaged over, summed
     /// across chains.
     pub n_sweeps: usize,
     /// Surviving chains that contributed at least one sweep.
     pub n_chains: usize,
+}
+
+/// One side of the `SpliceGuard` mask for the ancestor weights' effective
+/// sample size, pooled over the retained sweeps (gh#864).
+///
+/// The median rather than the mean: a handful of sweeps where the ancestor
+/// weights happen to spread wide pull a mean well above what a typical sweep
+/// draws from, and the question this answers — "how many ancestors can the
+/// categorical reach on an ordinary sweep" — is a question about the typical
+/// sweep. Its denominator travels with it because sweeps that measured nothing
+/// are absent from the median, not entered as zero, so `n_sweeps` here can be
+/// smaller than [`PathRenewal::n_sweeps`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AncestorEss {
+    /// Median over the sweeps that measured one, in particles. `null` when no
+    /// retained sweep did — ancestor sampling off, or no substep ever drew an
+    /// ancestry — which is a different reading from an ESS of zero.
+    pub median: Option<f64>,
+    /// Retained sweeps [`Self::median`] is over.
+    pub n_sweeps: usize,
 }
 
 /// Accumulator for [`PathRenewal`] over the retained sweeps of every chain.
@@ -267,6 +301,12 @@ pub struct PathRenewalAccum {
     n_chains: usize,
     n_as_proposed: u64,
     n_as_accepted: u64,
+    /// gh#864: the per-sweep ancestor-weight ESS, kept rather than summed —
+    /// the summary reports a median, which cannot be accumulated in a scalar.
+    /// One `f64` per retained sweep per side, which is the same order as the
+    /// per-sweep diagnostics already held to compute the profile.
+    as_ess_pre: Vec<f64>,
+    as_ess_post: Vec<f64>,
 }
 
 impl PathRenewalAccum {
@@ -310,6 +350,16 @@ impl PathRenewalAccum {
         self.n_sweeps += 1;
         self.n_as_proposed += d.n_as_proposed as u64;
         self.n_as_accepted += d.n_as_accepted as u64;
+        // gh#864. Non-finite is "this sweep had no ancestor weight to measure"
+        // — ancestor sampling off, or no substep drew an ancestry. Dropped, not
+        // zeroed, for the same reason a bin holding no substep is: a median
+        // taken over invented zeros reports a collapse nothing measured.
+        if d.as_ess_pre.is_finite() {
+            self.as_ess_pre.push(d.as_ess_pre);
+        }
+        if d.as_ess_post.is_finite() {
+            self.as_ess_post.push(d.as_ess_post);
+        }
     }
 
     /// Close the accumulator.
@@ -350,9 +400,30 @@ impl PathRenewalAccum {
             as_accept,
             n_as_proposed: self.n_as_proposed,
             n_as_accepted: self.n_as_accepted,
+            as_ess_pre: AncestorEss::of(self.as_ess_pre),
+            as_ess_post: AncestorEss::of(self.as_ess_post),
             n_sweeps: self.n_sweeps,
             n_chains: self.n_chains,
         })
+    }
+}
+
+impl AncestorEss {
+    /// Close over the per-sweep values collected for one side of the mask.
+    ///
+    /// `values` holds only the sweeps that measured an ESS, so the count
+    /// published beside the median is the count the median is actually over.
+    fn of(mut values: Vec<f64>) -> Self {
+        let n_sweeps = values.len();
+        values.sort_by(|a, b| a.partial_cmp(b).expect("finite by construction"));
+        let median = match n_sweeps {
+            0 => None,
+            // Even counts average the two central sweeps, the ordinary
+            // convention; odd counts take the single centre.
+            n if n % 2 == 0 => Some((values[n / 2 - 1] + values[n / 2]) / 2.0),
+            n => Some(values[n / 2]),
+        };
+        AncestorEss { median, n_sweeps }
     }
 }
 
@@ -429,6 +500,24 @@ impl PathRenewal {
             self.n_as_accepted,
             self.n_as_proposed,
         ));
+        // gh#864. Beside the acceptance rate because they answer the question
+        // the rate leaves open: a low rate at a healthy post-mask ESS is the
+        // suffix ratio rejecting real choices, while a low rate at an ESS near
+        // 1 is a categorical that had no choice to reject.
+        let ess_cell = |e: &AncestorEss| match e.median {
+            Some(x) => format!("{x:.2}"),
+            None => "NA".to_string(),
+        };
+        s.push_str(&format!(
+            "  ancestor-weight ESS (median): {} before the splice guard ({} \
+             sweep(s)), {} after ({} sweep(s))\n  \
+             effective particles, not a fraction — read them against \
+             as_finite_frac / as_admissible_frac × particles in trace.tsv\n",
+            ess_cell(&self.as_ess_pre),
+            self.as_ess_pre.n_sweeps,
+            ess_cell(&self.as_ess_post),
+            self.as_ess_post.n_sweeps,
+        ));
         s
     }
 }
@@ -470,6 +559,8 @@ mod tests {
             weight_collapse: WeightCollapse::none(100),
             as_finite_frac: f64::NAN,
             as_admissible_frac: f64::NAN,
+            as_ess_pre: f64::NAN,
+            as_ess_post: f64::NAN,
             n_as_starved: 0,
         }
     }
@@ -790,6 +881,100 @@ mod tests {
             "the anchor rests on a real separation between the two populations: \
              the mildest diagnosed failure reads {worst_failure:.3}, the working \
              run {working:.3}");
+    }
+
+    /// One sweep carrying only the two gh#864 ancestor-weight ESS values. The
+    /// profile is the healthy one so nothing else in the block can be read as
+    /// coming from these numbers.
+    fn sweep_ess(pre: f64, post: f64) -> CSMCDiagnostics {
+        let mut d = sweep(HEALTHY, 0, 0);
+        d.as_ess_pre = pre;
+        d.as_ess_post = post;
+        d
+    }
+
+    /// gh#864: the pooled number is a median over the sweeps that measured an
+    /// ESS, and a sweep that measured none is absent from it rather than
+    /// entered as zero.
+    ///
+    /// The two are distinguishable by construction here: over `[1, 3, 9]` the
+    /// median is 3, while folding the unmeasured sweep in as a zero would give
+    /// `[0, 1, 3, 9]` and a median of 2. A sweep with no ancestor-sampling step
+    /// says nothing about how concentrated the ancestor weights are, and
+    /// averaging it in as a collapse invents a reading.
+    #[test]
+    fn the_ancestor_ess_median_is_over_the_sweeps_that_measured_one() {
+        let diags: Vec<CSMCDiagnostics> = vec![
+            sweep_ess(1.0, 2.0),
+            sweep_ess(3.0, 6.0),
+            sweep_ess(f64::NAN, f64::NAN),
+            sweep_ess(9.0, 18.0),
+        ];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let pr = acc.finish().unwrap();
+
+        assert_eq!(pr.n_sweeps, 4, "every sweep still counts toward the profile");
+        assert_eq!(pr.as_ess_pre.n_sweeps, 3,
+            "but the ESS median is over the three sweeps that measured one");
+        assert_eq!(pr.as_ess_pre.median, Some(3.0),
+            "median of [1, 3, 9] is 3 — a zero folded in for the unmeasured \
+             sweep would read 2");
+        assert_eq!(pr.as_ess_post.median, Some(6.0), "and the same after the mask");
+        assert_eq!(pr.as_ess_post.n_sweeps, 3);
+    }
+
+    /// No sweep measured one — ancestor sampling off for the whole stage — and
+    /// the median is `null`, not 0.0. The block still publishes, because the
+    /// profile and the acceptance rate are still measurements.
+    #[test]
+    fn a_stage_that_measured_no_ancestor_ess_reports_null_not_zero() {
+        let diags: Vec<CSMCDiagnostics> = vec![sweep_ess(f64::NAN, f64::NAN)];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let pr = acc.finish().unwrap();
+        assert_eq!(pr.as_ess_pre.median, None);
+        assert_eq!(pr.as_ess_post.median, None);
+        assert_eq!(pr.as_ess_pre.n_sweeps, 0, "and it says so in its denominator");
+        let json = serde_json::to_value(&pr).expect("serializes");
+        assert!(json["as_ess_pre"]["median"].is_null(),
+            "null in the JSON too — a consumer must not read a collapsed \
+             categorical off a stage that measured none: {json}");
+    }
+
+    /// The guard can lower the candidate count and raise the ESS, so both sides
+    /// of the mask must survive into the artifact and the printed block. A
+    /// reader holding only the post-mask number cannot tell the gh#607 screen
+    /// concentrating the draw from the density doing it.
+    #[test]
+    fn both_sides_of_the_mask_reach_the_report_and_the_json() {
+        // The gh#864 eight-particle case, at the sweep level: fewer candidates
+        // after the guard, a higher ESS among them.
+        let diags: Vec<CSMCDiagnostics> = vec![sweep_ess(1.23, 3.85)];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let pr = acc.finish().unwrap();
+        let text = pr.report();
+        assert!(text.contains("ancestor-weight ESS"),
+            "the block must name the statistic:\n{text}");
+        assert!(text.contains("1.23") && text.contains("3.85"),
+            "both sides are printed, not the post-mask one alone:\n{text}");
+        assert!(text.contains("particles"),
+            "and it must say the units are particles, since its two \
+             `trace.tsv` neighbours are fractions:\n{text}");
+        // Adjacent to the acceptance rate: a low rate at a healthy post-mask
+        // ESS is the suffix ratio rejecting, a low rate at an ESS near 1 is a
+        // categorical with nothing to reject.
+        let i_accept = text.find("ancestor-sampling acceptance").expect("acceptance line");
+        let i_ess = text.find("ancestor-weight ESS").expect("ess line");
+        assert!(i_ess > i_accept && text[i_accept..i_ess].lines().count() <= 2,
+            "the ESS must sit beside the acceptance rate it qualifies:\n{text}");
+
+        let json = serde_json::to_value(&pr).expect("serializes");
+        assert_eq!(json["as_ess_pre"]["median"].as_f64(), Some(1.23));
+        assert_eq!(json["as_ess_post"]["median"].as_f64(), Some(3.85));
+        assert_eq!(json["as_ess_post"]["n_sweeps"].as_u64(), Some(1),
+            "with the denominator beside it: {json}");
     }
 
     /// A run that renews poorly but UNIFORMLY in time is a different failure —

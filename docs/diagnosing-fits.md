@@ -330,6 +330,63 @@ that, which is what to expect for an integer compartment state whose ancestor
 weight is sharply peaked and often exactly zero on support grounds. That is only
 visible because the two are reported side by side.
 
+**A low acceptance rate has two causes, and four columns tell them apart.**
+Ancestor sampling is the step that re-attaches the reference trajectory's prefix
+onto another particle's history — the mechanism whose effect the renewal profile
+measures. At each substep it computes one weight per particle (Lindsten, Jordan
+& Schön 2014, Eq. 17), screens out candidates whose splice would strand the
+reference's later recorded flows, and draws the new ancestor from a categorical
+distribution over the survivors. Four `trace.tsv` columns describe that draw:
+
+| column               | what it holds                                                                 |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `as_finite_frac`     | fraction of the ensemble carrying a finite ancestor weight, before the screen |
+| `as_admissible_frac` | the same fraction after the screen                                            |
+| `as_ess_pre`         | effective sample size of those weights before the screen, **in particles**    |
+| `as_ess_post`        | the same after the screen, in particles                                       |
+
+The first two count candidates; the last two count choices, and on a real fit
+the two come apart by orders of magnitude. Effective sample size here is
+$(\sum w)^2 / \sum w^2$ over the ancestor weights — the number of
+equally-weighted candidates that would give the same draw. At
+`as_admissible_frac = 0.24` on 4,800 particles roughly 1,150 candidates survive
+the screen; if one of them carries almost all the weight, the categorical picks
+it nearly every time, the effective number is 1, and the ancestor move renews
+nothing however many candidates are nominally admissible.
+
+**The two ESS columns are particle counts, while the two beside them are
+fractions.** Read `as_ess_post` against `as_admissible_frac × particles` — the
+candidates it is an effective count _of_. An ESS of 3 out of 4 candidates is
+unremarkable; an ESS of 3 out of 1,150 is a categorical with one real choice.
+Both read `NA`, never `0`, on a sweep that ran no ancestor-sampling step: no
+data is not a measured collapse.
+
+Both sides of the screen are reported because the screen can _raise_ the ESS
+while lowering the count. Eight particles, normalised ancestor weights:
+
+```text
+0.90  0.04  0.02  0.02  0.01  0.01   -inf  -inf    6 finite, ESS 1.23
+ --   0.40  0.20  0.20  0.10  0.10                 5 admissible, ESS 3.85
+```
+
+The count fell and the ESS more than tripled: the screen removed a dominant
+candidate whose splice was infeasible and which had been monopolising the draw.
+By the counts alone the screen looks harmful. Hence the four readings:
+
+| `as_ess_pre` | `as_ess_post` | what it says                                                                                                                                                                                     |
+| ------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| high         | high          | the weights are spread and the screen is neutral — a low acceptance rate is the exact suffix ratio rejecting real choices, so the proposal is fine and the update itself (blocking) is the lever |
+| high         | low           | the screen is concentrating the draw; the bottleneck is the backward-feasibility test, not the density                                                                                           |
+| low          | low           | the density itself piles onto one ancestor; the ancestor proposal needs improving, and no change to the screen will help                                                                         |
+| low          | high          | the screen removed a dominant infeasible candidate — working as intended                                                                                                                         |
+
+Without them, a low acceptance rate is compatible with both "the move has good
+candidates and the Metropolis step rejects them" and "the move never had a
+choice", which have different fixes and very different costs. The medians over
+the retained sweeps are in the `path_renewal` block of `pgas_summary.json` and
+printed at the end of the stage beside the acceptance rate; the per-sweep values
+are the `trace.tsv` columns above, written as the run proceeds.
+
 **When you re-run at more particles, compare the profile and the aggregate — not
 the gradient.** The gradient describes a shape, and raising the particle count
 can steepen that shape even as the sampler improves. Measured on one model
