@@ -28,12 +28,19 @@ cases {
 }
 ```
 
-| form                                   | the row covers          |
-| -------------------------------------- | ----------------------- |
-| `covers = day(time)`                   | `[D, D+1 day)`          |
-| `covers = starting_on(time, 7 'days)`  | `[D, D+7 days)`         |
-| `covers = ending_on(time, 7 'days)`    | `[D−6 days, D+1 day)`   |
-| `window_start` + `window_stop` columns | exactly `[start, stop)` |
+| form                                   | the row covers          | `D = 11 Jul`                 |
+| -------------------------------------- | ----------------------- | ---------------------------- |
+| `covers = day(time)`                   | `[D, D+1 day)`          | `[11 Jul, 12 Jul)`           |
+| `covers = starting_on(time, 7 'days)`  | `[D, D+7 days)`         | `[11 Jul, 18 Jul)`           |
+| `covers = ending_on(time, 7 'days)`    | `[D−6 days, D+1 day)`   | `[5 Jul, 12 Jul)` — 11th in  |
+| `covers = closing_at(time, 7 'days)`   | `[D−7 days, D)`         | `[4 Jul, 11 Jul)` — 11th out |
+| `window_start` + `window_stop` columns | exactly `[start, stop)` | as written                   |
+
+`ending_on` and `closing_at` differ by a whole day. "Week ending 11 July"
+includes the 11th; "closing at 11 July" makes the 11th the boundary, excluded
+from this row and opening the next. `closing_at` is the reading of a file whose
+labels are closing boundaries — pomp's accumulator convention, and what camdl's
+own `simulate --obs` has always written.
 
 The width in `starting_on` / `ending_on` is a fixed duration. A width that
 varies row to row is stated with the window columns instead — there is
@@ -51,13 +58,15 @@ compiles and is scored exactly as before. Declaring is currently optional and
 will become required, because no default is right — the same date column means
 three different spans depending on the source.
 
-**Declaring CHANGES YOUR NUMBERS, and that is the point.** An undeclared stream
-is scored over `(previous row, this row]` — a window nobody wrote down, which
-for a file labelled by the day the count describes reads it one day early.
-`covers = day(time)` moves the scoring onto the day the label names. Every
-uniform form closes strictly after the row's label, so none of them reproduces
-the undeclared reading. If you need the old numbers exactly, shift the file's
-time column back one period rather than looking for a form that preserves them.
+**Whether declaring changes your numbers depends on what your file meant.** An
+undeclared stream was scored over `(previous row, this row]` — a window nobody
+wrote down. For a file whose labels are closing boundaries (anything
+`simulate --obs` wrote, anything derived from pomp) that window was right, and
+`closing_at(time, <spacing>)` states it with no change to the fitted numbers.
+For a file labelled by the day the count describes, that window read the count
+one day early; `day(time)` moves the scoring onto the day the label names, and
+the fitted numbers move by one bucket — the correction, not a regression. Say
+which file you have; do not shift a time column to make a form fit.
 
 **A declared first period opens where it says, not at `simulate.from`.** An
 undeclared stream's first bin runs from the start of the run to the first row —

@@ -90,6 +90,22 @@ fn write_counts(path: &Path, shift: f64) {
     std::fs::write(path, s).unwrap();
 }
 
+/// The same fixture with `covers = closing_at(time, 1 'days)` injected, in its
+/// lowered form: closing AT the row's own label, one day wide — the reading of
+/// a file whose labels are closing boundaries.
+fn closing_model(dir: &Path) -> PathBuf {
+    let src = std::fs::read_to_string(seed_timing_ir()).unwrap();
+    let injected = src.replacen(
+        "\"projection\":",
+        "\"covers\":{\"kind\":\"until\",\"offset\":0.0,\"span\":1.0},\"projection\":",
+        1,
+    );
+    assert!(injected.contains("\"covers\""), "covers injection failed");
+    let p = dir.join("closing.ir.json");
+    std::fs::write(&p, injected).unwrap();
+    p
+}
+
 /// The fixture with the time column REPLACED by a `window_start`/`window_stop`
 /// pair and `covers` set to `window_columns` — the per-row form, the only one
 /// that can state a gap. Nothing else about the stream changes.
@@ -228,6 +244,37 @@ fn a_declared_day_window_scores_one_bucket_later_and_opens_at_its_own_start() {
         "the declared stream's first period must open at its own start (3), not \
          at t_start; agreeing with the un-conditioned shifted reading means the \
          first bin spans the whole warm-up",
+    );
+}
+
+/// Proposal Testing item 2's twin, and the fact the in-repo migration rests on:
+/// `closing_at(time, 1 'days)` on a file labelled 1,2,3,… with `t_start = 0`
+/// scores bit-identically to the undeclared reading of the same file — every
+/// bin is `(t−1, t]` either way, the leading one included because the first
+/// row sits one period after `t_start`. A closing-labelled file (anything
+/// `simulate --obs` wrote, anything from pomp) declares what it always meant
+/// and nothing moves. Non-vacuity: `day(time)` on the same file moves the
+/// numbers, so the two forms are not confusable in effect.
+#[test]
+fn closing_at_reproduces_the_undeclared_reading_exactly() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("closing");
+    let data = tmp.join("counts.tsv");
+    // Labels 1..=40: the first row closes one day after t_start = 0.
+    write_counts(&data, -2.0);
+
+    let closing = pfilter_loglik(&camdl, &closing_model(&tmp), &data, &[]);
+    let undeclared = pfilter_loglik(&camdl, &undeclared_model(&tmp), &data, &[]);
+    assert_eq!(
+        closing, undeclared,
+        "closing_at(time, 1 'days) must be the undeclared reading, bit for bit \
+         (closing={closing}, undeclared={undeclared})",
+    );
+
+    let day = pfilter_loglik(&camdl, &declared_model(&tmp), &data, &[]);
+    assert_ne!(
+        closing, day,
+        "day(time) on the same file must NOT agree — it scores one bucket later",
     );
 }
 

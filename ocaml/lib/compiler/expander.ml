@@ -7989,7 +7989,7 @@ let projection_accumulates (p : Ir.projection) =
 (* Lower `covers = <form>(<time column>[, <span>])`, or a `window_start` /
    `window_stop` pair, to [Ir.covers] (gh#833).
 
-   All calendar arithmetic happens HERE: the three uniform forms collapse to an
+   All calendar arithmetic happens HERE: the four uniform forms collapse to an
    offset and a span, both already in the model's axis units, so the runtime
    never needs to know how long a day is on this axis. `one_day` below is one
    civil day expressed in axis units — 1.0 on a `'days` axis, 1/7 on `'weeks`. *)
@@ -8078,22 +8078,33 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
           ~message:(Printf.sprintf
             "observation '%s': `covers = day(...)` takes only the time column \
              — a day is already one day wide" od.oname)
-          ~hint:"for another width write `starting_on(time, <duration>)` or \
-                 `ending_on(time, <duration>)`" ();
+          ~hint:"for another width write `starting_on(time, <duration>)`, \
+                 `ending_on(time, <duration>)` or `closing_at(time, <duration>)`" ();
         None
       | "starting_on", Some e ->
         Option.map (fun s -> Ir.CoversFrom (0.0, s)) (span_of e)
       | "ending_on", Some e ->
-        (* "week ending D" means D is the LAST INCLUDED day, so the period
-           closes one day after the label and opens `span` before that. *)
+        (* `ending_on` INCLUDES the labelled day; `closing_at` EXCLUDES it.
+           "week ending D" means D is the LAST INCLUDED day, so the period
+           closes one day after the label and opens `span` before that:
+           ending_on(11 Jul, 7 'days) = [5 Jul, 12 Jul). *)
         Option.map (fun s -> Ir.CoversUntil (one_day, s)) (span_of e)
-      | ("starting_on" | "ending_on"), None ->
+      | "closing_at", Some e ->
+        (* `closing_at` EXCLUDES the labelled instant; `ending_on` INCLUDES
+           the labelled day. The label is the boundary at which the window
+           closes: closing_at(11 Jul, 7 'days) = [4 Jul, 11 Jul). This is the
+           reading of a file whose rows are labelled by their closing
+           boundary — pomp's accumulator convention, and what camdl's own
+           `simulate --obs` writes. *)
+        Option.map (fun s -> Ir.CoversUntil (0.0, s)) (span_of e)
+      | ("starting_on" | "ending_on" | "closing_at"), None ->
         Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
           ~message:(Printf.sprintf
             "observation '%s': `covers = %s(...)` needs a width as its second \
              argument" od.oname cv.ocv_form)
           ~hint:(Printf.sprintf
-            "write `%s(%s, 7 'days)`, or name a per-row width column"
+            "write `%s(%s, 7 'days)`; for a width that varies row to row give \
+             the file `window_start`/`window_stop` columns"
             cv.ocv_form (if cv.ocv_col = "" then "time" else cv.ocv_col)) ();
         None
       | "", _ -> None  (* the parser already reported a malformed shape *)
@@ -8101,8 +8112,10 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
         Diagnostics.error ctx.diags ~code:"E349" ~loc:cv_loc
           ~message:(Printf.sprintf
             "observation '%s': unknown `covers` form '%s'" od.oname other)
-          ~hint:"the forms are `day(t)`, `starting_on(t, d)` and \
-                 `ending_on(t, d)`" ();
+          ~hint:"the forms are `day(t)`, `starting_on(t, d)`, `ending_on(t, d)` \
+                 (the labelled day is the last one included) and \
+                 `closing_at(t, d)` (the label is the boundary the window \
+                 closes at, itself excluded)" ();
         None
     end
 

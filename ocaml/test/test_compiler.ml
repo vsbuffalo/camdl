@@ -12801,6 +12801,25 @@ let test_covers_ending_on_opens_before_the_label () =
     Alcotest.(check (float 1e-12)) "seven days wide" 7.0 d
   | _ -> Alcotest.fail "ending_on did not lower to a stop-anchored period"
 
+let test_covers_closing_at_closes_at_the_label () =
+  (* `closing_at` EXCLUDES the labelled instant where `ending_on` INCLUDES the
+     labelled day: the label IS the close, so the period opens seven days
+     before it. The two lower to the same variant and differ only in the
+     offset -- 0 here, one day for ending_on -- which is the whole day they
+     differ by. *)
+  let m = compile_expect_ok
+    (covers_model_with
+       (cases_stream "    covers        = closing_at(time, 7 'days)\n")) in
+  match covers_of m with
+  | Some (Ir.CoversUntil (offset, d)) ->
+    Alcotest.(check (float 1e-12)) "closes AT the label" 0.0 offset;
+    Alcotest.(check (float 1e-12)) "seven days wide" 7.0 d
+  | _ -> Alcotest.fail "closing_at did not lower to a stop-anchored period"
+
+let test_closing_at_without_a_width_is_rejected () =
+  compile_expect_error_code ~code:"E349" ~contains:"needs a width"
+    (covers_model_with (cases_stream "    covers        = closing_at(time)\n"))
+
 let test_window_columns_are_the_declaration () =
   let m = compile_expect_ok
     (covers_model_with {|  cases {
@@ -13901,6 +13920,10 @@ let () =
         `Quick test_covers_day_lowers_to_a_one_day_span;
       Alcotest.test_case "ending_on closes one day after the label"
         `Quick test_covers_ending_on_opens_before_the_label;
+      Alcotest.test_case "closing_at closes AT the label"
+        `Quick test_covers_closing_at_closes_at_the_label;
+      Alcotest.test_case "closing_at without a width is E349"
+        `Quick test_closing_at_without_a_width_is_rejected;
       Alcotest.test_case "window columns are themselves the declaration"
         `Quick test_window_columns_are_the_declaration;
       Alcotest.test_case "an undeclared stream carries no period"
