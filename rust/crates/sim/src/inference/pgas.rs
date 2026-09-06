@@ -569,6 +569,64 @@ impl WeightCollapseTally {
     }
 }
 
+/// Running mean of the ancestor weights' effective sample size over one
+/// sweep's ancestor-sampling steps, for one side of the [`SpliceGuard`] mask.
+///
+/// A type rather than a loose sum-and-count pair, for the same reason
+/// [`WeightCollapseTally`] is one: the rule deciding which steps the mean is
+/// taken over is then written once and applies identically before and after the
+/// mask, which is what makes the two numbers comparable at all.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AncestorEssMean {
+    sum: f64,
+    n_steps: usize,
+}
+
+impl AncestorEssMean {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold in the effective sample size `(Σw)²/Σw²` of one ancestor-weight
+    /// vector, as [`ess_from_log_weights`](super::types::ess_from_log_weights)
+    /// computes it — on max-shifted weights, so a vector whose entries are all
+    /// large and negative (the ordinary case at thousands of particles) does
+    /// not underflow to a plausible small number.
+    ///
+    /// A vector with nothing selectable — every entry `-inf`, or one of them
+    /// `NaN` — reads `0.0` there and is skipped, not folded in. That step
+    /// measured nothing: it is not a concentration of zero, and averaging it in
+    /// would pull the sweep's mean down using the steps that say nothing about
+    /// concentration at all. Same rule as
+    /// [`CSMCDiagnostics::as_accept_rate`] over zero proposals. The skipped
+    /// steps are not lost: a step with at most one selectable weight is counted
+    /// by [`CSMCDiagnostics::n_as_starved`], and one where the categorical had
+    /// nothing at all by [`CSMCDiagnostics::n_degenerate`].
+    pub fn record(&mut self, ancestor_log_w: &[f64]) {
+        let ess = super::types::ess_from_log_weights(ancestor_log_w);
+        if ess > 0.0 {
+            self.sum += ess;
+            self.n_steps += 1;
+        }
+    }
+
+    /// The mean over the steps that had something to measure, or `NaN` when no
+    /// step did — which is what `ancestor_sampling = false` reports, the
+    /// density pass never having run.
+    pub fn mean(&self) -> f64 {
+        if self.n_steps == 0 {
+            f64::NAN
+        } else {
+            self.sum / self.n_steps as f64
+        }
+    }
+
+    /// Steps the mean is over.
+    pub fn n_steps(&self) -> usize {
+        self.n_steps
+    }
+}
+
 /// Diagnostics from one CSMC-AS sweep.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CSMCDiagnostics {
@@ -660,6 +718,42 @@ pub struct CSMCDiagnostics {
     /// two is what the guard's backward-feasibility screen removes on top of
     /// the density's own support.
     pub as_admissible_frac: f64,
+    /// gh#864. Mean, over this sweep's ancestor-sampling steps, of the
+    /// effective sample size `(Σw)²/Σw²` of the Eq.-(17) ancestor weights
+    /// *before* the [`SpliceGuard`] mask. `NaN` when no step this sweep had a
+    /// selectable weight to measure (`ancestor_sampling = false`, or no
+    /// substep drew an ancestry).
+    ///
+    /// **Units: particles, not a fraction.** Its two neighbours
+    /// ([`Self::as_finite_frac`], [`Self::as_admissible_frac`]) are fractions
+    /// of `n_particles`; this is an effective particle count on the same scale
+    /// as `n_particles` itself, so it is read against
+    /// `as_finite_frac × n_particles` — the candidates it is an effective count
+    /// *of*. An ESS of 3.1 is uninterpretable without that denominator: out of
+    /// four candidates it is unremarkable, out of 1,150 it is a categorical
+    /// with one real choice.
+    ///
+    /// A count says how many candidates exist; this says how many the
+    /// categorical can reach, and on a real fit the two come apart by orders of
+    /// magnitude. If one particle takes almost all the mass, the ancestor move
+    /// draws it nearly every time and cannot renew the reference's prefix
+    /// however many candidates are nominally admissible.
+    pub as_ess_pre: f64,
+    /// gh#864. As [`Self::as_ess_pre`], after the [`SpliceGuard`] mask — the
+    /// effective number of ancestors the categorical actually draws from. Also
+    /// a particle count, read against `as_admissible_frac × n_particles`.
+    ///
+    /// Reported *alongside* the pre-mask value, never in place of it, because the
+    /// guard can lower the count and raise the ESS in the same step: removing a
+    /// dominant but backward-infeasible candidate leaves fewer candidates
+    /// spread more evenly. Eight particles at normalised weights
+    /// `[0.90, 0.04, 0.02, 0.02, 0.01, 0.01, -inf, -inf]` read 6 finite at ESS
+    /// 1.23; masking the 0.90 reads 5 admissible at ESS 3.85 — the count fell
+    /// and the ESS rose four-fold. A post-mask number on its own cannot
+    /// separate "the density concentrates the draw" (the proposal needs
+    /// improving) from "the guard concentrates it" (the gh#607 screen is the
+    /// bottleneck), and those have different remedies.
+    pub as_ess_post: f64,
     /// Ancestor-sampling steps where at most ONE ancestor weight survived the
     /// mask — the reference itself, or nothing — so no alternative ancestor
     /// existed and the move could not have fired regardless of the ratio.
@@ -2482,6 +2576,13 @@ pub fn csmc_as(
     let mut as_finite_frac_sum: f64 = 0.0;
     let mut as_admissible_frac_sum: f64 = 0.0;
     let mut n_as_starved: usize = 0;
+    // gh#864: how far the categorical's mass spreads over those candidates,
+    // on the same two sides of the mask. The fractions count candidates; these
+    // count the choices the draw actually has among them. Counters only — no
+    // RNG. Their own denominator (steps with something to measure) lives in
+    // `AncestorEssMean`, which is why they are types and not two more sums.
+    let mut as_ess_pre = AncestorEssMean::new();
+    let mut as_ess_post = AncestorEssMean::new();
     // Denominator for the two means above: substeps where the AS density pass
     // actually ran. Distinct from `n_resampled` because `ancestor_sampling =
     // false` resamples without ever evaluating ancestor weights — the means
@@ -2677,6 +2778,11 @@ pub fn csmc_as(
             // Starvation instrument, half 1: how many particles are alive AND
             // can host the reference's recorded step (finite Eq.-17 weight).
             let n_finite = ancestor_log_w.iter().filter(|w| w.is_finite()).count();
+            // gh#864: and how much of the categorical those finite weights
+            // spread over. Taken here, on the unmasked vector, because the mask
+            // overwrites it in place and leaves no way to recover what the
+            // density alone had concentrated.
+            as_ess_pre.record(&ancestor_log_w);
 
             // gh#607: refuse a candidate whose splice would shift the reference's
             // remaining recorded flows onto states that cannot produce them.
@@ -2692,6 +2798,8 @@ pub fn csmc_as(
             // one survivor (the reference, or nothing) means no alternative
             // ancestor existed — the move was starved before any ratio ran.
             let n_admissible = ancestor_log_w.iter().filter(|w| w.is_finite()).count();
+            // gh#864: the vector the categorical below actually draws from.
+            as_ess_post.record(&ancestor_log_w);
             n_as_eval_steps += 1;
             as_finite_frac_sum += n_finite as f64 / n_particles as f64;
             as_admissible_frac_sum += n_admissible as f64 / n_particles as f64;
@@ -2970,6 +3078,12 @@ pub fn csmc_as(
         } else {
             f64::NAN
         },
+        // gh#864. Same "no data is not zero" convention, one step finer: these
+        // average over the steps that had a selectable weight, so a step the
+        // mask emptied is absent from the mean rather than entered as an ESS of
+        // zero. `n_as_starved` is where those steps are counted.
+        as_ess_pre: as_ess_pre.mean(),
+        as_ess_post: as_ess_post.mean(),
         n_as_starved,
     };
 
@@ -4144,7 +4258,8 @@ pub fn run_pgas(
                 n_degenerate: 0, n_resampled: 0, n_as_skipped_no_resample: 0, n_substeps: 0,
                 n_as_proposed: 0, n_as_accepted: 0, n_as_refused_inadmissible: 0,
                 weight_collapse: WeightCollapse::none(config.n_particles),
-                as_finite_frac: f64::NAN, as_admissible_frac: f64::NAN, n_as_starved: 0,
+                as_finite_frac: f64::NAN, as_admissible_frac: f64::NAN,
+                as_ess_pre: f64::NAN, as_ess_post: f64::NAN, n_as_starved: 0,
             };
             for csmc_rep in 0..config.csmc_sweeps_per_nuts {
                 let csmc_seed = seed ^ ((sweep as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))

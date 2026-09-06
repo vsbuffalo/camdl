@@ -233,6 +233,40 @@ fn profile_from_traces(stage: &Path) -> ([Option<f64>; N_BINS], f64, usize) {
     (bins, agg_sum / n_sweeps as f64, n_sweeps)
 }
 
+/// gh#864: the per-sweep ancestor-weight ESS columns, over the same retained
+/// post-burn-in sweeps, `NA` skipped. Returns `(pre-mask, post-mask)`.
+///
+/// `NA` is a sweep with no ancestor-sampling step to measure — dropped here,
+/// exactly as the summary drops it, and never read as an ESS of zero.
+fn ancestor_ess_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>) {
+    let mut pre = Vec::new();
+    let mut post = Vec::new();
+    for c in 1..=CHAINS {
+        let (header, rows) = trace(stage, c);
+        for row in &rows {
+            let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
+            if sweep < BURN_IN { continue; }
+            for (name, sink) in [("as_ess_pre", &mut pre), ("as_ess_post", &mut post)] {
+                let v = col(&header, row, name);
+                if v == "NA" { continue; }
+                sink.push(v.parse::<f64>()
+                    .unwrap_or_else(|e| panic!("{name} = {v:?} ({e})")));
+            }
+        }
+    }
+    (pre, post)
+}
+
+/// Median of a sample, or `None` when it is empty — the same convention the
+/// summary uses, recomputed here so the published number is checked against
+/// the sampler's own record rather than restated.
+fn median_of(mut xs: Vec<f64>) -> Option<f64> {
+    if xs.is_empty() { return None; }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = xs.len();
+    Some(if n % 2 == 0 { (xs[n / 2 - 1] + xs[n / 2]) / 2.0 } else { xs[n / 2] })
+}
+
 #[test]
 fn pgas_summary_carries_the_per_bin_renewal_profile() {
     let bin = camdl_bin();
@@ -343,11 +377,44 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
              a different diagnosis from an acceptance rate of 0"),
     }
 
+    // ── The ancestor weights' ESS, both sides of the mask (gh#864) ────────
+    // A count of admissible candidates is not a count of choices: the ancestor
+    // index is drawn from a categorical over those weights, and one dominant
+    // weight leaves the move with one real option however many are admissible.
+    // Both sides are published because the guard can lower the count and raise
+    // the ESS, by removing a dominant candidate whose splice was infeasible.
+    let (ess_pre, ess_post) = ancestor_ess_from_traces(&stage);
+    for (key, from_trace) in [("as_ess_pre", &ess_pre), ("as_ess_post", &ess_post)] {
+        let block = &pr[key];
+        assert_eq!(block["n_sweeps"].as_u64(), Some(from_trace.len() as u64),
+            "{key} must say how many retained sweeps measured an ESS — the \
+             non-`NA` rows of its own trace column ({} of {n_sweeps})",
+            from_trace.len());
+        match (block["median"].as_f64(), median_of(from_trace.clone())) {
+            (Some(published), Some(recomputed)) => {
+                // The column prints two decimals, so the recomputation agrees
+                // to that rather than exactly.
+                assert!((published - recomputed).abs() < 0.01,
+                    "{key} must be the median of its own trace column over the \
+                     retained sweeps: published {published}, recomputed \
+                     {recomputed}");
+                assert!((1.0..=40.0).contains(&published),
+                    "{key} is an effective particle count, so it lies in \
+                     [1, particles = 40]: {published}");
+            }
+            (None, None) => {}
+            (p, t) => panic!(
+                "{key}: summary says {p:?} while the traces say {t:?}; the \
+                 median is null exactly when no retained sweep measured one"),
+        }
+    }
+
     // ── The aggregate is not replaced ─────────────────────────────────────
     // `trajectory_renewal` is what downstream tools read today, and it stays
     // where they read it.
     let (header, _) = trace(&stage, 1);
-    for c in ["trajectory_renewal", "renewal_b0", "renewal_b9", "as_accept"] {
+    for c in ["trajectory_renewal", "renewal_b0", "renewal_b9", "as_accept",
+              "as_ess_pre", "as_ess_post"] {
         assert!(header.iter().any(|h| h == c),
             "trace.tsv must keep the `{c}` column; header was {header:?}");
     }
@@ -360,6 +427,11 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
         "with both derived numbers; stderr was:\n{stderr}");
     assert!(stderr.contains("ancestor-sampling acceptance"),
         "and the ancestor-sampling acceptance rate beside them; stderr was:\n{stderr}");
+    // gh#864: the acceptance rate on its own leaves the reader unable to tell a
+    // move that was rejected from a move that had nothing to choose among.
+    assert!(stderr.contains("ancestor-weight ESS"),
+        "and the ancestor-weight ESS beside the acceptance rate it qualifies; \
+         stderr was:\n{stderr}");
     assert!(stderr.contains("tenth"),
         "and it must say what a bin spans wherever it prints one; stderr was:\n{stderr}");
 }

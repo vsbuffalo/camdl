@@ -871,8 +871,22 @@ pub fn run_stage(
             // denominator), while a low acceptance at a healthy admissible
             // fraction blames the proposal/suffix ratio instead. Field docs on
             // `CSMCDiagnostics` carry the full reading.
+            // `as_ess_pre` / `as_ess_post` (gh#864): the effective sample size
+            // `(Σw)²/Σw²` of those same two weight vectors. These are particle
+            // counts, not fractions like the two columns before them — read
+            // `as_ess_post` against `as_admissible_frac × particles`, the
+            // candidates it is an effective count of. A count of candidates is
+            // not a count of choices: at `as_admissible_frac` 0.24 on 4,800
+            // particles roughly 1,150 candidates carry a finite weight, and if
+            // one of them holds most of the mass the categorical has one real
+            // choice. Both sides are kept because the guard can lower the count
+            // and raise the ESS by removing a dominant infeasible candidate —
+            // "the density concentrates the draw" and "the guard concentrates
+            // it" have different remedies, and the post-mask number alone
+            // cannot tell them apart.
             trace_columns.extend(["as_opportunity", "as_accept", "as_proposed",
-                  "as_finite_frac", "as_admissible_frac", "as_starved",
+                  "as_finite_frac", "as_admissible_frac",
+                  "as_ess_pre", "as_ess_post", "as_starved",
                   super::loglik::TRACE_COL_TRANSITION_LL,
                   super::loglik::TRACE_COL_OBS_LL,
                   super::loglik::TRACE_COL_INITIAL_STATE_LL]);
@@ -970,6 +984,17 @@ pub fn run_stage(
                 };
                 let as_finite_frac_str = fmt_frac(result.csmc_diag.as_finite_frac);
                 let as_admissible_frac_str = fmt_frac(result.csmc_diag.as_admissible_frac);
+                // gh#864: effective particle counts, so two decimals rather
+                // than the fractions' six. `NA` when no AS step this sweep had
+                // a selectable weight to measure — not 0, which would read as a
+                // measured collapse.
+                let fmt_ess = |v: f64| if v.is_finite() {
+                    format!("{v:.2}")
+                } else {
+                    "NA".to_string()
+                };
+                let as_ess_pre_str = fmt_ess(result.csmc_diag.as_ess_pre);
+                let as_ess_post_str = fmt_ess(result.csmc_diag.as_ess_post);
                 let as_starved_str = result.csmc_diag.n_as_starved.to_string();
                 let transition_ll_str = format!("{:.4}", result.transition_ll);
                 let obs_ll_str = format!("{:.4}", result.obs_ll);
@@ -988,7 +1013,7 @@ pub fn run_stage(
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
                 let mut extra: Vec<&str> =
-                    Vec::with_capacity(RENEWAL_BINS + 17 + obs_ll_stream_strs.len());
+                    Vec::with_capacity(RENEWAL_BINS + 19 + obs_ll_stream_strs.len());
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
                 extra.extend([collapsed_windows_str.as_str(), min_alive_str.as_str()]);
@@ -997,6 +1022,7 @@ pub fn run_stage(
                     as_opportunity_str.as_str(),
                     as_accept_str.as_str(), as_proposed_str.as_str(),
                     as_finite_frac_str.as_str(), as_admissible_frac_str.as_str(),
+                    as_ess_pre_str.as_str(), as_ess_post_str.as_str(),
                     as_starved_str.as_str(),
                     transition_ll_str.as_str(), obs_ll_str.as_str(),
                     initial_state_ll_str.as_str(),
