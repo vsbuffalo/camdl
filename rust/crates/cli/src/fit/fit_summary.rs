@@ -1396,9 +1396,6 @@ impl Formatter {
                 // A collapsed within-chain variance leaves no Â at all; say so
                 // rather than printing `Â=NaN ✗`, which reads as a failure the
                 // estimator never assessed (gh#45).
-                // A collapsed within-chain variance leaves no Â at all; say so
-                // rather than printing `Â=NaN ✗`, which reads as a failure the
-                // estimator never assessed (gh#45).
                 Some(r) if !r.is_finite() => {
                     self.dim("Â=n/a (W ≈ 0; rely on Δ_dB)").to_string()
                 }
