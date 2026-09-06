@@ -180,9 +180,21 @@ fn pgas_trace_carries_renewal_resolved_in_time() {
              header was: {header}"
         );
     }
+    // gh#864: the acceptance rate over the same ten bins, so `as_accept_b3` is
+    // read directly against `renewal_b3`.
+    let as_accept_cols: Vec<String> = (0..10).map(|b| format!("as_accept_b{b}")).collect();
+    for c in &as_accept_cols {
+        assert!(
+            cols.contains(&c.as_str()),
+            "PGAS trace must carry the `{c}` positional acceptance column (gh#864); \
+             header was: {header}"
+        );
+    }
     let idx = |name: &str| cols.iter().position(|&c| c == name).unwrap();
     let i_renewal = idx("trajectory_renewal");
+    let i_as_proposed = idx("as_proposed");
     let bin_idx: Vec<usize> = bin_cols.iter().map(|c| idx(c)).collect();
+    let as_accept_idx: Vec<usize> = as_accept_cols.iter().map(|c| idx(c)).collect();
 
     let rows: Vec<&str> = lines.filter(|l| !l.trim().is_empty()).collect();
     assert!(!rows.is_empty(), "trace has no data rows");
@@ -221,6 +233,36 @@ fn pgas_trace_carries_renewal_resolved_in_time() {
             (mean - renewal).abs() < 1e-4,
             "the per-bin profile must agree with the aggregate it resolves: bins mean to \
              {mean:.4}, trajectory_renewal reads {renewal:.4}; row was: {row}"
+        );
+
+        // gh#864: the acceptance profile on the same row. A bin is measured
+        // only where an ancestor move was actually proposed, so on this
+        // 6-substep fixture most bins read `NA` — and `NA` there is "the move
+        // was never offered in this bin", not an acceptance rate of 0.
+        let n_proposed: usize = f[i_as_proposed].parse().expect("as_proposed parses");
+        let mut n_measured = 0usize;
+        for (b, &i) in as_accept_idx.iter().enumerate() {
+            if f[i] == "NA" { continue; }
+            let r: f64 = f[i].parse().unwrap_or_else(|e| {
+                panic!("as_accept_b{b} = {:?} is neither `NA` nor a number ({e}); \
+                        row was: {row}", f[i])
+            });
+            assert!(
+                (0.0..=1.0).contains(&r),
+                "as_accept_b{b} is an acceptance rate and must lie in [0,1]; got {r}"
+            );
+            n_measured += 1;
+        }
+        assert!(
+            n_measured <= n_proposed,
+            "{n_measured} bins carry an acceptance rate but only {n_proposed} moves \
+             were proposed this sweep — a bin needs at least one proposal to be \
+             measured, and the rest must read `NA` rather than 0.0; row was: {row}"
+        );
+        assert_eq!(
+            n_measured == 0, n_proposed == 0,
+            "a sweep that proposed no ancestor move measures no bin, and one that \
+             proposed a move measures at least the bin it fell in; row was: {row}"
         );
     }
 }

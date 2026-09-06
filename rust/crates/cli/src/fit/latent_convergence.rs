@@ -381,7 +381,7 @@ impl std::fmt::Display for LatentError {
     }
 }
 
-/// The bin a substep falls in — the expression `RenewalBins::record` uses, so
+/// The bin a substep falls in — the expression `PositionBins::record` uses, so
 /// a renewal bin and a latent bin cover the same substeps.
 fn bin_of(substep: usize, n_substeps: usize) -> usize {
     (substep * RENEWAL_BINS / n_substeps).min(RENEWAL_BINS - 1)

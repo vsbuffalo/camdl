@@ -32,7 +32,7 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, csmc_as, simulate_reference, EffectFiring, ObsAtSubstep, RenewalBins,
+    build_obs_at_substep, csmc_as, simulate_reference, EffectFiring, ObsAtSubstep, PositionBins,
     RENEWAL_BINS,
 };
 use sim::rng::StatefulRng;
@@ -46,7 +46,7 @@ const SEED: u64 = 20260820;
 /// `from_ref[s] == true` means the traceback took substep `s` from the
 /// reference particle, i.e. that substep was NOT renewed.
 fn bins_of(from_ref: &[bool]) -> [f64; RENEWAL_BINS] {
-    let mut acc = RenewalBins::new(from_ref.len());
+    let mut acc = PositionBins::new(from_ref.len());
     for (s, &r) in from_ref.iter().enumerate() {
         acc.record(s, !r);
     }
@@ -236,6 +236,9 @@ struct SweepProfile {
     n_substeps: usize,
     as_proposed: usize,
     as_accepted: usize,
+    /// gh#864: the ancestor-sampling acceptance rate over the same ten bins —
+    /// the row the renewal profile is read against.
+    as_accept_by_bin: [f64; RENEWAL_BINS],
 }
 
 fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
@@ -289,6 +292,7 @@ fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
                 n_substeps: diag.n_substeps,
                 as_proposed: diag.n_as_proposed,
                 as_accepted: diag.n_as_accepted,
+                as_accept_by_bin: diag.as_accept_by_bin,
             }
         })
         .collect()
@@ -351,6 +355,71 @@ fn returned_bins_are_per_substep_counts_not_the_scalar_rebroadcast() {
     );
 }
 
+/// gh#864: what `csmc_as` returns for the acceptance profile must be a record
+/// of real per-substep Metropolis decisions, tied to the counters the sweep
+/// reports for the same decisions.
+///
+/// Four ties, each catching what the others miss:
+///
+///  - **A bin is measured only where a move was proposed.** A sweep proposing
+///    `k` moves cannot measure more than `k` bins. Catches a profile recorded
+///    at every ancestor-sampling step rather than at the proposals — which
+///    would enter "no alternative was proposed here" as a rejection and
+///    manufacture a low early profile out of nothing.
+///  - **Measured at all iff the step ran at all.** A sweep with no proposal
+///    has no measured bin, and one with a proposal has at least one.
+///  - **Containment.** The sweep's pooled rate is a weighted mean of its bin
+///    rates, so it lies between the smallest and the largest of them. Catches a
+///    profile populated from the wrong decision.
+///  - **Granularity.** A profile that simply rebroadcast the sweep's scalar
+///    into every bin would pass containment; across sweeps at least one bin
+///    must differ from its own sweep's rate.
+#[test]
+fn the_acceptance_profile_is_a_record_of_real_proposals() {
+    const SWEEPS: u64 = 12;
+    let profiles = sweeps(SWEEPS, 32);
+    let (mut any_measured, mut n_off_the_scalar) = (false, 0usize);
+
+    for (i, p) in profiles.iter().enumerate() {
+        let measured: Vec<usize> = p.as_accept_by_bin.iter().enumerate()
+            .filter(|(_, v)| v.is_finite()).map(|(b, _)| b).collect();
+        assert!(measured.len() <= p.as_proposed,
+            "sweep {i}: {} bins carry an acceptance rate but only {} moves were \
+             proposed all sweep — a bin needs at least one proposal to be \
+             measured; profile {:?}",
+            measured.len(), p.as_proposed, p.as_accept_by_bin);
+        assert_eq!(measured.is_empty(), p.as_proposed == 0,
+            "sweep {i}: {} proposals and {} measured bins — a sweep that \
+             proposed nothing must measure nothing, and one that proposed \
+             something must measure somewhere; profile {:?}",
+            p.as_proposed, measured.len(), p.as_accept_by_bin);
+        if p.as_proposed == 0 { continue; }
+        any_measured = true;
+
+        let pooled = p.as_accepted as f64 / p.as_proposed as f64;
+        let (lo, hi) = p.as_accept_by_bin.iter().filter(|v| v.is_finite())
+            .fold((f64::INFINITY, f64::NEG_INFINITY),
+                  |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(lo - 1e-12 <= pooled && pooled <= hi + 1e-12,
+            "sweep {i}: the sweep rate {pooled:.4} ({}/{}) must lie inside the \
+             bins it averages [{lo}, {hi}]; profile {:?}",
+            p.as_accepted, p.as_proposed, p.as_accept_by_bin);
+        for &v in p.as_accept_by_bin.iter().filter(|v| v.is_finite()) {
+            assert!((0.0..=1.0).contains(&v),
+                "sweep {i}: an acceptance rate must lie in [0,1]; profile {:?}",
+                p.as_accept_by_bin);
+            if (v - pooled).abs() > 1e-12 { n_off_the_scalar += 1; }
+        }
+    }
+
+    assert!(any_measured,
+        "this fixture is only a test of the profile while ancestor sampling \
+         proposes moves; no sweep of {SWEEPS} proposed one");
+    assert!(n_off_the_scalar > 0,
+        "across {SWEEPS} sweeps not one bin differed from its sweep's pooled \
+         acceptance rate — the profile carries no positional resolution at all");
+}
+
 /// Negative control: on a healthy sweep — one where ancestor sampling is
 /// proposing and accepting splices — renewal is roughly uniform in t. No bin
 /// is starved relative to the series as a whole, which is the flat LJS
@@ -382,11 +451,32 @@ fn a_healthy_sweep_renews_roughly_uniformly_in_time() {
         .map(|b| bin_sum[b] / bin_n[b].max(1) as f64)
         .collect();
 
+    // gh#864: the acceptance profile over the same bins, printed beside the
+    // renewal one because that pairing is how either is read.
+    let mut acc_sum = [0.0f64; RENEWAL_BINS];
+    let mut acc_n = [0usize; RENEWAL_BINS];
+    for p in &profiles {
+        for b in 0..RENEWAL_BINS {
+            if p.as_accept_by_bin[b].is_finite() {
+                acc_sum[b] += p.as_accept_by_bin[b];
+                acc_n[b] += 1;
+            }
+        }
+    }
+    let as_accept_by_bin: Vec<String> = (0..RENEWAL_BINS)
+        .map(|b| if acc_n[b] > 0 {
+            format!("{:.3}", acc_sum[b] / acc_n[b] as f64)
+        } else {
+            "   NA".to_string()
+        })
+        .collect();
+
     eprintln!(
         "renewal by time bin ({SWEEPS} sweeps, {} substeps): {:?}",
         profiles[0].n_substeps,
         mean_by_bin.iter().map(|r| format!("{r:.3}")).collect::<Vec<_>>()
     );
+    eprintln!("AS acceptance by time bin (sweeps measuring each: {acc_n:?}): {as_accept_by_bin:?}");
     eprintln!("  aggregate renewal {mean_renewal:.3} | AS proposed {proposed} accepted {accepted}");
 
     assert!(

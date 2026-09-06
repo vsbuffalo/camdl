@@ -239,6 +239,29 @@ pub struct PathRenewal {
     /// (no alternative ancestor was ever admissible), which is a different
     /// diagnosis from an acceptance rate of 0.
     pub as_accept: Option<f64>,
+    /// gh#864. [`Self::as_accept`] resolved into the same ten bins as
+    /// [`Self::bins`]: entry `b` is the acceptance rate over the ancestor-
+    /// sampling Metropolis steps that ran in the `b`-th tenth of the substep
+    /// series. `null` for a bin no retained sweep ever proposed a move in —
+    /// not `0.0`, which would report a move that was offered and always
+    /// refused.
+    ///
+    /// Published beside the profile because the pair is the reading: renewal
+    /// says where the path stopped moving, this says whether the ancestor move
+    /// was ever offered there and whether it landed. A profile that FALLS
+    /// toward `b0` says the splice gets harder further back — more subsequent
+    /// recorded history has to stay plausible under the new ancestor — while a
+    /// FLAT one says the proposal is mismatched uniformly in time. The scalar
+    /// [`Self::as_accept`] averages over exactly that difference.
+    ///
+    /// Aggregated like [`Self::bins`] and NOT like [`Self::as_accept`]: this is
+    /// the mean of the per-sweep bin rates, so it is reproducible from the
+    /// `as_accept_b<n>` columns of `trace.tsv` by hand and sits on the same
+    /// footing as the renewal row above it, while `as_accept` is the pooled
+    /// ratio over all proposals. The two therefore need not reconcile exactly —
+    /// they weight a sweep's proposals differently — and the pooled scalar
+    /// remains the authority on the overall rate.
+    pub as_accept_bins: Vec<Option<f64>>,
     /// Substeps at which the Metropolis step actually ran — the denominator of
     /// [`Self::as_accept`].
     pub n_as_proposed: u64,
@@ -288,13 +311,18 @@ pub struct AncestorEss {
 /// Accumulator for [`PathRenewal`] over the retained sweeps of every chain.
 ///
 /// A type rather than loose sums at the call site, for the same reason
-/// `RenewalBins` is one on the sim side: the "skip a bin no substep fell in"
+/// `PositionBins` is one on the sim side: the "skip a bin no substep fell in"
 /// rule is then written once, and the profile cannot be updated out of step
 /// with the aggregate it resolves.
 #[derive(Debug, Clone, Default)]
 pub struct PathRenewalAccum {
     bin_sum: [f64; RENEWAL_BINS],
     bin_n: [usize; RENEWAL_BINS],
+    /// gh#864: the acceptance profile, accumulated exactly as the renewal
+    /// profile above it — a sweep that proposed nothing in bin `b` is skipped
+    /// there rather than entered as a zero.
+    as_accept_bin_sum: [f64; RENEWAL_BINS],
+    as_accept_bin_n: [usize; RENEWAL_BINS],
     aggregate_sum: f64,
     aggregate_n: usize,
     n_sweeps: usize,
@@ -343,6 +371,17 @@ impl PathRenewalAccum {
                 self.bin_n[b] += 1;
             }
         }
+        // gh#864. Same rule, on the acceptance profile: non-finite is "the
+        // Metropolis step never ran in this bin on this sweep", which is not an
+        // acceptance rate of zero. Folding those in would report a move that
+        // was offered and refused everywhere, on the bins where it was never
+        // offered at all — the reading this profile exists to separate.
+        for (b, &v) in d.as_accept_by_bin.iter().enumerate() {
+            if v.is_finite() {
+                self.as_accept_bin_sum[b] += v;
+                self.as_accept_bin_n[b] += 1;
+            }
+        }
         if d.trajectory_renewal.is_finite() {
             self.aggregate_sum += d.trajectory_renewal;
             self.aggregate_n += 1;
@@ -374,6 +413,10 @@ impl PathRenewalAccum {
         let bins: Vec<Option<f64>> = (0..RENEWAL_BINS)
             .map(|b| (self.bin_n[b] > 0).then(|| self.bin_sum[b] / self.bin_n[b] as f64))
             .collect();
+        let as_accept_bins: Vec<Option<f64>> = (0..RENEWAL_BINS)
+            .map(|b| (self.as_accept_bin_n[b] > 0)
+                .then(|| self.as_accept_bin_sum[b] / self.as_accept_bin_n[b] as f64))
+            .collect();
         // Over the OBSERVED bins among the first half. A short series can leave
         // some of them empty (fewer substeps than bins), and averaging over the
         // ones that exist is the honest reading; a consumer that needs to know
@@ -398,6 +441,7 @@ impl PathRenewalAccum {
             gradient,
             aggregate,
             as_accept,
+            as_accept_bins,
             n_as_proposed: self.n_as_proposed,
             n_as_accepted: self.n_as_accepted,
             as_ess_pre: AncestorEss::of(self.as_ess_pre),
@@ -469,17 +513,25 @@ impl PathRenewal {
         };
         let labels: Vec<String> = (0..self.n_bins).map(|b| format!("   b{b}")).collect();
         let values: Vec<String> = self.bins.iter().map(|&v| cell(v)).collect();
+        // gh#864: the acceptance profile is printed directly under the renewal
+        // profile, on the same bins, because the pair is the reading — "the
+        // prefix does not renew" and "the splice is never accepted there" are
+        // one line apart or they are not compared at all.
+        let as_accept_values: Vec<String> =
+            self.as_accept_bins.iter().map(|&v| cell(v)).collect();
         let mut s = format!(
             "\npath renewal (gh#791; mean over {} retained post-burn-in sweep(s) \
-             across {} chain(s)):\n  bin      {}\n  renewal  {}\n",
+             across {} chain(s)):\n  bin        {}\n  renewal    {}\n  as accept  {}\n",
             self.n_sweeps,
             self.n_chains,
             labels.join(" "),
             values.join(" "),
+            as_accept_values.join(" "),
         );
         s.push_str(&format!(
             "  each bin is a fixed tenth of the substep series: b0 is its first \
-             tenth, b{} its last\n",
+             tenth, b{} its last;\n  NA is nothing recorded in that bin — no \
+             substep, or no ancestor move proposed — and never a measured 0\n",
             self.n_bins - 1,
         ));
         s.push_str(&format!(
@@ -492,7 +544,8 @@ impl PathRenewal {
             cell(self.aggregate),
         ));
         s.push_str(&format!(
-            "  ancestor-sampling acceptance: {} ({}/{} proposals)\n",
+            "  ancestor-sampling acceptance (pooled over proposals): {} \
+             ({}/{} proposals)\n",
             match self.as_accept {
                 Some(r) => format!("{:.4}", r),
                 None => "NA (no alternative ancestor was ever proposed)".to_string(),
@@ -533,7 +586,9 @@ mod tests {
 
     /// A `CSMCDiagnostics` carrying one sweep's profile and ancestor counters.
     /// Everything else is filled with values this module never reads, so a
-    /// test's numbers cannot come from anywhere but the two it sets.
+    /// test's numbers cannot come from anywhere but the two it sets. The
+    /// acceptance profile is left unmeasured (`NaN` throughout) unless a test
+    /// sets it — `sweep_as_accept` below is the one that does.
     fn sweep(profile: [f64; RENEWAL_BINS], as_proposed: usize, as_accepted: usize)
         -> CSMCDiagnostics
     {
@@ -555,6 +610,7 @@ mod tests {
             n_substeps: 100,
             n_as_proposed: as_proposed,
             n_as_accepted: as_accepted,
+            as_accept_by_bin: [f64::NAN; RENEWAL_BINS],
             n_as_refused_inadmissible: 0,
             weight_collapse: WeightCollapse::none(100),
             as_finite_frac: f64::NAN,
@@ -1110,11 +1166,121 @@ mod tests {
             "and it must say what a bin spans — `b0 = 0.03` is uninterpretable \
              without it:\n{text}");
         // Adjacency, asserted rather than eyeballed: the acceptance rate is
-        // useless unless it is read against the profile above it.
+        // useless unless it is read against the profile above it. "Same block"
+        // is stated two ways — an unbroken run of lines, and a bound on how
+        // many — because a line count alone would pass with a blank line
+        // between them, which is what separates one block from the next.
         let i_bins = text.find("renewal  ").expect("profile row");
         let i_as = text.find("ancestor-sampling").expect("acceptance line");
-        assert!(i_as > i_bins && text[i_bins..i_as].lines().count() <= 4,
+        assert!(i_as > i_bins, "the acceptance rate follows the profile:\n{text}");
+        // `trim_end` drops the indentation of the acceptance line itself, which
+        // is the partial last "line" of the slice and not a blank one.
+        let between = text[i_bins..i_as].trim_end();
+        assert!(between.lines().all(|l| !l.trim().is_empty()),
+            "nothing may break the block between the profile and the acceptance \
+             rate:\n{text}");
+        assert!(between.lines().count() <= 6,
             "as_accept must sit within the same block as the profile:\n{text}");
+    }
+
+    /// A `CSMCDiagnostics` carrying an acceptance profile, on the healthy
+    /// renewal profile so nothing else in the block can be read as coming from
+    /// it.
+    fn sweep_as_accept(as_accept: [f64; RENEWAL_BINS]) -> CSMCDiagnostics {
+        let mut d = sweep(HEALTHY, 0, 0);
+        d.as_accept_by_bin = as_accept;
+        d
+    }
+
+    /// gh#864: the acceptance profile is the mean down each column over the
+    /// sweeps that proposed a move in that bin, and a sweep that proposed none
+    /// there is absent from the mean rather than entered as a zero.
+    ///
+    /// The two are distinguishable by construction: bin 0 is measured on one
+    /// sweep at 0.40 and unmeasured on the other, so the column mean is 0.40
+    /// while folding the unmeasured sweep in as a zero would read 0.20.
+    #[test]
+    fn the_acceptance_profile_averages_only_the_sweeps_that_proposed_a_move() {
+        let mut first = [0.10; RENEWAL_BINS];
+        first[0] = 0.40;
+        let mut second = [0.30; RENEWAL_BINS];
+        second[0] = f64::NAN;
+        let diags: Vec<CSMCDiagnostics> =
+            vec![sweep_as_accept(first), sweep_as_accept(second)];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let pr = acc.finish().unwrap();
+
+        assert_eq!(pr.as_accept_bins.len(), RENEWAL_BINS, "one entry per bin");
+        assert_eq!(pr.as_accept_bins[0], Some(0.40),
+            "bin 0 was proposed in on one sweep only, so its mean is that \
+             sweep's 0.40 — a zero folded in for the other would read 0.20");
+        for b in 1..RENEWAL_BINS {
+            let v = pr.as_accept_bins[b].expect("both sweeps proposed here");
+            assert!((v - 0.20).abs() < 1e-12,
+                "bin {b} must be the mean of 0.10 and 0.30, got {v}");
+        }
+        assert_eq!(pr.n_sweeps, 2, "every sweep still counts toward the profile");
+    }
+
+    /// A bin no retained sweep ever proposed a move in is `null`, never `0.0` —
+    /// the same rule the renewal row uses, and the one that keeps "the move was
+    /// never offered here" separable from "it was offered and always refused".
+    /// Those are the two readings the whole profile exists to tell apart.
+    #[test]
+    fn a_bin_with_no_proposal_is_null_in_the_acceptance_profile_and_the_json() {
+        let mut profile = [f64::NAN; RENEWAL_BINS];
+        profile[0] = 0.0;
+        profile[9] = 0.5;
+        let diags: Vec<CSMCDiagnostics> = vec![sweep_as_accept(profile)];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let pr = acc.finish().unwrap();
+
+        assert_eq!(pr.as_accept_bins[0], Some(0.0),
+            "b0 was proposed in and never accepted — a measured zero, which is \
+             not the same reading as an unproposed bin");
+        assert_eq!(pr.as_accept_bins[4], None, "and an unproposed bin is null");
+
+        let json = serde_json::to_value(&pr).expect("serializes");
+        let bins = json["as_accept_bins"].as_array().expect("as_accept_bins array");
+        assert_eq!(bins.len(), RENEWAL_BINS);
+        assert!(bins[4].is_null(),
+            "null in the JSON too — a consumer must not read a refused move off \
+             a bin the move was never offered in: {json}");
+        assert_eq!(bins[0].as_f64(), Some(0.0),
+            "while a genuine zero survives as a zero: {json}");
+    }
+
+    /// The two rows are printed one above the other, on the same bins. A
+    /// falling acceptance profile is only legible against the renewal profile
+    /// it explains, and a reader who has to scroll between them will not
+    /// compare them.
+    #[test]
+    fn the_acceptance_profile_prints_directly_under_the_renewal_profile() {
+        // Falling toward b0: the shape the mechanistic claim predicts — a
+        // splice is harder the further back it happens.
+        let falling: [f64; RENEWAL_BINS] =
+            [0.029, 0.05, 0.09, 0.14, 0.21, 0.30, 0.42, 0.57, 0.71, 0.83];
+        let diags: Vec<CSMCDiagnostics> = vec![sweep_as_accept(falling)];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let text = acc.finish().unwrap().report();
+
+        assert!(text.contains("as accept"), "the row must be labelled:\n{text}");
+        assert!(text.contains("0.029") && text.contains("0.830"),
+            "both ends of the acceptance profile are printed:\n{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let i_renewal = lines.iter().position(|l| l.trim_start().starts_with("renewal"))
+            .expect("renewal row");
+        let i_accept = lines.iter().position(|l| l.trim_start().starts_with("as accept"))
+            .expect("acceptance row");
+        assert_eq!(i_accept, i_renewal + 1,
+            "the acceptance row must be the line directly after the renewal \
+             row, on the same bins:\n{text}");
+        // And the bin header they are both read against is directly above.
+        assert_eq!(i_renewal, lines.iter().position(|l| l.trim_start().starts_with("bin "))
+            .expect("bin header") + 1, "with the bin labels above both:\n{text}");
     }
 
     /// The artifact states its own bin span. A reader who has only the JSON —
