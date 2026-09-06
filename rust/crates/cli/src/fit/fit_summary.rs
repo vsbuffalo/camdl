@@ -797,6 +797,38 @@ fn num_col_width<'a>(rendered: impl Iterator<Item = &'a str>, min: usize) -> usi
     rendered.map(|v| v.chars().count()).max().unwrap_or(0).max(min)
 }
 
+/// Codepoint ranges [`display_width`] treats as occupying no cell of their own:
+/// the combining diacritical marks (U+0302, the accent in `R̂`) and the
+/// combining marks for symbols.
+const COMBINING_MARKS: [(char, char); 2] = [('\u{0300}', '\u{036F}'), ('\u{20D0}', '\u{20F0}')];
+
+/// How many terminal cells `s` occupies.
+///
+/// `chars().count()` — which is what Rust's own `{:>8}` pads by — is the wrong
+/// measure wherever a string carries a combining mark: `R̂` is `R` followed by
+/// U+0302 COMBINING CIRCUMFLEX ACCENT, two `char`s the terminal composes into
+/// one cell, so a field padded by `char` count comes out a cell short of the
+/// column it is meant to fill. Subtracting the combining marks is the whole of
+/// the correction these tables need — their labels are ASCII plus a diacritic,
+/// with nothing double-width in them — so a full Unicode width table would be a
+/// dependency bought for a handful of fixed strings.
+pub(super) fn display_width(s: &str) -> usize {
+    s.chars()
+        .filter(|c| !COMBINING_MARKS.iter().any(|(lo, hi)| c >= lo && c <= hi))
+        .count()
+}
+
+/// `s` right-aligned in a field `width` display cells wide: `{:>width$}` with
+/// [`display_width`] in place of `chars().count()`.
+///
+/// Reach for it wherever a padded cell can carry a combining mark, and leave
+/// `{:>N}` where the cell is plain ASCII. A hand-placed compensating space
+/// would do the same thing here and stop doing it the next time the string
+/// changes.
+fn right_align(s: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(display_width(s))) + s
+}
+
 /// `name` cut to `width` characters, ellipsized in the MIDDLE.
 ///
 /// The head gives way, not the tail: a stratified parameter's distinguishing
@@ -1748,9 +1780,13 @@ impl Formatter {
         // minimum width, so a name longer than it pushes every later
         // column right and the grid stops being one.
         let w = name_col_width(posterior_mean.keys().map(String::as_str), 14);
+        // Every header cell but the last is plain ASCII, where `{:>N}` pads to
+        // the right column. `R̂` is not: it is two `char`s in one cell, so
+        // `{:>8}` gave it a seven-cell field and the label sat one cell left of
+        // the eight-cell column of numbers it names.
         s.push_str(&format!(
-            "  {:w$} {:>14} {:>10} {:>10} {:>8}\n",
-            "param", "mean", "ESS bulk", "ESS tail", "R̂"
+            "  {:w$} {:>14} {:>10} {:>10} {}\n",
+            "param", "mean", "ESS bulk", "ESS tail", right_align("R̂", 8)
         ));
         for name in by_rhat_desc(diag, posterior_mean.keys().map(String::as_str)) {
             let mean = posterior_mean[name];
@@ -4533,12 +4569,45 @@ mod tests {
         let out = block(&fmt, "posterior", "pgas", no_traces,
             BayesianView::Pgas(&r), LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_POSTERIOR), concat!(
-"  param                    mean   ESS bulk   ESS tail       R̂\n",
+"  param                    mean   ESS bulk   ESS tail        R̂\n",
 "  tau                     240.8          8         10    4.870\n",
 "  beta                    6.178         12         19    2.104\n",
 "  alpha                  0.2351         41         88    1.412\n",
 "  gamma                  0.4806       1450       1610    1.008\n",
         ));
+    }
+
+    /// The posterior table's header sits over the columns it names, `R̂`
+    /// included.
+    ///
+    /// `{:>8}` pads to a `char` count, and `R̂` is `R` followed by U+0302
+    /// COMBINING CIRCUMFLEX ACCENT — two `char`s in one terminal cell — so that
+    /// header cell was seven cells wide against a column of eight-cell numbers,
+    /// and the label sat one cell left of what it labels. Measured in cells,
+    /// not in `char`s: a `chars().count()` check reports the broken header as
+    /// the same width as its rows, which is exactly how this survived.
+    #[test]
+    fn the_posterior_header_sits_over_its_columns_in_display_cells() {
+        let fmt = plain_formatter();
+        let no_traces = std::path::Path::new("/nonexistent/stage_dir");
+        let r = layout_pgas_result();
+        let out = block(&fmt, "posterior", "pgas", no_traces,
+            BayesianView::Pgas(&r), LoglikType::CompleteData);
+        let table = section_of(&out, SECTION_POSTERIOR);
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(lines.len() > 1, "header plus at least one row:\n{table}");
+        let widths: Vec<usize> = lines.iter().map(|l| display_width(l)).collect();
+        assert!(
+            widths.iter().all(|w| *w == widths[0]),
+            "the header is the same number of cells wide as its rows: {widths:?}\n{table}"
+        );
+        // The premise, asserted so the check above cannot go vacuous: the
+        // header is the line whose `char` count overstates the space it takes.
+        let header = lines[0];
+        assert_eq!(
+            header.chars().count(), widths[0] + 1,
+            "the accent makes the header one `char` wider than it prints:\n{header}"
+        );
     }
 
     /// The convergence table carries both halves of R̂, the classic statistic,
@@ -4868,7 +4937,7 @@ mod tests {
         let out = block(&fmt, "posterior", "pgas", no_traces,
             BayesianView::Pgas(&wide_range_pgas_result()), LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_POSTERIOR), concat!(
-"  param                         mean   ESS bulk   ESS tail       R\u{302}\n",
+"  param                         mean   ESS bulk   ESS tail        R\u{302}\n",
 "  I0_ituri                     240.8          9         21    3.481\n",
 "  kappa                     0.001854          9         17    3.412\n",
 "  phi_split_haut_uele          59.68         28        317    1.194\n",
