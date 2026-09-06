@@ -420,6 +420,25 @@ fit.toml would not, which is exactly why it's disallowed.
 extracts R̂, ESS, the MLE table, and any fired diagnostics. Eyeballing trace TSVs
 is for debugging the summary, not for routine inspection.
 
+**When a PGAS fit will not behave, read `camdl docs diagnosing-fits` before
+guessing.** It carries the readings for the per-sweep columns in
+`chain_N/trace.tsv` that most agents never open: path renewal by tenth of the
+trajectory, and the ancestor-sampling health block (`as_finite_frac`,
+`as_admissible_frac`, `as_ess_pre`, `as_ess_post`, `as_starved`). Those five
+separate three failures that all look like "the chains are stuck" — the ancestor
+move having no candidates, having candidates it cannot reach, and having
+reachable candidates the Metropolis step rejects. The fixes differ, and the
+aggregate acceptance rate cannot tell them apart.
+
+**A refused chain names what refused it.** `diagnostics.json` carries a
+`bad_init` record per refused chain, whose `attempts` array gives, per stream at
+the failing observation, the stream name, the date, the observed value, what the
+ensemble managed across the live particles, and the specific guard that produced
+`-inf` — with live and dead particle counts kept apart, so a process-model death
+is not read as an observation refusal. Read those fields rather than parsing the
+prose `reason`; the prose is rendered from them. Layout in `camdl-run-spec.md`
+§10.7.
+
 It leads with the verdict and the estimates; the diagnostics follow, and the
 posterior table is sorted worst-R̂ first so the problems are at the top rather
 than alphabetized among the healthy parameters. Two flags add material that is

@@ -790,7 +790,7 @@ which are model quantities, and which are sampler diagnostics — so a consumer
 can render or join a TSV without reverse-engineering its header.
 
 The full field-by-field contract is §9.5; the column-role vocabulary and the
-rendering rule it implies are §10.8.
+rendering rule it implies are §10.9.
 
 **Sub-artifacts have no `run.json`.** A trajectory leaf may declare an
 observation ensemble as a child at `obs/{obs_hash8}-{obs_seed}/`, holding one
@@ -2456,19 +2456,19 @@ restarting mid-schedule is statistically incoherent.
 
 **`pgas`** — `chains`, `particles`, `sweeps` required.
 
-| key                    | default | meaning                                                                                        |
-| ---------------------- | ------- | ---------------------------------------------------------------------------------------------- |
-| `burn_in`              | `2000`  | Discarded sweeps. Must be `< sweeps`.                                                          |
-| `thin`                 | `5`     | Retain every k-th post-burn-in sweep.                                                          |
-| `tempering`            | `[1.0]` | Parallel-tempering ladder of β ∈ (0,1]. First entry must be `1.0`; only the cold rung samples. |
-| `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                   |
-| `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                               |
-| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible). |
-| `csmc_sweeps_per_nuts` | `1`     | CSMC trajectory updates per parameter update.                                                  |
-| `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                             |
-| `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                             |
-| `use_nuts`             | `true`  | `false` falls back to MH-within-Gibbs for θ\|X.                                                |
-| `ancestor_sampling`    | `true`  | `false` runs plain particle Gibbs without the ancestor-sampling move (diagnostic control).     |
+| key                    | default | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `burn_in`              | `2000`  | Discarded sweeps. Must be `< sweeps`.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `thin`                 | `5`     | Retain every k-th post-burn-in sweep.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `tempering`            | `[1.0]` | Parallel-tempering ladder of β ∈ (0,1]. First entry must be `1.0`; only the cold rung samples.                                                                                                                                                                                                                                                                                                                                                                      |
+| `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible).                                                                                                                                                                                                                                                                                                                                                                      |
+| `csmc_sweeps_per_nuts` | `1`     | CSMC trajectory updates per parameter update.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `use_nuts`             | `true`  | `false` falls back to MH-within-Gibbs for θ\|X.                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `ancestor_sampling`    | `true`  | `false` runs plain particle Gibbs without the ancestor-sampling move — a valid kernel on its own, since ancestor sampling is a mixing addition and removing it leaves the invariant distribution intact. A diagnostic control, not a recommendation: run a stage both ways to measure how much the ancestor move is buying on this model. If path renewal is unchanged with it off, the move is contributing nothing and the freeze is structural in the genealogy. |
 
 **`pmmh`** — `chains`, `particles`, `iterations` required.
 
@@ -3884,7 +3884,7 @@ Three `ir::Model` fields are deliberately **not** hashed:
   rates over already-hashed parameters, so model identity is
   gradient-independent and a `--no-state-grad` compile keys the same.
 - `quantities` and `contrasts` — reporting-only reductions written to a
-  regenerated sidecar outside the leaf (§10.7), never to the leaf itself.
+  regenerated sidecar outside the leaf (§10.8), never to the leaf itself.
 
 One conditional inside `SimulationConfig::hash_into` (`ir_hash.rs:1046`): the
 integrator is folded **only when non-default**, i.e. only for
@@ -4267,7 +4267,7 @@ wildcard, and carries a populated `inputs`:
 | `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                        |
 | `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                 |
 | `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                         |
-| `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.8); omitted when empty                                             |
+| `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                             |
 | `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`); omitted when empty                                  |
 | `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                    |
 | `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed   |
@@ -4356,7 +4356,7 @@ sites check for the file rather than assume it.
 ## 10. Output File Schemas
 
 Every tabular output is tab-separated. The column _roles_ of the files a run
-writes are declared in `run.json.output_schema` (§10.8), read back from the
+writes are declared in `run.json.output_schema` (§10.9), read back from the
 file's own header, so a consumer never has to reverse-engineer a column name.
 
 ### 10.1 Trajectories (`traj.tsv`)
@@ -4623,14 +4623,51 @@ A sampler stage (PGAS, PMMH, NUTS, MH) additionally writes:
 | `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at stage end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                               |
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
 | `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared                                                                                                                                                                                                                                                                     |
-| `diagnostics.json`          | R̂ / ESS / divergence diagnostics                                                                                                                                                                                                                                                                                                                                                                         |
+| `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
 | `progress.json`             | sampler progress, written live                                                                                                                                                                                                                                                                                                                                                                           |
 
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
 `{name}={value:.12}\0` pairs, truncated to 8 hex — so a hand-edited parameter
 value is detectable. It is not a content hash of the file.
 
-### 10.7 Generated quantities
+### 10.7 A refused chain's `bad_init` record
+
+When a chain cannot start, `diagnostics.json` carries a `bad_init` record for
+it: the chain id, the full estimated-parameter vector it was refused at (so the
+refusal is reproducible), a one-line prose `reason`, and an `attempts` array.
+
+`attempts` is the structured half, and it is what downstream tooling should read
+— the prose is rendered from the same values, so parsing the sentence gets you
+the same facts less reliably. One entry per observation stream scheduled at the
+failing observation:
+
+| field                                 | what it holds                                                                                                                                                                |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stream`                              | the declared stream name, not its position in the observation queue                                                                                                          |
+| `time`, `date`                        | the observation's model time, and its calendar date when the run is anchored                                                                                                 |
+| `cell`                                | `Scored { y_obs }`, `Hole` (scheduled, value missing), or `NotScheduled` (a sibling stream's cadence). All three contribute `0.0` to the joint, and they are different facts |
+| `projected_max`, `projected_median`   | the stream's projected quantity across the **live** particles. `null` when no particle was live, or every projection was `NaN`                                               |
+| `n_projected_zero`, `n_projected_nan` | how many projections were exactly zero, and how many were `NaN`                                                                                                              |
+| `n_neg_inf`, `neg_inf_causes`         | live particles whose per-stream log-density was `-inf`, with the specific guard that fired                                                                                   |
+| `n_live`, `n_dead`, `n_particles`     | `n_live + n_dead == n_particles`                                                                                                                                             |
+
+**Dead particles are excluded from every other field**, and this is the point of
+the split rather than bookkeeping. A particle killed earlier by a chain-binomial
+overshoot carries `-inf` without the observation model having been consulted, so
+a mixture of process-model deaths and observation refusals would otherwise read
+as a unanimous observation refusal. A refusal with `n_dead` near `n_particles`
+is a process-model finding, not an observation one.
+
+Four readings, which have different fixes:
+
+| the numbers                                   | what it means                                                      |
+| --------------------------------------------- | ------------------------------------------------------------------ |
+| `projected_max` exactly 0, `y_obs` positive   | the model cannot produce this observation here — structural        |
+| `projected_max` small against a large `y_obs` | it can; this draw is far out — the prior is the thing to change    |
+| `projected_max` finite, `n_neg_inf == n_live` | read `neg_inf_causes`; this is a support violation, not a location |
+| `n_dead` near `n_particles`                   | a process-model failure that never reached the observation model   |
+
+### 10.8 Generated quantities
 
 `simulate --quantities-out DIR` writes `DIR/quantities/<name>.tsv` plus a
 `DIR/quantities.json` manifest (`schema: "camdl.quantities/v1"`). A single
@@ -4646,7 +4683,7 @@ evaluated from the run just performed, never read back from a stored leaf.
 Without the flag, a model that declares quantities prints a note and skips them
 rather than erroring.
 
-### 10.8 Declared column roles (`run.json.output_schema`)
+### 10.9 Declared column roles (`run.json.output_schema`)
 
 Rather than reconstruct a writer's column order — which would drift from the
 writer — camdl reads each written file's **actual header** and classifies every
@@ -4696,7 +4733,7 @@ omitted from `run.json` when empty.
 > / `tpeak_X` / `final_X` / `integral_X`). The `camdl experiment
 > summarize`
 > subcommand that produced those was removed. Equivalent reductions are
-> expressed in the model's `quantities {}` block (§10.7).
+> expressed in the model's `quantities {}` block (§10.8).
 
 ## 11. Predictive Workflows
 
