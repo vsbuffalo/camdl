@@ -770,6 +770,20 @@ fn name_col_width<'a>(names: impl Iterator<Item = &'a str>, min: usize) -> usize
         .clamp(min, NAME_COL_MAX)
 }
 
+/// The width a column of already-rendered numbers must have for every one of
+/// them to fit, never narrower than `min`.
+///
+/// The numeric twin of [`name_col_width`], and it has no upper bound for the
+/// same reason that one does: a name can be ellipsized and still identify its
+/// row, a number cannot be shortened without changing what it says. Callers
+/// render each value once and size the column to those strings — `{:<12.6}`
+/// bounds the decimals but not the integer part, so a value at or above `1e6`
+/// is fourteen characters in a twelve-wide field and moves every column after
+/// it on that row while its neighbours stay put.
+fn num_col_width<'a>(rendered: impl Iterator<Item = &'a str>, min: usize) -> usize {
+    rendered.map(|v| v.chars().count()).max().unwrap_or(0).max(min)
+}
+
 /// `name` cut to `width` characters, ellipsized in the MIDDLE.
 ///
 /// The head gives way, not the tail: a stratified parameter's distinguishing
@@ -1389,7 +1403,15 @@ impl Formatter {
         // Sized to the names present: `{:12}` was a minimum width, so a
         // longer name shifted the `=` and every column after it.
         let w = name_col_width(est_keys.iter().map(|k| k.as_str()), 12);
-        for k in est_keys {
+        // Rendered once so the value column can be sized to them too. `{:.6}`
+        // bounds the decimals but not the integer part, so a population-sized
+        // estimate (1e6 renders 14 characters) overran the 12-wide field and
+        // shifted the Â column and everything after it on that row alone.
+        let vals: Vec<String> =
+            est_keys.iter().map(|k| format!("{:.6}", state.start_values[*k])).collect();
+        let vw = num_col_width(vals.iter().map(|v| v.as_str()), 12);
+        for (k, val) in est_keys.iter().zip(&vals) {
+            let k = *k;
             let v = state.start_values[k];
             let agreement = state.tail_chain_agreement.get(k).copied();
             let agreement_str = match agreement {
@@ -1411,8 +1433,8 @@ impl Formatter {
                 Some(date) => format!("  ({})", date),
                 None => String::new(),
             };
-            s.push_str(&format!("    {:w$} = {:<12.6}  {}{}{}\n",
-                fit_name(k, w), v, agreement_str, t0_marker, date_marker));
+            s.push_str(&format!("    {:w$} = {:<vw$}  {}{}{}\n",
+                fit_name(k, w), val, agreement_str, t0_marker, date_marker));
         }
         s.push('\n');
         s
@@ -3601,6 +3623,39 @@ mod tests {
         assert!(
             sigma.contains("n/a"),
             "and it must say so, naming why:\n{sigma}"
+        );
+    }
+
+    /// A population-sized estimate must not push its own row's Â out of the
+    /// column every other row's sits in.
+    ///
+    /// `{:<12.6}` bounds the decimals but not the integer part, so a value at
+    /// or above `1e6` renders fourteen characters into a twelve-wide field and
+    /// shifts everything after it on that row alone. Every value in this
+    /// repository's fixtures is a single digit or smaller, which is exactly why
+    /// the overflow survived: it is invisible until a parameter is a
+    /// population, a case count, or a seed size.
+    #[test]
+    fn a_population_sized_estimate_does_not_shift_the_agreement_column() {
+        let mut state = synthetic_fit_state();
+        state.start_values.insert("N".into(), 2_400_000.0);
+        state.tail_chain_agreement.insert("N".into(), 1.02);
+        let fmt = plain_formatter();
+        let table = fmt.parameter_table(&state);
+        let cols: Vec<usize> = table
+            .lines()
+            .filter(|l| l.contains("Â="))
+            .map(|l| l.split("Â=").next().unwrap().chars().count())
+            .collect();
+        assert_eq!(cols.len(), 4, "one row per estimated parameter:\n{table}");
+        assert!(
+            cols.iter().all(|c| *c == cols[0]),
+            "every Â starts in the same column, whatever the magnitudes: {cols:?}\n{table}"
+        );
+        assert!(
+            table.contains("2400000.000000"),
+            "and the value is printed whole — a number cannot be ellipsized \
+             the way a name can:\n{table}"
         );
     }
 
