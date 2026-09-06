@@ -643,6 +643,137 @@ impl AncestorEssMean {
     }
 }
 
+/// How close to accepting a rejected ancestor-sampling proposal came:
+/// `log α > LOG_ALPHA_NEAR`.
+///
+/// One nat below parity — a candidate whose spliced suffix carries at least
+/// `e⁻¹ ≈ 0.37` of the reference's own suffix density, which the Metropolis coin
+/// therefore accepts better than a third of the time. Named once because the
+/// number is a reading convention and not a tuning knob: nothing in the sampler
+/// branches on it, and moving it changes only what
+/// [`CSMCDiagnostics::as_logalpha_near`] means.
+///
+/// One nat, rather than a value fitted to any run, because the question it
+/// answers is qualitative — is there real mass near parity, or is the whole
+/// distribution far below it? On the runs this instrument was built for the two
+/// candidate answers are "clustered around −20" and "spread with mass near 0",
+/// which no bar between roughly −0.1 and −5 would separate differently.
+pub const LOG_ALPHA_NEAR: f64 = -1.0;
+
+/// The ancestor-sampling acceptance ratio's own distribution over one sweep.
+///
+/// The Eq.-(21) Metropolis step compares the spliced suffix's density under the
+/// proposed ancestor with the one under the current ancestry:
+/// `log α = log s_prop − log s_ref`. The accept/reject outcome is already
+/// counted ([`CSMCDiagnostics::n_as_accepted`]); this is the quantity behind it,
+/// and it answers what the acceptance rate and the ancestor-weight ESS cannot.
+/// The ESS says how the *proposal* chooses among candidates; this says why the
+/// *accept test* refuses the one it chose:
+///
+/// - **clustered far below zero** (say around −20) — the reference's remaining
+///   history is hopeless under any other ancestor, and no better-informed
+///   proposal helps, because the candidates it would pick are refused for the
+///   same reason;
+/// - **spread, with real mass near zero** — the move is close to working, and a
+///   proposal that preferred the candidates already near parity would land it.
+///
+/// Those have different remedies, and the acceptance rate is the same small
+/// number in both.
+///
+/// # What is in the sample, and what is not
+///
+/// One entry per proposal whose ratio is a finite number — both suffix
+/// densities positive, so the coin actually decided. The two other branches of
+/// the accept test have no ratio to record:
+///
+/// - the proposed splice carries zero suffix density, refused outright and
+///   counted by [`CSMCDiagnostics::n_as_refused_inadmissible`];
+/// - the reference's own suffix carries zero density, in which case any finite
+///   candidate is accepted outright. That is a state a chain inside the support
+///   cannot be in; the branch exists as a backstop, not as a population.
+///
+/// They are excluded rather than entered as `∓∞` so every published value stays
+/// finite, which is what keeps `NaN` meaning "no data" throughout — an infinite
+/// median would serialize to JSON `null` and read as exactly the thing it is
+/// not. [`CSMCDiagnostics::n_as_logalpha`] carries the sample size, so a reader
+/// always has this sample against `n_as_proposed`.
+#[derive(Clone, Debug, Default)]
+pub struct AcceptRatioTally {
+    /// Every finite `log α` of the sweep, in substep order. Kept rather than
+    /// summarised online because a median cannot be accumulated in a scalar;
+    /// one `f64` per proposal, and a sweep cannot propose more moves than it
+    /// has substeps.
+    log_alphas: Vec<f64>,
+}
+
+impl AcceptRatioTally {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold in one proposal's acceptance ratio.
+    ///
+    /// A non-finite ratio is not recorded. The call site reaches this only on
+    /// the branch where both suffix densities are positive, so the ordinary
+    /// case is finite by construction — but `NaN` is representable as the
+    /// difference of two finite densities that an upstream defect made
+    /// nonsensical, and it must not reach the sample: the median sorts, and a
+    /// `NaN` makes that comparison undefined. A diagnostic must not be able to
+    /// abort a fit, so the guard is here rather than a `debug_assert!` that
+    /// disappears in the build users run. Such a proposal is then absent from
+    /// [`CSMCDiagnostics::n_as_logalpha`], which is what makes it visible: the
+    /// count no longer accounts for every proposal.
+    pub fn record(&mut self, log_alpha: f64) {
+        if log_alpha.is_finite() {
+            self.log_alphas.push(log_alpha);
+        }
+    }
+
+    /// The median over the sweep's proposals, or `NaN` when it made none with a
+    /// finite ratio.
+    ///
+    /// **The median, and deliberately not the mean.** `log α` is a log ratio
+    /// with a heavy left tail: a sweep whose proposals sit mostly near −200 with
+    /// a handful near −0.5 has a mean dominated by the hopeless ones, and would
+    /// report "hopeless" of a distribution with real mass near parity — the
+    /// exact opposite of the reading this exists to give. Do not add a mean
+    /// beside it and do not swap one in: the mean is not a summary of this
+    /// distribution, it is a summary of its tail.
+    pub fn median(&self) -> f64 {
+        let n = self.log_alphas.len();
+        if n == 0 {
+            return f64::NAN;
+        }
+        let mut xs = self.log_alphas.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).expect("finite by construction"));
+        if n % 2 == 0 {
+            (xs[n / 2 - 1] + xs[n / 2]) / 2.0
+        } else {
+            xs[n / 2]
+        }
+    }
+
+    /// Fraction of the sweep's proposals within [`LOG_ALPHA_NEAR`] of parity, or
+    /// `NaN` when it made none with a finite ratio.
+    ///
+    /// Carried beside the median because the two see different things: a
+    /// distribution can have a hopeless median and still put a tenth of its mass
+    /// near parity, which is a proposal problem and not a target problem.
+    pub fn near_frac(&self) -> f64 {
+        let n = self.log_alphas.len();
+        if n == 0 {
+            return f64::NAN;
+        }
+        let near = self.log_alphas.iter().filter(|&&a| a > LOG_ALPHA_NEAR).count();
+        near as f64 / n as f64
+    }
+
+    /// Proposals the two statistics are over.
+    pub fn n(&self) -> usize {
+        self.log_alphas.len()
+    }
+}
+
 /// Diagnostics from one CSMC-AS sweep.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CSMCDiagnostics {
@@ -724,6 +855,48 @@ pub struct CSMCDiagnostics {
     /// cannot separate those, and they have different remedies
     /// (`docs/diagnosing-fits.md`).
     pub as_accept_by_bin: [f64; RENEWAL_BINS],
+    /// gh#864. Median of `log α = log s_prop − log s_ref` over this sweep's
+    /// ancestor-sampling proposals — the Eq.-(21) acceptance ratio itself,
+    /// rather than the accept/reject outcome it produced. `NaN` when the sweep
+    /// made no proposal with a finite ratio.
+    ///
+    /// Answers what [`Self::as_accept_rate`] and the ancestor-weight ESS cannot:
+    /// the ESS says how the proposal *chooses*, this says why the accept test
+    /// *rejects*. Clustered around −20, the reference's remaining history is
+    /// hopeless under any other ancestor and no proposal can help; spread with
+    /// real mass near zero, the move is close to working and a better-informed
+    /// proposal would pick the winners. Different remedies, the same low
+    /// acceptance rate.
+    ///
+    /// **The median, never the mean.** A log ratio with a heavy left tail has a
+    /// mean dominated by its hopeless cases: mostly −200 with a few near −0.5
+    /// averages to "hopeless" on a distribution that has real mass near parity,
+    /// which is the opposite of the reading being sought. The reason is
+    /// recorded here so it is not "restored" as an oversight.
+    ///
+    /// Over the proposals whose ratio is a finite number — see
+    /// [`AcceptRatioTally`] for the two branches that have no ratio to record,
+    /// and [`Self::n_as_logalpha`] for the sample size.
+    pub as_logalpha_median: f64,
+    /// gh#864. Fraction of the same proposals with `log α` above
+    /// [`LOG_ALPHA_NEAR`] — how much of the distribution sits close enough to
+    /// parity that the Metropolis coin accepts it better than a third of the
+    /// time. `NaN` when the sweep made no proposal with a finite ratio.
+    ///
+    /// Beside [`Self::as_logalpha_median`] because the two see different things:
+    /// a hopeless median with a tenth of the mass near parity is a proposal that
+    /// is finding winners and failing to prefer them, which the median alone
+    /// reads as uniformly hopeless.
+    pub as_logalpha_near: f64,
+    /// gh#864. Proposals this sweep whose acceptance ratio was a finite number —
+    /// the denominator of [`Self::as_logalpha_median`] and
+    /// [`Self::as_logalpha_near`], and never larger than [`Self::n_as_proposed`].
+    ///
+    /// Published rather than left to be inferred: the gap to `n_as_proposed` is
+    /// the proposals refused with no ratio at all, and without it a `near`
+    /// fraction of 0.6 cannot be told from one measured over 5% of the sweep's
+    /// proposals.
+    pub n_as_logalpha: usize,
     /// Of `n_as_proposed`, how many were rejected because the EXACT suffix
     /// ratio was zero-density — a candidate the cheap screened weight admitted
     /// but the full ratio refused.
@@ -2610,6 +2783,11 @@ pub fn csmc_as(
     // below, through the same type, so the two profiles line up substep for
     // substep. Counters only, no RNG.
     let mut as_accept_bins = PositionBins::new(n_substeps);
+    // gh#864: and the ratio behind each of those decisions, which the accept
+    // test computes and discards. The outcome counters say how often the move
+    // landed; this says how far from landing the ones that did not were.
+    // Counters only, no RNG.
+    let mut as_logalpha = AcceptRatioTally::new();
 
     // gh#783: the FILTER weights' own degeneracy — a different vector from
     // `ancestor_log_w` below, and a different failure. `n_degenerate` counts
@@ -2902,6 +3080,14 @@ pub fn csmc_as(
                     true
                 } else {
                     let log_alpha = log_s_prop - log_s_ref;
+                    // gh#864: the ratio itself, before the coin consumes it.
+                    // Only this branch: the two above have no ratio — one
+                    // refuses a zero-density proposal (counted by
+                    // `n_as_refused_inadmissible`), the other escapes a
+                    // zero-density reference — and entering them as ∓∞ would
+                    // put an infinity in a published median, which serializes
+                    // to `null` and reads as "no data".
+                    as_logalpha.record(log_alpha);
                     log_alpha >= 0.0 || resample_rng.uniform().ln() < log_alpha
                 };
                 // gh#864: which tenth of the series this decision fell in.
@@ -3120,6 +3306,13 @@ pub fn csmc_as(
         // gh#864. `NaN` in every bin the Metropolis step never ran in, by the
         // same rule the renewal profile uses for a bin holding no substep.
         as_accept_by_bin: as_accept_bins.finish(),
+        // gh#864. Both `NaN` when the sweep made no proposal with a finite
+        // ratio — including a sweep whose every proposal was refused as
+        // zero-density, which measured no ratio even though it proposed. The
+        // count says which of those happened.
+        as_logalpha_median: as_logalpha.median(),
+        as_logalpha_near: as_logalpha.near_frac(),
+        n_as_logalpha: as_logalpha.n(),
         n_as_refused_inadmissible,
         weight_collapse,
         // Means over the AS steps that actually evaluated weights; NaN when
@@ -4315,6 +4508,8 @@ pub fn run_pgas(
                 n_degenerate: 0, n_resampled: 0, n_as_skipped_no_resample: 0, n_substeps: 0,
                 n_as_proposed: 0, n_as_accepted: 0,
                 as_accept_by_bin: [f64::NAN; RENEWAL_BINS],
+                as_logalpha_median: f64::NAN, as_logalpha_near: f64::NAN,
+                n_as_logalpha: 0,
                 n_as_refused_inadmissible: 0,
                 weight_collapse: WeightCollapse::none(config.n_particles),
                 as_finite_frac: f64::NAN, as_admissible_frac: f64::NAN,

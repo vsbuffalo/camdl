@@ -69,7 +69,7 @@
 use serde::{Deserialize, Serialize};
 
 use sim::inference::diagnostic::DiagnosticKind;
-use sim::inference::pgas::{CSMCDiagnostics, RENEWAL_BINS};
+use sim::inference::pgas::{CSMCDiagnostics, LOG_ALPHA_NEAR, RENEWAL_BINS};
 
 /// Leading bins the [`PathRenewal::prefix`] mean spans: the first half of the
 /// series, rounded down.
@@ -248,13 +248,13 @@ pub struct PathRenewal {
     ///
     /// Published beside the profile because the pair is the reading: renewal
     /// says where the path stopped moving, this says whether the ancestor move
-    /// was ever offered there and whether it landed. A profile that FALLS
+    /// was ever offered there and whether it landed. A profile that *falls*
     /// toward `b0` says the splice gets harder further back — more subsequent
     /// recorded history has to stay plausible under the new ancestor — while a
-    /// FLAT one says the proposal is mismatched uniformly in time. The scalar
+    /// *flat* one says the proposal is mismatched uniformly in time. The scalar
     /// [`Self::as_accept`] averages over exactly that difference.
     ///
-    /// Aggregated like [`Self::bins`] and NOT like [`Self::as_accept`]: this is
+    /// Aggregated like [`Self::bins`] and *not* like [`Self::as_accept`]: this is
     /// the mean of the per-sweep bin rates, so it is reproducible from the
     /// `as_accept_b<n>` columns of `trace.tsv` by hand and sits on the same
     /// footing as the renewal row above it, while `as_accept` is the pooled
@@ -271,7 +271,7 @@ pub struct PathRenewal {
     /// `SpliceGuard` mask, pooled over the same sweeps. In particles, not a
     /// fraction: read it against `as_finite_frac × particles` from `trace.tsv`,
     /// the candidates it is an effective count of.
-    pub as_ess_pre: AncestorEss,
+    pub as_ess_pre: SweepMedian,
     /// gh#864. The same after the mask — the effective number of ancestors the
     /// categorical draws from. Read against `as_admissible_frac × particles`.
     ///
@@ -280,7 +280,30 @@ pub struct PathRenewal {
     /// removing a dominant candidate whose splice was backward-infeasible. A
     /// low value here with a high one there is the guard concentrating the
     /// draw; low in both is the density doing it, and the remedies differ.
-    pub as_ess_post: AncestorEss,
+    pub as_ess_post: SweepMedian,
+    /// gh#864. Median over the retained sweeps of each sweep's own median
+    /// `log α = log s_prop − log s_ref` — the acceptance ratio behind the
+    /// Metropolis decisions, rather than the decisions themselves.
+    ///
+    /// The reading it settles, which neither the acceptance rate nor the
+    /// ancestor-weight ESS can: around −20, the reference's remaining history is
+    /// hopeless under any other ancestor, and improving the proposal changes
+    /// nothing because the candidates it would pick are refused for the same
+    /// reason. Near zero, or far down with [`Self::as_logalpha_near`] well above
+    /// zero, the move is close to landing and a proposal that preferred those
+    /// candidates would land it.
+    pub as_logalpha_median: SweepMedian,
+    /// gh#864. Median over the retained sweeps of the fraction of each sweep's
+    /// proposals within one nat of parity — how much of the acceptance ratio's
+    /// distribution sits close enough that the coin accepts it better than a
+    /// third of the time.
+    pub as_logalpha_near: SweepMedian,
+    /// gh#864. Proposals whose acceptance ratio was a finite number, pooled over
+    /// the same sweeps — the sample the two fields above summarise. The gap to
+    /// [`Self::n_as_proposed`] is the proposals refused with no ratio at all
+    /// (a zero-density spliced suffix), so a `near` fraction is always readable
+    /// against how much of the sweep it was measured over.
+    pub n_as_logalpha: u64,
     /// Retained post-burn-in sweeps the profile was averaged over, summed
     /// across chains.
     pub n_sweeps: usize,
@@ -288,21 +311,26 @@ pub struct PathRenewal {
     pub n_chains: usize,
 }
 
-/// One side of the `SpliceGuard` mask for the ancestor weights' effective
-/// sample size, pooled over the retained sweeps (gh#864).
+/// One per-sweep ancestor-sampling statistic, pooled over the retained sweeps
+/// as a median (gh#864).
 ///
-/// The median rather than the mean: a handful of sweeps where the ancestor
-/// weights happen to spread wide pull a mean well above what a typical sweep
-/// draws from, and the question this answers — "how many ancestors can the
-/// categorical reach on an ordinary sweep" — is a question about the typical
-/// sweep. Its denominator travels with it because sweeps that measured nothing
-/// are absent from the median, not entered as zero, so `n_sweeps` here can be
-/// smaller than [`PathRenewal::n_sweeps`].
+/// **The median rather than the mean**, for every statistic published this way,
+/// and for the same reason each time: these are heavy-tailed quantities where a
+/// handful of unrepresentative sweeps moves a mean a long way, and the question
+/// being asked is always about the *ordinary* sweep — how many ancestors the
+/// categorical can reach on one, how far from accepting its proposals are on
+/// one. A mean over the ancestor-weight ESS is pulled up by the few sweeps whose
+/// weights happen to spread; a mean over `log α` is pulled down by the hopeless
+/// proposals, which is worse, because it then reports "hopeless" of a
+/// distribution with real mass near parity.
+///
+/// The denominator travels with the value because a sweep that measured nothing
+/// is absent from the median rather than entered as zero, so `n_sweeps` here can
+/// be smaller than [`PathRenewal::n_sweeps`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AncestorEss {
-    /// Median over the sweeps that measured one, in particles. `null` when no
-    /// retained sweep did — ancestor sampling off, or no substep ever drew an
-    /// ancestry — which is a different reading from an ESS of zero.
+pub struct SweepMedian {
+    /// Median over the sweeps that measured the statistic. `null` when no
+    /// retained sweep did, which is a different reading from a measured zero.
     pub median: Option<f64>,
     /// Retained sweeps [`Self::median`] is over.
     pub n_sweeps: usize,
@@ -335,6 +363,11 @@ pub struct PathRenewalAccum {
     /// per-sweep diagnostics already held to compute the profile.
     as_ess_pre: Vec<f64>,
     as_ess_post: Vec<f64>,
+    /// gh#864: the per-sweep acceptance-ratio summaries, kept for the same
+    /// reason — a median cannot be accumulated in a scalar.
+    as_logalpha_median: Vec<f64>,
+    as_logalpha_near: Vec<f64>,
+    n_as_logalpha: u64,
 }
 
 impl PathRenewalAccum {
@@ -399,6 +432,19 @@ impl PathRenewalAccum {
         if d.as_ess_post.is_finite() {
             self.as_ess_post.push(d.as_ess_post);
         }
+        // gh#864. Non-finite is "this sweep measured no acceptance ratio" —
+        // it proposed nothing, or everything it proposed was refused as
+        // zero-density and so carried no ratio at all. Dropped, not zeroed:
+        // a `log α` of 0 is parity, the best reading there is, and inventing
+        // one for a sweep that measured nothing would report the opposite of
+        // what happened.
+        if d.as_logalpha_median.is_finite() {
+            self.as_logalpha_median.push(d.as_logalpha_median);
+        }
+        if d.as_logalpha_near.is_finite() {
+            self.as_logalpha_near.push(d.as_logalpha_near);
+        }
+        self.n_as_logalpha += d.n_as_logalpha as u64;
     }
 
     /// Close the accumulator.
@@ -444,19 +490,22 @@ impl PathRenewalAccum {
             as_accept_bins,
             n_as_proposed: self.n_as_proposed,
             n_as_accepted: self.n_as_accepted,
-            as_ess_pre: AncestorEss::of(self.as_ess_pre),
-            as_ess_post: AncestorEss::of(self.as_ess_post),
+            as_ess_pre: SweepMedian::of(self.as_ess_pre),
+            as_ess_post: SweepMedian::of(self.as_ess_post),
+            as_logalpha_median: SweepMedian::of(self.as_logalpha_median),
+            as_logalpha_near: SweepMedian::of(self.as_logalpha_near),
+            n_as_logalpha: self.n_as_logalpha,
             n_sweeps: self.n_sweeps,
             n_chains: self.n_chains,
         })
     }
 }
 
-impl AncestorEss {
-    /// Close over the per-sweep values collected for one side of the mask.
+impl SweepMedian {
+    /// Close over the per-sweep values collected for one statistic.
     ///
-    /// `values` holds only the sweeps that measured an ESS, so the count
-    /// published beside the median is the count the median is actually over.
+    /// `values` holds only the sweeps that measured it, so the count published
+    /// beside the median is the count the median is actually over.
     fn of(mut values: Vec<f64>) -> Self {
         let n_sweeps = values.len();
         values.sort_by(|a, b| a.partial_cmp(b).expect("finite by construction"));
@@ -467,7 +516,7 @@ impl AncestorEss {
             n if n % 2 == 0 => Some((values[n / 2 - 1] + values[n / 2]) / 2.0),
             n => Some(values[n / 2]),
         };
-        AncestorEss { median, n_sweeps }
+        SweepMedian { median, n_sweeps }
     }
 }
 
@@ -557,7 +606,7 @@ impl PathRenewal {
         // the rate leaves open: a low rate at a healthy post-mask ESS is the
         // suffix ratio rejecting real choices, while a low rate at an ESS near
         // 1 is a categorical that had no choice to reject.
-        let ess_cell = |e: &AncestorEss| match e.median {
+        let ess_cell = |e: &SweepMedian| match e.median {
             Some(x) => format!("{x:.2}"),
             None => "NA".to_string(),
         };
@@ -570,6 +619,27 @@ impl PathRenewal {
             self.as_ess_pre.n_sweeps,
             ess_cell(&self.as_ess_post),
             self.as_ess_post.n_sweeps,
+        ));
+        // gh#864. The ratio behind the accept/reject decisions, which the two
+        // lines above cannot show: the ESS says how the proposal *chooses*, this
+        // says why the accept test *refuses* what it chose.
+        s.push_str(&format!(
+            "  acceptance ratio log α (median over sweeps): {}   \
+             fraction above {LOG_ALPHA_NEAR}: {}\n  \
+             over {} proposal(s) with a finite ratio, of {} proposed; the rest \
+             carried no ratio (zero-density suffix).\n  \
+             Clustered far below 0, no proposal helps; spread with mass near 0, \
+             a better-informed proposal would land the move.\n",
+            match self.as_logalpha_median.median {
+                Some(x) => format!("{x:.3}"),
+                None => "NA".to_string(),
+            },
+            match self.as_logalpha_near.median {
+                Some(x) => format!("{x:.4}"),
+                None => "NA".to_string(),
+            },
+            self.n_as_logalpha,
+            self.n_as_proposed,
         ));
         s
     }
@@ -613,6 +683,9 @@ mod tests {
             as_accept_by_bin: [f64::NAN; RENEWAL_BINS],
             n_as_refused_inadmissible: 0,
             weight_collapse: WeightCollapse::none(100),
+            as_logalpha_median: f64::NAN,
+            as_logalpha_near: f64::NAN,
+            n_as_logalpha: 0,
             as_finite_frac: f64::NAN,
             as_admissible_frac: f64::NAN,
             as_ess_pre: f64::NAN,
@@ -1250,6 +1323,102 @@ mod tests {
              a bin the move was never offered in: {json}");
         assert_eq!(bins[0].as_f64(), Some(0.0),
             "while a genuine zero survives as a zero: {json}");
+    }
+
+    /// One sweep carrying only the gh#864 acceptance-ratio summaries, on the
+    /// healthy renewal profile so nothing else in the block can be read as
+    /// coming from them.
+    fn sweep_logalpha(median: f64, near: f64, n: usize) -> CSMCDiagnostics {
+        let mut d = sweep(HEALTHY, 0, 0);
+        d.as_logalpha_median = median;
+        d.as_logalpha_near = near;
+        d.n_as_logalpha = n;
+        d
+    }
+
+    /// gh#864: the published ratio summaries are medians over the sweeps that
+    /// measured one, and a sweep that measured none is absent rather than
+    /// entered as a zero.
+    ///
+    /// Zero is parity — the best reading a `log α` can carry — so folding an
+    /// unmeasured sweep in as one does not merely dilute the number, it reports
+    /// the opposite of what happened. Distinguishable by construction: over
+    /// `[−30, −6, −2]` the median is −6, while an invented zero would give
+    /// `[−30, −6, −2, 0]` and −4.
+    #[test]
+    fn the_ratio_summaries_are_over_the_sweeps_that_measured_one() {
+        let diags: Vec<CSMCDiagnostics> = vec![
+            sweep_logalpha(-30.0, 0.10, 20),
+            sweep_logalpha(-6.0, 0.20, 15),
+            sweep_logalpha(f64::NAN, f64::NAN, 0),
+            sweep_logalpha(-2.0, 0.60, 5),
+        ];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let pr = acc.finish().unwrap();
+
+        assert_eq!(pr.n_sweeps, 4, "every sweep still counts toward the profile");
+        assert_eq!(pr.as_logalpha_median.n_sweeps, 3,
+            "but the ratio median is over the three sweeps that measured one");
+        assert_eq!(pr.as_logalpha_median.median, Some(-6.0),
+            "median of [−30, −6, −2] is −6 — a zero folded in for the \
+             unmeasured sweep would read −4, and a zero is *parity*");
+        assert_eq!(pr.as_logalpha_near.median, Some(0.20));
+        assert_eq!(pr.n_as_logalpha, 40,
+            "and the sample size is pooled over every sweep: 20 + 15 + 0 + 5");
+    }
+
+    /// The sample size is published because the fraction near parity is
+    /// unreadable without it — `null` for the median, and a pooled count that
+    /// is still a measurement, are different facts and both survive into the
+    /// JSON.
+    #[test]
+    fn a_stage_that_measured_no_ratio_reports_null_with_its_denominator() {
+        let diags: Vec<CSMCDiagnostics> = vec![sweep_logalpha(f64::NAN, f64::NAN, 0)];
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain(diags.iter());
+        let pr = acc.finish().unwrap();
+        assert_eq!(pr.as_logalpha_median.median, None);
+        assert_eq!(pr.as_logalpha_near.median, None);
+        assert_eq!(pr.n_as_logalpha, 0);
+
+        let json = serde_json::to_value(&pr).expect("serializes");
+        assert!(json["as_logalpha_median"]["median"].is_null(),
+            "null in the JSON — a consumer must not read parity off a stage \
+             that measured no ratio at all: {json}");
+        assert_eq!(json["n_as_logalpha"].as_u64(), Some(0),
+            "with the sample size beside it: {json}");
+    }
+
+    /// The printed block carries the ratio beside the outcome counters it
+    /// explains, with the sample it is over. A median with no denominator is a
+    /// number a reader cannot act on.
+    #[test]
+    fn the_report_prints_the_ratio_with_the_sample_it_is_over() {
+        let mut d = sweep(COALESCED, 1000, 16);
+        d.as_logalpha_median = -12.375;
+        d.as_logalpha_near = 0.0314;
+        d.n_as_logalpha = 640;
+        let mut acc = PathRenewalAccum::new();
+        acc.add_chain([d].iter());
+        let text = acc.finish().unwrap().report();
+
+        assert!(text.contains("acceptance ratio log"),
+            "the block must name the statistic:\n{text}");
+        assert!(text.contains("-12.375"), "with the median:\n{text}");
+        assert!(text.contains("0.0314"), "and the fraction near parity:\n{text}");
+        assert!(text.contains("640") && text.contains("1000"),
+            "and the sample it is over against the proposals made:\n{text}");
+        // The word "mean" is legitimate elsewhere in the block — the profile
+        // is one, over sweeps. What must never appear is a mean *of the ratio*.
+        let ratio_line = text.lines().find(|l| l.contains("acceptance ratio log"))
+            .expect("ratio line");
+        assert!(!ratio_line.contains("mean"),
+            "the ratio is summarised by a median and never a mean — on a log \
+             ratio's left tail the mean reports the opposite of the \
+             distribution: {ratio_line}");
+        assert!(ratio_line.contains("median"),
+            "and it must say which summary it is: {ratio_line}");
     }
 
     /// The two rows are printed one above the other, on the same bins. A

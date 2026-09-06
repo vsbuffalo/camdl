@@ -431,6 +431,45 @@ The two shapes are what the sweep-level rate cannot separate: a run accepting
 nothing before the midpoint and everything after it, and a run accepting half of
 everything everywhere, report the identical scalar.
 
+**When the move is being rejected, ask how narrowly.** The accept test compares
+the spliced suffix's density under the proposed ancestor with the one under the
+current ancestry, and rejects on the ratio `log α = log s_prop − log s_ref` — a
+number the sampler computes at every proposal. Three `trace.tsv` columns report
+its distribution over a sweep:
+
+| column               | what it holds                                            |
+| -------------------- | -------------------------------------------------------- |
+| `as_logalpha_median` | median `log α` over the sweep's proposals, in nats       |
+| `as_logalpha_near`   | fraction of them above −1, i.e. within one nat of parity |
+| `as_logalpha_n`      | proposals the two are over — those with a finite ratio   |
+
+This is a different question from the ESS columns above, and the two are not
+substitutes: the ESS says how the _proposal_ chooses among candidates, the ratio
+says why the _accept test_ refuses the one it chose.
+
+- **A median clustered far below zero** — around −20, say — with
+  `as_logalpha_near` near zero: the reference's remaining history is not
+  plausible under any other ancestor the ensemble holds. A better-informed
+  proposal will not help, because the candidates it would pick are refused for
+  the same reason. The lever is the structure of the update, or more particles
+  so the ensemble holds a genuinely compatible prefix.
+- **A median far below zero but `as_logalpha_near` well above it** — a fifth of
+  the proposals at parity, the rest hopeless — the move is already finding
+  winners and failing to prefer them. That is a proposal problem, and a proposal
+  that used information from the suffix it has to keep would land the move.
+
+`as_logalpha_n` is not decoration: proposals whose spliced suffix carries zero
+density have no ratio to record and are excluded, so a `near` of 0.6 measured
+over 5% of a sweep's proposals says something very different from the same 0.6
+over all of them. The gap between `as_logalpha_n` and `as_proposed` is that
+excluded population.
+
+**No mean is reported, and none should be added.** `log α` is a log ratio with a
+heavy left tail: a sweep with seven proposals near −0.5 and three at −1000 has a
+mean of −300 and a median of −0.5. The mean reads "hopeless under any other
+ancestor" of a move that is landing better than half the time it is offered — it
+summarises the tail, not the distribution.
+
 **When you re-run at more particles, compare the profile and the aggregate — not
 the gradient.** The gradient describes a shape, and raising the particle count
 can steepen that shape even as the sampler improves. Measured on one model

@@ -839,7 +839,7 @@ pub fn run_stage(
                 .map(|n| super::loglik::trace_col_obs_ll_stream(n))
                 .collect();
             let mut trace_columns: Vec<&str> =
-                Vec::with_capacity(2 * RENEWAL_BINS + 17 + obs_ll_stream_columns.len());
+                Vec::with_capacity(2 * RENEWAL_BINS + 25 + obs_ll_stream_columns.len());
             trace_columns.push("trajectory_renewal");
             trace_columns.extend(RENEWAL_BIN_COLUMNS);
             // gh#783: `collapsed_windows` is how many of the sweep's
@@ -905,7 +905,21 @@ pub fn run_stage(
             // acceptance rate of zero.
             trace_columns.extend(["as_opportunity", "as_accept", "as_proposed"]);
             trace_columns.extend(AS_ACCEPT_BIN_COLUMNS);
+            // `as_logalpha_median` / `as_logalpha_near` / `as_logalpha_n`
+            // (gh#864): the Eq.-(21) acceptance *ratio* behind those decisions,
+            // which the accept test computes and discards. The ESS columns
+            // below say how the proposal chooses; these say why the accept test
+            // rejects. A median near −20 is a remaining history that is
+            // hopeless under any other ancestor, and no proposal helps; a
+            // median far down with `as_logalpha_near` well above zero is a
+            // distribution with real mass at parity, and a proposal that
+            // preferred those candidates would land the move. The median and
+            // never the mean: a log ratio's mean is dominated by its left tail
+            // and would report "hopeless" of the second case. `as_logalpha_n`
+            // is the sample size — the proposals whose ratio was finite, the
+            // rest having been refused as zero-density.
             trace_columns.extend([
+                  "as_logalpha_median", "as_logalpha_near", "as_logalpha_n",
                   "as_finite_frac", "as_admissible_frac",
                   "as_ess_pre", "as_ess_post", "as_starved",
                   super::loglik::TRACE_COL_TRANSITION_LL,
@@ -1002,6 +1016,22 @@ pub fn run_stage(
                 let as_accept_bins: Vec<String> = result.csmc_diag.as_accept_by_bin.iter()
                     .map(|&r| if r.is_finite() { format!("{r:.4}") } else { "NA".to_string() })
                     .collect();
+                // gh#864: the acceptance ratio's own distribution. `NA` when
+                // the sweep made no proposal with a finite ratio — which
+                // includes a sweep that proposed and had every proposal refused
+                // as zero-density, so `as_logalpha_n` travels beside them.
+                // Four decimals: the median is a log ratio in nats, which runs
+                // to the hundreds, and the fraction is in [0,1].
+                let fmt_logalpha = |v: f64| if v.is_finite() {
+                    format!("{v:.4}")
+                } else {
+                    "NA".to_string()
+                };
+                let as_logalpha_median_str =
+                    fmt_logalpha(result.csmc_diag.as_logalpha_median);
+                let as_logalpha_near_str =
+                    fmt_logalpha(result.csmc_diag.as_logalpha_near);
+                let as_logalpha_n_str = result.csmc_diag.n_as_logalpha.to_string();
                 // Starvation instrument: `NA` when no AS step ran this sweep,
                 // same convention as `as_accept`.
                 let fmt_frac = |v: f64| if v.is_finite() {
@@ -1040,7 +1070,7 @@ pub fn run_stage(
                 let n_divergent_str = nd.n_divergent.to_string();
                 let energy_str = format!("{:.4}", nd.energy);
                 let mut extra: Vec<&str> =
-                    Vec::with_capacity(2 * RENEWAL_BINS + 19 + obs_ll_stream_strs.len());
+                    Vec::with_capacity(2 * RENEWAL_BINS + 25 + obs_ll_stream_strs.len());
                 extra.push(&renewal);
                 extra.extend(renewal_bins.iter().map(String::as_str));
                 extra.extend([collapsed_windows_str.as_str(), min_alive_str.as_str()]);
@@ -1051,6 +1081,8 @@ pub fn run_stage(
                 ]);
                 extra.extend(as_accept_bins.iter().map(String::as_str));
                 extra.extend([
+                    as_logalpha_median_str.as_str(), as_logalpha_near_str.as_str(),
+                    as_logalpha_n_str.as_str(),
                     as_finite_frac_str.as_str(), as_admissible_frac_str.as_str(),
                     as_ess_pre_str.as_str(), as_ess_post_str.as_str(),
                     as_starved_str.as_str(),
