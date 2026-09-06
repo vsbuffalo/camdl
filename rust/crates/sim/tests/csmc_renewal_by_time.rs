@@ -239,6 +239,12 @@ struct SweepProfile {
     /// gh#864: the ancestor-sampling acceptance rate over the same ten bins —
     /// the row the renewal profile is read against.
     as_accept_by_bin: [f64; RENEWAL_BINS],
+    /// gh#864: the acceptance *ratio*'s distribution over the sweep's proposals,
+    /// and the sample size the two summaries are over.
+    as_logalpha_median: f64,
+    as_logalpha_near: f64,
+    n_as_logalpha: usize,
+    as_refused: usize,
 }
 
 fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
@@ -293,6 +299,10 @@ fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
                 as_proposed: diag.n_as_proposed,
                 as_accepted: diag.n_as_accepted,
                 as_accept_by_bin: diag.as_accept_by_bin,
+                as_logalpha_median: diag.as_logalpha_median,
+                as_logalpha_near: diag.as_logalpha_near,
+                n_as_logalpha: diag.n_as_logalpha,
+                as_refused: diag.n_as_refused_inadmissible,
             }
         })
         .collect()
@@ -420,6 +430,56 @@ fn the_acceptance_profile_is_a_record_of_real_proposals() {
          acceptance rate — the profile carries no positional resolution at all");
 }
 
+/// gh#864: the acceptance ratio's distribution, tied to the counters that
+/// account for the same proposals.
+///
+/// The sample is the proposals whose ratio is a finite number — both suffix
+/// densities positive, so the coin actually decided. The proposals refused for
+/// carrying zero suffix density have no ratio and are counted separately, so
+/// the two counts can never together exceed the proposals made. Publishing the
+/// sample size is what lets a reader take `as_logalpha_near` at face value: a
+/// fraction of 0.6 measured over 5% of a sweep's proposals is a different
+/// statement from one measured over all of them.
+#[test]
+fn the_acceptance_ratio_sample_is_accounted_for_against_the_proposals() {
+    const SWEEPS: u64 = 12;
+    let profiles = sweeps(SWEEPS, 32);
+    let mut any_measured = false;
+
+    for (i, p) in profiles.iter().enumerate() {
+        assert!(p.n_as_logalpha <= p.as_proposed,
+            "sweep {i}: {} finite ratios recorded over {} proposals — the \
+             sample cannot be larger than what was proposed",
+            p.n_as_logalpha, p.as_proposed);
+        assert!(p.n_as_logalpha + p.as_refused <= p.as_proposed,
+            "sweep {i}: {} proposals with a finite ratio plus {} refused as \
+             zero-density exceed the {} proposed — every proposal is one or \
+             the other (or the zero-density-reference escape, which a chain \
+             inside the support cannot take)",
+            p.n_as_logalpha, p.as_refused, p.as_proposed);
+
+        let measured = p.n_as_logalpha > 0;
+        assert_eq!(p.as_logalpha_median.is_finite(), measured,
+            "sweep {i}: the median is a number exactly when the sample is \
+             non-empty ({} recorded, median {})",
+            p.n_as_logalpha, p.as_logalpha_median);
+        assert_eq!(p.as_logalpha_near.is_finite(), measured,
+            "sweep {i}: and so is the fraction near parity ({} recorded, \
+             near {})", p.n_as_logalpha, p.as_logalpha_near);
+        if measured {
+            any_measured = true;
+            assert!((0.0..=1.0).contains(&p.as_logalpha_near),
+                "sweep {i}: a fraction must lie in [0,1], got {}",
+                p.as_logalpha_near);
+        }
+    }
+
+    assert!(any_measured,
+        "this fixture is only a test of the ratio while proposals reach the \
+         Metropolis step with a finite suffix ratio; none of {SWEEPS} sweeps \
+         did");
+}
+
 /// Negative control: on a healthy sweep — one where ancestor sampling is
 /// proposing and accepting splices — renewal is roughly uniform in t. No bin
 /// is starved relative to the series as a whole, which is the flat LJS
@@ -478,6 +538,20 @@ fn a_healthy_sweep_renews_roughly_uniformly_in_time() {
     );
     eprintln!("AS acceptance by time bin (sweeps measuring each: {acc_n:?}): {as_accept_by_bin:?}");
     eprintln!("  aggregate renewal {mean_renewal:.3} | AS proposed {proposed} accepted {accepted}");
+    // gh#864: and the ratio behind those decisions, over the sweeps that
+    // measured one.
+    let logalpha: Vec<f64> = profiles.iter()
+        .map(|p| p.as_logalpha_median).filter(|v| v.is_finite()).collect();
+    let near: Vec<f64> = profiles.iter()
+        .map(|p| p.as_logalpha_near).filter(|v| v.is_finite()).collect();
+    let n_ratio: usize = profiles.iter().map(|p| p.n_as_logalpha).sum();
+    let n_refused: usize = profiles.iter().map(|p| p.as_refused).sum();
+    eprintln!(
+        "  AS log-alpha: per-sweep medians {:?} | fractions above -1 {:?}",
+        logalpha.iter().map(|v| format!("{v:.2}")).collect::<Vec<_>>(),
+        near.iter().map(|v| format!("{v:.2}")).collect::<Vec<_>>(),
+    );
+    eprintln!("  over {n_ratio} proposals with a finite ratio, {n_refused} refused as zero-density");
 
     assert!(
         accepted > 0,

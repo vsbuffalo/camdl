@@ -284,6 +284,30 @@ fn ancestor_ess_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>) {
     (pre, post)
 }
 
+/// gh#864: the per-sweep acceptance-ratio columns over the same retained
+/// post-burn-in sweeps. Returns `(medians, fractions near parity, pooled
+/// sample size)`; `NA` — a sweep that measured no finite ratio — is skipped.
+fn logalpha_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>, u64) {
+    let (mut median, mut near, mut n) = (Vec::new(), Vec::new(), 0u64);
+    for c in 1..=CHAINS {
+        let (header, rows) = trace(stage, c);
+        for row in &rows {
+            let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
+            if sweep < BURN_IN { continue; }
+            n += col(&header, row, "as_logalpha_n")
+                .parse::<u64>().expect("as_logalpha_n parses");
+            for (name, sink) in [("as_logalpha_median", &mut median),
+                                 ("as_logalpha_near", &mut near)] {
+                let v = col(&header, row, name);
+                if v == "NA" { continue; }
+                sink.push(v.parse::<f64>()
+                    .unwrap_or_else(|e| panic!("{name} = {v:?} ({e})")));
+            }
+        }
+    }
+    (median, near, n)
+}
+
 /// Median of a sample, or `None` when it is empty — the same convention the
 /// summary uses, recomputed here so the published number is checked against
 /// the sampler's own record rather than restated.
@@ -477,12 +501,46 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
              bins that resolve it [{lo}, {hi}]; profile {as_accept_bins:?}");
     }
 
+    // ── The acceptance ratio's own distribution (gh#864) ──────────────────
+    // The outcome counters say how often the move landed; these say how far
+    // from landing the ones that did not were, which is what decides between
+    // "no proposal can help" and "a better-informed proposal would".
+    let (ratio_median, ratio_near, n_ratio) = logalpha_from_traces(&stage);
+    assert_eq!(pr["n_as_logalpha"].as_u64(), Some(n_ratio),
+        "the block must publish the sample size the two ratio summaries are \
+         over — the sum of the `as_logalpha_n` column over the retained sweeps");
+    assert!(n_ratio <= n_prop,
+        "the ratio sample ({n_ratio}) cannot exceed the proposals ({n_prop})");
+    for (key, from_trace) in [("as_logalpha_median", &ratio_median),
+                              ("as_logalpha_near", &ratio_near)] {
+        let block = &pr[key];
+        assert_eq!(block["n_sweeps"].as_u64(), Some(from_trace.len() as u64),
+            "{key} must say how many retained sweeps measured one — the \
+             non-`NA` rows of its own trace column");
+        match (block["median"].as_f64(), median_of(from_trace.clone())) {
+            (Some(published), Some(recomputed)) => assert!(
+                (published - recomputed).abs() < 1e-3,
+                "{key} must be the median of its own trace column over the \
+                 retained sweeps: published {published}, recomputed \
+                 {recomputed}"),
+            (None, None) => {}
+            (p, t) => panic!(
+                "{key}: summary says {p:?} while the traces say {t:?}; the \
+                 median is null exactly when no retained sweep measured one"),
+        }
+    }
+    if let Some(near) = pr["as_logalpha_near"]["median"].as_f64() {
+        assert!((0.0..=1.0).contains(&near),
+            "the fraction near parity is a fraction: {near}");
+    }
+
     // ── The aggregate is not replaced ─────────────────────────────────────
     // `trajectory_renewal` is what downstream tools read today, and it stays
     // where they read it.
     let (header, _) = trace(&stage, 1);
     for c in ["trajectory_renewal", "renewal_b0", "renewal_b9", "as_accept",
               "as_accept_b0", "as_accept_b9",
+              "as_logalpha_median", "as_logalpha_near", "as_logalpha_n",
               "as_ess_pre", "as_ess_post"] {
         assert!(header.iter().any(|h| h == c),
             "trace.tsv must keep the `{c}` column; header was {header:?}");
@@ -511,6 +569,13 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     assert!(stderr.contains("ancestor-weight ESS"),
         "and the ancestor-weight ESS beside the acceptance rate it qualifies; \
          stderr was:\n{stderr}");
+    // gh#864: and the ratio behind the accept/reject decisions — the ESS says
+    // how the proposal chooses, this says why the accept test refuses.
+    assert!(stderr.contains("acceptance ratio log"),
+        "and the acceptance ratio's distribution; stderr was:\n{stderr}");
+    assert!(stderr.contains("finite ratio"),
+        "with the sample it is over, since the proposals refused as \
+         zero-density carry no ratio; stderr was:\n{stderr}");
     assert!(stderr.contains("tenth"),
         "and it must say what a bin spans wherever it prints one; stderr was:\n{stderr}");
 }

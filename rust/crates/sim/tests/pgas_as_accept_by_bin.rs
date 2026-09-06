@@ -54,7 +54,7 @@ fn a_bin_with_no_proposal_is_unmeasured_not_zero() {
         "the bin that was proposed in and refused reads a measured 0.0; \
          profile {profile:?}");
     assert_eq!(measured(&profile), vec![RENEWAL_BINS - 1],
-        "and it is the ONLY measured bin — the other nine were never proposed \
+        "and it is the *only* measured bin — the other nine were never proposed \
          in, so they carry no rate at all; profile {profile:?}");
     for b in 0..RENEWAL_BINS - 1 {
         assert!(profile[b].is_nan(),
@@ -107,7 +107,7 @@ fn a_substep_lands_in_the_same_bin_for_acceptance_as_for_renewal() {
     }
 }
 
-/// A falling profile and a flat profile with the SAME sweep-level rate — the
+/// A falling profile and a flat profile with the *same* sweep-level rate — the
 /// oracle for why the scalar cannot answer the question it is quoted for.
 ///
 /// Both patterns accept 20 of 40 proposals, so `as_accept_rate` scores them
