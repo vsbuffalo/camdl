@@ -8,8 +8,10 @@
   the table below is enforced where the form is visible (the loader), not in the
   binder. Step 3 landed: every per-stream prequential score records what its
   value covered (`coverage`, trace schema 4) and `compare` refuses two traces
-  that scored one stream over different windows at the same time. Outstanding:
-  the migration that makes the declaration required, and the output columns.
+  that scored one stream over different windows at the same time. The four
+  rulings that govern the rest are recorded under "Decisions" (2026-09-06).
+  Outstanding: `closing_at`, the required declaration and the migration, the
+  removal of `condition_from`/W329, and the output columns.
 - **Issue:** gh#833
 - **Supersedes:** `2026-09-04-explicit-observation-windows.md`
 - **Area:** IR (`ObservationModel`, observation rows), runtime
@@ -215,48 +217,67 @@ cases {
 }
 ```
 
-| form                                   | the period a row covers      |
-| -------------------------------------- | ---------------------------- |
-| `window_start` + `window_stop` columns | exactly `[start, stop)`      |
-| `covers = day(t)`                      | `[t, t + 1 day)`             |
-| `covers = starting_on(t, Δ)`           | `[t, t + Δ)`                 |
-| `covers = ending_on(t, Δ)`             | `[t + 1 day − Δ, t + 1 day)` |
+| form                                   | the period a row covers      | with `t = 11 Jul`, `Δ = 7 days` |
+| -------------------------------------- | ---------------------------- | ------------------------------- |
+| `window_start` + `window_stop` columns | exactly `[start, stop)`      | as written                      |
+| `covers = day(t)`                      | `[t, t + 1 day)`             | `[11 Jul, 12 Jul)`              |
+| `covers = starting_on(t, Δ)`           | `[t, t + Δ)`                 | `[11 Jul, 18 Jul)`              |
+| `covers = ending_on(t, Δ)`             | `[t + 1 day − Δ, t + 1 day)` | `[5 Jul, 12 Jul)` — 11th in     |
+| `covers = closing_at(t, Δ)`            | `[t − Δ, t)`                 | `[4 Jul, 11 Jul)` — 11th out    |
 
-`ending_on` is the one that earns a named form: _"week ending 11 July"_ means 11
-July is the **last included day**, so the span is `[5 Jul, 12 Jul)`. That
-off-by-one is what the constructor exists to hide.
+`ending_on` and `closing_at` are near-synonyms in English and differ by a whole
+day, which is why they sit as adjacent rows with the resolved intervals spelled
+out. _"Week ending 11 July"_ means 11 July is the **last included day**, so the
+span is `[5 Jul, 12 Jul)`; that off-by-one is what `ending_on` exists to hide.
+`closing_at(t, Δ)` is the reading a file has when its label is the boundary at
+which the window **closes** and is itself excluded: the convention pomp's
+`accumvars` produces (the value at `t[k+1]` is the flow over `(t[k], t[k+1])`),
+and the one camdl's own `simulate --obs` has always written. Both lower to
+`Covers::Until { offset, span }` — `ending_on` with `offset = 1 day`,
+`closing_at` with `offset = 0` — so the fourth form adds no IR variant.
 
-There is no form that spells today's implicit `(previous row, this row]`. A
-compatibility form would preserve exactly the behaviour this proposal
-establishes to be wrong, and pre-1.0 policy forbids shims.
+**Why a closing form, when this section once said there would be none.** An
+earlier draft held that no form should spell today's implicit
+`(previous row, this row]`, because a compatibility form would preserve the
+behaviour the proposal establishes to be wrong. A survey of every incidence
+stream in the repository (2026-09-06; 31 streams in 24 files) inverted the
+premise: **no fitted data file in this repository labels a row by the day the
+count describes.** Twenty streams have no fitted data; nine read files written
+by `simulate --obs`, where the label is the closing boundary by construction;
+the two real ones are the He, Ionides & King 2010 London measles pair, pomp-
+derived and closing-labelled, with `he2010_pfilter_loglik` pinned against pomp
+to 35 nats. Declaring `day(time)` on those eleven would not have corrected a
+mislabelling; it would have introduced one and broken the oracle parity. The
+surveillance file the Problem section describes — read a day early — is real,
+and lives in the downstream ebola project, where `day(time)` and the shift
+remain the right call and stay that project's to make.
 
-**Migration moves the likelihood for every stream, not only irregular ones — and
-this contradicts an earlier draft of this section.** Each form above closes
-strictly after the row's label: `day(t)` at `t + 1`, `starting_on(t, Δ)` at
-`t + Δ`, `ending_on(t, Δ)` at `t + 1`. Today's reading closes at `t` itself. So
-no uniform form reproduces today's numbers, and the claim that a daily stream
-migrates "with byte-identical results" cannot hold — it is the same one-bucket
-offset the Problem section opens with, which is the defect, not an artifact. Two
-ways to migrate, and they are not equivalent:
-
-- **Take the shift.** Declare the true window; every migrated stream's
-  likelihood moves by one reporting period; baselines are re-captured. This is
-  the fix working as intended.
-- **Relabel the data.** Shift each file's time column back one period so the
-  declared stops land on today's boundaries, preserving every number.
-
-The recommendation is to take the shift, because preserving the numbers means
-preserving the defect. But it is not a fixture-tidying decision: 31 incidence
-streams across 33 model files migrate, and
-`tests/external/cases/he2010_pfilter_loglik_sparse` scores against an external
-reference, so a shifted window there has to be re-derived against that reference
-rather than re-baselined. **Ruled on before step 2 starts.**
+So `closing_at` is not a compatibility shim: it is the true statement for a
+closing-labelled file, and every file must state what is true of it. The
+consequence for migration is that **no fitted number in this repository moves**
+— each in-repo stream declares `closing_at`, he2010 keeps its oracle, and the
+baseline hashes reproduce. A file that declares `day` where it meant
+`closing_at` moves by one bucket, which is the correction working as intended
+for a file that was mislabelled and a defect for one that was not; the
+declaration is where the author says which.
 
 **An interval stream must state its period.** There is no default, because no
 default is right: `2026-07-08` is `[7 Jul, 8 Jul)` in a daily file,
-`[8 Jul, 15 Jul)` in a week-starting one, and `[2 Jul, 9 Jul)` in a week-ending
-one. A rule that guesses is silently wrong for someone. The error names the four
-forms above.
+`[8 Jul, 15 Jul)` in a week-starting one, `[2 Jul, 9 Jul)` in a week-ending one,
+and `[1 Jul, 8 Jul)` in a closing-labelled one. A rule that guesses is silently
+wrong for someone. The error names the five forms above.
+
+**`condition_from` and W329 go with the requirement.** `condition_from` existed
+to open an undeclared stream's first bin somewhere other than `t_start`, and
+W329 to warn that the inferred first window was wide. A declared first period
+states where the stream opens, which is what `condition_from` was hand-placing,
+so on a declared incidence stream neither has a job; on an instant stream
+neither ever did — a state reading has no accumulator to open, and
+`t_start`/`origin` already control how long the process runs before it. The key
+is replaced by a hard error whose hint says the declaration now does this and
+the key can be deleted; an accepted-and-ignored key that used to move the first
+bin would be a silent-wrong risk, and pre-1.0 policy forbids the shim. No
+warm-up knob is added for prevalence streams.
 
 ### Data shapes
 
@@ -367,19 +388,20 @@ built cleanly on the current representation.
 be ruled on rather than assumed away. The type removes three per-value illegal
 states; these are the relational ones:
 
-| state                                                       | rule                                                                                                                            |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| periods overlap within a stream                             | error — the span would be scored twice                                                                                          |
-| periods out of order                                        | error; today's guards are scalar and differ in strictness across three sites                                                    |
-| a period narrower than `dt`                                 | error, as today for observations, but it can now fire on a boundary the user never wrote                                        |
-| a period starting before `t_start` or `condition_from`      | error naming both                                                                                                               |
-| an unintended gap under a uniform form                      | a missing row under `covers = day(t)` is an **error**; a gap stated by per-row columns is legal and discards the uncovered flow |
-| `condition_from` on a stream that declared its first period | error — a stated window must not be silently truncated                                                                          |
+| state                                               | rule                                                                                                                            |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| periods overlap within a stream                     | error — the span would be scored twice                                                                                          |
+| periods out of order                                | error; today's guards are scalar and differ in strictness across three sites                                                    |
+| a period narrower than `dt`                         | error, as today for observations, but it can now fire on a boundary the user never wrote                                        |
+| a period starting before `t_start`                  | error naming both — that time is never simulated                                                                                |
+| an unintended gap under a uniform form              | a missing row under `covers = day(t)` is an **error**; a gap stated by per-row columns is legal and discards the uncovered flow |
+| a row whose period falls outside the run, on output | not emitted — `simulate --obs` writes only rows whose period lies within `[t_start, t_end]`                                     |
 
-The last two are the ones that decide behaviour rather than tidiness. A missing
+The gap row is the one that decides behaviour rather than tidiness. A missing
 row under a uniform declaration is ambiguous — it could be a hole or a merge —
 and today's widening is _correct_ for a merge. Forcing that case onto per-row
 columns is the point: the merged row is exactly what the format could not state.
+(`condition_from` no longer exists; see "The DSL surface".)
 
 ### Naming
 
@@ -451,12 +473,15 @@ If other re-keying changes are pending, land them in one bump.
    refused, naming both times and pointing at the per-row form, which is where a
    genuinely merged row belongs.
 2. A uniform daily stream declaring `covers = day(time)` scores one bucket later
-   than the same stream undeclared — the correction this proposal exists to
-   make, asserted rather than assumed, with the test recording the shift. (An
-   earlier draft claimed byte-identity here; see "The DSL surface" for why that
-   cannot hold for any uniform form.) A stream that is genuinely unchanged is
-   one that declares periods ending where its rows already close, which no
-   uniform form produces.
+   than the same stream undeclared — the correction this proposal exists to make
+   for a file labelled by the day it describes, asserted rather than assumed,
+   with the test recording the shift. Its twin: the same stream declaring
+   `closing_at(time, 1 'days)` scores identically to the undeclared reading —
+   every interior bin is the same `(t[k−1], t[k]]`, and the leading bin too
+   whenever the first row sits one period after `t_start`, which is the shape of
+   every fitted file in this repository. (When it does not, the two differ by
+   exactly the warm-up the undeclared reading swallowed into its first bin,
+   which is the defect W329 used to warn about.)
 3. A row with `window_start`/`window_stop` spanning two days scores its count
    against two days of flow. Oracle: a hand-computed likelihood at fixed
    parameters.
@@ -479,15 +504,53 @@ If other re-keying changes are pending, land them in one bump.
    `obs_idx` stops corresponding 1:1 with observations — the correctness step.
 2. **The DSL surface** — `window_start`/`window_stop` column kinds and the
    `covers` declaration, with the required-declaration rule and its diagnostics.
-   Every model in the repo migrates here; nothing compiles until it does.
+   Every model in the repo migrates here; nothing compiles until it does. The
+   `closing_at` form lands first, since the migration declares it everywhere;
+   `condition_from` and W329 are removed in the same step, with the hard error
+   and the `language-changes` entry, and the downstream ebola project is told
+   before the removal merges (267 of its model files reference the key).
 3. **`compare`'s window gate**, no later than 2 in wall-clock: declared periods
    become possible at 2, and the gate is what stops a migrated/unmigrated pair
    reading as a model-comparison result.
-4. **Output columns**, closing the round trip; unblocks gh#830 and gh#831. The
-   `fit predict` grid follows.
+4. **Output columns**, closing the round trip; unblocks gh#830 and gh#831. Both
+   the observation emitters (declared column names, `window_start`/`window_stop`
+   for a windowed stream, rows outside the run not written, the format entering
+   the CAS key) and the trajectory's `t_start`/`t_stop` beside `t` land here as
+   one batch, so the fixture re-captures they force are reviewed once, on one
+   diff where the whole output shape is visible. Renaming `lineage cohort`'s
+   `window_end` to `window_stop` is its own commit with its own changelog line.
+   The `fit predict` grid follows.
 
 Steps 0 and 2 are wide and mechanical. Step 1 is narrow and is the one where a
 wrong choice is a silently wrong gradient rather than a red test.
+
+## Decisions
+
+Rulings by the maintainer, 2026-09-06, after the data survey described under
+"The DSL surface":
+
+1. **The closing-boundary form is added and is named `closing_at`.** It lowers
+   to the existing `Covers::Until { offset: 0, span }`; no IR change. The
+   exclusive-versus-inclusive contrast with `ending_on` is stated as adjacent
+   table rows with resolved intervals, and first in each form's doc comment.
+   In-repo streams migrate to `closing_at`; the ebola files' `day(time)` and its
+   shift stay that project's decision.
+2. **The trajectory's window columns are deferred into step 4** and batched with
+   the emitter work, so one human-loop re-capture covers both. Vocabulary:
+   `t_start`/`t_stop` beside `t` in trajectories, `window_start`/`window_stop`
+   in observation files; `lineage`'s `window_end` is renamed in its own commit.
+3. **The observation emitters follow the declaration**: the label is the emit
+   time, the value is the flow over the period the declaration assigns to it, a
+   windowed stream gets contiguous windows closing at the emit times, and a row
+   whose period falls outside `[t_start, t_end]` is not written. Under
+   `closing_at` with a schedule starting at `t_start` this drops the leading
+   zero row, which was zero-width and moved no likelihood; the changelog says
+   so. The wide `--obs` file keeps stream names (two streams can share a scored
+   column name); covariate columns belong to gh#831. The format enters the CAS
+   `obs/` key, because the bytes change under an otherwise unchanged key.
+4. **`condition_from` and W329 are removed**, the key replaced by a hard error
+   pointing at `covers`. No warm-up knob for prevalence streams. The
+   run-identity turnover on downstream configs is accepted.
 
 ## Relationship to other work
 
