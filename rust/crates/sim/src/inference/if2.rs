@@ -492,6 +492,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         // single eval, independent of how many iterations the fit runs).
         let mut iters: u64 = 0;
 
+        // The step IC-free inference leaves out of the log-likelihood: the
+        // first index that carries an observation, not necessarily 0 (gh#833).
+        let first_observation_idx = obs_model.first_observation_idx();
         for obs_idx in 0..n_obs {
             // PERTURB — Ionides et al. (2015) Algorithm 1, first line of the
             // inner loop. This runs BEFORE the process step so the SAME
@@ -640,7 +643,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             // accumulated log-likelihood. See
             // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
             let ll_inc = log_sum_exp(&log_weights) - (n as f64).ln();
-            if !(config.skip_first_obs_from_loglik && obs_idx == 0) {
+            if !(config.skip_first_obs_from_loglik && Some(obs_idx) == first_observation_idx) {
                 if ll_inc.is_finite() {
                     total_loglik += ll_inc;
                 } else {

@@ -109,7 +109,7 @@ fn run_once() -> PGASResult {
     }
 
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             StreamProjection::FlowSum(vec![0]),
             compiled.model.observations[0].clone(),
             dense_cells(obs.iter().map(|o| o.value).collect()),

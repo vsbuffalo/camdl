@@ -515,7 +515,9 @@ mod tests {
             aux: vec![],
         };
         let obs_model =
-            MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, cm.clone()).unwrap();
+            MultiStreamObsModel::new(
+                BoundObs::bind(cm.model.simulation.t_start, vec![spec]).unwrap().0, cm.clone(),
+            ).unwrap();
 
         // Estimate beta only, starting from a wrong value; flat prior, log transform.
         let estimated = vec![EstimatedParam {
@@ -607,7 +609,9 @@ mod tests {
             projection, ir_model: om, observations: dense_cells(data), aux: vec![],
         };
         let obs_model =
-            MultiStreamObsModel::new(BoundObs::bind(vec![spec]).unwrap().0, cm.clone()).unwrap();
+            MultiStreamObsModel::new(
+                BoundObs::bind(cm.model.simulation.t_start, vec![spec]).unwrap().0, cm.clone(),
+            ).unwrap();
 
         // Estimate beta AND gamma — both interior-identified (no boundary railing),
         // with differently-scaled z-posteriors: the anisotropy the metric adapts to.

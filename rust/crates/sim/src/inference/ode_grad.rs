@@ -207,7 +207,8 @@ mod tests {
                 }
             })
             .collect();
-        MultiStreamObsModel::new(BoundObs::bind(specs).unwrap().0, compiled).unwrap()
+        let t_start = compiled.model.simulation.t_start;
+        MultiStreamObsModel::new(BoundObs::bind(t_start, specs).unwrap().0, compiled).unwrap()
     }
 
     /// The det_grad FD oracle (gh#275 §1f): `∇_symbolic` vs a central finite
@@ -793,8 +794,10 @@ mod tests {
                 aux: vec![],
             })
             .collect();
-        let obs_model =
-            MultiStreamObsModel::new(BoundObs::bind(specs).unwrap().0, compiled.clone()).unwrap();
+        let obs_model = MultiStreamObsModel::new(
+            BoundObs::bind(compiled.model.simulation.t_start, specs).unwrap().0,
+            compiled.clone(),
+        ).unwrap();
 
         // The UNION axis both paths score on.
         let mut union: Vec<f64> = times_a.iter().chain(times_b.iter()).copied().collect();

@@ -3316,7 +3316,7 @@ fn one_step_bands(
     }
 
     let specs = crate::fit::runner::stream_specs_from_obs_streams(&obs_streams);
-    let (bound, _report) = BoundObs::bind(specs)
+    let (bound, _report) = BoundObs::bind(compiled.model.simulation.t_start, specs)
         .map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
         .map_err(|e| format!("observation model construction failed: {e:?}"))?;

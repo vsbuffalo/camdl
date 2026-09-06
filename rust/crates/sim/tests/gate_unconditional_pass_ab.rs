@@ -176,7 +176,7 @@ fn fixture() -> Fixture {
         PREVALENCE_SUBSTEPS.iter().map(|&s| (s + 1) as f64 * DT).collect();
 
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![
+        BoundObs::bind(0.0, vec![
             StreamSpec::dense(
                 StreamProjection::FlowSum(vec![infection]),
                 compiled.model.observations[0].clone(),

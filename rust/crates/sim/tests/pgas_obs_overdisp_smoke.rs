@@ -93,7 +93,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
     // Build a NegBin obs model with FIXED rho=1 and k=10. Only σ_se is
     // estimated.
     let obs_model_ = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: ir::observation::ObservationModel {
                 name: "weekly_cases".into(),
@@ -241,7 +241,7 @@ fn smoke_pgas_nuts_estimates_rho() {
 
     // Re-use the original observation block (NegBinomial with rho * incidence).
     let obs_model_ = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             projection: StreamProjection::FlowSum(
                 compiled.model.transitions.iter().enumerate()
                     .filter(|(_, t)| t.name == "infection")

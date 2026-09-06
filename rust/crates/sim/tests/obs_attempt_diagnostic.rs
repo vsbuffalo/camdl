@@ -387,7 +387,7 @@ fn a_stream_that_cannot_explain_its_data_is_named_with_its_date() {
     let times = vec![5.0, 10.0, 15.0, 20.0];
     let values = vec![3.0, 5.0, 13.0, 14.0];
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             StreamProjection::IntCompSum(vec![1]), // `I` is int-local index 1
             compiled.model.observations[0].clone(),
             dense_cells(values.clone()),
@@ -437,7 +437,7 @@ fn the_refusal_carries_the_structured_record_the_prose_is_rendered_from() {
     let times = vec![5.0, 10.0, 15.0, 20.0];
     let values = vec![3.0, 5.0, 13.0, 14.0];
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             StreamProjection::IntCompSum(vec![1]),
             compiled.model.observations[0].clone(),
             dense_cells(values.clone()),
@@ -516,7 +516,7 @@ fn nan_shape_parameters_are_reported_as_such_against_a_finite_projection() {
     );
     let compiled = carrier(vec![block.clone()]);
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: block,
             observations: dense_cells(vec![18.0]),
@@ -585,7 +585,7 @@ fn a_count_exceeding_an_expression_denominator_names_that_guard() {
     );
     let compiled = carrier(vec![block.clone()]);
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             StreamProjection::FlowSum(vec![0]),
             block,
             dense_cells(vec![50.0]),
@@ -629,7 +629,7 @@ fn a_data_column_denominator_smaller_than_its_count_is_refused_at_bind() {
         }),
         &["tested"],
     );
-    let bound = BoundObs::bind(vec![StreamSpec {
+    let bound = BoundObs::bind(0.0, vec![StreamSpec {
         projection: StreamProjection::FlowSum(vec![0]),
         ir_model: block,
         observations: dense_cells(vec![50.0]),
@@ -663,7 +663,7 @@ fn a_dead_particle_is_counted_apart_from_one_the_observation_refused() {
     let compiled = mixed_death_model();
     let obs = vec![Observation { time: 2.0, value: 5.0 }];
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             StreamProjection::IntCompSum(vec![2]), // `W`
             compiled.model.observations[0].clone(),
             dense_cells(vec![5.0]),
@@ -765,7 +765,7 @@ fn the_cell_states_are_distinguishable_and_a_zero_effort_row_is_not_a_failure() 
     ]);
     let prevalence = || StreamProjection::IntCompSum(vec![1]); // `I`
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![
+        BoundObs::bind(0.0, vec![
             StreamSpec::dense(prevalence(), scored, dense_cells(vec![4.0]), vec![5.0]),
             // A hole: scheduled at the same time, no value.
             StreamSpec::dense(prevalence(), hole, vec![None], vec![5.0]),
@@ -879,7 +879,7 @@ fn unbinding_a_stream_changes_nothing_for_the_rest() {
                 )
             })
             .collect();
-        MultiStreamObsModel::new(BoundObs::bind(specs).expect("bind").0, compiled.clone())
+        MultiStreamObsModel::new(BoundObs::bind(0.0, specs).expect("bind").0, compiled.clone())
             .expect("obs model")
     };
 
@@ -943,7 +943,7 @@ fn a_nan_projection_is_counted_and_excluded_rather_than_absorbed() {
     )
     .expect("resolve projection");
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             resolved,
             block,
             dense_cells(vec![1.0]),

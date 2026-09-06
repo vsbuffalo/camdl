@@ -139,7 +139,7 @@ fn run_loglik(record_prequential: bool) -> f64 {
         times,
     );
     let obs = MultiStreamObsModel::new(
-        BoundObs::bind(vec![cases]).expect("bind").0, compiled.clone()).unwrap();
+        BoundObs::bind(0.0, vec![cases]).expect("bind").0, compiled.clone()).unwrap();
 
     let process = ChainBinomialProcess::new(compiled.clone());
     let cfg = SMCConfig {
@@ -186,7 +186,7 @@ fn record_prequential_does_not_perturb_loglik() {
         times.clone(),
     );
     let obs = MultiStreamObsModel::new(
-        BoundObs::bind(vec![cases]).expect("bind").0, compiled.clone()).unwrap();
+        BoundObs::bind(0.0, vec![cases]).expect("bind").0, compiled.clone()).unwrap();
     let process = ChainBinomialProcess::new(compiled.clone());
     let cfg = SMCConfig {
         n_particles: 64, dt: 1.0, t_start: 0.0,

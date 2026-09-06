@@ -153,7 +153,7 @@ fn fixture(kind: Kind) -> Fixture {
         Kind::Prevalence => StreamProjection::IntCompSum(vec![I_IDX]),
     };
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             projection,
             compiled.model.observations[0].clone(),
             dense_cells(obs.iter().map(|o| o.value).collect()),

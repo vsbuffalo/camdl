@@ -171,7 +171,7 @@ fn fixture_with(schedule: &[(usize, f64)], n_substeps: usize) -> Fixture {
         .collect();
 
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec::dense(
+        BoundObs::bind(0.0, vec![StreamSpec::dense(
             StreamProjection::IntCompSum(vec![I_IDX]),
             compiled.model.observations[0].clone(),
             dense_cells(obs.iter().map(|o| o.value).collect()),

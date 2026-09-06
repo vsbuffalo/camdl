@@ -98,7 +98,7 @@ fn time_varying_obs(compiled: &Arc<CompiledModel>, obs_times: Vec<f64>, observat
         right: Box::new(Expr::Const(ConstExpr { value: 1.0 })),
     }});
     MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![0]), obs_times),
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: ir::observation::ObservationModel {

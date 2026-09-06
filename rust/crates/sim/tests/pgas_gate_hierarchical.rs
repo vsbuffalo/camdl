@@ -116,7 +116,7 @@ fn gh175_pgas_refuses_hierarchical_prior_with_clear_error() {
     }
 
     let obs_model = MultiStreamObsModel::new(
-        BoundObs::bind(vec![StreamSpec {
+        BoundObs::bind(0.0, vec![StreamSpec {
             times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![0]), obs.iter().map(|o| o.time).collect()),
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),

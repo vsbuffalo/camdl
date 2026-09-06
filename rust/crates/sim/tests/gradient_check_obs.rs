@@ -67,7 +67,7 @@ fn build_obs_model(
             aux: vec![],
         }
     }).collect();
-    MultiStreamObsModel::new(BoundObs::bind(specs).unwrap().0, compiled).unwrap()
+    MultiStreamObsModel::new(BoundObs::bind(0.0, specs).unwrap().0, compiled).unwrap()
 }
 
 fn set_param_defaults(model: &mut ir::Model, defaults: &[(&str, f64)]) {
