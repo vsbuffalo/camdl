@@ -168,6 +168,7 @@ mod tests {
                 stream: n.to_string(), y_obs: *y, y_pred_samples: vec![], log_score: *ls,
                 crps: 0.0, pit: 0.5,
                 interval: PredInterval { q05: 10.0, q25: 0.0, q50: 0.0, q75: 0.0, q95: 20.0 },
+                coverage: Default::default(),
             }).collect(),
         }
     }
