@@ -743,6 +743,19 @@ enum Tone {
 /// match the other.
 const POSTERIOR_MEAN_SIG_FIGS: usize = 4;
 
+/// Significant figures the two efficiency headlines carry.
+///
+/// Fixed decimals were the wrong invariant here for a sharper reason than in
+/// the mean column: the quantity is a ratio whose numerator is an ESS and whose
+/// denominator is an iteration or a second count, so it gets SMALLER exactly as
+/// the fit gets worse. A min-parameter ESS of 8 over 48,000 raw iterations is
+/// 1.7e-4, which `{:.3}` renders `0.000` — the headline reads as "nothing" on
+/// the one fit whose reader most needs the number, and two such fits an order
+/// of magnitude apart render identically. Significant figures keep three digits
+/// at any magnitude, and [`sig_figs`] falls back to scientific notation below
+/// `1e-4` rather than growing a run of leading zeros.
+const EFFICIENCY_SIG_FIGS: usize = 3;
+
 /// Column the section rules and the `--explain` prose wrap to. Wide enough for
 /// the per-chain log-likelihood table, narrow enough to survive an 80-column
 /// terminal without wrapping.
@@ -1843,8 +1856,8 @@ impl Formatter {
                 // sampler mixes N× better per step" holds on any machine.
                 if let Some(epi) = diag.ess_per_iter() {
                     s.push_str(&format!(
-                        "  ESS/iter = {:.3}  (min-param ESS {:.0} / {} raw sampling iters)\n",
-                        epi, min_ess, diag.raw_iters()
+                        "  ESS/iter = {}  (min-param ESS {:.0} / {} raw sampling iters)\n",
+                        sig_figs(epi, EFFICIENCY_SIG_FIGS), min_ess, diag.raw_iters()
                     ));
                 }
                 // ESS/second — the RUNTIME metric: min-parameter ESS per second of
@@ -1856,8 +1869,8 @@ impl Formatter {
                     (diag.ess_per_sec(), diag.wall_time_secs.filter(|s| *s > 0.0))
                 {
                     s.push_str(&format!(
-                        "  ESS/sec  = {:.2}  (min-param ESS {:.0} / {:.1}s wall)\n",
-                        eps, min_ess, secs
+                        "  ESS/sec  = {}  (min-param ESS {:.0} / {:.1}s wall)\n",
+                        sig_figs(eps, EFFICIENCY_SIG_FIGS), min_ess, secs
                     ));
                 }
             }
@@ -3820,12 +3833,59 @@ mod tests {
             "a complete map still reports ESS/iter off the slowest param: {ok}"
         );
         assert!(
-            ok.contains("ESS/sec  = 12.29"),
+            ok.contains("ESS/sec  = 12.3"),
             "a complete map still reports ESS/sec: {ok}"
         );
         assert!(
             !ok.contains("not reportable"),
             "the withholding branch must not fire on a complete map: {ok}"
+        );
+    }
+
+    /// Both efficiency ratios must still carry information on a badly-mixing
+    /// fit — the one whose reader most needs them.
+    ///
+    /// Each is an ESS over a count that grows as the fit is pushed harder, so
+    /// both shrink exactly when mixing is worst. A min-parameter ESS of 8 over
+    /// 48,000 raw sampling iterations is `1.67e-4`, which `{:.3}` printed as
+    /// `0.000`; over a twenty-minute run it is `6.67e-3` per second, which
+    /// `{:.2}` printed as `0.01`. Two fits an order of magnitude apart then
+    /// render identically, and one of them renders as nothing at all.
+    #[test]
+    fn the_efficiency_headline_stays_informative_at_a_tiny_ess() {
+        use std::collections::BTreeMap;
+        let fmt = plain_formatter();
+        let diag = |n_samples: usize| PosteriorDiagnostics {
+            per_param: crate::fit::method_result::per_param_from_maps(
+                BTreeMap::from([("beta".to_string(), 2.639)]),
+                BTreeMap::from([("beta".to_string(), 8.0)]),
+                BTreeMap::new(),
+            ),
+            n_samples,
+            thin: 1,
+            wall_time_secs: Some(1200.0),
+            n_chains: 4,
+        };
+
+        // 8 / 48,000 iterations and 8 / 1,200 s: three significant figures at
+        // both magnitudes, where fixed decimals had none and one.
+        let out = fmt.efficiency_lines(&diag(48_000));
+        assert!(
+            out.contains("ESS/iter = 0.000167  (min-param ESS 8 / 48000 raw sampling iters)"),
+            "the per-iteration ratio keeps its digits at 1.67e-4:\n{out}"
+        );
+        assert!(
+            out.contains("ESS/sec  = 0.00667  (min-param ESS 8 / 1200.0s wall)"),
+            "and so does the per-second ratio at 6.67e-3:\n{out}"
+        );
+
+        // Ten times longer, ten times worse: the two must be distinguishable,
+        // and below 1e-4 the fixed form is mostly leading zeros, so it switches
+        // to scientific rather than growing them.
+        let worse = fmt.efficiency_lines(&diag(480_000));
+        assert!(
+            worse.contains("ESS/iter = 1.67e-5"),
+            "an order of magnitude worse reads as an order of magnitude worse:\n{worse}"
         );
     }
 
@@ -3925,10 +3985,10 @@ mod tests {
         // No chain traces on disk for this in-memory result → the per-chain
         // table degrades to "unavailable"; the ESS lines under test are unaffected.
         let no_traces = std::path::Path::new("/nonexistent/stage_dir");
-        // min-param ESS (145) / wall (11.8 s) = 12.29 ESS/sec — thinning-invariant.
+        // min-param ESS (145) / wall (11.8 s) = 12.3 ESS/sec — thinning-invariant.
         let with = block(&fmt, "posterior", "pgas", no_traces, BayesianView::Pgas(&mk(Some(11.8), 500, 1)), LoglikType::CompleteData);
         assert!(
-            with.contains("ESS/sec  = 12.29"),
+            with.contains("ESS/sec  = 12.3"),
             "must report ESS/sec off the slowest param (145/11.8): {with}"
         );
         // ESS/iteration = 145 / (n_samples 500 × thin 1) = 0.290, per raw sampling step.
@@ -4501,8 +4561,8 @@ mod tests {
 "  beta              1.330     2.104     9.512   folded 9 3 40 7\n",
 "  alpha             1.412     1.109     2.870   bulk   39 4 38 26\n",
 "  gamma             1.008     1.002     1.011   bulk   380 402 331 337\n",
-"  ESS/iter = 0.002  (min-param ESS 8 / 4000 raw sampling iters)\n",
-"  ESS/sec  = 0.04  (min-param ESS 8 / 200.0s wall)\n",
+"  ESS/iter = 0.00200  (min-param ESS 8 / 4000 raw sampling iters)\n",
+"  ESS/sec  = 0.0400  (min-param ESS 8 / 200.0s wall)\n",
         ));
     }
 
