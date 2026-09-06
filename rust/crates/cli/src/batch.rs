@@ -1861,8 +1861,19 @@ pub(crate) fn obs_subtree_hash(
     if let Some(e) = emit {
         buf.push_str(&e.identity_repr());
     }
+    // The file FORMAT is part of what the subtree holds (gh#833): the header
+    // names the declared columns, a windowed stream carries two boundaries,
+    // and a row outside the run is not written. Bytes that change under an
+    // unchanged key would be a stored artifact the key no longer describes,
+    // so the format version enters the key.
+    buf.push_str(OBS_FILE_FORMAT);
     Ok(crate::hashing::sha256_hex(buf.as_bytes()))
 }
+
+/// The obs-file format the CAS subtree is written in — bumped whenever the
+/// bytes written for an unchanged model would change (the count-in-the-key
+/// rule).
+const OBS_FILE_FORMAT: &str = "\nobs-file-format:2";
 
 fn write_obs_into_cas(
     run_dir: &std::path::Path,
@@ -1896,15 +1907,20 @@ fn write_obs_into_cas(
     // written — a child directory that exists, is incomplete, and carries no
     // provenance to say so. Validation is cheap and pure, so hoisting it turns
     // a partial write into no write.
+    // The rows each stream's declaration assigns to its emit times, within the
+    // run (gh#833) — planned once, so the preflight and the write loop cannot
+    // disagree about which rows exist.
+    let run_start = crate::run_start_of(traj, model);
+    let mut plans = Vec::with_capacity(model.observations.len());
     for obs_ir in &model.observations {
         // Must use the SAME horizon the write loop below uses — a preflight that
         // validates a different set of times than gets written is worse than no
         // preflight (gh#561 + gh#589).
         let times =
             crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
-        // `None`: an emit_schedule-driven synthetic stream binds no data, so
-        // there is no conditioning window to open the first bin at (gh#702).
-        crate::project_all_obs_times(traj, obs_ir, model, &times, None)?;
+        let plan = crate::obs_emit::plan_emission(obs_ir, &times, run_start, model.simulation.t_end)?;
+        crate::project_coverages(traj, obs_ir, model, &plan.coverages())?;
+        plans.push(plan);
     }
 
     let obs_dir = run_dir.join("obs").join(format!(
@@ -1923,32 +1939,46 @@ fn write_obs_into_cas(
     let mut obs_rng = sim::rng::StatefulRng::new(obs_seed);
 
     let mut stream_names: Vec<String> = Vec::new();
-    for obs_ir in &model.observations {
+    for (obs_ir, plan) in model.observations.iter().zip(&plans) {
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs_ir, compiled.clone(), &params,
         );
         // The cell's own horizon (a per-scenario `simulate { to }` has already
-        // moved `model.simulation.t_end`), so the CAS `obs/` subtree never
-        // carries rows past the end of the trajectory beside it (gh#561).
-        let obs_times =
-            crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
-        // `None` — emit_schedule-driven, no data to condition on (gh#702).
-        let projected =
-            crate::project_all_obs_times(traj, obs_ir, model, &obs_times, None)?;
+        // moved `model.simulation.t_end`) bounded the plan, so the CAS `obs/`
+        // subtree never carries rows past the end of the trajectory beside it
+        // (gh#561).
+        let rows = plan.coverages();
+        let projected = crate::project_coverages(traj, obs_ir, model, &rows)?;
 
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
         let mut out = std::io::BufWriter::new(
             std::fs::File::create(&path)
                 .map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
         );
-        writeln!(out, "time\t{}", obs_ir.name).map_err(|e| e.to_string())?;
-        for (ti, &obs_t) in obs_times.iter().enumerate() {
+        // The declared columns, so the file re-loads under its own model
+        // (gh#833, gh#830).
+        match &plan.columns {
+            crate::obs_emit::TemporalColumns::Time(t) => {
+                writeln!(out, "{t}\t{}", plan.scored).map_err(|e| e.to_string())?;
+            }
+            crate::obs_emit::TemporalColumns::Window { start, stop } => {
+                writeln!(out, "{start}\t{stop}\t{}", plan.scored).map_err(|e| e.to_string())?;
+            }
+        }
+        for (ti, &(obs_t, coverage)) in rows.iter().enumerate() {
             let snap = crate::snap_at(traj, obs_t);
             let draw = sampler(projected[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng);
+            match (&plan.columns, coverage) {
+                (crate::obs_emit::TemporalColumns::Window { .. },
+                 sim::inference::Coverage::Interval { start, stop }) => {
+                    write!(out, "{start}\t{stop}").map_err(|e| e.to_string())?;
+                }
+                _ => write!(out, "{obs_t}").map_err(|e| e.to_string())?,
+            }
             if draw == draw.round() && draw.abs() < 1e15 {
-                writeln!(out, "{}\t{}", obs_t, draw as i64).map_err(|e| e.to_string())?;
+                writeln!(out, "\t{}", draw as i64).map_err(|e| e.to_string())?;
             } else {
-                writeln!(out, "{}\t{:.6}", obs_t, draw).map_err(|e| e.to_string())?;
+                writeln!(out, "\t{:.6}", draw).map_err(|e| e.to_string())?;
             }
         }
         out.flush().map_err(|e| e.to_string())?;

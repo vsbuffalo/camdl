@@ -15,6 +15,7 @@ mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-0
 mod quantities_file; // `--quantities FILE`: a separable reporting vocabulary + its artifact key
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
 mod obs_anchor;     // gh#616: runtime resolution of a model's observation anchors
+mod obs_emit;       // gh#833: what `simulate --obs` writes per stream, and over which period
 mod emit_every;     // gh#656: `--emit-every`, the per-stream emission-cadence override
 mod run_paths;      // canonical output-path helpers
 mod cas;
@@ -1836,7 +1837,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         obs_dir: job.obs.dir_path().map(|p| p.to_string_lossy().into_owned()),
         obs_data: Vec::new(),
         obs_stream_names: Vec::new(),
-        obs_times_cache: Vec::new(),
+        obs_plans: Vec::new(),
         emit_every: emit_every.clone(),
         total_runs: 1,
         n_scenarios: 1,
@@ -2252,8 +2253,14 @@ fn materialize_obs_for_quantities(
         };
         let sampler =
             sim::inference::obs_model::compile_obs_sample_pf(obs_ir, compiled.clone(), params);
-        // `None` — emit_schedule-driven, no data to condition on (gh#702).
-        let projected = project_all_obs_times(traj, obs_ir, model, &times, None)?;
+        // The rows the stream's declaration assigns to these times (gh#833):
+        // the same rows `--obs` writes, so a quantity sourced from a stream
+        // reduces over exactly the file the stream would emit.
+        let plan = crate::obs_emit::plan_emission(
+            obs_ir, &times, run_start_of(traj, model), model.simulation.t_end,
+        )?;
+        let projected = project_coverages(traj, obs_ir, model, &plan.coverages())?;
+        let times = plan.labels();
         let mut vals = Vec::with_capacity(times.len());
         for (ti, &t) in times.iter().enumerate() {
             let snap = snap_at(traj, t);
@@ -2726,7 +2733,16 @@ fn report_cas_leaves(runs: &[crate::batch::RunEntry], cas_root: &str) {
 }
 
 /// One sampled observation row in the combined-obs accumulator.
-struct ObsRow { time: f64, replicate: usize, draw: usize, scenario: String, value: f64 }
+struct ObsRow {
+    time: f64,
+    /// What the value was drawn over — an instant, or `[start, stop)`; a
+    /// windowed stream writes both boundaries (gh#833).
+    coverage: sim::inference::Coverage,
+    replicate: usize,
+    draw: usize,
+    scenario: String,
+    value: f64,
+}
 
 /// `RunSink` for `camdl simulate`: streams the combined wide-format
 /// trajectory TSV (replicate/scenario/draw columns gated on the grid
@@ -2750,7 +2766,10 @@ struct StreamSink {
     obs_dir: Option<String>,
     obs_data: Vec<Vec<ObsRow>>,
     obs_stream_names: Vec<String>,
-    obs_times_cache: Vec<Vec<f64>>,
+    /// Per stream, the rows `--obs` writes and the columns they go under —
+    /// planned once from the stream's declaration at `run_idx == 0` and shared
+    /// by every cell, which all share one obs axis (gh#833).
+    obs_plans: Vec<crate::obs_emit::EmitPlan>,
     /// gh#656: the `--emit-every` override for this run's emitted observations.
     /// `None` for every run without the flag.
     emit_every: Option<crate::emit_every::EmitEvery>,
@@ -2872,7 +2891,24 @@ impl engine::RunSink for StreamSink {
                         model.simulation.t_end,
                         self.emit_every.as_ref(),
                     )?;
-                    self.obs_times_cache.push(times);
+                    // The rows the declaration assigns to those times, within
+                    // the run (gh#833). A wide file has one `time` column and
+                    // cannot carry a windowed stream's two boundaries.
+                    let plan = crate::obs_emit::plan_emission(
+                        obs_model, &times, run_start_of(traj, model), model.simulation.t_end,
+                    )?;
+                    if self.obs_path.is_some()
+                        && matches!(plan.columns, crate::obs_emit::TemporalColumns::Window { .. })
+                    {
+                        return Err(format!(
+                            "observation stream '{}' declares `window_start`/`window_stop` \
+                             columns, which a single wide `--obs` file cannot carry.\n  \
+                             Use --obs-dir (one file per stream, keeps trajectory) or \
+                             --obs-only-dir (one file per stream, suppresses trajectory).",
+                            obs_model.name
+                        ));
+                    }
+                    self.obs_plans.push(plan);
                 }
             }
 
@@ -2880,13 +2916,9 @@ impl engine::RunSink for StreamSink {
                 let sampler = sim::inference::obs_model::compile_obs_sample_pf(
                     obs_ir, compiled.clone(), &params,
                 );
-                let obs_times = self.obs_times_cache[si].clone();
-                // `None` — `simulate --obs` emits on the model's own
-                // emit_schedule and binds no data (gh#702).
-                let projected_values = project_all_obs_times(
-                    traj, obs_ir, model, &obs_times, None,
-                )?;
-                for (ti, &obs_t) in obs_times.iter().enumerate() {
+                let rows = self.obs_plans[si].coverages();
+                let projected_values = project_coverages(traj, obs_ir, model, &rows)?;
+                for (ti, &(obs_t, coverage)) in rows.iter().enumerate() {
                     // GH #6 fix: pass the actual compartment state at the obs
                     // time so the likelihood p/mean expressions can resolve
                     // references like `N = S + I + R`.
@@ -2896,6 +2928,7 @@ impl engine::RunSink for StreamSink {
                     );
                     self.obs_data[si].push(ObsRow {
                         time: obs_t,
+                        coverage,
                         replicate: run_idx + 1,
                         draw: draw_idx + 1,
                         scenario: scenario_label.clone(),
@@ -2937,7 +2970,7 @@ impl StreamSink {
             for name in &self.obs_stream_names { write!(out, "\t{}", name).unwrap(); }
             writeln!(out).unwrap();
 
-            let n_times = self.obs_times_cache[0].len();
+            let n_times = self.obs_plans[0].rows.len();
             for run in 0..total_runs {
                 for ti in 0..n_times {
                     let row_idx = run * n_times + ti;
@@ -2966,32 +2999,58 @@ impl StreamSink {
             eprintln!("observations written to {}", path);
         }
 
-        // --obs-dir / --obs-only-dir: one file per stream.
+        // --obs-dir / --obs-only-dir: one file per stream, under the columns
+        // the stream declared, so the file re-loads under its own model
+        // (gh#833, gh#830): the value under the SCORED column's name, the
+        // time under the `: time` column's name — or both window boundaries
+        // under their `window_start`/`window_stop` names, each dated when
+        // `--dates` is on.
         if let Some(ref dir) = self.obs_dir {
             for (si, name) in self.obs_stream_names.iter().enumerate() {
+                let plan = &self.obs_plans[si];
                 let path = format!("{}/{}.tsv", dir, name);
                 let f = std::fs::File::create(&path)
                     .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path, e); std::process::exit(1); });
                 let mut out = std::io::BufWriter::new(f);
+                let render_date = |t: f64| -> String {
+                    let (o, tu) = date_render.expect("dated only when --dates");
+                    ir::caltime::internal_to_date_hires(o, t, tu)
+                        .unwrap_or_else(|e| { eprintln!("error rendering date: {}", e); std::process::exit(1); })
+                };
 
                 if multi_rep { write!(out, "replicate\t").unwrap(); }
                 if n_scenarios > 1 { write!(out, "scenario\t").unwrap(); }
                 if n_draws > 1 { write!(out, "draw\t").unwrap(); }
-                if date_render.is_some() {
-                    writeln!(out, "time\tdate\t{}", name).unwrap();
-                } else {
-                    writeln!(out, "time\t{}", name).unwrap();
+                match &plan.columns {
+                    crate::obs_emit::TemporalColumns::Time(t) => {
+                        write!(out, "{t}").unwrap();
+                        if date_render.is_some() { write!(out, "\tdate").unwrap(); }
+                    }
+                    crate::obs_emit::TemporalColumns::Window { start, stop } => {
+                        write!(out, "{start}\t{stop}").unwrap();
+                        if date_render.is_some() { write!(out, "\tdate_start\tdate_stop").unwrap(); }
+                    }
                 }
+                writeln!(out, "\t{}", plan.scored).unwrap();
 
                 for row in &self.obs_data[si] {
                     if multi_rep { write!(out, "{}\t", row.replicate).unwrap(); }
                     if n_scenarios > 1 { write!(out, "{}\t", row.scenario).unwrap(); }
                     if n_draws > 1 { write!(out, "{}\t", row.draw).unwrap(); }
-                    write!(out, "{}", row.time).unwrap();
-                    if let Some((o, tu)) = date_render {
-                        let d = ir::caltime::internal_to_date_hires(o, row.time, tu)
-                            .unwrap_or_else(|e| { eprintln!("error rendering date: {}", e); std::process::exit(1); });
-                        write!(out, "\t{}", d).unwrap();
+                    match (&plan.columns, row.coverage) {
+                        (crate::obs_emit::TemporalColumns::Window { .. },
+                         sim::inference::Coverage::Interval { start, stop }) => {
+                            write!(out, "{start}\t{stop}").unwrap();
+                            if date_render.is_some() {
+                                write!(out, "\t{}\t{}", render_date(start), render_date(stop)).unwrap();
+                            }
+                        }
+                        _ => {
+                            write!(out, "{}", row.time).unwrap();
+                            if date_render.is_some() {
+                                write!(out, "\t{}", render_date(row.time)).unwrap();
+                            }
+                        }
                     }
                     let val = row.value;
                     if val == val.round() && val.abs() < 1e15 {
@@ -3328,19 +3387,44 @@ fn check_obs_times_on_snapshot_grid(
     ))
 }
 
+/// The time the recorded trajectory begins — `t_start`, or the restart origin
+/// of an `--init-state` cell. The initial row is always recorded, with zeroed
+/// flows, so the first snapshot IS the run's start (`sim::state::Trajectory`).
+pub(crate) fn run_start_of(traj: &sim::Trajectory, model: &ir::Model) -> f64 {
+    traj.snapshots.first().map(|s| s.t).unwrap_or(model.simulation.t_start)
+}
+
+/// Rows read under the undeclared convention: row `k` covers `(t[k−1], t[k]]`,
+/// the first opening at `first_start` — the run's start, or a fit's
+/// conditioning boundary. Transitional (gh#833): `fit predict` still projects
+/// over the data's labels this way; the emitters plan their rows from the
+/// stream's declaration (`obs_emit::plan_emission`).
+pub(crate) fn undeclared_rows(
+    obs_ir: &ir::observation::ObservationModel,
+    obs_times: &[f64],
+    first_start: f64,
+) -> Vec<(f64, sim::inference::Coverage)> {
+    use sim::inference::Coverage;
+    match obs_ir.projection.temporal_kind() {
+        ir::observation::TemporalKind::Instant => {
+            obs_times.iter().map(|&t| (t, Coverage::Instant)).collect()
+        }
+        ir::observation::TemporalKind::Interval => {
+            let mut prev = first_start;
+            obs_times.iter().map(|&t| {
+                let row = (t, Coverage::Interval { start: prev, stop: t });
+                prev = t;
+                row
+            }).collect()
+        }
+    }
+}
+
 /// `window_start` is the fit's conditioning boundary for this stream
-/// (`condition_from`), when it has one. An INTERVAL (incidence) projection
-/// reports the flow accumulated since the previous emitted time; the first
-/// emitted time has no predecessor, so its bin opens at `window_start` —
-/// exactly where the likelihood resets that stream's accumulator. `None` opens
-/// it at the model origin, which is the behaviour for every caller with no data
-/// to condition on (synthetic emission, `simulate --obs`, `batch`).
-///
-/// Passing the wrong one is a first-row-only error, which is why gh#702 lived
-/// so long: one row among many on a long series, the ENTIRE artifact on a
-/// single-observation fit. It has no effect on an INSTANT (prevalence /
-/// expression) projection, which reads state at a time and has no accumulator
-/// to reset.
+/// (`condition_from`), when it has one: the first bin opens there — exactly
+/// where the likelihood reset that stream's accumulator — and at the run's
+/// start otherwise. Passing the wrong one is a first-row-only error, which is
+/// why gh#702 lived so long. It has no effect on an INSTANT projection.
 pub(crate) fn project_all_obs_times(
     traj: &sim::Trajectory,
     obs_ir: &ir::observation::ObservationModel,
@@ -3348,15 +3432,63 @@ pub(crate) fn project_all_obs_times(
     obs_times: &[f64],
     window_start: Option<f64>,
 ) -> Result<Vec<f64>, String> {
-    check_obs_times_on_snapshot_grid(traj, &obs_ir.name, &model.time_unit, obs_times)?;
+    // Reading the cumulative flow at the conditioning boundary requires the
+    // boundary to BE a recorded snapshot: between snapshots it would resolve
+    // to an earlier one and silently hand part of the warm-up back to the
+    // first bin — the class of silent-wrong gh#702 is about, reintroduced by
+    // the fix for it. The general walk below refuses any unrecorded boundary;
+    // this names the one the user wrote.
+    if let Some(t0) = window_start {
+        if obs_ir.projection.temporal_kind() == ir::observation::TemporalKind::Interval
+            && !is_recorded_snapshot(traj, t0)
+        {
+            return Err(format!(
+                "observation stream '{}': the conditioning boundary \
+                 condition_from = {t0} is not a recorded output time, so the flow \
+                 accumulated up to it cannot be read.\n  \
+                 The first incidence bin is ({t0}, first_obs] — the window this fit \
+                 scored — and the projection reads it as the difference of the \
+                 recorded cumulative flow at those two times.\n  \
+                 Fix: add {t0} to the output schedule \
+                 (`output {{ trajectories {{ every = ... }} }}`, or an `at = [...]` \
+                 list containing it), or move condition_from onto a recorded output \
+                 time.",
+                obs_ir.name,
+            ));
+        }
+    }
+    let first_start = window_start.unwrap_or_else(|| run_start_of(traj, model));
+    let rows = undeclared_rows(obs_ir, obs_times, first_start);
+    project_coverages(traj, obs_ir, model, &rows)
+}
+
+/// Project a stream's observed quantity for each row — the state at an
+/// instant, or the flow over `[start, stop)` — off the recorded trajectory.
+/// One walk serves every caller: the synthetic emitters (rows planned from the
+/// stream's declaration), `fit predict` (rows from the bound data) and the
+/// obs-sourced quantities (gh#833).
+///
+/// Both endpoints of an interval row must be recorded snapshots. Between
+/// snapshots the cumulative flow would resolve to an earlier one and silently
+/// hand part of the interval to the wrong row — the class of silent-wrong
+/// gh#702 was about (incident 2026-08-12, gh#589).
+pub(crate) fn project_coverages(
+    traj: &sim::Trajectory,
+    obs_ir: &ir::observation::ObservationModel,
+    model: &ir::Model,
+    rows: &[(f64, sim::inference::Coverage)],
+) -> Result<Vec<f64>, String> {
+    use sim::inference::Coverage;
+    let obs_times: Vec<f64> = rows.iter().map(|r| r.0).collect();
+    check_obs_times_on_snapshot_grid(traj, &obs_ir.name, &model.time_unit, &obs_times)?;
     // Per-interval incidence over a set of transition flow indices: build the
-    // running cumulative flow at each snapshot, read it at each obs time, then
-    // difference consecutive obs times. Shared by CumulativeFlow (one exact
-    // transition) and CumulativeFlowSum (explicit strata family per §25.4).
+    // running cumulative flow at each snapshot, then read it at each row's two
+    // boundaries. Shared by CumulativeFlow (one exact transition) and
+    // CumulativeFlowSum (explicit strata family per §25.4).
     let incidence_over = |flow_indices: &[usize]| -> Result<Vec<f64>, String> {
         // `f64` throughout: ODE flows are real-valued (the chain-binomial /
         // Gillespie integer flows widen losslessly via `Flows::value`).
-        // `cum_at_snap[i]` is the flow over (t_start, snapshots[i].t]: the
+        // `cum_at_snap[i]` is the flow over (run start, snapshots[i].t]: the
         // trajectory's initial row carries zeroed flows by construction
         // (`sim::state::Trajectory`), so the running sum needs no offset.
         let mut cum_at_snap: Vec<(f64, f64)> = Vec::with_capacity(traj.snapshots.len());
@@ -3367,60 +3499,32 @@ pub(crate) fn project_all_obs_times(
             }
             cum_at_snap.push((snap.t, running));
         }
-
-        let mut cum_at_obs = Vec::with_capacity(obs_times.len());
-        let mut snap_idx = 0;
-        for &obs_t in obs_times {
-            while snap_idx + 1 < cum_at_snap.len()
-                && cum_at_snap[snap_idx + 1].0 <= obs_t + OBS_SNAP_EPS
-            {
-                snap_idx += 1;
-            }
-            cum_at_obs.push(if snap_idx < cum_at_snap.len() && cum_at_snap[snap_idx].0 <= obs_t + OBS_SNAP_EPS {
-                cum_at_snap[snap_idx].1
-            } else {
-                0.0
-            });
-        }
-
-        // Where the FIRST bin opens. Reading the cumulative flow at the
-        // conditioning boundary requires the boundary to BE a recorded
-        // snapshot: between snapshots it would resolve to an earlier one and
-        // silently hand part of the warm-up back to the first bin — the same
-        // class of silent-wrong gh#702 is about, reintroduced by the fix for
-        // it. So refuse, naming the boundary and the output schedule.
-        let seed = match window_start {
-            None => 0.0,
-            Some(t0) => {
-                let i = resolved_snapshot_index(traj, t0)
-                    .filter(|_| is_recorded_snapshot(traj, t0))
-                    .ok_or_else(|| format!(
-                        "observation stream '{}': the conditioning boundary \
-                         condition_from = {t0} is not a recorded output time, \
-                         so the flow accumulated up to it cannot be read.\n  \
-                         The first incidence bin is ({t0}, first_obs] — the \
-                         window this fit scored — and the projection reads it \
-                         as the difference of the recorded cumulative flow at \
-                         those two times.\n  \
-                         Fix: add {t0} to the output schedule \
-                         (`output {{ trajectories {{ every = ... }} }}`, or an \
-                         `at = [...]` list containing it), or move \
-                         condition_from onto a recorded output time.",
-                        obs_ir.name,
-                    ))?;
-                cum_at_snap[i].1
-            }
+        // The cumulative flow at a boundary, which must BE a recorded snapshot.
+        let cum_at = |t: f64| -> Result<f64, String> {
+            let i = resolved_snapshot_index(traj, t)
+                .filter(|_| is_recorded_snapshot(traj, t))
+                .ok_or_else(|| format!(
+                    "observation stream '{}': the period boundary t = {t} is not a \
+                     recorded output time, so the flow accumulated up to it cannot \
+                     be read.\n  \
+                     A row's value is the difference of the recorded cumulative \
+                     flow at its two boundaries.\n  \
+                     Fix: add {t} to the output schedule \
+                     (`output {{ trajectories {{ every = ... }} }}`, or an \
+                     `at = [...]` list containing it), or move the boundary onto \
+                     a recorded output time.",
+                    obs_ir.name,
+                ))?;
+            Ok(cum_at_snap[i].1)
         };
-
-        // Difference: flow in interval (prev_obs_t, obs_t], with the first bin
-        // opening at `seed`'s time rather than at t_start.
-        let mut result = Vec::with_capacity(obs_times.len());
-        let mut prev_cum = seed;
-        for &cum in &cum_at_obs {
-            result.push(cum - prev_cum);
-            prev_cum = cum;
-        }
-        Ok(result)
+        rows.iter().map(|&(label, cov)| match cov {
+            Coverage::Interval { start, stop } => Ok(cum_at(stop)? - cum_at(start)?),
+            Coverage::Instant | Coverage::Unrecorded => Err(format!(
+                "observation stream '{}': an incidence projection needs a period \
+                 for the row at {label}, but it was given {cov:?}",
+                obs_ir.name,
+            )),
+        }).collect()
     };
     match &obs_ir.projection {
         ir::observation::Projection::CumulativeFlow(flow_name) => {

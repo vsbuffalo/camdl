@@ -1747,6 +1747,27 @@ Use --obs-dir (one file per stream, keeps trajectory) or
 --obs-only-dir (one file per stream, suppresses trajectory).
 ```
 
+`--obs-dir` / `--obs-only-dir` write one file per stream under the columns the
+stream **declared**, so the file re-loads under its own model (gh#833, gh#830):
+the value under the scored column's name, the time under the `: time` column's
+name — or both boundaries under the `window_start`/`window_stop` names for a
+stream that declares its windows per row, each with a `date_*` twin under
+`--dates`:
+
+```
+win_start	win_stop	cases
+0	7	2
+7	14	3
+```
+
+Each row is drawn over the period the stream's `covers` assigns to its label,
+and a row whose period falls outside the run is not written. Under
+`closing_at` with a schedule starting at `t_start` that drops the first emit
+time, whose period `[t_start − Δ, t_start)` was never simulated — the row the
+undeclared reading writes as a count of zero at `t_start`, a zero-width bin
+nothing scores. A windowed stream cannot go into the single wide `--obs` file,
+which has one `time` column; the error names `--obs-dir`.
+
 `--obs-only` / `--obs-only-dir` suppress only the *loose* trajectory mirror; the
 store leaf still holds `traj.tsv`. In every mode the sampled observations are
 also written into the leaf under `obs/<obs-hash>-<obs-seed>/<stream>.tsv`

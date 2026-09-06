@@ -283,6 +283,27 @@ pub enum Covers {
     WindowColumns,
 }
 
+impl Covers {
+    /// The `[start, stop)` a uniform form assigns to the row labelled `label`,
+    /// in axis units — the one arithmetic both the loader (reading a label
+    /// column) and the emitter (writing one) perform, so they cannot disagree
+    /// about what a label means. `None` for `WindowColumns`, whose boundaries
+    /// are data, not arithmetic.
+    pub fn period_of(&self, label: f64) -> Option<(f64, f64)> {
+        match *self {
+            Covers::From { offset, span } => {
+                let start = label + offset;
+                Some((start, start + span))
+            }
+            Covers::Until { offset, span } => {
+                let stop = label + offset;
+                Some((stop - span, stop))
+            }
+            Covers::WindowColumns => None,
+        }
+    }
+}
+
 // ── Observation model ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
