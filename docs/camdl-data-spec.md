@@ -604,23 +604,32 @@ A stream that reads an _instant_ — `prevalence(...)`, a compartment reading, a
 serosurvey — needs none of this. It has a time column and nothing else; there is
 no window to state, and declaring one is an error.
 
-### Four ways to say it
+### Five ways to say it
 
-Three forms take the stream's own time column and a rule. With `D` the label in
-a row's time column:
+Four forms take the stream's own time column and a rule. With `D` the label in a
+row's time column, and the last column showing `D = 11 July`, seven days:
 
-| you write                             | the row covers        | for                              |
-| ------------------------------------- | --------------------- | -------------------------------- |
-| `covers = day(time)`                  | `[D, D+1 day)`        | daily counts                     |
-| `covers = starting_on(time, 7 'days)` | `[D, D+7 days)`       | a week LABELLED BY ITS FIRST DAY |
-| `covers = ending_on(time, 7 'days)`   | `[D−6 days, D+1 day)` | "week ending D" — ISO/MMWR       |
+| you write                             | the row covers        | resolved                              | for                                  |
+| ------------------------------------- | --------------------- | ------------------------------------- | ------------------------------------ |
+| `covers = day(time)`                  | `[D, D+1 day)`        | `[11 Jul, 12 Jul)`                    | daily counts, labelled by the day    |
+| `covers = starting_on(time, 7 'days)` | `[D, D+7 days)`       | `[11 Jul, 18 Jul)`                    | a week labelled by its first day     |
+| `covers = ending_on(time, 7 'days)`   | `[D−6 days, D+1 day)` | `[5 Jul, 12 Jul)` — 11th **included** | "week ending D" — ISO/MMWR           |
+| `covers = closing_at(time, 7 'days)`  | `[D−7 days, D)`       | `[4 Jul, 11 Jul)` — 11th **excluded** | a label that is the closing boundary |
 
-`ending_on` is the one that earns a named form. "Week ending Saturday 11 July"
-means 11 July is the **last included day**, so the span runs `[5 Jul, 12 Jul)` —
-it starts six days _before_ the label and ends one day _after_ it. That
-off-by-one is what the constructor exists to hide.
+`ending_on` and `closing_at` are near-synonyms in English and differ by a whole
+day; that is why they are adjacent rows with the interval written out. "Week
+ending Saturday 11 July" means 11 July is the **last included day**, so the span
+runs `[5 Jul, 12 Jul)` — it starts six days _before_ the label and ends one day
+_after_ it. That off-by-one is what `ending_on` exists to hide. `closing_at` is
+for a file whose label is the instant the window closes, with that instant
+itself in the _next_ row's window: the convention of pomp's accumulator
+variables (the value at `t[k+1]` is the flow over `(t[k], t[k+1])`), and of
+camdl's own `simulate --obs` output, whose row at `t` carries the flow since the
+previous row. If your file was made by either, write `closing_at`; if it was
+typed from a surveillance bulletin labelled by the day or week it reports on,
+write `day`, `starting_on` or `ending_on`.
 
-The fourth form puts both boundaries in the file, one pair per row:
+The fifth form puts both boundaries in the file, one pair per row:
 
 ```camdl
 cases_ituri {
@@ -685,7 +694,7 @@ against it, and the next row's bin opens at its own `window_start`. That is the
 same reading an `NA` row gets (see the next section): no likelihood term, and
 the window is kept.
 
-Under the three uniform forms a gap is refused. Every row's window follows from
+Under the four uniform forms a gap is refused. Every row's window follows from
 its label, so consecutive rows whose windows do not touch can only mean a row is
 **missing** — and a missing row is exactly what used to widen the next bin
 silently. The error names both windows and the uncovered span between them. Keep
@@ -695,11 +704,16 @@ covers the whole span, state that with the window columns.
 ### What this changes for an existing file
 
 Nothing about the file; everything about how it is read. A stream that declared
-nothing was scored over `(previous row, this row]` — a window nobody wrote down,
-which for a daily file labelled by the day the count describes is **one day
-early**. Declaring `covers = day(time)` moves the scoring to the day the label
-names. That is a real change in the fitted numbers, and it is the correction,
-not a regression.
+nothing was scored over `(previous row, this row]` — a window nobody wrote down.
+For a file whose label is the closing boundary — anything `simulate --obs`
+wrote, anything derived from pomp — that window was right all along, and
+`covers = closing_at(time, <spacing>)` states it; nothing in the fitted numbers
+moves. For a daily file labelled by the day the count describes, that window
+read the count **one day early**; declaring `covers = day(time)` moves the
+scoring to the day the label names, which is a real change in the fitted numbers
+and is the correction, not a regression. The declaration is where you say which
+kind of file you have; there is no default, because either guess is silently
+wrong for the other kind.
 
 The declaration also settles where scoring _begins_. Undeclared, the first bin
 runs from `simulate.from` to the first row — the whole warm-up scored against

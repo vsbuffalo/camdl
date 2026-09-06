@@ -248,16 +248,21 @@ pub struct StratumKey {
 /// are already in AXIS units. With `t` the row's own label and `one_day`
 /// converted likewise:
 ///
-/// | surface              | lowers to                            |
-/// | -------------------- | ------------------------------------ |
-/// | `covers = day(t)`    | `From  { offset: 0, span: one_day }` |
-/// | `starting_on(t, d)`  | `From  { offset: 0, span: d }`       |
-/// | `ending_on(t, d)`    | `Until { offset: one_day, span: d }` |
-/// | window columns       | `WindowColumns`                      |
+/// | surface              | lowers to                            | `t = 11 Jul`, `d = 7 days` |
+/// | -------------------- | ------------------------------------ | -------------------------- |
+/// | `covers = day(t)`    | `From  { offset: 0, span: one_day }` | `[11 Jul, 12 Jul)`         |
+/// | `starting_on(t, d)`  | `From  { offset: 0, span: d }`       | `[11 Jul, 18 Jul)`         |
+/// | `ending_on(t, d)`    | `Until { offset: one_day, span: d }` | `[5 Jul, 12 Jul)` 11th in  |
+/// | `closing_at(t, d)`   | `Until { offset: 0, span: d }`       | `[4 Jul, 11 Jul)` 11th out |
+/// | window columns       | `WindowColumns`                      | as written                 |
 ///
 /// Two anchors rather than one because the label pins a different end in each
-/// case: `ending_on` fixes the row's CLOSE and measures backwards, which is
-/// what "week ending 11 July" means.
+/// case: `ending_on` and `closing_at` fix the row's CLOSE and measure
+/// backwards. They are near-synonyms in English and differ by a whole day:
+/// "week ending 11 July" INCLUDES the 11th, so the close is the 12th;
+/// "closing at 11 July" EXCLUDES it — the label is the closing boundary, which
+/// is pomp's accumulator convention and what camdl's own `simulate --obs`
+/// writes.
 ///
 /// A uniform form's span is a CONSTANT. A width that varies row to row is
 /// expressible — as `WindowColumns`, which states both boundaries outright.

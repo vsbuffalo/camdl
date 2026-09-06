@@ -543,12 +543,16 @@ type obs_column = {
 
      covers = day(t)        ->  CoversFrom  (0.,      one_day)
      starting_on (t, d)     ->  CoversFrom  (0.,      d)
-     ending_on   (t, d)     ->  CoversUntil (one_day, d)
+     ending_on   (t, d)     ->  CoversUntil (one_day, d)   11 Jul, 7d: [5 Jul, 12 Jul)
+     closing_at  (t, d)     ->  CoversUntil (0.,      d)   11 Jul, 7d: [4 Jul, 11 Jul)
      window_start/_stop     ->  CoversWindowColumns
 
    Two anchors rather than one because the label pins a different end in each
-   case: [ending_on] fixes the row's CLOSE and measures backwards, which is
-   what "week ending 11 July" means.
+   case: [ending_on] and [closing_at] fix the row's CLOSE and measure
+   backwards. They differ by a whole day and are near-synonyms in English:
+   "week ending 11 July" INCLUDES the 11th, so the close is the 12th;
+   "closing at 11 July" EXCLUDES it — the label is the closing boundary, the
+   reading of pomp's accumulators and of camdl's own `simulate --obs`.
 
    A uniform form's span is a CONSTANT. A width that varies row to row is
    expressible as [CoversWindowColumns], which states both boundaries
