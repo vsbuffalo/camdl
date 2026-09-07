@@ -33,6 +33,8 @@ fn classify(
         "replicate" => ColumnRole::Replicate,
         "scenario" => ColumnRole::Scenario,
         "t" | "time" | "date" => ColumnRole::Time,
+        "t_start" | "date_start" => ColumnRole::WindowStart,
+        "t_stop" | "date_stop" => ColumnRole::WindowStop,
         "sweep" | "step" | "draw" | "iteration" | "point_id" => ColumnRole::Iteration,
         n if n.starts_with("flow_") => ColumnRole::Flow,
         n if n.starts_with("inc_") => ColumnRole::Incidence,
@@ -171,6 +173,11 @@ mod tests {
         let st = ColumnRole::State;
         assert_eq!(classify("t", &none, &none, st), ColumnRole::Time);
         assert_eq!(classify("date", &none, &none, st), ColumnRole::Time);
+        // The period a row's flows cover (gh#833): boundaries, not the axis.
+        assert_eq!(classify("t_start", &none, &none, st), ColumnRole::WindowStart);
+        assert_eq!(classify("t_stop", &none, &none, st), ColumnRole::WindowStop);
+        assert_eq!(classify("date_start", &none, &none, st), ColumnRole::WindowStart);
+        assert_eq!(classify("date_stop", &none, &none, st), ColumnRole::WindowStop);
         assert_eq!(classify("flow_infection", &none, &none, st), ColumnRole::Flow);
         assert_eq!(classify("inc_cases", &none, &none, st), ColumnRole::Incidence);
         assert_eq!(classify("replicate", &none, &none, st), ColumnRole::Replicate);
@@ -180,15 +187,20 @@ mod tests {
     #[test]
     fn sim_schema_classifies_trajectory_header() {
         let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        files.insert("traj.tsv".to_string(), b"t\tS\tI\tR\tflow_infection\n0\t99\t1\t0\t0\n".to_vec());
+        files.insert(
+            "traj.tsv".to_string(),
+            b"t\tt_start\tt_stop\tS\tI\tR\tflow_infection\n0\t0\t0\t99\t1\t0\t0\n".to_vec(),
+        );
         files.insert("event_log.tsv".to_string(), b"anything\n".to_vec()); // not a trajectory
         let schema = sim_output_schema(&files);
         assert!(!schema.contains_key("event_log.tsv"), "non-trajectory artifact skipped");
         let traj = &schema["traj.tsv"];
         assert_eq!(traj.role, TableRole::Trajectory);
         assert_eq!(traj.columns[0].role, ColumnRole::Time); // t — the x-axis
-        assert_eq!(traj.columns[1].role, ColumnRole::State); // S (compartment)
-        assert_eq!(traj.columns[4].role, ColumnRole::Flow); // flow_infection
+        assert_eq!(traj.columns[1].role, ColumnRole::WindowStart); // t_start
+        assert_eq!(traj.columns[2].role, ColumnRole::WindowStop); // t_stop
+        assert_eq!(traj.columns[3].role, ColumnRole::State); // S (compartment)
+        assert_eq!(traj.columns[6].role, ColumnRole::Flow); // flow_infection
     }
 
     #[test]

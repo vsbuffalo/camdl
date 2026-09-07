@@ -236,24 +236,23 @@ to different things:
 | column                                          | what the row's time means                                                                                                    |
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | compartment state (`S`, `I`), `prevalence(...)` | the value **at** that instant                                                                                                |
-| trajectory flow (`flow_*`)                      | the total **over the interval ending at** that instant                                                                       |
+| trajectory flow (`flow_*`)                      | the total over `[t_start, t_stop)`, which the row states beside `t` — `t_stop` is `t`, `t_start` the previous row's          |
 | observation `incidence(...)`                    | the total over the period the stream's `covers` assigns to the label — `[D−Δ, D)` under `closing_at`, `[D, D+1)` under `day` |
 
 ```
-t  date        S      I    flow_infection
-4  2026-07-05  9931   49    24.2009
-5  2026-07-06  9895   73    35.8401
-6  2026-07-07  9842  108    52.8828
+t  t_start  t_stop  date        date_start  date_stop   S      I    flow_infection
+4  3        4       2026-07-05  2026-07-04  2026-07-05  9931   49    24.2009
+5  4        5       2026-07-06  2026-07-05  2026-07-06  9895   73    35.8401
+6  5        6       2026-07-07  2026-07-06  2026-07-07  9842  108    52.8828
 ```
 
 The flow column is what happened _between_ two rows; `S` and `I` are counts _at_
-each one. This is not a wrinkle to fix — it is what stocks and flows are.
-
-**Read the flow row carefully.** A flow row is labelled by the boundary at which
-its bucket _closes_, so `flow_infection = 52.8828` on the row dated 7 July is
-the flow over `[6 July, 7 July)` — the infections of **6 July**, not the 7th.
-This is the most counterintuitive consequence of the convention, and it stands
-until flow output carries its own `period_start` / `period_stop`.
+each one. This is not a wrinkle to fix — it is what stocks and flows are, and
+the row says so: `flow_infection = 52.8828` on the row dated 7 July is the flow
+over `[6 July, 7 July)` — the infections of **6 July** — and `date_start` /
+`date_stop` state exactly that, so a reader never has to infer it from the row
+above. The initial-condition row, having no interval before it, writes the empty
+`[t, t)` and zero flows.
 
 ### What a data row means is not `date()`'s job
 
@@ -618,17 +617,19 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
 
 - **`camdl simulate --dates`** adds a calendar `date` column (the inverse map)
   alongside the canonical numeric `t` in trajectory and observation output
-  (single-file and `--obs-dir`). Without `--dates`, output is byte-identical to
-  before. Requires `origin`. A whole-day timepoint renders as a bare
-  `YYYY-MM-DD`; a **sub-day** timepoint (a fractional snapshot step under a
-  sub-day `dt`, the hot-epidemic regime) renders the floor date with the
-  fractional day appended as a `+<frac>d` delta — e.g. `t = 0.25` under `'days`
-  from a `2020-02-28` origin is `2020-02-28+0.25d`. This keeps the column
-  one-to-one with the timepoint: distinct sub-day rows get distinct labels
-  rather than silently coalescing onto the same date (gh#108). The suffix is a
-  fractional-day delta, deliberately _not_ the `YYYY-MM-DDTHH:MM` datetime form
-  (datetimes are out of scope — see "Not supported (yet)" below); a consumer
-  grouping on the date column can split on `+` to recover the calendar day.
+  (single-file and `--obs-dir`), and in a trajectory `date_start`/`date_stop`
+  alongside `t_start`/`t_stop`, the period each row's flows cover. Without
+  `--dates`, output is byte-identical to before. Requires `origin`. A whole-day
+  timepoint renders as a bare `YYYY-MM-DD`; a **sub-day** timepoint (a
+  fractional snapshot step under a sub-day `dt`, the hot-epidemic regime)
+  renders the floor date with the fractional day appended as a `+<frac>d` delta
+  — e.g. `t = 0.25` under `'days` from a `2020-02-28` origin is
+  `2020-02-28+0.25d`. This keeps the column one-to-one with the timepoint:
+  distinct sub-day rows get distinct labels rather than silently coalescing onto
+  the same date (gh#108). The suffix is a fractional-day delta, deliberately
+  _not_ the `YYYY-MM-DDTHH:MM` datetime form (datetimes are out of scope — see
+  "Not supported (yet)" below); a consumer grouping on the date column can split
+  on `+` to recover the calendar day.
 - **`camdl fit summary`** renders `instant`-kind estimands as dates when the
   model has an `origin` (e.g. `tau = 23.0  (2020-02-13)`); `duration` estimands
   render as spans. Numeric `t` stays the canonical, diff-stable value. A point

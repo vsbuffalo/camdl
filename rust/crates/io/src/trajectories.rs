@@ -108,8 +108,9 @@ impl TrajColumnSpec {
         }
     }
 
-    /// Every data-column name (excluding the leading `chain/draw/time[/date]`
-    /// id columns), in emit order. Used for the manifest `columns` list.
+    /// Every data-column name (excluding the leading id and time columns,
+    /// [`ID_COLUMN_NAMES`]), in emit order. Used for the manifest `columns`
+    /// list.
     pub fn data_column_names(&self) -> Vec<String> {
         let mut out = Vec::new();
         out.extend(self.int_comps.iter().cloned());
@@ -119,6 +120,23 @@ impl TrajColumnSpec {
         out
     }
 }
+
+/// The leading id and time column names of a `trajectories.tsv`, in emit
+/// order, as [`write_trajectories_tsv`] writes them: with a calendar the date
+/// twins follow the numeric triple. The manifest's `columns` list starts with
+/// exactly these, so a consumer reading the manifest and one reading the
+/// header agree.
+pub fn id_column_names(dated: bool) -> Vec<String> {
+    let mut cols: Vec<String> =
+        ["chain", "draw", "time", "t_start", "t_stop"].iter().map(|s| s.to_string()).collect();
+    if dated {
+        cols.extend(["date", "date_start", "date_stop"].iter().map(|s| s.to_string()));
+    }
+    cols
+}
+
+/// See [`id_column_names`].
+pub const ID_COLUMN_NAMES: &str = "chain draw time t_start t_stop [date date_start date_stop]";
 
 /// The `trajectories.json` manifest. Records how to interpret the sibling
 /// `trajectories.tsv` without scraping its header, and surfaces the
@@ -130,8 +148,9 @@ pub struct TrajManifest {
     pub granularity: Granularity,
     pub n_chains: usize,
     pub n_draws: usize,
-    /// Every TSV column name in emit order: the id columns
-    /// (`chain`, `draw`, `time`, optional `date`) then the data columns.
+    /// Every TSV column name in emit order: the id columns (`chain`, `draw`,
+    /// `time`, `t_start`, `t_stop`, and under a calendar `date`, `date_start`,
+    /// `date_stop`) then the data columns.
     pub columns: Vec<String>,
     pub model_hash: String,
     /// `true` for a smoother path conditioned on the data (PGAS `X|θ,y`); the
@@ -206,9 +225,16 @@ fn header_comment(model_hash: &str, method: &str, granularity: Granularity) -> S
 pub type DateOrigin<'a> = Option<(&'a str, &'a str)>;
 
 /// Write the tidy/long `trajectories.tsv`: a `# camdl-trajectories v1` header,
-/// the column header (`chain  draw  time [date]  <int> <real> flow_* inc_*`),
+/// the column header
+/// (`chain  draw  time  t_start  t_stop  [date date_start date_stop]  <int> <real> flow_* inc_*`),
 /// then one row per snapshot per draw — all chains × all draws stacked into one
 /// file, disambiguated by the leading id columns.
+///
+/// `t_start`/`t_stop` are the half-open period the row's `flow_*` and `inc_*`
+/// values were accumulated over ([`Trajectory::flow_periods`], gh#833): the
+/// previous snapshot of the same draw up to this one, and for a draw's first
+/// row the empty `[time, time)`. `time` itself is the instant the compartment
+/// columns are read at.
 ///
 /// `columns` describes the data-column layout (built once from the model);
 /// every draw's `path` must agree with it (same int/real/flow vector lengths)
@@ -236,9 +262,9 @@ pub fn write_trajectories_tsv(
         .map_err(|e| e.to_string())?;
 
     // Column header.
-    write!(w, "chain\tdraw\ttime").map_err(|e| e.to_string())?;
+    write!(w, "chain\tdraw\ttime\tt_start\tt_stop").map_err(|e| e.to_string())?;
     if date_origin.is_some() {
-        write!(w, "\tdate").map_err(|e| e.to_string())?;
+        write!(w, "\tdate\tdate_start\tdate_stop").map_err(|e| e.to_string())?;
     }
     for n in &columns.int_comps {
         write!(w, "\t{}", n).map_err(|e| e.to_string())?;
@@ -272,7 +298,7 @@ pub fn write_trajectories_tsv(
                 d.chain, d.draw, d.incidence.len(), d.path.snapshots.len(), n_inc
             ));
         }
-        for (s, snap) in d.path.snapshots.iter().enumerate() {
+        for ((s, snap), (start, stop)) in d.path.snapshots.iter().enumerate().zip(d.path.flow_periods()) {
             if snap.int_state.counts.len() != n_int {
                 return Err(format!(
                     "trajectories: chain {} draw {}: snapshot has {} integer \
@@ -295,11 +321,14 @@ pub fn write_trajectories_tsv(
                 ));
             }
 
-            write!(w, "{}\t{}\t{}", d.chain, d.draw, snap.t).map_err(|e| e.to_string())?;
+            write!(w, "{}\t{}\t{}\t{}\t{}", d.chain, d.draw, snap.t, start, stop)
+                .map_err(|e| e.to_string())?;
             if let Some((origin, time_unit)) = date_origin {
-                let date = ir::caltime::internal_to_date_hires(origin, snap.t, time_unit)
-                    .map_err(|e| format!("trajectories: error rendering date: {e}"))?;
-                write!(w, "\t{}", date).map_err(|e| e.to_string())?;
+                for x in [snap.t, start, stop] {
+                    let date = ir::caltime::internal_to_date_hires(origin, x, time_unit)
+                        .map_err(|e| format!("trajectories: error rendering date: {e}"))?;
+                    write!(w, "\t{}", date).map_err(|e| e.to_string())?;
+                }
             }
             for &c in &snap.int_state.counts {
                 write!(w, "\t{}", c).map_err(|e| e.to_string())?;
@@ -908,14 +937,19 @@ mod tests {
         assert!(lines[0].contains("granularity=substep"));
         assert_eq!(
             lines[1],
-            "chain\tdraw\ttime\tS\tI\tR\tflow_infection\tflow_recovery\tinc_cases"
+            "chain\tdraw\ttime\tt_start\tt_stop\tS\tI\tR\tflow_infection\tflow_recovery\tinc_cases"
         );
+        assert_eq!(lines[1].split('\t').take(5).collect::<Vec<_>>(), id_column_names(false));
         // 2 draws × 2 snapshots = 4 data rows + header-comment + col-header.
         assert_eq!(lines.len(), 6);
-        // First data row.
-        assert_eq!(lines[2], "0\t5\t0\t99\t1\t0\t0\t0\t0");
-        // The inc_cases column == the FlowSum value the producer computed.
-        assert_eq!(lines[3], "0\t5\t1\t97\t2\t1\t2\t1\t2");
+        // First data row: the initial-condition row covers the empty [0, 0).
+        assert_eq!(lines[2], "0\t5\t0\t0\t0\t99\t1\t0\t0\t0\t0");
+        // The second covers [0, 1); the inc_cases column == the FlowSum value
+        // the producer computed.
+        assert_eq!(lines[3], "0\t5\t1\t0\t1\t97\t2\t1\t2\t1\t2");
+        // The second draw's first row opens its own period afresh: [0, 0),
+        // not [1, 0) continued from the previous draw's last snapshot.
+        assert_eq!(lines[4], "1\t5\t0\t0\t0\t99\t1\t0\t0\t0\t0");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1072,7 +1106,7 @@ mod tests {
         write_trajectories_tsv(&path, &draws, &c, None, "h", "pgas", Granularity::Substep).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let header = text.lines().nth(1).unwrap();
-        assert_eq!(header, "chain\tdraw\ttime\tN\tflow_death");
+        assert_eq!(header, "chain\tdraw\ttime\tt_start\tt_stop\tN\tflow_death");
         assert!(!header.contains("inc_"));
         let _ = std::fs::remove_dir_all(&tmp);
     }

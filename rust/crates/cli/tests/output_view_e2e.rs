@@ -81,8 +81,8 @@ fn columns_restricts_to_the_allow_list() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let h = header(&out.stdout);
     let h: Vec<&str> = h.iter().map(String::as_str).collect();
-    assert_eq!(h, ["t", "S", "flow_infection"],
-        "--columns must restrict to `t` + the listed columns (mixed compartment + flow)");
+    assert_eq!(h, ["t", "t_start", "t_stop", "S", "flow_infection"],
+        "--columns must restrict to the time columns + the listed columns (mixed compartment + flow)");
 }
 
 #[test]

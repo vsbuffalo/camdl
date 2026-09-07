@@ -3461,19 +3461,59 @@ pub fn traj_tsv_bytes(traj: &Trajectory, cols: &TrajColumns) -> Vec<u8> {
 }
 
 /// The shared trajectory-TSV renderer: header + one row per snapshot. The
-/// column set (and thus any output-view filter) lives entirely in `cols`.
+/// column set (and thus any output-view filter) lives entirely in `cols`; the
+/// time columns are [`TRAJ_TIME_HEADER`] / [`write_traj_time_cells`].
 fn write_traj_to(
     w: &mut impl std::io::Write,
     traj: &Trajectory,
     cols: &TrajColumns,
 ) -> std::io::Result<()> {
-    write!(w, "t")?;
+    write!(w, "{TRAJ_TIME_HEADER}")?;
     cols.write_header(w)?;
     writeln!(w)?;
-    for snap in &traj.snapshots {
-        write!(w, "{}", snap.t)?;
+    for (snap, period) in traj.snapshots.iter().zip(traj.flow_periods()) {
+        write_traj_time_cells(w, snap.t, period)?;
         cols.write_row(w, snap)?;
         writeln!(w)?;
+    }
+    Ok(())
+}
+
+/// The time columns every trajectory row carries (gh#833): `t`, the instant
+/// the compartment columns are read at, and `t_start`/`t_stop`, the half-open
+/// period the `flow_*` columns were accumulated over
+/// ([`Trajectory::flow_periods`]). The two writers of a trajectory table —
+/// the leaf renderer above and the `--stdout` / `-o` mirror in `main.rs` —
+/// share these so a flow can never be labelled by one boundary in one file
+/// and by both in the other.
+pub const TRAJ_TIME_HEADER: &str = "t\tt_start\tt_stop";
+
+/// The `--dates` twins of [`TRAJ_TIME_HEADER`], written after it.
+pub const TRAJ_DATE_HEADER: &str = "\tdate\tdate_start\tdate_stop";
+
+/// The three numeric time cells of one row, in [`TRAJ_TIME_HEADER`] order.
+pub fn write_traj_time_cells(
+    w: &mut impl std::io::Write,
+    t: f64,
+    (start, stop): (f64, f64),
+) -> std::io::Result<()> {
+    write!(w, "{t}\t{start}\t{stop}")
+}
+
+/// The three date cells of one row, in [`TRAJ_DATE_HEADER`] order, rendered
+/// from the same boundaries by the inverse calendar map `simulate --dates`
+/// uses for `t`.
+pub fn write_traj_date_cells(
+    w: &mut impl std::io::Write,
+    origin: &str,
+    time_unit: &str,
+    t: f64,
+    (start, stop): (f64, f64),
+) -> Result<(), String> {
+    for x in [t, start, stop] {
+        let d = ir::caltime::internal_to_date_hires(origin, x, time_unit)
+            .map_err(|e| format!("error rendering date: {}", e))?;
+        write!(w, "\t{d}").map_err(|e| e.to_string())?;
     }
     Ok(())
 }

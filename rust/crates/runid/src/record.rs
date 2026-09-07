@@ -67,6 +67,13 @@ pub struct FileChecksum {
 pub enum ColumnRole {
     /// Physical/calendar axis: `t`, `time`, `date`.
     Time,
+    /// The opening boundary of the half-open period a row's flow or count
+    /// covers: `t_start`, `date_start` (gh#833). Not an x-axis — the `Time`
+    /// column beside it is — but the reader that renders a flow as a bar
+    /// spans it from here to `WindowStop`.
+    WindowStart,
+    /// The closing boundary of that period: `t_stop`, `date_stop`.
+    WindowStop,
     /// Sampler/optimizer axis: `sweep`, `step`, `draw`, `iteration`, `point_id`.
     Iteration,
     /// MCMC chain key.

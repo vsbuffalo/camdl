@@ -1489,10 +1489,10 @@ camdl simulate seir_vaccine.camdl --params params.toml --seed 42 \
 
 ```
 # 0.1.0+3e2b2888 (2026-08-10)
-t	S	I
-0	99990	10
-30	99791	64
-60	96434	1208
+t	t_start	t_stop	S	I
+0	0	0	99990	10
+30	0	30	99791	64
+60	30	60	96434	1208
 ```
 
 Without an `origin` in the model, `--dates` is an error:
@@ -1559,7 +1559,7 @@ TSV with a comment line naming the binary that produced it:
 
 ```
 # 0.1.0+3e2b2888 (2026-08-10)
-t	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
+t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
 ```
 
 The bytes in the store leaf's `traj.tsv` are the same table without that header.
@@ -1619,8 +1619,8 @@ more than one scenario ran, then `draw` under `--draws`:
 
 ```
 # 0.1.0+3e2b2888 (2026-08-10)
-replicate	scenario	t	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
-1	baseline	0	99990	0	10	0	0	0	0	0	0
+replicate	scenario	t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
+1	baseline	0	0	0	99990	0	10	0	0	0	0	0	0
 ```
 
 `replicate` is a 1-based cell index, not the seed. With `--seeds 10,20` the
@@ -3906,11 +3906,15 @@ if the field did not exist.
 `runid::inputs`):
 
 - `model` — `ModelDigest` (§9.2.3). Label: the model file stem.
-- `config` — `SimConfig`, `schema_version = 3`: `backend`
+- `config` — `SimConfig`, `schema_version = 5`: `backend`
   (gillespie/chain_binomial/ode), `dt`, `t_start`, `t_end`, the resolved output
   schedule (`Regular { start, step }` or `AtTimes([…])`), `calendar` (a
-  placeholder always `Numeric` today), `allow_degenerate_rates`, `no_flows`, and
-  the `columns` allow-list as a sorted set. Label: `{backend}-dt{dt}`.
+  placeholder always `Numeric` today), `allow_degenerate_rates`, `no_flows`, the
+  `columns` allow-list as a sorted set, and `init_state`. The schema version is
+  also where the leaf's _file format_ enters the key: version 5 changed no
+  field, it re-keyed every sim leaf because `traj.tsv` gained `t_start`/`t_stop`
+  (§10.1) and a key must not name bytes a recompute no longer reproduces. Label:
+  `{backend}-dt{dt}`.
 - `params` — `ResolvedParams`: the resolved base parameter map
   (`BTreeMap<ParamId, FiniteF64>`, i.e. model defaults overlaid by `--params`
   then `--param`, plus any sweep point) and the SHA-256 **content** digests of
@@ -4207,6 +4211,8 @@ A real `sims/` leaf record (hashes and paths abbreviated):
       "role": "trajectory",
       "columns": [
         { "name": "t", "role": "time" },
+        { "name": "t_start", "role": "window_start" },
+        { "name": "t_stop", "role": "window_stop" },
         { "name": "S", "role": "state" },
         { "name": "I", "role": "state" },
         { "name": "R", "role": "state" },
@@ -4365,24 +4371,33 @@ The canonical per-cell trajectory artifact in a `Sim` leaf. One row per output
 time. **No comment or version line** — the first line is the header:
 
 ```
-t	S	I	R	flow_infection	flow_recovery
-0	990	10	0	0	0
-1	989	9	2	1	2
+t	t_start	t_stop	S	I	R	flow_infection	flow_recovery
+0	0	0	990	10	0	0	0
+1	0	1	989	9	2	1	2
 ```
 
-Columns, in this order (`util::TrajColumns::select`):
+Columns, in this order (`util::TRAJ_TIME_HEADER`, then
+`util::TrajColumns::select`):
 
-1. `t` — the output time, rendered with `{}` on an `f64` (`0`, `1`, `0.5`).
-2. Integer compartments, in model declaration order, rendered `{}`.
-3. Real compartments, in model declaration order, rendered `{:.4}`.
-4. `flow_<transition>` for every transition, in model declaration order —
+1. `t` — the output time, rendered with `{}` on an `f64` (`0`, `1`, `0.5`). The
+   compartment columns are read **at** this instant.
+2. `t_start`, `t_stop` — the half-open period `[t_start, t_stop)` the row's
+   `flow_*` columns were accumulated over: `t_stop` is the row's `t`, `t_start`
+   the previous row's. The initial-condition row has no interval before it and
+   writes the empty `[t, t)`; its flows are zero. A row carries both readings —
+   a state _at_ `t`, a flow _over_ the period — and names each boundary rather
+   than leaving the period to be inferred from the row above.
+3. Integer compartments, in model declaration order, rendered `{}`.
+4. Real compartments, in model declaration order, rendered `{:.4}`.
+5. `flow_<transition>` for every transition, in model declaration order —
    integer flows `{}`, real flows `{:.4}`. Each value is the flow accumulated
-   since the previous output row.
+   over `[t_start, t_stop)`.
 
-`--no-flows` drops group 4; `--columns A,B,…` restricts groups 2–4 to an
+`--no-flows` drops group 5; `--columns A,B,…` restricts groups 3–5 to an
 allow-list validated against the model (an unknown name is a hard error listing
-the valid ones). Emitted order always follows the model, never the allow-list.
-Both knobs are identity (§9.2.4), so a filtered trajectory is its own leaf.
+the valid ones); the three time columns are always written. Emitted order always
+follows the model, never the allow-list. Both knobs are identity (§9.2.4), so a
+filtered trajectory is its own leaf.
 
 The leaf trajectory never carries a `date` column, regardless of `--dates`.
 
@@ -4395,8 +4410,9 @@ A multi-cell `simulate` (`--replicates` / `--seeds` / multiple `--scenario` /
 
 ```
 # 0.1.0+<git> (<build date>)
-replicate	t	date	S	I	R	V	flow_infection	flow_recovery
-1	0	2020-01-01	9990	10	0	0	0	0
+replicate	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow_recovery
+1	0	0	0	2020-01-01	2020-01-01	2020-01-01	9990	10	0	0	0	0
+1	1	0	1	2020-01-02	2020-01-01	2020-01-02	9985	13	2	0	5	2
 ```
 
 - Line 1 is a `# {camdl version} ({build date})` comment — present here and
@@ -4404,8 +4420,9 @@ replicate	t	date	S	I	R	V	flow_infection	flow_recovery
 - Leading key columns appear only when the corresponding axis has more than one
   level: `replicate` when the run has more than one cell, `scenario` when more
   than one scenario, `draw` when more than one parameter draw.
-- `date` appears only under `--dates`, which requires the model to declare an
-  `origin`; it is rendered via `ir::caltime::internal_to_date_hires`.
+- `date`, `date_start`, `date_stop` appear only under `--dates`, which requires
+  the model to declare an `origin`; each is its numeric twin (`t`, `t_start`,
+  `t_stop`) rendered via `ir::caltime::internal_to_date_hires`.
 - The data columns are identical to §10.1 and honour the same
   `--no-flows`/`--columns` filter.
 
@@ -4630,7 +4647,7 @@ A sampler stage (PGAS, PMMH, NUTS, MH) additionally writes:
 | `draws.tsv`                 | the thinned posterior cloud (§10.3)                                                                                                                                                                                                                                                                                                                                                                      |
 | `chain_N/trace.tsv`         | per-chain trace (§10.4)                                                                                                                                                                                                                                                                                                                                                                                  |
 | `chain_N/resume_state.bin`  | bincode resume state, guarded by its own config hash (§9.4)                                                                                                                                                                                                                                                                                                                                              |
-| `chain_N/trajectories.tsv`  | PGAS only — the smoothed latent paths, tidy/long, keyed `chain draw time [date]`, with a `# camdl-trajectories v1` header line                                                                                                                                                                                                                                                                           |
+| `chain_N/trajectories.tsv`  | PGAS only — the smoothed latent paths, tidy/long, keyed `chain draw time t_start t_stop [date date_start date_stop]` (§10.1 for the period columns), with a `# camdl-trajectories v1` header line                                                                                                                                                                                                        |
 | `chain_N/trajectories.json` | the matching manifest (`format`, `version`, `method`, `granularity`, `n_chains`, `n_draws`, `columns`, `model_hash`, `conditioned`, `calendar`, …)                                                                                                                                                                                                                                                       |
 | `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at stage end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                               |
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
@@ -4706,21 +4723,26 @@ column, so the declaration cannot disagree with the file it describes
 `role` (the table's default view) is one of `trajectory`, `observation`,
 `posterior_cloud`, `trace`, `predictive`, `landscape`.
 
-Each column's `role` is one of `time`, `iteration`, `chain`, `replicate`,
-`scenario`, `dimension`, `state`, `flow`, `incidence`, `param_estimated`,
-`param_fixed`, `observable`, `quantile`, `diagnostic`. Classification is by
-reserved name (`chain`, `replicate`, `scenario`; `t`/`time`/`date` → `time`;
+Each column's `role` is one of `time`, `window_start`, `window_stop`,
+`iteration`, `chain`, `replicate`, `scenario`, `dimension`, `state`, `flow`,
+`incidence`, `param_estimated`, `param_fixed`, `observable`, `quantile`,
+`diagnostic`. Classification is by reserved name (`chain`, `replicate`,
+`scenario`; `t`/`time`/`date` → `time`; `t_start`/`date_start` → `window_start`;
+`t_stop`/`date_stop` → `window_stop`;
 `sweep`/`step`/`draw`/`iteration`/`point_id` → `iteration`), then prefix
 (`flow_`, `inc_`), then membership in the estimated / all-parameter sets, then a
 per-table default (`state` for trajectories, `diagnostic` for fit tables).
 
 `time` and `iteration` are deliberately distinct: a trajectory's x-axis is
 physical time and a trace's is a sampler index, and conflating them is a real
-rendering bug.
+rendering bug. `window_start`/`window_stop` are not an axis either: they are the
+boundaries of the half-open period a row's `flow` columns cover (§10.1), so a
+consumer draws a flow as a bar over that span and a state as a point at `time`.
 
 The rendering rule is then mechanical: the x-axis is the `time` or `iteration`
 column; group by `chain` / `replicate` / `scenario`; facet by `dimension`;
-series are `state` / `param_estimated` / `observable`; ribbons are `quantile`;
+series are `state` / `param_estimated` / `observable`, with `flow` and
+`incidence` spanning `window_start`–`window_stop`; ribbons are `quantile`;
 overlays are `diagnostic`. Because the index column is spelled differently by
 method (`sweep`, `step`, `draw`, `iteration`), a consumer reads the role and
 never the name.

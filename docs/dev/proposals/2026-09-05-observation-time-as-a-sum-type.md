@@ -17,8 +17,13 @@
   transitional `InferredIntervals` runtime variant is deleted: an interval
   stream's times are always explicit periods, an IR that carries no declaration
   is refused by the loader and the emitters, and `survey` scores over the
-  declared periods like every other path. Outstanding: the trajectory's
-  `t_start`/`t_stop` columns.
+  declared periods like every other path. Step 4 is complete: every trajectory
+  table (`traj.tsv`, the `--stdout`/`-o` mirror, the PGAS `trajectories.tsv`)
+  carries `t_start`/`t_stop` beside `t`, with `date_start`/`date_stop` under
+  `--dates`, the `run.json` schema names the two as `window_start`/`window_stop`
+  roles, and the sim leaf re-keyed for the changed bytes (`SimConfig`
+  schema_version 5). The lineage cohort table says `window_stop`. Nothing in
+  this proposal is outstanding.
 - **Issue:** gh#833
 - **Supersedes:** `2026-09-04-explicit-observation-windows.md`
 - **Area:** IR (`ObservationModel`, observation rows), runtime
@@ -421,9 +426,10 @@ the concept and the type:
 cases { covers = day(time) }
 ```
 
-`docs/dates.md` names the future output columns `period_start`/`period_stop`;
-this proposal emits `t_start`/`t_stop`/`date_start`/`date_stop`. Settle on the
-`dates.md` names before either ships.
+The trajectory's period columns are `t_start`/`t_stop`, with
+`date_start`/`date_stop` under `--dates` (ruling 2); `docs/dates.md` uses the
+same names. Observation files say `window_start`/`window_stop`, because there
+the columns are the modeller's declaration, not the runtime's report.
 
 ## IR, run identity, goldens
 

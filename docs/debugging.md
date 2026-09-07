@@ -87,10 +87,13 @@ camdl simulate model.ir.json --params p.toml --backend chain_binomial --dt 1 --s
 ```
 
 ```
-t   S       E     I     R     flow_infection  flow_progression  flow_recovery
-0   73151   127   127   2.4M  0               0                 0
-1   73080   198   127   2.4M  71              0                 0
+t   t_start  t_stop  S       E     I     R     flow_infection  flow_progression  flow_recovery
+0   0        0       73151   127   127   2.4M  0               0                 0
+1   0        1       73080   198   127   2.4M  71              0                 0
 ```
+
+`t_start`/`t_stop` is the period each row's `flow_*` columns were accumulated
+over; the compartment columns are read at `t`.
 
 The planned `--trace` flag would add the remaining traced columns (forcing
 functions and let bindings, e.g. `school`, `beta_base`). It is **not yet
