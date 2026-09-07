@@ -5396,6 +5396,7 @@
         "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
+        "covers": { "kind": "until", "offset": 0.0, "span": 7.0 },
         "projection": { "cumulative_flow": "recovery_p1" },
         "likelihood": {
           "neg_binomial": {
@@ -5431,6 +5432,7 @@
         "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
+        "covers": { "kind": "until", "offset": 0.0, "span": 7.0 },
         "projection": { "cumulative_flow": "recovery_p2" },
         "likelihood": {
           "neg_binomial": {
@@ -5466,6 +5468,7 @@
         "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
+        "covers": { "kind": "until", "offset": 0.0, "span": 7.0 },
         "projection": { "cumulative_flow": "recovery_p3" },
         "likelihood": {
           "neg_binomial": {
@@ -5501,6 +5504,7 @@
         "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
+        "covers": { "kind": "until", "offset": 0.0, "span": 7.0 },
         "projection": { "cumulative_flow": "recovery_p4" },
         "likelihood": {
           "neg_binomial": {
@@ -5536,6 +5540,7 @@
         "emit_schedule": {
           "regular": { "start": 0.0, "step": 7.0, "end": 365.0 }
         },
+        "covers": { "kind": "until", "offset": 0.0, "span": 7.0 },
         "projection": { "cumulative_flow": "recovery_p5" },
         "likelihood": {
           "neg_binomial": {

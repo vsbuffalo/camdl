@@ -142,6 +142,7 @@
             "end": 365.0
           }
         },
+        "covers": { "kind": "until", "offset": 0.0, "span": 7.0 },
         "projection": {
           "cumulative_flow": "infection"
         },
