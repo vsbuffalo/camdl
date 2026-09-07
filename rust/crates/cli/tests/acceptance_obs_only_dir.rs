@@ -64,12 +64,14 @@ simulate { from = 0 'days  to = 56 'days }
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected  = incidence(infection)
     emit_schedule = every 7 'days
     weekly_cases ~ poisson(rate = rho * projected)
   }
   biweekly_recoveries {
     columns       { time : time, biweekly_recoveries : count }
+    covers        = closing_at(time, 14 'days)
     projected  = incidence(recovery)
     emit_schedule = every 14 'days
     biweekly_recoveries ~ poisson(rate = rho * projected)

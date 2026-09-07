@@ -46,6 +46,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   cases {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 1 'days)
     projected     = incidence(infection)
     emit_schedule = every 1 'days
     cases         ~ poisson(rate = projected)
@@ -194,14 +195,20 @@ fn the_bare_form_sets_every_streams_cadence() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    for stream in ["cases", "prevalent"] {
-        let times = obs_times(&dir.join(format!("{stream}.tsv")));
-        assert_eq!(
-            times,
-            vec![0.0, 7.0, 14.0, 21.0, 28.0],
-            "'{stream}' must emit weekly, not on its declared daily cadence"
-        );
-    }
+    // The prevalence stream reads an instant at every emit time, the origin
+    // included. The incidence stream's row at the origin would cover the
+    // week BEFORE the run and is not written (gh#833): `--emit-every 7`
+    // re-widens its declared one-day window to the week it now spans.
+    assert_eq!(
+        obs_times(&dir.join("prevalent.tsv")),
+        vec![0.0, 7.0, 14.0, 21.0, 28.0],
+        "'prevalent' must emit weekly, not on its declared daily cadence"
+    );
+    assert_eq!(
+        obs_times(&dir.join("cases.tsv")),
+        vec![7.0, 14.0, 21.0, 28.0],
+        "'cases' must emit weekly, not on its declared daily cadence"
+    );
 }
 
 #[test]
@@ -229,8 +236,9 @@ fn the_labelled_form_sets_one_stream_and_leaves_its_sibling_alone() {
 
     assert_eq!(
         obs_times(&dir.join("cases.tsv")),
-        vec![0.0, 7.0, 14.0, 21.0, 28.0],
-        "the named stream must take the override"
+        vec![7.0, 14.0, 21.0, 28.0],
+        "the named stream must take the override (its origin row covers the \
+         week before the run and is not written, gh#833)"
     );
     assert_eq!(
         obs_times(&dir.join("prevalent.tsv")).len(),
@@ -415,9 +423,10 @@ fn distinct_cadences_are_distinct_obs_artifacts_and_the_same_cadence_collides() 
     );
     assert!(after_14.contains(&after_7[0]), "the weekly artifact must survive: {after_14:?}");
 
-    // And the two carry what they claim to.
-    assert_eq!(obs_times(&tmp.path().join("o7").join("cases.tsv")).len(), 5);
-    assert_eq!(obs_times(&tmp.path().join("o14").join("cases.tsv")).len(), 3);
+    // And the two carry what they claim to (the origin row's period precedes
+    // the run and is not written, gh#833).
+    assert_eq!(obs_times(&tmp.path().join("o7").join("cases.tsv")).len(), 4);
+    assert_eq!(obs_times(&tmp.path().join("o14").join("cases.tsv")).len(), 2);
 }
 
 /// The model identity does not move.
@@ -659,7 +668,11 @@ sim_seeds = [1]
     let out_dir = tmp.path().join("out");
     let toml = fit_for("a", &out_dir);
 
-    for every in ["1", "7"] {
+    // The override names the INSTANT stream: a state read has no window, so
+    // any cadence is one the model reads back. The incidence stream declares
+    // `closing_at(time, 1 'days)`, so re-spacing IT would write rows the same
+    // model cannot read (see the refusal test below).
+    for every in ["prevalent=1", "prevalent=7"] {
         let out = run_fit(&toml, &["--emit-every", every]);
         assert!(
             out.status.success(),
@@ -689,14 +702,25 @@ sim_seeds = [1]
             }
         }
     }
+    // The wide file carries the union of both streams' times — daily either
+    // way, since `cases` stays daily — with `NA` where a stream has no row
+    // (`cases` at the origin, whose period precedes the run; `prevalent` on
+    // the six days a week it is not emitted under the weekly override). Same
+    // row count, different bytes: the data genuinely changed.
     let mut row_counts: Vec<usize> =
         generated.iter().map(|p| obs_times(p).len()).collect();
     row_counts.sort();
     assert_eq!(
         row_counts,
-        vec![5, 29],
-        "each cadence must generate its own dataset (weekly = 5 rows, daily = \
-         29) — got {generated:?}"
+        vec![29, 29],
+        "each cadence must generate its own dataset over the daily union axis — \
+         got {generated:?}"
+    );
+    assert_eq!(generated.len(), 2, "one dataset per cadence: {generated:?}");
+    assert_ne!(
+        std::fs::read(&generated[0]).unwrap(),
+        std::fs::read(&generated[1]).unwrap(),
+        "the two cadences must generate different data"
     );
 
     // …and the fit followed the data onto a distinct base. The fit-level
@@ -709,6 +733,38 @@ sim_seeds = [1]
         2,
         "each cadence's fit must key on its own generated data: {cells:?}"
     );
+}
+
+/// gh#833: a `[synthetic]` dataset is fitted by the model that generated it,
+/// so re-spacing a stream whose declared window has another width would write
+/// rows the model reads as gapped. Refused, naming the declaration and the one
+/// that would emit the requested cadence — not rescaled behind the user's back.
+#[test]
+fn a_synthetic_fit_refuses_an_emit_every_that_contradicts_the_declared_window() {
+    if skip_if_missing_binary() || camdlc().is_none() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (ir, truth) = fit_fixture(tmp.path());
+    let toml = tmp.path().join("fit.toml");
+    std::fs::write(
+        &toml,
+        format!(
+            "output_dir = \"{out}\"\n\n[model]\ncamdl = \"{ir}\"\n\n[synthetic]\n\
+             true_params = \"{truth}\"\nsim_seeds = [1]\n{stages}\n",
+            out = tmp.path().join("out").display(),
+            ir = ir.display(),
+            truth = truth.display(),
+            stages = FIT_STAGES,
+        ),
+    )
+    .unwrap();
+
+    let out = run_fit(&toml, &["--emit-every", "7"]);
+    assert!(!out.status.success(), "a weekly override on a daily-declared incidence stream must be refused");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cases") && err.contains("covers") && err.contains("closing_at(time, 7 'days)"),
+        "the refusal must name the stream, its declaration and the declaration that would emit weekly: {err}");
 }
 
 /// Fit bases holding at least one `fit_stage` leaf — the cell fits, as opposed

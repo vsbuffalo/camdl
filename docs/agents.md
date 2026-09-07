@@ -256,21 +256,28 @@ one that costs the most time to diagnose, because the symptom does not point at
 the cause.
 
 For a stream whose `projected` is an `incidence(...)`, camdl accumulates
-modelled flow over the interval **since that stream's previous row** — not over
-a window you name. So the two ways of handling a bad day mean different things:
+modelled flow over the period the stream's `covers` declaration assigns to each
+row — `covers = day(time)` for a daily file labelled by the day it describes —
+and every incidence stream must carry one (**E350**; the forms are in
+`camdl docs data`, "What a row covers"). Under such a form a row's window
+follows from its label, so the two ways of handling a bad day mean different
+things:
 
-| you write         | the model sees                                              |
-| ----------------- | ----------------------------------------------------------- |
-| `2026-07-14  NA`  | scheduled, unobserved — no likelihood term, interval CLOSES |
-| (no row on 07-14) | not scheduled — the NEXT row's interval spans the gap       |
+| you write         | the model sees                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `2026-07-14  NA`  | scheduled, unobserved — no likelihood term, the window is kept                              |
+| (no row on 07-14) | a missing row — the file is refused, naming both neighbouring windows and the uncovered day |
 
-Filtering unusable days out therefore _silently widens_ the next row's exposure
-window while its own count still covers one day. A real case: after filtering,
-the retained rows sat up to 13 days apart, so `projected` was compared against
-13 days of modelled flow against one day of specimens — a 13x inflation that
-**refused 23 of 24 chains at initialisation**, because a modelled flow above the
-specimen count is impossible rather than merely a poor fit. Nothing in that
-error mentions the filtering.
+The refusal exists because of what dropping a row used to do. Before a stream
+could state its period, the next row's window silently stretched back across the
+gap while its count still covered one day. A real case: after filtering, the
+retained rows sat up to 13 days apart, so `projected` compared 13 days of
+modelled flow against one day of specimens — a 13x inflation that **refused 23
+of 24 chains at initialisation**, because a modelled flow above the specimen
+count is impossible rather than merely a poor fit, and nothing in that error
+mentioned the filtering. If one row genuinely covers a longer span (publication
+was suspended), say so with `window_start`/`window_stop` columns rather than by
+leaving a gap.
 
 So: **emit every scheduled time, and make the unusable ones `NA`.** The days you
 cannot use then contribute no observation at all — which is what they are,

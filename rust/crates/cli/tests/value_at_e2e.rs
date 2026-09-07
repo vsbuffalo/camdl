@@ -60,6 +60,7 @@ init { S = 990  I = 10 }
 observations {
   cases {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     cases         ~ neg_binomial(mean = rho * projected, r = k)
@@ -99,7 +100,6 @@ fn write_data(dir: &Path) -> PathBuf {
 fn write_fit_toml(dir: &Path, model: &Path, data: &Path) -> PathBuf {
     let body = format!(
         r#"output_dir = "{out}"
-condition_from = "first_obs - 1 week"
 
 [model]
 camdl = "{model}"

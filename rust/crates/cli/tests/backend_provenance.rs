@@ -385,7 +385,6 @@ fn fit_records_stage_backend_in_mle() {
     let fit_toml = tmp.path().join("fit.toml");
     let body = format!(
         r#"output_dir = "{out}"
-condition_from = "first_obs - 1 day"
 
 [model]
 camdl = "{ir}"

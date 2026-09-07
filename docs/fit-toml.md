@@ -178,92 +178,36 @@ what a run did.
 > at load rather than being silently dropped, so a sweep that varies a typo'd
 > knob can't quietly produce identical fits.
 
-## Conditioning boundary (`condition_from`)
-
-### Why it exists
+## Where scoring begins
 
 An **incidence** observation (a weekly case count, say) is the flow accumulated
-over one reporting interval — `(t_{k-1}, t_k]`. The _first_ observation is the
-only one whose left edge isn't a previous observation; by default the filter
-opens it at the model origin (`simulate.from` / `t_start`), so `y_1` is scored
-against every event since the dynamics began. That is correct when the data
-starts about one cadence after `t_start`. It is **wrong** when `t_start` sits
-far behind the first datum — e.g. you start dynamics in 2011 so births and
-SIA/MCV covariates shape the susceptible pool, but case data begins in 2014. The
-first bin then spans the whole 2011–2014 warm-up, and scoring one weekly count
-against three years of flow is meaningless (gh#134) — and it collapses the
-particle filter (no particle's three-year integral matches a single datum).
+over the period its row covers, and the model states that period on the stream —
+`covers = day(time)`, `starting_on(...)`, `ending_on(...)`, `closing_at(...)`,
+or `window_start`/`window_stop` columns (`camdl docs data`, "What a row
+covers"). That declaration also decides where the likelihood begins. The first
+row's period opens where the declaration says, so a model whose dynamics start
+well before the data — `simulate.from` in 2011 so births and SIA/MCV covariates
+shape the susceptible pool, case data from 2014 — simulates the 2011–2014 span
+with the full stochastic dynamics and scores none of it. The first datum is
+scored against its own declared period, never against the whole warm-up, and
+there is no `fit.toml` setting for that boundary. A first period that opens
+before `simulate.from` is an error naming both times: that span is never
+simulated.
 
-The fix is a **conditioning boundary**: the leading span `[t_start, cond_from)`
-becomes a covariate-informed **warm-up** — simulated with the full stochastic
-dynamics (births, campaigns, seasonality, process noise) but **not scored** —
-and the first observation is scored against one normal cadence
-`(cond_from, first_obs]`. Mechanically it is a leading reset-only point on the
-stream's grid: the incidence accumulator resets at `cond_from`, discarding the
-warm-up flow, with no likelihood term there.
+`fit.toml` used to carry a `condition_from` key for this. It is removed, and a
+leftover key — top-level, or under `[data]` — is a hard error rather than an
+unknown-field rejection:
 
-### Conditioning is explicit — you state it, the filter never guesses
-
-camdl does **not** infer the boundary. An inferred boundary would be fragile (it
-fails exactly on the irregular/sparse surveillance data this is for) and fail
-_silently_. So you set it, and it is **required** precisely when it matters: an
-**incidence** stream whose first observation lands anomalously far after
-`t_start` (a wide leading window relative to that stream's own cadence) with no
-`condition_from` is a **hard error (W329)** that names the fix. A stream whose
-first observation is ~one cadence after `t_start` (the common, well-set-up case)
-needs nothing. A **prevalence** stream is exempt (its `y_1` reads the state at
-the instant, not a flow integral) — a wide gap there is only a soft warning.
-
-### The surface — one default, optional per-stream shadows
-
-`condition_from` is a top-level key with two forms:
-
-```toml
-# (1) a string — the default applied to EVERY stream:
-condition_from = "first_obs - 1 week" # one cadence before the data
-# condition_from = "date(\"2014-08-18\")"  # an absolute calendar date
-# condition_from = "19"                     # an absolute model-time number (quoted)
+```
+condition_from = ... is no longer a fit.toml key: an incidence stream now states
+what each row covers (`covers = ...` or window columns in the model), and a
+declared first period opens where it says, so the warm-up before the first row
+is discarded without a separate setting. Delete the key.
 ```
 
-```toml
-# (2) a table — an optional all-streams `default` plus per-observation-label
-#     SHADOWS, for multi-cadence models (streams on different schedules):
-[condition_from]
-default = "first_obs - 1 week" # applied to every stream …
-es = "first_obs - 2 weeks" # … except `es`, which this shadows
-afp = "first_obs - 1 month" # … and `afp`
-```
-
-**Resolution per stream:** its shadow → else the `default` → else _none_ (and
-then W329 decides whether none is fine or a hard error). The shadow key is the
-observation-block label (the `[data]` key). `default` is reserved — a stream
-literally labelled `default` is a hard error; so is a shadow naming a stream
-that doesn't exist (typo-safety, the error lists the valid labels).
-
-A spec must resolve to a time strictly between `t_start` and that stream's first
-observation (and onto the `dt` grid). The duration form (`first_obs - 1 week`)
-is anchored to **each stream's own** first observation, so in a multi-cadence
-model the same `default` gives each stream a window in its own cadence.
-
-`condition_from` and `ic_free` cannot be combined (the leading hole would leave
-`y_1` with nothing to condition on).
-
-`camdl pfilter` and `camdl profile` apply the same conditioning, so a fixed-θ
-loglik is computed over the same scored window as the fit's: they read the
-`--fit` toml's `condition_from`, overridden by the repeatable flag
-`--condition-from SPEC` (all-streams default) / `--condition-from LABEL=SPEC`
-(per-stream shadow). The W329 wide-first-window hard error applies there
-identically.
-
-`camdl fit predict` carries the same window into both predictive horizons, so a
-predicted row and the observed row it is plotted against cover the same
-interval: the free-forward projection opens the first incidence bin at
-`condition_from`, and the one-step filter is handed the same leading reset. The
-boundary is a reset, not an observation — no predictive row is emitted at it.
-The free-forward projection reads the recorded cumulative flow at the boundary,
-so `condition_from` must also be a **recorded output time**; if it is not,
-`fit predict` refuses and names the fix (widen `output { trajectories { … } }`,
-or move the boundary onto an output time).
+`camdl pfilter`, `camdl profile` and `camdl fit predict` bind the same declared
+periods, so a fixed-θ log-likelihood or a predictive row covers exactly the
+window the fit scored. The history is in `camdl docs language-changes`.
 
 ## Priors
 

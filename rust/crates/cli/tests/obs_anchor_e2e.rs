@@ -105,6 +105,7 @@ init {{ S = 990  I = 10 }}
 observations {{
   cases {{
     columns       {{ time : time, cases : count }}
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     cases         ~ poisson(rate = rho * projected)

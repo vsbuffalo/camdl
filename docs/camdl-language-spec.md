@@ -2799,6 +2799,7 @@ transitions {
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
@@ -2815,7 +2816,9 @@ observations {
 
 Syntax notes: the observation header is `name { … }` (no colon), optionally
 `name from <source> { … }`. `columns { }` declares the file schema by name
-(exactly one `: time` column). The measurement model uses `<value_col> ~
+(exactly one temporal anchor: a `: time` column, or a `window_start`/`window_stop`
+pair — §12.1.1). An incidence stream also states what period each row covers
+(`covers = …`, §12.1.1). The measurement model uses `<value_col> ~
 KIND(...)` (the `~` operator, function-call form with named arguments).
 `emit_schedule` is the simulate-only emission cadence; a fit-only model omits
 it (the data file's `time` column drives the fit).
@@ -2823,7 +2826,7 @@ it (the data file's `time` column drives the fit).
 ### 12.1 Projections
 
 ```camdl
-incidence(transition)                    cumulative flow since last observation
+incidence(transition)                    flow accumulated over the period the row covers (§12.1.1)
 incidence(transition[north])             positional index, by declaration order
 incidence(transition[patch = north])     named index (order-independent)
 prevalence(compartment)                  current population
@@ -2932,6 +2935,7 @@ therefore goes in the *likelihood*, not the projection:
   ```camdl
   cases[p in patch] {
     columns   { time : time, patch : dim, cases : count }
+    covers    = closing_at(time, 7 'days)
     projected = incidence(infection[p])
     cases ~ poisson(rate = rho[p] * projected)
   }
@@ -2959,6 +2963,97 @@ pair names a *different existing cell* and binds silently, with no diagnostic
 
 Inside a likelihood expression, the keyword `projected` refers to the evaluated
 projection value for that observation.
+
+### 12.1.1 What a row covers: `covers` and the window columns
+
+An `incidence(...)` projection accumulates a flow over an interval, and a row's
+time label alone does not say which interval. `2026-07-08` is the day 8 July in
+a daily file labelled by the day the count describes, the week 8–14 July in a
+week-starting file, the week 2–8 July in a week-ending one, and the week 1–7
+July in a file whose label is the boundary its window closes at — the convention
+of pomp's accumulator variables and of camdl's own `simulate --obs` output. No
+rule gets all four right, so **an incidence stream must state what each of its
+rows covers.** A stream whose `projected` accumulates a flow — `incidence(...)`,
+`sum(..., incidence(...))`, or added incidence terms (§12.1) — and declares
+neither `covers = …` nor `window_start`/`window_stop` columns is **E350**; there
+is no default. A stream whose `projected` reads state at an instant —
+`prevalence(...)`, a compartment expression — has no window to state, and
+declaring one by either means is **E348**.
+
+**The five forms.** Four take the stream's own `: time` column and a rule; the
+fifth puts both boundaries in the file. With `D` the label in a row's time
+column, resolved for `D = 11 July` and a seven-day width:
+
+| form                                   | the row covers          | `D = 11 Jul`, `7 'days`               |
+| -------------------------------------- | ----------------------- | ------------------------------------- |
+| `covers = day(time)`                   | `[D, D+1 day)`          | `[11 Jul, 12 Jul)`                    |
+| `covers = starting_on(time, 7 'days)`  | `[D, D+7 days)`         | `[11 Jul, 18 Jul)`                    |
+| `covers = ending_on(time, 7 'days)`    | `[D−6 days, D+1 day)`   | `[5 Jul, 12 Jul)` — 11th **included** |
+| `covers = closing_at(time, 7 'days)`   | `[D−7 days, D)`         | `[4 Jul, 11 Jul)` — 11th **excluded** |
+| `window_start` + `window_stop` columns | exactly `[start, stop)` | as written                            |
+
+`ending_on` and `closing_at` are near-synonyms in English and differ by a whole
+day, which is why they sit as adjacent rows with the intervals written out.
+"Week ending 11 July" means 11 July is the **last included day**: the span opens
+six days before the label and closes one day after it, and that off-by-one is
+what `ending_on` exists to hide. `closing_at` is for a file whose label is the
+instant at which the window **closes**, the label itself belonging to the next
+row's window. That is the reading of pomp's accumulator variables (the value
+reported at `t[k+1]` is the flow since `t[k]`) and of every file
+`simulate --obs` writes, so synthetic data round-trips under
+`closing_at(time, <cadence>)` with the cadence of the stream's `emit_schedule`.
+A file typed from a surveillance bulletin is labelled by the day or week it
+reports on and takes `day`, `starting_on` or `ending_on`. The width is a
+compile-time constant duration; `day(...)` takes none. A width given to `day`, a
+width missing from the other three, an unknown form name, or a width naming a
+data column is **E349** — a width that varies row to row is stated with the
+window columns, not with a duration column. `covers` must name the stream's own
+`: time` column (**E347** otherwise).
+
+**Window columns.** `window_start` and `window_stop` are `columns { }` roles
+alongside `time`, `dim` and `count`. They replace the `: time` column and are
+the declaration on their own — a stream carrying them writes no `covers` line.
+`columns { }` names exactly one temporal anchor: a `: time` column, or a
+`window_start`/`window_stop` pair. Both, half a pair, or a pair together with
+`covers` is **E347**. Each row covers exactly `[start, stop)` as written, so this
+is the only form that can state a width that changes row to row (a fortnightly
+row in a weekly file, because publication was suspended) or a span no row
+covers. The **stop** is the stream's fit time source: output rows,
+`--score-from` and a forecast grid all read the closing boundary, so a windowed
+stream sits on the time axis exactly where a `: time`-column stream does.
+
+```camdl preamble=obs-sir
+observations {
+  cases {
+    columns   { onset_from : window_start, onset_stop : window_stop,
+                cases : count }
+    projected = incidence(infection)
+    cases     ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+```
+
+**A gap between rows.** Under the four uniform forms every row's window follows
+from its label, so consecutive rows whose windows do not touch can only mean a
+row is **missing** — the shape that, with the window inferred from row spacing,
+used to widen the next row's bin silently. It is refused when the data is bound,
+with an error naming both windows and the uncovered span between them; keep
+every scheduled row and write the unobserved one as `NA`, which is a hole (no
+likelihood term) whose window is kept. Under the window columns a gap is a
+statement and is legal: the flow over the uncovered span belongs to no row and
+is discarded, and the next row's bin opens at its own `window_start`.
+Overlapping windows are refused.
+
+**Where scoring begins.** A declared first period opens where it says. The
+process is simulated from `simulate.from`, and nothing before the first period's
+start is scored, so the declaration is the warm-up boundary and no separate
+warm-up knob is needed. A first period that opens before `simulate.from` is an
+error naming both times: that time is never simulated, so the row would be
+scored against flow that does not exist. Opening exactly at `simulate.from` is
+fine.
+
+The data-file side — file layouts, `NA` holes, and what the declaration changes
+for an existing file — is specified in `camdl docs data` ("What a row covers").
 
 ### 12.2 Likelihood Families
 
@@ -3092,6 +3187,7 @@ readable as "how much of the zero mass the dynamics could not explain".
 observations {
   vector_catch {
     columns       { time : time, vector_catch : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     vector_catch  ~ zero_inflated(
@@ -3159,6 +3255,7 @@ transitions {
 observations {
   cases_by_patch[p in patch] {
     columns        { time : time, patch : dim, cases_by_patch : count }
+    covers         = closing_at(time, 7 'days)
     projected      = incidence(infection[patch = p])
     emit_schedule  = every 7 'days
     cases_by_patch ~ neg_binomial(mean = rho * projected, r = k)
@@ -3182,9 +3279,10 @@ The `observations {}` block is evaluated at runtime in both directions.
   against the same likelihood family, producing log p(y | θ). PGAS, IF2,
   particle filtering, and PMMH all consume the `observations {}` declarations
   via the compiled `dmeasure` / `rmeasure` paths. When fitting with `--data`,
-  the data file's time column supplies the observation times and the declared
-  `emit_schedule` is not consulted; the schedule is used only for forward
-  synthetic-data generation under `simulate`.
+  the data file's time column (the `window_stop` column, for a stream that
+  declares its windows per row — §12.1.1) supplies the observation times and
+  the declared `emit_schedule` is not consulted; the schedule is used only for
+  forward synthetic-data generation under `simulate`.
 
 The emission cadence is written `emit_schedule = every N 'unit` or
 `emit_schedule = at [t1 'unit, t2 'unit, ...]` — the unit rides on each list
@@ -3529,6 +3627,7 @@ transitions {
 observations {
   weekly_afp {
     columns       { time : time, weekly_afp : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly_afp    ~ poisson(rate = rho * projected)
@@ -4072,6 +4171,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     cases ~ neg_binomial(mean = rho * projected, r = k)
@@ -5525,6 +5625,7 @@ interventions {
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     # `infection` is stratified over age × patch, so the pooling is stated
     # rather than left implicit — a bare `incidence(infection)` here is E280
     # (§12.1). One national column, one reporting rate.
@@ -5928,6 +6029,9 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E300 | Error   | Transition rate has the wrong dimension                                                    |
 | E302 | Error   | Addition/subtraction of mismatched dimensions                                             |
 | E303 | Error   | Conflicting dimensions for a parameter across transitions                                 |
+| E347 | Error   | Observation stream anchors time twice or by half — `: time` plus window columns, half a pair, or `covers` with window columns (§12.1.1) |
+| E348 | Error   | `covers` or window columns on a stream whose `projected` reads state at an instant (§12.1.1) |
+| E350 | Error   | Incidence stream states no period — add `covers = …` or `window_start`/`window_stop` columns (§12.1.1) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to

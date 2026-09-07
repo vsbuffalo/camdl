@@ -157,13 +157,13 @@ pub enum PrequentialWarning {
     /// `threshold` is the absolute ESS cut applied, derived as
     /// [`ESS_COLLAPSE_FRACTION`] of the particle count.
     EssCollapse { step_count: usize, threshold: f64 },
-    /// Scoring starts at the prior: `t0 = 0` and no conditioning window
-    /// precedes the first observation, so the first scored one-step-ahead
-    /// predictive is issued from the initial-state distribution with no
-    /// data assimilated — it scores the initializer as much as the model,
-    /// and can dominate a short trace's elpd. Declare `condition_from`
-    /// (simulate-but-don't-score warm-up) to place the scoring boundary
-    /// deliberately.
+    /// Scoring starts at the prior: `t0 = 0` and no warm-up precedes the
+    /// first observation — its window opens at the run's start — so the
+    /// first scored one-step-ahead predictive is issued from the
+    /// initial-state distribution with no data assimilated. It scores the
+    /// initializer as much as the model, and can dominate a short trace's
+    /// elpd. A stream whose first declared period opens after `t_start`
+    /// (the warm-up simulated but not scored) does not trip this.
     StartsAtPrior,
     /// The predictive sample array is empty for ≥1 step
     /// (user passed `--no-save-samples`); CRPS recomputed from
@@ -462,11 +462,11 @@ pub fn crps_sample_fair(samples: &[f64], y: f64) -> f64 {
 /// step order — one for the joint score, then one per present stream —
 /// so a trace is reproducible from (seed, data).
 ///
-/// `has_conditioning_window` says whether a `condition_from` warm-up
-/// precedes the first observation. When it does not and `t0 = 0`, the
-/// first scored predictive is issued from the initial-state
-/// distribution with no data assimilated, and the trace carries a
-/// [`PrequentialWarning::StartsAtPrior`].
+/// `has_warm_up` says whether the first observation's window opens after
+/// the run's start (`MultiStreamObsModel::first_observation_opens_after_run_start`).
+/// When it does not and `t0 = 0`, the first scored predictive is issued
+/// from the initial-state distribution with no data assimilated, and the
+/// trace carries a [`PrequentialWarning::StartsAtPrior`].
 ///
 /// Bootstrap-PF-specific assumption: pre-obs weights are uniform
 /// (reset to zero at the end of the previous step), so log-score
@@ -480,7 +480,7 @@ pub fn build_trace(
     ess_trace: &[f64],
     t0: usize,
     pit_seed: u64,
-    has_conditioning_window: bool,
+    has_warm_up: bool,
     score_from: Option<f64>,
 ) -> PrequentialTrace {
     assert_eq!(recorded.obs_times.len(), y_obs.len(),
@@ -590,7 +590,7 @@ pub fn build_trace(
             threshold: ess_threshold_used,
         });
     }
-    if t0 == 0 && !has_conditioning_window && !steps.is_empty() {
+    if t0 == 0 && !has_warm_up && !steps.is_empty() {
         warnings.push(PrequentialWarning::StartsAtPrior);
     }
 

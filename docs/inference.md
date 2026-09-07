@@ -277,60 +277,32 @@ fit's one-step reduces to its free-forward band). See
 ### Incidence observations and the model origin
 
 An incidence observation (`incidence(...)`, i.e. a `cumulative_flow` projection)
-is scored against the flow accumulated over the window
-`(previous observation, this observation]`. The very first window starts at the
-model origin (internal time 0, or `t_start`), so an incidence row placed _at_
-the origin has a zero-width accumulation window: its expected count is
-identically 0. A positive count at the origin is therefore impossible (`-Inf`
-likelihood), and `camdl pfilter` / `camdl fit` reject it before the filter runs
-with a diagnostic naming the convention and the three remedies:
+is scored against the flow accumulated over the period its row is declared to
+cover — the stream's `covers = ...` line, or its `window_start`/`window_stop`
+columns (`camdl docs data`, "What a row covers"). Two consequences follow for
+the model origin (`simulate.from`, internal `t_start`).
 
-- drop the origin row;
-- shift the observation times to interval _ends_ (date each row at the end of
-  its accumulation window); or
-- move the model origin earlier so the first observation has a full preceding
-  interval.
+**A period cannot open before the origin.** Under `closing_at(time, 7 'days)` a
+row labelled at the origin covers the seven days _before_ it, which were never
+simulated; `camdl pfilter` / `camdl fit` reject the file before the filter runs,
+naming the period and the origin. The remedies are the obvious two: drop the
+row, or move `simulate.from` back to the period's start or earlier. A row at the
+origin under `day(time)` or `starting_on(...)` covers the period _starting_
+there and is fine.
 
-None of these changes the window convention, which is always
-`(previous observation, this observation]` — see `camdl docs dates`, "What a
-dated row covers". Note that the second applies only if your source dates each
-row at the _start_ of its accumulation window; if it already dates rows at the
-end (the common case for surveillance data), re-dating is a no-op and you need
-the first or the third.
+**A warm-up before the first row is simulated, not scored.** When the origin
+sits far before the data — a covariate-informed burn-in that starts dynamics
+years before the case series so births and campaigns shape the susceptible pool
+— the first period still opens where its declaration says, so the first datum is
+scored against one declared period and the pre-data span contributes no
+likelihood term. Nothing has to be set for this: the declaration is the
+boundary. (The former `fit.toml` key `condition_from`, which hand-placed that
+boundary, is removed; a leftover key is a hard error saying so — see
+`camdl docs language-changes`.)
 
-A zero count at the origin is consistent with the zero-width window and is
-accepted. (Prevalence observations — `current_pop` — read state at the instant
-and are unaffected: there is no accumulation window.)
-
-The opposite failure is an origin placed far _before_ the first datum — e.g. a
-covariate-informed burn-in that starts dynamics years before the case data (the
-third remedy above, overshot). Then the first window spans the whole pre-data
-gap, and the first incidence count is scored against the flow accumulated over
-that entire span — a wrong likelihood (gh#134). The fourth remedy covers this:
-set `condition_from` (a top-level `fit.toml` key) to one cadence before the
-first datum, so the pre-data span becomes an unscored warm-up and the first
-observation is scored against one normal cadence:
-
-```toml
-condition_from = "first_obs - 1 week"
-```
-
-Conditioning is **explicit, not inferred** — `camdl fit` rejects an incidence
-model with a wide pre-data gap and no `condition_from` (W329), naming the fix,
-rather than guessing a boundary (which would fail silently on irregular data).
-For a **multi-cadence** model (streams on different schedules) `condition_from`
-is per-stream: a table with an optional all-streams `default` plus
-per-observation-label **shadows** —
-
-```toml
-[condition_from]
-default = "first_obs - 1 week"
-es = "first_obs - 2 weeks" # shadows the `es` stream only
-```
-
-Resolution per stream: its shadow → else `default` → else none. See
-`camdl docs fit-toml` (the `condition_from` section) and §3.9 of
-`camdl-inference-spec.md`.
+Prevalence observations (`current_pop`) read state at the instant and have no
+period; neither point applies to them. See `camdl docs fit-toml` ("Where scoring
+begins") and §3.9 of `camdl-inference-spec.md`.
 
 ### Multi-cadence: streams on different schedules
 
@@ -353,10 +325,11 @@ Two things make this correct rather than a fudge:
   (Prevalence streams read state at the instant and never accumulate, so the
   reset doesn't apply to them.)
 
-Each stream is conditioned independently (see `condition_from`, above — the
-per-stream table form is exactly for this). A homogeneous model (every stream on
-one cadence) is the special case where the union _is_ the shared axis and every
-stream is observed at every time — and it fits byte-for-byte as before.
+Each stream's first period opens where its own declaration says, so where
+scoring begins is settled per stream with no extra setting. A homogeneous model
+(every stream on one cadence) is the special case where the union _is_ the
+shared axis and every stream is observed at every time — and it fits
+byte-for-byte as before.
 
 `camdl simulate --obs-dir <dir>` writes one file per stream at its own cadence,
 which is the natural input back into a multi-cadence fit.

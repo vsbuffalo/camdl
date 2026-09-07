@@ -61,6 +61,13 @@ const BURN_IN: usize = 400;
 /// `incidence(infection)`), which is the only thing the two recovery tests
 /// differ in. Returns the compiled IR path.
 fn write_model_proj(dir: &Path, camdl: &Path, projected: &str, integ: &str) -> PathBuf {
+    // Only an interval (incidence) stream states what each row covers; a
+    // prevalence stream must not (E348). The cadence is the emit_schedule's.
+    let covers = if projected.starts_with("incidence(") {
+        "    covers        = closing_at(time, 2 'days)\n"
+    } else {
+        ""
+    };
     let src = format!(r#"
 time_unit = 'days
 compartments {{ S, I, R }}
@@ -76,7 +83,7 @@ transitions {{
 observations {{
   cases {{
     columns       {{ time : time, cases : count }}
-    projected     = {projected}
+{covers}    projected     = {projected}
     emit_schedule = every 2 'days
     cases ~ poisson(rate = projected)
   }}

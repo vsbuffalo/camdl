@@ -399,75 +399,42 @@ approach avoids `I₀` by replacing the compartmental structure during growth wi
 a branching process parameterised by `R_t`. That is a different process model,
 not a different likelihood factorisation, and is out of scope for this feature.
 
-### 3.9 The conditioning boundary (covariate-informed burn-in)
+### 3.9 Where scoring begins (covariate-informed burn-in)
 
 `simulate.from` (the model origin `t_start`) and the first observation need not
 coincide: a model may start dynamics well before the data — e.g. to let births
 and SIA/MCV covariates shape the susceptible pool over a span where no case data
-exists yet. The particle filter conditions observation _k_ over the half-open
-window `(t_{k-1}, t_k]`, so the first window is `(t_start, first_obs]`. For an
-**incidence** observation (a flow accumulated between observations), that first
-window then spans the whole pre-data gap, and the first datum is scored against
-the flow integrated over the entire gap — a wrong likelihood (gh#134).
+exists yet. For an **incidence** observation (a flow accumulated over a period)
+that leading span must not be scored against the first datum: one weekly count
+against three years of flow is a wrong likelihood (gh#134).
 
-`condition_from` decouples where dynamics begin from where the likelihood
-begins. It places a **conditioning boundary** one cadence before the first
-datum: the leading span `[t_start, condition_from)` becomes a **warm-up** —
-simulated with the full stochastic dynamics (births, campaigns, seasonality,
-process noise) but not scored — and the first observation is scored against one
-normal cadence `(condition_from, first_obs]`.
+The stream's declaration settles it. Every incidence stream states what each row
+covers (`covers = ...`, or `window_start`/`window_stop` columns — see
+`camdl-data-spec.md`, "What a row covers"), and **a declared first period opens
+where it says**. The span from `t_start` to that opening is simulated with the
+full stochastic dynamics — births, campaigns, seasonality, process noise — and
+scored nowhere; the first observation is scored against exactly its declared
+period. There is no separate knob: the declaration is the boundary, per stream,
+so a multi-cadence model needs nothing extra either.
 
-```toml
-condition_from = "first_obs - 1 week" # the default for every stream
-# condition_from = "date(\"2014-08-18\")"   # or an absolute calendar date
-# condition_from = "19"                      # or an absolute model-time number (quoted)
-```
+- **Mechanism.** A declared period contributes two boundaries to the bound
+  observation axis: the incidence accumulator resets at the period's start and
+  is read and scored at its stop. The warm-up is the span before the first
+  reset. This rides the same hole/reset seam as sparse (`NA`) observations, so
+  every algorithm — bootstrap PF, IF2, correlated-PF, PGAS, PMMH — receives it
+  through the bound observation set.
+- **Domain.** A first period that opens before `simulate.from` is a hard error
+  naming both times — that span is never simulated, so the row would be scored
+  against flow that does not exist. Opening exactly at `simulate.from` is fine.
+- **Removed surface.** The `fit.toml` key `condition_from` (string or per-stream
+  table) and its `--condition-from` flag on `fit run` / `pfilter` / `profile`,
+  which hand-placed this boundary, and the W329 wide-first-window guard that
+  demanded it, are removed. A leftover key is a hard error stating that the
+  declaration now does this and to delete the key; a leftover flag is an
+  unknown-argument error. See `camdl docs language-changes`.
 
-For a multi-cadence model the conditioning window is **per observation stream**.
-A table form carries an optional all-streams `default` plus per-stream
-**shadows** keyed by the observation-block label (its `[data.observations]`
-key); a stream with no shadow falls to the `default`:
-
-```toml
-[condition_from]
-default = "first_obs - 1 week" # applied to every stream …
-es = "first_obs - 2 weeks" # … except `es`, which this shadows
-```
-
-Conditioning is **explicit, not inferred**: an incidence stream whose first
-observation lands anomalously far after `t_start` (a wide leading window
-relative to its own cadence) with _no_ conditioning window is a **hard error**
-(W329) naming the `condition_from.<label> = …` fix — the single first datum
-cannot constrain that whole warm-up span, and an _inferred_ boundary would fail
-silently on irregular data. A stream whose first observation is ~one cadence
-after `t_start` needs nothing.
-
-Mechanically the boundary is a leading **reset-only hole** on the shared
-observation grid: its grid time resets the incidence accumulator (so the first
-scored bin is one cadence) while contributing no likelihood term (the warm-up
-flow is discarded, not scored). It rides the same hole/reset seam as sparse
-(`NA`) observations, so every algorithm — bootstrap PF, IF2, correlated-PF,
-PGAS, PMMH — receives it through the bound observation set.
-
-- **Domain.** `condition_from` must resolve strictly between `simulate.from` and
-  the first observation, and onto the `dt` grid. A value at/after the first
-  observation, at/before the origin, or off-grid is a hard error naming the
-  valid range.
-- **Default.** Omitted (or resolving to `t_start`) inserts no hole — byte-for-
-  byte identical to no conditioning.
-- **Guard (W329).** When `simulate.from` sits a wide gap before the data on an
-  incidence stream and `condition_from` is unset, the fit is rejected with a
-  hard error naming this fix; for a prevalence observation (read at the instant,
-  no accumulation) it is only a soft warning.
-- **Composition with `ic_free`.** The two cannot be combined: the leading hole
-  is obs-index 0, and `ic_free` conditions on the first observation there — a
-  hole is not an observation, so the fit is rejected ("nothing to condition
-  on"). They address overlapping uncertainty anyway: a covariate-informed
-  burn-in _derives_ the boundary state, reducing the need for the `ic_free`
-  initial-state estimate.
-
-See `docs/dev/proposals/2026-06-09-burnin-conditioning-window.md` for the
-design, the gh#134 reproduction, and the per-algorithm mechanics.
+See `docs/dev/proposals/2026-09-05-observation-time-as-a-sum-type.md` for the
+design and the runtime mechanics.
 
 ---
 
@@ -1318,12 +1285,13 @@ es_positive = "data/es_results.tsv"
 
 ### 10.2.1 Incidence vs. Prevalence
 
-Incidence data (event counts accumulated over the interval since the last
-observation) and prevalence data (point-in-time compartment counts) project the
-simulator state differently. Both are first-class: the observation block's
-projection (`incidence(X)`, `prevalence(X)`, or a derived expression like
-`B1 + B2`) selects the mode. See `camdl-run-spec.md` §14 for the snapshot-timing
-and intervention-ordering rules.
+Incidence data (event counts accumulated over the period each row is declared to
+cover — `covers = …`, or `window_start`/`window_stop` columns; see
+`camdl-data-spec.md`, "What a row covers") and prevalence data (point-in-time
+compartment counts) project the simulator state differently. Both are
+first-class: the observation block's projection (`incidence(X)`,
+`prevalence(X)`, or a derived expression like `B1 + B2`) selects the mode. See
+`camdl-run-spec.md` §14 for the snapshot-timing and intervention-ordering rules.
 
 Prevalence and incidence carry different Fisher information about the parameters
 — prevalence is more informative about the recovery rate γ (decay shape),
@@ -1340,8 +1308,12 @@ a mismatch is visible before the filter runs.
 
 ### 10.3 Missing Data
 
-Rows with `NA` or blank values are skipped (no contribution to log-likelihood at
-that time). Missing entire time points: omit the row.
+A row whose value is `NA` is a hole: no contribution to the log-likelihood at
+that time, and the row's window is kept. Do not omit a scheduled row. Under a
+uniform `covers` form a gap between consecutive rows is refused as a missing row
+(naming both windows and the uncovered span); a span genuinely covered by no row
+is stated with `window_start`/`window_stop` columns. See `camdl-data-spec.md`,
+"Missing observations" and "A gap between rows".
 
 ### 10.4 Spatially Indexed Data
 

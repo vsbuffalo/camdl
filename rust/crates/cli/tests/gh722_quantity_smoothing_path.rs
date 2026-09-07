@@ -81,6 +81,7 @@ init { S = N0 - I0  I = I0 }
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly_cases  ~ poisson(rate = projected)
@@ -154,6 +155,7 @@ init { S = 990  I = 10 }
 observations {
   cases {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     cases         ~ neg_binomial(mean = rho * projected, r = k)

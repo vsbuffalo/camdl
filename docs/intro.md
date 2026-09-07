@@ -439,6 +439,7 @@ everything, then patch the exceptions.
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
@@ -446,10 +447,15 @@ observations {
 }
 ```
 
-`incidence(infection)` counts infection events since the last observation time.
-The `neg_binomial` likelihood defines how simulated counts relate to observed
-data — used for scoring during inference and for generating synthetic
-observations during forward simulation.
+`incidence(infection)` counts infection events over the period each row covers,
+and an incidence stream must say what that period is.
+`closing_at(time, 7 'days)` means a row labelled `D` holds the seven days
+closing at `D`, with `D` itself excluded — the labelling `simulate --obs`
+writes. A surveillance file labelled by the day or week it reports on writes
+`day(time)`, `starting_on(...)` or `ending_on(...)` instead (`camdl docs data`,
+"What a row covers"). The `neg_binomial` likelihood defines how simulated counts
+relate to observed data — used for scoring during inference and for generating
+synthetic observations during forward simulation.
 
 ---
 

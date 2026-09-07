@@ -1044,7 +1044,16 @@ let e304_diags_in src =
   Compiler.collect_diagnostics ~filename:"<nb-mean>" src
   |> List.filter (fun (d : Diagnostics.diagnostic) -> d.code = "E304")
 
-let nb_mean_src ~projected ~likelihood = Printf.sprintf {camdl|
+let nb_mean_src ~projected ~likelihood =
+  (* Only an accumulating projection states the period each row covers
+     (gh#833): `covers` on a state read is E348, and the RED cases here
+     project a rate (`gamma * I`), which is a state read. *)
+  let covers =
+    if String.starts_with ~prefix:"incidence(" projected
+    then "    covers        = closing_at(time, 7 'days)\n"
+    else ""
+  in
+  Printf.sprintf {camdl|
 compartments { S, I, R }
 parameters {
   beta    : rate
@@ -1063,12 +1072,12 @@ transitions {
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
-    projected  = %s
+%s    projected  = %s
     emit_schedule = every 7 'days
     weekly_cases ~ %s
   }
 }
-|camdl} projected likelihood
+|camdl} covers projected likelihood
 
 let no_e304 ~projected ~likelihood =
   e304_diags_in (nb_mean_src ~projected ~likelihood) = []

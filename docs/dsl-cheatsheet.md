@@ -289,6 +289,9 @@ The compiler issues E-codes with source locations and fix-hints.
 | ---- | -------- | ------------------------------------------------------------------------------------------ |
 | E100 | naming   | parameter name shadows reserved (`t`, etc.)                                                |
 | E332 | indexing | a named index labels a dimension the thing indexed does not have                           |
+| E347 | obs      | a stream anchors time twice or by half (`: time` plus window columns, half a pair)         |
+| E348 | obs      | `covers` or window columns on a `prevalence(...)` / state-reading stream                   |
+| E350 | obs      | an `incidence(...)` stream with neither `covers = …` nor `window_start`/`window_stop`      |
 | E220 | date     | `date(...)` without `origin` declared                                                      |
 | E300 | dim      | transition rate not P·T⁻¹                                                                  |
 | E301 | dim      | non-dimensionless argument to `exp`/`log`                                                  |
@@ -356,6 +359,15 @@ before assuming the language doesn't do something — it usually does.
 
 ## Recent and incoming changes
 
+- **`covers`** (gh#833) — an incidence stream states the period each row covers,
+  right after its `columns { }`: `covers = day(time)`,
+  `starting_on(time, 7 'days)`, `ending_on(time, 7 'days)` (the label is the
+  last _included_ day) or `closing_at(time, 7 'days)` (the label is the closing
+  boundary, _excluded_ — what `simulate --obs` writes); or `window_start` /
+  `window_stop` column roles in place of `: time`, one pair per row. Required on
+  every `incidence(...)` stream (**E350**); forbidden on a `prevalence(...)` or
+  state-reading stream (**E348**). New reserved word: `covers`. See spec
+  §12.1.1.
 - **`beta` likelihood** (gh#440) — scores a directly-observed **continuous
   proportion**: `frac ~ beta(mean = projected, concentration = phi)`, with
   shapes `α = mean·φ`, `β = (1−mean)·φ`. Mean-linked like `neg_binomial`, so the

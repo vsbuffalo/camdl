@@ -2270,7 +2270,6 @@ with the serde list quoted in §6.9.
 | `enable`         | list of strings             | no       | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                                                                                                                                   |
 | `disable`        | list of strings             | no       | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                                                                                                                                    |
 | `ic_free`        | bool                        | no       | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/plain `pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — a `perturb_only_at_t0 = true` parameter. |
-| `condition_from` | string **or** table         | no       | none                   | Conditioning boundary for a covariate-informed burn-in. See below.                                                                                                                                                                                                                                                                              |
 | `[provenance]`   | table                       | no       | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                                     |
 
 `[config]` (`FitBackendConfig`, `config_v2.rs:294`):
@@ -2312,33 +2311,20 @@ holdout` / `holdout_after` do not perform it.
 | `scenario`    | string                             | no       | none             | Scenario applied during **generation** only, not during fitting.                  |
 | `backend`     | `chain_binomial`/`gillespie`/`ode` | no       | `chain_binomial` | Forward backend used to generate the datasets. Distinct from a stage's `backend`. |
 
-`condition_from` places a leading reset-only hole on an incidence stream's
-observation grid: the span `[t_start, cond_from)` is simulated with the full
-dynamics but scored nowhere, the incidence accumulator resets at the boundary,
-and the first scored bin is `(cond_from, first_obs]`. Two surface forms
-(`ConditionFrom`, `config_v2.rs:205`):
-
-```toml
-condition_from = "first_obs - 1 week" # one default for every stream
-```
-
-```toml
-[condition_from] # per-stream shadows
-default = "first_obs - 1 week"
-es = "first_obs - 2 weeks"
-```
-
-Each value is a bare model-time number (`"14"`), an absolute date
-(`date("2020-02-01")` or a bare ISO date), or a relative offset off _that_
-stream's first observation. Resolution per stream is shadow → `default` → none.
-`default` is a reserved key. `condition_from` and `ic_free` cannot be combined.
-
-`camdl pfilter`, `camdl profile`, and `camdl fit predict` all carry the same
-per-stream window, so a fixed-θ loglik and a predictive row cover the window the
-fit scored. `fit predict` emits no row at the boundary itself (it is a reset,
-not an observation), and its free-forward projection reads the recorded
-cumulative flow there — so `condition_from` must also be a recorded **output**
-time, or `fit predict` refuses and names the fix.
+**Where scoring begins** is not a `fit.toml` concern. Every incidence stream
+declares what each row covers (`covers = ...`, or `window_start`/`window_stop`
+columns — `camdl-data-spec.md`, "What a row covers"), and a declared first
+period opens where it says: the span from `t_start` to that opening is simulated
+and scored nowhere, and the first datum is scored against its own period. A
+first period opening before `t_start` is a load error naming both times. The
+former `condition_from` key (string or per-stream table) that hand-placed this
+boundary is removed; `detect_removed_condition_from` (`config_v2.rs:2133`)
+refuses it ahead of the strict `deny_unknown_fields` parse — at the top level or
+anywhere under `[data]` — with a message naming the replacement, so a stale
+config fails with a migration rather than a bare unknown-field error.
+`camdl pfilter`, `camdl profile` and `camdl fit predict` bind the same declared
+periods, so a fixed-θ loglik and a predictive row cover the window the fit
+scored.
 
 ### 6.3 `[estimate]` — free parameters
 
@@ -2703,7 +2689,7 @@ executes.
 
 - An unknown top-level key:
 
-  > `` unknown field `dt`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `fit_starts`, `output_dir`, `estimate`, `fixed`, `stages`, `config`, `scenario`, `enable`, `disable`, `ic_free`, `condition_from`, `provenance` ``
+  > `` unknown field `dt`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `fit_starts`, `output_dir`, `estimate`, `fixed`, `stages`, `config`, `scenario`, `enable`, `disable`, `ic_free`, `provenance` ``
 
 - An unknown key inside a `[stages.*]` block. `Stage` is internally tagged, so
   serde cannot deny unknown fields on it; a post-parse pass compares the raw
@@ -2744,7 +2730,7 @@ executes.
 8. **(algorithm, backend)** against the registry. The error names the structural
    reason, suggests the right alternative, and lists the supported pairs:
    > `stage 's': stage has algorithm = "if2" with backend = "ode", which is not a supported inference method.`
-9. `ic_free` support per stage, and `ic_free` exclusive with `condition_from`.
+9. `ic_free` support per stage.
 10. IF2 `iterations ≥ 1`.
 11. `burn_in < iterations` (`pmmh`, `mh`) and `burn_in < sweeps` (`pgas`), using
     the **defaults** when unset — so a short sampler run must set `burn_in`
@@ -2902,9 +2888,9 @@ fit.toml uses legacy stage keys removed in CLI UX rev 2 (proposal 2026-05-25-cli
 
 ### 7.2 CLI Type
 
-`fit run` takes the config path plus five groups of flags: run control, chain
-starts, the conditioning window, the dt-convergence audit, and per-algorithm
-overrides. The run-control core:
+`fit run` takes the config path plus four groups of flags: run control, chain
+starts, the dt-convergence audit, and per-algorithm overrides. The run-control
+core:
 
 ```rust
 pub struct FitRunArgs {
@@ -3007,13 +2993,9 @@ $ camdl fit run fits/09_pgas_only.toml --stage posterior \
 Init applies only to parameters in `[estimate]`; anything in `[fixed]` takes its
 declared value regardless of mode.
 
-**Conditioning and the dt audit.** `--condition-from <WHEN>` mirrors the
-top-level `condition_from` key and overrides it, setting the all-streams default
-(per-stream shadows stay TOML-only). It accepts a model-time number (`14`), a
-calendar date (`2020-02-01`), or a relative offset (`"first_obs - 1 week"`), and
-a set value re-keys the fit. `--no-dt-check` skips the post-fit Richardson
-dt-convergence check, `--dt-check-strict` tightens its threshold (0.5 nats for
-chain_binomial, 0.1 for ode_rk4, against routine defaults of 2.0 / 0.5), and
+**The dt audit.** `--no-dt-check` skips the post-fit Richardson dt-convergence
+check, `--dt-check-strict` tightens its threshold (0.5 nats for chain_binomial,
+0.1 for ode_rk4, against routine defaults of 2.0 / 0.5), and
 `--dt-check-halvings <N>` sets how many halvings it evaluates (default 2).
 
 **Per-algorithm overrides.** Each requires `--stage`. Each writes through to the
@@ -3699,14 +3681,12 @@ pfilter: bound streams: weekly_cases(neg_binomial)
 ```
 
 Read that number carefully. The filter starts at the model's `simulate { from }`
-and the first held-out observation is at t = 63, so the first scored bin
-accumulates incidence over the entire 0–63 warm-up rather than over one weekly
-cadence. `condition_from` fixes exactly this, and `pfilter` applies it the same
-way `fit run` does: `--condition-from` if given, else the `condition_from` of
-the toml passed to `--fit`. A `pfilter` that scored a window the fit never
-scores would report a log-likelihood incomparable with the fit's, so the two
-share one code path (`apply_conditioning_windows`), and W329 — the
-wide-first-window enforcer — runs here too.
+and the first held-out observation is at t = 63, but each row is scored over the
+period the stream declares for it (`covers`, or window columns), so that first
+observation is scored against its own weekly period and the 0–63 warm-up is
+simulated and scored nowhere. `pfilter` binds the same declared periods
+`fit run` does — there is no separate window setting on either — so the two
+log-likelihoods are comparable by construction.
 
 `camdl fit predict` plus `camdl compare` answers a different question, replaying
 the fitted trajectory forward into the held-out window rather than re-filtering
@@ -4578,6 +4558,18 @@ stratified family); the two forms are mutually exclusive, `N` is a plain number
 in the model's `time_unit`, and a stream whose schedule is a fixed `at [...]`
 list is refused by name rather than silently converted to a cadence.
 
+On an incidence stream declared with a uniform `covers` form, the override also
+re-widens each row's window to the new cadence, keeping the form's anchor — a
+daily `closing_at(time, 1 'days)` stream emitted every 7 writes weekly totals
+closing at their labels, not one day in seven (gh#833). The file it writes is
+then the file of a model declaring that cadence, not of this one;
+`simulate
+--obs` allows that (nothing has to read the file back), while
+`[synthetic]` generation, whose dataset this same model fits, refuses an
+override that contradicts the declaration and names the `closing_at` that would
+emit it. A stream declared with `window_start`/`window_stop` columns carries its
+own boundaries and takes any cadence.
+
 The override is applied at the CONSUMPTION sites — the `--obs*` writers, the
 `obs/` child, an obs-sourced quantity, and `[synthetic]` generation — **not** by
 rematerializing the compiled IR the way `--output-every` does. That is
@@ -5364,13 +5356,12 @@ projected = I[child] + I[adult]                    → derived_expr
 ```
 
 - **Interval (incidence)** — the sum of per-transition flow counters accumulated
-  over the reporting window, read at the observation and **reset afterwards**
-  (`StreamProjection::resets_after_observation`,
-  `rust/crates/sim/src/inference/multi_stream_obs.rs:210`). The window is
-  right-closed, left-open: `(previous obs, this obs]`, with the first window
-  starting at `t_start` (or at `condition_from` when a conditioning window is
-  set, which resets the accumulator at the boundary so the first scored bin is
-  `(condition_from, first_obs]`).
+  over the period the row is declared to cover, read at the period's stop and
+  **reset afterwards** (`StreamProjection::resets_after_observation`,
+  `rust/crates/sim/src/inference/multi_stream_obs.rs:210`). The period is
+  `[start, stop)` from the stream's `covers` form or its window columns; the
+  accumulator also resets at the first period's start, so a warm-up before the
+  first row is never scored.
 - **Instant (prevalence / derived)** — a function of the state vector read at
   the observation instant. No accumulation, **no reset**; each observation is
   independent of the previous one.
@@ -5467,7 +5458,7 @@ output cadence.** With a weekly output grid and a daily `emit_schedule`:
 output { trajectories { every = 7 'days } }
 observations {
   prev { projected = prevalence(I)          emit_schedule = every 1 'days  … }
-  inc  { projected = incidence(infection)   emit_schedule = every 1 'days  … }
+  inc  { projected = incidence(infection)   covers = closing_at(time, 1 'days)   emit_schedule = every 1 'days  … }
 }
 ```
 
@@ -5784,8 +5775,6 @@ overrides it.
   --sweep NAME=SPEC           Cartesian sweep over a fixed parameter (repeatable).
                               SPEC = V1,V2,... | lin(min,max,n) | log10(min,max,n)
   --label TEXT                display label
-  --condition-from WHEN       burn-in / conditioning window; a model-time number,
-                              a date, or "first_obs - 1 week". Re-keys the fit
   --allow-nonconverged-scout  proceed past a failed convergence gate
 
 Chain initialisation

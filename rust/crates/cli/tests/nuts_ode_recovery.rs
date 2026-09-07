@@ -48,6 +48,7 @@ transitions {
 observations {
   cases {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 3 'days)
     projected     = incidence(infection)
     emit_schedule = every 3 'days
     cases ~ poisson(rate = projected)

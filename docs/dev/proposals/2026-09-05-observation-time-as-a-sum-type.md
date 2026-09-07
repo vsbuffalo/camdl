@@ -9,9 +9,13 @@
   binder. Step 3 landed: every per-stream prequential score records what its
   value covered (`coverage`, trace schema 4) and `compare` refuses two traces
   that scored one stream over different windows at the same time. The four
-  rulings that govern the rest are recorded under "Decisions" (2026-09-06).
-  Outstanding: `closing_at`, the required declaration and the migration, the
-  removal of `condition_from`/W329, and the output columns.
+  rulings that govern the rest are recorded under "Decisions" (2026-09-06), and
+  step 2 has landed under them: `closing_at`, the required declaration (E350),
+  the migration of every in-repo stream with no fitted number moving, and the
+  removal of `condition_from`/W329; step 4's observation emitters follow the
+  declaration and `fit predict` projects over the declared periods. Outstanding:
+  the trajectory's `t_start`/`t_stop` columns, and the deletion of the
+  transitional `InferredIntervals` runtime variant.
 - **Issue:** gh#833
 - **Supersedes:** `2026-09-04-explicit-observation-windows.md`
 - **Area:** IR (`ObservationModel`, observation rows), runtime

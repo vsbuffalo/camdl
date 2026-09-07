@@ -40,12 +40,14 @@ output { trajectories { every = 7 } }
 observations {
   weekly {
     columns       { time : time, weekly : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly        ~ poisson(rate = projected)
   }
   daily {
     columns       { time : time, daily : count }
+    covers        = closing_at(time, 1 'days)
     projected     = incidence(recovery)
     emit_schedule = every 1 'days
     daily         ~ poisson(rate = projected)

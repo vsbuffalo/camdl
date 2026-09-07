@@ -1019,11 +1019,12 @@ struct PredictiveSink {
     /// binomial denominator `n = n_examined`). Empty inner vec = no aux at that
     /// obs time (the likelihood's denominator then resolves data-free).
     leaf_aux: Vec<Vec<Vec<(String, f64)>>>,
-    /// Per leaf: the fit's `condition_from` boundary, where it has one — the
-    /// time the likelihood resets that stream's incidence accumulator at, and
-    /// therefore where the FIRST emitted bin opens (gh#702). `None` for a
-    /// stream with no conditioning; ignored by a prevalence projection.
-    leaf_window_start: Vec<Option<f64>>,
+    /// Per leaf, per emitted time (aligned 1:1 with `leaf_times`): what the
+    /// row covers — the observed rows per the stream's bound declaration, the
+    /// forecast tail per the same declaration continued. The likelihood scored
+    /// exactly these periods, so the predictive's first bin opens where the
+    /// likelihood's did (gh#702) and never reads the warm-up (gh#833).
+    leaf_coverages: Vec<Vec<(f64, sim::inference::Coverage)>>,
     /// The generated-quantities evaluator, `Some` iff the model declares a
     /// `quantities {}` block. Composed alongside the obs-sample accumulator (same
     /// draw, same params) — not a second [`RunSink`]. Held behind an `Arc` so a
@@ -1123,10 +1124,11 @@ impl crate::engine::RunSink for PredictiveSink {
                 self.compiled.clone(),
                 &params,
             );
-            // The first bin opens where the LIKELIHOOD opened it — at this
-            // stream's conditioning boundary, not at the model origin (gh#702).
-            let projected = crate::project_all_obs_times(
-                &cell.traj, obs_ir, model, times, self.leaf_window_start[si],
+            // Each row is projected over the period the LIKELIHOOD scored it
+            // over — the stream's declared coverage — so the first bin opens
+            // where the likelihood's did, not at the model origin (gh#702).
+            let projected = crate::project_coverages(
+                &cell.traj, obs_ir, model, &self.leaf_coverages[si],
             )?;
             let leaf_aux = &self.leaf_aux[si];
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
@@ -1257,6 +1259,10 @@ struct LeafObs {
     source: String,
     stratum: Vec<(String, String)>,
     times: Vec<f64>,
+    /// What each observed row covers, per the stream's declaration — the same
+    /// schedule the fit's likelihood scored, so the predictive's first bin
+    /// opens where the likelihood's did (gh#702, gh#833).
+    stream_times: sim::inference::StreamTimes,
     observed: Vec<Option<f64>>,
     /// `aux[i]` = the auxiliary `(column, value)` pairs observed at `times[i]`.
     /// Carried into the free-forward predictive so a data-supplied denominator
@@ -1534,15 +1540,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         }
     }
 
-    // 4. Load the observed data per leaf (the cadence + the observed half).
-    let leaves = load_leaf_obs(&model, &config, dt, args.stream.as_deref())?;
-    if leaves.is_empty() {
-        return Err("no observation streams to predict — check that the model's \
-                    observation sources are bound to data in the fit config, and that \
-                    --stream (if given) names a real stream".into());
-    }
-
-    // 5. Validate the draw schema BEFORE simulating: every draw column must be a
+    // 4. Validate the draw schema BEFORE simulating: every draw column must be a
     // real model parameter (an unknown name is a stale/mis-keyed draw, never
     // silently dropped), and every model parameter must be covered (so none is
     // silently defaulted). The cloud is non-empty by construction, so [0] is safe.
@@ -1592,6 +1590,15 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             .map_err(|e| format!("compiling model for prediction: {e:?}"))?,
     );
 
+    // 5. Load the observed data per leaf (the cadence, the observed half, and
+    // what each row covers — resolved against the compiled model's projections).
+    let leaves = load_leaf_obs(&model, &compiled, &config, dt, args.stream.as_deref())?;
+    if leaves.is_empty() {
+        return Err("no observation streams to predict — check that the model's \
+                    observation sources are bound to data in the fit config, and that \
+                    --stream (if given) names a real stream".into());
+    }
+
     let schema = crate::run_meta::read_fit_sidecar(&segment).and_then(|s| s.schema);
     let seed = args.seed.unwrap_or(1);
 
@@ -1630,11 +1637,6 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // below then have nothing to anchor to and say so.
     let quantity_obs_anchors: Option<sim::quantity::ObsAnchorTimes> =
         sim::quantity::ObsAnchorTimes::of_times(leaf_times.iter().flatten().copied());
-    // Per leaf, the conditioning boundary this fit scored from (gh#702). Read
-    // off `leaf_times` — the OBSERVED axis — because `condition_from`'s
-    // relative form is anchored to each stream's own first observation, which
-    // is what the fit anchored it to.
-    let leaf_window_start = leaf_condition_boundaries(&model, &config, &leaf_times, dt)?;
 
     // The rendered quantity sidecars (per logical quantity, all design cells
     // stacked) + the merged manifest, filled after the free-forward pass.
@@ -1786,6 +1788,26 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             }
             ff_emit_times[si].extend(extension);
         }
+
+        // What each emitted row covers (gh#833): the observed prefix per the
+        // stream's bound declaration — the very periods the likelihood scored
+        // — and the forecast tail per the same declaration continued.
+        let leaf_coverages: Vec<Vec<(f64, sim::inference::Coverage)>> = model
+            .observations
+            .iter()
+            .enumerate()
+            .map(|(si, o)| {
+                let n_obs = leaf_times[si].len();
+                let observed = leaves.iter().find(|l| leaf_matches(o, l));
+                leaf_row_coverages(
+                    o,
+                    observed.map(|l| &l.stream_times),
+                    &ff_emit_times[si][..n_obs],
+                    &ff_emit_times[si][n_obs..],
+                    model.simulation.t_start,
+                )
+            })
+            .collect();
 
         // The free-forward cells (one per sweep-point × scenario, engine canonical
         // order), plus the stacked quantity files — accumulated across the whole
@@ -1996,7 +2018,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                 compiled: compiled.clone(),
                 leaf_times: ff_emit_times.clone(),
                 leaf_aux: leaf_aux.clone(),
-                leaf_window_start: leaf_window_start.clone(),
+                leaf_coverages: leaf_coverages.clone(),
                 quant_eval: quant_eval.clone(),
                 obs_anchors: quantity_obs_anchors,
                 conditioned,
@@ -2555,6 +2577,7 @@ fn leaf_matches(o: &ir::observation::ObservationModel, l: &LeafObs) -> bool {
 /// Load each (filtered) observation leaf's observed series.
 fn load_leaf_obs(
     model: &ir::Model,
+    compiled: &sim::CompiledModel,
     config: &crate::fit::config_v2::FitConfigV2,
     dt: f64,
     stream_filter: Option<&str>,
@@ -2587,6 +2610,12 @@ fn load_leaf_obs(
         let (obs, cells, aux) =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, dt, &time_opts)?;
         let times: Vec<f64> = obs.iter().map(|o| o.time).collect();
+        let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
+            &obs_model.projection, compiled, &obs_model.name,
+        )?;
+        let stream_times = crate::fit::runner::load_stream_times(
+            data_path, obs_model, &projection, &times, &time_opts,
+        )?;
         let observed: Vec<Option<f64>> = cells
             .iter()
             .map(|c| c.as_ref().map(|cell| match cell {
@@ -2595,63 +2624,49 @@ fn load_leaf_obs(
             .collect();
         let stratum: Vec<(String, String)> =
             obs_model.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
-        out.push(LeafObs { source: obs_model.source.clone(), stratum, times, observed, aux });
+        out.push(LeafObs {
+            source: obs_model.source.clone(), stratum, times, stream_times, observed, aux,
+        });
     }
     Ok(out)
 }
 
-/// Each leaf's conditioning boundary, in `model.observations` order and aligned
-/// 1:1 with `leaf_times`: the time the FIT reset that stream's incidence
-/// accumulator at, or `None` for a stream with no `condition_from` (and for one
-/// not bound to data at all, which has no window and emits nothing).
-///
-/// gh#702. A `condition_from` fit simulates `[t_start, cond_from)` as warm-up
-/// and scores its first incidence datum over `(cond_from, first_obs]`. The
-/// predictive is plotted against that same datum, so it must report the same
-/// interval — the free-forward projection would otherwise report
-/// `(t_start, first_obs]`, folding the whole warm-up into the first row.
-///
-/// Resolution routes through [`crate::fit::runner::stream_condition_window`],
-/// the same per-stream resolver `fit run` / `pfilter` / `profile` reach through
-/// `apply_conditioning_windows`, so the fit and its predictive cannot disagree
-/// about where a stream's first bin opens. What predict does NOT do is prepend
-/// the reset-only hole row: here the observation times are also the emitted
-/// axis and the axis `value_at(..., first_obs / last_obs)` anchors to
-/// (`main.rs`'s anchor resolution deliberately folds over the raw streams for
-/// the same reason), and a synthetic row must shift neither.
-///
-/// Label validation is not repeated here: it is a property of the whole spec
-/// against the whole bound stream set, already enforced when the fit ran, and
-/// re-running it under a `--stream` filter would reject a shadow naming a
-/// stream this invocation merely filtered out.
-fn leaf_condition_boundaries(
-    model: &ir::Model,
-    config: &crate::fit::config_v2::FitConfigV2,
-    leaf_times: &[Vec<f64>],
-    dt: f64,
-) -> Result<Vec<Option<f64>>, String> {
-    let spec = config.condition_from.as_ref();
-    if spec.is_none() {
-        return Ok(vec![None; model.observations.len()]);
+/// What each emitted row of a leaf covers, aligned 1:1 with the leaf's emitted
+/// times (gh#833). The observed rows are read off the stream's bound schedule —
+/// the periods the fit's likelihood scored, so the predictive's first bin opens
+/// exactly where the likelihood's did (gh#702) rather than at the model origin.
+/// The forecast tail continues the same declaration: a uniform form assigns each
+/// extrapolated label its period; per-row window columns, having no rule to
+/// extrapolate, continue as contiguous windows closing at each label. A leaf
+/// with no bound data has no rows.
+fn leaf_row_coverages(
+    obs_ir: &ir::observation::ObservationModel,
+    observed: Option<&sim::inference::StreamTimes>,
+    observed_times: &[f64],
+    forecast_times: &[f64],
+    t_start: f64,
+) -> Vec<(f64, sim::inference::Coverage)> {
+    use ir::observation::TemporalKind;
+    use sim::inference::Coverage;
+    let mut rows: Vec<(f64, Coverage)> = match observed {
+        Some(st) => observed_times.iter().enumerate()
+            .map(|(k, &t)| (t, st.coverage(k, t_start)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut prev_stop = rows.last().map(|(t, _)| *t).unwrap_or(t_start);
+    for &t in forecast_times {
+        let coverage = match obs_ir.projection.temporal_kind() {
+            TemporalKind::Instant => Coverage::Instant,
+            TemporalKind::Interval => match obs_ir.covers.as_ref().and_then(|c| c.period_of(t)) {
+                Some((start, stop)) => Coverage::Interval { start, stop },
+                None => Coverage::Interval { start: prev_stop, stop: t },
+            },
+        };
+        prev_stop = t;
+        rows.push((t, coverage));
     }
-    let t_start = model.simulation.t_start;
-    model
-        .observations
-        .iter()
-        .enumerate()
-        .map(|(si, o)| {
-            // A stream with no observation times is unbound or filtered out: it
-            // emits nothing, so it has no first bin to open.
-            let first_obs = leaf_times[si].iter().copied().fold(f64::INFINITY, f64::min);
-            if !first_obs.is_finite() {
-                return Ok(None);
-            }
-            crate::fit::runner::stream_condition_window(
-                spec, &o.source, &o.name, first_obs, model, t_start, dt,
-            )
-            .map(|w| w.boundary())
-        })
-        .collect()
+    rows
 }
 
 /// Whether a leaf passes the `--stream` filter — matches the logical source or
@@ -3272,49 +3287,11 @@ fn one_step_bands(
             .into());
     }
 
-    // ── The conditioning window, into the FILTER (gh#702) ──────────────────
-    //
     // The one-step band is `p(y_t | y_{1:t-1})`, drawn from the filter's own
-    // accumulator — so unlike the free-forward path there is nothing to reseed
-    // after the fact: the filter has to be handed the same leading reset-only
-    // hole the fit's likelihood was, or its first predictive is an incidence
-    // bin that has been accumulating since `t_start`. Without it the band is
-    // wrong at the first observation AND the particle weights there are
-    // computed against the wrong bin, so the resampled cloud carries the error
-    // forward.
-    //
-    // Resolution routes through the shared per-stream resolver, so the fit and
-    // its predictive cannot disagree about where a stream's first bin opens.
-    // Label validation and the W329 enforcer stay at the fit
-    // (`apply_conditioning_windows`): they judge the whole spec against the
-    // whole bound stream set, which a `--stream`-filtered predict does not have.
-    let mut boundary_by_leaf: std::collections::HashMap<String, f64> =
-        std::collections::HashMap::new();
-    if config.condition_from.is_some() {
-        let t_start = compiled.model.simulation.t_start;
-        for s in obs_streams.iter_mut() {
-            let first_obs_s = s.data.iter().map(|o| o.time).fold(f64::INFINITY, f64::min);
-            if !first_obs_s.is_finite() {
-                continue;
-            }
-            let window = crate::fit::runner::stream_condition_window(
-                config.condition_from.as_ref(),
-                &s.obs_model_ir.source,
-                &s.name,
-                first_obs_s,
-                model,
-                t_start,
-                dt,
-            )?;
-            if let Some(cond_from) = window.boundary() {
-                // The shared seam, not a second copy — see its doc comment for
-                // what the copy cost.
-                crate::fit::runner::prepend_conditioning_boundary(s, cond_from)?;
-                boundary_by_leaf.insert(s.name.clone(), cond_from);
-            }
-        }
-    }
-
+    // accumulator. Each stream's `times` carries its declared periods, so the
+    // filter resets every bin exactly where the fit's likelihood did — the
+    // first one at its declared start, never accumulating from `t_start`
+    // (gh#702, gh#833). Nothing to hand the filter beyond the streams.
     let specs = crate::fit::runner::stream_specs_from_obs_streams(&obs_streams);
     let (bound, _report) = BoundObs::bind(compiled.model.simulation.t_start, specs)
         .map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
@@ -3435,23 +3412,14 @@ fn one_step_bands(
             let leaf = leaf_of_name[stream_names[si].as_str()];
             let stratum: Vec<(String, String)> =
                 leaf.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect();
-            // This leaf's conditioning boundary, when it has one (gh#702).
-            let boundary = boundary_by_leaf.get(leaf.name.as_str()).copied();
             for (ti, &t) in obs_times.iter().enumerate() {
                 let cell = pool.cell(si, ti);
                 if cell.is_empty() {
                     // This stream is not scheduled at this union time (all NaN,
-                    // dropped) — emit no row for it (multi-cadence).
-                    continue;
-                }
-                if boundary.is_some_and(|b| (t - b).abs() < 1e-9) {
-                    // The conditioning boundary is a RESET, not an observation:
-                    // the filter is scheduled there (that is how the bin
-                    // reopens) and therefore drew a sample, but the bin it
-                    // predicts is the discarded warm-up and there is no
-                    // observed row to plot it against. Per leaf, so a sibling
-                    // stream genuinely observed at this union time keeps its
-                    // row (gh#702).
+                    // dropped) — emit no row for it (multi-cadence). A declared
+                    // period's opening boundary is such a time: the filter
+                    // stops there to reset the bin, nothing is observed, and
+                    // there is no row to plot against (gh#702, gh#833).
                     continue;
                 }
                 let quantiles = band(&cell)

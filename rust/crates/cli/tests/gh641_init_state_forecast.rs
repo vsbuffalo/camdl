@@ -55,6 +55,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   daily_cases {
     columns       { time : time, daily_cases : count }
+    covers        = closing_at(time, 1 'days)
     projected     = incidence(infection)
     emit_schedule = every 1 'days
     daily_cases   ~ poisson(rate = projected)
@@ -86,6 +87,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   daily_cases {
     columns       { time : time, daily_cases : count }
+    covers        = closing_at(time, 1 'days)
     projected     = incidence(infection)
     emit_schedule = every 1 'days
     daily_cases   ~ poisson(rate = projected)
@@ -143,6 +145,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   daily_cases {
     columns       { time : time, daily_cases : count }
+    covers        = closing_at(time, 20 'days)
     projected     = incidence(infection)
     emit_schedule = at [0 'days, 20 'days, 40 'days]
     daily_cases   ~ poisson(rate = projected)
@@ -404,10 +407,10 @@ fn composes_with_an_observation_anchored_horizon() {
 /// the origin — an observation time before the run's first snapshot cannot be
 /// projected at all, so it is not this run's to emit.
 ///
-/// The row AT the origin is emitted, carrying 0 for an incidence stream: its
-/// interval has zero length. That is the same convention `t_start` already has
-/// on an ordinary run (see `incidence_t0.rs`), not something the forecast
-/// origin introduces.
+/// The incidence stream's row AT the origin is not emitted: under its declared
+/// `closing_at(time, 1 'days)` that row would cover the day BEFORE the origin,
+/// which this run never simulated (gh#833) — the same rule an ordinary run
+/// applies at `t_start`. The first row is the first whole day of the forecast.
 #[test]
 fn synthetic_observations_cover_the_forecast_window_only() {
     let bin = skip_if_missing();
@@ -432,8 +435,9 @@ fn synthetic_observations_cover_the_forecast_window_only() {
     let times: Vec<f64> = col(&hdr, &rows, "time").iter().map(|v| v.parse().unwrap()).collect();
     assert!(!times.is_empty(), "the forecast must emit observations");
     assert_eq!(
-        times.iter().cloned().fold(f64::INFINITY, f64::min), 30.0,
-        "no observation may precede the forecast origin"
+        times.iter().cloned().fold(f64::INFINITY, f64::min), 31.0,
+        "no observation may precede the forecast origin, and the day closing AT \
+         the origin covers time before it"
     );
     assert_eq!(
         times.iter().cloned().fold(f64::NEG_INFINITY, f64::max), 90.0,

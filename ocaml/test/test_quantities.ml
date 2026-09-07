@@ -98,6 +98,7 @@ let model_obs_with body =
     observations {
       afp {
         columns       { time : time, afp : count }
+        covers        = closing_at(time, 1 'days)
         projected     = incidence(infection)
         emit_schedule = every 1 'days
         afp           ~ poisson(rate = rho * projected)
@@ -127,6 +128,7 @@ let stratified_obs_src body =
     observations {
       afp[p in patch] {
         columns       { time : time, patch : dim, afp : count }
+        covers        = closing_at(time, 1 'days)
         projected     = incidence(infection[p])
         emit_schedule = every 1 'days
         afp           ~ poisson(rate = rho * projected)
@@ -406,6 +408,7 @@ let test_e290_obs_in_rate () =
     observations {
       afp {
         columns       { time : time, afp : count }
+        covers        = closing_at(time, 1 'days)
         projected     = incidence(recovery)
         emit_schedule = every 1 'days
         afp           ~ poisson(rate = rho * projected)

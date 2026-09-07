@@ -87,6 +87,7 @@ observations {
   # AFP — monthly incidence of the paralysis flow, per patch, low/zero-heavy.
   afp[p in patch] {
     columns       { time : time, patch : dim, cases : count }
+    covers        = closing_at(time, 30 'days)
     projected     = incidence(paralysis[p])
     emit_schedule = every 30 'days
     cases         ~ neg_binomial(mean = rho * projected, r = k)

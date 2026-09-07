@@ -13,6 +13,41 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-09-06 — `condition_from` and W329 are removed
+
+**What.** The `fit.toml` key `condition_from` — a string or a per-stream table,
+mirrored by `--condition-from` on `fit run`, `pfilter` and `profile` — opened an
+undeclared incidence stream's first bin somewhere other than `simulate.from`, so
+that a warm-up before the data was simulated but not scored. W329 was the guard
+that refused a fit whose first bin was anomalously wide without it. Every
+incidence stream now declares what each row covers (the entry below), and a
+declared first period opens where it says, so neither has a job left: the
+warm-up before the first row is discarded without a separate setting. Both are
+removed.
+
+**Migration.** Delete the key (and the flag). Give the stream its `covers = …`
+line or `window_start`/`window_stop` columns; the first period's start is where
+scoring begins. A first period opening before `simulate.from` is an error naming
+both times — move `simulate.from` back, or drop the rows the run cannot cover.
+To score the warm-up deliberately, state it in the file: a first row whose
+`window_start` is `simulate.from`.
+
+**Diagnostic.** A leftover key, at the top level or under `[data]`, is a hard
+error rather than an unknown-field rejection:
+
+```
+condition_from = ... is no longer a fit.toml key: an incidence stream now states
+what each row covers (`covers = ...` or window columns in the model), and a
+declared first period opens where it says, so the warm-up before the first row
+is discarded without a separate setting. Delete the key.
+```
+
+A leftover `--condition-from` flag is an unknown-argument error from the CLI. An
+incidence stream that declares neither `covers` nor window columns is **E350**
+(the entry below).
+
+---
+
 ## 2026-09-05 — an observation stream can state what each row covers
 
 **What.** An incidence stream can now declare the period each of its rows
@@ -53,10 +88,11 @@ declaration on their own — a stream carrying them does not also write
 `covers = ...` — and they are the only form that can state a gap between
 consecutive rows, or a width that changes row to row.
 
-**Migration.** Nothing is required yet: a stream that declares nothing still
-compiles and is scored exactly as before. Declaring is currently optional and
-will become required, because no default is right — the same date column means
-three different spans depending on the source.
+**Migration.** Declaring is required: an incidence stream with neither
+`covers = …` nor window columns is **E350**, whose hint names every form. There
+is no default, because no default is right — the same date column means three
+different spans depending on the source. A prevalence or state-reading stream
+declares nothing; a `covers` line or window columns there is **E348**.
 
 **Whether declaring changes your numbers depends on what your file meant.** An
 undeclared stream was scored over `(previous row, this row]` — a window nobody
@@ -68,15 +104,12 @@ one day early; `day(time)` moves the scoring onto the day the label names, and
 the fitted numbers move by one bucket — the correction, not a regression. Say
 which file you have; do not shift a time column to make a form fit.
 
-**A declared first period opens where it says, not at `simulate.from`.** An
-undeclared stream's first bin runs from the start of the run to the first row —
-the whole warm-up scored against one datum, which is what W329 warns about and
-`condition_from` exists to cut. A declared stream needs neither: its first bin
-opens at the first period's start and the warm-up before it is discarded. So on
-a declared stream `condition_from` is refused (it would silently truncate a
-stated window) and W329 is not emitted (the window it would infer has been
-stated). A first period opening _before_ `simulate.from` is an error — that time
-is never simulated.
+**A declared first period opens where it says, not at `simulate.from`.** A
+stream's first bin opens at its first period's start, and the warm-up before it
+is simulated but not scored. The `fit.toml` key `condition_from`, which used to
+hand-place that boundary, and the W329 guard that demanded it, are removed (the
+2026-09-06 entry above). A first period opening _before_ `simulate.from` is an
+error — that time is never simulated.
 
 **A gap between rows means different things under different forms.** Under `day`
 / `starting_on` / `ending_on` every row's window follows from its label, so two

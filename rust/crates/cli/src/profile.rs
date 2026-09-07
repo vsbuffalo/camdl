@@ -134,7 +134,7 @@ const PROFILE_SUPPLY: &str = "pass `--data PATH` (single-stream), \
 ///
 /// A struct rather than a `json!` literal so the level is include-by-default:
 /// add a field here and it is hashed. The literal this replaced was
-/// exclude-by-default, and `condition_from` is exactly what fell through it —
+/// exclude-by-default, and a scoring-window setting once fell through it —
 /// present in the computation, absent from the key, so a rerun under a
 /// different window was served the previous landscape.
 #[derive(serde::Serialize)]
@@ -144,7 +144,6 @@ struct ProfileBaseLevel<'a> {
     obs_family: &'a str,
     fit_toml: &'a Option<String>,
     priors: &'a [(String, String)],
-    condition_from: Option<&'a crate::fit::config_v2::ConditionFrom>,
 }
 
 /// The `stage` level's identity: the METHOD, i.e. how each cell is fitted.
@@ -597,26 +596,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     };
     let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
+    let streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-
-    // gh#621: apply the conditioning window exactly as `fit run` does —
-    // `--condition-from` flags, else the `--fit` toml's `condition_from`.
-    // Without this, profile scored the first bin over the whole leading span
-    // (a window the fit never scores) and skipped W329.
-    // Bound (not scoped to this block) because the identity must hash the
-    // same window that was applied: it decides which observations each point
-    // is scored against, so it changes every stored loglik.
-    let condition_from = crate::fit::runner::condition_spec_from_cli_or_toml(
-        &a.condition_from, a.fit.as_deref(),
-    ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    {
-        crate::fit::runner::apply_conditioning_windows(
-            &mut streams, condition_from.as_ref(), &model,
-            compiled.model.simulation.t_start, dt,
-        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-    }
 
     if streams.len() > 1 {
         eprintln!(
@@ -1144,21 +1126,12 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     fixed_blob.sort();
     let mut priors_blob = resolved_priors_kv.clone();
     priors_blob.sort_by(|a, b| a.0.cmp(&b.0));
-    // 2026-08-23 audit: the conditioning window decides WHICH observations
-    // every point is scored against, so it changes each cell's loglik and
-    // MLE — but only the `--fit` toml route reached identity (incidentally,
-    // via fit_toml), while the CLI flag that OVERRIDES it did not. It belongs
-    // with fixed/priors: part of the inference problem, not of the method.
-    // `ConditionFrom` serializes untagged (a string, or a BTreeMap with
-    // stable key order), and `null` when absent — so an unconditioned profile
-    // re-keys here too, which is unavoidable: this level is a single blob.
     let base_config_hash = crate::fit::cas::canonical_config_hash(&ProfileBaseLevel {
         base_params: &base_params_hash,
         fixed: &fixed_blob,
         obs_family: &obs_family_key,
         fit_toml: &fit_toml_hash,
         priors: &priors_blob,
-        condition_from: condition_from.as_ref(),
     }, &[]).unwrap_or_else(|e| {
         eprintln!("error: profile base identity: {e}");
         std::process::exit(1);
@@ -2192,7 +2165,6 @@ mod tests {
         let fixed: Vec<String> = vec!["N0".into()];
         let priors: Vec<(String, String)> = vec![("beta".into(), "log_normal".into())];
         let fit_toml: Option<String> = Some("abc123".into());
-        let cond: Option<crate::fit::config_v2::ConditionFrom> = None;
 
         let base_struct = serde_json::to_value(ProfileBaseLevel {
             base_params: "bp-hash",
@@ -2200,7 +2172,6 @@ mod tests {
             obs_family: "poisson",
             fit_toml: &fit_toml,
             priors: &priors,
-            condition_from: cond.as_ref(),
         }).unwrap();
         let base_literal = serde_json::json!({
             "base_params": "bp-hash",
@@ -2208,7 +2179,6 @@ mod tests {
             "obs_family":  "poisson",
             "fit_toml":    fit_toml,
             "priors":      priors,
-            "condition_from": cond,
         });
         assert_eq!(base_struct, base_literal,
             "ProfileBaseLevel must reproduce the literal — otherwise every \

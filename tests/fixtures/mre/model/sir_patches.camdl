@@ -34,12 +34,14 @@ transitions {
 observations {
   cases_north {
     columns       { time : time, cases_north : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection_north)
     emit_schedule = every 7 'days
     cases_north   ~ neg_binomial(mean = rho * projected, r = k)
   }
   cases_south {
     columns       { time : time, cases_south : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection_south)
     emit_schedule = every 7 'days
     cases_south   ~ neg_binomial(mean = rho * projected, r = k)

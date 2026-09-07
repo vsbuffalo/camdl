@@ -42,6 +42,7 @@ transitions {
 observations {
   lab_a from lab_a {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     cases         ~ poisson(rate = rho_a * projected)
@@ -49,6 +50,7 @@ observations {
 
   lab_b from lab_b {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     cases         ~ poisson(rate = rho_b * projected)

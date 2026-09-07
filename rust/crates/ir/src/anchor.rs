@@ -183,7 +183,7 @@ pub mod null_as_nan {
 impl std::str::FromStr for ObsAnchor {
     type Err = ();
     /// The single place a string becomes an anchor — shared by the IR decoder
-    /// and the CLI's `--to` / `condition_from` spec parser, so the accepted
+    /// and the CLI's `--to` / `--score-from` spec parser, so the accepted
     /// spellings cannot diverge between the DSL and the CLI.
     fn from_str(s: &str) -> Result<Self, ()> {
         match s {

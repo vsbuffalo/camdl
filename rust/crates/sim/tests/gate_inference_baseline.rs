@@ -45,7 +45,7 @@ use sim::{
     inference::{
         BoundObs,
         dense_cells,
-        multi_stream_obs::{MultiStreamObsModel, StreamProjection, StreamSpec, StreamTimes},
+        multi_stream_obs::{MultiStreamObsModel, Period, StreamProjection, StreamSpec, StreamTimes},
         particle_filter::bootstrap_filter,
         traits::SMCConfig,
         ChainBinomialProcess,
@@ -166,9 +166,18 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
     };
     let compiled = Arc::new(CompiledModel::new(m).unwrap());
     let inf = compiled.model.transitions.iter().position(|t| t.name == "infection").unwrap();
+    // The rows are closing-labelled, as every file `simulate --obs` writes: row
+    // k covers `[t[k−1], t[k])`, the first from the run's start (gh#833). That
+    // is exactly the undeclared reading these baselines were captured under,
+    // so the pinned values hold.
+    let periods: Vec<Period> = obs_times.iter().scan(0.0_f64, |prev, &t| {
+        let p = Period::new(*prev, t).expect("increasing observation times");
+        *prev = t;
+        Some(p)
+    }).collect();
     let spec = StreamSpec {
         ir_model: compiled.model.observations[0].clone(),
-        times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![inf]), obs_times),
+        times: StreamTimes::Intervals(periods),
         projection: StreamProjection::FlowSum(vec![inf]),
         // seed-1 synthetic weekly reported cases (see the sir case README).
         observations: dense_cells(vec![16.0, 166.0, 626.0, 1303.0, 1260.0, 1023.0, 327.0, 91.0, 58.0, 6.0, 2.0]),
