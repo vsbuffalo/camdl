@@ -461,7 +461,9 @@ pub fn cmd_lineage_cohort(a: &LineageCohortArgs) {
     let bins = sim::lineage::project::cohort(&entries, event, a.window, !a.align_first_event);
 
     let mut out = open_required_output("cohort", a.output.as_deref());
-    writeln!(out, "window_start\twindow_end\tincidence\tcumulative").ok();
+    // Half-open windows `[window_start, window_stop)`, named as every other
+    // table camdl writes names a window's boundaries (gh#833).
+    writeln!(out, "window_start\twindow_stop\tincidence\tcumulative").ok();
     for b in &bins {
         writeln!(out, "{}\t{}\t{}\t{}", b.start, b.end, b.incidence, b.cumulative).ok();
     }
