@@ -31,6 +31,10 @@ pub fn compute_ode_loglik(
 ) -> Result<f64, crate::error::SimError> {
     use crate::config::OdeConfig;
 
+    // `obs_times` must be the model's own union axis: the loop below scores
+    // `obs_model` by position along it (gh#833).
+    obs_model.check_axis(obs_times).map_err(crate::error::SimError::Validation)?;
+
     let model_sim = &compiled.model.simulation;
     let ode_cfg = OdeConfig {
         t_start: model_sim.t_start,

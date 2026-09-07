@@ -272,27 +272,6 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         );
     }
 
-    // Canonical observations: the sorted-unique UNION of every stream's
-    // observation times (multi-cadence, proposal 2026-06-10 §3.3). `bind`
-    // re-merges each stream's own schedule to this union and records per-stream
-    // `at_union` membership; the per-stream incidence reset (Phase 2a) fires
-    // only where a stream is scheduled. Downstream single-stream code paths
-    // (trace, prequential, save_filtering, save_paths, save_final_state) consume
-    // `obs.time` (the union grid) and `obs.value` (a never-scored placeholder
-    // 0.0 — the per-stream scored values live in each stream's cells). The old
-    // "must share identical observation times" guard was the no-silent-gaps
-    // stance for machinery that did not yet exist; it now exists.
-    let observations: Vec<Observation> = {
-        let mut times: Vec<f64> = streams.iter()
-            .flat_map(|s| s.data.iter().map(|o| o.time))
-            .collect();
-        times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
-        times.dedup();
-        times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
-    };
-
-    eprintln!("pfilter: {} observations × {} streams, {} particles, dt={}, seed={}",
-        observations.len(), n_streams, n_particles, dt, seed);
     if n_streams > 1 {
         eprintln!("  streams: {}", streams.iter()
             .map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
@@ -351,6 +330,22 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             eprintln!("error: observation model construction failed: {:?}", e);
             std::process::exit(1);
         });
+
+    // Canonical observations: the UNION axis the bound model scores along —
+    // every stream's scoring boundaries plus every declared period's opening
+    // boundary inside the run (multi-cadence, proposal 2026-06-10 §3.3;
+    // periods, gh#833) — taken FROM the model, never rebuilt from the rows'
+    // labels, which agree with it only under `closing_at`. Downstream
+    // single-stream code paths (trace, prequential, save_filtering, save_paths,
+    // save_final_state) consume `obs.time` (the union grid) and `obs.value` (a
+    // never-scored placeholder 0.0 — the per-stream scored values live in each
+    // stream's cells).
+    let observations: Vec<Observation> = obs_model.obs_times().iter()
+        .map(|&time| Observation { time, value: 0.0 })
+        .collect();
+
+    eprintln!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
+        observations.len(), n_streams, n_particles, dt, seed);
 
     // Record ancestry when either --save-paths or --save-filtering is
     // active. Both flags consume the same per-step snapshot data; the
@@ -1151,7 +1146,10 @@ pub fn stream_times_for(
     // belongs in the per-row form. Under `window_start`/`window_stop` a gap
     // is a statement and is legal: the binder discards the uncovered flow.
     if matches!(covers, Covers::From { .. } | Covers::Until { .. }) {
-        if let Some(w) = periods.windows(2).find(|w| w[1].start() > w[0].stop()) {
+        // Within `BOUNDARY_EPS` is contiguous: off a whole-unit axis the next
+        // label and the previous stop are the same boundary a few ulps apart.
+        let eps = sim::inference::multi_stream_obs::BOUNDARY_EPS;
+        if let Some(w) = periods.windows(2).find(|w| w[1].start() > w[0].stop() + eps) {
             return Err(format!(
                 "observation stream '{}' ({}): consecutive rows cover [{}, {}) and \
                  [{}, {}), leaving {} to {} covered by neither — under a uniform \
@@ -1826,6 +1824,62 @@ mod tests {
         opts.t_start = 3.0;
         stream_times_for(&obs, &proj, &[3.0, 4.0], "cases.tsv", &opts)
             .expect("a period opening at t_start is legal");
+    }
+
+    fn incidence_stream_with(covers: ir::observation::Covers) -> ir::observation::ObservationModel {
+        let mut obs = daily_incidence_stream();
+        obs.covers = Some(covers);
+        obs
+    }
+
+    fn period_pairs(times: &sim::inference::StreamTimes) -> Vec<(f64, f64)> {
+        times.periods().expect("a declared stream carries periods")
+            .iter().map(|p| (p.start(), p.stop())).collect()
+    }
+
+    /// The two named forms through the loader: `starting_on(time, 7 'days)`
+    /// opens at the label and `ending_on(time, 7 'days)` closes the day after
+    /// it (the labelled day included), each on contiguous weekly labels.
+    #[test]
+    fn starting_on_and_ending_on_build_the_periods_their_names_say() {
+        use ir::observation::Covers;
+        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
+
+        let starting = incidence_stream_with(Covers::From { offset: 0.0, span: 7.0 });
+        let times = stream_times_for(&starting, &proj, &[7.0, 14.0, 21.0], "cases.tsv", &numeric_opts())
+            .expect("contiguous weekly labels");
+        assert_eq!(period_pairs(&times), vec![(7.0, 14.0), (14.0, 21.0), (21.0, 28.0)]);
+        assert_eq!(times.closes(), vec![14.0, 21.0, 28.0], "scored a week after each label");
+
+        // ending_on(D, 7d) = [D − 6, D + 1): the 11th is in a row labelled 11.
+        let ending = incidence_stream_with(Covers::Until { offset: 1.0, span: 7.0 });
+        let times = stream_times_for(&ending, &proj, &[7.0, 14.0, 21.0], "cases.tsv", &numeric_opts())
+            .expect("contiguous weekly labels");
+        assert_eq!(period_pairs(&times), vec![(1.0, 8.0), (8.0, 15.0), (15.0, 22.0)]);
+        assert_eq!(times.closes(), vec![8.0, 15.0, 22.0], "scored the day after each label");
+    }
+
+    /// `day(time)` on a `'weeks` axis: the span is `1/7`, so a row's stop
+    /// (`label + 1/7`) and the next row's start (the next label) are the same
+    /// boundary computed two ways, a few ulps apart. That is not a gap.
+    #[test]
+    fn a_daily_form_off_a_whole_unit_axis_is_contiguous_not_gapped() {
+        use ir::observation::Covers;
+        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
+        let one_day = 1.0 / 7.0;
+        let daily_on_weeks = incidence_stream_with(Covers::From { offset: 0.0, span: one_day });
+        let labels: Vec<f64> = (0..40).map(|k| 1.0 + f64::from(k) * one_day).collect();
+        // Non-vacuous: the arithmetic really does disagree somewhere in the list.
+        assert!(labels.windows(2).any(|w| w[0] + one_day != w[1]),
+            "the fixture must contain at least one pair the exact comparison would split");
+        let times = stream_times_for(&daily_on_weeks, &proj, &labels, "cases.tsv", &numeric_opts())
+            .expect("daily rows on a weeks axis tile the span");
+        let ps = period_pairs(&times);
+        assert_eq!(ps.len(), 40);
+        for w in ps.windows(2) {
+            assert!((w[1].0 - w[0].1).abs() <= sim::inference::multi_stream_obs::BOUNDARY_EPS,
+                "consecutive periods share a boundary: {:?} then {:?}", w[0], w[1]);
+        }
     }
 
     #[test]

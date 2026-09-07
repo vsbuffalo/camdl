@@ -111,6 +111,17 @@ hand-place that boundary, and the W329 guard that demanded it, are removed (the
 2026-09-06 entry above). A first period opening _before_ `simulate.from` is an
 error — that time is never simulated.
 
+**`ic_free = true` now omits the first _observed_ row.** IC-free inference
+leaves the first observation out of the log-likelihood — the term that pins the
+initial state. The omission is keyed on the first row that carries a value, not
+on the first boundary of the axis: a declared first period opening after
+`simulate.from` puts a boundary there where nothing is scored, and a file that
+begins with an `NA` row has a hole there. A fit whose data began with a hole
+used to skip that hole's zero and count the real first row; it now skips the
+real first row. This is the one number in the migration that moves for a reason
+other than a window shift, and only for `ic_free` fits with a leading hole; the
+new value is the one the option describes.
+
 **A gap between rows means different things under different forms.** Under `day`
 / `starting_on` / `ending_on` every row's window follows from its label, so two
 consecutive rows whose windows do not touch can only mean a row is missing — and

@@ -191,6 +191,10 @@ pub fn run_ode_nuts_with_progress(
             d
         )));
     }
+    // The sensitivity integration records at `obs_times` and the likelihood
+    // scores `obs_model` by position along them: they must be the model's own
+    // axis (gh#833).
+    obs_model.check_axis(obs_times).map_err(SimError::Validation)?;
     let estimated_to_model: Vec<usize> = estimated.iter().map(|e| e.index).collect();
 
     // The z-space posterior target: data term from det_grad, prior + Jacobian from

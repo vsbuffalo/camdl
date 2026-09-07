@@ -389,3 +389,49 @@ fn a_two_day_window_is_scored_against_two_days_of_flow() {
         );
     }
 }
+
+/// The ODE likelihood takes the observation axis as an argument, and the
+/// axis it must be handed is the one the bound observation model built —
+/// the periods' boundaries — because it indexes that model by position along
+/// it. A caller that rebuilt the list from the rows' labels hands `day(time)`
+/// rows an axis one entry short and one day early; the driver must refuse
+/// the disagreement rather than score the wrong boundary. Handed the model's
+/// own axis it reproduces the per-row oracle.
+#[test]
+fn the_ode_likelihood_refuses_an_axis_that_is_not_the_obs_models_own() {
+    let compiled = model();
+    let params = compiled.default_params.clone();
+    let recovery = compiled.model.transitions.iter().position(|t| t.name == "recovery").unwrap();
+    let flows = reported_recovery_flow(&compiled, &params);
+
+    // `day(time)` on labels 3, 4, 5: periods [3,4), [4,5), [5,6).
+    let labels = [3.0, 4.0, 5.0];
+    let periods: Vec<Period> = labels.iter().map(|&d| Period::new(d, d + 1.0).unwrap()).collect();
+    let ys: Vec<f64> = labels.iter().map(|&d| flows[&(d as u32 + 1)].round().max(1.0)).collect();
+    let spec = StreamSpec::dense_covering(
+        StreamProjection::FlowSum(vec![recovery]),
+        compiled.model.observations[0].clone(),
+        dense_cells(ys.clone()),
+        periods,
+    );
+    let (bound, _) = BoundObs::bind(0.0, vec![spec]).expect("binds");
+    assert_eq!(bound.times(), &[3.0, 4.0, 5.0, 6.0], "the axis: the first opening, then every stop");
+    let axis = bound.times().to_vec();
+    let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
+
+    let oracle: f64 = labels.iter().zip(&ys)
+        .map(|(&d, &y)| poisson_logpmf(y, flows[&(d as u32 + 1)]))
+        .sum();
+    let ll = compute_ode_loglik(&compiled, &obs_model, &axis, 1.0, &params, 1.0).expect("ode loglik");
+    assert!((ll - oracle).abs() < 1e-9, "on the model's own axis: got {ll}, oracle {oracle}");
+
+    let handed_labels = compute_ode_loglik(&compiled, &obs_model, &labels, 1.0, &params, 1.0);
+    let err = match handed_labels {
+        Err(e) => e.to_string(),
+        Ok(ll_labels) => panic!(
+            "an axis of row labels must be refused, not scored: it returned {ll_labels} \
+             against the oracle {oracle}"
+        ),
+    };
+    assert!(err.contains("axis"), "the refusal names the disagreement: {err}");
+}
