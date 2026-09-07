@@ -751,9 +751,13 @@ impl BoundObs {
             // exactly the one-bucket correction gh#833 exists to make. The
             // schedule is DERIVED from the stops (`StreamTimes::closes`), so
             // there is no second time vector for a window to disagree with.
+            //
+            // A start within `BOUNDARY_EPS` of the previous stop is the same
+            // boundary computed two ways (a label plus a span against the
+            // next label), not an overlap.
             if let Some(periods) = spec.times.periods() {
                 for (i, w) in periods.windows(2).enumerate() {
-                    if w[1].start() < w[0].stop() {
+                    if w[1].start() < w[0].stop() - BOUNDARY_EPS {
                         findings.push(Finding {
                             severity: Severity::Error,
                             message: format!(
@@ -935,10 +939,13 @@ impl BoundObs {
         // new boundary, the one that lets the first bin open where the
         // declaration says instead of at `t_start` (gh#833) — unless it IS
         // `t_start`, where the bin is already empty and a boundary would only
-        // cost a resampling draw (see the doc comment). Identity is EXACT f64
-        // — one deterministic time parser gives one value per calendar instant
-        // (§3.2), so no tolerance is needed (and none is used).
-        let inside_run = |start: f64| start > run_start;
+        // cost a resampling draw (see the doc comment). Two boundaries within
+        // [`BOUNDARY_EPS`] are one instant: a stop is a label plus a span and
+        // the next start is the next label, and off a whole-unit axis
+        // (`day(time)` on `'weeks`, span 1/7) the two arithmetics land a few
+        // ulps apart on the same boundary.
+        let inside_run = |start: f64| start > run_start + BOUNDARY_EPS;
+        let same = |a: f64, b: f64| (a - b).abs() <= BOUNDARY_EPS;
         let mut times: Vec<f64> = streams
             .iter()
             .flat_map(|s| {
@@ -953,7 +960,7 @@ impl BoundObs {
         // non-finite time is a fatal finding → early return before this sort),
         // so `partial_cmp` never returns `None` here.
         times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite (checked above)"));
-        times.dedup();
+        times.dedup_by(|later, kept| same(*later, *kept));
 
         // Each stream keeps its own schedule; `at_union` records, per union
         // index, this stream's own local cell index (or `None` where a sibling
@@ -966,7 +973,7 @@ impl BoundObs {
                 let mut at_union = Vec::with_capacity(times.len());
                 let mut local = 0usize;
                 for &ut in &times {
-                    if local < closes.len() && closes[local] == ut {
+                    if local < closes.len() && same(closes[local], ut) {
                         at_union.push(Some(local));
                         local += 1;
                     } else {
@@ -995,7 +1002,7 @@ impl BoundObs {
                         let mut out = Vec::with_capacity(times.len());
                         let mut k = 0usize;
                         for &ut in &times {
-                            if k < starts.len() && starts[k] == ut {
+                            if k < starts.len() && same(starts[k], ut) {
                                 out.push(true);
                                 k += 1;
                             } else {
@@ -1058,6 +1065,15 @@ impl BoundObs {
         &self.streams[stream_idx].reset_at_union
     }
 }
+
+/// Two period boundaries closer than this are the same instant. A stop is a
+/// row's label plus the declared span and the next row's start is the next
+/// label; off a whole-unit axis (`covers = day(time)` on a `'weeks` model, span
+/// `1/7`) the two arithmetics land a few ulps apart on one boundary, and an
+/// exact comparison would read that as a gap or an overlap. Well below any
+/// `dt` in use (the smallest is sub-hour, ~4e-2 on a days axis) and far above
+/// f64 rounding at any plausible time value.
+pub const BOUNDARY_EPS: f64 = 1e-9;
 
 /// A half-open observation period, `[start, stop)`, on the model's internal
 /// time axis. Constructed only through [`Period::new`], which is the single
@@ -1892,6 +1908,42 @@ impl MultiStreamObsModel {
         self.obs_times[obs_idx]
     }
 
+    /// The union observation axis this model scores along — every boundary
+    /// the filter must stop at, in order ([`BoundObs::times`]). A driver that
+    /// takes an axis as an argument must be handed this one: it steps the
+    /// process along it and indexes this model by position along it.
+    pub fn obs_times(&self) -> &[f64] {
+        &self.obs_times
+    }
+
+    /// Refuse an axis that is not this model's own. `run_pgas`,
+    /// `compute_ode_loglik` and the ODE NUTS sampler take the axis as a
+    /// separate argument and score by position along it, so a caller that
+    /// rebuilt the list from the rows' labels agrees with the model only when
+    /// every period closes at its label (`closing_at`); under `day(time)` it is
+    /// one boundary short and never scores the last row, and under a form with
+    /// an offset it scores every row at the wrong boundary (gh#833). Exact
+    /// comparison: the axis a caller should hand over is [`Self::obs_times`],
+    /// and anything else is a different list, not a rounding of this one.
+    pub fn check_axis(&self, axis: &[f64]) -> Result<(), String> {
+        let own = &self.obs_times;
+        let first_diff = (0..axis.len().max(own.len()))
+            .find(|&i| axis.get(i) != own.get(i));
+        match first_diff {
+            None => Ok(()),
+            Some(i) => Err(format!(
+                "observation axis handed to the driver is not the observation model's own: \
+                 {} entries against the model's {} boundaries, first difference at index {} \
+                 ({} handed, {} in the model). The model scores by position along its union \
+                 of declared period boundaries (`MultiStreamObsModel::obs_times`); a list \
+                 rebuilt from the rows' labels matches it only under `closing_at`.",
+                axis.len(), own.len(), i,
+                axis.get(i).map(|t| t.to_string()).unwrap_or_else(|| "nothing".into()),
+                own.get(i).map(|t| t.to_string()).unwrap_or_else(|| "nothing".into()),
+            )),
+        }
+    }
+
     /// The same instant as a calendar label, when the model declares an
     /// `origin`. Uses the one-to-one renderer, so two observations less than a
     /// day apart do not collapse onto the same label — the identifier has to
@@ -2680,6 +2732,27 @@ mod period_and_covers_tests {
         );
     }
 
+    /// Periods whose boundaries were computed two ways — a stop as `label +
+    /// span`, the next start as the next label — off a whole-unit axis: the
+    /// union must hold ONE boundary where they agree to within
+    /// [`BOUNDARY_EPS`], not two a few ulps apart that the filter would step
+    /// between.
+    #[test]
+    fn boundaries_a_few_ulps_apart_merge_to_one_union_entry() {
+        let one_day = 1.0 / 7.0;
+        let labels: Vec<f64> = (0..40).map(|k| 1.0 + f64::from(k) * one_day).collect();
+        assert!(labels.windows(2).any(|w| w[0] + one_day != w[1]), "non-vacuous fixture");
+        let periods: Vec<Period> = labels.iter().map(|&d| Period::new(d, d + one_day).unwrap()).collect();
+        let n = periods.len();
+        let s = spec_covering("cases", periods, vec![1.0; n]);
+        let (bound, report) = BoundObs::bind(0.0, vec![s]).expect("binds");
+        assert!(!report.is_fatal(), "{:?}", report.findings());
+        assert_eq!(bound.times().len(), n + 1, "the first opening, then one stop per row");
+        assert_eq!(bound.at_union_for_test(0).iter().filter(|c| c.is_some()).count(), n,
+            "every row is scheduled at exactly one union boundary");
+    }
+
+
     /// A first period opening AT the run's start puts no boundary on the axis:
     /// the accumulator is empty there by construction, and a reset would only
     /// cost a zero-length step and a resampling draw, taking every Monte Carlo
@@ -3115,6 +3188,21 @@ mod hole_scoring_tests {
         );
         MultiStreamObsModel::new(
             BoundObs::bind(0.0, vec![spec]).expect("bind").0, compiled).unwrap()
+    }
+
+    /// The drivers that take the axis as an argument index the model by
+    /// position along it, so the only axis they may be handed is the model's
+    /// own (gh#833); a list that is shorter, or differs anywhere, is refused
+    /// naming the first disagreement.
+    #[test]
+    fn the_obs_model_refuses_an_axis_that_is_not_its_own() {
+        let m = obs_model(dense_cells(vec![1.0, 2.0, 3.0]), vec![3.0, 4.0, 5.0]);
+        assert_eq!(m.obs_times(), &[3.0, 4.0, 5.0]);
+        assert!(m.check_axis(&[3.0, 4.0, 5.0]).is_ok());
+        let e = m.check_axis(&[3.0, 4.0]).unwrap_err();
+        assert!(e.contains("2 entries against the model's 3") && e.contains("index 2"), "{e}");
+        let e = m.check_axis(&[3.0, 4.5, 5.0]).unwrap_err();
+        assert!(e.contains("index 1") && e.contains("4.5 handed, 4 in the model"), "{e}");
     }
 
     /// gh#268: `joint_observed()` is the per-union-index cross-stream sum used as

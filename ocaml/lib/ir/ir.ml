@@ -593,12 +593,11 @@ type observation_model = {
      whose [stratum] matches the row's `: dim` column values BY NAME. *)
   stratum:       (string * string) list;
   (* What each row covers (gh#833) — the `covers = ...` declaration, or
-     [CoversWindowColumns] when the stream carries a window pair instead.
-     [None] is a stream that has not declared, scored under the historical
-     convention where a row's window is whatever its spacing from the previous
-     row happens to be. Transitional: it disappears when the declaration
-     becomes required. NOT a default — no default is right, because the same
-     date column means three different spans depending on the source. *)
+     [CoversWindowColumns] when the stream carries a window pair instead. An
+     accumulating projection always carries [Some]: the expander requires the
+     declaration (E350) because no default is right — the same date column
+     means three different spans depending on the source. [None] is a state
+     read (`prevalence(...)`), which has no window. *)
   covers:        covers option;
   projection:    projection;
   (* ∂projection/∂compartment for a [DerivedExpr] (nonlinear) projection — the

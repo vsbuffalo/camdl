@@ -628,19 +628,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         }
     }
 
-    // Canonical schedule: the sorted-unique UNION of every stream's observation
-    // times (multi-cadence, proposal 2026-06-10 §3.3). Downstream code reads it
-    // for `obs_times` (the substep grid + the ODE-MLE / PMMH consumers); `bind`
-    // re-merges each stream's own schedule to this union and records per-stream
-    // `at_union` membership. The old "must share identical observation times"
-    // guard was the no-silent-gaps stance for machinery that did not yet exist.
+    // Canonical schedule: the UNION axis the bound observation model scores
+    // along — every stream's scoring boundaries plus every declared period's
+    // opening boundary inside the run (multi-cadence, proposal 2026-06-10
+    // §3.3; periods, gh#833). Downstream code reads it for `obs_times` (the
+    // substep grid + the ODE-MLE / PMMH consumers, which index the obs model
+    // by position along it), so it is taken FROM `bind` — the same call that
+    // builds the model below — never rebuilt from the rows' labels, which
+    // agree with the boundaries only under `closing_at`.
     let observations: Vec<Observation> = {
-        let mut times: Vec<f64> = streams.iter()
-            .flat_map(|s| s.data.iter().map(|o| o.time))
-            .collect();
-        times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
-        times.dedup();
-        times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
+        let specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
+        let (bound, _report) = BoundObs::bind(compiled.model.simulation.t_start, specs)
+            .unwrap_or_else(|report| {
+                eprintln!("error: observation data invalid:\n{}", report.render());
+                std::process::exit(1);
+            });
+        bound.times().iter().map(|&time| Observation { time, value: 0.0 }).collect()
     };
     let observations = Arc::new(observations);
 

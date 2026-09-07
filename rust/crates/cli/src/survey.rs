@@ -454,12 +454,6 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // type for `log_likelihood_from_flows_and_counts`. `&*obs_model`
     // auto-coerces to `&dyn ObservationModel<ParticleState>` for the
     // pfilter path.
-    // The shared schedule (`resolve_survey_inputs` requires every stream's to
-    // be identical): the boundaries the streams are scored at, which for a
-    // declared period is its stop, not the row's label.
-    let obs_times: Vec<f64> = resolved.per_stream_times.first()
-        .map(StreamTimes::closes)
-        .unwrap_or_default();
     let obs_model: Arc<MultiStreamObsModel> = {
         let mut stream_specs = Vec::with_capacity(resolved.obs_models.len());
         for ((obs, stream_obs), times) in resolved.obs_models.iter()
@@ -516,8 +510,11 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
                 ),
                 SurveyEvalMethod::Auto => unreachable!(
                     "Auto resolved before parallel eval loop"),
+                // The ODE likelihood is handed the obs model's OWN axis — the
+                // union of every declared period's boundaries — never a list
+                // rebuilt from the rows' labels (gh#833).
                 SurveyEvalMethod::Simulate => eval_point_simulate(
-                    &resolved.compiled, &obs_model, &obs_times,
+                    &resolved.compiled, &obs_model, obs_model.obs_times(),
                     &params, &resolved.estimated, draw,
                     smc_dt, point_id,
                 ),

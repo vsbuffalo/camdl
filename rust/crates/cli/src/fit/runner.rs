@@ -396,22 +396,25 @@ impl FitRunConfig {
             &time_opts,
         )?;
 
-        // Canonical observations: the sorted-unique UNION of every stream's
-        // observation times (multi-cadence, proposal 2026-06-10 §3.3). This is
-        // what feeds the filter's substep grid, `n_observations`, the
-        // obs-alignment gate, and the single-stream output labels — so it MUST
-        // be the union, not stream 0's schedule (else heterogeneous streams
-        // silently collapse onto stream 0's dates). The per-stream scored
-        // VALUES live in each `ObsStream.cells`; the canonical's `value` is a
-        // never-scored placeholder (0.0). `bind` re-derives this same union
-        // from each stream's own times below.
+        // Canonical observations: the UNION axis the bound observation model
+        // scores along — every stream's scoring boundaries plus every declared
+        // period's opening boundary inside the run (multi-cadence, proposal
+        // 2026-06-10 §3.3; periods, gh#833). This feeds the filter's substep
+        // grid, `n_observations`, the obs-alignment gate and the single-stream
+        // output labels, and the PGAS / ODE / NUTS drivers index the obs model
+        // by position along it — so it is taken FROM `bind`, the one place the
+        // axis is built, never rebuilt from the rows' labels: a label list
+        // agrees with the boundaries only when every period closes at its label
+        // (`closing_at`), and under `day(time)` it is one entry short. The
+        // per-stream scored VALUES live in each `ObsStream.cells`; the
+        // canonical's `value` is a never-scored placeholder (0.0). The drivers
+        // check the two agree (`MultiStreamObsModel::check_axis`).
         let observations: Vec<Observation> = {
-            let mut times: Vec<f64> = streams.iter()
-                .flat_map(|s| s.data.iter().map(|o| o.time))
-                .collect();
-            times.sort_by(|a, b| a.partial_cmp(b).expect("observation times are finite"));
-            times.dedup();
-            times.into_iter().map(|time| Observation { time, value: 0.0 }).collect()
+            let specs = stream_specs_from_obs_streams(&streams);
+            let (bound, _report) = sim::inference::BoundObs::bind(
+                compiled.model.simulation.t_start, specs,
+            ).map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
+            bound.times().iter().map(|&time| Observation { time, value: 0.0 }).collect()
         };
 
         // (algorithm × obs-alignment) support gate — the fit-dispatch seam.

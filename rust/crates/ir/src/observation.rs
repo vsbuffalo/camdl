@@ -332,16 +332,12 @@ pub struct ObservationModel {
     pub stratum:       Vec<StratumKey>,
     /// What each row covers (gh#833) — the `covers = …` declaration, or
     /// [`Covers::WindowColumns`] when the stream carries a `window_start` /
-    /// `window_stop` pair instead. `None` is a stream that has not declared,
-    /// scored under the historical convention where a row's window is
-    /// whatever its spacing from the previous row happens to be.
-    ///
-    /// `None` is transitional and disappears when the declaration becomes
-    /// required. It is NOT a default: no default is right, because the same
-    /// date column means three different spans depending on the source.
-    ///
-    /// Meaningful only for an accumulating projection — a state read has no
-    /// window, and declaring one for it is refused.
+    /// `window_stop` pair instead. An accumulating projection always carries
+    /// `Some`: the compiler requires the declaration (E350) because no default
+    /// is right — the same date column means three different spans depending
+    /// on the source — and the runtime refuses an IR that lacks it. `None` is
+    /// a state read (`prevalence(...)`), which has no window; declaring one
+    /// for it is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covers:        Option<Covers>,
     pub projection:    Projection,
