@@ -49,16 +49,6 @@ pub struct PfilterCtx<'a> {
     /// override was removed (projections now always come from `observations {}`);
     /// always `""`. Retained in the hashed context so a pre-removal `--flow`-free
     /// `run_id` is unchanged (removing the field would re-key every pfilter leaf).
-    /// The resolved conditioning spec in force (`--condition-from`, else the
-    /// `--fit` toml's `condition_from`), or `None` when nothing conditions.
-    /// Identity-bearing: the window decides WHICH observations are scored, so
-    /// it changes the stored loglik (2026-08-23 audit). The raw spec is
-    /// hashed rather than the per-stream resolved times because the inputs
-    /// that resolve it — the data bytes, `dt` and the model — are already in
-    /// this leaf's identity, so spec + those pin the window uniquely.
-    /// `None` is omitted from the config blob entirely, so an unconditioned
-    /// pfilter keys exactly as before this field existed.
-    pub condition_from: Option<&'a crate::fit::config_v2::ConditionFrom>,
     pub obs_block: &'a str,
     /// Flow-override transition indices. Vestigial (see `obs_block`); always
     /// empty. Kept so the content-addressed `run_id` of a `--flow`-free run is
@@ -75,10 +65,10 @@ use crate::fit::cas::{data_digests, level, structural_level_hash};
 ///
 /// A STRUCT, not a `json!` literal, so the level is include-by-default: add a
 /// field here and it is hashed, where the literal this replaced hashed only
-/// what someone remembered to list (that omission is how `--condition-from`
-/// stayed out of the key). Field names and shapes reproduce the literal
-/// exactly, so existing pfilter leaves keep their `run_id`s — pinned by
-/// `config_level_is_byte_identical_to_the_literal_it_replaced`.
+/// what someone remembered to list (that omission is how a scoring-window
+/// flag once stayed out of the key). Field names and shapes reproduce the
+/// literal exactly, so existing pfilter leaves keep their `run_id`s — pinned
+/// by `config_level_is_byte_identical_to_the_literal_it_replaced`.
 #[derive(serde::Serialize)]
 struct PfilterConfigLevel<'a> {
     particles: u32,
@@ -87,10 +77,6 @@ struct PfilterConfigLevel<'a> {
     obs_block: &'a str,
     flow_indices: &'a [u32],
     data: &'a [(&'a str, &'a str)],
-    /// Omitted entirely when nothing conditions, so an unconditioned run keys
-    /// exactly as it did before this field existed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    condition_from: Option<&'a crate::fit::config_v2::ConditionFrom>,
 }
 
 /// Resolve a pfilter-eval leaf's identity: the four factored levels and the
@@ -120,7 +106,6 @@ pub fn resolve_pfilter(ctx: &PfilterCtx) -> Result<ResolvedPfilter, String> {
         obs_block: ctx.obs_block,
         flow_indices: ctx.flow_indices,
         data: &data_sorted,
-        condition_from: ctx.condition_from,
     };
 
     let model_digest = ModelDigest::from_model(
@@ -183,54 +168,6 @@ mod tests {
         }), &[]).unwrap()
     }
 
-    /// The same blob with a conditioning spec folded in, mirroring
-    /// `resolve_pfilter`'s insert-only-when-Some.
-    fn config_level_conditioned(
-        particles: u32, replicates: u32, dt: f64, obs: &str, data: &[(&str, &str)],
-        cond: &crate::fit::config_v2::ConditionFrom,
-    ) -> crate::fit::cas::LevelHash {
-        let mut d: Vec<(&str, &str)> = data.to_vec();
-        d.sort_by(|a, b| a.0.cmp(b.0));
-        let mut blob = serde_json::json!({
-            "particles": particles, "replicates": replicates, "dt": dt,
-            "obs_block": obs, "flow_indices": Vec::<u32>::new(), "data": d,
-        });
-        blob["condition_from"] = serde_json::to_value(cond).unwrap();
-        canonical_config_hash(&blob, &[]).unwrap()
-    }
-
-    /// The conditioning window decides WHICH observations are scored, so two
-    /// windows produce different logliks and must not share a `run_id`
-    /// (2026-08-23 audit: `--condition-from` reached the scoring but not the
-    /// key, so the store kept the first window's loglik.toml for both).
-    /// Crucially, an UNCONDITIONED run must key exactly as it did before the
-    /// field existed — the spec is omitted from the blob entirely.
-    #[test]
-    fn conditioning_window_is_in_the_key_and_absence_is_hash_neutral() {
-        use crate::fit::config_v2::ConditionFrom;
-        let hh = h(1);
-        let data = [("cases", hh.as_str())];
-        let plain = config_level(100, 1, 1.0, "", &data);
-
-        let a = config_level_conditioned(100, 1, 1.0, "", &data,
-            &ConditionFrom::All("first_obs - 3 'days".into()));
-        let b = config_level_conditioned(100, 1, 1.0, "", &data,
-            &ConditionFrom::All("first_obs - 10 'days".into()));
-        assert_ne!(a, b, "two conditioning windows must key differently");
-        assert_ne!(plain, a, "conditioned must not share the unconditioned key");
-        assert_eq!(a, config_level_conditioned(100, 1, 1.0, "", &data,
-            &ConditionFrom::All("first_obs - 3 'days".into())),
-            "the same window must be stable");
-
-        // Hash-neutrality: the unconditioned blob has no condition_from key at
-        // all, so its digest is what it was before the field was added.
-        assert_eq!(plain, canonical_config_hash(&serde_json::json!({
-            "particles": 100u32, "replicates": 1u32, "dt": 1.0,
-            "obs_block": "", "flow_indices": Vec::<u32>::new(),
-            "data": vec![("cases", hh.as_str())],
-        }), &[]).unwrap(), "an unconditioned pfilter must key exactly as before");
-    }
-
     /// Byte-neutrality of the struct rewrite: `PfilterConfigLevel` must digest
     /// EXACTLY as the hand-built `json!` literal it replaced, or every stored
     /// pfilter leaf silently re-keys. `digest_value` canonicalizes (sorts keys
@@ -246,7 +183,6 @@ mod tests {
         let lvl = PfilterConfigLevel {
             particles: 100, replicates: 1, dt: 1.0,
             obs_block: "", flow_indices: &flow, data: &data,
-            condition_from: None,
         };
         // The literal, verbatim from before the rewrite.
         let literal = serde_json::json!({
@@ -260,20 +196,6 @@ mod tests {
         assert_eq!(canonical_config_hash(&lvl, &[]).unwrap(), canonical_config_hash(&literal, &[]).unwrap(),
             "the struct must reproduce the literal's digest — otherwise every \
              stored pfilter leaf re-keys silently");
-
-        // And with conditioning in force, matching the insert-when-Some form.
-        let cond = crate::fit::config_v2::ConditionFrom::All("first_obs - 3 'days".into());
-        let lvl_c = PfilterConfigLevel {
-            particles: 100, replicates: 1, dt: 1.0,
-            obs_block: "", flow_indices: &flow, data: &data,
-            condition_from: Some(&cond),
-        };
-        let mut literal_c = literal.clone();
-        literal_c["condition_from"] = serde_json::to_value(&cond).unwrap();
-        assert_eq!(canonical_config_hash(&lvl_c, &[]).unwrap(), canonical_config_hash(&literal_c, &[]).unwrap());
-        assert_ne!(canonical_config_hash(&lvl, &[]).unwrap(),
-                   canonical_config_hash(&lvl_c, &[]).unwrap(),
-                   "conditioning must still change the key");
     }
 
     /// A non-finite scored value must be REFUSED, not hashed. `json!` maps

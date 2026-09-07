@@ -194,10 +194,10 @@ fn hole_does_not_suppress_incidence_reset() {
 /// `[t_start, cond_from)`, so the FIRST SCORED bin tallies only
 /// `(cond_from, first_obs]` — not the whole `[t_start, first_obs]` gap.
 ///
-/// This is exactly the property the runner's `condition_from` insertion relies
-/// on: a conditioning boundary IS a hole (reset, no score), so it rides the
-/// SAME unconditional per-obs-index reset this file already pins for interior
-/// holes — no new reset mechanism. Here we probe it at the filter-loop level
+/// This is exactly the property a declared first period's START relies on
+/// (gh#833): the opening boundary is a reset with no score, so it rides the
+/// SAME per-obs-index reset this file already pins for interior holes — no
+/// new reset mechanism. Here we probe it at the filter-loop level
 /// (the shared scoring/reset seam all cells route through).
 ///
 /// Deterministic inflow `K` per unit, t_start = 0, weekly grid. Without
@@ -214,8 +214,8 @@ fn conditioning_boundary_resets_leading_incidence() {
     let weekly = 7.0 * k; // 70 over one 7-unit week
     let two_weeks = 14.0 * k; // 140 — the inflated [0,14] bin if no reset at t=7
 
-    // Conditioning boundary at t=7: a LEADING hole, then real obs at 14, 21, 28.
-    // This is what `FitRunConfig::build` prepends when `condition_from = 7`.
+    // Warm-up boundary at t=7: a LEADING hole, then real obs at 14, 21, 28 —
+    // the shape a first declared period opening at 7 puts on the union axis.
     let times = vec![7.0, 14.0, 21.0, 28.0];
     let cells = vec![
         None, // leading reset-only hole at cond_from = 7 (warm-up boundary)

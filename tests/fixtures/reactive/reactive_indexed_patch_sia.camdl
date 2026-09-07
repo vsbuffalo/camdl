@@ -25,6 +25,7 @@ transitions {
 observations {
   weekly_cases[p in patch] {
     columns       { time : time, patch : dim, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection[p])
     emit_schedule = every 7 'days
     weekly_cases  ~ poisson(rate = projected)

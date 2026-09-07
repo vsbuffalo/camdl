@@ -37,6 +37,7 @@ init { S = 990  I = 10  R = 0 }
 observations {
   daily_cases {
     columns       { time : time, daily_cases : count }
+    covers        = closing_at(time, 1 'days)
     projected     = incidence(infection)
     emit_schedule = every 1 'days
     daily_cases   ~ poisson(rate = projected)
@@ -137,7 +138,9 @@ fn aligned_and_coarser_emit_schedules_are_accepted() {
     // recovery suite relies on, so it must keep working.
     let tmp2 = tempfile::tempdir().unwrap();
     let (m2, p2) = setup(tmp2.path());
-    let weekly = MODEL.replace("every 1 'days", "every 7 'days");
+    let weekly = MODEL
+        .replace("every 1 'days", "every 7 'days")
+        .replace("closing_at(time, 1 'days)", "closing_at(time, 7 'days)");
     std::fs::write(&m2, weekly).unwrap();
     let obs2 = tmp2.path().join("obs.tsv");
     let out2 = run(&[

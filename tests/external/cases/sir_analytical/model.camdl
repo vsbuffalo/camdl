@@ -23,6 +23,7 @@ transitions {
 observations {
   recoveries {
     columns       { time : time, recoveries : count }
+    covers        = closing_at(time, 1 'days)
     projected     = incidence(recovery)
     emit_schedule = every 1 'days
     recoveries    ~ poisson(rate = projected)

@@ -595,7 +595,7 @@ with `dims → scalar` tables, the `dimensions {}` block, and the existing
 ## What a row covers: `covers` and the window columns
 
 A date in an observation file does not say what it means. `2026-07-08` is the
-day 7 July in a file labelled by the day the count describes, the week 8–14 July
+day 8 July in a file labelled by the day the count describes, the week 8–14 July
 in a week-starting file, and the week 2–8 July in a week-ending one. The same
 cell, three different spans. No rule gets all three right, so **an incidence
 stream states its period rather than having one inferred from row spacing.**
@@ -715,12 +715,11 @@ and is the correction, not a regression. The declaration is where you say which
 kind of file you have; there is no default, because either guess is silently
 wrong for the other kind.
 
-The declaration also settles where scoring _begins_. Undeclared, the first bin
-runs from `simulate.from` to the first row — the whole warm-up scored against
-one count — and `condition_from` is how you cut it. Declared, the first period
-opens where it says; the warm-up before it is simulated but not scored, and no
-`condition_from` is needed or accepted. A first period that opens before
-`simulate.from` is an error, since that time is never simulated.
+The declaration also settles where scoring _begins_. The first period opens
+where it says; the warm-up before it is simulated but not scored, and there is
+no separate setting for that boundary — the declaration alone places the first
+bin. A first period that opens before `simulate.from` is an error, since that
+time is never simulated.
 
 ## Missing observations: `NA` is a hole, not a zero
 

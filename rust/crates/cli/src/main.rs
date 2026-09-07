@@ -2258,6 +2258,7 @@ fn materialize_obs_for_quantities(
         // reduces over exactly the file the stream would emit.
         let plan = crate::obs_emit::plan_emission(
             obs_ir, &times, run_start_of(traj, model), model.simulation.t_end,
+            emit.and_then(|e| e.resolve_for(&obs_ir.source)),
         )?;
         let projected = project_coverages(traj, obs_ir, model, &plan.coverages())?;
         let times = plan.labels();
@@ -2896,6 +2897,7 @@ impl engine::RunSink for StreamSink {
                     // cannot carry a windowed stream's two boundaries.
                     let plan = crate::obs_emit::plan_emission(
                         obs_model, &times, run_start_of(traj, model), model.simulation.t_end,
+                        self.emit_every.as_ref().and_then(|e| e.resolve_for(&obs_model.source)),
                     )?;
                     if self.obs_path.is_some()
                         && matches!(plan.columns, crate::obs_emit::TemporalColumns::Window { .. })
@@ -3076,10 +3078,9 @@ impl StreamSink {
 /// paths resolve against the segment — co-located data only, the same limit
 /// `fit predict <run-dir>` has). Streams load through the same shared seam as
 /// pfilter/profile, so dated time columns, long-form families, and holes
-/// resolve exactly as at fit time; `apply_conditioning_windows` is NOT
-/// applied (anchors fold over the raw streams; a conditioning hole must not
-/// shift `first_obs`). Hole rows count as observation times, matching
-/// `fit predict`'s `value_at` anchor.
+/// resolve exactly as at fit time; anchors fold over the raw streams. Hole
+/// rows count as observation times, matching `fit predict`'s `value_at`
+/// anchor.
 fn o_source(o: &ir::observation::ObservationModel) -> String { o.source.clone() }
 
 fn resolve_simulate_obs_anchors(
@@ -3392,74 +3393,6 @@ fn check_obs_times_on_snapshot_grid(
 /// flows, so the first snapshot IS the run's start (`sim::state::Trajectory`).
 pub(crate) fn run_start_of(traj: &sim::Trajectory, model: &ir::Model) -> f64 {
     traj.snapshots.first().map(|s| s.t).unwrap_or(model.simulation.t_start)
-}
-
-/// Rows read under the undeclared convention: row `k` covers `(t[k−1], t[k]]`,
-/// the first opening at `first_start` — the run's start, or a fit's
-/// conditioning boundary. Transitional (gh#833): `fit predict` still projects
-/// over the data's labels this way; the emitters plan their rows from the
-/// stream's declaration (`obs_emit::plan_emission`).
-pub(crate) fn undeclared_rows(
-    obs_ir: &ir::observation::ObservationModel,
-    obs_times: &[f64],
-    first_start: f64,
-) -> Vec<(f64, sim::inference::Coverage)> {
-    use sim::inference::Coverage;
-    match obs_ir.projection.temporal_kind() {
-        ir::observation::TemporalKind::Instant => {
-            obs_times.iter().map(|&t| (t, Coverage::Instant)).collect()
-        }
-        ir::observation::TemporalKind::Interval => {
-            let mut prev = first_start;
-            obs_times.iter().map(|&t| {
-                let row = (t, Coverage::Interval { start: prev, stop: t });
-                prev = t;
-                row
-            }).collect()
-        }
-    }
-}
-
-/// `window_start` is the fit's conditioning boundary for this stream
-/// (`condition_from`), when it has one: the first bin opens there — exactly
-/// where the likelihood reset that stream's accumulator — and at the run's
-/// start otherwise. Passing the wrong one is a first-row-only error, which is
-/// why gh#702 lived so long. It has no effect on an INSTANT projection.
-pub(crate) fn project_all_obs_times(
-    traj: &sim::Trajectory,
-    obs_ir: &ir::observation::ObservationModel,
-    model: &ir::Model,
-    obs_times: &[f64],
-    window_start: Option<f64>,
-) -> Result<Vec<f64>, String> {
-    // Reading the cumulative flow at the conditioning boundary requires the
-    // boundary to BE a recorded snapshot: between snapshots it would resolve
-    // to an earlier one and silently hand part of the warm-up back to the
-    // first bin — the class of silent-wrong gh#702 is about, reintroduced by
-    // the fix for it. The general walk below refuses any unrecorded boundary;
-    // this names the one the user wrote.
-    if let Some(t0) = window_start {
-        if obs_ir.projection.temporal_kind() == ir::observation::TemporalKind::Interval
-            && !is_recorded_snapshot(traj, t0)
-        {
-            return Err(format!(
-                "observation stream '{}': the conditioning boundary \
-                 condition_from = {t0} is not a recorded output time, so the flow \
-                 accumulated up to it cannot be read.\n  \
-                 The first incidence bin is ({t0}, first_obs] — the window this fit \
-                 scored — and the projection reads it as the difference of the \
-                 recorded cumulative flow at those two times.\n  \
-                 Fix: add {t0} to the output schedule \
-                 (`output {{ trajectories {{ every = ... }} }}`, or an `at = [...]` \
-                 list containing it), or move condition_from onto a recorded output \
-                 time.",
-                obs_ir.name,
-            ));
-        }
-    }
-    let first_start = window_start.unwrap_or_else(|| run_start_of(traj, model));
-    let rows = undeclared_rows(obs_ir, obs_times, first_start);
-    project_coverages(traj, obs_ir, model, &rows)
 }
 
 /// Project a stream's observed quantity for each row — the state at an

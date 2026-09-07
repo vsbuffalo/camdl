@@ -52,24 +52,21 @@ fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
 
 /// The fixture with its time column replaced by a `window_start`/`window_stop`
 /// pair and `covers` set to `window_columns` — the per-row form, the only one
-/// that can state a gap or a merge.
+/// that can state a gap or a merge. Edited as JSON, not text: the committed
+/// fixture already declares `closing_at`, which this replaces.
 fn windowed_model(dir: &Path) -> PathBuf {
-    let src = std::fs::read_to_string(seed_timing_ir()).unwrap();
-    let with_roles = src.replacen(
-        "{ \"name\": \"time\", \"role\": \"time\" },",
-        "{ \"name\": \"win_start\", \"role\": \"window_start\" },\n          \
-         { \"name\": \"win_stop\", \"role\": \"window_stop\" },",
-        1,
-    );
-    assert!(with_roles.contains("window_stop"), "window role injection failed");
-    let injected = with_roles.replacen(
-        "\"projection\":",
-        "\"covers\":{\"kind\":\"window_columns\"},\"projection\":",
-        1,
-    );
-    assert!(injected.contains("window_columns"), "covers injection failed");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(seed_timing_ir()).unwrap()).unwrap();
+    let obs = &mut v["model"]["observations"][0];
+    obs["covers"] = serde_json::json!({ "kind": "window_columns" });
+    let cols = obs["columns"].as_array_mut().expect("columns");
+    let time_idx = cols.iter().position(|c| c["role"] == "time").expect("a time column");
+    cols.splice(time_idx..=time_idx, [
+        serde_json::json!({ "name": "win_start", "role": "window_start" }),
+        serde_json::json!({ "name": "win_stop", "role": "window_stop" }),
+    ]);
     let p = dir.join("windowed.ir.json");
-    std::fs::write(&p, injected).unwrap();
+    std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
     p
 }
 

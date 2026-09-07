@@ -233,10 +233,11 @@ And the invariant worth memorising:
 A trajectory or observation row holds quantities of both kinds, and they refer
 to different things:
 
-| column                                          | what the row's time means                              |
-| ----------------------------------------------- | ------------------------------------------------------ |
-| compartment state (`S`, `I`), `prevalence(...)` | the value **at** that instant                          |
-| flow (`flow_*`), `incidence(...)`               | the total **over the interval ending at** that instant |
+| column                                          | what the row's time means                                                                                                    |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| compartment state (`S`, `I`), `prevalence(...)` | the value **at** that instant                                                                                                |
+| trajectory flow (`flow_*`)                      | the total **over the interval ending at** that instant                                                                       |
+| observation `incidence(...)`                    | the total over the period the stream's `covers` assigns to the label — `[D−Δ, D)` under `closing_at`, `[D, D+1)` under `day` |
 
 ```
 t  date        S      I    flow_infection
@@ -258,32 +259,36 @@ until flow output carries its own `period_start` / `period_stop`.
 
 Parsing `2026-07-05` from a file establishes an Instant. It does **not**
 establish whether the value is a count over 5 July, a week ending on the 5th, or
-a census taken that morning. Those are properties of the observation stream.
+a census taken that morning. Those are properties of the observation stream, and
+the stream states them: an incidence stream declares what each row covers —
+`covers = day(time)`, `starting_on(time, Δ)`, `ending_on(time, Δ)`,
+`closing_at(time, Δ)`, or `window_start`/`window_stop` columns — and is refused
+without one (E350); an instant stream declares nothing. The forms are specified
+in [`camdl-data-spec.md`](camdl-data-spec.md), "What a row covers", and the
+language spec §12.1.1.
 
-**Today camdl has no vocabulary for that**, so a dated observation inherits the
-Instant directly: a row at time `t` is scored over `(t_prev, t]`, which means a
-daily row dated `D` is scored against the day **ending** at `D` — the civil day
-before its label. A file labelled the way most surveillance systems label — by
-the day the count describes — is therefore read one day early.
-
-That is a real gap, not a convention. Giving a stream a way to state its period
-— so a row can say it covers `[D, D+1)` and be scored in the bucket ending at
-`D+1` — is the subject of the observation-window and input-format work (gh#833).
-On the axis above, the mismatch is one unit:
+The declaration exists because no single reading is right. Under
+`closing_at(time, 1 'days)` a row dated `D` is scored over `(D−1, D]` — the day
+**ending** at `D`, the civil day before its label — which is what a file written
+by `simulate --obs` or derived from pomp means. A file labelled the way most
+surveillance systems label — by the day the count describes — means `[D, D+1)`,
+and under the closing reading it is scored one day early. On the axis above, the
+mismatch is one unit:
 
 ```
-                 (0,1]      (1,2]     (2,3]
-camdl scores    "07-02"    "07-03"   "07-04"      row label -> bucket
-spans            1 Jul      2 Jul     3 Jul
+                    (0,1]      (1,2]     (2,3]
+closing_at scores  "07-02"    "07-03"   "07-04"      row label -> bucket
+spans               1 Jul      2 Jul     3 Jul
 
-a file means    "07-02" is [1,2) = 2 Jul
-camdl reads     "07-02" as (0,1] = 1 Jul
-                           ^^^^^ one unit apart
+a day-labelled file means  "07-02" is [1,2) = 2 Jul
+closing_at reads           "07-02" as (0,1] = 1 Jul
+                                      ^^^^^ one unit apart
 ```
 
 **Changing `origin` does not fix it.** `origin` shifts every date coordinate by
 the same amount, so the span between two dated rows is invariant under it — a
-row labelled `D` spans the civil day before `D` whatever origin you pick:
+row labelled `D` under `closing_at` spans the civil day before `D` whatever
+origin you pick:
 
 ```
 origin = 2026-07-01   row "07-02" -> (0,1] -> 1 Jul
@@ -300,17 +305,13 @@ row a file labels `"07-04"` is scored over `(2,3] = 3 Jul`. The two disagree by
 one bucket.
 
 **The fix is a declaration, not a default.** A date column cannot say what its
-rows cover — `2026-07-08` is `[7 Jul, 8 Jul)` in a daily file, `[8 Jul, 15 Jul)`
-in a week-starting file, and `[2 Jul, 9 Jul)` in a week-ending one. No rule gets
-all three right, so the stream has to state it. That is gh#833, and it is a
-runtime change as well as a format one: an observation is a single scalar time
-today (`Observation { time, value }`), with one accumulator reset at that time,
-so a window with a gap has nothing to lower onto.
-
-Until then: if the model has no dated instants, nothing is wrong beyond the
-labelling. If it does, adjust the _instant_ by one day rather than rewriting the
-data file — one visible line in the model instead of a silent transformation of
-the input.
+rows cover — `2026-07-08` is `[8 Jul, 9 Jul)` in a daily file labelled by the
+day it describes, `[7 Jul, 8 Jul)` in one labelled by the closing boundary,
+`[8 Jul, 15 Jul)` in a week-starting file, and `[2 Jul, 9 Jul)` in a week-ending
+one. No rule gets all four right, so the stream states it: `covers = day(time)`
+for the day-labelled file, and the row is then scored on the day its label
+names. Say which kind of file you have; do not shift the time column, or
+`origin`, to make a form fit.
 
 ## Anchored vs unanchored models
 
@@ -504,12 +505,14 @@ a trap:
   label mismatch in a dated file.
 
 And even with the phase right, a boundary date cannot carry "week ending Sunday"
-as a _label_; that is what `period_ending_on` and `mmwr_week` are for. Do not
-match a camdl weekly row to an ISO or MMWR week by its date alone.
+as a _label_; that is what `covers = ending_on(time, 7 'days)` states on the
+stream. Do not match a camdl weekly row to an ISO or MMWR week by its date
+alone.
 
 Named week constructors (`iso_week(2026, 28)`, `mmwr_week(2026, 28)`) would fix
 a week's phase from the standard rather than from `origin`. They do not exist;
-they are part of the input-format work (gh#833).
+`ending_on` states what a week-ending row spans, but its phase still comes from
+the labels in the file.
 
 ## Interventions and events are instants
 
@@ -788,7 +791,6 @@ behaves differently, each tracked:
 
 | deviation                                                                                                                                                                                                                                        | issue  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| No period constructors. An observation cannot state the interval it covers, so a dated row is scored over the day _ending_ at its label.                                                                                                         | gh#833 |
 | `--dates` emits `YYYY-MM-DD+0.25d` for sub-day times, which camdl's own `--data` loader rejects, with an error naming the wrong cause.                                                                                                           | gh#839 |
 | A duration literal in an instant position (`to = 600 'months`) is accepted and read as an origin-relative coordinate, contradicting the Instant/Duration rule stated above. Retained for migration compatibility; do not write it in new models. | gh#847 |
 | The CAS leaf carries no `date` column or calendar metadata, so a stored run cannot be mapped back to dates without its source model.                                                                                                             | gh#838 |

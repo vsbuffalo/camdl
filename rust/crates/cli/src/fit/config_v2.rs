@@ -116,54 +116,6 @@ pub struct FitConfigV2 {
     #[serde(default)]
     pub ic_free: Option<bool>,
 
-    /// Burn-in / conditioning window (gh#134). The model is simulated
-    /// faithfully over the leading span `[t_start, cond_from)` — full process
-    /// noise, interventions, forcings — but **nothing there is scored**, and
-    /// the incidence accumulator is reset at `cond_from`, so the first scored
-    /// incidence bin is `(cond_from, first_obs]` rather than the whole
-    /// `[t_start, first_obs]` gap. Mechanically this inserts `cond_from` as a
-    /// leading reset-only HOLE on the observation grid (reset, no likelihood
-    /// term — the same machinery sparse-obs `NA` cells use), so PF / IF2 /
-    /// PGAS / PMMH all get it through the shared `BoundObs`/obs grid.
-    ///
-    /// Per-stream and explicit (multi-cadence Phase 3). The conditioning window
-    /// is resolved **per incidence stream** keyed on its observation-block label
-    /// (the `[data.observations]` key / IR `source`). Two surface forms (see
-    /// [`ConditionFrom`]):
-    ///
-    /// - `condition_from = "first_obs - 1 week"` — a single spec applied as the
-    ///   default for **every** stream;
-    /// - `[condition_from]` — a table whose optional `default` key is the
-    ///   all-streams default and whose other keys *shadow* individual streams by
-    ///   label (`es = "first_obs - 2 weeks"`).
-    ///
-    /// A stream with no shadow and no `default` resolves to NO conditioning. The
-    /// wide-first-window detector (`W329`,
-    /// `crate::util::check_first_interval_window`) is the enforcer: a
-    /// late-starting incidence stream that resolves to no conditioning
-    /// HARD-ERRORS, naming `condition_from.<label>` as the fix.
-    /// There is no automatic / inferred boundary — the boundary comes only from
-    /// an explicit spec.
-    ///
-    /// Each per-stream value accepts:
-    /// - absolute model-time number string (`"14"`),
-    /// - absolute `date("…")` / bare ISO date (`"date(\"2020-02-01\")"`),
-    ///   resolved via the model origin + `time_unit`,
-    /// - relative `"first_obs - <N> <unit>"` (`"first_obs - 1 week"`),
-    ///   resolved as `first_obs_s − N·unit` against THAT stream's first obs.
-    ///
-    /// Validation (in `FitRunConfig::build`): each resolved `cond_from_s ∈
-    /// [t_start, first_obs_s)`. `cond_from_s == t_start` (or no spec) is a no-op
-    /// (bit-identical — no hole inserted). Orthogonal to `ic_free`; setting BOTH
-    /// errors loudly (the inserted leading hole trips the existing "nothing to
-    /// condition on" guard).
-    ///
-    /// `skip_serializing_if None` keeps it OUT of the fit identity hash when
-    /// unset, so existing fits' `run_id`s are unchanged. A *set* value re-keys
-    /// the fit (a different conditioning window is a different fit / estimand).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition_from: Option<ConditionFrom>,
-
     /// Optional lineage metadata (not used by the runner).
     #[serde(default)]
     pub provenance: Option<FitProvenance>,
@@ -178,163 +130,6 @@ pub struct FitConfigV2 {
     /// identity-bearing source path (the fit content hash hashes its bytes).
     #[serde(skip)]
     pub compiled_ir: Option<String>,
-}
-
-/// The user-facing `condition_from` value before resolution to model time.
-///
-/// Per-stream and explicit (multi-cadence Phase 3). Two surface forms,
-/// dispatched on the TOML value type (a string vs a table):
-///
-/// - [`ConditionFrom::All`] — `condition_from = "first_obs - 1 week"`. One spec
-///   used as the default for **every** stream; no per-stream shadows.
-/// - [`ConditionFrom::PerStream`] — `[condition_from]`. A table mapping a
-///   reserved `default` key (the all-streams default, optional) and/or
-///   observation-block labels (per-stream shadows) to spec strings. A stream
-///   resolves to its shadow if present, else `default`, else NO conditioning.
-///
-/// Each spec string accepts the same three forms (resolved per stream by
-/// [`crate::fit::runner::resolve_condition_from`]): a bare model-time number
-/// (`"14"`), an absolute calendar date (`date("YYYY-MM-DD")` or a bare
-/// `"YYYY-MM-DD"`, resolved via the model origin + `time_unit`), or a relative
-/// offset off that stream's first observation (`"first_obs - <N> <unit>"`).
-///
-/// `#[serde(untagged)]`: a TOML string deserializes to `All`, a TOML table to
-/// `PerStream`. The `BTreeMap` keeps the table key order stable, so the
-/// round-trip through the fit-identity hash is deterministic.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum ConditionFrom {
-    /// `condition_from = "<spec>"` — one spec, the default for every stream.
-    All(String),
-    /// `[condition_from]` — `default = "<spec>"` (all-streams default, optional)
-    /// plus zero or more `<label> = "<spec>"` per-stream shadows. The `default`
-    /// key is reserved; a stream literally named `default` collides (a hard
-    /// error in [`ConditionFrom::resolve_for`]'s caller).
-    PerStream(std::collections::BTreeMap<String, String>),
-}
-
-/// The reserved key in a `[condition_from]` table that names the all-streams
-/// default (vs a per-stream shadow). A stream whose observation-block label is
-/// literally this string collides with the reserved key.
-pub const CONDITION_FROM_DEFAULT_KEY: &str = "default";
-
-impl ConditionFrom {
-    /// Build a [`ConditionFrom`] from repeatable CLI `--condition-from`
-    /// values (gh#621), mirroring the toml surface: a bare `SPEC` is the
-    /// all-streams default (at most one), `LABEL=SPEC` is a per-stream
-    /// shadow. Bare + labelled forms compose exactly like the toml's
-    /// `default` key + shadows. Returns `Ok(None)` for an empty list (no
-    /// flag given), so callers can fall back to a `--fit` toml's key.
-    pub fn from_cli_specs(specs: &[String]) -> Result<Option<ConditionFrom>, String> {
-        if specs.is_empty() {
-            return Ok(None);
-        }
-        let mut map = std::collections::BTreeMap::new();
-        let mut default: Option<String> = None;
-        for raw in specs {
-            // A spec is `LABEL=SPEC` only when the text before `=` looks like
-            // a stream label (no spaces): `first_obs - 7 days` has no `=`, and
-            // a hypothetical spec syntax containing `=` after a space is not
-            // split.
-            match raw.split_once('=') {
-                Some((label, spec)) if !label.trim().contains(' ') && !label.trim().is_empty() => {
-                    let label = label.trim();
-                    if label == CONDITION_FROM_DEFAULT_KEY {
-                        return Err(format!(
-                            "--condition-from {CONDITION_FROM_DEFAULT_KEY}=…: use the bare \
-                             form `--condition-from \"<spec>\"` for the all-streams \
-                             default (the `{CONDITION_FROM_DEFAULT_KEY}` key is the toml \
-                             spelling)."));
-                    }
-                    if map.insert(label.to_string(), spec.trim().to_string()).is_some() {
-                        return Err(format!(
-                            "--condition-from: stream '{label}' given twice."));
-                    }
-                }
-                _ => {
-                    if default.replace(raw.trim().to_string()).is_some() {
-                        return Err(
-                            "--condition-from: more than one bare (all-streams) spec; \
-                             give at most one, or use LABEL=SPEC per stream.".to_string());
-                    }
-                }
-            }
-        }
-        Ok(Some(match (default, map.is_empty()) {
-            (Some(d), true) => ConditionFrom::All(d),
-            (default, _) => {
-                let mut m = map;
-                if let Some(d) = default {
-                    m.insert(CONDITION_FROM_DEFAULT_KEY.to_string(), d);
-                }
-                ConditionFrom::PerStream(m)
-            }
-        }))
-    }
-
-    /// Resolve the conditioning spec string for the stream labelled `label`
-    /// (its observation-block label / IR `source`). Returns the per-stream
-    /// shadow if present, else the all-streams default, else `None` (no
-    /// conditioning for this stream). Resolution to a concrete model-time
-    /// boundary (and `[t_start, first_obs_s)` validation) is the caller's job
-    /// via [`crate::fit::runner::resolve_condition_from`].
-    pub fn resolve_for(&self, label: &str) -> Option<&str> {
-        match self {
-            ConditionFrom::All(spec) => Some(spec.as_str()),
-            ConditionFrom::PerStream(map) => map
-                .get(label)
-                .or_else(|| map.get(CONDITION_FROM_DEFAULT_KEY))
-                .map(String::as_str),
-        }
-    }
-
-    /// Validate the `[condition_from]` shadow labels against the set of real
-    /// observation-stream labels (`valid_labels`, the distinct IR `source`s of
-    /// the bound streams). Two hard errors (located, naming the valid labels):
-    ///
-    /// 1. an unknown shadow label (a typo'd stream name) — listing the valid
-    ///    labels so the user can correct it;
-    /// 2. a stream literally named `default`, which collides with the reserved
-    ///    all-streams-default key.
-    ///
-    /// `All(_)` has no labels to validate, so it always passes. Returns `Ok(())`
-    /// for the no-op cases.
-    pub fn validate_labels(&self, valid_labels: &[String]) -> Result<(), String> {
-        let map = match self {
-            ConditionFrom::All(_) => return Ok(()),
-            ConditionFrom::PerStream(map) => map,
-        };
-        // (2) A stream named `default` is indistinguishable from the reserved
-        //     all-streams-default key — refuse rather than silently shadow.
-        if valid_labels.iter().any(|l| l == CONDITION_FROM_DEFAULT_KEY) {
-            return Err(format!(
-                "[condition_from]: an observation stream is labelled \
-                 '{CONDITION_FROM_DEFAULT_KEY}', which collides with the \
-                 reserved all-streams-default key. Rename the stream's \
-                 observation-block label (its `[data.observations]` key) so it \
-                 is not '{CONDITION_FROM_DEFAULT_KEY}'."
-            ));
-        }
-        // (1) Every shadow key must name a real stream (or be `default`).
-        for key in map.keys() {
-            if key == CONDITION_FROM_DEFAULT_KEY {
-                continue;
-            }
-            if !valid_labels.iter().any(|l| l == key) {
-                let mut labels: Vec<&str> = valid_labels.iter().map(String::as_str).collect();
-                labels.sort_unstable();
-                return Err(format!(
-                    "[condition_from]: '{key}' is not an observation stream. \
-                     `condition_from.<label>` shadows a stream by its \
-                     observation-block label; valid labels are: {} (or \
-                     '{CONDITION_FROM_DEFAULT_KEY}' for the all-streams \
-                     default).",
-                    labels.join(", ")
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -415,8 +210,8 @@ pub struct DataSpec {
     /// are withheld from training; `camdl compare` scores them out-of-sample
     /// (gh#585, Stage 3 of the 2026-08-29 honest-predictive-evaluation
     /// proposal). Accepts a bare model-time number or the shared time-spec
-    /// grammar `condition_from` uses (a date under a calendar-anchored
-    /// model, or `last_obs - N weeks`), resolved at fit load.
+    /// grammar (`parse_time_spec`: a date under a calendar-anchored model,
+    /// or `last_obs - N weeks`), resolved at fit load.
     /// Mutually exclusive with `holdout`.
     #[serde(default)]
     pub holdout_after: Option<TimeSpecToml>,
@@ -1782,9 +1577,8 @@ impl Stage {
     /// `run_id` and the second was served the first's result. Writing them
     /// into the in-memory stage BEFORE the claim makes a different `--init` a
     /// different artifact, exactly as a different toml `init` already is.
-    ///
-    /// Same shape as the `--condition-from` override, which writes into the
-    /// config before `cas::fit_level_hash` for the same reason.
+    /// Any CLI override of a keyed field must write into the config before
+    /// `cas::fit_level_hash` for the same reason.
     ///
     /// A `None` argument leaves the field as the toml declared it, so a run
     /// with no CLI overrides keys identically to before — no existing cached
@@ -2317,6 +2111,48 @@ fn detect_relocated_config_backend(contents: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The error a `condition_from` key in a fit.toml raises. The key opened an
+/// undeclared incidence stream's first bin somewhere other than `t_start`;
+/// every incidence stream now declares what its rows cover, and a declared
+/// first period opens where it says, so the key has no job left. Kept as a
+/// hard error rather than an unknown-field rejection so the user is told what
+/// replaced it (proposal 2026-09-05-observation-time-as-a-sum-type, ruling 4).
+pub const CONDITION_FROM_REMOVED_MSG: &str =
+    "condition_from = ... is no longer a fit.toml key: an incidence stream now \
+     states what each row covers (`covers = ...` or window columns in the \
+     model), and a declared first period opens where it says, so the warm-up \
+     before the first row is discarded without a separate setting. Delete the \
+     key.";
+
+/// Refuse a removed `condition_from` key before the strict
+/// `deny_unknown_fields` parse, so the user gets
+/// [`CONDITION_FROM_REMOVED_MSG`] rather than a bare serde "unknown field"
+/// error. Fires on the key at the top level (both the `condition_from = "…"`
+/// scalar and the `[condition_from]` table spell a top-level key) and on the
+/// key anywhere under `[data]`, where a user may have guessed it belongs.
+fn detect_removed_condition_from(contents: &str) -> Result<(), String> {
+    fn table_has_key_anywhere(value: &toml::Value, key: &str) -> bool {
+        match value.as_table() {
+            Some(t) => t.contains_key(key)
+                || t.values().any(|v| table_has_key_anywhere(v, key)),
+            None => false,
+        }
+    }
+    let value: toml::Value = match toml::from_str(contents) {
+        Ok(v) => v,
+        // Malformed TOML surfaces from the strict parse with its own message.
+        Err(_) => return Ok(()),
+    };
+    let at_top = value.get("condition_from").is_some();
+    let under_data = value
+        .get("data")
+        .is_some_and(|d| table_has_key_anywhere(d, "condition_from"));
+    if at_top || under_data {
+        return Err(CONDITION_FROM_REMOVED_MSG.into());
+    }
+    Ok(())
+}
+
 fn detect_legacy_init_keys(contents: &str) -> Result<(), String> {
     // Parse as a generic toml::Value so the walker doesn't depend on the
     // `FitConfigV2` schema (which has already renamed the fields).
@@ -2444,6 +2280,7 @@ impl FitConfigV2 {
     pub fn from_toml_str(contents: &str) -> Result<Self, String> {
         detect_legacy_init_keys(contents)?;
         detect_relocated_config_backend(contents)?;
+        detect_removed_condition_from(contents)?;
         let config: Self = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
         // gh#241 (C3): catch typo'd stage keys serde silently drops.
@@ -2852,23 +2689,6 @@ impl FitConfigV2 {
                 ) {
                     return Err(format!("stage '{}': {}", stage_name, msg));
                 }
-            }
-            // condition_from + ic_free are mutually exclusive. The conditioning
-            // warm-up REPLACES the first observation with a reset-only leading
-            // hole, leaving ic_free nothing real to condition the initial state
-            // on. This must be rejected EXPLICITLY here: the runtime "nothing to
-            // condition on" guard fires only when EVERY stream's first cell is a
-            // hole (`.all()`), which a PER-STREAM `condition_from` (holing one
-            // stream of several) does not satisfy — so relying on that guard lets
-            // a multi-stream config slip through and silently condition on the
-            // warm-up boundary instead of a real y₁.
-            if self.condition_from.is_some() {
-                return Err(
-                    "condition_from and ic_free cannot be combined: the \
-                     conditioning warm-up replaces the first observation with a \
-                     reset-only boundary (a leading hole), leaving ic_free nothing \
-                     real to condition the initial state on. Use one or the other."
-                        .into());
             }
         }
 
@@ -4881,44 +4701,6 @@ cooling = 0.9
     }
 
     #[test]
-    fn condition_from_with_ic_free_is_rejected() {
-        // condition_from inserts a leading reset-only hole that REPLACES y₁;
-        // ic_free needs a real y₁ to condition the initial state on. Setting
-        // both must be rejected EXPLICITLY at config-load — not left to the
-        // runtime "nothing to condition on" guard, which fires only when EVERY
-        // stream's first cell is a hole (`.all()`) and so misses a PER-STREAM
-        // `condition_from` that holes only one stream.
-        let cfg = parse(r#"
-ic_free = true
-condition_from = "first_obs - 1 week"
-
-[model]
-camdl = "models/sir.camdl"
-
-[data.observations]
-weekly_cases = "data/cases.tsv"
-
-[estimate]
-beta = { bounds = [0.01, 2.0], perturb_only_at_t0 = true }
-
-[fixed]
-N0 = 1000
-
-[stages.scout]
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 4
-particles = 500
-iterations = 30
-cooling = 0.9
-        "#).unwrap();
-
-        let err = cfg.validate(&["beta".into(), "N0".into()], InitLaw::Absent).unwrap_err();
-        assert!(err.contains("condition_from") && err.contains("ic_free"),
-            "error should name both condition_from and ic_free: {}", err);
-    }
-
-    #[test]
     fn data_with_neither_file_nor_observations_rejected() {
         // Empty [data] block (no file, no observations) → DataSpec::validate fails.
         let cfg = parse(r#"
@@ -5619,6 +5401,45 @@ cooling = 0.7
         assert!(err.contains("[synthetic].backend"), "names the new location: {err}");
         assert!(err.contains("gh#241"), "cites the change: {err}");
         assert!(!err.contains("unknown field"), "not a bare serde error: {err}");
+    }
+
+    #[test]
+    fn removed_condition_from_key_is_rejected_with_covers_hint() {
+        // Ruling 4 of proposal 2026-09-05-observation-time-as-a-sum-type: the
+        // key is gone, and every spelling of it must fail with the hint that
+        // names `covers`, not a bare serde "unknown field" error. Three
+        // spellings: the top-level scalar, the `[condition_from]` table, and
+        // the key misplaced under `[data]`.
+        let body = r#"
+[model]
+camdl = "m.camdl"
+[estimate]
+beta = { bounds = [0.01, 2.0] }
+[fixed]
+gamma = 0.2
+[stages.mle]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 100
+iterations = 5
+cooling = 0.7
+"#;
+        let spellings = [
+            format!("condition_from = \"first_obs - 1 week\"\n[data.observations]\ncases = \"d.tsv\"\n{body}"),
+            format!("[condition_from]\ncases = \"14\"\n[data.observations]\ncases = \"d.tsv\"\n{body}"),
+            format!("[data]\ncondition_from = \"14\"\n[data.observations]\ncases = \"d.tsv\"\n{body}"),
+        ];
+        for toml_str in &spellings {
+            let err = parse(toml_str).unwrap_err();
+            assert_eq!(err, CONDITION_FROM_REMOVED_MSG, "exact hint text for:\n{toml_str}");
+            assert!(err.contains("covers"), "points at the replacement: {err}");
+            assert!(!err.contains("unknown field"), "not a bare serde error: {err}");
+        }
+        // The same document without the key parses — the detector is keyed
+        // on the name, not on anything else in the fixture.
+        parse(&format!("[data.observations]\ncases = \"d.tsv\"\n{body}"))
+            .expect("fixture without condition_from must parse");
     }
 
     #[test]
@@ -7792,50 +7613,5 @@ cooling = 0.70
 "#).expect("arbitrary [fixed] param keys must still be accepted");
         assert!(cfg.fixed.values.contains_key("some_param"),
             "[fixed] must keep flattening arbitrary param keys");
-    }
-
-    // ── ConditionFrom::from_cli_specs (gh#621) ──────────────────────────────
-
-    #[test]
-    fn condition_from_cli_bare_spec_is_all_streams() {
-        let got = ConditionFrom::from_cli_specs(&["first_obs - 7 days".into()])
-            .unwrap().unwrap();
-        assert_eq!(got, ConditionFrom::All("first_obs - 7 days".into()));
-        // The spec text contains spaces around a '-', never split as LABEL=.
-        assert_eq!(got.resolve_for("anything"), Some("first_obs - 7 days"));
-    }
-
-    #[test]
-    fn condition_from_cli_labeled_specs_are_shadows() {
-        let got = ConditionFrom::from_cli_specs(&[
-            "cases=first_obs - 7 days".into(),
-            "deaths=14".into(),
-        ]).unwrap().unwrap();
-        assert_eq!(got.resolve_for("cases"), Some("first_obs - 7 days"));
-        assert_eq!(got.resolve_for("deaths"), Some("14"));
-        assert_eq!(got.resolve_for("other"), None, "no default given");
-    }
-
-    #[test]
-    fn condition_from_cli_bare_plus_labeled_compose_like_toml_default() {
-        let got = ConditionFrom::from_cli_specs(&[
-            "first_obs - 7 days".into(),
-            "deaths=14".into(),
-        ]).unwrap().unwrap();
-        assert_eq!(got.resolve_for("deaths"), Some("14"), "shadow wins");
-        assert_eq!(got.resolve_for("cases"), Some("first_obs - 7 days"),
-            "bare spec is the all-streams default");
-    }
-
-    #[test]
-    fn condition_from_cli_rejects_duplicates_and_reserved_key() {
-        assert!(ConditionFrom::from_cli_specs(&["7".into(), "14".into()]).is_err(),
-            "two bare specs are ambiguous");
-        assert!(ConditionFrom::from_cli_specs(&["cases=7".into(), "cases=14".into()]).is_err(),
-            "one stream twice");
-        assert!(ConditionFrom::from_cli_specs(&["default=7".into()]).is_err(),
-            "the toml-reserved key is not a CLI label");
-        assert_eq!(ConditionFrom::from_cli_specs(&[]).unwrap(), None,
-            "no flags -> fall through to the toml");
     }
 }

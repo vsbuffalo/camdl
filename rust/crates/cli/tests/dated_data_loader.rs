@@ -97,15 +97,6 @@ fn parse_loglik(out: &std::process::Output) -> f64 {
             String::from_utf8_lossy(&out.stderr)))
 }
 
-/// gh#621: pfilter runs the same W329 wide-first-window enforcer as `fit run`,
-/// and this fixture's first window is 40 days against a ~5-day cadence. The
-/// loglik-comparison tests below declare the SAME window on both sides — they
-/// are about dated-vs-numeric equivalence, not conditioning, and this also
-/// pins that the flag treats dated and numeric time columns identically.
-/// Tests whose subject is a DIFFERENT error (empty file, missing origin) must
-/// NOT pass it, or they hit the conditioning resolver first.
-const COND: [&str; 2] = ["--condition-from", "first_obs - 5 days"];
-
 /// §9.4 byte-identity: a dated TSV yields the same pfilter loglik as the same
 /// data hand-converted to day-numbers against the origin.
 #[test]
@@ -126,16 +117,17 @@ fn dated_loglik_matches_numeric() {
     // sensitive loglik (~-53.1 at 500 particles), so the test now actually
     // exercises the conversion.
     //
-    // origin = 2020-02-28. Dates → day-numbers:
-    //   2020-04-08 → 40, 2020-04-13 → 45, 2020-04-18 → 50, 2020-04-23 → 55
+    // origin = 2020-02-28. Dates → day-numbers (consecutive days, as the
+    // stream's `closing_at(time, 1 'days)` declares):
+    //   2020-04-08 → 40, 2020-04-09 → 41, 2020-04-10 → 42, 2020-04-11 → 43
     let dated = tmp.join("dated.tsv");
     std::fs::write(&dated,
-        "time\tcases\n2020-04-08\t11\n2020-04-13\t75\n2020-04-18\t212\n2020-04-23\t73\n").unwrap();
+        "time\tcases\n2020-04-08\t11\n2020-04-09\t75\n2020-04-10\t212\n2020-04-11\t73\n").unwrap();
     let numeric = tmp.join("numeric.tsv");
-    std::fs::write(&numeric, "time\tcases\n40\t11\n45\t75\n50\t212\n55\t73\n").unwrap();
+    std::fs::write(&numeric, "time\tcases\n40\t11\n41\t75\n42\t212\n43\t73\n").unwrap();
 
-    let ll_dated = parse_loglik(&pfilter_loglik(&camdl, &model, &dated, &COND));
-    let ll_numeric = parse_loglik(&pfilter_loglik(&camdl, &model, &numeric, &COND));
+    let ll_dated = parse_loglik(&pfilter_loglik(&camdl, &model, &dated, &[]));
+    let ll_numeric = parse_loglik(&pfilter_loglik(&camdl, &model, &numeric, &[]));
     assert_eq!(ll_dated, ll_numeric,
         "dated and hand-converted-numeric logliks must be bit-identical");
 
@@ -259,10 +251,11 @@ fn numeric_shift_invariance() {
     let camdl = camdl_bin();
     let tmp = tempdir("shift");
 
-    // Baseline data at tau=30: numeric daily cases (chosen to give a real
-    // epidemic so the loglik is non-degenerate).
+    // Baseline data at tau=30: numeric daily cases on consecutive days (the
+    // stream declares `closing_at(time, 1 'days)`), inside the seeded epidemic
+    // so the loglik is non-degenerate.
     let base_rows: &[(f64, i64)] =
-        &[(20.0, 2), (30.0, 25), (40.0, 110), (50.0, 70), (60.0, 20)];
+        &[(38.0, 2), (39.0, 25), (40.0, 110), (41.0, 70), (42.0, 20)];
 
     let loglik_at_shift = |c: f64| -> f64 {
         let model = model_with_t_start(&tmp, c);
@@ -341,13 +334,17 @@ fn dates_flag_adds_calendar_column() {
     assert!(dated_hdr.starts_with("time\tdate\t"), "header: {dated_hdr}");
     assert!(plain_txt.lines().next().unwrap().starts_with("time\t"));
 
-    // t=0 → origin date; the numeric `time` column matches the plain run.
+    // Dates render from the origin; the numeric `time` column matches the
+    // plain run. The first emitted row is t=1: the row at t=0 would cover the
+    // day BEFORE the run under `closing_at(time, 1 'days)` and is not written
+    // (gh#833), so the leap day 2020-02-29 (t=1) leads.
     let plain_times: Vec<&str> = plain_txt.lines().skip(1)
         .map(|l| l.split('\t').next().unwrap()).collect();
     let dated_rows: Vec<Vec<&str>> = dated_txt.lines().skip(1)
         .map(|l| l.split('\t').collect()).collect();
-    assert_eq!(dated_rows[0][1], "2020-02-28", "t=0 renders to origin");
-    assert_eq!(dated_rows[1][1], "2020-02-29", "t=1 is the leap day");
+    assert_eq!(dated_rows[0][0], "1", "the first row the run covers closes at t=1");
+    assert_eq!(dated_rows[0][1], "2020-02-29", "t=1 is the leap day");
+    assert_eq!(dated_rows[1][1], "2020-03-01", "t=2 is the first of March");
     let dated_times: Vec<&str> = dated_rows.iter().map(|r| r[0]).collect();
     assert_eq!(plain_times, dated_times, "numeric time column must be unchanged");
 
@@ -411,11 +408,12 @@ fn timezone_offset_in_a_time_cell_is_refused() {
     // The bare-date sibling of every case below loads and scores fine
     // (dates land in the seeded epidemic window, tau=30), so a failure here
     // is attributable to the offset alone and not to a degenerate filter.
-    // origin = 2020-02-28; 2020-04-06 -> day 38, -11 -> 43, -16 -> 48.
+    // origin = 2020-02-28; 2020-04-06 -> day 38, -07 -> 39, -08 -> 40
+    // (consecutive days, as the stream's `closing_at(time, 1 'days)` declares).
     let bare = tmp.join("bare.tsv");
     std::fs::write(&bare,
-        "time\tcases\n2020-04-06\t4\n2020-04-11\t64\n2020-04-16\t174\n").unwrap();
-    let ok = pfilter_loglik(&camdl, &model, &bare, &COND);
+        "time\tcases\n2020-04-06\t4\n2020-04-07\t64\n2020-04-08\t174\n").unwrap();
+    let ok = pfilter_loglik(&camdl, &model, &bare, &[]);
     assert!(ok.status.success(),
         "control: the offset-free sibling must load, else this test cannot \
          attribute the failures below to the offset. STDERR: {}",
@@ -426,11 +424,11 @@ fn timezone_offset_in_a_time_cell_is_refused() {
     // message is a real locator rather than a constant.
     for (offset, cell, line) in [
         ("+01:00", "2020-04-06+01:00", "line 2"),
-        ("+05:45", "2020-04-11+05:45", "line 3"),
-        ("-03:00", "2020-04-16-03:00", "line 4"),
-        ("Z", "2020-04-16Z", "line 4"),
+        ("+05:45", "2020-04-07+05:45", "line 3"),
+        ("-03:00", "2020-04-08-03:00", "line 4"),
+        ("Z", "2020-04-08Z", "line 4"),
     ] {
-        let rows: Vec<String> = ["2020-04-06\t4", "2020-04-11\t64", "2020-04-16\t174"]
+        let rows: Vec<String> = ["2020-04-06\t4", "2020-04-07\t64", "2020-04-08\t174"]
             .iter()
             .map(|r| {
                 let date = r.split('\t').next().unwrap();
@@ -441,7 +439,7 @@ fn timezone_offset_in_a_time_cell_is_refused() {
         let data = tmp.join(format!("tz{}.tsv", offset.replace([':', '+', '-'], "")));
         std::fs::write(&data, format!("time\tcases\n{}\n", rows.join("\n"))).unwrap();
 
-        let out = pfilter_loglik(&camdl, &model, &data, &COND);
+        let out = pfilter_loglik(&camdl, &model, &data, &[]);
         assert!(!out.status.success(),
             "a '{offset}' offset must be refused, not silently stripped; \
              the run succeeded with STDOUT: {}",

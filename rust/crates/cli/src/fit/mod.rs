@@ -293,19 +293,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // evaluation. Was a CLI flag, which silently bypassed the run_id.
     sim::eval_stats::set_allow_degenerate_rates(config.config.allow_degenerate_rates);
 
-    // gh#134: `--condition-from` mirrors the top-level fit.toml `condition_from`
-    // and OVERRIDES it. Written into the in-memory config BEFORE the
-    // fit-identity hash is computed (`cas::fit_level_hash` serializes this
-    // config via `fit_config_blob_hash`), so a CLI-set conditioning window
-    // re-keys the fit exactly as a toml-set one does — no silent identity
-    // bypass. The CLI carries one value, so it always sets the all-streams
-    // default (`ConditionFrom::All`); per-stream shadows are toml-only. The
-    // spec string (bare number / date / `first_obs - <N> <unit>`) is resolved
-    // per stream at build time.
-    if let Some(raw) = &a.condition_from {
-        config.condition_from = Some(config_v2::ConditionFrom::All(raw.trim().to_string()));
-    }
-
     // gh#656: `--emit-every` reaches exactly one thing on this command — the
     // `[synthetic]` generator, which is the only fit path where the emission
     // cadence determines data that is then fitted. A fit against REAL data
@@ -608,7 +595,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // digests open each bound path, so an unbound key would otherwise surface
     // as "cannot read data file '<key>'", diagnosing a missing file when the
     // real fault is a binding that names no stream. The motivating case is a
-    // top-level key (`condition_from`) written below the `[data.observations]`
+    // top-level key such as `ic_free` written below the `[data.observations]`
     // header, which TOML scopes into the table.
     if let Ok(ds) = config.data_spec() {
         for (origin, table) in [
@@ -1973,7 +1960,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             preq_trace = Some(sim::inference::prequential::build_trace(
                                 recorded, &y_obs, &per_stream_obs, &per_stream_cov,
                                 &result.ess_trace, 0,
-                                pf_seed, sweep_config.condition_from.is_some(), None));
+                                pf_seed,
+                                obs_model.first_observation_opens_after_run_start(smc_config.t_start),
+                                None));
                         }
                     }
                     logliks.push(result.log_likelihood);

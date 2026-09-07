@@ -54,6 +54,7 @@ init {
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
@@ -424,6 +425,7 @@ init {
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
@@ -588,6 +590,7 @@ init {
 observations {
   weekly_cases {
     columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)

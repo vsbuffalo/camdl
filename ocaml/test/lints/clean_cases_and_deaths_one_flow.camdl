@@ -41,6 +41,7 @@ observations {
   # Confirmed cases: the confirmation flow, thinned by reporting.
   cases_national {
     columns        { time : time, cases : count }
+    covers         = closing_at(time, 7 'days)
     projected      = incidence(confirm)
     emit_schedule  = every 7 'days
     cases          ~ neg_binomial(mean = rho * projected, r = k_cases)
@@ -50,6 +51,7 @@ observations {
   # measurement pipeline with its own multiplier and its own dispersion.
   deaths_national {
     columns        { time : time, deaths : count }
+    covers         = closing_at(time, 7 'days)
     projected      = incidence(confirm)
     emit_schedule  = every 7 'days
     deaths         ~ neg_binomial(mean = rho_d * projected, r = k_deaths)

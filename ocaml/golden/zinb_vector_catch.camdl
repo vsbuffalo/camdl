@@ -32,6 +32,7 @@ transitions {
 observations {
   vector_catch {
     columns       { time : time, vector_catch : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     vector_catch  ~ zero_inflated(base = neg_binomial(mean = rho * projected, r = k), pi = pi_zero)

@@ -32,6 +32,7 @@ transitions {
 observations {
   cases[p in patch] {
     columns       { time : time, patch : dim, cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection[p])
     emit_schedule = every 7 'days
     cases         ~ neg_binomial(mean = rho * projected, r = k)

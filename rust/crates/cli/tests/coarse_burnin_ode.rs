@@ -198,7 +198,10 @@ fn nuts_ode_coarse_burnin_prevalence_recovers() {
 #[test]
 fn burnin_dt_refuses_incidence_stream() {
     // Same model but an INCIDENCE projection — the cell burnin_dt refuses in v1.
-    let inc_model = PREV_MODEL.replace("projected     = I", "projected     = incidence(infection)");
+    let inc_model = PREV_MODEL.replace(
+        "projected     = I",
+        "covers        = closing_at(time, 10 'days)\n    projected     = incidence(infection)",
+    );
     let Some((tmp, ir, data)) = setup("incidence", &inc_model) else { return };
     let bin = camdl_bin();
     let out_dir = tmp.path().join("out");
@@ -303,7 +306,10 @@ fn mh_burnin_dt_refuses_incidence_stream() {
     // The shared `validate_burnin_dt` gate must fire on the mh path too: an
     // incidence stream's first bin accumulates flow from t_start, which coarsening
     // would bias.
-    let inc_model = PREV_MODEL.replace("projected     = I", "projected     = incidence(infection)");
+    let inc_model = PREV_MODEL.replace(
+        "projected     = I",
+        "covers        = closing_at(time, 10 'days)\n    projected     = incidence(infection)",
+    );
     let Some((tmp, ir, data)) = setup("mh_incidence", &inc_model) else { return };
     let bin = camdl_bin();
     let out_dir = tmp.path().join("out");

@@ -1038,6 +1038,7 @@ let test_obs_output_start_agrees () =
     observations {
       cases {
         columns       { time : time, cases : count }
+        covers        = closing_at(time, 1 'days)
         projected     = incidence(recovery)
         emit_schedule = every 1 'days
         cases         ~ poisson(rate = rho * projected)
@@ -1083,6 +1084,7 @@ let test_stratified_observation_emits_stratum () =
     observations {
       cases[p in patch] {
         columns       { time : time, patch : dim, cases : count }
+        covers        = closing_at(time, 7 'days)
         projected     = incidence(infection[p])
         emit_schedule = every 7 'days
         cases         ~ poisson(rate = rho * projected)
@@ -1794,6 +1796,7 @@ let test_incidence_positional_and_named_produce_equal_projections () =
     observations {
       north_cases {
         columns       { time : time, north_cases : count }
+        covers        = closing_at(time, 1 'days)
         projected  = incidence(recovery[north])
         emit_schedule = every 1 'days
         north_cases ~ poisson(rate = rho * projected)
@@ -1816,6 +1819,7 @@ let test_incidence_positional_and_named_produce_equal_projections () =
     observations {
       north_cases {
         columns       { time : time, north_cases : count }
+        covers        = closing_at(time, 1 'days)
         projected  = incidence(recovery[patch = north])
         emit_schedule = every 1 'days
         north_cases ~ poisson(rate = rho * projected)
@@ -2207,6 +2211,7 @@ let test_reactive_under_anchor_rejected () =
     observations {
       cases {
         columns       { time : time, cases : count }
+        covers        = closing_at(time, 7 'days)
         projected     = incidence(infection)
         emit_schedule = every 7 'days
         cases         ~ poisson(rate = projected)
@@ -5184,6 +5189,7 @@ let test_where_param_in_reactive_guard () =
     observations {
       weekly[p in patch] {
         columns       { time : time, patch : dim, weekly : count }
+        covers        = closing_at(time, 7 'days)
         projected     = incidence(infection[p])
         emit_schedule = every 7 'days
         weekly        ~ poisson(rate = projected)
@@ -6118,6 +6124,7 @@ let test_incidence_unindexed_cross_strata_is_rejected () =
     observations {
       weekly_cases {
         columns       { time : time, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected  = incidence(infection)
         emit_schedule = every 7 'days
         weekly_cases ~ neg_binomial(mean = projected, r = k)
@@ -6299,6 +6306,7 @@ let test_incidence_explicit_sum_compiles_to_flow_sum () =
     observations {
       weekly_cases {
         columns       { time : time, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected  = sum(a in age, incidence(infection[a]))
         emit_schedule = every 7 'days
         weekly_cases ~ neg_binomial(mean = projected, r = k)
@@ -6333,6 +6341,7 @@ let test_incidence_addition_lowers_to_flow_sum () =
     observations {
       weekly_cases {
         columns       { time : time, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected     = incidence(infection[child]) + incidence(infection[adult])
         emit_schedule = every 7 'days
         weekly_cases ~ neg_binomial(mean = projected, r = k)
@@ -6358,6 +6367,7 @@ let test_incidence_addition_flattens_with_family_sum () =
     observations {
       weekly_cases {
         columns       { time : time, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected     = sum(a in age, incidence(infection[a])) + incidence(recovery[child])
         emit_schedule = every 7 'days
         weekly_cases ~ neg_binomial(mean = projected, r = k)
@@ -6391,6 +6401,7 @@ let test_flow_union_rejects_binder_collision () =
       observations {
         cases[a in age] {
           columns       { time : time, age : dim, cases : count }
+          covers        = closing_at(time, 7 'days)
           projected     = incidence(infection[a]) + incidence(infection[child])
           emit_schedule = every 7 'days
           cases ~ neg_binomial(mean = projected, r = k)
@@ -6407,6 +6418,7 @@ let test_flow_union_rejects_named_index_collision () =
       observations {
         cases {
           columns       { time : time, cases : count }
+          covers        = closing_at(time, 7 'days)
           projected     = incidence(infection[age = child]) + incidence(infection[child])
           emit_schedule = every 7 'days
           cases ~ neg_binomial(mean = projected, r = k)
@@ -6421,6 +6433,7 @@ let test_flow_union_allows_distinct_flows_same_stratum () =
     observations {
       cases[a in age] {
         columns       { time : time, age : dim, cases : count }
+        covers        = closing_at(time, 7 'days)
         projected     = incidence(infection[a]) + incidence(recovery[a])
         emit_schedule = every 7 'days
         cases ~ neg_binomial(mean = projected, r = k)
@@ -6446,6 +6459,7 @@ let test_weighted_incidence_is_named_not_e100 () =
       observations {
         weekly_cases {
           columns       { time : time, weekly_cases : count }
+          covers        = closing_at(time, 7 'days)
           projected     = rho_a[child] * incidence(infection[child])
           emit_schedule = every 7 'days
           weekly_cases ~ neg_binomial(mean = projected, r = k)
@@ -6462,6 +6476,7 @@ let test_incidence_mixed_with_state_is_named () =
       observations {
         weekly_cases {
           columns       { time : time, weekly_cases : count }
+          covers        = closing_at(time, 7 'days)
           projected     = incidence(infection[child]) + I[child]
           emit_schedule = every 7 'days
           weekly_cases ~ neg_binomial(mean = projected, r = k)
@@ -6491,6 +6506,7 @@ let test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum () =
     observations {
       cases {
         columns   { time : time, cases : count }
+        covers    = closing_at(time, 1 'days)
         projected = sum(a in age, sum(p in patch, incidence(infection[a, p])))
         cases ~ poisson(rate = rho * projected)
       }
@@ -6745,6 +6761,7 @@ let test_unknown_dimension_in_projection_sum_is_rejected () =
     observations {
       cases {
         columns       { time : time, cases : count }
+        covers        = closing_at(time, 7 'days)
         projected     = sum(b in aeg, incidence(infection[b]))
         emit_schedule = every 7 'days
         cases ~ neg_binomial(mean = rho * projected, r = k)
@@ -6771,6 +6788,7 @@ let test_declared_dimension_in_projection_sum_compiles () =
     observations {
       cases {
         columns       { time : time, cases : count }
+        covers        = closing_at(time, 7 'days)
         projected     = sum(b in age, incidence(infection[b]))
         emit_schedule = every 7 'days
         cases ~ neg_binomial(mean = rho * projected, r = k)
@@ -6819,6 +6837,7 @@ let test_incidence_sum_honours_where_guard () =
     observations {
       cases {
         columns   { time : time, cases : count }
+        covers    = closing_at(time, 1 'days)
         projected = sum(a in age where a == child, incidence(infection[a]))
         cases ~ poisson(rate = rho * projected)
       }
@@ -6844,6 +6863,7 @@ let test_incidence_positional_indexed_pins_one_stratum () =
     observations {
       child_cases {
         columns       { time : time, child_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected  = incidence(infection[child])
         emit_schedule = every 7 'days
         child_cases ~ neg_binomial(mean = projected, r = k)
@@ -6911,6 +6931,7 @@ let gh669_incidence_keyword_src = {|
     observations {
       cases {
         columns   { time : time, cases : count }
+        covers    = closing_at(time, 1 'days)
         projected = incidence(recovery, foo = 1)
         cases ~ poisson(rate = projected)
       }
@@ -7061,6 +7082,7 @@ let test_gh669_bare_incidence_on_family_still_flow_sums () =
     observations {
       cases[a in age] {
         columns   { time : time, age : dim, cases : count }
+        covers    = closing_at(time, 1 'days)
         projected = incidence(infection)
         cases ~ poisson(rate = rho * projected)
       }
@@ -7268,6 +7290,7 @@ let test_incidence_named_indexed_pins_one_stratum () =
     observations {
       adult_cases {
         columns       { time : time, adult_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected  = incidence(infection[age = adult])
         emit_schedule = every 7 'days
         adult_cases ~ neg_binomial(mean = projected, r = k)
@@ -7296,6 +7319,7 @@ let test_incidence_unstratified () =
     observations {
       cases {
         columns       { time : time, cases : count }
+        covers        = closing_at(time, 1 'days)
         projected  = incidence(infection)
         emit_schedule = every 1 'days
         cases ~ neg_binomial(mean = projected, r = k)
@@ -10237,6 +10261,7 @@ let outcome_model_ok = {|
     observations {
       weekly_cases {
         columns       { time : time, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected  = incidence(infection)
         emit_schedule = every 7 'days
         weekly_cases ~ neg_binomial(mean = rho * projected, r = k)
@@ -10265,6 +10290,7 @@ let outcome_model_late_err = {|
     observations {
       weekly_cases {
         columns       { time : time, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
         projected  = incidence(infektion)
         emit_schedule = every 7 'days
         weekly_cases ~ neg_binomial(mean = rho * projected, r = k)
@@ -10340,6 +10366,7 @@ let test_validate_reference_error_has_location () =
     observations {
       cases {
         columns       { time : time, cases : count }
+        covers        = closing_at(time, 1 'days)
         projected  = incidence(recoveryX)
         emit_schedule = every 1 'days
         cases ~ poisson(rate = rho * projected)
@@ -11322,6 +11349,7 @@ transitions { infection : S --> I @ beta * S * I / N }
 observations {
   weekly {
     columns       { time : time, weekly : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly        ~ poisson(rate = projected)
@@ -11383,6 +11411,7 @@ parameters { beta : rate  N0 : count  I0 : count }
 observations {
   weekly {
     columns       { time : time, weekly : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     weekly        ~ poisson(rate = projected)
@@ -11515,6 +11544,7 @@ observations {
   #' weekly reported cases (Poisson reporting)
   cases {
     columns   { time : time, cases : count }
+    covers    = closing_at(time, 7 'days)
     projected = incidence(infection)
     cases     ~ poisson(rate = rho * projected)
   }
@@ -12831,11 +12861,26 @@ let test_window_columns_are_the_declaration () =
   | Some Ir.CoversWindowColumns -> ()
   | _ -> Alcotest.fail "a window pair did not lower to CoversWindowColumns"
 
-let test_undeclared_stream_still_compiles_with_no_covers () =
-  (* Transitional: declaring is not yet required, and an undeclared stream
-     must carry no period rather than a guessed one. *)
-  let m = compile_expect_ok (covers_model_with (cases_stream "")) in
-  Alcotest.(check bool) "no declared period" true (covers_of m = None)
+let test_undeclared_incidence_stream_is_rejected () =
+  (* An interval stream must state its period: there is no default, because
+     the same label means different spans in different files, and a guess is
+     silently wrong for someone. The hint names every form and where to read
+     about them. *)
+  compile_expect_error_code ~code:"E350" ~contains:"what period each row covers"
+    (covers_model_with (cases_stream ""));
+  compile_expect_error_code ~code:"E350" ~contains:"closing_at"
+    (covers_model_with (cases_stream ""))
+
+let test_prevalence_stream_declares_nothing_and_compiles () =
+  (* A state reading has no window to state; requiring one would be E348's
+     mirror image. *)
+  let m = compile_expect_ok (covers_model_with {|  prev {
+    columns       { time : time, prev : count }
+    projected     = prevalence(I)
+    emit_schedule = every 1 'days
+    prev          ~ poisson(rate = projected)
+  }|}) in
+  Alcotest.(check bool) "no period on an instant stream" true (covers_of m = None)
 
 let test_covers_on_a_prevalence_stream_is_rejected () =
   compile_expect_error_code ~code:"E348" ~contains:"instant"
@@ -13926,8 +13971,10 @@ let () =
         `Quick test_closing_at_without_a_width_is_rejected;
       Alcotest.test_case "window columns are themselves the declaration"
         `Quick test_window_columns_are_the_declaration;
-      Alcotest.test_case "an undeclared stream carries no period"
-        `Quick test_undeclared_stream_still_compiles_with_no_covers;
+      Alcotest.test_case "an undeclared incidence stream is E350"
+        `Quick test_undeclared_incidence_stream_is_rejected;
+      Alcotest.test_case "a prevalence stream declares nothing and compiles"
+        `Quick test_prevalence_stream_declares_nothing_and_compiles;
       Alcotest.test_case "covers on a prevalence stream is E348"
         `Quick test_covers_on_a_prevalence_stream_is_rejected;
       Alcotest.test_case "window columns on a prevalence stream are E348"

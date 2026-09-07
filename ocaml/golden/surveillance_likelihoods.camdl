@@ -47,6 +47,7 @@ observations {
   # Large weekly case counts — normal approximation; SD scales with the mean.
   cases {
     columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(infection)
     emit_schedule = every 7 'days
     cases         ~ normal(mean = rho * projected, sd = sigma_rel * projected)
@@ -55,6 +56,7 @@ observations {
   # Rare, well-ascertained deaths — Poisson.
   deaths {
     columns       { time : time, deaths : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(disease_death)
     emit_schedule = every 7 'days
     deaths        ~ poisson(rate = projected)

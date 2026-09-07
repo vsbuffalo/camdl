@@ -43,23 +43,30 @@ fn write_model(dir: &Path, name: &str, src: &str) -> PathBuf {
     p
 }
 
-/// The fixture with `covers` injected in its lowered form.
-fn with_covers(src: &str, covers_json: &str) -> String {
-    let out = src.replacen("\"projection\":", &format!("\"covers\":{covers_json},\"projection\":"), 1);
-    assert!(out.contains("\"covers\""), "covers injection failed");
-    out
+/// The fixture with its stream's `covers` replaced (`None` = the undeclared
+/// reading, which the runtime still accepts). The committed fixture declares
+/// `closing_at(time, 1 'days)`; edit it as JSON rather than by text injection.
+fn with_covers(src: &str, covers: Option<serde_json::Value>) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(src).unwrap();
+    let obs = v["model"]["observations"][0].as_object_mut().expect("one stream");
+    match covers {
+        Some(c) => { obs.insert("covers".into(), c); }
+        None => { obs.remove("covers"); }
+    }
+    serde_json::to_string_pretty(&v).unwrap()
 }
 
 /// The fixture with its `: time` column replaced by a window pair.
 fn with_window_columns(src: &str) -> String {
-    let out = src.replacen(
-        "{ \"name\": \"time\", \"role\": \"time\" },",
-        "{ \"name\": \"win_start\", \"role\": \"window_start\" },\n          \
-         { \"name\": \"win_stop\", \"role\": \"window_stop\" },",
-        1,
-    );
-    assert!(out.contains("window_stop"), "window role injection failed");
-    with_covers(&out, "{\"kind\":\"window_columns\"}")
+    let with_cov = with_covers(src, Some(serde_json::json!({ "kind": "window_columns" })));
+    let mut v: serde_json::Value = serde_json::from_str(&with_cov).unwrap();
+    let cols = v["model"]["observations"][0]["columns"].as_array_mut().expect("columns");
+    let time_idx = cols.iter().position(|c| c["role"] == "time").expect("a time column");
+    cols.splice(time_idx..=time_idx, [
+        serde_json::json!({ "name": "win_start", "role": "window_start" }),
+        serde_json::json!({ "name": "win_stop", "role": "window_stop" }),
+    ]);
+    serde_json::to_string_pretty(&v).unwrap()
 }
 
 const PARAMS: &[&str] = &[
@@ -87,9 +94,9 @@ fn closing_at_drops_the_zero_width_leading_row_and_nothing_else() {
     let camdl = camdl_bin();
     let tmp = tempdir("closing");
     let src = seed_timing_ir();
-    let undeclared = write_model(&tmp, "undeclared.ir.json", &src);
-    let closing = write_model(&tmp, "closing.ir.json",
-        &with_covers(&src, "{\"kind\":\"until\",\"offset\":0.0,\"span\":1.0}"));
+    let undeclared = write_model(&tmp, "undeclared.ir.json", &with_covers(&src, None));
+    // The committed fixture's own declaration: closing_at(time, 1 'days).
+    let closing = write_model(&tmp, "closing.ir.json", &src);
 
     let u = emit(&camdl, &undeclared, &tmp.join("u"));
     let c = emit(&camdl, &closing, &tmp.join("c"));
@@ -112,8 +119,9 @@ fn the_value_goes_under_the_scored_column_not_the_stream_name() {
     // gh#830: a stream named `reported` whose scored column is `cases`.
     let camdl = camdl_bin();
     let tmp = tempdir("scored");
-    let src = seed_timing_ir().replacen("\"name\": \"cases\",", "\"name\": \"reported\",", 1);
-    assert!(src.contains("\"name\": \"reported\""), "stream rename failed");
+    let mut v: serde_json::Value = serde_json::from_str(&seed_timing_ir()).unwrap();
+    v["model"]["observations"][0]["name"] = serde_json::json!("reported");
+    let src = serde_json::to_string_pretty(&v).unwrap();
     let model = write_model(&tmp, "renamed.ir.json", &src);
     let out_dir = tmp.join("o");
     let mut args = vec![

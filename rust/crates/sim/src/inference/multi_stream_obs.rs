@@ -1681,6 +1681,27 @@ impl MultiStreamObsModel {
             .collect()
     }
 
+    /// Whether a warm-up precedes the first observation: the first observed
+    /// period opens — or the first observed instant sits — strictly after the
+    /// run's start, so the process ran unobserved before any datum was
+    /// assimilated. `false` when the first observation's window opens at the
+    /// run's start (its predictive is issued from the initial-state law with
+    /// nothing else), and when nothing is observed at all. Feeds the
+    /// prequential trace's `StartsAtPrior` warning (gh#833).
+    pub fn first_observation_opens_after_run_start(&self, run_start: f64) -> bool {
+        let Some(idx) = self.first_observation_idx() else { return false };
+        self.streams.iter().any(|s| match s.at_union[idx] {
+            Some(local) if s.observations[local].is_some() => {
+                match s.times.coverage(local, run_start) {
+                    Coverage::Interval { start, .. } => start > run_start,
+                    Coverage::Instant => self.obs_times[idx] > run_start,
+                    Coverage::Unrecorded => false,
+                }
+            }
+            _ => false,
+        })
+    }
+
     /// Sibling of [`per_stream_observed`] for what each value was accumulated
     /// over: `[obs_idx][stream]`, `None` where the stream is not scheduled at
     /// that union index. `run_start` is the filter's `t_start` (see

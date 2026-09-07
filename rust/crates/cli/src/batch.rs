@@ -1918,7 +1918,10 @@ fn write_obs_into_cas(
         // preflight (gh#561 + gh#589).
         let times =
             crate::obs_emit_schedule_times(obs_ir, restart_origin, model.simulation.t_end, emit)?;
-        let plan = crate::obs_emit::plan_emission(obs_ir, &times, run_start, model.simulation.t_end)?;
+        let plan = crate::obs_emit::plan_emission(
+            obs_ir, &times, run_start, model.simulation.t_end,
+            emit.and_then(|e| e.resolve_for(&obs_ir.source)),
+        )?;
         crate::project_coverages(traj, obs_ir, model, &plan.coverages())?;
         plans.push(plan);
     }

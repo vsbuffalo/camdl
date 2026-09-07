@@ -147,7 +147,12 @@ fn generate_data(bin: &Path, ir: &Path, dir: &Path) -> (PathBuf, PathBuf) {
     // Both AFP leaves share a 30-day grid; both ES leaves share a 14-day grid.
     assert_eq!(afp_u, afp_r, "AFP leaves must share one cadence");
     assert_eq!(es_u, es_r, "ES leaves must share one cadence");
-    assert_eq!(afp_u[0], 0.0);
+    // AFP is an incidence stream declared `closing_at(time, 30 'days)`: its row
+    // at the origin would cover the month BEFORE the run and is not written
+    // (gh#833), so the first row closes at 30. ES reads an instant and keeps
+    // its origin row.
+    assert_eq!(afp_u[0], 30.0);
+    assert_eq!(es_u[0], 0.0);
     assert_eq!(afp_u[1] - afp_u[0], 30.0, "AFP is monthly (every 30 days)");
     assert_eq!(es_u[1] - es_u[0], 14.0, "ES is biweekly (every 14 days)");
     // Distinct cadences → distinct grids: AFP at 30 is not an ES time.

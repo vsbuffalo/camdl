@@ -86,30 +86,35 @@ init {
 observations {
   cases_p1 {
     columns       { time : time, cases_p1 : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(recovery_p1)
     emit_schedule = every 7 'days
     cases_p1      ~ neg_binomial(mean = rho * projected, r = k)
   }
   cases_p2 {
     columns       { time : time, cases_p2 : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(recovery_p2)
     emit_schedule = every 7 'days
     cases_p2      ~ neg_binomial(mean = rho * projected, r = k)
   }
   cases_p3 {
     columns       { time : time, cases_p3 : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(recovery_p3)
     emit_schedule = every 7 'days
     cases_p3      ~ neg_binomial(mean = rho * projected, r = k)
   }
   cases_p4 {
     columns       { time : time, cases_p4 : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(recovery_p4)
     emit_schedule = every 7 'days
     cases_p4      ~ neg_binomial(mean = rho * projected, r = k)
   }
   cases_p5 {
     columns       { time : time, cases_p5 : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(recovery_p5)
     emit_schedule = every 7 'days
     cases_p5      ~ neg_binomial(mean = rho * projected, r = k)

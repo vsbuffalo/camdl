@@ -1,17 +1,17 @@
 //! gh#604 — a `[data.observations]` key that names no observation source must
 //! be diagnosed as a BINDING error, before anything reads a byte of data.
 //!
-//! The motivating case is TOML scoping. `condition_from` is a top-level
-//! fit.toml key; written below the `[data.observations]` header it becomes
-//! `data.observations.condition_from` and binds an observation stream named
-//! `condition_from` to the "path" `first_obs - 1 week`. The conditioning
-//! window it was meant to set is then unset.
+//! The motivating case is TOML scoping. `scenario` is a top-level fit.toml
+//! key; written below the `[data.observations]` header it becomes
+//! `data.observations.scenario` and binds an observation stream named
+//! `scenario` to the "path" `baseline`. The scenario it was meant to select is
+//! then unset.
 //!
 //! The guard that catches this (`fit::runner::check_bound_sources`) existed but
 //! was unreachable on the `fit run` path: the fit-level identity digests open
 //! every bound path first, so the run died on `cannot read data file
-//! 'condition_from'` — a missing-file diagnosis for a binding fault, pointing
-//! the user at the filesystem instead of at the header their key sits under.
+//! 'scenario'` — a missing-file diagnosis for a binding fault, pointing the
+//! user at the filesystem instead of at the header their key sits under.
 //!
 //! Gates three properties:
 //!   1. the misplaced top-level key reports as a binding error naming the
@@ -105,7 +105,10 @@ fn run_fit(fit_toml: &Path) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// (1) `condition_from` scoped into `[data.observations]` by its header.
+/// (1) `scenario` scoped into `[data.observations]` by its header. The example
+/// key must be string-valued: `[data.observations]` deserializes as a
+/// string→string map, so a boolean or numeric top-level key misplaced here
+/// fails in the TOML parse before the binder is reached.
 #[test]
 fn misplaced_top_level_key_reports_as_a_binding_error() {
     let tmp = tempfile::tempdir().unwrap();
@@ -113,7 +116,7 @@ fn misplaced_top_level_key_reports_as_a_binding_error() {
     let fit = write_fit_toml(
         tmp.path(),
         &format!(
-            "cases = \"{}\"\ncondition_from = \"first_obs - 1 day\"",
+            "cases = \"{}\"\nscenario = \"baseline\"",
             data.display()
         ),
     );
@@ -123,7 +126,7 @@ fn misplaced_top_level_key_reports_as_a_binding_error() {
     // The fault is named, and named as a binding fault in the table the user
     // typed it in — not as a missing file.
     assert!(
-        stderr.contains("[data.observations]") && stderr.contains("'condition_from'"),
+        stderr.contains("[data.observations]") && stderr.contains("'scenario'"),
         "must name the offending table and key; got:\n{stderr}"
     );
     assert!(

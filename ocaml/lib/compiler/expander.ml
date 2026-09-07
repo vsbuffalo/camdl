@@ -8013,7 +8013,28 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
     None
   end else
   match od.ocovers with
-  | None -> if windowed then Some Ir.CoversWindowColumns else None
+  | None when windowed -> Some Ir.CoversWindowColumns
+  | None when accumulates ->
+    (* An interval stream must state its period. There is no default, because
+       no default is right: the same label is `[D, D+1)` in a daily file
+       labelled by the day it describes, `[D−7, D)` in one labelled by the
+       boundary its bin closes at (pomp's accumulators, camdl's own
+       `simulate --obs`), and a week either way for weekly data. A rule that
+       guesses is silently wrong for someone (gh#833). *)
+    Diagnostics.error ctx.diags ~code:"E350" ~loc:od_loc
+      ~message:(Printf.sprintf
+        "observation '%s' accumulates a flow over an interval but does not say \
+         what period each row covers" od.oname)
+      ~hint:"add `covers = closing_at(time, <spacing>)` if each row is \
+             labelled by the boundary its window closes at (a file written by \
+             `simulate --obs`, or derived from pomp); `covers = day(time)` if \
+             it is labelled by the day the count describes; `starting_on(time, \
+             7 'days)` / `ending_on(time, 7 'days)` for a week labelled by its \
+             first / last included day; or `window_start`/`window_stop` \
+             columns to state each row's boundaries in the file — see `camdl \
+             docs language-changes`" ();
+    None
+  | None -> None
   | Some cv ->
     let cv_loc = diag_loc_of_ast_ctx ctx cv.ocv_loc in
     if not accumulates then begin

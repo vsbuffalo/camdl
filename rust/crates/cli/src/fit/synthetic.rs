@@ -180,11 +180,37 @@ fn generate_one_dataset(
         // shortened horizon the surplus rows are fabricated, and a recovery
         // study would then fit invented data (gh#561).
         let times = crate::obs_emit_schedule_times(obs_ir, None, model.simulation.t_end, emit)?;
+        // A synthetic dataset is fitted by THIS model, so its cadence must be
+        // one the model's own declaration reads: `--emit-every` re-spacing a
+        // stream declared with a uniform window of another width would write
+        // rows the model then reads as gapped (gh#656 × gh#833). Refused, not
+        // rescaled — the flag exists for `simulate --obs`, whose output nothing
+        // has to read back.
+        let override_step = emit.and_then(|e| e.resolve_for(&obs_ir.source));
+        if let (Some(step), Some(covers)) = (override_step, obs_ir.covers.as_ref()) {
+            if let Some((start, stop)) = covers.period_of(0.0) {
+                let span = stop - start;
+                if (span - step).abs() > crate::OBS_SNAP_EPS {
+                    return Err(format!(
+                        "--emit-every {step} would write '{}' rows covering {step} {unit} \
+                         each, but the model declares `covers` with {span}-{unit} windows, \
+                         and a [synthetic] dataset is fitted by this same model — which \
+                         would read those rows as {span}-{unit} windows with gaps between. \
+                         Drop the override for this stream, or declare the window you want \
+                         to emit (`closing_at({time}, {step} '{unit})`) in the model.",
+                        obs_ir.name,
+                        unit = model.time_unit,
+                        time = crate::pfilter::obs_time_column(obs_ir).unwrap_or("time"),
+                    ));
+                }
+            }
+        }
         // The rows the stream's declaration assigns to those times, within the
         // run (gh#833). This wide file has one `time` column, so a stream that
         // declares its windows per row cannot be written here.
         let plan = crate::obs_emit::plan_emission(
             obs_ir, &times, crate::run_start_of(&traj, &model), model.simulation.t_end,
+            override_step,
         )?;
         if matches!(plan.columns, crate::obs_emit::TemporalColumns::Window { .. }) {
             return Err(format!(
@@ -211,10 +237,12 @@ fn generate_one_dataset(
     }
 
     // Write wide-format TSV: time column + one column per obs stream.
-    // Uses the union of all obs times across streams, sorted; missing
-    // values are blank (NA-compatible with the fit-loader). Streams
-    // that share the same schedule (the common case for parameter-
-    // recovery studies) collapse to one row per time, no NAs.
+    // Uses the union of all obs times across streams, sorted; a stream with
+    // no row at a union time gets the loader's hole token `NA` (a blank cell
+    // is a parse error there). Streams that share the same schedule (the
+    // common case for parameter-recovery studies) collapse to one row per
+    // time, no NAs — except that an incidence stream declared `closing_at`
+    // has no row at the run's start, where its instant siblings do (gh#833).
     let mut union_times: Vec<f64> = all_times.iter().flatten().copied().collect();
     union_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     union_times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
@@ -236,7 +264,7 @@ fn generate_one_dataset(
                 .position(|&ot| (ot - t).abs() < 1e-9);
             match hit {
                 Some(ti) => buf.push_str(&format_value(all_draws[si][ti])),
-                None     => {} // blank cell — fit-loader treats as missing
+                None     => buf.push_str("NA"), // a hole: no row for this stream here
             }
         }
         buf.push('\n');

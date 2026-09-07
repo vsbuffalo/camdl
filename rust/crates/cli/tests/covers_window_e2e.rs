@@ -1,22 +1,21 @@
 //! End-to-end: a declared observation window (gh#833) actually moves the
 //! scoring boundary, through the real CLI data path.
 //!
-//! The claim this pins is the one the whole arc exists to make. An UNDECLARED
-//! incidence stream scores row `k` over `(t[k-1], t[k]]` — a window nobody
-//! wrote down. `covers = day(time)` says row `D` covers `[D, D+1)`, so it is
-//! scored one bucket LATER. Stated as an equivalence, which is stronger than
-//! "the number changed" and does not depend on any particular fixture's
+//! The claim this pins is the one the whole arc exists to make. `covers =
+//! day(time)` says row `D` covers `[D, D+1)`; `closing_at(time, 1 'days)` says
+//! row `D` covers `[D−1, D)`. Stated as equivalences, which are stronger than
+//! "the number changed" and do not depend on any particular fixture's
 //! sensitivity:
 //!
-//!   declared `day(time)` on a file       ==       undeclared on the same file
-//!   labelled 0,1,2,…                              with every label shifted +1
+//!   day(time) on labels 3,4,5,…   ==   closing_at(time, 1 'days) on labels 4,5,6,…
 //!
-//! Both sides then close their bins at 1,2,3,…, so the logliks must agree
-//! EXACTLY, not approximately.
+//! Both declare the periods [3,4), [4,5), … so the logliks agree EXACTLY, and
+//! `closing_at` on the SAME file as `day` does not — the shift is real.
 //!
-//! `covers` is injected into the committed IR rather than compiled from a
-//! `.camdl`, so this test does not depend on the OCaml compiler being on PATH
-//! (mirroring `dated_data_loader.rs`).
+//! The committed fixture already declares `closing_at(time, 1 'days)`; the
+//! variants are made by editing that declaration in the IR as JSON, so this
+//! test does not depend on the OCaml compiler being on PATH (mirroring
+//! `dated_data_loader.rs`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,9 +32,10 @@ fn camdl_bin() -> PathBuf {
     p
 }
 
-fn seed_timing_ir() -> PathBuf {
+fn seed_timing_ir() -> serde_json::Value {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    Path::new(&manifest).join("../sim/tests/fixtures/seed_timing.ir.json")
+    let p = Path::new(&manifest).join("../sim/tests/fixtures/seed_timing.ir.json");
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
 }
 
 fn tempdir(tag: &str) -> PathBuf {
@@ -56,31 +56,59 @@ fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
         .expect("camdl must invoke")
 }
 
-/// The committed fixture, unchanged — an incidence stream that declares
-/// nothing about what its rows cover.
+/// The fixture with its one stream's `covers` replaced. `None` removes the
+/// declaration — the undeclared reading, which the runtime still accepts.
+fn model_with_covers(dir: &Path, name: &str, covers: Option<serde_json::Value>) -> PathBuf {
+    let mut v = seed_timing_ir();
+    let obs = v["model"]["observations"][0].as_object_mut().expect("one stream");
+    match covers {
+        Some(c) => { obs.insert("covers".into(), c); }
+        None => { obs.remove("covers"); }
+    }
+    let p = dir.join(name);
+    std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    p
+}
+
+/// `covers = day(time)` in its lowered form: open at the label, one day wide.
+fn day_model(dir: &Path) -> PathBuf {
+    model_with_covers(dir, "day.ir.json",
+        Some(serde_json::json!({ "kind": "from", "offset": 0.0, "span": 1.0 })))
+}
+
+/// `covers = closing_at(time, 1 'days)`: the committed fixture's own
+/// declaration, closing at the label, one day wide.
+fn closing_model(dir: &Path) -> PathBuf {
+    model_with_covers(dir, "closing.ir.json",
+        Some(serde_json::json!({ "kind": "until", "offset": 0.0, "span": 1.0 })))
+}
+
+/// No declaration: the transitional undeclared reading.
 fn undeclared_model(dir: &Path) -> PathBuf {
-    let p = dir.join("undeclared.ir.json");
-    std::fs::copy(seed_timing_ir(), &p).unwrap();
+    model_with_covers(dir, "undeclared.ir.json", None)
+}
+
+/// The fixture with the time column REPLACED by a `window_start`/`window_stop`
+/// pair and `covers` set to `window_columns` — the per-row form, the only one
+/// that can state a gap.
+fn windowed_model(dir: &Path) -> PathBuf {
+    let mut v = seed_timing_ir();
+    let obs = &mut v["model"]["observations"][0];
+    obs["covers"] = serde_json::json!({ "kind": "window_columns" });
+    let cols = obs["columns"].as_array_mut().expect("columns");
+    let time_idx = cols.iter().position(|c| c["role"] == "time").expect("a time column");
+    cols.splice(time_idx..=time_idx, [
+        serde_json::json!({ "name": "win_start", "role": "window_start" }),
+        serde_json::json!({ "name": "win_stop", "role": "window_stop" }),
+    ]);
+    let p = dir.join("windowed.ir.json");
+    std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
     p
 }
 
-/// The same fixture with `covers = day(time)` injected, in its lowered form:
-/// open at the row's own label, one day wide.
-fn declared_model(dir: &Path) -> PathBuf {
-    let src = std::fs::read_to_string(seed_timing_ir()).unwrap();
-    let injected = src.replacen(
-        "\"projection\":",
-        "\"covers\":{\"kind\":\"from\",\"offset\":0.0,\"span\":1.0},\"projection\":",
-        1,
-    );
-    assert!(injected.contains("\"covers\""), "covers injection failed");
-    let p = dir.join("declared.ir.json");
-    std::fs::write(&p, injected).unwrap();
-    p
-}
-
-/// A daily counts file over `times`, with a bump so the series is not all
-/// zeros (an all-zero series would agree under any window and prove nothing).
+/// A daily counts file over 40 rows labelled `3 + k + shift`, with a bump so
+/// the series is not all zeros (an all-zero series would agree under any
+/// window and prove nothing).
 fn write_counts(path: &Path, shift: f64) {
     let mut s = String::from("time\tcases\n");
     for k in 0..40u32 {
@@ -88,45 +116,6 @@ fn write_counts(path: &Path, shift: f64) {
         s.push_str(&format!("{}\t{}\n", 3.0 + f64::from(k) + shift, v));
     }
     std::fs::write(path, s).unwrap();
-}
-
-/// The same fixture with `covers = closing_at(time, 1 'days)` injected, in its
-/// lowered form: closing AT the row's own label, one day wide — the reading of
-/// a file whose labels are closing boundaries.
-fn closing_model(dir: &Path) -> PathBuf {
-    let src = std::fs::read_to_string(seed_timing_ir()).unwrap();
-    let injected = src.replacen(
-        "\"projection\":",
-        "\"covers\":{\"kind\":\"until\",\"offset\":0.0,\"span\":1.0},\"projection\":",
-        1,
-    );
-    assert!(injected.contains("\"covers\""), "covers injection failed");
-    let p = dir.join("closing.ir.json");
-    std::fs::write(&p, injected).unwrap();
-    p
-}
-
-/// The fixture with the time column REPLACED by a `window_start`/`window_stop`
-/// pair and `covers` set to `window_columns` — the per-row form, the only one
-/// that can state a gap. Nothing else about the stream changes.
-fn windowed_model(dir: &Path) -> PathBuf {
-    let src = std::fs::read_to_string(seed_timing_ir()).unwrap();
-    let with_roles = src.replacen(
-        "{ \"name\": \"time\", \"role\": \"time\" },",
-        "{ \"name\": \"win_start\", \"role\": \"window_start\" },\n          \
-         { \"name\": \"win_stop\", \"role\": \"window_stop\" },",
-        1,
-    );
-    assert!(with_roles.contains("window_stop"), "window role injection failed");
-    let injected = with_roles.replacen(
-        "\"projection\":",
-        "\"covers\":{\"kind\":\"window_columns\"},\"projection\":",
-        1,
-    );
-    assert!(injected.contains("window_columns"), "covers injection failed");
-    let p = dir.join("windowed.ir.json");
-    std::fs::write(&p, injected).unwrap();
-    p
 }
 
 /// Daily one-day windows [D, D+1) for D in 3..43, with the row for
@@ -144,9 +133,9 @@ fn write_window_counts(path: &Path, skip: u32) {
     std::fs::write(path, s).unwrap();
 }
 
-/// The undeclared reading of the same counts: labels shifted +1 (an
-/// undeclared row closes AT its label), with the row that closes the gap
-/// present as `NA` — a hole, which closes the bin without scoring it.
+/// The `closing_at` reading of the same counts: labels shifted +1 (a closing
+/// row is labelled by its stop), with the row that closes the gap present as
+/// `NA` — a hole, which closes the bin without scoring it.
 fn write_counts_with_hole(path: &Path, hole_label: u32) {
     let mut s = String::from("time\tcases\n");
     for k in 0..40u32 {
@@ -172,14 +161,13 @@ const BASE_PARAMS: &[&str] = &[
     "--param", "tau=2",
 ];
 
-fn pfilter_loglik(camdl: &Path, model: &Path, data: &Path, extra: &[&str]) -> f64 {
+fn pfilter_loglik(camdl: &Path, model: &Path, data: &Path) -> f64 {
     let mut args = vec![
         "pfilter", model.to_str().unwrap(),
         "--particles", "500", "--dt", "1", "--seed", "5",
         "--data", data.to_str().unwrap(),
     ];
     args.extend_from_slice(BASE_PARAMS);
-    args.extend_from_slice(extra);
     let out = run(camdl, &args);
     let stdout = String::from_utf8_lossy(&out.stdout);
     stdout
@@ -191,70 +179,47 @@ fn pfilter_loglik(camdl: &Path, model: &Path, data: &Path, extra: &[&str]) -> f6
             String::from_utf8_lossy(&out.stderr)))
 }
 
-/// The complete meaning of `covers = day(time)` on a file labelled 3,4,5,…
-/// with `t_start = 0`, stated as an equivalence with the undeclared machinery:
+/// The complete meaning of `covers = day(time)`, stated as an equivalence
+/// between two declarations of the same periods:
 ///
-///   declared day(time)  ==  undeclared, labels shifted +1, AND `condition_from`
-///                           opening the first bin at 3
+///   day(time) on labels 3,4,5,…   ==   closing_at(time, 1 'days) on labels 4,5,6,…
 ///
-/// Both then reset at 3 and close bins at 4,5,6,…, so the numbers agree
-/// EXACTLY. This pins two things at once: the one-bucket SHIFT (row D closes at
-/// D+1) and the LEADING EDGE (the first period opens where it says, at 3, not
-/// at `t_start`). A declaration is the thing that makes `condition_from`
-/// unnecessary — it states where scoring begins.
+/// Both declare [3,4), [4,5), …: the same bins, the same first period opening at
+/// 3 (the warm-up before it simulated but not scored), so the numbers agree
+/// EXACTLY. This pins the one-bucket SHIFT (row D under `day` closes at D+1)
+/// and the LEADING EDGE at once, with no conditioning knob anywhere — the
+/// declaration itself says where scoring begins.
 #[test]
 fn a_declared_day_window_scores_one_bucket_later_and_opens_at_its_own_start() {
     let camdl = camdl_bin();
-    let tmp = tempdir("shift");
+    let tmp = tempdir("day");
+    let labelled_by_day = tmp.join("by_day.tsv");
+    let labelled_by_close = tmp.join("by_close.tsv");
+    write_counts(&labelled_by_day, 0.0);
+    write_counts(&labelled_by_close, 1.0);
 
-    let plain = tmp.join("counts.tsv");
-    let shifted = tmp.join("counts_shifted.tsv");
-    write_counts(&plain, 0.0); // labels 3..42
-    write_counts(&shifted, 1.0); // labels 4..43
-
-    let declared = pfilter_loglik(&camdl, &declared_model(&tmp), &plain, &[]);
-    // The shifted file's first observation is 4; opening one day before it
-    // puts the reset-only boundary at 3 — exactly where the declared stream's
-    // first period opens.
-    let undeclared_equiv = pfilter_loglik(
-        &camdl, &undeclared_model(&tmp), &shifted,
-        &["--condition-from", "first_obs - 1 days"],
-    );
+    let day = pfilter_loglik(&camdl, &day_model(&tmp), &labelled_by_day);
+    let closing = pfilter_loglik(&camdl, &closing_model(&tmp), &labelled_by_close);
     assert_eq!(
-        declared, undeclared_equiv,
-        "a declared day-window must score exactly as the undeclared reading of \
-         the same data shifted one day later with its first bin opened at the \
-         declared start (declared={declared}, equivalent={undeclared_equiv})",
+        day, closing,
+        "day(time) on labels 3.. must equal closing_at(time, 1 day) on labels 4.., \
+         bit for bit — they declare the same periods (day={day}, closing={closing})",
     );
 
-    // Non-vacuous, twice over. (1) The undeclared reading of the UNSHIFTED file
-    // is a different scoring, so this is not "any two runs agree".
-    let undeclared_plain = pfilter_loglik(&camdl, &undeclared_model(&tmp), &plain, &[]);
+    // Non-vacuous: the two forms on the SAME file declare different periods.
+    let closing_same_file = pfilter_loglik(&camdl, &closing_model(&tmp), &labelled_by_day);
     assert_ne!(
-        declared, undeclared_plain,
-        "declaring a window must change the scoring of the same file; if these \
-         agree the declaration is not reaching the filter",
-    );
-    // (2) The shifted file WITHOUT conditioning opens its first bin at t_start,
-    // so it must NOT match: if it does, the declared stream is also opening at
-    // t_start — the leading-window defect — rather than at its declared start.
-    let undeclared_shifted_wide = pfilter_loglik(&camdl, &undeclared_model(&tmp), &shifted, &[]);
-    assert_ne!(
-        declared, undeclared_shifted_wide,
-        "the declared stream's first period must open at its own start (3), not \
-         at t_start; agreeing with the un-conditioned shifted reading means the \
-         first bin spans the whole warm-up",
+        day, closing_same_file,
+        "day and closing_at on one file must NOT agree — the shift is real",
     );
 }
 
-/// Proposal Testing item 2's twin, and the fact the in-repo migration rests on:
-/// `closing_at(time, 1 'days)` on a file labelled 1,2,3,… with `t_start = 0`
-/// scores bit-identically to the undeclared reading of the same file — every
-/// bin is `(t−1, t]` either way, the leading one included because the first
-/// row sits one period after `t_start`. A closing-labelled file (anything
-/// `simulate --obs` wrote, anything from pomp) declares what it always meant
-/// and nothing moves. Non-vacuity: `day(time)` on the same file moves the
-/// numbers, so the two forms are not confusable in effect.
+/// The fact the in-repo migration rests on: `closing_at(time, 1 'days)` on a
+/// file labelled 1,2,3,… with `t_start = 0` scores bit-identically to the
+/// undeclared reading of the same file — every bin is `(t−1, t]` either way,
+/// the leading one included because the first row sits one period after
+/// `t_start`. A closing-labelled file (anything `simulate --obs` wrote,
+/// anything from pomp) declares what it always meant and nothing moves.
 #[test]
 fn closing_at_reproduces_the_undeclared_reading_exactly() {
     let camdl = camdl_bin();
@@ -263,15 +228,15 @@ fn closing_at_reproduces_the_undeclared_reading_exactly() {
     // Labels 1..=40: the first row closes one day after t_start = 0.
     write_counts(&data, -2.0);
 
-    let closing = pfilter_loglik(&camdl, &closing_model(&tmp), &data, &[]);
-    let undeclared = pfilter_loglik(&camdl, &undeclared_model(&tmp), &data, &[]);
+    let closing = pfilter_loglik(&camdl, &closing_model(&tmp), &data);
+    let undeclared = pfilter_loglik(&camdl, &undeclared_model(&tmp), &data);
     assert_eq!(
         closing, undeclared,
         "closing_at(time, 1 'days) must be the undeclared reading, bit for bit \
          (closing={closing}, undeclared={undeclared})",
     );
 
-    let day = pfilter_loglik(&camdl, &declared_model(&tmp), &data, &[]);
+    let day = pfilter_loglik(&camdl, &day_model(&tmp), &data);
     assert_ne!(
         closing, day,
         "day(time) on the same file must NOT agree — it scores one bucket later",
@@ -281,15 +246,15 @@ fn closing_at_reproduces_the_undeclared_reading_exactly() {
 /// Proposal Testing item 4 through the real loader and filter. A stream stating
 /// its windows per row, with the window [10,11) simply absent, is a declared
 /// GAP: the flow over (10,11) belongs to no bin and is discarded. Stated as an
-/// equivalence with the undeclared machinery:
+/// equivalence with a uniform declaration and an `NA` row:
 ///
-///   windowed, [10,11) omitted  ==  undeclared, labels +1, row 11 present as NA,
-///                                  `condition_from` opening at 3
+///   windowed, [10,11) omitted  ==  closing_at(time, 1 day) on labels 4..43,
+///                                  the row labelled 11 present as NA
 ///
-/// On the undeclared side the NA row is a hole: no likelihood term, but it
+/// Under the uniform form the NA row is a hole: no likelihood term, but it
 /// closes the bin at 11 without scoring it — discarding exactly (10,11). Both
-/// sides then reset at 3, score at 4..10 and 12..43, and discard the same span,
-/// so the numbers agree EXACTLY.
+/// sides open at 3, score at 4..10 and 12..43, and discard the same span, so
+/// the numbers agree EXACTLY.
 #[test]
 fn a_stated_gap_under_window_columns_discards_exactly_that_span() {
     let camdl = camdl_bin();
@@ -300,61 +265,23 @@ fn a_stated_gap_under_window_columns_discards_exactly_that_span() {
     write_window_counts(&windowed, 10);
     write_counts_with_hole(&holed, 11);
 
-    let declared_gap = pfilter_loglik(&camdl, &windowed_model(&tmp), &windowed, &[]);
-    let undeclared_equiv = pfilter_loglik(
-        &camdl, &undeclared_model(&tmp), &holed,
-        &["--condition-from", "first_obs - 1 days"],
-    );
+    let declared_gap = pfilter_loglik(&camdl, &windowed_model(&tmp), &windowed);
+    let uniform_with_hole = pfilter_loglik(&camdl, &closing_model(&tmp), &holed);
     assert_eq!(
-        declared_gap, undeclared_equiv,
+        declared_gap, uniform_with_hole,
         "a stated gap must discard exactly the uncovered span — the same numbers \
-         as an NA row closing that bin unscored (declared={declared_gap}, \
-         equivalent={undeclared_equiv})",
+         as an NA row closing that bin unscored (windowed={declared_gap}, \
+         uniform={uniform_with_hole})",
     );
 
-    // Non-vacuous: without the hole the undeclared side scores (10,11] against
-    // a real count, so the gap genuinely removes a term.
+    // Non-vacuous: without the hole the uniform side scores (10,11] against a
+    // real count, so the gap genuinely removes a term.
     let plain = tmp.join("plain.tsv");
     write_counts_with_hole(&plain, u32::MAX);
-    let undeclared_no_hole = pfilter_loglik(
-        &camdl, &undeclared_model(&tmp), &plain,
-        &["--condition-from", "first_obs - 1 days"],
-    );
+    let uniform_no_hole = pfilter_loglik(&camdl, &closing_model(&tmp), &plain);
     assert_ne!(
-        declared_gap, undeclared_no_hole,
+        declared_gap, uniform_no_hole,
         "the gap must change the scoring; agreeing with the gapless reading means \
          the omitted window was not discarded",
-    );
-}
-
-#[test]
-fn condition_from_on_a_declared_stream_is_refused() {
-    // Conditioning opens the first scored bin at a boundary of the USER's
-    // choosing, by prepending a reset-only row. On a stream that has stated
-    // what its first row covers, that silently truncates the stated window —
-    // two sources disagreeing about one period. Refuse, naming both.
-    let camdl = camdl_bin();
-    let tmp = tempdir("cond");
-    let plain = tmp.join("counts.tsv");
-    write_counts(&plain, 0.0);
-
-    let model = declared_model(&tmp);
-    let mut args: Vec<String> = vec![
-        "pfilter".into(), model.to_str().unwrap().into(),
-        "--particles".into(), "50".into(), "--dt".into(), "1".into(),
-        "--seed".into(), "5".into(),
-        "--data".into(), plain.to_str().unwrap().into(),
-        "--condition-from".into(), "first_obs - 2 days".into(),
-    ];
-    args.extend(BASE_PARAMS.iter().map(|s| s.to_string()));
-    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run(&camdl, &borrowed);
-
-    assert!(!out.status.success(), "a declared stream + condition_from must fail");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("declares what each of its rows covers")
-            && err.contains("silently truncated"),
-        "the refusal must explain the conflict, got: {err}",
     );
 }

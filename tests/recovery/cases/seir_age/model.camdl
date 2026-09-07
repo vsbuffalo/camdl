@@ -38,12 +38,14 @@ transitions {
 observations {
   cases_child {
     columns       { time : time, cases_child : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(recovery_child)
     emit_schedule = every 7 'days
     cases_child   ~ neg_binomial(mean = rho * projected, r = k)
   }
   cases_adult {
     columns       { time : time, cases_adult : count }
+    covers        = closing_at(time, 7 'days)
     projected     = incidence(recovery_adult)
     emit_schedule = every 7 'days
     cases_adult   ~ neg_binomial(mean = rho * projected, r = k)
