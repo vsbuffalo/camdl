@@ -508,7 +508,7 @@ mod tests {
         let om = cm.model.observations[0].clone();
         let projection = StreamProjection::from_ir(&om.projection, &cm, &om.name).unwrap();
         let spec = StreamSpec {
-            times: StreamTimes::undeclared_for(&projection, obs_times.clone()),
+            times: StreamTimes::contiguous_for(&projection, cm.model.simulation.t_start, obs_times.clone()).unwrap(),
             projection,
             ir_model: om,
             observations: dense_cells(data),
@@ -605,7 +605,7 @@ mod tests {
         let om = cm.model.observations[0].clone();
         let projection = StreamProjection::from_ir(&om.projection, &cm, &om.name).unwrap();
         let spec = StreamSpec {
-            times: StreamTimes::undeclared_for(&projection, obs_times.clone()),
+            times: StreamTimes::contiguous_for(&projection, cm.model.simulation.t_start, obs_times.clone()).unwrap(),
             projection, ir_model: om, observations: dense_cells(data), aux: vec![],
         };
         let obs_model =

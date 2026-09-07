@@ -4,8 +4,8 @@
 //! scored column's name (gh#830), the time under the declared `: time` column,
 //! a windowed stream under its `window_start`/`window_stop` names, and a row
 //! whose period falls outside the run is not written. Under `closing_at` with
-//! a schedule starting at `t_start` that drops the leading row, which was the
-//! zero-width bin the old convention wrote as a count of zero.
+//! a schedule starting at `t_start` that drops the leading row: its period
+//! `[t_start − Δ, t_start)` was never simulated.
 //!
 //! Proposal Testing item 7 is the round trip: a windowed model's emitted file
 //! re-loads under the same model with exactly the periods that were written,
@@ -43,9 +43,10 @@ fn write_model(dir: &Path, name: &str, src: &str) -> PathBuf {
     p
 }
 
-/// The fixture with its stream's `covers` replaced (`None` = the undeclared
-/// reading, which the runtime still accepts). The committed fixture declares
-/// `closing_at(time, 1 'days)`; edit it as JSON rather than by text injection.
+/// The fixture with its stream's `covers` replaced (`None` removes it — an IR
+/// the compiler cannot produce, which the runtime refuses). The committed
+/// fixture declares `closing_at(time, 1 'days)`; edit it as JSON rather than by
+/// text injection.
 fn with_covers(src: &str, covers: Option<serde_json::Value>) -> String {
     let mut v: serde_json::Value = serde_json::from_str(src).unwrap();
     let obs = v["model"]["observations"][0].as_object_mut().expect("one stream");
@@ -89,29 +90,44 @@ fn first_column(line: &str) -> &str {
     line.split('\t').next().unwrap()
 }
 
+/// The fixture's schedule is `regular { start 0, step 1 }` over a run
+/// `[0, 120]` under `closing_at(time, 1 'days)`: the emit time 0 would cover
+/// `[−1, 0)`, which the run never simulated, and is not written; every other
+/// emit time covers a period inside the run and is.
 #[test]
-fn closing_at_drops_the_zero_width_leading_row_and_nothing_else() {
+fn closing_at_writes_every_row_the_run_covers_and_no_leading_zero_width_row() {
     let camdl = camdl_bin();
     let tmp = tempdir("closing");
-    let src = seed_timing_ir();
-    let undeclared = write_model(&tmp, "undeclared.ir.json", &with_covers(&src, None));
-    // The committed fixture's own declaration: closing_at(time, 1 'days).
-    let closing = write_model(&tmp, "closing.ir.json", &src);
+    let closing = write_model(&tmp, "closing.ir.json", &seed_timing_ir());
 
-    let u = emit(&camdl, &undeclared, &tmp.join("u"));
     let c = emit(&camdl, &closing, &tmp.join("c"));
-    let u_lines: Vec<&str> = u.lines().collect();
     let c_lines: Vec<&str> = c.lines().collect();
+    assert_eq!(c_lines[0], "time\tcases", "the time under the declared column's name");
+    let labels: Vec<&str> = c_lines[1..].iter().map(|l| first_column(l)).collect();
+    let expected: Vec<String> = (1..=120).map(|t| t.to_string()).collect();
+    assert_eq!(labels, expected, "labels 1..=120: the row at t_start has no simulated period");
+}
 
-    assert_eq!(u_lines[0], "time\tcases", "the undeclared header is as it always was");
-    assert_eq!(c_lines[0], "time\tcases");
-    assert_eq!(u_lines[1], "0\t0",
-        "the undeclared reading writes the zero-width bin at t_start as a count of zero");
-    // Same rows, minus that one: the labels agree exactly.
-    let u_labels: Vec<&str> = u_lines[2..].iter().map(|l| first_column(l)).collect();
-    let c_labels: Vec<&str> = c_lines[1..].iter().map(|l| first_column(l)).collect();
-    assert_eq!(c_labels, u_labels, "closing_at emits every row the run covers, and only those");
-    assert_ne!(c_lines[1].split('\t').next().unwrap(), "0", "no row for a period the run never simulated");
+/// An accumulating stream whose IR carries no `covers` is an IR the compiler
+/// cannot have produced (E350); the emitter has no reading to write under and
+/// refuses, naming the stream and the rule.
+#[test]
+fn an_incidence_stream_with_no_declaration_is_refused_by_the_emitter() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("undeclared");
+    let undeclared = write_model(&tmp, "undeclared.ir.json", &with_covers(&seed_timing_ir(), None));
+    let out_dir = tmp.join("u");
+    let mut args = vec![
+        "simulate", undeclared.to_str().unwrap(), "--backend", "chain_binomial", "--dt", "1",
+        "--seed", "3", "--obs-only-dir", out_dir.to_str().unwrap(),
+    ];
+    args.extend_from_slice(PARAMS);
+    let out = run(&camdl, &args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "must refuse; stderr:\n{stderr}");
+    assert!(stderr.contains("'cases'") && stderr.contains("E350"),
+        "names the stream and the rule:\n{stderr}");
+    assert!(!out_dir.join("cases.tsv").exists(), "nothing is written under an unstated reading");
 }
 
 #[test]

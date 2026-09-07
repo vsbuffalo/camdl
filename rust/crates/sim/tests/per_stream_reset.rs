@@ -149,12 +149,14 @@ fn multi_cadence_obs(
     let inflow = compiled.model.transitions.iter()
         .position(|t| t.name == "inflow").unwrap();
     let afp = StreamSpec::dense(
+        0.0,
         StreamProjection::FlowSum(vec![inflow]),
         compiled.model.observations[0].clone(),
         dense_cells(vec![0.0; afp_times.len()]), // values irrelevant: we read predictions / bins
         afp_times,
     );
     let es = StreamSpec::dense(
+        0.0,
         StreamProjection::FlowSum(vec![inflow]),
         compiled.model.observations[1].clone(),
         dense_cells(vec![0.0; es_times.len()]),
@@ -327,12 +329,14 @@ fn bootstrap_filter_runs_multi_cadence() {
     let inflow = compiled.model.transitions.iter()
         .position(|t| t.name == "inflow").unwrap();
     let afp = StreamSpec::dense(
+        0.0,
         StreamProjection::FlowSum(vec![inflow]),
         compiled.model.observations[0].clone(),
         dense_cells(vec![300.0; afp_times.len()]),
         afp_times,
     );
     let es = StreamSpec::dense(
+        0.0,
         StreamProjection::FlowSum(vec![inflow]),
         compiled.model.observations[1].clone(),
         dense_cells(vec![140.0; es_times.len()]),

@@ -47,11 +47,11 @@ pub struct ObsStream {
     /// reads by `Expr::ObsColumnRef`. Empty inner vec when the likelihood
     /// references no aux column or the cell is a hole. (§3, §6.1.)
     pub aux: Vec<Vec<(String, f64)>>,
-    /// What this stream's rows cover (gh#833) — declared periods when the
-    /// model states them, otherwise the transitional undeclared form whose
-    /// window is the row spacing. Built once by the loader, from the same file
-    /// read that produced `data`, so a row's window and its scoring boundary
-    /// cannot come from two different places.
+    /// What this stream's rows cover (gh#833) — the periods the model's
+    /// declaration assigns them, or the instants a state read is taken at.
+    /// Built once by the loader, from the same file read that produced `data`,
+    /// so a row's window and its scoring boundary cannot come from two
+    /// different places.
     pub times: sim::inference::StreamTimes,
 }
 
@@ -79,9 +79,6 @@ impl ObsStream {
                     idx.iter().map(|&i| ps[i]).collect()),
             sim::inference::StreamTimes::Instants(ts) =>
                 sim::inference::StreamTimes::Instants(
-                    idx.iter().map(|&i| ts[i]).collect()),
-            sim::inference::StreamTimes::InferredIntervals(ts) =>
-                sim::inference::StreamTimes::InferredIntervals(
                     idx.iter().map(|&i| ts[i]).collect()),
         };
     }
@@ -1481,28 +1478,10 @@ pub(crate) fn resolve_and_load_obs_streams(
                 compiled.model.simulation.t_start,
                 &obs_times,
             )?;
-            // The degenerate-origin-window check fires only when the FIRST
-            // observation sits exactly on the origin AND carries a positive
-            // incidence value. A leading HOLE scores no value at the origin, so
-            // pass a non-positive sentinel (the check is a no-op then). We must
-            // NOT substitute a later present value nor a fictitious 0 that
-            // scores. Its premise — a zero-width first bin — holds only for an
-            // UNDECLARED stream (transitional, gh#833); a declared row at the
-            // origin has a real period that opens before the run, which
-            // `stream_times_for` refuses in those terms.
-            if obs_model.covers.is_none() {
-                let first_value = match cells.first() {
-                    Some(Some(sim::inference::ObsCell::Scalar(v))) => *v,
-                    _ => 0.0,
-                };
-                crate::util::check_incidence_origin_window(
-                    &stream_name,
-                    &obs_model.projection,
-                    compiled.model.simulation.t_start,
-                    &obs_times,
-                    first_value,
-                )?;
-            }
+            // A row AT the origin is judged by `stream_times_for` from what it
+            // covers: an incidence row there has a period opening before the
+            // run and is refused in those terms; an instant row is a reading
+            // of the initial state.
         }
 
         let times = load_stream_times(
@@ -5945,6 +5924,7 @@ dt = 1.0
                 Some(ObsCell::Scalar(weekly)), // t=28
             ];
             let spec = StreamSpec::dense(
+                compiled.model.simulation.t_start,
                 StreamProjection::FlowSum(vec![inflow_idx]),
                 compiled.model.observations[0].clone(),
                 cells,

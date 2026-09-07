@@ -1505,63 +1505,6 @@ pub fn format_unbound_streams_warning(
     ))
 }
 
-/// gh#174 — guard against a positive incidence observation at the model
-/// origin.
-///
-/// An incidence (`cumulative_flow` / `cumulative_flow_sum`) projection scores
-/// the flow accumulated over the window `(previous obs, this obs]`. The first
-/// window starts at `t_start` (the model origin's internal time), so an
-/// observation placed *at* `t_start` has a zero-width accumulation window: the
-/// flow accumulator is identically 0. A positive count against a 0 mean scores
-/// `-Inf` under every likelihood — and that `-Inf` is indistinguishable from a
-/// genuinely degenerate particle filter, so a non-expert discards valid
-/// parameters (see gh#174).
-///
-/// Incidence at `t = origin` has no preceding accumulation interval, so this is
-/// not a recoverable numeric edge — it is a data-alignment mistake. We reject
-/// it before the filter runs, naming the convention and the three remedies.
-/// Returns `Ok(())` for non-incidence projections, for a first obs strictly
-/// after the origin, or for a zero/negative count at the origin (a zero count
-/// is consistent with the zero-width window, so it is allowed).
-pub fn check_incidence_origin_window(
-    stream_name: &str,
-    projection: &ir::observation::Projection,
-    t_start: f64,
-    obs_times: &[f64],
-    first_value: f64,
-) -> Result<(), String> {
-    use ir::observation::Projection;
-    let is_incidence = matches!(
-        projection,
-        Projection::CumulativeFlow(_) | Projection::CumulativeFlowSum(_)
-    );
-    if !is_incidence {
-        return Ok(());
-    }
-    let Some(&first_time) = obs_times.first() else {
-        return Ok(());
-    };
-    // The first window [t_start, first_time] is degenerate (zero-width) exactly
-    // when the first observation sits on the origin. Tolerance matches the
-    // obs-time comparison used elsewhere in the loaders.
-    if (first_time - t_start).abs() > 1e-9 {
-        return Ok(());
-    }
-    if first_value <= 0.0 {
-        return Ok(());
-    }
-    Err(format!(
-        "observation stream '{stream_name}': first incidence observation is \
-         positive ({first_value}) at model time 0 (the model origin). \
-         Incidence at t=0 has no preceding accumulation interval, so this row \
-         has zero expected count and a positive count gives an impossible \
-         (-Inf) likelihood. Fix the data alignment: drop the origin row, shift \
-         the observation times to interval ends (each row dated at the END of \
-         its accumulation window), or move the model origin earlier so the \
-         first observation has a full preceding interval."
-    ))
-}
-
 /// Reject any observation strictly before the model origin `t_start` (F4).
 ///
 /// An observation dated before the model begins cannot be scored: the
@@ -1574,9 +1517,10 @@ pub fn check_incidence_origin_window(
 ///
 /// This is the load-bearing boundary check the time-helper docs defer to:
 /// caught once at config load, with a located message, before any stage runs.
-/// Returns `Ok(())` when every observation is at or after the origin (obs
-/// exactly AT the origin is allowed here; the degenerate first-incidence
-/// window is a separate concern handled by `check_incidence_origin_window`).
+/// Returns `Ok(())` when every observation is at or after the origin. An
+/// observation exactly AT the origin is allowed here; whether an incidence row
+/// there can be scored is judged from the period it covers, by
+/// `pfilter::stream_times_for`.
 ///
 /// "Strictly before" is judged with the same 1e-9 tolerance the loaders use
 /// for obs-time comparisons, so a time a float-ULP below the origin is treated
@@ -1667,61 +1611,6 @@ mod modal_value_tests {
 }
 
 #[cfg(test)]
-mod incidence_origin_tests {
-    use super::check_incidence_origin_window;
-    use ir::observation::Projection;
-
-    fn inc() -> Projection { Projection::CumulativeFlow("infection".into()) }
-    fn inc_sum() -> Projection { Projection::CumulativeFlowSum(vec!["a".into(), "b".into()]) }
-    fn prev() -> Projection { Projection::CurrentPop("I".into()) }
-
-    #[test]
-    fn positive_incidence_at_origin_errors_and_names_convention() {
-        let e = check_incidence_origin_window("cases", &inc(), 0.0, &[0.0, 7.0, 14.0], 11.0)
-            .unwrap_err();
-        assert!(e.contains("incidence") && e.contains("time 0"),
-            "error must name the t=0 incidence convention: {e}");
-        // The three documented remedies are all surfaced.
-        assert!(e.contains("drop") && e.contains("interval ends") && e.contains("origin earlier"),
-            "error must list the remedies: {e}");
-        // CumulativeFlowSum is incidence too.
-        assert!(check_incidence_origin_window("cases", &inc_sum(), 0.0, &[0.0, 7.0], 1.0).is_err());
-    }
-
-    #[test]
-    fn zero_count_at_origin_is_allowed() {
-        // A zero count is consistent with the zero-width origin window.
-        assert!(check_incidence_origin_window("cases", &inc(), 0.0, &[0.0, 7.0], 0.0).is_ok());
-    }
-
-    #[test]
-    fn first_obs_after_origin_is_allowed() {
-        // The first window [t_start, 7] is non-degenerate.
-        assert!(check_incidence_origin_window("cases", &inc(), 0.0, &[7.0, 14.0], 11.0).is_ok());
-    }
-
-    #[test]
-    fn honors_nonzero_t_start() {
-        // The origin is t_start, not literally 0.0 (shift-invariance). A
-        // positive first obs AT t_start is still degenerate.
-        assert!(check_incidence_origin_window("cases", &inc(), 30.0, &[30.0, 37.0], 11.0).is_err());
-        // ...but the same obs time with a later t_start is fine.
-        assert!(check_incidence_origin_window("cases", &inc(), 23.0, &[30.0, 37.0], 11.0).is_ok());
-    }
-
-    #[test]
-    fn prevalence_projection_is_never_flagged() {
-        // Prevalence reads state at the instant; no accumulation window.
-        assert!(check_incidence_origin_window("prev", &prev(), 0.0, &[0.0, 7.0], 999.0).is_ok());
-    }
-
-    #[test]
-    fn empty_obs_times_is_ok() {
-        assert!(check_incidence_origin_window("cases", &inc(), 0.0, &[], 11.0).is_ok());
-    }
-}
-
-#[cfg(test)]
 mod obs_before_origin_tests {
     use super::check_obs_before_origin;
 
@@ -1741,9 +1630,9 @@ mod obs_before_origin_tests {
 
     #[test]
     fn obs_at_origin_is_allowed() {
-        // An observation exactly at the origin is fine — the window
-        // semantics (degenerate first incidence) are handled separately by
-        // check_incidence_origin_window, not here.
+        // An observation exactly at the origin is fine here — whether an
+        // incidence row there can be scored is judged from what it covers, in
+        // `stream_times_for`, not by this check.
         assert!(check_obs_before_origin("cases", 21.0, &[21.0, 28.0]).is_ok());
     }
 

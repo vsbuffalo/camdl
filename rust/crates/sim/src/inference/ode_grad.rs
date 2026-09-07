@@ -199,7 +199,7 @@ mod tests {
             .map(|(si, om)| {
                 let projection = StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap();
                 StreamSpec {
-                    times: StreamTimes::undeclared_for(&projection, obs_times.to_vec()),
+                    times: StreamTimes::contiguous_for(&projection, compiled.model.simulation.t_start, obs_times.to_vec()).unwrap(),
                     projection,
                     ir_model: om.clone(),
                     observations: dense_cells(per_stream[si].clone()),
@@ -787,7 +787,7 @@ mod tests {
             .iter()
             .zip([(&data_a, times_a), (&data_b, times_b)])
             .map(|(om, (data, times))| StreamSpec {
-                times: StreamTimes::undeclared_for(&StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap(), times.to_vec()),
+                times: StreamTimes::contiguous_for(&StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap(), compiled.model.simulation.t_start, times.to_vec()).unwrap(),
                 projection: StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap(),
                 ir_model: om.clone(),
                 observations: dense_cells(data.clone()),

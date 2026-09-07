@@ -13,10 +13,9 @@
 //!
 //! One consequence is visible: under `closing_at` with a schedule starting at
 //! `t_start`, the first emit time's period `[t_start − Δ, t_start)` falls
-//! outside the run and is dropped. That row was the zero-width bin the old
-//! convention wrote as a count of zero at `t_start`; nothing scored it, and no
-//! likelihood moves. An undeclared stream keeps that row, and every other byte
-//! of its output, exactly as before.
+//! outside the run and is dropped — a row nothing could score, so no likelihood
+//! moves. An accumulating stream whose IR carries no declaration has no reading
+//! to write under and is refused (the compiler never produces one, E350).
 
 use ir::observation::{ColumnRole, Covers, ObservationModel, TemporalKind};
 use sim::inference::Coverage;
@@ -102,20 +101,9 @@ pub(crate) fn plan_emission(
             .iter()
             .map(|&t| EmitRow { label: t, coverage: Coverage::Instant })
             .collect(),
-        // Undeclared (transitional): today's reading exactly — each row is the
-        // flow since the previous emit time, the first since `t_start`, which
-        // makes the first row zero-width when the schedule starts there.
-        (TemporalKind::Interval, None) => {
-            let mut prev = t_start;
-            emit_times
-                .iter()
-                .map(|&t| {
-                    let row = EmitRow { label: t, coverage: Coverage::Interval { start: prev, stop: t } };
-                    prev = t;
-                    row
-                })
-                .collect()
-        }
+        // An accumulating stream with no declaration is an IR the compiler
+        // cannot have produced (E350); there is no reading to write under.
+        (TemporalKind::Interval, None) => return Err(crate::pfilter::missing_covers_error(obs)),
         // A uniform form: the label's period, kept only when the run covers it.
         (TemporalKind::Interval, Some(covers @ (Covers::From { .. } | Covers::Until { .. }))) => {
             let mut rows = Vec::with_capacity(emit_times.len());
@@ -205,13 +193,14 @@ mod tests {
         Projection::CumulativeFlow("infection".into())
     }
 
+    /// An accumulating stream whose IR says nothing about what its rows cover
+    /// has no reading to write under: there is no default period, so the plan
+    /// refuses rather than emit rows under a convention the model never stated.
     #[test]
-    fn an_undeclared_stream_keeps_the_old_rows_including_the_zero_width_first() {
+    fn an_interval_stream_with_no_declaration_is_refused() {
         let s = stream(incidence(), None, time_cols());
-        let plan = plan_emission(&s, &[0.0, 7.0, 14.0], 0.0, 14.0, None).unwrap();
-        assert_eq!(plan.columns, TemporalColumns::Time("day".into()));
-        assert_eq!(plan.scored, "n_cases", "the value goes under the SCORED column, not the stream name");
-        assert_eq!(plan.coverages(), vec![(0.0, iv(0.0, 0.0)), (7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))]);
+        let e = plan_emission(&s, &[0.0, 7.0, 14.0], 0.0, 14.0, None).unwrap_err();
+        assert!(e.contains("cases") && e.contains("E350"), "names the stream and the rule: {e}");
     }
 
     #[test]
@@ -220,6 +209,8 @@ mod tests {
         // which the run never simulated; 7 and 14 cover [0,7) and [7,14).
         let s = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 7.0 }), time_cols());
         let plan = plan_emission(&s, &[0.0, 7.0, 14.0], 0.0, 14.0, None).unwrap();
+        assert_eq!(plan.columns, TemporalColumns::Time("day".into()));
+        assert_eq!(plan.scored, "n_cases", "the value goes under the SCORED column, not the stream name");
         assert_eq!(plan.coverages(), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))]);
     }
 

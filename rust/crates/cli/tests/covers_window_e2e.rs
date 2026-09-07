@@ -57,7 +57,7 @@ fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
 }
 
 /// The fixture with its one stream's `covers` replaced. `None` removes the
-/// declaration — the undeclared reading, which the runtime still accepts.
+/// declaration — an IR the compiler cannot produce, which the loader refuses.
 fn model_with_covers(dir: &Path, name: &str, covers: Option<serde_json::Value>) -> PathBuf {
     let mut v = seed_timing_ir();
     let obs = v["model"]["observations"][0].as_object_mut().expect("one stream");
@@ -83,7 +83,8 @@ fn closing_model(dir: &Path) -> PathBuf {
         Some(serde_json::json!({ "kind": "until", "offset": 0.0, "span": 1.0 })))
 }
 
-/// No declaration: the transitional undeclared reading.
+/// No declaration on an incidence stream: an IR that did not come from the
+/// compiler (E350 refuses it there).
 fn undeclared_model(dir: &Path) -> PathBuf {
     model_with_covers(dir, "undeclared.ir.json", None)
 }
@@ -214,14 +215,14 @@ fn a_declared_day_window_scores_one_bucket_later_and_opens_at_its_own_start() {
     );
 }
 
-/// The fact the in-repo migration rests on: `closing_at(time, 1 'days)` on a
-/// file labelled 1,2,3,… with `t_start = 0` scores bit-identically to the
-/// undeclared reading of the same file — every bin is `(t−1, t]` either way,
-/// the leading one included because the first row sits one period after
-/// `t_start`. A closing-labelled file (anything `simulate --obs` wrote,
-/// anything from pomp) declares what it always meant and nothing moves.
+/// `closing_at(time, 1 'days)` and `day(time)` on one file labelled 1,2,3,…
+/// declare different periods — `[t−1, t)` against `[t, t+1)` — and score
+/// differently. The migration recorded in the proposal rests on the closing
+/// form being what every in-repo file meant; that it reproduced the numbers
+/// those files were fitted under was checked against the pinned inference
+/// baselines and the pomp fixtures when the migration landed.
 #[test]
-fn closing_at_reproduces_the_undeclared_reading_exactly() {
+fn closing_at_and_day_on_one_file_declare_different_periods() {
     let camdl = camdl_bin();
     let tmp = tempdir("closing");
     let data = tmp.join("counts.tsv");
@@ -229,18 +230,35 @@ fn closing_at_reproduces_the_undeclared_reading_exactly() {
     write_counts(&data, -2.0);
 
     let closing = pfilter_loglik(&camdl, &closing_model(&tmp), &data);
-    let undeclared = pfilter_loglik(&camdl, &undeclared_model(&tmp), &data);
-    assert_eq!(
-        closing, undeclared,
-        "closing_at(time, 1 'days) must be the undeclared reading, bit for bit \
-         (closing={closing}, undeclared={undeclared})",
-    );
-
     let day = pfilter_loglik(&camdl, &day_model(&tmp), &data);
+    assert!(closing.is_finite() && day.is_finite(), "closing={closing}, day={day}");
     assert_ne!(
         closing, day,
         "day(time) on the same file must NOT agree — it scores one bucket later",
     );
+}
+
+/// An incidence stream whose IR says nothing about what its rows cover has no
+/// reading: the compiler never produces such an IR (E350), and the loader
+/// refuses one rather than score the file under a convention it never stated.
+#[test]
+fn an_incidence_stream_with_no_declaration_is_refused_by_the_loader() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("undeclared");
+    let data = tmp.join("counts.tsv");
+    write_counts(&data, -2.0);
+    let model = undeclared_model(&tmp);
+    let mut args = vec![
+        "pfilter", model.to_str().unwrap(),
+        "--particles", "50", "--dt", "1", "--seed", "5",
+        "--data", data.to_str().unwrap(),
+    ];
+    args.extend_from_slice(BASE_PARAMS);
+    let out = run(&camdl, &args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "must refuse; stderr:\n{stderr}");
+    assert!(stderr.contains("'cases'") && stderr.contains("E350"),
+        "names the stream and the rule:\n{stderr}");
 }
 
 /// Proposal Testing item 4 through the real loader and filter. A stream stating

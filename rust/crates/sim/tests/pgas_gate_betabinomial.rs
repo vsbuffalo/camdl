@@ -195,7 +195,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec {
-            times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![0]), obs.iter().map(|o| o.time).collect()),
+            times: StreamTimes::contiguous_for(&StreamProjection::FlowSum(vec![0]), 0.0, obs.iter().map(|o| o.time).collect()).unwrap(),
             projection: StreamProjection::FlowSum(vec![0]),
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
@@ -303,7 +303,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec {
-            times: StreamTimes::undeclared_for(&stream_proj, obs.iter().map(|o| o.time).collect()),
+            times: StreamTimes::contiguous_for(&stream_proj, 0.0, obs.iter().map(|o| o.time).collect()).unwrap(),
             projection: stream_proj,
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),

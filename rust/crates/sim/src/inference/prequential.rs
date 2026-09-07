@@ -763,8 +763,8 @@ mod tests {
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool { (a - b).abs() < tol }
 
     /// Every stream an interval closing at its step time, opening at the
-    /// previous one (the first at 0) — the shape of an undeclared incidence
-    /// stream. Enough for the tests that are not about coverage.
+    /// previous one (the first at 0) — the `closing_at` shape. Enough for the
+    /// tests that are not about coverage.
     fn interval_coverage(obs_times: &[f64], n_streams: usize) -> Vec<Vec<Option<Coverage>>> {
         obs_times.iter().enumerate().map(|(k, &t)| {
             let start = if k == 0 { 0.0 } else { obs_times[k - 1] };

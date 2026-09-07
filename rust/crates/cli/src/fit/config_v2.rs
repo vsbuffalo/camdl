@@ -2112,8 +2112,8 @@ fn detect_relocated_config_backend(contents: &str) -> Result<(), String> {
 }
 
 /// The error a `condition_from` key in a fit.toml raises. The key opened an
-/// undeclared incidence stream's first bin somewhere other than `t_start`;
-/// every incidence stream now declares what its rows cover, and a declared
+/// incidence stream's first bin somewhere other than `t_start` when nothing
+/// else could; every incidence stream now declares what its rows cover, and a
 /// first period opens where it says, so the key has no job left. Kept as a
 /// hard error rather than an unknown-field rejection so the user is told what
 /// replaced it (proposal 2026-09-05-observation-time-as-a-sum-type, ruling 4).

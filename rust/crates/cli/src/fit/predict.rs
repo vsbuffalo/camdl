@@ -2650,7 +2650,7 @@ fn leaf_row_coverages(
     use sim::inference::Coverage;
     let mut rows: Vec<(f64, Coverage)> = match observed {
         Some(st) => observed_times.iter().enumerate()
-            .map(|(k, &t)| (t, st.coverage(k, t_start)))
+            .map(|(k, &t)| (t, st.coverage(k)))
             .collect(),
         None => Vec::new(),
     };
@@ -2658,6 +2658,12 @@ fn leaf_row_coverages(
     for &t in forecast_times {
         let coverage = match obs_ir.projection.temporal_kind() {
             TemporalKind::Instant => Coverage::Instant,
+            // A uniform form assigns the label its period. Per-row windows
+            // have no rule to extrapolate, so the forecast continues
+            // contiguously. (An interval stream with no declaration never
+            // binds — the loader refuses it — so `covers: None` is not
+            // reached here; it takes the contiguous reading, which is the only
+            // one with nothing to consult.)
             TemporalKind::Interval => match obs_ir.covers.as_ref().and_then(|c| c.period_of(t)) {
                 Some((start, stop)) => Coverage::Interval { start, stop },
                 None => Coverage::Interval { start: prev_stop, stop: t },

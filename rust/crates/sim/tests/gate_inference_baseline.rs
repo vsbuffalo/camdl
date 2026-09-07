@@ -168,13 +168,9 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
     let inf = compiled.model.transitions.iter().position(|t| t.name == "infection").unwrap();
     // The rows are closing-labelled, as every file `simulate --obs` writes: row
     // k covers `[t[k−1], t[k])`, the first from the run's start (gh#833). That
-    // is exactly the undeclared reading these baselines were captured under,
-    // so the pinned values hold.
-    let periods: Vec<Period> = obs_times.iter().scan(0.0_f64, |prev, &t| {
-        let p = Period::new(*prev, t).expect("increasing observation times");
-        *prev = t;
-        Some(p)
-    }).collect();
+    // is exactly the reading these baselines were captured under, so the
+    // pinned values hold.
+    let periods = Period::contiguous(0.0, &obs_times).expect("increasing observation times");
     let spec = StreamSpec {
         ir_model: compiled.model.observations[0].clone(),
         times: StreamTimes::Intervals(periods),

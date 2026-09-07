@@ -811,7 +811,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         // gh#833: what each scored value was accumulated over, so `compare`
         // can refuse to difference two traces that scored different windows
         // at the same times.
-        let per_stream_cov = obs_model.per_stream_coverage(smc_config.t_start);
+        let per_stream_cov = obs_model.per_stream_coverage();
         let mut trace = sim::inference::prequential::build_trace(
             recorded, &y_obs, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
             obs_model.first_observation_opens_after_run_start(smc_config.t_start),
@@ -1045,17 +1045,32 @@ fn read_column_raw<'a>(
     parse_column_cells(content, path, column, column)
 }
 
+/// The error for an interval stream whose IR carries no `covers`: the compiler
+/// refuses to produce one (E350), so the IR was hand-edited or predates the
+/// rule. There is no reading to fall back on — the same label means different
+/// periods in different files — so the loader and the emitters both refuse.
+pub(crate) fn missing_covers_error(obs: &ir::observation::ObservationModel) -> String {
+    format!(
+        "observation stream '{}' accumulates flow but its IR does not say what each \
+         row covers: the compiler requires `covers = ...` or `window_start`/`window_stop` \
+         columns on an incidence stream (E350), so this IR did not come from the current \
+         compiler. Recompile the model.",
+        obs.name
+    )
+}
+
 /// Build the [`StreamTimes`] for one stream: what its rows cover, per its
 /// `covers` declaration (gh#833).
 ///
 /// `label_times` are the already-converted values of the stream's own anchor
 /// column — the `: time` column, or `window_stop` for a windowed stream.
 ///
-/// An UNDECLARED stream keeps today's reading exactly: its schedule is the row
-/// times and the window is whatever the spacing happens to be. A declared one
-/// gets real periods, and its scoring boundary moves accordingly — for a daily
-/// file labelled by the day the count describes, one bucket later, which is the
-/// correction this exists to make.
+/// An instant stream reads at its labels. An interval stream gets the periods
+/// its declaration assigns, and its scoring boundary follows them — for a
+/// daily file labelled by the day the count describes, one bucket after the
+/// label, which is the correction this exists to make. An interval stream
+/// with no declaration is an IR the compiler cannot have produced (E350), and
+/// is refused rather than read under a convention the file never stated.
 pub fn stream_times_for(
     obs: &ir::observation::ObservationModel,
     projection: &sim::inference::multi_stream_obs::StreamProjection,
@@ -1063,11 +1078,14 @@ pub fn stream_times_for(
     path: &str,
     opts: &TimeOpts,
 ) -> Result<sim::inference::StreamTimes, String> {
-    use ir::observation::Covers;
+    use ir::observation::{Covers, TemporalKind};
     use sim::inference::{Period, StreamTimes};
 
     let Some(covers) = &obs.covers else {
-        return Ok(StreamTimes::undeclared_for(projection, label_times.to_vec()));
+        return match projection.temporal_kind() {
+            TemporalKind::Instant => Ok(StreamTimes::Instants(label_times.to_vec())),
+            TemporalKind::Interval => Err(missing_covers_error(obs)),
+        };
     };
 
     let periods = match covers {

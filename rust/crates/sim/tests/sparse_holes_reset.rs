@@ -125,7 +125,7 @@ fn obs_model(compiled: Arc<CompiledModel>, cells: Vec<Option<ObsCell>>, obs_time
     let inflow = compiled.model.transitions.iter()
         .position(|t| t.name == "inflow").unwrap();
     let spec = StreamSpec {
-        times: StreamTimes::undeclared_for(&StreamProjection::FlowSum(vec![inflow]), obs_times),
+        times: StreamTimes::contiguous_for(&StreamProjection::FlowSum(vec![inflow]), 0.0, obs_times).unwrap(),
         projection: StreamProjection::FlowSum(vec![inflow]),
         ir_model: compiled.model.observations[0].clone(),
         observations: cells,

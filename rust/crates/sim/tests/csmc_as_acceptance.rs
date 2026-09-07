@@ -154,6 +154,7 @@ fn tally(interval: bool, sweeps: u64) -> AsTally {
     };
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec::dense(
+            0.0,
             projection,
             compiled.model.observations[0].clone(),
             dense_cells(obs.iter().map(|o| o.value).collect()),

@@ -60,7 +60,7 @@ fn build_obs_model(
     let specs: Vec<StreamSpec> = model.observations.iter().enumerate().map(|(si, om)| {
         let projection = StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap();
         StreamSpec {
-            times: StreamTimes::undeclared_for(&projection, obs_times.to_vec()),
+            times: StreamTimes::contiguous_for(&projection, 0.0, obs_times.to_vec()).unwrap(),
             projection,
             ir_model: om.clone(),
             observations: dense_cells(per_stream_data[si].clone()),

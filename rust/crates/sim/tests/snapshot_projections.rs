@@ -110,7 +110,7 @@ fn build_obs_model(compiled: &Arc<CompiledModel>, projection: StreamProjection, 
     let obs_ir = compiled.model.observations[0].clone();
     MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec {
-            times: StreamTimes::undeclared_for(&projection, vec![5.0]),
+            times: StreamTimes::contiguous_for(&projection, 0.0, vec![5.0]).unwrap(),
             projection,
             ir_model: obs_ir,
             observations: dense_cells(vec![observed]),
@@ -157,7 +157,7 @@ fn current_pop_sum_from_ir_resolves_stratified_compartments() {
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec {
-            times: StreamTimes::undeclared_for(&projection, vec![5.0]),
+            times: StreamTimes::contiguous_for(&projection, 0.0, vec![5.0]).unwrap(),
             projection,
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![20.0]),
@@ -417,7 +417,7 @@ fn snapshot_reads_post_intervention_state() {
     ).unwrap();
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec {
-            times: StreamTimes::undeclared_for(&projection, vec![5.0]),
+            times: StreamTimes::contiguous_for(&projection, 0.0, vec![5.0]).unwrap(),
             projection,
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(vec![500.0]),

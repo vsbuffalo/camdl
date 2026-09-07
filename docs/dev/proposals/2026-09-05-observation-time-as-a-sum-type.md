@@ -13,9 +13,12 @@
   step 2 has landed under them: `closing_at`, the required declaration (E350),
   the migration of every in-repo stream with no fitted number moving, and the
   removal of `condition_from`/W329; step 4's observation emitters follow the
-  declaration and `fit predict` projects over the declared periods. Outstanding:
-  the trajectory's `t_start`/`t_stop` columns, and the deletion of the
-  transitional `InferredIntervals` runtime variant.
+  declaration and `fit predict` projects over the declared periods. The
+  transitional `InferredIntervals` runtime variant is deleted: an interval
+  stream's times are always explicit periods, an IR that carries no declaration
+  is refused by the loader and the emitters, and `survey` scores over the
+  declared periods like every other path. Outstanding: the trajectory's
+  `t_start`/`t_stop` columns.
 - **Issue:** gh#833
 - **Supersedes:** `2026-09-04-explicit-observation-windows.md`
 - **Area:** IR (`ObservationModel`, observation rows), runtime
@@ -479,13 +482,15 @@ If other re-keying changes are pending, land them in one bump.
 2. A uniform daily stream declaring `covers = day(time)` scores one bucket later
    than the same stream undeclared — the correction this proposal exists to make
    for a file labelled by the day it describes, asserted rather than assumed,
-   with the test recording the shift. Its twin: the same stream declaring
-   `closing_at(time, 1 'days)` scores identically to the undeclared reading —
-   every interior bin is the same `(t[k−1], t[k]]`, and the leading bin too
-   whenever the first row sits one period after `t_start`, which is the shape of
-   every fitted file in this repository. (When it does not, the two differ by
-   exactly the warm-up the undeclared reading swallowed into its first bin,
-   which is the defect W329 used to warn about.)
+   with the test recording the shift. Its twin, run while the undeclared reading
+   still existed: the same stream declaring `closing_at(time, 1 'days)` scored
+   identically to it — every interior bin is the same `(t[k−1], t[k]]`, and the
+   leading bin too whenever the first row sits one period after `t_start`, which
+   is the shape of every fitted file in this repository. (When it does not, the
+   two differ by exactly the warm-up the undeclared reading swallowed into its
+   first bin, which is the defect W329 used to warn about.) With the undeclared
+   reading deleted the twin's evidence lives in the pinned inference baselines
+   and the pomp fixtures, which reproduce under `closing_at`.
 3. A row with `window_start`/`window_stop` spanning two days scores its count
    against two days of flow. Oracle: a hand-computed likelihood at fixed
    parameters.

@@ -397,10 +397,10 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
                     }),
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
-            times: StreamTimes::undeclared_for(
-                &StreamProjection::FlowSum(vec![0]),
+            times: StreamTimes::contiguous_for(
+                &StreamProjection::FlowSum(vec![0]), 0.0,
                 obs.iter().map(|o| o.time).collect(),
-            ),
+            ).unwrap(),
             aux: vec![],
         }]).unwrap().0,
         compiled.clone(),
