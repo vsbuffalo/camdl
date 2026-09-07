@@ -133,6 +133,7 @@ fn run_loglik(record_prequential: bool) -> f64 {
     let inflow = compiled.model.transitions.iter()
         .position(|t| t.name == "inflow").unwrap();
     let cases = StreamSpec::dense(
+        0.0,
         StreamProjection::FlowSum(vec![inflow]),
         compiled.model.observations[0].clone(),
         dense_cells(vec![70.0; times.len()]),
@@ -180,6 +181,7 @@ fn record_prequential_does_not_perturb_loglik() {
     let inflow = compiled.model.transitions.iter()
         .position(|t| t.name == "inflow").unwrap();
     let cases = StreamSpec::dense(
+        0.0,
         StreamProjection::FlowSum(vec![inflow]),
         compiled.model.observations[0].clone(),
         dense_cells(vec![70.0; times.len()]),

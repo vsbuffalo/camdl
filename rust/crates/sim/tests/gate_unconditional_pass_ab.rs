@@ -178,12 +178,14 @@ fn fixture() -> Fixture {
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![
             StreamSpec::dense(
+                0.0,
                 StreamProjection::FlowSum(vec![infection]),
                 compiled.model.observations[0].clone(),
                 dense_cells(incidence_values),
                 incidence_times.clone(),
             ),
             StreamSpec::dense(
+                0.0,
                 StreamProjection::IntCompSum(vec![I_IDX]),
                 compiled.model.observations[1].clone(),
                 dense_cells(prevalence_values),

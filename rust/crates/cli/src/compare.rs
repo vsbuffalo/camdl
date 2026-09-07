@@ -554,8 +554,8 @@ fn check_shared_observation_axis(rows: &[Row]) -> Result<(), String> {
                      would compare unlike times.\n       \
                      Re-score both models on the same observation set \
                      (check for a hole in one series, a different t0, or a \
-                     different `covers` declaration — a declared period is scored \
-                     at its stop, one bucket after the undeclared reading).",
+                     different `covers` declaration — a period is scored at its \
+                     stop, so `day(t)` scores one bucket after `closing_at`).",
                     first.name, r.name, k + 1, a.t, first.name, b.t, r.name,
                 ));
             }

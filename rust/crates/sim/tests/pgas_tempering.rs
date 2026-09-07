@@ -146,10 +146,10 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
                 }),
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
-            times: sim::inference::multi_stream_obs::StreamTimes::undeclared_for(
-                &sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
+            times: sim::inference::multi_stream_obs::StreamTimes::contiguous_for(
+                &sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), 0.0,
                 obs.iter().map(|o| o.time).collect(),
-            ),
+            ).unwrap(),
             aux: vec![],
         }]).unwrap().0,
         compiled.clone(),

@@ -553,17 +553,17 @@ struct BoundStream {
     /// `at_union.len() == BoundObs.times.len()`.
     at_union: Vec<Option<usize>>,
     /// Where this stream's accumulator RESETS, per union index — a schedule
-    /// independent of where it SCORES (gh#833). For a declared interval stream
-    /// it is the set of period starts, which includes a leading boundary no
-    /// observation closes; for an undeclared one it is its score positions,
-    /// exactly today's reset-after-scoring; for an instant stream it is empty,
-    /// there being no accumulator. INVARIANT (`bind`):
+    /// independent of where it SCORES (gh#833). For an interval stream it is
+    /// the set of period starts strictly inside the run, which includes a
+    /// leading boundary no observation closes whenever the first period opens
+    /// after the run's start; for an instant stream it is empty, there being no
+    /// accumulator. INVARIANT (`bind`):
     /// `reset_at_union.len() == BoundObs.times.len()`.
     reset_at_union: Vec<bool>,
-    /// What this stream's observations are — instants, declared periods, or a
-    /// still-undeclared interval stream. Carried past validation so a declared
-    /// window survives into the model rather than being checked and dropped:
-    /// the output columns and the `t`-in-likelihood refusal read it (gh#833).
+    /// What this stream's observations are — instants or periods. Carried past
+    /// validation so a window survives into the model rather than being
+    /// checked and dropped: the output columns and the `t`-in-likelihood
+    /// refusal read it (gh#833).
     times: StreamTimes,
     /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
     /// person-time offset), indexed by THIS stream's own observation index,
@@ -610,20 +610,19 @@ impl BoundObs {
     /// `Ok((bound, report))`. Each stream carries two maps over that axis:
     /// `at_union`, its own local cell index where it SCORES (`None` where it
     /// does not), and `reset_at_union`, where its accumulator RESETS. The two
-    /// coincide for an undeclared stream; for a declared one the first
-    /// period's start is a boundary where nothing scores and one bin resets
-    /// (gh#833). A homogeneous, undeclared model is the special case where
-    /// every stream is scheduled at every union time.
+    /// coincide when every period opens at the previous one's stop and the
+    /// first at the run's start; a first period opening later puts a boundary
+    /// on the axis where nothing scores and one bin resets (gh#833). A
+    /// homogeneous model is the special case where every stream is scheduled
+    /// at every union time.
     ///
-    /// `run_start` is the simulation's `t_start`. A declared period that opens
-    /// AT the run's start contributes no boundary: every accumulator is empty
-    /// there by construction, so a reset would be a no-op — one that costs a
-    /// zero-length filter step and a resampling draw, moving every Monte Carlo
-    /// estimate off the path the same file takes undeclared. Dropping it is
-    /// what makes `closing_at` bit-identical to the reading it names. A period
-    /// opening BEFORE the run is the loader's error to raise, not this
-    /// function's; one opening after it keeps its boundary, which is the
-    /// leading-edge reset the declaration exists to state.
+    /// `run_start` is the simulation's `t_start`. A period that opens AT the
+    /// run's start contributes no boundary: every accumulator is empty there by
+    /// construction, so a reset would be a no-op — one that costs a zero-length
+    /// filter step and a resampling draw, moving every Monte Carlo estimate off
+    /// its path. A period opening BEFORE the run is the loader's error to
+    /// raise, not this function's; one opening after it keeps its boundary,
+    /// which is the leading-edge reset the declaration exists to state.
     pub fn bind(
         run_start: f64,
         mut streams: Vec<StreamSpec>,
@@ -1107,12 +1106,35 @@ impl Period {
     pub fn width(&self) -> f64 {
         self.stop - self.start
     }
+
+    /// Contiguous periods closing at each of `stops`, the first opening at
+    /// `open_at`: `[open_at, s₀), [s₀, s₁), …`. This is the schedule a stream
+    /// declaring `covers = closing_at(time, Δ)` has when Δ equals the row
+    /// spacing, and the shape a fixture means when all it states is a list of
+    /// observation times. Fails on the first pair that is not strictly
+    /// increasing — including a first stop equal to `open_at`, which would be
+    /// a zero-width bin.
+    pub fn contiguous(open_at: f64, stops: &[f64]) -> Result<Vec<Period>, String> {
+        let mut prev = open_at;
+        stops
+            .iter()
+            .map(|&stop| {
+                let p = Period::new(prev, stop)?;
+                prev = stop;
+                Ok(p)
+            })
+            .collect()
+    }
 }
 
 /// When a stream's observations happen (gh#833). The variant is fixed by the
 /// stream's projection: an accumulating projection (`incidence(...)`,
 /// `FlowSum`) reads an interval, a state read (`prevalence(...)`) reads an
 /// instant. `bind` rejects a variant that disagrees with the projection.
+///
+/// There is no variant for an interval stream that has not said what its rows
+/// cover: the compiler requires the declaration (E350), the loader builds the
+/// periods from it, and a fixture states them with [`Self::contiguous_for`].
 ///
 /// The point of the type is that the **closing boundaries are derived, never
 /// stored alongside** the periods: [`Self::closes`] is the single source of
@@ -1127,27 +1149,16 @@ pub enum StreamTimes {
     /// bucket closing at `D + 1`, which is the one-bucket correction gh#833
     /// exists to make.
     Intervals(Vec<Period>),
-    /// An interval stream that has NOT declared what its rows cover, scored
-    /// under the historical convention: row `k` covers `(t[k-1], t[k]]`, so
-    /// its window is whatever the row spacing happens to be.
-    ///
-    /// TRANSITIONAL. This is the state gh#833 exists to abolish, and it is a
-    /// variant rather than an `Option` so that "undeclared" is visible at
-    /// every match site instead of hiding behind a `None`. It disappears when
-    /// the DSL requires a declaration (step 2) and every model migrates;
-    /// nothing new should construct it.
-    InferredIntervals(Vec<f64>),
 }
 
 impl StreamTimes {
     /// The stream's schedule: the boundary each observation is scored at. For
-    /// an instant reading that is the instant itself; for a declared period it
-    /// is the period's **stop** (the proposal's "the fit time source for a
-    /// windowed stream is `window_stop`"); for an undeclared interval it is
-    /// the row's own time, as today.
+    /// an instant reading that is the instant itself; for a period it is the
+    /// period's **stop** (the proposal's "the fit time source for a windowed
+    /// stream is `window_stop`").
     pub fn closes(&self) -> Vec<f64> {
         match self {
-            StreamTimes::Instants(ts) | StreamTimes::InferredIntervals(ts) => ts.clone(),
+            StreamTimes::Instants(ts) => ts.clone(),
             StreamTimes::Intervals(ps) => ps.iter().map(Period::stop).collect(),
         }
     }
@@ -1155,7 +1166,7 @@ impl StreamTimes {
     /// One entry per observation, in every variant.
     pub fn len(&self) -> usize {
         match self {
-            StreamTimes::Instants(ts) | StreamTimes::InferredIntervals(ts) => ts.len(),
+            StreamTimes::Instants(ts) => ts.len(),
             StreamTimes::Intervals(ps) => ps.len(),
         }
     }
@@ -1164,11 +1175,11 @@ impl StreamTimes {
         self.len() == 0
     }
 
-    /// The declared periods, or `None` for an instant / undeclared stream.
+    /// The periods, or `None` for an instant stream.
     pub fn periods(&self) -> Option<&[Period]> {
         match self {
             StreamTimes::Intervals(ps) => Some(ps),
-            _ => None,
+            StreamTimes::Instants(_) => None,
         }
     }
 
@@ -1178,37 +1189,36 @@ impl StreamTimes {
         use ir::observation::TemporalKind;
         match self {
             StreamTimes::Instants(_) => TemporalKind::Instant,
-            StreamTimes::Intervals(_) | StreamTimes::InferredIntervals(_) => TemporalKind::Interval,
+            StreamTimes::Intervals(_) => TemporalKind::Interval,
         }
     }
 
-    /// Build the undeclared form appropriate to `projection` — an `Instants`
-    /// reading for a prevalence projection, an `InferredIntervals` for an
-    /// incidence one. The bridge for every call site that predates `covers`.
-    pub fn undeclared_for(projection: &StreamProjection, times: Vec<f64>) -> Self {
+    /// The times a stream with `projection` reads at when all a fixture states
+    /// is a list of labels: the labels themselves for a state read, and for an
+    /// accumulating projection the contiguous periods closing at each label,
+    /// the first opening at `open_at` — the run's start
+    /// ([`Period::contiguous`]). The loader never calls this; it builds the
+    /// periods from the stream's `covers` declaration.
+    pub fn contiguous_for(
+        projection: &StreamProjection,
+        open_at: f64,
+        labels: Vec<f64>,
+    ) -> Result<Self, String> {
         use ir::observation::TemporalKind;
-        match projection.temporal_kind() {
-            TemporalKind::Instant => StreamTimes::Instants(times),
-            TemporalKind::Interval => StreamTimes::InferredIntervals(times),
-        }
+        Ok(match projection.temporal_kind() {
+            TemporalKind::Instant => StreamTimes::Instants(labels),
+            TemporalKind::Interval => StreamTimes::Intervals(Period::contiguous(open_at, &labels)?),
+        })
     }
 
-    /// What row `k` was accumulated over. `run_start` is the simulation's
-    /// `t_start`: an undeclared interval stream's first row has no boundary of
-    /// its own before it, so its bin runs from there — which is exactly what
-    /// the filter accumulates (the accumulator starts empty at `t_start` and
-    /// first resets where the stream first scores). A declared period answers
-    /// from its own endpoints; an instant has no span.
-    pub fn coverage(&self, k: usize, run_start: f64) -> Coverage {
+    /// What row `k` was accumulated over: a period answers from its own
+    /// endpoints; an instant has no span.
+    pub fn coverage(&self, k: usize) -> Coverage {
         match self {
             StreamTimes::Instants(_) => Coverage::Instant,
             StreamTimes::Intervals(ps) => {
                 Coverage::Interval { start: ps[k].start(), stop: ps[k].stop() }
             }
-            StreamTimes::InferredIntervals(ts) => Coverage::Interval {
-                start: if k == 0 { run_start } else { ts[k - 1] },
-                stop: ts[k],
-            },
         }
     }
 }
@@ -1261,10 +1271,9 @@ struct Stream {
     /// [`IntervalSlot`], which is what `reset_due_acc` reads; kept here so the
     /// slot is built from the bound stream in one place.
     reset_at_union: Vec<bool>,
-    /// What this stream's observations are — instants, declared periods, or a
-    /// still-undeclared interval stream — carried from the bound stream so
-    /// [`MultiStreamObsModel::per_stream_coverage`] can say what each scored
-    /// value was accumulated over (gh#833).
+    /// What this stream's observations are — instants or periods — carried
+    /// from the bound stream so [`MultiStreamObsModel::per_stream_coverage`]
+    /// can say what each scored value was accumulated over (gh#833).
     times: StreamTimes,
     /// Per-observation cells indexed by THIS stream's own observation index
     /// (NOT the union index — resolve via `at_union`). `None` is a hole: no
@@ -1326,11 +1335,10 @@ pub struct StreamSpec {
     pub projection: StreamProjection,
     pub ir_model: ir::observation::ObservationModel,
     pub observations: Vec<Option<ObsCell>>,
-    /// When this stream's observations happen — instants, declared periods, or
-    /// (transitionally) an interval stream that has not declared what its rows
-    /// cover. The single source of truth for the stream's schedule: the
-    /// boundary each observation is scored at is [`StreamTimes::closes`], never
-    /// a separately-stored time that could disagree with a declared window.
+    /// When this stream's observations happen — instants or periods. The single
+    /// source of truth for the stream's schedule: the boundary each observation
+    /// is scored at is [`StreamTimes::closes`], never a separately-stored time
+    /// that could disagree with a declared window.
     pub times: StreamTimes,
     /// Per-observation auxiliary data (a binomial denominator `n = tested`, a
     /// person-time offset), indexed by observation index — each a name→value
@@ -1341,24 +1349,32 @@ pub struct StreamSpec {
 }
 
 impl StreamSpec {
-    /// Build a spec with NO auxiliary data, under today's undeclared
-    /// convention — the common scalar-outcome stream. The `times` variant
-    /// follows the projection's kind ([`StreamTimes::undeclared_for`]). The
+    /// The fixture constructor: a scalar-outcome stream with no auxiliary data
+    /// whose times are given as a list of labels. An accumulating projection
+    /// gets the contiguous periods closing at each label, the first opening at
+    /// `open_at` — the run's start, the same value the `bind` call is given
+    /// ([`StreamTimes::contiguous_for`]); a state read is at the labels. The
     /// aux vector is all-empty, length-matched to `observations`.
+    ///
+    /// Panics when the labels do not increase strictly from `open_at`: this
+    /// builds test fixtures, and a malformed fixture is a red test. Data files
+    /// go through the loader, which reports the row instead.
     pub fn dense(
+        open_at: f64,
         projection: StreamProjection,
         ir_model: ir::observation::ObservationModel,
         observations: Vec<Option<ObsCell>>,
-        obs_times: Vec<f64>,
+        labels: Vec<f64>,
     ) -> Self {
         let aux = vec![Vec::new(); observations.len()];
-        let times = StreamTimes::undeclared_for(&projection, obs_times);
+        let times = StreamTimes::contiguous_for(&projection, open_at, labels)
+            .unwrap_or_else(|e| panic!("StreamSpec::dense for '{}': {e}", ir_model.name));
         StreamSpec { projection, ir_model, observations, times, aux }
     }
 
-    /// Build a spec whose stream DECLARES the period each row covers — the
-    /// gh#833 form. The schedule is derived from the periods' stops, so a
-    /// row's label and the boundary it is scored at can no longer disagree.
+    /// Build a spec whose stream states the period each row covers explicitly.
+    /// The schedule is derived from the periods' stops, so a row's label and
+    /// the boundary it is scored at can no longer disagree.
     pub fn dense_covering(
         projection: StreamProjection,
         ir_model: ir::observation::ObservationModel,
@@ -1692,7 +1708,7 @@ impl MultiStreamObsModel {
         let Some(idx) = self.first_observation_idx() else { return false };
         self.streams.iter().any(|s| match s.at_union[idx] {
             Some(local) if s.observations[local].is_some() => {
-                match s.times.coverage(local, run_start) {
+                match s.times.coverage(local) {
                     Coverage::Interval { start, .. } => start > run_start,
                     Coverage::Instant => self.obs_times[idx] > run_start,
                     Coverage::Unrecorded => false,
@@ -1704,15 +1720,14 @@ impl MultiStreamObsModel {
 
     /// Sibling of [`per_stream_observed`] for what each value was accumulated
     /// over: `[obs_idx][stream]`, `None` where the stream is not scheduled at
-    /// that union index. `run_start` is the filter's `t_start` (see
-    /// [`StreamTimes::coverage`]). Feeds the per-stream prequential record
-    /// that `compare`'s window gate reads (gh#833).
-    pub fn per_stream_coverage(&self, run_start: f64) -> Vec<Vec<Option<Coverage>>> {
+    /// that union index ([`StreamTimes::coverage`]). Feeds the per-stream
+    /// prequential record that `compare`'s window gate reads (gh#833).
+    pub fn per_stream_coverage(&self) -> Vec<Vec<Option<Coverage>>> {
         (0..self.obs_times.len())
             .map(|union_idx| {
                 self.streams
                     .iter()
-                    .map(|s| s.at_union[union_idx].map(|local| s.times.coverage(local, run_start)))
+                    .map(|s| s.at_union[union_idx].map(|local| s.times.coverage(local)))
                     .collect()
             })
             .collect()
@@ -2370,7 +2385,7 @@ mod bind_tests {
     //! located message; the happy path returns `Ok((bound, report))` with a
     //! non-fatal verdict. gh#188 (strictly increasing) and the empty/
     //! heterogeneous checks all live here now.
-    use super::{BoundObs, dense_cells, Severity, StreamProjection, StreamSpec};
+    use super::{BoundObs, dense_cells, Period, Severity, StreamProjection, StreamSpec};
     use ir::observation::{
         Likelihood, ObservationModel as IrObservationModel, ObservationSchedule,
         PoissonLikelihood, Projection,
@@ -2403,6 +2418,7 @@ mod bind_tests {
 
     pub(super) fn spec(name: &str, obs_times: Vec<f64>, observations: Vec<f64>) -> StreamSpec {
         StreamSpec::dense(
+            0.0,
             StreamProjection::FlowSum(vec![0]),
             ir_obs(name),
             dense_cells(observations),
@@ -2448,12 +2464,28 @@ mod bind_tests {
             "message must name the stream and the cause: {:?}", report.findings());
     }
 
+    /// An instant stream stated as labels. A malformed time list — repeated,
+    /// out of order, non-finite — is representable only in this shape: a
+    /// period cannot be built from one (`Period::new` refuses it), so for an
+    /// interval stream the state never reaches `bind`.
+    fn instant_spec(name: &str, obs_times: Vec<f64>, observations: Vec<f64>) -> StreamSpec {
+        let mut ir = ir_obs(name);
+        ir.projection = Projection::CurrentPop("I".into());
+        StreamSpec::dense(
+            0.0,
+            StreamProjection::IntCompSum(vec![0]),
+            ir,
+            dense_cells(observations),
+            obs_times,
+        )
+    }
+
     #[test]
     fn non_increasing_obs_times_is_fatal() {
         // gh#188: [3.0, 3.0] previously passed and silently dropped one
         // likelihood (build_obs_at_substep last-wins; exact grid drops the suffix).
         let dup = expect_fatal(
-            BoundObs::bind(0.0, vec![spec(
+            BoundObs::bind(0.0, vec![instant_spec(
                 "cases", vec![1.0, 3.0, 3.0, 6.0], vec![0.0, 0.0, 0.0, 0.0],
             )]),
             "duplicate observation times must be rejected",
@@ -2464,12 +2496,16 @@ mod bind_tests {
             "message must name the stream and the rule: {:?}", dup.findings());
 
         let oo = expect_fatal(
-            BoundObs::bind(0.0, vec![spec(
+            BoundObs::bind(0.0, vec![instant_spec(
                 "cases", vec![1.0, 6.0, 3.0], vec![0.0, 0.0, 0.0],
             )]),
             "out-of-order observation times must be rejected",
         );
         assert!(oo.is_fatal());
+
+        // The same lists cannot even be stated as periods.
+        assert!(Period::contiguous(0.0, &[1.0, 3.0, 3.0, 6.0]).is_err());
+        assert!(Period::contiguous(0.0, &[1.0, 6.0, 3.0]).is_err());
     }
 
     #[test]
@@ -2479,7 +2515,7 @@ mod bind_tests {
         // which would `.expect`-panic at the sort if bind did not reject
         // non-finite times first.
         let nan = expect_fatal(
-            BoundObs::bind(0.0, vec![spec(
+            BoundObs::bind(0.0, vec![instant_spec(
                 "cases", vec![1.0, f64::NAN, 3.0], vec![0.0, 0.0, 0.0],
             )]),
             "a NaN observation time must be rejected, not panic",
@@ -2490,12 +2526,16 @@ mod bind_tests {
             "message must name the stream and the rule: {:?}", nan.findings());
 
         let inf = expect_fatal(
-            BoundObs::bind(0.0, vec![spec(
+            BoundObs::bind(0.0, vec![instant_spec(
                 "cases", vec![1.0, f64::INFINITY], vec![0.0, 0.0],
             )]),
             "an infinite observation time must be rejected",
         );
         assert!(inf.is_fatal());
+
+        // A period refuses the same endpoints at construction.
+        assert!(Period::contiguous(0.0, &[1.0, f64::NAN, 3.0]).is_err());
+        assert!(Period::contiguous(0.0, &[1.0, f64::INFINITY]).is_err());
     }
 
     #[test]
@@ -2592,36 +2632,59 @@ mod period_and_covers_tests {
     }
 
     /// What each variant says a row covered (gh#833, `compare`'s window
-    /// gate). An instant has no span; a declared period answers from its own
-    /// endpoints — including across a gap, where the union spacing would lie;
-    /// an undeclared row runs from the previous row, the first from the run's
-    /// start, which is exactly what the filter's accumulator spans.
+    /// gate). An instant has no span; a period answers from its own endpoints
+    /// — including across a gap, where the union spacing would lie.
     #[test]
     fn coverage_follows_the_variant() {
         let iv = |s: f64, e: f64| Coverage::Interval { start: s, stop: e };
 
         let inst = StreamTimes::Instants(vec![1.0, 2.0]);
-        assert_eq!(inst.coverage(0, 0.0), Coverage::Instant);
-        assert_eq!(inst.coverage(1, 0.0), Coverage::Instant);
+        assert_eq!(inst.coverage(0), Coverage::Instant);
+        assert_eq!(inst.coverage(1), Coverage::Instant);
 
         let decl = StreamTimes::Intervals(vec![
             Period::new(2.0, 3.0).unwrap(), Period::new(5.0, 6.0).unwrap(),
         ]);
-        assert_eq!(decl.coverage(0, 0.0), iv(2.0, 3.0));
-        assert_eq!(decl.coverage(1, 0.0), iv(5.0, 6.0), "not [3, 6): the gap is not covered");
-
-        let undecl = StreamTimes::InferredIntervals(vec![3.0, 4.0, 6.0]);
-        assert_eq!(undecl.coverage(0, 0.5), iv(0.5, 3.0), "the first row runs from t_start");
-        assert_eq!(undecl.coverage(1, 0.5), iv(3.0, 4.0));
-        assert_eq!(undecl.coverage(2, 0.5), iv(4.0, 6.0), "a missing row widens the undeclared bin");
+        assert_eq!(decl.coverage(0), iv(2.0, 3.0));
+        assert_eq!(decl.coverage(1), iv(5.0, 6.0), "not [3, 6): the gap is not covered");
     }
 
-    /// A declared first period opening AT the run's start puts no boundary on
-    /// the axis: the accumulator is empty there by construction, and a reset
-    /// would only cost a zero-length step and a resampling draw, taking every
-    /// Monte Carlo estimate off the path the undeclared reading follows. The
-    /// same period opening after the start keeps its boundary — that is the
-    /// leading-edge reset.
+    /// A fixture that states only its labels gets contiguous periods from the
+    /// run's start — the `closing_at` reading — and a first label at the run's
+    /// start is the zero-width bin `Period` does not admit.
+    #[test]
+    fn contiguous_periods_close_at_each_label_from_the_run_start() {
+        let ps = Period::contiguous(0.5, &[3.0, 4.0, 6.0]).unwrap();
+        assert_eq!(ps, vec![
+            Period::new(0.5, 3.0).unwrap(),
+            Period::new(3.0, 4.0).unwrap(),
+            Period::new(4.0, 6.0).unwrap(),
+        ]);
+        assert!(Period::contiguous(0.0, &[]).unwrap().is_empty());
+
+        let e = Period::contiguous(3.0, &[3.0, 4.0]).unwrap_err();
+        assert!(e.contains("[3, 3)"), "names the zero-width bin: {e}");
+        let e = Period::contiguous(0.0, &[4.0, 3.0]).unwrap_err();
+        assert!(e.contains("[4, 3)"), "names the inverted pair: {e}");
+
+        let inc = StreamProjection::FlowSum(vec![0]);
+        assert_eq!(
+            StreamTimes::contiguous_for(&inc, 0.0, vec![7.0, 14.0]).unwrap(),
+            StreamTimes::Intervals(Period::contiguous(0.0, &[7.0, 14.0]).unwrap()),
+        );
+        let prev = StreamProjection::IntCompSum(vec![0]);
+        assert_eq!(
+            StreamTimes::contiguous_for(&prev, 0.0, vec![7.0, 14.0]).unwrap(),
+            StreamTimes::Instants(vec![7.0, 14.0]),
+            "a state read is at its labels; `open_at` plays no part",
+        );
+    }
+
+    /// A first period opening AT the run's start puts no boundary on the axis:
+    /// the accumulator is empty there by construction, and a reset would only
+    /// cost a zero-length step and a resampling draw, taking every Monte Carlo
+    /// estimate off its path. The same period opening after the start keeps
+    /// its boundary — that is the leading-edge reset.
     #[test]
     fn a_period_opening_at_the_run_start_adds_no_boundary() {
         let periods = vec![Period::new(0.0, 7.0).unwrap(), Period::new(7.0, 14.0).unwrap()];
@@ -2672,6 +2735,7 @@ mod period_and_covers_tests {
             }),
         };
         StreamSpec::dense(
+            0.0,
             StreamProjection::IntCompSum(vec![0]),
             ir_model,
             dense_cells(observations),
@@ -2679,7 +2743,7 @@ mod period_and_covers_tests {
         )
     }
 
-    /// An incidence stream that DECLARES what each row covers.
+    /// An incidence stream that states the period each row covers.
     fn spec_covering(name: &str, periods: Vec<Period>, observations: Vec<f64>) -> StreamSpec {
         StreamSpec::dense_covering(
             StreamProjection::FlowSum(vec![0]),
@@ -2771,8 +2835,8 @@ mod period_and_covers_tests {
         // THE correction gh#833 exists to make. A file labels its rows 1, 2, 3
         // and `covers = day(time)` says row D covers [D, D+1). So the rows are
         // scored in the buckets closing at 2, 3, 4 — one bucket LATER than the
-        // undeclared reading, which closes them at 1, 2, 3 and therefore reads
-        // the file a day early.
+        // closing reading (`spec`: each row closes at its label), which closes
+        // them at 1, 2, 3 and therefore reads the file a day early.
         //
         // This is asserted, not assumed: if the schedule were still taken from
         // the row labels, both axes below would read [1, 2, 3].
@@ -2787,11 +2851,11 @@ mod period_and_covers_tests {
             vec![10.0, 11.0, 12.0],
         );
 
-        let (bound_u, _) = BoundObs::bind(0.0, vec![undeclared]).expect("undeclared binds");
+        let (bound_u, _) = BoundObs::bind(0.0, vec![undeclared]).expect("closing binds");
         let (bound_d, report_d) = BoundObs::bind(0.0, vec![declared]).expect("declared binds");
         assert!(!report_d.is_fatal(), "a contiguous declaration is valid: {:?}", report_d.findings());
 
-        assert_eq!(bound_u.times(), &[1.0, 2.0, 3.0], "undeclared closes at the row labels");
+        assert_eq!(bound_u.times(), &[1.0, 2.0, 3.0], "the closing reading closes at the row labels");
         // The declared axis carries the first period's START (1) as a boundary
         // where nothing scores and the bin opens, then closes one bucket later
         // than the labels.
@@ -2853,32 +2917,35 @@ mod period_and_covers_tests {
     }
 
     #[test]
-    fn an_undeclared_stream_still_resets_where_it_scores() {
-        // The transitional variant keeps today's exact schedule: reset right
-        // after scoring, at every stop. Pinned so the fix to declared streams
-        // cannot leak into unmigrated ones.
+    fn contiguous_periods_from_the_run_start_reset_where_they_score() {
+        // Periods [0,1), [1,2), [2,3): the first opens at the run's start, so
+        // no leading boundary; each later one opens at the previous stop, so
+        // the bin resets where the previous row scored. No period opens at the
+        // last stop, so nothing resets there — there is nothing left to
+        // accumulate into.
         let (bound, _) = BoundObs::bind(0.0, vec![
             spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
         ]).expect("binds");
         assert_eq!(bound.times(), &[1.0, 2.0, 3.0]);
-        assert_eq!(bound.reset_at_union_for_test(0), &[true, true, true]);
+        assert_eq!(bound.at_union_for_test(0), &[Some(0), Some(1), Some(2)]);
+        assert_eq!(bound.reset_at_union_for_test(0), &[true, true, false]);
     }
 
     #[test]
-    fn an_undeclared_interval_stream_is_unchanged() {
-        // The transitional variant: every model today. Its schedule is still
-        // the row's own time, so nothing about an unmigrated model moves.
+    fn a_fixture_stated_as_labels_binds_as_contiguous_periods() {
+        // `spec` gives only labels; an incidence stream reads them as the
+        // periods closing at each, the first opening at the run's start — so
+        // its schedule is the labels and its periods are explicit.
         let (bound, report) = BoundObs::bind(0.0, vec![
             spec("cases", vec![1.0, 2.0, 3.0], vec![10.0, 11.0, 12.0]),
-        ]).expect("an undeclared interval stream still binds");
+        ]).expect("binds");
         assert!(!report.is_fatal());
         assert_eq!(bound.times(), &[1.0, 2.0, 3.0]);
         assert_eq!(
             bound.stream_times(0),
-            &StreamTimes::InferredIntervals(vec![1.0, 2.0, 3.0]),
-            "an incidence stream with no declaration is InferredIntervals, not Instants",
+            &StreamTimes::Intervals(Period::contiguous(0.0, &[1.0, 2.0, 3.0]).unwrap()),
         );
-        assert!(bound.stream_times(0).periods().is_none(), "nothing to report as declared");
+        assert_eq!(bound.stream_times(0).periods().map(|ps| ps.len()), Some(3));
     }
 }
 
@@ -3040,6 +3107,7 @@ mod hole_scoring_tests {
         let rec = compiled.model.transitions.iter()
             .position(|t| t.name == "recovery").unwrap();
         let spec = StreamSpec::dense(
+            0.0,
             StreamProjection::FlowSum(vec![rec]),
             compiled.model.observations[0].clone(),
             cells,
@@ -3066,6 +3134,7 @@ mod hole_scoring_tests {
         ir_b.name = "b".into();
         // a: t ∈ {1, 3}, value 10 at t=1 and a HOLE at t=3.
         let spec_a = StreamSpec::dense(
+            0.0,
             StreamProjection::FlowSum(vec![rec]),
             ir_a,
             vec![Some(ObsCell::Scalar(10.0)), None],
@@ -3073,6 +3142,7 @@ mod hole_scoring_tests {
         );
         // b: t ∈ {2}, value 20.
         let spec_b = StreamSpec::dense(
+            0.0,
             StreamProjection::FlowSum(vec![rec]),
             ir_b,
             dense_cells(vec![20.0]),
@@ -3204,10 +3274,10 @@ mod hole_scoring_tests {
         // index — distinct observed values so the two terms differ.
         let times = vec![7.0, 14.0];
         let spec_a = StreamSpec::dense(
-            StreamProjection::FlowSum(vec![rec]), ir_a,
+            0.0, StreamProjection::FlowSum(vec![rec]), ir_a,
             dense_cells(vec![30.0, 25.0]), times.clone());
         let spec_b = StreamSpec::dense(
-            StreamProjection::FlowSum(vec![rec]), ir_b,
+            0.0, StreamProjection::FlowSum(vec![rec]), ir_b,
             dense_cells(vec![40.0, 55.0]), times.clone());
         let m = MultiStreamObsModel::new(
             BoundObs::bind(0.0, vec![spec_a, spec_b]).expect("bind").0, compiled,

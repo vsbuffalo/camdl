@@ -1763,10 +1763,9 @@ win_start	win_stop	cases
 Each row is drawn over the period the stream's `covers` assigns to its label,
 and a row whose period falls outside the run is not written. Under
 `closing_at` with a schedule starting at `t_start` that drops the first emit
-time, whose period `[t_start − Δ, t_start)` was never simulated — the row the
-undeclared reading writes as a count of zero at `t_start`, a zero-width bin
-nothing scores. A windowed stream cannot go into the single wide `--obs` file,
-which has one `time` column; the error names `--obs-dir`.
+time, whose period `[t_start − Δ, t_start)` was never simulated. A windowed
+stream cannot go into the single wide `--obs` file, which has one `time`
+column; the error names `--obs-dir`.
 
 `--obs-only` / `--obs-only-dir` suppress only the *loose* trajectory mirror; the
 store leaf still holds `traj.tsv`. In every mode the sampled observations are
@@ -5546,17 +5545,17 @@ Pairing guidance:
 - **Prevalence as a fraction** (projection ∈ [0, 1]): `beta` for a directly
   observed proportion, `beta_binomial` for a `k`-of-`n` count.
 
-**A first incidence observation at the model origin is refused.** Incidence at
-`t = t_start` has a zero-width accumulation window, so its expected count is
-identically 0; a positive count against it scores `−∞`, which is
-indistinguishable from a degenerate filter. The check
-(`rust/crates/cli/src/util.rs:1526`) rejects it before the filter runs and names
-three fixes: drop the origin row, date each row at the _end_ of its accumulation
-window, or move the model origin earlier. None changes the convention, which is
-always `(previous observation, this observation]` (`docs/dates.md`, "What a
-dated row covers") — and the second is a no-op on data already dated at window
-ends, which is the common case. A zero count at the origin is consistent with
-the zero-width window and is allowed.
+**An incidence row whose period opens before the run is refused.** Every
+incidence stream states what its rows cover (`covers`, or `window_start` /
+`window_stop` columns — `docs/camdl-data-spec.md`), so each row's period is
+known at load. A row whose period opens before `t_start` would be scored against
+flow that was never simulated; the loader (`pfilter::stream_times_for`) refuses
+it before the filter runs, naming the period's start and `t_start`, and the fix
+is to move `simulate.from` back or drop the rows the model cannot cover. Under
+`closing_at(time, Δ)` a row labelled `t_start` is exactly this case. A hole
+(`NA`) whose period opens before the run carries nothing to score and is dropped
+instead. There is no zero-width bin to reason about: a row's period is never
+inferred from its neighbours.
 
 **The startup block prints the pairing — on three of the stage types.** `pgas`,
 `pmmh`, and `nuts` stages print each stream's projection kind and likelihood

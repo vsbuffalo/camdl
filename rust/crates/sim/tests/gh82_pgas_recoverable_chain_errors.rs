@@ -218,7 +218,7 @@ fn obs_model(compiled: &Arc<CompiledModel>) -> MultiStreamObsModel {
     let obs = observations();
     MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec {
-            times: StreamTimes::undeclared_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), obs.iter().map(|o| o.time).collect()),
+            times: StreamTimes::contiguous_for(&sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]), 0.0, obs.iter().map(|o| o.time).collect()).unwrap(),
             projection: sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]),
             ir_model: ir::observation::ObservationModel {
                 name: "cases".into(),

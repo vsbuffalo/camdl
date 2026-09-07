@@ -232,7 +232,7 @@ fn the_obs_model_reports_the_declared_period_each_value_covered() {
     let (bound, _) = BoundObs::bind(0.0, vec![spec]).expect("binds");
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
 
-    let cov = obs_model.per_stream_coverage(0.0);
+    let cov = obs_model.per_stream_coverage();
     assert_eq!(cov, vec![
         vec![None],
         vec![Some(Coverage::Interval { start: 2.0, stop: 3.0 })],

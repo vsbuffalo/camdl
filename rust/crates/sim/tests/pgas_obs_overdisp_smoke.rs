@@ -123,10 +123,10 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
                     }),
             },
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
-            times: StreamTimes::undeclared_for(
-                &StreamProjection::FlowSum(vec![0]),
+            times: StreamTimes::contiguous_for(
+                &StreamProjection::FlowSum(vec![0]), 0.0,
                 obs.iter().map(|o| o.time).collect(),
-            ),
+            ).unwrap(),
             aux: vec![],
         }]).unwrap().0,
         compiled.clone(),
@@ -250,10 +250,10 @@ fn smoke_pgas_nuts_estimates_rho() {
             ),
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),
-            times: StreamTimes::undeclared_for(
-                &StreamProjection::FlowSum(vec![0]),
+            times: StreamTimes::contiguous_for(
+                &StreamProjection::FlowSum(vec![0]), 0.0,
                 obs.iter().map(|o| o.time).collect(),
-            ),
+            ).unwrap(),
             aux: vec![],
         }]).unwrap().0,
         compiled.clone(),

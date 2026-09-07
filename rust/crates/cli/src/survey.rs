@@ -36,8 +36,8 @@ use sim::{
     compiled_model::CompiledModel,
     inference::{
         particle_filter::{bootstrap_filter, Observation, PFilterResult},
-        BoundObs, ChainBinomialProcess, MultiStreamObsModel,
-        multi_stream_obs::StreamSpec,
+        BoundObs, ChainBinomialProcess, MultiStreamObsModel, StreamTimes,
+        multi_stream_obs::{StreamProjection, StreamSpec},
         traits::{ObservationModel, SMCConfig},
         types::{log_sum_exp, EstimatedParam, ParticleState},
     },
@@ -79,6 +79,11 @@ struct ResolvedSurveyInputs {
     obs_models: Vec<ir::observation::ObservationModel>,
     /// Per-stream observations, aligned to `obs_models`.
     per_stream_obs: Vec<Vec<Observation>>,
+    /// What each stream's rows cover, aligned to `obs_models` — the periods
+    /// its `covers` declaration assigns, or its instants (gh#833). Every
+    /// stream's schedule (`closes()`) is required to be identical; the shared
+    /// one is the survey's evaluation axis.
+    per_stream_times: Vec<StreamTimes>,
     /// Per-stream data file content hashes, keyed by stream name.
     data_hashes: HashMap<String, String>,
     /// Resolved fixed params (name → value).
@@ -449,24 +454,32 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // type for `log_likelihood_from_flows_and_counts`. `&*obs_model`
     // auto-coerces to `&dyn ObservationModel<ParticleState>` for the
     // pfilter path.
-    let obs_times: Vec<f64> = resolved.per_stream_obs.first()
-        .map(|v| v.iter().map(|o| o.time).collect())
+    // The shared schedule (`resolve_survey_inputs` requires every stream's to
+    // be identical): the boundaries the streams are scored at, which for a
+    // declared period is its stop, not the row's label.
+    let obs_times: Vec<f64> = resolved.per_stream_times.first()
+        .map(StreamTimes::closes)
         .unwrap_or_default();
     let obs_model: Arc<MultiStreamObsModel> = {
         let mut stream_specs = Vec::with_capacity(resolved.obs_models.len());
-        for (obs, stream_obs) in resolved.obs_models.iter().zip(resolved.per_stream_obs.iter()) {
-            let projection = sim::inference::multi_stream_obs::StreamProjection::from_ir(
+        for ((obs, stream_obs), times) in resolved.obs_models.iter()
+            .zip(resolved.per_stream_obs.iter())
+            .zip(resolved.per_stream_times.iter())
+        {
+            let projection = StreamProjection::from_ir(
                 &obs.projection, &resolved.compiled, &obs.name,
             ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
             // survey is dense + aux-free in v1 (survey denominators bind in the
             // fit / pfilter loaders; survey rejects NA upstream).
-            stream_specs.push(StreamSpec::dense(
+            let observations = sim::inference::dense_cells(
+                stream_obs.iter().map(|o| o.value).collect());
+            stream_specs.push(StreamSpec {
+                aux: vec![Vec::new(); observations.len()],
                 projection,
-                obs.clone(),
-                sim::inference::dense_cells(
-                    stream_obs.iter().map(|o| o.value).collect()),
-                obs_times.clone(),
-            ));
+                ir_model: obs.clone(),
+                observations,
+                times: times.clone(),
+            });
         }
         let (bound, _report) = BoundObs::bind(resolved.compiled.model.simulation.t_start, stream_specs)
             .unwrap_or_else(|report| {
@@ -851,6 +864,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
 
         let mut obs_models = Vec::new();
         let mut per_stream_obs = Vec::new();
+        let mut per_stream_times = Vec::new();
         let mut data_hashes: HashMap<String, String> = HashMap::new();
         let mut canonical_times: Option<Vec<f64>> = None;
         let time_opts = crate::caltime_load::TimeOpts {
@@ -865,25 +879,15 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 .find(|o| o.name == **stream_name).cloned()
                 .ok_or_else(|| format!(
                     "no observation block named '{}' in model", stream_name))?;
-            let observations = load_observations_from_tsv(data_path, &obs_model_ir, &time_opts)?;
-            let times: Vec<f64> = observations.iter().map(|o| o.time).collect();
-            match &canonical_times {
-                None => canonical_times = Some(times),
-                Some(ct) => {
-                    if ct.len() != times.len()
-                        || ct.iter().zip(&times).any(|(a, b)| (a - b).abs() > 1e-9) {
-                        return Err(format!(
-                            "observation times for stream '{}' differ from the first \
-                             stream; all streams must share identical schedules.",
-                            stream_name));
-                    }
-                }
-            }
+            let (observations, times) =
+                load_stream_from_tsv(data_path, &obs_model_ir, &compiled, &time_opts)?;
+            check_shared_schedule(&mut canonical_times, &times, stream_name)?;
             let bytes = std::fs::read(data_path)
                 .map_err(|e| format!("cannot read data file '{}': {}", data_path, e))?;
             data_hashes.insert((*stream_name).clone(), crate::hashing::sha256_hex(&bytes));
             obs_models.push(obs_model_ir);
             per_stream_obs.push(observations);
+            per_stream_times.push(times);
         }
 
         // Capture [estimate].start for the start-rank diagnostic.
@@ -897,6 +901,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             estimated,
             obs_models,
             per_stream_obs,
+            per_stream_times,
             data_hashes,
             fixed: fixed_resolved.into_iter().collect(),
             scenario: config.scenario,
@@ -1011,6 +1016,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         }
         let mut obs_models = Vec::new();
         let mut per_stream_obs = Vec::new();
+        let mut per_stream_times = Vec::new();
         let mut data_hashes: HashMap<String, String> = HashMap::new();
         let bytes = std::fs::read(&data_path)
             .map_err(|e| format!("cannot read --data file '{}': {}", data_path, e))?;
@@ -1030,23 +1036,13 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             format: crate::caltime_load::TimeFormat::Auto,
         };
         for obs in sorted_obs {
-            let observations = load_observations_from_tsv(&data_path, obs, &time_opts)?;
-            let times: Vec<f64> = observations.iter().map(|o| o.time).collect();
-            match &canonical_times {
-                None => canonical_times = Some(times),
-                Some(ct) => {
-                    if ct.len() != times.len()
-                        || ct.iter().zip(&times).any(|(x, y)| (x - y).abs() > 1e-9) {
-                        return Err(format!(
-                            "observation times for stream '{}' differ from the first \
-                             stream; all streams must share identical schedules.",
-                            obs.name));
-                    }
-                }
-            }
+            let (observations, times) =
+                load_stream_from_tsv(&data_path, obs, &compiled, &time_opts)?;
+            check_shared_schedule(&mut canonical_times, &times, &obs.name)?;
             data_hashes.insert(obs.name.clone(), data_hash.clone());
             obs_models.push(obs.clone());
             per_stream_obs.push(observations);
+            per_stream_times.push(times);
         }
 
         Ok(ResolvedSurveyInputs {
@@ -1056,6 +1052,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             estimated,
             obs_models,
             per_stream_obs,
+            per_stream_times,
             data_hashes,
             fixed: fixed_map,
             scenario: a.scenario.clone(),
@@ -1077,6 +1074,54 @@ fn load_observations_from_tsv(
     let time_col = crate::pfilter::obs_time_column(obs)?;
     let raw = crate::pfilter::load_data_tsv_column(path, time_col, &obs.scored, opts)?;
     Ok(raw.into_iter().map(|o| Observation { time: o.time, value: o.value }).collect())
+}
+
+/// One stream's rows and what they cover: the values under the scored column,
+/// and the periods (or instants) the stream's declaration assigns to the rows'
+/// labels — the same lowering the fit and pfilter loaders use
+/// (`pfilter::stream_times_for`), so a survey scores each row over exactly
+/// the window the fit will (gh#833).
+fn load_stream_from_tsv(
+    path: &str,
+    obs: &ir::observation::ObservationModel,
+    compiled: &CompiledModel,
+    opts: &crate::caltime_load::TimeOpts,
+) -> Result<(Vec<Observation>, StreamTimes), String> {
+    let observations = load_observations_from_tsv(path, obs, opts)?;
+    let projection = StreamProjection::from_ir(&obs.projection, compiled, &obs.name)?;
+    let labels: Vec<f64> = observations.iter().map(|o| o.time).collect();
+    let times = crate::pfilter::stream_times_for(obs, &projection, &labels, path, opts)?;
+    Ok((observations, times))
+}
+
+/// Survey v1 evaluates every stream on one schedule. The first stream's
+/// closing boundaries become the canonical axis; a later stream whose
+/// boundaries differ — in count or in place — is refused. Compared on
+/// `closes()`, not on the rows' labels: two streams can share labels and,
+/// under different `covers` forms, be scored at different boundaries.
+fn check_shared_schedule(
+    canonical: &mut Option<Vec<f64>>,
+    times: &StreamTimes,
+    stream_name: &str,
+) -> Result<(), String> {
+    let closes = times.closes();
+    match canonical {
+        None => {
+            *canonical = Some(closes);
+            Ok(())
+        }
+        Some(ct) => {
+            if ct.len() != closes.len()
+                || ct.iter().zip(&closes).any(|(a, b)| (a - b).abs() > 1e-9)
+            {
+                return Err(format!(
+                    "observation times for stream '{}' differ from the first \
+                     stream; all streams must share identical schedules.",
+                    stream_name));
+            }
+            Ok(())
+        }
+    }
 }
 
 // ─── Per-point evaluation ────────────────────────────────────────────────────

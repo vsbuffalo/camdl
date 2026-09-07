@@ -149,7 +149,7 @@ fn attempt_nuts_fit_with(
 
     let obs_model = MultiStreamObsModel::new(
         BoundObs::bind(0.0, vec![StreamSpec {
-            times: StreamTimes::undeclared_for(&stream_proj, obs.iter().map(|o| o.time).collect()),
+            times: StreamTimes::contiguous_for(&stream_proj, 0.0, obs.iter().map(|o| o.time).collect()).unwrap(),
             projection: stream_proj,
             ir_model: compiled.model.observations[0].clone(),
             observations: dense_cells(obs.iter().map(|o| o.value).collect()),

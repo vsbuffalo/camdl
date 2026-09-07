@@ -176,6 +176,7 @@ fn spec(compiled: &CompiledModel, which: usize, times: &[f64], observed: f64) ->
         .position(|t| t.name == "inflow")
         .unwrap();
     StreamSpec::dense(
+        0.0,
         StreamProjection::FlowSum(vec![inflow]),
         compiled.model.observations[which].clone(),
         dense_cells(vec![observed; times.len()]),
