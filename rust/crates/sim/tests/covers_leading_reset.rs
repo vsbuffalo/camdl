@@ -337,3 +337,55 @@ fn a_declared_first_period_is_scored_against_its_own_window_only() {
         "non-vacuous: the correct and defective readings must be distinguishable"
     );
 }
+
+/// Proposal Testing item 3: a row whose declared window spans two days is
+/// scored against two days of flow — the flow over both unit intervals the
+/// window contains, and nothing else. Oracle: the integrator's own
+/// per-interval flows, Poisson-scored by hand at fixed parameters. The period
+/// [3,5) is scored against `flow(3,4] + flow(4,5]`; a one-day reading (the
+/// last day only) and a warm-up-widened one (everything since `t_start`) are
+/// the numbers this must not produce.
+#[test]
+fn a_two_day_window_is_scored_against_two_days_of_flow() {
+    let compiled = model();
+    let params = compiled.default_params.clone();
+    let recovery = compiled.model.transitions.iter().position(|t| t.name == "recovery").unwrap();
+
+    let flows = reported_recovery_flow(&compiled, &params);
+    let expected_two_days = flows[&4] + flows[&5];
+    let one_day = flows[&5];
+    let widened: f64 = (1..=5).map(|t| flows[&t]).sum();
+    assert!(
+        (expected_two_days - one_day).abs() > 1.0 && (widened - expected_two_days).abs() > 1.0,
+        "vacuous fixture: the readings must separate clearly \
+         (two days={expected_two_days}, one day={one_day}, widened={widened})"
+    );
+
+    let y = expected_two_days.round().max(1.0);
+    let spec = StreamSpec::dense_covering(
+        StreamProjection::FlowSum(vec![recovery]),
+        compiled.model.observations[0].clone(),
+        dense_cells(vec![y]),
+        vec![Period::new(3.0, 5.0).unwrap()],
+    );
+    let (bound, report) = BoundObs::bind(0.0, vec![spec]).expect("a two-day period binds");
+    assert!(!report.is_fatal(), "{:?}", report.findings());
+    assert_eq!(bound.times(), &[3.0, 5.0], "the period's start opens the bin; its stop scores it");
+    let union = bound.times().to_vec();
+    let obs_model = MultiStreamObsModel::new(bound, compiled.clone()).unwrap();
+
+    let ll = compute_ode_loglik(&compiled, &obs_model, &union, 1.0, &params, 1.0)
+        .expect("ode loglik");
+    let ll_two_days = poisson_logpmf(y, expected_two_days);
+    assert!(
+        (ll - ll_two_days).abs() < 1e-9,
+        "a [3,5) window must be scored against the flow over (3,5]: got {ll}, \
+         expected {ll_two_days}"
+    );
+    for (label, wrong) in [("one day", one_day), ("widened", widened)] {
+        assert!(
+            (ll - poisson_logpmf(y, wrong)).abs() > 1e-6,
+            "non-vacuous: the {label} reading must be distinguishable"
+        );
+    }
+}
