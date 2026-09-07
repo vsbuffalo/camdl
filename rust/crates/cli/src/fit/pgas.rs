@@ -1242,10 +1242,8 @@ pub fn run_stage(
                     n_chains: 1,
                     n_draws: draws.len(),
                     columns: {
-                        // Id columns + data columns, in emit order.
-                        let mut cols = vec!["chain".to_string(), "draw".to_string(),
-                            "time".to_string()];
-                        if date_origin.is_some() { cols.push("date".to_string()); }
+                        // Id + time columns, then data columns, in emit order.
+                        let mut cols = io::trajectories::id_column_names(date_origin.is_some());
                         cols.extend(traj_columns.data_column_names());
                         cols
                     },

@@ -89,15 +89,19 @@ fn write_ir(tmp: &tempfile::TempDir) -> PathBuf {
     path
 }
 
-/// Read the trajectory TSV, return S column at time t.
+/// Read the trajectory TSV, return the `S` column at time `t` — both resolved
+/// from the header by name, never by position.
 fn s_at(traj: &str, t: f64) -> i64 {
-    for line in traj.lines() {
-        if line.starts_with('#') || line.starts_with('t') { continue; }
+    let mut lines = traj.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let header: Vec<&str> = lines.next().expect("a header").split('\t').collect();
+    let col = |name: &str| header.iter().position(|c| *c == name)
+        .unwrap_or_else(|| panic!("no `{name}` column in {header:?}"));
+    let (t_i, s_i) = (col("t"), col("S"));
+    for line in lines {
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.is_empty() { continue; }
-        let t_parsed: f64 = cols[0].parse().unwrap_or(-1.0);
+        let t_parsed: f64 = cols[t_i].parse().unwrap_or(-1.0);
         if (t_parsed - t).abs() < 1e-6 {
-            return cols[1].parse().unwrap_or(0);
+            return cols[s_i].parse().unwrap_or(0);
         }
     }
     panic!("no trajectory row at t={}: {}", t, traj);

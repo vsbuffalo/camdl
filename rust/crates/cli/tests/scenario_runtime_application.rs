@@ -90,11 +90,8 @@ fn simulate_terminal_s(
     assert!(out.status.success(),
         "simulate failed; stderr: {}", String::from_utf8_lossy(&out.stderr));
 
-    // traj.tsv: columns `t`, `S`. Final row = t=20. Return S.
-    let content = std::fs::read_to_string(&out_path).unwrap();
-    let last_line = content.lines().filter(|l| !l.trim().is_empty()).last().unwrap();
-    let fields: Vec<&str> = last_line.split('\t').collect();
-    fields[1].parse::<f64>().unwrap()
+    // Final row = t=20. Return its S, found by name.
+    terminal_s_from_traj(&out_path)
 }
 
 /// A two-parameter pure-death-ish model: `mu` (S→I) and `nu` (I→out), both

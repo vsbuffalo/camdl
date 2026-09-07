@@ -176,7 +176,11 @@ impl ChainPaths {
             })
         };
         let (chain_i, draw_i, time_i) = (pos("chain")?, pos("draw")?, pos("time")?);
-        let key = |h: &str| matches!(h, "chain" | "draw" | "time" | "date");
+        // The id and time columns the writer leads with — `chain draw time
+        // t_start t_stop [date date_start date_stop]` — are not trajectory
+        // columns; everything after them is (`io::trajectories::id_column_names`).
+        let id_cols = io::trajectories::id_column_names(true);
+        let key = |h: &str| id_cols.iter().any(|k| k == h);
         let data_i: Vec<usize> = (0..header.len()).filter(|&i| !key(header[i])).collect();
         let columns: Vec<String> = data_i.iter().map(|&i| header[i].to_string()).collect();
         let n_cols = columns.len();
@@ -1241,14 +1245,21 @@ mod tests {
         assert!(report.contains("widest frozen disagreement: `c0` at substep"));
     }
 
-    /// A `trajectories.tsv` as the writer lays it out: comment line, key
-    /// columns (with `date`), then the data columns; each draw contiguous.
+    /// A `trajectories.tsv` as the writer lays it out: comment line, the id
+    /// and time columns (with the `date` twins), then the data columns; each
+    /// draw contiguous. The period columns carry values a reader that took
+    /// them for trajectory columns would happily analyse.
     fn traj_tsv(chain: usize, draws: &[(usize, &[(f64, [f64; 2])])]) -> String {
         let mut s = String::from("# camdl-trajectories v1\tmodel=x\tmethod=pgas\tgranularity=substep\n");
-        s.push_str("chain\tdraw\ttime\tdate\tS\tflow_a\n");
+        s.push_str("chain\tdraw\ttime\tt_start\tt_stop\tdate\tdate_start\tdate_stop\tS\tflow_a\n");
         for (d, rows) in draws {
+            let mut prev: Option<f64> = None;
             for (t, v) in rows.iter() {
-                s.push_str(&format!("{chain}\t{d}\t{t}\t2026-01-01\t{}\t{}\n", v[0], v[1]));
+                let start = prev.unwrap_or(*t);
+                prev = Some(*t);
+                s.push_str(&format!(
+                    "{chain}\t{d}\t{t}\t{start}\t{t}\t2026-01-01\t2026-01-01\t2026-01-01\t{}\t{}\n",
+                    v[0], v[1]));
             }
         }
         s

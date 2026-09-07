@@ -221,8 +221,16 @@ pub struct ResolvedScenario {
 /// the file's bytes and the restored row must re-key; the field contributes
 /// bytes at its `None` default too, which re-keys every existing sim leaf.
 /// Deliberate, versioned turnover, in the gh#156 / gh#143 line.
+///
+/// `schema_version = 5` (gh#833): no field changed — the leaf's `traj.tsv`
+/// did. Every trajectory row now carries `t_start`/`t_stop` beside `t`, the
+/// period its flow columns were accumulated over, so the bytes a leaf holds
+/// for an unchanged model, config and seed are different bytes. A stored leaf
+/// is the artifact its key names; a key that stayed put would name an
+/// artifact a recompute no longer reproduces. The format enters the key by
+/// this bump, exactly as the obs-file format enters the `obs/` subtree key.
 #[derive(Debug, Clone, PartialEq, RunInput)]
-#[run_input(schema_version = 4)]
+#[run_input(schema_version = 5)]
 pub struct SimConfig {
     pub backend: Backend,
     pub dt: FiniteF64,

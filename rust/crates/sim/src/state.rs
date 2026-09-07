@@ -209,5 +209,21 @@ impl Trajectory {
     pub fn push(&mut self, snap: Snapshot) {
         self.snapshots.push(snap);
     }
+
+    /// The half-open period each snapshot's `flows` were accumulated over,
+    /// one per snapshot in order: `[previous snapshot's t, this t)`, and for
+    /// the initial-condition row — no interval precedes it — the empty
+    /// `[t, t)`, whose flows are zero by the convention above. This is the
+    /// one statement of what a flow column's row covers, and every trajectory
+    /// writer names it as `t_start`/`t_stop` beside `t` (gh#833), so a flow is
+    /// never labelled by one boundary alone.
+    pub fn flow_periods(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        let mut prev: Option<f64> = None;
+        self.snapshots.iter().map(move |s| {
+            let start = prev.unwrap_or(s.t);
+            prev = Some(s.t);
+            (start, s.t)
+        })
+    }
 }
 

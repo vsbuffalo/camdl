@@ -2837,22 +2837,25 @@ impl engine::RunSink for StreamSink {
                 if total_runs > 1 { write!(out, "replicate\t").map_err(|e| e.to_string())?; }
                 if n_scenarios > 1 { write!(out, "scenario\t").map_err(|e| e.to_string())?; }
                 if n_draws > 1 { write!(out, "draw\t").map_err(|e| e.to_string())?; }
-                write!(out, "t").map_err(|e| e.to_string())?;
-                if date_origin.is_some() { write!(out, "\tdate").map_err(|e| e.to_string())?; }
+                // `t t_start t_stop [date date_start date_stop]`: the instant
+                // the states are read at and the period the flows cover
+                // (gh#833), the same cells the leaf's `traj.tsv` carries.
+                write!(out, "{}", util::TRAJ_TIME_HEADER).map_err(|e| e.to_string())?;
+                if date_origin.is_some() {
+                    write!(out, "{}", util::TRAJ_DATE_HEADER).map_err(|e| e.to_string())?;
+                }
                 cols.write_header(out).map_err(|e| e.to_string())?;
                 writeln!(out).map_err(|e| e.to_string())?;
                 self.traj_header_written = true;
             }
 
-            for snap in &traj.snapshots {
+            for (snap, period) in traj.snapshots.iter().zip(traj.flow_periods()) {
                 if total_runs > 1 { write!(out, "{}\t", run_idx + 1).map_err(|e| e.to_string())?; }
                 if n_scenarios > 1 { write!(out, "{}\t", scenario_label).map_err(|e| e.to_string())?; }
                 if n_draws > 1 { write!(out, "{}\t", draw_idx + 1).map_err(|e| e.to_string())?; }
-                write!(out, "{}", snap.t).map_err(|e| e.to_string())?;
+                util::write_traj_time_cells(out, snap.t, period).map_err(|e| e.to_string())?;
                 if let Some(o) = date_origin {
-                    let d = ir::caltime::internal_to_date_hires(o, snap.t, &model.time_unit)
-                        .map_err(|e| format!("error rendering date: {}", e))?;
-                    write!(out, "\t{}", d).map_err(|e| e.to_string())?;
+                    util::write_traj_date_cells(out, o, &model.time_unit, snap.t, period)?;
                 }
                 cols.write_row(out, snap).map_err(|e| e.to_string())?;
                 writeln!(out).map_err(|e| e.to_string())?;

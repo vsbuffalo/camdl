@@ -100,12 +100,15 @@ fn canonical_encoding_is_pinned() {
         ("ResolvedObsAlignment::Snap", "c8d06c17fd493405f2f220666705f80193775801258a0be28ae36fb8d475a809"),
         ("Seed", "dd2fb5245233d07fc6a715d0e7683b52767252050a29e5dbbb9921e1ba61397d"),
         ("ModelDigest", "50b2c476d23c4a7923f414bed47b0fc59757e17b18048ba82af36d89267e9447"),
-        ("SimConfig", "2da6a6c529f909dfef38be64e58722ff8d30a8c760ebcf70b5828476f3bb1d6d"),
+        // gh#833: `SimConfig` schema_version 4 -> 5 — the sim leaf's
+        // `traj.tsv` gained `t_start`/`t_stop`, so the bytes under an
+        // unchanged key changed; the key follows. `run_id(Sim)` moves with it.
+        ("SimConfig", "d5c50fdd5a253a0130617c6dc04be72895833567fc31f7ef078877ef92524000"),
         ("ResolvedParams", "3cae27d97f964a1a6e654228dcf0ced7407f2937792ea7b2c20b724628d1ec10"),
         ("ResolvedScenario", "bdc6a70dd99429b0adc3646f4f089279a69b6101ece3ab5bb3ebf31b7a32c0ca"),
         ("FitDigest", "a87aad94ad68c799fd558a872ebeb7de8507c3da867c6553ad198af38882d7e7"),
         ("StageConfig", "f6eb2654d2393f1365ba8610b3a80a5a5772e752b54179dc208f82b995f067df"),
-        ("run_id(Sim)", "5ff91d4772e77bd6f896a0e7ff516968219acc1a48f0e75aa176f395f5e1582a"),
+        ("run_id(Sim)", "741daad2df1f8641ee03b4a03adbc659cf46b0bed950d60c4a71e8854afad2da"),
         ("run_id(FitStage)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
     ];
     let actual = golden_fixtures();

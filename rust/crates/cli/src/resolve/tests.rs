@@ -676,7 +676,13 @@ fn cas_identity_pins() {
         // `ivp` -> `perturb_only_at_t0` rename, whose renamed TOML key
         // changes the fit canonical JSON's hashed bytes even at its `false`
         // default. The other five carry only this one.
-        ("sim", "79410b7a99a5481578da7c4aeb1104ac98eaac188b4c363b3bc0ea69fa6c0fc5"),
+        //
+        // gh#833 then moved `sim` ALONE: `SimConfig` schema_version 4 -> 5,
+        // because the sim leaf's `traj.tsv` gained `t_start`/`t_stop` and a
+        // key must not name bytes a recompute no longer reproduces. The other
+        // five kinds hold no trajectory table under a `SimConfig` key, so
+        // they stay — that scope is the claim this pin checks.
+        ("sim", "3db7bf9105cb8bb4c8b6efc44fdcb289fea7ad0d628bd139a0475aee334a5f84"),
         ("fit", "4013b1617bb9152e85ab715b2acded4923e3d23f8df68246b4447db943610fa5"),
         ("pfilter", "487a1ac8fafaa7548b078657be2fc7d1b5ec17ccfb177ff10b992b8a03e161b3"),
         ("survey", "ef89bb787175271fbec810a494a3a7b7cde2ef909cff60633d638b66ea1b0ab0"),

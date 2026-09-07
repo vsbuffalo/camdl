@@ -194,8 +194,13 @@ fn read_paths(stage: &Path) -> (Vec<Vec<Vec<Vec<f64>>>>, Vec<String>) {
     let mut columns: Option<Vec<String>> = None;
     for c in 1..=CHAINS {
         let (header, rows) = read_tsv(&stage.join(format!("chain_{c}/trajectories.tsv")));
+        // The id and time columns lead: `chain draw time t_start t_stop`
+        // (+ `date date_start date_stop` under a calendar); the rest are the
+        // trajectory columns the stage assesses.
         let data_cols: Vec<String> = header.iter()
-            .filter(|h| !matches!(h.as_str(), "chain" | "draw" | "time" | "date"))
+            .filter(|h| !matches!(h.as_str(),
+                "chain" | "draw" | "time" | "t_start" | "t_stop"
+                | "date" | "date_start" | "date_stop"))
             .cloned()
             .collect();
         match &columns {
