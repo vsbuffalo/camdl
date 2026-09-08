@@ -531,6 +531,18 @@ pub fn run_stage(
     // 3. `init` dispatch on Lhs / Uniform / Single. Default `lhs` gives
     //    stratified posterior coverage.
     let has_starts = prior_state.is_some();
+    // gh#871. Under `init_mle = "<stage>"` / `--starts-from` every chain takes
+    // the upstream stage's point estimate and the declared `init` never runs,
+    // so the declared `init` is not what supplied the values. Provenance
+    // records the mode that did — otherwise `chain_starts.tsv` reports N
+    // independent per-chain draws beside N identical values, and that file is
+    // what an auditor reads to check whether the chains were started apart.
+    let recorded_init = match starts_from.as_deref() {
+        Some(dir) => super::init::InitMethod::FromMle {
+            source: super::init::MleSource::FitDir(std::path::PathBuf::from(dir)),
+        },
+        None => pgas_opts.init_method.clone(),
+    };
     let mut survey_top_k_result: Option<super::init::SurveyTopKResult> = None;
     let chain_starts: Vec<Vec<f64>> = if has_starts {
         if pgas_opts.init_method == super::init::InitMethod::SurveyTopK {
@@ -664,7 +676,7 @@ pub fn run_stage(
         &config.estimated_params,
         Some(&per_chain_specs_for_audit),
         n_chains,
-        &pgas_opts.init_method,
+        &recorded_init,
         survey_top_k_result.as_ref(),
     ) {
         eprintln!("warning: could not write chain_starts.tsv: {}", e);
@@ -1720,8 +1732,11 @@ pub fn run_stage(
         // otherwise render the in-process sampler name verbatim.
         // SurveyTopK is dispatched via the shared
         // `resolve_per_chain_starts_from_method` helper above.
+        // `recorded_init` rather than the declared `init` for the same reason
+        // `chain_starts.tsv` uses it (gh#871): the two must agree, and under
+        // `init_mle` neither of them ran the declared mode.
         chain_init_source: Some(super::init::format_chain_init_source(
-            &pgas_opts.init_method, survey_top_k_result.as_ref(),
+            &recorded_init, survey_top_k_result.as_ref(),
         )),
         // gh#52: Richardson dt-check is wired only on IF2 stages in
         // v1 (the inference math is shared but the dispatch site

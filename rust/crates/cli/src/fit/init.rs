@@ -149,6 +149,37 @@ impl InitMethod {
             _ => None,
         }
     }
+
+    /// Does this mode put every chain at the same point?
+    ///
+    /// The split is the one the sibling
+    /// [`crate::fit::chain_starts::InitSource`] draws between its
+    /// single-point tags (`SeededBase`, `MlePoint`, `ParamsPoint`) and its
+    /// per-chain ones (`UniformDraw`, `UnconstrainedDraw`, `LhsCell`,
+    /// `PriorDraw`, `PosteriorRow`, `SurveyRank`), asked of the method
+    /// instead of the resolved source because the fit stages only ever hold
+    /// the method.
+    ///
+    /// `chain_starts.tsv` appends `:chain-<id>` to a row's source only when
+    /// that chain got a point of its own; appending it to a single-point mode
+    /// reads as independent draws that happen to coincide, which is the
+    /// opposite of what happened (gh#871).
+    ///
+    /// `Uniform` counts as per-chain: chain 1 keeps the seeded base point but
+    /// chains 2..N are drawn, so the chains do not share one point.
+    pub fn starts_every_chain_at_one_point(&self) -> bool {
+        match self {
+            InitMethod::Single
+            | InitMethod::FromMle { .. }
+            | InitMethod::FromParams { .. } => true,
+            InitMethod::Uniform
+            | InitMethod::Lhs
+            | InitMethod::UniformUnconstrained
+            | InitMethod::SurveyTopK
+            | InitMethod::FromPrior
+            | InitMethod::FromPosterior { .. } => false,
+        }
+    }
 }
 
 /// Where to read posterior draws from. See [`InitMethod::FromPosterior`].
@@ -1203,6 +1234,13 @@ pub fn format_chain_init_source(
 /// base values and `source = "single"`. For ranked-survey mode the
 /// caller supplies `survey_top_k` so each chain's source carries
 /// `:rank-N` (1-indexed).
+///
+/// `method` must be the mode that *supplied* the values, which is not
+/// always the one the stage declared: a stage chained off another with
+/// `init_mle = "<stage>"` takes the upstream point estimate and never
+/// runs its declared `init` (gh#871). Modes that put every chain at one
+/// point write a bare source tag; only a mode that drew each chain its
+/// own point earns the `:chain-<id>` suffix.
 pub fn write_chain_starts_tsv(
     stage_dir: &std::path::Path,
     base: &[EstimatedParam],
@@ -1230,6 +1268,8 @@ pub fn write_chain_starts_tsv(
             let source = match (method, survey_top_k) {
                 (InitMethod::SurveyTopK, Some(res)) =>
                     format!("survey:{}:rank-{}", res.survey_hash, chain_id + 1),
+                _ if method.starts_every_chain_at_one_point() =>
+                    method.to_string(),
                 _ => format!("{}:chain-{}", method, chain_id),
             };
             let mut fields = vec![chain_id.to_string(), source];
@@ -1885,6 +1925,51 @@ beta\tgamma\tn_replicates\tpoint_id\n\
         let s = format_chain_init_source(&InitMethod::SurveyTopK, None);
         assert!(s.contains("missing"),
             "fallback string should flag the wiring bug: {}", s);
+    }
+
+    // ── chain_starts.tsv source labels (gh#871) ─────────────────────
+
+    /// Read back the `source` column of a `chain_starts.tsv` written for
+    /// `method` at `n_chains` chains, every chain at the same point.
+    fn source_column(method: &InitMethod, n_chains: usize) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let base = vec![ep("beta", 0.01, 1.0,
+                           Transform::Log { lo: 0.01, hi: 1.0 }, 0.3)];
+        let per_chain = vec![base.clone(); n_chains];
+        write_chain_starts_tsv(
+            dir.path(), &base, Some(&per_chain), n_chains, method, None,
+        ).expect("write chain_starts.tsv");
+        let txt = std::fs::read_to_string(dir.path().join("chain_starts.tsv")).unwrap();
+        txt.lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .skip(1)                              // column header
+            .map(|l| l.split('\t').nth(1).expect("source column").to_string())
+            .collect()
+    }
+
+    /// A mode that drew each chain its own point earns `:chain-<id>`; a mode
+    /// that put every chain at one point does not, because that suffix reads
+    /// as independent draws that happen to coincide. gh#871.
+    #[test]
+    fn chain_starts_source_marks_per_chain_draws_only() {
+        for method in [InitMethod::Uniform, InitMethod::Lhs,
+                       InitMethod::UniformUnconstrained, InitMethod::FromPrior] {
+            let got = source_column(&method, 3);
+            assert_eq!(got, vec![format!("{method}:chain-0"),
+                                 format!("{method}:chain-1"),
+                                 format!("{method}:chain-2")],
+                "{method} draws each chain its own point, so each row names its chain");
+        }
+        for method in [
+            InitMethod::Single,
+            InitMethod::FromMle { source: MleSource::FitDir("up".into()) },
+            InitMethod::FromParams { path: "p.toml".into() },
+        ] {
+            let got = source_column(&method, 3);
+            assert_eq!(got, vec![method.to_string(); 3],
+                "{method} puts every chain at one point, so no row may claim \
+                 a draw of its own");
+        }
     }
 
     // ── build_chain_starts_from_survey end-to-end (gh#51) ────────────

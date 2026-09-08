@@ -157,6 +157,19 @@ pub fn run_stage(
     // Load prior state if --starts-from provided
     let prior_state = starts_from.map(FitState::load).transpose()?;
 
+    // gh#871. Under `init_mle = "<stage>"` / `--starts-from` every chain takes
+    // the upstream stage's point estimate and the declared `init` never runs,
+    // so the declared `init` is not what supplied the values. Provenance
+    // records the mode that did — otherwise `chain_starts.tsv` reports N
+    // independent per-chain draws beside N identical values, and that file is
+    // what an auditor reads to check whether the chains were started apart.
+    let recorded_init = match starts_from {
+        Some(dir) => super::init::InitMethod::FromMle {
+            source: super::init::MleSource::FitDir(std::path::PathBuf::from(dir)),
+        },
+        None => pmmh_opts.init_method.clone(),
+    };
+
     // Build FitRunConfig (reuse existing builder). iterations,
     // cooling, cooling_target_iters are IF2-specific and never read
     // by PMMH — pass harmless values.
@@ -435,7 +448,7 @@ pub fn run_stage(
         &config.estimated_params,
         Some(&per_chain_specs_for_audit),
         n_chains,
-        &pmmh_opts.init_method,
+        &recorded_init,
         survey_top_k_result.as_ref(),
     ) {
         eprintln!("warning: could not write chain_starts.tsv: {}", e);
@@ -1036,8 +1049,11 @@ pub fn run_stage(
         // otherwise render the in-process sampler name verbatim.
         // SurveyTopK is dispatched via the shared
         // `resolve_per_chain_starts_from_method` helper above.
+        // `recorded_init` rather than the declared `init` for the same reason
+        // `chain_starts.tsv` uses it (gh#871): the two must agree, and under
+        // `init_mle` neither of them ran the declared mode.
         chain_init_source: Some(super::init::format_chain_init_source(
-            &pmmh_opts.init_method, survey_top_k_result.as_ref(),
+            &recorded_init, survey_top_k_result.as_ref(),
         )),
         // gh#52, gh#227: deterministic ODE dt-check at the MAP (above); `None`
         // on the PMMH path (PF dt-check is wired on the IF2 path).

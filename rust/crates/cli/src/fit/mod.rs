@@ -1378,6 +1378,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let effective_init: crate::fit::init::InitMethod = init_method.clone();
                 let effective_survey_path: Option<std::path::PathBuf> = survey_path.clone();
                 let effective_survey_top_k_n: Option<usize> = *survey_top_k_n;
+                // gh#871. When this stage consumes a prior one, every chain
+                // takes that stage's point estimate and `effective_init` never
+                // runs, so it is not what supplied the values. Provenance
+                // records the mode that did; the declared `init` stays in the
+                // stage config, which is where it belongs.
+                let recorded_init: crate::fit::init::InitMethod =
+                    match effective_starts.as_deref() {
+                        Some(dir) => crate::fit::init::InitMethod::FromMle {
+                            source: crate::fit::init::MleSource::FitDir(
+                                std::path::PathBuf::from(dir)),
+                        },
+                        None => effective_init.clone(),
+                    };
                 // gh#506 follow-up: a declared `start` that the chosen init
                 // mode discards is a silent no-op. Not an error — the
                 // spreading modes ignore it on purpose — but the user who
@@ -1454,13 +1467,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &run_config.estimated_params,
                     per_chain_params.as_deref(),
                     *chains,
-                    &effective_init,
+                    &recorded_init,
                     survey_top_k_result.as_ref(),
                 ) {
                     eprintln!("warning: could not write chain_starts.tsv: {}", e);
                 }
                 let chain_init_source = init::format_chain_init_source(
-                    &effective_init, survey_top_k_result.as_ref(),
+                    &recorded_init, survey_top_k_result.as_ref(),
                 );
                 let stage_dir_str = stage_dir.to_string_lossy();
                 let chain_results = runner::run_chains_with_per_chain_params(
