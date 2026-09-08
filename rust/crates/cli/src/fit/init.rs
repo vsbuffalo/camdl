@@ -1191,8 +1191,14 @@ fn emit_top_k_se_warning(top_k: &[&LandscapeRow]) {
 
 /// Format `chain_init_source` for `fit_state.toml` — one line of
 /// provenance describing where this stage's chain starts came from.
-/// `lhs` / `single` / `uniform` for the in-process samplers,
-/// `survey:<full-hash>:top-<K>` for the survey reader.
+///
+/// Every mode but one renders its [`InitMethod`] `Display` tag
+/// (`single` / `lhs` / `from_mle` / …), so the one fit reports one
+/// spelling of one choice across `fit_state.toml`, `chain_starts.tsv`
+/// and `run.json`'s `init_provenance.method` (gh#87, gh#873). The
+/// survey reader is the exception: its provenance carries the survey's
+/// content hash and K, which the tag alone cannot express, and renders
+/// `survey:<full-hash>:top-<K>`.
 pub fn format_chain_init_source(
     method: &InitMethod,
     survey_top_k: Option<&SurveyTopKResult>,
@@ -1201,24 +1207,17 @@ pub fn format_chain_init_source(
         return format!("survey:{}:top-{}", res.survey_hash, res.chains.len());
     }
     match method {
-        InitMethod::Single => "single".into(),
-        InitMethod::Uniform => "uniform".into(),
-        InitMethod::Lhs => "lhs".into(),
-        InitMethod::UniformUnconstrained => "uniform_unconstrained".into(),
         InitMethod::SurveyTopK => {
             // SurveyTopKResult should have been provided. Defensive
             // fallback so a wiring bug doesn't write a corrupt
             // provenance string into fit_state.toml.
             "survey:<missing-result>:top-?".into()
         }
-        // Step 6 warm-start variants render the bare kebab-case tag
-        // here. Per-chain provenance lives in `InitSource` on each
-        // `ChainStart`, which step-9 serialises into
-        // `init_provenance.chains[i]` of `run.json`.
-        InitMethod::FromPrior          => "from-prior".into(),
-        InitMethod::FromPosterior { .. } => "from-posterior".into(),
-        InitMethod::FromMle       { .. } => "from-mle".into(),
-        InitMethod::FromParams    { .. } => "from-params".into(),
+        // Per-chain provenance for the warm-start variants lives in
+        // `InitSource` on each `ChainStart`, which step-9 serialises
+        // into `init_provenance.chains[i]` of `run.json`; this line
+        // carries only the mode.
+        other => other.to_string(),
     }
 }
 
@@ -1933,6 +1932,71 @@ beta\tgamma\tn_replicates\tpoint_id\n\
             "should embed full hash: {}", s);
         assert!(s.ends_with(":top-20"),
             "should include K from chain count: {}", s);
+    }
+
+    /// gh#873: the `fit_state.toml` provenance string must be the same
+    /// spelling as the `Display` tag for every mode that renders from
+    /// the method alone. One fit writes both — `chain_init_source` here,
+    /// `Display` into `chain_starts.tsv`'s `method=` header and
+    /// `run.json`'s `init_provenance.method` — so a second spelling
+    /// means one run reports two names for one choice (pre-fix:
+    /// `chain_init_source = "from-mle"` beside `method=from_mle`).
+    /// `SurveyTopK` is the sole exception: its provenance carries the
+    /// survey hash and K, which the tag cannot express.
+    #[test]
+    fn chain_init_source_agrees_with_display_for_every_variant() {
+        use std::path::PathBuf;
+        let variants = vec![
+            InitMethod::Single,
+            InitMethod::Uniform,
+            InitMethod::Lhs,
+            InitMethod::UniformUnconstrained,
+            InitMethod::FromPrior,
+            InitMethod::FromPosterior {
+                source: PosteriorSource::DrawsTsv(PathBuf::from("/x")),
+            },
+            InitMethod::FromMle {
+                source: MleSource::File(PathBuf::from("/y")),
+            },
+            InitMethod::FromParams { path: PathBuf::from("/z") },
+        ];
+        for m in &variants {
+            // Exhaustiveness guard: adding a variant to `InitMethod`
+            // stops this match compiling, which is the prompt to decide
+            // whether its provenance is the plain tag (add it above) or
+            // carries more, like `SurveyTopK` (assert it below).
+            match m {
+                InitMethod::Single
+                | InitMethod::Uniform
+                | InitMethod::Lhs
+                | InitMethod::UniformUnconstrained
+                | InitMethod::SurveyTopK
+                | InitMethod::FromPrior
+                | InitMethod::FromPosterior { .. }
+                | InitMethod::FromMle { .. }
+                | InitMethod::FromParams { .. } => {}
+            }
+            let got = format_chain_init_source(m, None);
+            assert_eq!(got, m.to_string(),
+                "chain_init_source for InitMethod::{:?} is {:?} but the \
+                 Display tag written into chain_starts.tsv and run.json \
+                 is {:?} — one fit must not record two spellings of one \
+                 init mode (gh#873).",
+                m, got, m.to_string());
+            // Snake_case, as gh#87 pinned for Display.
+            assert!(!got.contains('-'),
+                "chain_init_source for InitMethod::{:?} contains '-': {}",
+                m, got);
+        }
+        // The survey reader is the documented exception: more than the
+        // tag, because the hash and K are the provenance.
+        let result = SurveyTopKResult {
+            chains: vec![Vec::new(); 3],
+            survey_hash: "0badc0de".repeat(8),
+        };
+        assert_eq!(
+            format_chain_init_source(&InitMethod::SurveyTopK, Some(&result)),
+            format!("survey:{}:top-3", "0badc0de".repeat(8)));
     }
 
     #[test]
