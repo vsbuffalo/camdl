@@ -616,6 +616,17 @@ row's time column, and the last column showing `D = 11 July`, seven days:
 | `covers = ending_on(time, 7 'days)`   | `[D−6 days, D+1 day)` | `[5 Jul, 12 Jul)` — 11th **included** | "week ending D" — ISO/MMWR           |
 | `covers = closing_at(time, 7 'days)`  | `[D−7 days, D)`       | `[4 Jul, 11 Jul)` — 11th **excluded** | a label that is the closing boundary |
 
+Every window camdl writes or reads is **half-open**: `[start, stop)` includes
+`start` and excludes `stop`. Two consequences make the notation worth reading
+carefully. The width is exactly `stop − start`, with no off-by-one to remember,
+and two adjacent rows share a boundary value without overlapping — the day
+ending one window is the day opening the next, counted once. (Readers coming
+from genomics will recognise the convention: a BED interval spans `[start, end)`
+for the same two reasons, and `end − start` is likewise the length.[^bed])
+
+[^bed]: UCSC Genome Browser, "BED format",
+    <https://genome.ucsc.edu/FAQ/FAQformat.html#format1>.
+
 `ending_on` and `closing_at` are near-synonyms in English and differ by a whole
 day; that is why they are adjacent rows with the interval written out. "Week
 ending Saturday 11 July" means 11 July is the **last included day**, so the span
@@ -652,17 +663,25 @@ That is the case with no expression at all under row-spacing inference — the
 only way to widen a window was to delete the intervening row, which this
 document separately forbids.
 
-### One temporal anchor, either kind
+### One set of temporal columns, either kind
 
-`columns {}` requires exactly one temporal anchor. That is either a `time`
-column _or_ a `window_start`/`window_stop` pair — never both, and never half a
-pair. A stream declaring window columns does not also write `covers =`; the
-columns are the declaration.
+`columns {}` requires exactly one set of temporal columns. That is either a
+`time` column _or_ a `window_start`/`window_stop` pair — never both, and never
+half a pair. A stream declaring window columns does not also write `covers =`;
+the columns are the declaration.
 
 The **stop is the stream's fit time source**. Everything downstream that asks
 "when is this observation" — output rows, `--score-from`, a forecast grid —
 reads the closing boundary, so a windowed stream sits on the axis exactly where
 an unwindowed one does.
+
+That is a position on the time axis and nothing more. It does **not** say the
+observation was _reported_ on that date. camdl has no report-date concept: a
+column carries a time, a dimension, a value, or a window boundary, and nothing
+else. Reporting delay is a modelled quantity — a delay or convolution term
+written into the model and estimated like any other — never something read out
+of a file's temporal columns. A row whose window is `[8 Jul, 9 Jul)` is the
+count for 8 July whatever date sits in the stop column.
 
 ### A width that varies row to row
 

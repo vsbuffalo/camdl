@@ -2816,8 +2816,8 @@ observations {
 
 Syntax notes: the observation header is `name { … }` (no colon), optionally
 `name from <source> { … }`. `columns { }` declares the file schema by name
-(exactly one temporal anchor: a `: time` column, or a `window_start`/`window_stop`
-pair — §12.1.1). An incidence stream also states what period each row covers
+(exactly one set of temporal columns: a `: time` column, or a
+`window_start`/`window_stop` pair — §12.1.1). An incidence stream also states what period each row covers
 (`covers = …`, §12.1.1). The measurement model uses `<value_col> ~
 KIND(...)` (the `~` operator, function-call form with named arguments).
 `emit_schedule` is the simulate-only emission cadence; a fit-only model omits
@@ -3013,8 +3013,8 @@ window columns, not with a duration column. `covers` must name the stream's own
 **Window columns.** `window_start` and `window_stop` are `columns { }` roles
 alongside `time`, `dim` and `count`. They replace the `: time` column and are
 the declaration on their own — a stream carrying them writes no `covers` line.
-`columns { }` names exactly one temporal anchor: a `: time` column, or a
-`window_start`/`window_stop` pair. Both, half a pair, or a pair together with
+`columns { }` names exactly one set of temporal columns: a `: time` column, or
+a `window_start`/`window_stop` pair. Both, half a pair, or a pair together with
 `covers` is **E347**. Each row covers exactly `[start, stop)` as written, so this
 is the only form that can state a width that changes row to row (a fortnightly
 row in a weekly file, because publication was suspended) or a span no row
@@ -6029,7 +6029,7 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E300 | Error   | Transition rate has the wrong dimension                                                    |
 | E302 | Error   | Addition/subtraction of mismatched dimensions                                             |
 | E303 | Error   | Conflicting dimensions for a parameter across transitions                                 |
-| E347 | Error   | Observation stream anchors time twice or by half — `: time` plus window columns, half a pair, or `covers` with window columns (§12.1.1) |
+| E347 | Error   | Observation stream declares its temporal columns twice or by half — `: time` plus window columns, half a pair, or `covers` with window columns (§12.1.1) |
 | E348 | Error   | `covers` or window columns on a stream whose `projected` reads state at an instant (§12.1.1) |
 | E350 | Error   | Incidence stream states no period — add `covers = …` or `window_start`/`window_stop` columns (§12.1.1) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |

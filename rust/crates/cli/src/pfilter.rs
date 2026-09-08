@@ -1004,10 +1004,12 @@ fn parse_column_cells<'a>(
 /// enforces this at compile); this surfaces a clear error if a malformed IR
 /// (no time column) somehow reaches the loader.
 pub fn obs_time_column(obs: &ir::observation::ObservationModel) -> Result<&str, String> {
-    // A windowed stream anchors on its CLOSING boundary — the proposal's "the
-    // fit time source for a windowed stream is `window_stop`" — so every
-    // downstream "observation time" consumer keeps the position it has for an
-    // unwindowed stream (gh#833).
+    // A windowed stream takes its time from the window's closing boundary —
+    // the proposal's "the fit time source for a windowed stream is
+    // `window_stop`" — so every downstream "observation time" consumer keeps
+    // the position it has for an unwindowed stream. That is a position on the
+    // axis only; it says nothing about when the observation was reported
+    // (gh#833).
     if let Some(c) = column_with_role(obs, &ir::observation::ColumnRole::WindowStop) {
         return Ok(c);
     }
@@ -1057,7 +1059,7 @@ pub(crate) fn missing_covers_error(obs: &ir::observation::ObservationModel) -> S
 /// Build the [`StreamTimes`] for one stream: what its rows cover, per its
 /// `covers` declaration (gh#833).
 ///
-/// `label_times` are the already-converted values of the stream's own anchor
+/// `label_times` are the already-converted values of the stream's own label
 /// column — the `: time` column, or `window_stop` for a windowed stream.
 ///
 /// An instant stream reads at its labels. An interval stream gets the periods

@@ -12777,7 +12777,7 @@ let test_a5_shadowed_binder_still_e283 () =
   compile_expect_error_code ~code:"E283" ~contains:"shadows"
     (reduction_binder_model ~body:"sum(a in age, sum(a in age, I[a,p] / N[a,p]))")
 
-(* -- gh#833: `covers`, and the window-column temporal anchor -------------- *)
+(* -- gh#833: `covers`, and the window columns ----------------------------- *)
 
 (* One incidence stream + one prevalence stream are both reachable through
    this shell; [obs] is spliced verbatim into `observations { }`. *)
@@ -12907,8 +12907,8 @@ let test_half_a_window_pair_is_rejected () =
     cases     ~ poisson(rate = projected)
   }|})
 
-let test_two_temporal_anchors_are_rejected () =
-  compile_expect_error_code ~code:"E347" ~contains:"anchor"
+let test_two_sets_of_temporal_columns_are_rejected () =
+  compile_expect_error_code ~code:"E347" ~contains:"temporal columns"
     (covers_model_with {|  cases {
     columns   { time : time, a : window_start, b : window_stop, cases : count }
     projected = incidence(infection)
@@ -12916,7 +12916,7 @@ let test_two_temporal_anchors_are_rejected () =
   }|})
 
 let test_covers_alongside_window_columns_is_rejected () =
-  compile_expect_error_code ~code:"E347" ~contains:"BOTH"
+  compile_expect_error_code ~code:"E347" ~contains:"only one of them"
     (covers_model_with {|  cases {
     columns   { a : window_start, b : window_stop, cases : count }
     covers    = day(time)
@@ -13981,8 +13981,8 @@ let () =
         `Quick test_window_columns_on_a_prevalence_stream_are_rejected;
       Alcotest.test_case "half a window pair is E347"
         `Quick test_half_a_window_pair_is_rejected;
-      Alcotest.test_case "a time column AND a window pair is E347"
-        `Quick test_two_temporal_anchors_are_rejected;
+      Alcotest.test_case "a time column and a window pair is E347"
+        `Quick test_two_sets_of_temporal_columns_are_rejected;
       Alcotest.test_case "covers alongside window columns is E347"
         `Quick test_covers_alongside_window_columns_is_rejected;
       Alcotest.test_case "covers naming another column is E347"

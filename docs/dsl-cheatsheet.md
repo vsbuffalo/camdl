@@ -285,36 +285,36 @@ reduction that never crosses is **right-censored** (reported via
 
 The compiler issues E-codes with source locations and fix-hints.
 
-| Code | Class    | Typical trigger                                                                            |
-| ---- | -------- | ------------------------------------------------------------------------------------------ |
-| E100 | naming   | parameter name shadows reserved (`t`, etc.)                                                |
-| E332 | indexing | a named index labels a dimension the thing indexed does not have                           |
-| E347 | obs      | a stream anchors time twice or by half (`: time` plus window columns, half a pair)         |
-| E348 | obs      | `covers` or window columns on a `prevalence(...)` / state-reading stream                   |
-| E350 | obs      | an `incidence(...)` stream with neither `covers = …` nor `window_start`/`window_stop`      |
-| E220 | date     | `date(...)` without `origin` declared                                                      |
-| E300 | dim      | transition rate not P·T⁻¹                                                                  |
-| E301 | dim      | non-dimensionless argument to `exp`/`log`                                                  |
-| E302 | dim      | addition/subtraction of mismatched dimensions                                              |
-| E303 | dim      | parameter used with inconsistent dimensions                                                |
-| E304 | dim      | `sqrt` of odd-exponent dimension                                                           |
-| E305 | dim      | balance expression must have dimension P                                                   |
-| E306 | dim      | ODE derivative must have dimension P·T⁻¹                                                   |
-| E308 | dim      | overdispersion σ² must be dimensionless                                                    |
-| E309 | dim      | forcing `lag` must be a duration (dimension T)                                             |
-| E320 | time     | `time_unit = 'months/'years` with `origin` declared                                        |
-| E321 | time     | `Instant ± Calendar`-duration (`date(...) + 6 'months`)                                    |
-| E322 | time     | calendar cadence in anchored recurring schedule (`every = 1 'months`)                      |
-| E323 | time     | bare-numeric `on=[...]` in anchored periodic forcing                                       |
-| E327 | time     | `add_calendar_*` / `origin` / calendar-cadence `date_range` in unanchored model            |
-| E328 | time     | argument-shape error in `add_calendar_*` / `date_range`                                    |
-| E329 | time     | zero/negative cadence or `count < 1` in `date_range`                                       |
-| W301 | forcing  | periodic range not aligned to step size                                                    |
-| W324 | time     | bare-numeric `simulate.from/to/dt` in anchored mode                                        |
-| W325 | time     | bare-numeric `at [k, ...]` schedule in anchored mode                                       |
-| W326 | time     | numeric `--data` time column under `origin` (use `--time-format internal-days` to silence) |
-| W327 | time     | literal nested `add_calendar_*` round-trip (non-invertible)                                |
-| W328 | time     | `date_range` `end` doesn't land on a cadence boundary                                      |
+| Code | Class    | Typical trigger                                                                                     |
+| ---- | -------- | --------------------------------------------------------------------------------------------------- |
+| E100 | naming   | parameter name shadows reserved (`t`, etc.)                                                         |
+| E332 | indexing | a named index labels a dimension the thing indexed does not have                                    |
+| E347 | obs      | a stream declares its temporal columns twice or by half (`: time` plus window columns, half a pair) |
+| E348 | obs      | `covers` or window columns on a `prevalence(...)` / state-reading stream                            |
+| E350 | obs      | an `incidence(...)` stream with neither `covers = …` nor `window_start`/`window_stop`               |
+| E220 | date     | `date(...)` without `origin` declared                                                               |
+| E300 | dim      | transition rate not P·T⁻¹                                                                           |
+| E301 | dim      | non-dimensionless argument to `exp`/`log`                                                           |
+| E302 | dim      | addition/subtraction of mismatched dimensions                                                       |
+| E303 | dim      | parameter used with inconsistent dimensions                                                         |
+| E304 | dim      | `sqrt` of odd-exponent dimension                                                                    |
+| E305 | dim      | balance expression must have dimension P                                                            |
+| E306 | dim      | ODE derivative must have dimension P·T⁻¹                                                            |
+| E308 | dim      | overdispersion σ² must be dimensionless                                                             |
+| E309 | dim      | forcing `lag` must be a duration (dimension T)                                                      |
+| E320 | time     | `time_unit = 'months/'years` with `origin` declared                                                 |
+| E321 | time     | `Instant ± Calendar`-duration (`date(...) + 6 'months`)                                             |
+| E322 | time     | calendar cadence in anchored recurring schedule (`every = 1 'months`)                               |
+| E323 | time     | bare-numeric `on=[...]` in anchored periodic forcing                                                |
+| E327 | time     | `add_calendar_*` / `origin` / calendar-cadence `date_range` in unanchored model                     |
+| E328 | time     | argument-shape error in `add_calendar_*` / `date_range`                                             |
+| E329 | time     | zero/negative cadence or `count < 1` in `date_range`                                                |
+| W301 | forcing  | periodic range not aligned to step size                                                             |
+| W324 | time     | bare-numeric `simulate.from/to/dt` in anchored mode                                                 |
+| W325 | time     | bare-numeric `at [k, ...]` schedule in anchored mode                                                |
+| W326 | time     | numeric `--data` time column under `origin` (use `--time-format internal-days` to silence)          |
+| W327 | time     | literal nested `add_calendar_*` round-trip (non-invertible)                                         |
+| W328 | time     | `date_range` `end` doesn't land on a cadence boundary                                               |
 
 ## Where things live
 

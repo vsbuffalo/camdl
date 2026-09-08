@@ -522,9 +522,9 @@ type obs_column_role =
   | RoleDim   of string
   | RoleValue of param_kind
   (* gh#833: the opening / closing boundary of the period this row covers.
-     Declared as a PAIR, and mutually exclusive with [RoleTime] — a stream
-     names exactly one temporal anchor, either a time column or a window
-     pair. [RoleWindowStop] doubles as the stream's fit time source. *)
+     Declared as a pair, and mutually exclusive with [RoleTime] — a stream
+     names exactly one set of temporal columns, either a time column or a
+     window pair. [RoleWindowStop] doubles as the stream's fit time source. *)
   | RoleWindowStart
   | RoleWindowStop
 

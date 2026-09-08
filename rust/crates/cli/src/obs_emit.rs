@@ -69,8 +69,8 @@ impl EmitPlan {
 /// names it (gh#656), in axis units. A uniform `covers` form's span is then
 /// re-widened to that cadence: the rows are re-spaced, and a row still covers
 /// the whole span back to its neighbour — a daily stream emitted weekly writes
-/// weekly totals, not one day in seven. The form's anchor (where the label sits
-/// on the window) is kept.
+/// weekly totals, not one day in seven. Where the label sits on its window is
+/// kept.
 pub(crate) fn plan_emission(
     obs: &ObservationModel,
     emit_times: &[f64],
@@ -141,8 +141,8 @@ pub(crate) fn plan_emission(
     Ok(EmitPlan { columns, scored, rows })
 }
 
-/// The stream's declared temporal anchor: exactly one of a `: time` column or a
-/// window pair (the compiler enforces this; the error here guards a malformed
+/// The stream's declared temporal columns: exactly one of a `: time` column or
+/// a window pair (the compiler enforces this; the error here guards a malformed
 /// IR).
 fn temporal_columns(obs: &ObservationModel) -> Result<TemporalColumns, String> {
     let start = crate::pfilter::column_with_role(obs, &ColumnRole::WindowStart);
@@ -238,15 +238,16 @@ mod tests {
     }
 
     /// gh#656 × gh#833: `--emit-every 7` on a stream declared
-    /// `closing_at(day, 1 'days)` re-spaces the rows AND re-widens each window
-    /// to the week it now spans — weekly totals, not one day in seven. The
-    /// anchor is kept: a `closing_at` row still closes at its label.
+    /// `closing_at(day, 1 'days)` re-spaces the rows _and_ re-widens each
+    /// window to the week it now spans — weekly totals, not one day in seven.
+    /// Where the label sits is kept: a `closing_at` row still closes at its
+    /// label.
     #[test]
     fn an_emit_every_override_rewidens_a_uniform_window_to_its_cadence() {
         let s = stream(incidence(), Some(Covers::Until { offset: 0.0, span: 1.0 }), time_cols());
         let plan = plan_emission(&s, &[0.0, 7.0, 14.0], 0.0, 14.0, Some(7.0)).unwrap();
         assert_eq!(plan.coverages(), vec![(7.0, iv(0.0, 7.0)), (14.0, iv(7.0, 14.0))]);
-        // `day(t)`: the anchor at the label's start is kept too.
+        // `day(t)`: a row still opens at its label.
         let s = stream(incidence(), Some(Covers::From { offset: 0.0, span: 1.0 }), time_cols());
         let plan = plan_emission(&s, &[0.0, 7.0], 0.0, 14.0, Some(7.0)).unwrap();
         assert_eq!(plan.coverages(), vec![(0.0, iv(0.0, 7.0)), (7.0, iv(7.0, 14.0))]);

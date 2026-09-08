@@ -419,9 +419,9 @@ type obs_col_role =
   | ColDim   of string
   | ColValue of param_type
   (* gh#833: the opening / closing boundary of the period this row covers.
-     Declared as a PAIR and mutually exclusive with [ColTime] — a stream
-     names exactly one temporal anchor, either a time column or a window
-     pair. [ColWindowStop] doubles as the stream's fit time source. *)
+     Declared as a pair and mutually exclusive with [ColTime] — a stream
+     names exactly one set of temporal columns, either a time column or a
+     window pair. [ColWindowStop] doubles as the stream's fit time source. *)
   | ColWindowStart
   | ColWindowStop
 

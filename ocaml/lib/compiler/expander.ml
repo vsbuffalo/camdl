@@ -8048,8 +8048,9 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
     end else if windowed then begin
       Diagnostics.error ctx.diags ~code:"E347" ~loc:cv_loc
         ~message:(Printf.sprintf
-          "observation '%s' declares BOTH `covers` and a \
-           `window_start`/`window_stop` pair" od.oname)
+          "observation '%s' declares `covers` and a \
+           `window_start`/`window_stop` pair; it may have only one of them"
+          od.oname)
         ~hint:"the window columns are already the declaration — keep one or \
                the other, not both" ();
       None
@@ -8183,19 +8184,19 @@ let expand_observations ctx =
        coherence checks (E276/E277), which would be spurious noise. *)
     let has_real_measurement = od.omeasurement <> None && meas_v.om_scored <> "" in
     let () =
-      (* Exactly one TEMPORAL ANCHOR — either a `: time` column or a complete
-         `window_start`/`window_stop` pair, never both and never half a pair
-         (gh#833). The single-time-column rule generalizes rather than relaxes:
-         a stream still names exactly one time axis, but a windowed stream
-         names it as two boundaries. *)
+      (* Exactly one set of temporal columns — either a `: time` column or a
+         complete `window_start`/`window_stop` pair, never both and never half
+         a pair (gh#833). The single-time-column rule generalizes rather than
+         relaxes: a stream still names exactly one time axis, but a windowed
+         stream names it as two boundaries. *)
       let time_cols = List.filter (fun c -> c.oc_role = ColTime) columns_v in
       let starts = List.filter (fun c -> c.oc_role = ColWindowStart) columns_v in
       let stops  = List.filter (fun c -> c.oc_role = ColWindowStop) columns_v in
       let n_time = List.length time_cols in
       let n_start = List.length starts and n_stop = List.length stops in
       (match n_time, n_start, n_stop with
-       | 1, 0, 0 -> ()                 (* time-anchored *)
-       | 0, 1, 1 -> ()                 (* window-anchored *)
+       | 1, 0, 0 -> ()                 (* a time column *)
+       | 0, 1, 1 -> ()                 (* a window pair *)
        | 0, 0, 0 when od.ocolumns <> None ->
          Diagnostics.error ctx.diags ~code:"E275" ~loc:od_loc
            ~message:(Printf.sprintf
@@ -8220,10 +8221,11 @@ let expand_observations ctx =
        | _ ->
          Diagnostics.error ctx.diags ~code:"E347" ~loc:od_loc
            ~message:(Printf.sprintf
-             "observation '%s': `columns { }` declares more than one temporal \
-              anchor (%d `: time`, %d `window_start`, %d `window_stop`)"
+             "observation '%s': `columns { }` declares more than one set of \
+              temporal columns (%d `: time`, %d `window_start`, %d \
+              `window_stop`)"
              od.oname n_time n_start n_stop)
-           ~hint:"a stream anchors its rows in time exactly once: either a \
+           ~hint:"a stream places its rows in time exactly once: either a \
                   `: time` column, or a `window_start`/`window_stop` pair" ());
       (* the `~` LHS (scored) must be a declared value column *)
       let value_cols = List.filter_map (fun c ->

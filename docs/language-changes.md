@@ -132,13 +132,14 @@ refused, naming both windows and the uncovered span; write the unobserved row as
 span belongs to no row and is discarded, the same as an `NA` row closing that
 bin unscored.
 
-**Diagnostics.** `E347` — more than one temporal anchor (a `: time` column and
-window columns together, half a window pair, `covers` alongside window columns),
-or `covers` naming a column that is not the stream's time column. `E348` —
-`covers` or window columns on a stream whose `projected` reads an instant; a
-state reading has no window. `E349` — a malformed form: unknown name, `day(...)`
-given a width, `starting_on`/`ending_on` missing one, or a width naming a data
-column rather than a duration (use the window columns for that).
+**Diagnostics.** `E347` — more than one set of temporal columns (a `: time`
+column and window columns together, half a window pair, `covers` alongside
+window columns), or `covers` naming a column that is not the stream's time
+column. `E348` — `covers` or window columns on a stream whose `projected` reads
+an instant; a state reading has no window. `E349` — a malformed form: unknown
+name, `day(...)` given a width, `starting_on`/`ending_on` missing one, or a
+width naming a data column rather than a duration (use the window columns for
+that).
 
 ---
 

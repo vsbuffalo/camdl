@@ -206,7 +206,7 @@ pub enum ObservationSchedule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ColumnRole {
-    /// The time axis (exactly one per stream) — the FIT time source.
+    /// The time axis (exactly one per stream) — the fit time source.
     Time,
     /// A model dimension; values bind to that dimension's levels.
     Dim(String),
@@ -215,12 +215,15 @@ pub enum ColumnRole {
     Value(ParamKind),
     /// The opening boundary of the period this row covers (gh#833). Paired
     /// with exactly one [`ColumnRole::WindowStop`], and mutually exclusive
-    /// with [`ColumnRole::Time`]: a stream declares exactly ONE temporal
-    /// anchor, either a time column or a window pair.
+    /// with [`ColumnRole::Time`]: a stream declares exactly one set of
+    /// temporal columns, either a time column or a window pair.
     WindowStart,
     /// The closing boundary of the period this row covers. Also the stream's
     /// fit time source, so every downstream "observation time" consumer keeps
-    /// the position it has today.
+    /// the position it has today. That is a position on the time axis only: it
+    /// does not assert when the observation was reported, and camdl has no
+    /// report-date concept — reporting delay is modelled, never read from a
+    /// file's temporal columns.
     WindowStop,
 }
 
