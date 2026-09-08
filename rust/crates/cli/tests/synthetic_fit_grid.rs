@@ -506,16 +506,24 @@ cooling    = 0.9
     let stage = cas_stage_leaf(&out.join("fits"), "mle");
     let starts_text = std::fs::read_to_string(stage.join("chain_starts.tsv"))
         .expect("chain_starts.tsv must exist");
-    let starts: Vec<Vec<f64>> = starts_text.lines()
-        .filter(|l| !l.starts_with('#') && !l.starts_with("chain"))
-        .map(|l| l.split('\t').skip(1)  // skip chain id
-             .map(|s| s.parse::<f64>().unwrap()).collect())
+    let mut body = starts_text.lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let cols: Vec<&str> = body.next().expect("header row").split('\t').collect();
+    let beta_col = cols.iter().position(|c| *c == "beta")
+        .unwrap_or_else(|| panic!("no beta column in {cols:?}"));
+    let starts: Vec<Vec<&str>> = body
+        .map(|l| l.split('\t').collect())
         .collect();
     assert_eq!(starts.len(), 8, "need 8 chain rows");
 
     // Assertion 1: chain_starts.tsv shows genuine spread, not 8 copies
-    // of the seeded start. Take the beta column (index 0).
-    let betas: Vec<f64> = starts.iter().map(|r| r[0]).collect();
+    // of the seeded start. Read beta by its header position — the file
+    // leads with provenance columns (`chain_id`, `source`), so a fixed
+    // offset would silently read the wrong column.
+    let betas: Vec<f64> = starts.iter()
+        .map(|r| r[beta_col].parse::<f64>()
+            .unwrap_or_else(|_| panic!("non-numeric beta {:?} in {r:?}", r[beta_col])))
+        .collect();
     let (min_b, max_b) = betas.iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY),
               |(lo, hi), &x| (lo.min(x), hi.max(x)));

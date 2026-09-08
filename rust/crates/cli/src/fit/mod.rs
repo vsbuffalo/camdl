@@ -1527,16 +1527,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &chain_results.loglik_eval, &run_config.estimated_params,
                     &param_names, &run_config.base_params, &run_config.compiled,
                 ).unwrap_or_else(|e| eprintln!("warning: {}", e));
-                // Pre-filter starts — records whatever per-chain
-                // initial points IF2 actually received. With the
-                // per-chain random-start builder above, this file now
-                // shows genuine independence across chains when
-                // `starts_from` is None.
-                runner::write_chain_starts(
-                    &stage_dir.to_string_lossy(),
-                    per_chain_params.as_deref(),
-                    &run_config.estimated_params, *chains,
-                ).unwrap_or_else(|e| eprintln!("warning: {}", e));
                 runner::write_diagnostics(&stage_dir.to_string_lossy(), &chain_results.results)
                     .unwrap_or_else(|e| eprintln!("warning: {}", e));
 

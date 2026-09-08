@@ -1235,6 +1235,15 @@ pub fn format_chain_init_source(
 /// caller supplies `survey_top_k` so each chain's source carries
 /// `:rank-N` (1-indexed).
 ///
+/// The values are captured before the sampler runs, which is what makes
+/// the file worth having: it answers "did the starts span the declared
+/// bounds?" and "did the chains collapse into one basin immediately?",
+/// and the per-chain trace cannot. An IF2 stage perturbs its parameter
+/// swarm before the first filter pass (`sim::inference::if2`, the `t=0`
+/// perturbation), so iteration 0 of `chain_<chain_id + 1>/parameter_traces.tsv`
+/// already shows moved values. The file header says so, because a
+/// reader who has only the TSV would otherwise pair the two row-by-row.
+///
 /// `method` must be the mode that *supplied* the values, which is not
 /// always the one the stage declared: a stage chained off another with
 /// `init_mle = "<stage>"` takes the upstream point estimate and never
@@ -1260,6 +1269,14 @@ pub fn write_chain_starts_tsv(
         if let Some(res) = survey_top_k {
             writeln!(f, "# survey_hash={}", res.survey_hash)?;
         }
+        // What the numbers are, for a reader holding only this file.
+        writeln!(f, "# each chain's starting point, captured before the \
+            sampler ran; an IF2 stage")?;
+        writeln!(f, "# perturbs its swarm before the first filter pass, so \
+            a per-chain trace opens on")?;
+        writeln!(f, "# values that have already moved.")?;
+        writeln!(f, "# chain_id is 0-based; that chain's outputs are under \
+            chain_<chain_id + 1>/.")?;
         // Header row.
         let mut cols = vec!["chain_id".to_string(), "source".to_string()];
         for spec in base { cols.push(spec.name.clone()); }

@@ -3114,50 +3114,6 @@ pub fn write_run_root_final_params(
     Ok(())
 }
 
-/// Write `chain_starts.tsv` at the stage root — one row per chain
-/// with the pre-filter starting values of every estimated parameter.
-///
-/// Diagnostic use: "did the random starts span the declared bounds?"
-/// and "did all chains collapse to the same basin in one filter
-/// pass?" — both questions that `parameter_traces.tsv` can't answer
-/// because iteration 0 there is post-first-filter (already perturbed).
-/// See the header in `chain_{N}/parameter_traces.tsv`.
-///
-/// `per_chain_params` is the same slice that `run_one_chain` receives:
-/// `Some(&[Vec<EstimatedParam>])` when scout supplies per-chain random
-/// starts, `None` when every chain starts from `config.estimated_params`.
-pub fn write_chain_starts(
-    dir: &str,
-    per_chain_params: Option<&[Vec<EstimatedParam>]>,
-    fallback: &[EstimatedParam],
-    n_chains: usize,
-) -> Result<(), String> {
-    use std::io::Write;
-    let path = format!("{}/chain_starts.tsv", dir);
-    let mut f = std::fs::File::create(&path)
-        .map_err(|e| format!("cannot write {}: {}", path, e))?;
-    writeln!(f, "# {}", crate::version::VERSION).unwrap();
-    writeln!(f, "# pre-filter starting values per chain (before any IF2 perturbation).").unwrap();
-    writeln!(f, "# pairs row-by-row with chain_{{chain}}/parameter_traces.tsv iter-0 rows").unwrap();
-    writeln!(f, "# to visualise how far chains moved on the first filter pass.").unwrap();
-    write!(f, "chain").unwrap();
-    for spec in fallback { write!(f, "\t{}", spec.name).unwrap(); }
-    writeln!(f).unwrap();
-
-    for chain_id in 0..n_chains {
-        let specs: &[EstimatedParam] = match per_chain_params {
-            Some(pcp) => &pcp[chain_id],
-            None      => fallback,
-        };
-        write!(f, "{}", chain_id + 1).unwrap();
-        for spec in specs {
-            write!(f, "\t{}", format_param_value(spec.initial)).unwrap();
-        }
-        writeln!(f).unwrap();
-    }
-    Ok(())
-}
-
 /// Format a parameter value with appropriate precision.
 /// Shared by chain output and provenance output.
 pub fn format_param_value(v: f64) -> String {

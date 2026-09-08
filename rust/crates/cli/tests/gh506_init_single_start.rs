@@ -55,20 +55,19 @@ fn find_chain_starts(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Parse `chain_starts.tsv` into (column names, one row of values per chain).
-/// Comment lines (`#`) carry provenance, not data.
-fn parse_chain_starts(path: &Path) -> (Vec<String>, Vec<Vec<f64>>) {
+/// Parse `chain_starts.tsv` into (column names, one row of raw fields per
+/// chain). Comment lines (`#`) carry provenance, not data. Fields stay as
+/// strings and rows keep every column, so a caller indexes a row with the
+/// header position of the column it wants and no offset can drift.
+fn parse_chain_starts(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
     let txt = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = txt.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
     let header: Vec<String> = lines.next().expect("header row")
         .split('\t').map(|s| s.to_string()).collect();
-    let rows = lines.map(|l| {
-        l.split('\t').skip(1) // drop the `chain` column
-            .map(|c| c.parse::<f64>()
-                .unwrap_or_else(|_| panic!("non-numeric start {c:?} in {l:?}")))
-            .collect()
-    }).collect();
+    let rows = lines
+        .map(|l| l.split('\t').map(|s| s.to_string()).collect())
+        .collect();
     (header, rows)
 }
 
@@ -147,7 +146,8 @@ dt = 1.0
         .unwrap_or_else(|| panic!("no beta column in {header:?}"));
     assert!(!rows.is_empty(), "chain_starts.tsv has no chain rows");
     for (i, row) in rows.iter().enumerate() {
-        let got = row[beta_col - 1]; // header includes `chain`, rows dropped it
+        let got: f64 = row[beta_col].parse()
+            .unwrap_or_else(|_| panic!("non-numeric beta {:?} in {row:?}", row[beta_col]));
         assert!((got - 0.123).abs() < 1e-9,
             "chain {} started at beta={got}, not the declared [estimate].start \
              of 0.123. A value inside [0.01, 0.5] but not equal to 0.123 means \
