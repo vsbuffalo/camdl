@@ -56,7 +56,7 @@ never as a pass; optimizer-only runs are exempt because they report no R̂.
 
 Workflow steps become verbs under `fit`, the namespace of everything that takes
 a `fit.toml`: `camdl fit preflight` (the observation design, the filter budget,
-the horizon check, and the prior predictive on the data's own windows —
+the forecast horizon, and the prior predictive on the data's own windows —
 everything a modeller should know before spending the compute; needs only the
 problem), `camdl fit recovery` (fixed-truth parameter recovery over replicates,
 the existing `[synthetic]` block with its missing roll-up), and a reserved
@@ -625,18 +625,16 @@ of the problem and the method, no simulation — and are the part that answers
 - _The budget._ `particles × scored points × chains × sweeps` for the method as
   configured, and a wall-time estimate from a timed one-sweep probe on one
   chain.
-- _The horizon check._ The rows `fit predict` will emit are a pure function of
-  what is bound: the observed labels, the trajectory's output schedule, and the
-  stream's `covers`. Preflight builds them the way predict does —
-  `forecast_times` continues the modal observed gap across the output schedule,
-  `leaf_row_coverages` assigns each label its period — and checks every
-  boundary, start and stop, against the output schedule and `simulate.to`
-  without a trajectory. The same arithmetic, moved from after the sampling to
-  before it. A weekly model whose last forecast row closes one day past its
-  horizon fails here in seconds, naming the row, the boundary, and the two fixes
-  (extend the horizon by a day, or drop the last forecast row), which is the
-  six-hour case in §1.5. A windowed stream's tail closes at its label and cannot
-  fail this check; a uniform form with a closing offset can.
+- _The forecast horizon._ The rows `fit predict` will emit are a pure function
+  of what is bound: the observed labels, the output schedule, and the stream's
+  `covers`. Preflight builds them the way predict does — `forecast_times`
+  continues the modal observed gap, `leaf_row_coverages` assigns each label its
+  period — and reports, per stream, how many forecast rows there are and the day
+  the last one closes. When that day lies past `simulate.to`, as it does for a
+  week-ending window whose label is the horizon itself, the block says the
+  integration will run to that day. Nothing is refused: the declared `to` is
+  what the modeller asked to forecast, and closing the last window is camdl's
+  arithmetic, not theirs (§3.5, `fit predict`).
 
 The fourth block is the prior predictive. It draws `n` parameter vectors from
 the priors with the existing precedence (fit-toml prior, then the model's `~`
@@ -710,6 +708,17 @@ that generated it with no hand step between generation and fit. That property �
 generate, write, load, fit, with the same loader on both sides — is what makes
 `fit recovery` a test of the model rather than of a transcription.
 
+One config rule stands in the way and is relaxed for this verb. Today `[data]`
+and `[synthetic]` are mutually exclusive (`FitConfigV2::validate`), so a
+`[synthetic]` config binds no data and can only simulate on the declared
+`emit_schedule`. Recovery on the real design needs both halves at once: `[data]`
+supplies the observation design — the rows, their periods, the holes, the
+covariate columns — and `[synthetic]` (or `--truth`) supplies the parameter
+values; the observed _values_ in `[data]` are read for their shape and never
+scored. The problem half therefore admits `[data]` beside `[synthetic]`, and
+`fit run` on such a file fits the real data as it always did while
+`fit recovery` fits the replicates (§8, item 19).
+
 **`fit calibration`** is a reserved slot: the verb name and the artifact
 (`ranks.tsv`, one row per simulation and parameter, the rank of the drawn truth
 among the posterior draws) are fixed here so nothing else takes them, and the
@@ -736,7 +745,15 @@ is print the one command that would make one. A nudge is not a verdict.
 Two rules from §1.5 attach here. `fit predict` keeps reusing the bound rows' own
 periods for the observed prefix and the declaration's continuation for the tail,
 as it does today; the proposal changes nothing about which windows a predictive
-row covers, only when a bad one is caught. And when the free-forward tail fails
+row covers. What changes is where the integration stops. Predict runs each draw
+to the close of the last forecast window rather than to `simulate.to`, and
+records that close as an output time, so a row whose window ends past the
+declared horizon — by up to one span: a day under `ending_on(time, 7 'days)`, a
+week under `starting_on(time, 7 'days)` — is scored instead of refused; the
+summary says to what day and why. The declared `to` still means what it says —
+how far to forecast — and the model is unchanged, so nothing re-keys. This is
+the six-hour case in §1.5: the fit was never at fault, and predict now closes
+the window it was asked for. And when the free-forward tail fails
 deterministically — a boundary off the schedule, an unresolvable horizon — the
 one-step artifact, which is data-conditioned and never reaches the horizon, is
 written, the failure is recorded in `report.json` under `failures`, and the exit
@@ -930,12 +947,12 @@ strictly more honest than before it.
    summary header, and `RhatBand::NotAssessed` for point starts; the `run_id`
    stability pins; the path-shape contract; the four `test-cli-docs` documents.
    This is the re-keying increment.
-2. **`fit preflight`.** The three static blocks (design, budget, horizon check)
-   land first: they are functions of the problem, the method, and the bound
-   observation times, built on `forecast_times` and `leaf_row_coverages` as they
-   stand. The prior predictive block lands next for streams whose likelihood
-   reads no data column, on the loader's `StreamTimes` and the existing
-   emitters; for streams with covariates it waits on gh#829
+2. **`fit preflight`.** The three static blocks (design, budget, forecast
+   horizon) land first: they are functions of the problem, the method, and the
+   bound observation times, built on `forecast_times` and `leaf_row_coverages`
+   as they stand. The prior predictive block lands next for streams whose
+   likelihood reads no data column, on the loader's `StreamTimes` and the
+   existing emitters; for streams with covariates it waits on gh#829
    (covariate-conditioned streams simulate as zero) and the covariate half of
    gh#830 (its header half landed with gh#833). Lands the `CheckReport` type,
    the `preflight` store kind, the `fit run` pre-flight with `--no-preflight`,
@@ -999,8 +1016,8 @@ wrong), _leaning_ (a reasonable person could choose the other way), _need-you_
    deterministic checks before sampling, stored as its own kind, with
    `--no-preflight` recorded** (§3.5). _Ruled 2026-09-09._ The case against is
    cost on very large models; the case for is that an unrun check is the status
-   quo the design exists to end, and the horizon check alone would have saved a
-   six-hour fit.
+   quo the design exists to end, and the forecast-horizon rule in §3.5 is what
+   would have saved a six-hour fit.
 6. **No separate posterior-predictive verb; `fit predict` is the posterior
    predictive and gains the failure rules and the `in_sample | held_out` label**
    (§3.5). _Ruled 2026-09-09._ One artifact family, two verbs (`fit preflight`
@@ -1010,12 +1027,11 @@ wrong), _leaning_ (a reasonable person could choose the other way), _need-you_
    §3.6.** Recommend as written. _Solid._ The trivial case is already `&&` over
    memoized verbs; the non-trivial case is a scheduler.
 8. **The failure/frequency line: deterministic facts stop the check, counts are
-   printed, nothing passes** (§3.5). Recommend as written. _Solid on the line._
-   _Need-you_ on one placement: a reported count exceeding the population is
-   classed here as a frequency (the observation family's support includes it);
-   the candidate rule classed it as a failure. Either is implementable; the
-   recommendation is frequency, because a fail on one tail draw of a
-   negative-binomial reporting model would fire on legitimate priors.
+   printed, nothing passes** (§3.5). _Ruled 2026-09-09._ A reported count
+   exceeding the population is a frequency — the observation family's support
+   includes it, and a fail on one tail draw of a negative-binomial reporting
+   model would fire on legitimate priors. A latent state outside `[0, N]` is a
+   deterministic failure.
 9. **Re-key the fit and method levels without bumping `LEVEL_SCHEMA_VERSION`;
    rename the level and drop the ordinal in the same change** (§5). Recommend as
    written. _Leaning._ A schema bump is the greppable form of a deliberate
@@ -1054,6 +1070,21 @@ wrong), _leaning_ (a reasonable person could choose the other way), _need-you_
     gh#829 lands** (§6). _Solid._ The §1.5 model has no covariate streams, the
     blocked case is exactly the one gh#829 names, and refusing a stream with
     covariates by name until then is the honest partial.
+
+18. **`fit predict` integrates each draw to the close of the last forecast
+    window and records that time as an output; no fit-start refusal** (§3.5).
+    _Ruled 2026-09-09._ The modeller asked for a horizon; the extra span a
+    window that closes past its label needs is camdl's bookkeeping. A refusal at
+    fit start was the earlier form; it guarded a failure predict can simply not
+    have.
+
+19. **`[data]` and `[synthetic]` may coexist; `fit recovery` reads the design
+    from the first and the truth from the second** (§3.5). _Solid._ The
+    design-preserving primitive already carries a `Bound` design built from a
+    fit's loaded streams; the exclusion in `FitConfigV2::validate` is the only
+    thing between it and recovery on the real design. Without this, recovery can
+    only simulate on the declared schedule, which is the case gh#831 exists to
+    end.
 
 ---
 
