@@ -12899,6 +12899,54 @@ let test_window_columns_on_a_prevalence_stream_are_rejected () =
     prev      ~ poisson(rate = projected)
   }|})
 
+(* gh#875. E341 refuses a projection that divides one incidence by another and
+   returns a `DerivedExpr (Const 0.0)` placeholder in its place. `lower_covers`
+   used to read that placeholder as a state reading at an instant and fire E348
+   on the same stream, telling the reader to remove a `covers` line that is not
+   the problem while the projection that IS the problem sits above it.
+
+   The projection here is the shape a case-fatality ratio wants — deaths over
+   deaths plus recoveries — which is exactly what E341 refuses today; the test
+   asserts only which diagnostics the modeler sees, so it stays valid whatever
+   E341 later accepts. *)
+let divided_incidence_with_covers = {|
+time_unit = 'days
+compartments { S, I, R, D }
+let N = S + I + R + D
+parameters { beta : rate  gamma : rate  mu : rate  N0 : count  I0 : count }
+observations {
+  cfr {
+    columns       { time : time, deaths : count }
+    covers        = day(time)
+    projected     = incidence(death) / (incidence(death) + incidence(recovery))
+    emit_schedule = every 1 'days
+    deaths        ~ poisson(rate = projected)
+  }
+}
+transitions {
+  infection : S --> I @ beta * S * I / N
+  recovery  : I --> R @ gamma * I
+  death     : I --> D @ mu * I
+}
+init { S = N0 - I0  I = I0  R = 0  D = 0 }
+simulate { from = 0 'days  to = 10 'days }
+|}
+
+let test_e348_does_not_pile_on_after_e341 () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"test_err" divided_incidence_with_covers in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ ->
+    Alcotest.fail "a divided projection must still be refused by E341"
+  | Error e ->
+    if not (contains_substring ~needle:"\"code\":\"E341\"" e) then
+      Alcotest.failf "expected E341 on the projection, got: %s" e;
+    if contains_substring ~needle:"\"code\":\"E348\"" e then
+      Alcotest.failf
+        "E348 piled on after E341: the placeholder projection is not an \
+         instant state read, and the `covers` line is not the problem. Got: %s" e
+
 let test_half_a_window_pair_is_rejected () =
   compile_expect_error_code ~code:"E347" ~contains:"window_stop"
     (covers_model_with {|  cases {
@@ -13979,6 +14027,8 @@ let () =
         `Quick test_covers_on_a_prevalence_stream_is_rejected;
       Alcotest.test_case "window columns on a prevalence stream are E348"
         `Quick test_window_columns_on_a_prevalence_stream_are_rejected;
+      Alcotest.test_case "E348 does not pile on after E341 (gh#875)"
+        `Quick test_e348_does_not_pile_on_after_e341;
       Alcotest.test_case "half a window pair is E347"
         `Quick test_half_a_window_pair_is_rejected;
       Alcotest.test_case "a time column and a window pair is E347"

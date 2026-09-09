@@ -7992,16 +7992,29 @@ let projection_accumulates (p : Ir.projection) =
    All calendar arithmetic happens HERE: the four uniform forms collapse to an
    offset and a span, both already in the model's axis units, so the runtime
    never needs to know how long a day is on this axis. `one_day` below is one
-   civil day expressed in axis units — 1.0 on a `'days` axis, 1/7 on `'weeks`. *)
+   civil day expressed in axis units — 1.0 on a `'days` axis, 1/7 on `'weeks`.
+
+   `projection_refused` says E341 already rejected this stream's `projected`,
+   so `projection` is the `DerivedExpr (Const 0.0)` placeholder rather than
+   anything the modeler wrote. *)
 let lower_covers ctx (od : obs_decl) (columns : obs_column list)
-      (projection : Ir.projection) : Ir.covers option =
+      ~(projection_refused : bool) (projection : Ir.projection)
+    : Ir.covers option =
   let od_loc = diag_loc_of_ast_ctx ctx od.oloc in
   let accumulates = projection_accumulates projection in
+  (* Is the stream's projection *known* to read state at an instant? A refused
+     projection only looks like one, because the placeholder E341 leaves behind
+     is a constant — so E348 would tell the reader to drop a `covers` line that
+     is not the problem, on top of the error that is (gh#875). This is E273's
+     convention: an error's own placeholder does not feed the checks downstream
+     of it. The covers form's own checks (E347/E349) never read the projection,
+     so they still run. *)
+  let reads_an_instant = (not accumulates) && not projection_refused in
   let has_role r = List.exists (fun c -> c.oc_role = r) columns in
   let windowed = has_role ColWindowStart && has_role ColWindowStop in
   (* A window pair on a stream that reads an instant: the columns ARE the
      declaration, so this is the same error as a `covers =` line there. *)
-  if windowed && not accumulates then begin
+  if windowed && reads_an_instant then begin
     Diagnostics.error ctx.diags ~code:"E348" ~loc:od_loc
       ~message:(Printf.sprintf
         "observation '%s': `window_start`/`window_stop` columns declare the \
@@ -8037,7 +8050,7 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
   | None -> None
   | Some cv ->
     let cv_loc = diag_loc_of_ast_ctx ctx cv.ocv_loc in
-    if not accumulates then begin
+    if reads_an_instant then begin
       Diagnostics.error ctx.diags ~code:"E348" ~loc:cv_loc
         ~message:(Printf.sprintf
           "observation '%s': `covers` states the period each row covers, but \
@@ -8540,6 +8553,12 @@ let expand_observations ctx =
       | ERange (a, b)         -> mentions_incidence a || mentions_incidence b
       | _                     -> false
     in
+    (* Set at [incidence_misuse]'s one emit site, read by [lower_covers]: the
+       projection it returns is a placeholder, not the modeler's expression, so
+       nothing downstream may classify the stream from it (gh#875). A `ref`
+       rather than a re-test of the same condition, so the flag cannot drift
+       from the diagnostic it stands for. *)
+    let projection_refused = ref false in
     (* An expression that mentions `incidence` but is not a unit-weighted sum of
        flows. Names what IS supported and both workarounds, rather than letting
        it fall through to E100. *)
@@ -8557,6 +8576,7 @@ let expand_observations ctx =
                weight inside the projection is not yet supported"
         ();
       ignore e;
+      projection_refused := true;
       Ir.DerivedExpr (Ir.Const 0.0)
     in
     (* gh#678. A union of flows must be DISJOINT — each event is counted once.
@@ -9008,7 +9028,8 @@ let expand_observations ctx =
       Ir.scored        = meas_v.om_scored;
       Ir.emit_schedule = emit_schedule;
       Ir.stratum;
-      Ir.covers        = lower_covers ctx od columns_v projection;
+      Ir.covers        = lower_covers ctx od columns_v
+                           ~projection_refused:!projection_refused projection;
       Ir.projection;
       Ir.projection_state_grad = [];
       Ir.likelihood;
