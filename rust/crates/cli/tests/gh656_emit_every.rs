@@ -681,16 +681,18 @@ sim_seeds = [1]
         );
     }
 
-    // The generated datasets: one per cadence, with the cadence's own times.
+    // The generated datasets: one `ds_NN<tag>/` directory per cadence, each
+    // holding one file per stream (gh#831).
     let mut generated: Vec<PathBuf> = Vec::new();
     let mut stack = vec![out_dir.clone()];
     while let Some(d) = stack.pop() {
         if d.file_name().map(|n| n == "data").unwrap_or(false)
             && d.parent().map(|p| p.ends_with("synthetic")).unwrap_or(false)
         {
-            for f in std::fs::read_dir(&d).unwrap().flatten() {
-                if f.path().extension().map(|e| e == "tsv").unwrap_or(false) {
-                    generated.push(f.path());
+            for ds in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = ds.path().join("prevalent.tsv");
+                if p.is_file() {
+                    generated.push(p);
                 }
             }
         }
@@ -702,18 +704,18 @@ sim_seeds = [1]
             }
         }
     }
-    // The wide file carries the union of both streams' times — daily either
-    // way, since `cases` stays daily — with `NA` where a stream has no row
-    // (`cases` at the origin, whose period precedes the run; `prevalent` on
-    // the six days a week it is not emitted under the weekly override). Same
-    // row count, different bytes: the data genuinely changed.
+    // `prevalent` is the stream the override names, and its own file carries
+    // only its own rows: 29 daily readings (t = 0…28 inclusive) under
+    // `prevalent=1`, and 5 (0, 7, 14, 21, 28) under `prevalent=7`. The wide
+    // file this replaced padded the sparser cadence with `NA` on a shared time
+    // column, which is why both cadences used to have 29 rows.
     let mut row_counts: Vec<usize> =
         generated.iter().map(|p| obs_times(p).len()).collect();
     row_counts.sort();
     assert_eq!(
         row_counts,
-        vec![29, 29],
-        "each cadence must generate its own dataset over the daily union axis — \
+        vec![5, 29],
+        "each cadence must generate its own dataset at its own times — \
          got {generated:?}"
     );
     assert_eq!(generated.len(), 2, "one dataset per cadence: {generated:?}");

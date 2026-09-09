@@ -1890,8 +1890,6 @@ fn write_obs_into_cas(
     // trajectory leaf instead of one overwriting the other.
     emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<(), String> {
-    use std::io::Write;
-
     if model.observations.is_empty() {
         return Ok(());
     }
@@ -1953,38 +1951,16 @@ fn write_obs_into_cas(
         let rows = plan.coverages();
         let projected = crate::project_coverages(traj, obs_ir, model, &rows)?;
 
-        let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
-        let mut out = std::io::BufWriter::new(
-            std::fs::File::create(&path)
-                .map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
-        );
+        let draws: Vec<f64> = rows.iter().enumerate()
+            .map(|(ti, &(obs_t, _))| {
+                let snap = crate::snap_at(traj, obs_t);
+                sampler(projected[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng)
+            })
+            .collect();
         // The declared columns, so the file re-loads under its own model
-        // (gh#833, gh#830).
-        match &plan.columns {
-            crate::obs_emit::TemporalColumns::Time(t) => {
-                writeln!(out, "{t}\t{}", plan.scored).map_err(|e| e.to_string())?;
-            }
-            crate::obs_emit::TemporalColumns::Window { start, stop } => {
-                writeln!(out, "{start}\t{stop}\t{}", plan.scored).map_err(|e| e.to_string())?;
-            }
-        }
-        for (ti, &(obs_t, coverage)) in rows.iter().enumerate() {
-            let snap = crate::snap_at(traj, obs_t);
-            let draw = sampler(projected[ti], obs_t, &snap.int_state.counts, &[], &mut obs_rng);
-            match (&plan.columns, coverage) {
-                (crate::obs_emit::TemporalColumns::Window { .. },
-                 sim::inference::Coverage::Interval { start, stop }) => {
-                    write!(out, "{start}\t{stop}").map_err(|e| e.to_string())?;
-                }
-                _ => write!(out, "{obs_t}").map_err(|e| e.to_string())?,
-            }
-            if draw == draw.round() && draw.abs() < 1e15 {
-                writeln!(out, "\t{}", draw as i64).map_err(|e| e.to_string())?;
-            } else {
-                writeln!(out, "\t{:.6}", draw).map_err(|e| e.to_string())?;
-            }
-        }
-        out.flush().map_err(|e| e.to_string())?;
+        // (gh#833, gh#830) — the same writer every simulated dataset uses.
+        let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
+        crate::obs_emit::write_stream_file(&path, plan, &draws)?;
         stream_names.push(obs_ir.name.clone());
     }
 

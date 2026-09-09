@@ -1,24 +1,48 @@
-//! What `simulate --obs` writes for one observation stream: which rows, under
+//! What a simulated observation file carries for one stream: which rows, under
 //! which temporal columns, each drawn over which period (gh#833, ruling 3 of
-//! the observation-time proposal).
+//! the observation-time proposal), and — for a dataset simulated on a fit's own
+//! observation design — which rows are holes (gh#831).
 //!
 //! The emitter follows the stream's own declaration, so the file it writes is
-//! the file the loader reads back. The label is the emit-schedule time; the
-//! value is the flow over whatever period the stream's `covers` assigns to
-//! that label — the same arithmetic the loader applies to a label it reads
-//! (`Covers::period_of`) — and a row whose period does not lie within the run
-//! is not written, because the run never simulated it. A stream declared with
-//! `window_start`/`window_stop` gets contiguous windows closing at the emit
-//! times, written under the declared column names.
+//! the file the loader reads back. There are two ways a stream's rows are
+//! fixed, and they meet in one [`EmitPlan`], one writer and one sampler:
 //!
-//! One consequence is visible: under `closing_at` with a schedule starting at
-//! `t_start`, the first emit time's period `[t_start − Δ, t_start)` falls
-//! outside the run and is dropped — a row nothing could score, so no likelihood
-//! moves. An accumulating stream whose IR carries no declaration has no reading
-//! to write under and is refused (the compiler never produces one, E350).
+//! - **From the model's declaration** ([`plan_emission`]), for a run with no
+//!   data bound. The label is the emit-schedule time; the value is the flow
+//!   over whatever period the stream's `covers` assigns to that label — the
+//!   same arithmetic the loader applies to a label it reads
+//!   (`Covers::period_of`) — and a row whose period does not lie within the run
+//!   is not written, because the run never simulated it. A stream declared with
+//!   `window_start`/`window_stop` gets contiguous windows closing at the emit
+//!   times, written under the declared column names.
+//!
+//!   One consequence is visible: under `closing_at` with a schedule starting at
+//!   `t_start`, the first emit time's period `[t_start − Δ, t_start)` falls
+//!   outside the run and is dropped — a row nothing could score, so no
+//!   likelihood moves. An accumulating stream whose IR carries no declaration
+//!   has no reading to write under and is refused (the compiler never produces
+//!   one, E350).
+//!
+//! - **From a fit's bound data** ([`plan_bound_rows`]), the design-preserving
+//!   case gh#831 asks for. The rows are the ones the loader gave the fit: each
+//!   observed label, each row's own period — including per-row
+//!   `window_start`/`window_stop` widths the model has no rule to generate —
+//!   and each `NA` hole, which stays a row carrying its period and no value. A
+//!   dataset drawn on this design carries exactly the information the real one
+//!   does, which is the property the simulation-based self-consistency test
+//!   depends on: simulating on a regular grid would give the synthetic fit more
+//!   information than the real fit has.
+//!
+//! [`simulate_dataset`] runs the forward model once and writes the dataset
+//! either way.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ir::observation::{ColumnRole, Covers, ObservationModel, TemporalKind};
-use sim::inference::Coverage;
+use sim::compiled_model::CompiledModel;
+use sim::inference::{Coverage, ObsCell, StreamTimes};
+use sim::rng::StatefulRng;
 
 /// The temporal column(s) an emitted file carries for a stream — the ones the
 /// stream declared in `columns { }`, so the file re-loads under its own model.
@@ -30,15 +54,22 @@ pub(crate) enum TemporalColumns {
     Window { start: String, stop: String },
 }
 
-/// One row the emitter writes: what its temporal column(s) say, and what the
-/// value is drawn over.
+/// One row the emitter writes: what its temporal column(s) say, what the
+/// value is drawn over, and whether the row carries a value at all.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EmitRow {
-    /// The `: time` column's value — the emit-schedule time. For a windowed
-    /// stream this is the window's stop; the start is in `coverage`.
+    /// The `: time` column's value — the emit-schedule time, or the bound
+    /// row's own label. For a windowed stream this is the window's stop; the
+    /// start is in `coverage`.
     pub label: f64,
     /// An instant at `label`, or the flow over `[start, stop)`.
     pub coverage: Coverage,
+    /// `false` for a row the design has as a hole: its period is written and
+    /// its value is the loader's `NA` token. Dropping the row instead would
+    /// hand the next row a wider window than the fit sees, so a hole is a row.
+    /// Every row planned from a declaration is observed — only a bound design
+    /// has holes.
+    pub observed: bool,
 }
 
 /// Everything a writer needs to emit one stream's file.
@@ -99,7 +130,7 @@ pub(crate) fn plan_emission(
         // A state read at each instant; a declaration on it does not compile.
         (TemporalKind::Instant, _) => emit_times
             .iter()
-            .map(|&t| EmitRow { label: t, coverage: Coverage::Instant })
+            .map(|&t| EmitRow { label: t, coverage: Coverage::Instant, observed: true })
             .collect(),
         // An accumulating stream with no declaration is an IR the compiler
         // cannot have produced (E350); there is no reading to write under.
@@ -118,7 +149,11 @@ pub(crate) fn plan_emission(
                     ));
                 }
                 if !label_in_run(t) || within_run(start, stop) {
-                    rows.push(EmitRow { label: t, coverage: Coverage::Interval { start, stop } });
+                    rows.push(EmitRow {
+                        label: t,
+                        coverage: Coverage::Interval { start, stop },
+                        observed: true,
+                    });
                 }
             }
             rows
@@ -131,7 +166,11 @@ pub(crate) fn plan_emission(
             let mut rows = Vec::with_capacity(emit_times.len());
             for &t in emit_times {
                 if t > prev + eps || !label_in_run(t) {
-                    rows.push(EmitRow { label: t, coverage: Coverage::Interval { start: prev, stop: t } });
+                    rows.push(EmitRow {
+                        label: t,
+                        coverage: Coverage::Interval { start: prev, stop: t },
+                        observed: true,
+                    });
                 }
                 prev = t;
             }
@@ -139,6 +178,323 @@ pub(crate) fn plan_emission(
         }
     };
     Ok(EmitPlan { columns, scored, rows })
+}
+
+/// Plan the rows a stream's **bound data** occupies — the design-preserving
+/// plan gh#831 asks for.
+///
+/// `times` is the loader's own [`StreamTimes`] for the stream, `labels` the
+/// values of its label column (the `: time` column, or `window_stop`), and
+/// `cells` the loaded values, `None` for an `NA` hole. All three are parallel,
+/// as `resolve_and_load_obs_streams` builds them.
+///
+/// Nothing here is re-derived: the periods are the ones the fit will score
+/// over, per-row window widths included, and a hole stays a row so the file
+/// reloads with the same holes it was drawn on.
+pub(crate) fn plan_bound_rows(
+    obs: &ObservationModel,
+    times: &StreamTimes,
+    labels: &[f64],
+    cells: &[Option<ObsCell>],
+) -> Result<EmitPlan, String> {
+    let columns = temporal_columns(obs)?;
+    if times.len() != labels.len() || times.len() != cells.len() {
+        return Err(format!(
+            "observation stream '{}': the loader bound {} period(s), {} label(s) and \
+             {} cell(s) — they must be one per row",
+            obs.name, times.len(), labels.len(), cells.len()
+        ));
+    }
+    if times.temporal_kind() != obs.projection.temporal_kind() {
+        return Err(format!(
+            "observation stream '{}': the bound rows read {:?} but the stream's \
+             projection reads {:?}",
+            obs.name, times.temporal_kind(), obs.projection.temporal_kind()
+        ));
+    }
+    let rows = (0..times.len())
+        .map(|k| EmitRow {
+            label: labels[k],
+            coverage: times.coverage(k),
+            observed: cells[k].is_some(),
+        })
+        .collect();
+    Ok(EmitPlan { columns, scored: obs.scored.clone(), rows })
+}
+
+/// One stream's rows in a dataset about to be written, and the identities the
+/// writer and the fit config need: the file's stem is the stream's **name**,
+/// and the key it binds to in `[data.observations]` is the stream's **source**.
+#[derive(Debug, Clone)]
+pub(crate) struct StreamPlan {
+    pub name: String,
+    pub source: String,
+    pub plan: EmitPlan,
+}
+
+/// The design a fit's bound data fixes: per stream, the rows the loader gives
+/// the fit (gh#831).
+///
+/// The streams are checked first ([`check_streams_round_trip`]), so
+/// `--design-from` refuses before it spends a forward simulation.
+pub(crate) fn design_from_bound_streams(
+    streams: &[crate::fit::runner::ObsStream],
+) -> Result<Vec<StreamPlan>, String> {
+    let irs: Vec<&ObservationModel> = streams.iter().map(|s| &s.obs_model_ir).collect();
+    check_streams_round_trip(&irs)?;
+    streams.iter()
+        .map(|s| {
+            let obs = &s.obs_model_ir;
+            let labels: Vec<f64> = s.data.iter().map(|o| o.time).collect();
+            Ok(StreamPlan {
+                name: obs.name.clone(),
+                source: obs.source.clone(),
+                plan: plan_bound_rows(obs, &s.times, &labels, &s.cells)?,
+            })
+        })
+        .collect()
+}
+
+/// Refuse, by name, a stream this writer cannot produce the loader's own file
+/// for. Every simulated dataset is meant to be read back — that round trip is
+/// what makes a recovery study a test of the model rather than of a
+/// transcription — so a shape that would not re-load is a stop, not an output.
+///
+/// Three refusals:
+///
+/// - a stream whose likelihood reads a data column — a binomial denominator
+///   `n = tested`, a person-time offset. There is no data file to read it from
+///   when the data is what is being generated, and writing `0` would assert an
+///   observation the run never made (gh#829): a synthetic file claiming zero
+///   positives out of zero tests is scored as a real observation when it is
+///   fitted back.
+/// - a stratified (long-form) stream. Its family's leaves share one `source`
+///   and one long-form file with `: dim` columns; one file per leaf, with no
+///   dim column, is a shape the loader would not route.
+/// - two streams sharing one `source`. The loader binds one file per source, so
+///   two files under one key cannot both be bound — one stream's data would go
+///   unread.
+fn check_streams_round_trip(streams: &[&ObservationModel]) -> Result<(), String> {
+    for obs in streams {
+        let aux = crate::pfilter::stream_aux_columns(obs);
+        if !aux.is_empty() {
+            return Err(format!(
+                "observation stream '{}': its likelihood reads the data column(s) {} — \
+                 values a data file supplies and the model has no term to generate. A \
+                 simulated dataset has no file to read them from, and writing 0 would \
+                 assert an observation the run never made (gh#829), which is then scored \
+                 as real when the file is fitted back.\n  \
+                 Fix: leave this stream out of the design (bind only the streams whose \
+                 likelihood reads the model alone), or wait on gh#829, which lands the \
+                 covariate-conditioned draw.",
+                obs.name,
+                aux.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", "),
+            ));
+        }
+        if crate::pfilter::is_long_form_stream(obs) {
+            return Err(format!(
+                "observation stream '{}' is stratified: it declares `: dim` column(s), so \
+                 its family shares one long-form file per `source` and the loader routes \
+                 each row to a stratum leaf by name. This writer emits one file per \
+                 stream, which that loader would not read back, so the stream is refused \
+                 rather than written in a shape that does not re-load.",
+                obs.name,
+            ));
+        }
+    }
+    for (i, a) in streams.iter().enumerate() {
+        if let Some(b) = streams[..i].iter().find(|b| b.source == a.source) {
+            return Err(format!(
+                "observation streams '{}' and '{}' both read the source '{}', which the \
+                 loader binds to ONE file — so the two files this would write cannot both \
+                 be bound, and one stream's data would go unread. Give each stream its own \
+                 `from` label, or fit them from a file you supply.",
+                b.name, a.name, a.source,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Where a simulated dataset's rows come from.
+pub(crate) enum ObservationDesign<'a> {
+    /// The rows a fit's bound data occupies, from [`design_from_bound_streams`]
+    /// — every observed label, each row's own period, every `NA` hole, exactly
+    /// as the loader bound them (gh#831).
+    Bound(&'a [StreamPlan]),
+    /// The rows the model's own `emit_schedule` declares — the design for a run
+    /// with no data bound. Planned after the run, because the first window
+    /// opens at the run's start. `emit` is the `--emit-every` override (gh#656).
+    Declared { emit: Option<&'a crate::emit_every::EmitEvery> },
+}
+
+/// One stream's generated file.
+#[derive(Debug, Clone)]
+pub(crate) struct StreamFile {
+    /// The `source` this file binds to in `[data.observations]` — the key a
+    /// fit config uses to bind it back.
+    pub source: String,
+    /// The file, named after the stream.
+    pub path: PathBuf,
+}
+
+/// Simulate one dataset and write it as the files the loader reads: one per
+/// stream, under the stream's declared column names, into `out_dir`.
+///
+/// The forward run is `run` — the same [`crate::util::SimRun`] `simulate`
+/// builds, so the parameter, scenario, backend and seed precedence is the one
+/// path. Observation noise is drawn from `run.seed ^ SEED_MIX_OBS`, the
+/// decorrelation constant every emitter shares, so the same nominal seed
+/// produces the same observation bytes whichever verb asked for them.
+///
+/// Every stream is projected before any file is created: a projection that
+/// cannot be read off the trajectory (a period boundary that is not a recorded
+/// output time) then leaves no partial dataset behind.
+pub(crate) fn simulate_dataset(
+    run: &crate::util::SimRun,
+    design: ObservationDesign<'_>,
+    out_dir: &Path,
+) -> Result<Vec<StreamFile>, String> {
+    let (traj, model) = crate::util::run_simulation(run)?;
+    if model.observations.is_empty() {
+        return Err("model has no `observations { }` block — a simulated dataset \
+             requires at least one observation stream in the .camdl file".to_string());
+    }
+
+    let plans: Vec<StreamPlan> = match design {
+        ObservationDesign::Bound(plans) => plans.to_vec(),
+        ObservationDesign::Declared { emit } => {
+            // gh#656: refuse an override that names no stream, names a fit-only
+            // stream, or targets an `at [...]` list — before any data is
+            // written, so a mis-typed label never yields a silently unchanged
+            // dataset.
+            if let Some(e) = emit {
+                e.validate(&model.observations)?;
+            }
+            // A bound design was checked when it was built, before this run;
+            // a declared one is checked here, still before anything is written.
+            check_streams_round_trip(&model.observations.iter().collect::<Vec<_>>())?;
+            let run_start = crate::run_start_of(&traj, &model);
+            model.observations.iter()
+                .map(|obs| {
+                    let times = crate::obs_emit_schedule_times(
+                        obs, None, model.simulation.t_end, emit)?;
+                    let plan = plan_emission(
+                        obs, &times, run_start, model.simulation.t_end,
+                        emit.and_then(|e| e.resolve_for(&obs.source)),
+                    )?;
+                    Ok(StreamPlan {
+                        name: obs.name.clone(),
+                        source: obs.source.clone(),
+                        plan,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        }
+    };
+
+    // The stream's declaration as THIS run resolved it (a scenario can change
+    // the model the trajectory came from), matched to the plan by name.
+    let declaration = |name: &str| -> Result<&ObservationModel, String> {
+        model.observations.iter().find(|o| o.name == name).ok_or_else(|| format!(
+            "the observation design names stream '{name}', which the model this run \
+             simulated does not declare"))
+    };
+
+    // Project every stream before creating any file: a partial dataset beside a
+    // failure is worse than none (gh#589 review).
+    let mut projected: Vec<Vec<f64>> = Vec::with_capacity(plans.len());
+    for sp in &plans {
+        let obs = declaration(&sp.name)?;
+        projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.coverages())?);
+    }
+
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
+
+    let compiled = Arc::new(
+        CompiledModel::new(model.clone()).map_err(|e| format!("compile error: {:?}", e))?,
+    );
+    let params = compiled.default_params.clone();
+    // One observation RNG, consumed in declaration order across streams — the
+    // order every other emitter uses, so a shared seed means shared bytes.
+    let mut obs_rng = StatefulRng::new(run.seed ^ crate::util::SEED_MIX_OBS);
+
+    let mut written = Vec::with_capacity(plans.len());
+    for (sp, projected) in plans.iter().zip(projected) {
+        let obs = declaration(&sp.name)?;
+        let sampler = sim::inference::obs_model::compile_obs_sample_pf(
+            obs, compiled.clone(), &params,
+        );
+        // gh#6: the compartment state at each row's label, so likelihood arg
+        // expressions (`p = projected / N`) resolve. The aux slice is empty
+        // because a stream that needs one is refused above (gh#829).
+        let values: Vec<f64> = sp.plan.rows.iter().enumerate()
+            .map(|(ti, row)| {
+                let snap = crate::snap_at(&traj, row.label);
+                sampler(projected[ti], row.label, &snap.int_state.counts, &[], &mut obs_rng)
+            })
+            .collect();
+        let path = out_dir.join(format!("{}.tsv", sp.name));
+        write_stream_file(&path, &sp.plan, &values)?;
+        written.push(StreamFile { source: sp.source.clone(), path });
+    }
+    Ok(written)
+}
+
+/// Write one stream's file: the declared temporal column(s), then the scored
+/// column, one line per planned row.
+///
+/// `values` is parallel to `plan.rows`. A row the plan marks unobserved is
+/// written under the loader's hole token `NA`, keeping its period — the row
+/// carries the reset the fit's accumulator needs even though it carries no
+/// likelihood term.
+pub(crate) fn write_stream_file(
+    path: &Path,
+    plan: &EmitPlan,
+    values: &[f64],
+) -> Result<(), String> {
+    use std::io::Write;
+    if values.len() != plan.rows.len() {
+        return Err(format!(
+            "{}: {} planned row(s) but {} value(s)",
+            path.display(), plan.rows.len(), values.len()
+        ));
+    }
+    let mut out = std::io::BufWriter::new(
+        std::fs::File::create(path)
+            .map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
+    );
+    let io = |e: std::io::Error| format!("{}: {}", path.display(), e);
+    match &plan.columns {
+        TemporalColumns::Time(t) => writeln!(out, "{t}\t{}", plan.scored).map_err(io)?,
+        TemporalColumns::Window { start, stop } => {
+            writeln!(out, "{start}\t{stop}\t{}", plan.scored).map_err(io)?
+        }
+    }
+    for (row, &value) in plan.rows.iter().zip(values) {
+        match (&plan.columns, row.coverage) {
+            (TemporalColumns::Window { .. }, Coverage::Interval { start, stop }) => {
+                write!(out, "{start}\t{stop}").map_err(io)?
+            }
+            _ => write!(out, "{}", row.label).map_err(io)?,
+        }
+        match row.observed {
+            true => writeln!(out, "\t{}", format_obs_value(value)).map_err(io)?,
+            false => writeln!(out, "\tNA").map_err(io)?,
+        }
+    }
+    out.flush().map_err(io)
+}
+
+/// A drawn observation as the file spells it: an integral value as an integer,
+/// so a count file looks like a count file, and anything else at six decimals.
+pub(crate) fn format_obs_value(v: f64) -> String {
+    if v == v.round() && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        format!("{:.6}", v)
+    }
 }
 
 /// The stream's declared temporal columns: exactly one of a `: time` column or
@@ -274,5 +630,174 @@ mod tests {
         let s = stream(Projection::CurrentPop("I".into()), None, time_cols());
         let plan = plan_emission(&s, &[0.0, 7.0], 0.0, 7.0, None).unwrap();
         assert_eq!(plan.coverages(), vec![(0.0, Coverage::Instant), (7.0, Coverage::Instant)]);
+    }
+
+    // ── The design-preserving simulate (gh#831) ────────────────────────────
+    //
+    // The fixture is the committed `seed_timing` model with its stream's `:
+    // time` column replaced by a `win_start`/`win_stop` pair, so its rows'
+    // periods come from the data file rather than from a uniform rule. The
+    // data file below is what no `covers` form can state: one-day rows, a
+    // three-day row, a two-day row, and an `NA` hole.
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn path(&self) -> &Path { &self.0 }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+    fn tempdir(tag: &str) -> TempDir {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let p = std::env::temp_dir()
+            .join(format!("camdl_design_{}_{}_{}", tag, std::process::id(), ns));
+        std::fs::create_dir_all(&p).unwrap();
+        TempDir(p)
+    }
+
+    fn seed_timing_ir() -> String {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        std::fs::read_to_string(
+            Path::new(&manifest).join("../sim/tests/fixtures/seed_timing.ir.json"),
+        ).unwrap()
+    }
+
+    /// The fixture's one stream re-declared with per-row window columns.
+    fn windowed_model(dir: &Path) -> std::path::PathBuf {
+        let mut v: serde_json::Value = serde_json::from_str(&seed_timing_ir()).unwrap();
+        let obs = v["model"]["observations"][0].as_object_mut().expect("one stream");
+        obs.insert("covers".into(), serde_json::json!({ "kind": "window_columns" }));
+        let cols = obs["columns"].as_array_mut().expect("columns");
+        let t = cols.iter().position(|c| c["role"] == "time").expect("a time column");
+        cols.splice(t..=t, [
+            serde_json::json!({ "name": "win_start", "role": "window_start" }),
+            serde_json::json!({ "name": "win_stop",  "role": "window_stop" }),
+        ]);
+        let p = dir.join("windowed.ir.json");
+        std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        p
+    }
+
+    /// The fixture's parameters, as the emitter integration test passes them.
+    fn fixture_run(ir: &Path, seed: u64) -> crate::util::SimRun {
+        let overrides: std::collections::HashMap<String, f64> = [
+            ("beta", 0.6), ("gamma", 0.2), ("lambda", 2.0), ("w", 3.0),
+            ("N0", 5000.0), ("rho", 0.5), ("k", 20.0), ("tau", 2.0),
+        ].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        crate::util::SimRun {
+            ir_path: ir.to_string_lossy().into_owned(),
+            overrides,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            dt: 1.0,
+            seed,
+            ..Default::default()
+        }
+    }
+
+    /// Load the streams a fit would bind for `data_path`, the way `fit run`
+    /// binds them.
+    fn bind(
+        run: &crate::util::SimRun,
+        data_path: &Path,
+    ) -> Vec<crate::fit::runner::ObsStream> {
+        let (compiled, model) = crate::util::resolve_run_model(run).unwrap();
+        let effective: indexmap::IndexMap<String, String> = [(
+            "cases".to_string(),
+            data_path.to_string_lossy().into_owned(),
+        )].into_iter().collect();
+        let opts = crate::caltime_load::TimeOpts {
+            origin: model.origin.as_deref(),
+            time_unit: &model.time_unit,
+            dt: run.dt,
+            t_start: compiled.model.simulation.t_start,
+            format: crate::caltime_load::TimeFormat::Auto,
+        };
+        crate::fit::runner::resolve_and_load_obs_streams(
+            &model, &compiled, &effective, run.dt, &opts,
+        ).unwrap()
+    }
+
+    /// gh#831. A dataset simulated on a fit's bound design re-loads with that
+    /// design unchanged: every period the loader built — one-day rows, a
+    /// three-day row, a two-day row — and every `NA` hole, which is a row with
+    /// a period and no value rather than a row that is absent.
+    ///
+    /// This is the property the simulation-based self-consistency test rests
+    /// on. A synthetic dataset on a regular grid would carry more information
+    /// than the real one: the three-day row would become three one-day rows,
+    /// and the hole would become an observation.
+    #[test]
+    fn a_dataset_simulated_on_a_bound_design_reloads_with_that_design() {
+        let tmp = tempdir("roundtrip");
+        let ir = windowed_model(tmp.path());
+        let data = tmp.path().join("cases.tsv");
+        std::fs::write(&data, "win_start\twin_stop\tcases\n\
+             0\t1\t3\n\
+             1\t2\t5\n\
+             2\t5\t20\n\
+             5\t6\t4\n\
+             6\t7\tNA\n\
+             7\t9\t11\n\
+             9\t10\t6\n").unwrap();
+
+        let run = fixture_run(&ir, 7);
+        let bound = bind(&run, &data);
+        assert_eq!(bound.len(), 1, "one stream");
+        let want_times = bound[0].times.clone();
+        let want_holes: Vec<bool> = bound[0].cells.iter().map(|c| c.is_none()).collect();
+        // The design under test is irregular and has a hole — assert that,
+        // so the round trip below cannot pass on a degenerate input.
+        let widths: Vec<f64> = want_times.periods().unwrap().iter()
+            .map(|p| p.width()).collect();
+        assert_eq!(widths, vec![1.0, 1.0, 3.0, 1.0, 1.0, 2.0, 1.0]);
+        assert_eq!(want_holes, vec![false, false, false, false, true, false, false]);
+
+        let out = tmp.path().join("synth");
+        let design = design_from_bound_streams(&bound).unwrap();
+        let written = simulate_dataset(&run, ObservationDesign::Bound(&design), &out).unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].source, "cases");
+
+        let text = std::fs::read_to_string(&written[0].path).unwrap();
+        assert_eq!(text.lines().next().unwrap(), "win_start\twin_stop\tcases",
+            "the declared columns, so the loader reads the file back");
+        assert!(text.lines().nth(5).unwrap().ends_with("\tNA"),
+            "the hole is written as NA, keeping its period: {text}");
+
+        let reloaded = bind(&run, &written[0].path);
+        assert_eq!(reloaded[0].times, want_times,
+            "every period the fit was bound over must survive the round trip");
+        let got_holes: Vec<bool> = reloaded[0].cells.iter().map(|c| c.is_none()).collect();
+        assert_eq!(got_holes, want_holes, "and every hole");
+    }
+
+    /// gh#829. A stream whose likelihood reads a data column has no source for
+    /// that column when the data is what is being generated. Writing 0 would
+    /// assert an observation the run never made, so the design refuses the
+    /// stream by name and names the column.
+    #[test]
+    fn a_covariate_stream_is_refused_by_name_rather_than_written_as_zeros() {
+        let tmp = tempdir("covariate");
+        // The fixture's negative-binomial mean `rho * projected` becomes
+        // `tested * projected`, reading a declared data column.
+        let mut v: serde_json::Value = serde_json::from_str(&seed_timing_ir()).unwrap();
+        let obs = v["model"]["observations"][0].as_object_mut().unwrap();
+        obs["columns"].as_array_mut().unwrap().push(
+            serde_json::json!({ "name": "tested", "role": { "value": "count" } }));
+        obs["likelihood"]["neg_binomial"]["mean"]["expr"]["bin_op"]["left"] =
+            serde_json::json!({ "obs_column_ref": "tested" });
+        let ir = tmp.path().join("covariate.ir.json");
+        std::fs::write(&ir, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let data = tmp.path().join("cases.tsv");
+        std::fs::write(&data, "time\tcases\ttested\n1\t3\t100\n2\t5\t120\n").unwrap();
+
+        let run = fixture_run(&ir, 7);
+        let bound = bind(&run, &data);
+        let err = design_from_bound_streams(&bound)
+            .expect_err("a covariate stream must be refused, not written as zeros");
+        assert!(err.contains("'cases'") && err.contains("`tested`") && err.contains("gh#829"),
+            "the refusal names the stream, the column and the issue: {err}");
     }
 }

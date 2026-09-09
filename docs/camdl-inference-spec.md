@@ -304,7 +304,7 @@ results/fits/<name>/
                                         coverage.tsv
                                         truth.toml
                                         data/
-                                          ds_01.tsv
+                                          ds_01/<stream>.tsv
                                           …
 ```
 
@@ -321,9 +321,12 @@ declared ground truth.
 When `[synthetic]` is present, the runner generates `len(sim_seeds)` datasets
 before dispatching any fits. Each dataset is a single run of the chosen backend
 at `true_params` with `sim_seed`, sampled through every declared observation
-stream at its declared schedule. The resulting wide-format TSV is written to
-`<fit_dir>/synthetic/data/ds_NN.tsv` and handed to the fit runner as if the user
-had supplied it via `[data.observations]`.
+stream at its declared schedule. Each dataset is written as one file per stream
+under `<fit_dir>/synthetic/data/ds_NN/`, in the columns that stream declared,
+and handed to the fit runner as if the user had supplied it via
+`[data.observations]` — so a dataset is read back by the loader real data uses,
+and a stream declaring `window_start`/`window_stop` columns generates and fits
+like any other.
 
 Generation is deterministic: same `(true_params, sim_seed)` produces
 bit-identical data. The content hash of each dataset participates in the

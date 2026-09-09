@@ -640,6 +640,28 @@ pub struct SimulateArgs {
     #[arg(long, conflicts_with_all = ["obs", "obs_dir", "obs_only", "output"])]
     pub obs_only_dir: Option<PathBuf>,
 
+    /// Simulate on the observation design a fit config binds, instead of on
+    /// the model's `emit_schedule` (gh#831). FIT_TOML's `[data.observations]`
+    /// is loaded exactly as `fit run` loads it, and each stream's rows are
+    /// reproduced: its observed labels, each row's own period — per-row
+    /// `window_start`/`window_stop` widths included — and each `NA` hole,
+    /// which is written as a row with its period and no value. The result is
+    /// one file per stream under the stream's declared column names, so it
+    /// re-loads under the model that produced it. This is what the
+    /// simulation-based self-consistency test needs: simulating on a regular
+    /// grid would give the synthetic fit more information than the real fit
+    /// has. Requires --obs-dir or --obs-only-dir. The parameter vector comes
+    /// from --params/--param (one dataset, written into the directory) or
+    /// from --draws (one `ds_NN/` subdirectory per draw). What it produces is
+    /// a dataset, not a run: no trajectory and no store leaf are written, with
+    /// --obs-dir as with --obs-only-dir. A stream whose likelihood reads a
+    /// data column is refused by name until gh#829 lands.
+    #[arg(long, value_name = "FIT_TOML", conflicts_with_all = [
+        "obs", "obs_only", "output", "stdout", "seeds", "replicates",
+        "emit_every", "dates", "init_state", "quantities_out", "event_log",
+    ])]
+    pub design_from: Option<PathBuf>,
+
     /// Add a calendar `date` column (rendered from the model `origin` +
     /// `time_unit`) alongside the numeric `t`/`time` column in trajectory
     /// and observation output. Numeric time stays the canonical, diff-stable

@@ -215,8 +215,8 @@ fn cell_fit_bases(out: &Path) -> Vec<PathBuf> {
 }
 
 /// The synthetic dataset-generation segment under `fits/` — the fit-base that
-/// holds `synthetic/data/` (generated `ds_NN.tsv` + `truth.toml`), distinct
-/// from the per-dataset cell fits.
+/// holds `synthetic/data/` (one `ds_NN/` directory of per-stream files, plus
+/// `truth.toml`), distinct from the per-dataset cell fits.
 fn datagen_segment(out: &Path) -> PathBuf {
     let fits = out.join("fits");
     std::fs::read_dir(&fits).unwrap().flatten().map(|e| e.path())
@@ -405,8 +405,15 @@ sim_seeds = [1, 2, 3]
     // parameter-recovery coverage.tsv are the deferred M4 views (gh#150).
     let datagen = datagen_segment(&out);
     for i in 1..=3 {
-        assert!(datagen.join("synthetic").join("data").join(format!("ds_{:02}.tsv", i)).is_file(),
-            "ds_{:02}.tsv must be generated under {}", i, datagen.display());
+        // One file per observation stream, under the stream's declared column
+        // names, so the loader the real data uses reads it back (gh#831).
+        let f = datagen.join("synthetic").join("data")
+            .join(format!("ds_{:02}", i)).join("cases.tsv");
+        assert!(f.is_file(), "ds_{:02}/cases.tsv must be generated at {}",
+            i, f.display());
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(text.lines().next().unwrap(), "time\tcases",
+            "the declared time column and the scored column");
     }
     assert!(datagen.join("synthetic").join("truth.toml").is_file(),
         "truth.toml must be recorded for provenance");
@@ -598,26 +605,27 @@ cooling    = 0.9
          iter0_lo, iter0_hi, iter0_spread, 0.03);
 }
 
-// ── seeding parity: --obs-only and [synthetic] must produce byte-identical
-//    data at the same nominal seed. Regression against the 2026-04-18
-//    parameter-recovery bias discrepancy. ──────────────────────────────────
+// ── seeding parity: --obs-only-dir and [synthetic] must produce
+//    byte-identical data at the same nominal seed. Regression against the
+//    2026-04-18 parameter-recovery bias discrepancy. ──────────────────────
 #[test]
-fn obs_only_and_synthetic_agree_byte_for_byte_at_same_seed() {
+fn obs_only_dir_and_synthetic_agree_byte_for_byte_at_same_seed() {
     let bin = camdl_sim();
     if camdlc().is_none() { return; }
     let tmp = tempdir("seed_parity");
     let (ir, truth) = write_fixture(tmp.path());
 
-    // Path A: --obs-only at seed=10
-    let cli_tsv = tmp.path().join("cli.tsv");
+    // Path A: --obs-only-dir at seed=10
+    let cli_dir = tmp.path().join("cli");
     let cli_status = Command::new(&bin).arg("simulate")
         .arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--seed", "10"])
         .args(["--backend", "chain_binomial", "--dt", "1"])
-        .args(["--obs-only"]).arg(&cli_tsv)
-        .status().expect("--obs-only must invoke");
+        .args(["--obs-only-dir"]).arg(&cli_dir)
+        .status().expect("--obs-only-dir must invoke");
     assert!(cli_status.success());
+    let cli_tsv = cli_dir.join("cases.tsv");
 
     // Path B: [synthetic] with sim_seeds = [10]
     let out = tmp.path().join("out");
@@ -635,12 +643,13 @@ sim_seeds = [10]
 "#, out.display(), ir.display(), truth.display(), stages_block())).unwrap();
     run_fit(&bin, &fit_toml);
 
-    let syn_tsv = datagen_segment(&out).join("synthetic").join("data").join("ds_01.tsv");
+    let syn_tsv = datagen_segment(&out).join("synthetic").join("data")
+        .join("ds_01").join("cases.tsv");
 
     let cli_bytes = std::fs::read(&cli_tsv).unwrap();
     let syn_bytes = std::fs::read(&syn_tsv).unwrap();
     assert_eq!(cli_bytes, syn_bytes,
-        "--obs-only (seed=N) and [synthetic] (sim_seeds=[N]) must produce \
+        "--obs-only-dir (seed=N) and [synthetic] (sim_seeds=[N]) must produce \
          byte-identical observations. Diverging these paths caused the \
          2026-04-18 parameter-recovery bias discrepancy. CLI:\n{}\nsynthetic:\n{}",
         String::from_utf8_lossy(&cli_bytes),

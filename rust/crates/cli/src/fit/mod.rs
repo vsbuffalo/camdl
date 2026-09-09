@@ -798,22 +798,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             data_override: None,
         }).collect()
     } else {
-        // Determine the observation stream name(s) for the generated TSVs
-        // from the model itself — synthetic generation writes one column
-        // per declared observation block, so the fit data map points each
-        // stream name at the same ds_NN.tsv file (the data loader picks
-        // its named column).
-        // Reuse the already-loaded model (compiled once above); no extra
-        // camdlc call. Observation-block names are structural, scenario-
-        // independent, so the validation-load model is the right source.
-        let obs_names: Vec<String> = model.observations.iter()
-            .map(|o| o.name.clone()).collect();
+        // Synthetic generation writes one file per observation stream, keyed
+        // by the `source` the loader binds it to — the same `[data.observations]`
+        // shape a real fit declares, so the generated dataset is read back
+        // through the loader the real data uses (gh#831).
         let mut out = Vec::with_capacity(synthetic_datasets.len() * fit_seeds.len());
         for ds in &synthetic_datasets {
-            let mut observations = indexmap::IndexMap::new();
-            for n in &obs_names {
-                observations.insert(n.clone(), ds.path.to_string_lossy().to_string());
-            }
+            let observations: indexmap::IndexMap<String, String> = ds.files.iter()
+                .map(|(source, path)| (source.clone(), path.to_string_lossy().to_string()))
+                .collect();
             let data_spec = config_v2::DataSpec {
                 file: None,
                 observations,

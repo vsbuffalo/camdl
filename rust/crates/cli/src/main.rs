@@ -1694,6 +1694,32 @@ fn run_simulate(a: &args::SimulateArgs) {
         return;
     }
 
+    // ── `--design-from`: simulate on a fit's own observation design ─────────
+    //
+    // gh#831. The rows come from the bound data rather than from the model's
+    // `emit_schedule`, so this leaves the store-backed trajectory pipeline
+    // below entirely: what it produces is a dataset, not a run. The flag
+    // conflicts (args/mod.rs) with every knob that pipeline owns, so nothing
+    // a user passed is silently dropped here.
+    if let Some(ref design_toml) = a.design_from {
+        let Some(ref dir) = obs_dir else {
+            eprintln!(
+                "error: --design-from writes one file per observation stream, so it \
+                 needs a directory: pass --obs-only-dir DIR (dataset only) or \
+                 --obs-dir DIR."
+            );
+            std::process::exit(1);
+        };
+        if let Err(e) = simulate_on_bound_design(
+            design_toml, &base_sim_run, &draws, draws_path.is_some(),
+            std::path::Path::new(dir), dt,
+        ) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // ── Build the SimulateJob and route through the unified engine ──────────
     //
     // `simulate` and `batch run` converge on `engine::run_job` (run-spec
@@ -3072,6 +3098,89 @@ impl StreamSink {
 }
 
 // ── Observation helpers ─────────────────────────────────────��───────────────
+
+/// `camdl simulate --design-from <fit.toml>`: simulate on the observation
+/// design that fit config binds, and write the dataset as the files the loader
+/// reads (gh#831).
+///
+/// The design is read through the same seam `fit run` uses
+/// (`resolve_and_load_obs_streams`), so each stream's rows here are the rows
+/// the fit scores: its observed labels, each row's own period, and every `NA`
+/// hole. Nothing is re-derived from a schedule.
+///
+/// One parameter vector writes its files straight into `dir`; several (from
+/// `--draws`) write one `ds_NN/` subdirectory each, so every dataset stays a
+/// file set the loader can bind on its own.
+fn simulate_on_bound_design(
+    design_toml: &std::path::Path,
+    base_run: &util::SimRun,
+    draws: &[HashMap<String, f64>],
+    draws_given: bool,
+    dir: &std::path::Path,
+    dt: f64,
+) -> Result<(), String> {
+    // The parameter vectors this writes a dataset for. Without `--draws` the
+    // base run IS the vector (`--params` / `--param`).
+    let points: Vec<indexmap::IndexMap<String, f64>> = if draws_given {
+        draws.iter()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .collect()
+    } else {
+        vec![indexmap::IndexMap::new()]
+    };
+    if points.is_empty() {
+        return Err("--draws produced no parameter vectors, so there is no \
+                    dataset to simulate".to_string());
+    }
+
+    // Each draw is its own realisation, seeded the way every other draw grid is
+    // (`engine::process_seed_for` — the determinism PIN's arithmetic): a lone
+    // point keeps `--seed` untouched, and a grid mixes the draw index in, so
+    // two draws do not share one process trajectory.
+    let run_for = |i: usize, point: &indexmap::IndexMap<String, f64>| util::SimRun {
+        point_overrides: point.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        seed: engine::process_seed_for(None, base_run.seed, i, 0, points.len()),
+        ..base_run.clone()
+    };
+
+    // The design is a property of the model and the bound data, not of θ — but
+    // resolving the model needs a complete parameter vector, so it is read off
+    // the first point's run and reused for the rest.
+    let first = run_for(0, &points[0]);
+    let (compiled, model) = util::resolve_run_model(&first)?;
+    let model_obs_names: Vec<String> =
+        model.observations.iter().map(|o| o.name.clone()).collect();
+    let bindings =
+        pfilter::load_data_observations_from_fit_toml(design_toml, &model_obs_names)?;
+    let effective = fit::runner::data_bindings_to_effective(&model, &bindings)?;
+    let time_opts = crate::caltime_load::TimeOpts {
+        origin: model.origin.as_deref(),
+        time_unit: &model.time_unit,
+        dt,
+        t_start: compiled.model.simulation.t_start,
+        format: crate::caltime_load::TimeFormat::Auto,
+    };
+    let streams = fit::runner::resolve_and_load_obs_streams(
+        &model, &compiled, &effective, dt, &time_opts,
+    )?;
+    let design = obs_emit::design_from_bound_streams(&streams)?;
+
+    for (i, point) in points.iter().enumerate() {
+        let out_dir = if points.len() == 1 {
+            dir.to_path_buf()
+        } else {
+            dir.join(fit::config_v2::format_dataset_dir(i + 1))
+        };
+        let run = run_for(i, point);
+        let written = obs_emit::simulate_dataset(
+            &run, obs_emit::ObservationDesign::Bound(&design), &out_dir,
+        )?;
+        for f in &written {
+            eprintln!("observations written to {}", f.path.display());
+        }
+    }
+    Ok(())
+}
 
 /// gh#626: resolve the global observation anchors (`first_obs`, `last_obs`)
 /// for an anchored `--to`, from the fit's `[data.observations]` bindings.

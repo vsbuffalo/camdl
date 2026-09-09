@@ -22,14 +22,25 @@ Do not touch a sampler knob until you know. The single highest-return test is
 parameter vector θ, then re-fit (or re-filter) and see whether you recover θ.
 
 ```bash
-# Generate synthetic data at a known θ
-camdl simulate model.camdl --params theta.toml --obs synth.tsv --seed 1
+# Generate synthetic data at a known θ, on the observation design your real
+# fit binds — its observation times, each row's own window, its NA holes.
+camdl simulate model.camdl --params theta.toml \
+    --design-from fit.toml --obs-only-dir synth/ --seed 1
 
-# Re-fit with a fit.toml whose [data] points at synth.tsv, then compare the
-# recovered estimate to theta.toml. (Data path lives in the fit.toml's
-# [data] block — there is no --data flag on `camdl fit run`.)
+# Re-fit with a fit.toml whose [data.observations] points at synth/<stream>.tsv,
+# then compare the recovered estimate to theta.toml. (Data paths live in the
+# fit.toml's [data] block — there is no --data flag on `camdl fit run`.)
 camdl fit run fit_synth.toml --seed 2
 ```
+
+Use `--design-from` rather than a bare `--obs`: the point of the test is to ask
+whether the inference can recover θ **from the data you actually have**.
+Simulating on the model's own `emit_schedule` gives the synthetic fit more
+information than the real fit has — a three-day reporting window becomes three
+daily rows, and a missing week becomes an observation — so a test that passes
+there tells you nothing about the fit that failed. Streams whose likelihood
+reads a data column (a binomial denominator, a person-time offset) are refused
+by name, because the model has no term that generates them (gh#829).
 
 Read the result this way:
 

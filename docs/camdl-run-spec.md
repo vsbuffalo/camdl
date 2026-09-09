@@ -281,7 +281,8 @@ results/fits/{stem}-{fit_hash8}/
   model.graph.json                  # archived flow graph (when given as .camdl)
   sweep_failures.tsv                # gate failures across a --sweep grid, when any
   synthetic/truth.toml              # [synthetic] fits only
-  synthetic/data/ds_NN.tsv          # [synthetic] fits only, one per sim seed
+  synthetic/data/ds_NN/<stream>.tsv # [synthetic] fits only, one directory per
+                                    #   sim seed, one file per stream
   predictive/<stream>.tsv           # `fit predict` output (§2.2.2)
   predictive.json
   observed/<stream>.tsv
@@ -1766,6 +1767,43 @@ and a row whose period falls outside the run is not written. Under
 time, whose period `[t_start − Δ, t_start)` was never simulated. A windowed
 stream cannot go into the single wide `--obs` file, which has one `time`
 column; the error names `--obs-dir`.
+
+#### `--design-from`: the rows a fit actually scores
+
+`--design-from <fit.toml>` replaces the emit schedule as the source of a
+stream's rows. That config's `[data.observations]` is loaded exactly as
+`fit run` loads it, and each stream is written on the rows the loader bound:
+its observed labels, each row's own period — per-row `window_start`/
+`window_stop` widths included — and each `NA` hole, written as a row with its
+period and no value. Only the values are simulated.
+
+This is what a simulation-based self-consistency test needs (gh#831).
+Simulating on a regular grid gives the synthetic fit more information than the
+real one has: a three-day row becomes three one-day rows, and a hole becomes an
+observation.
+
+```
+camdl simulate model.camdl --params theta.toml \
+    --design-from fit.toml --obs-only-dir synth/
+```
+
+It requires `--obs-dir` or `--obs-only-dir` (one file per stream), and takes θ
+from `--params`/`--param` — one dataset, written into the directory — or from
+`--draws`, which writes one `ds_NN/` subdirectory per draw so each dataset stays
+a file set the loader can bind on its own. What it produces is a **dataset, not
+a run**: no trajectory and no store leaf are written, with `--obs-dir` as with
+`--obs-only-dir`. It conflicts with the flags the store-backed trajectory
+pipeline owns (`--obs`, `--obs-only`, `-o`, `--stdout`, `--seeds`,
+`--replicates`, `--emit-every`, `--dates`, `--init-state`, `--quantities-out`,
+`--event-log`), so nothing passed is silently dropped.
+
+A stream whose likelihood reads a data column — a binomial denominator
+`n = tested`, a person-time offset — is refused by name: there is no data file
+to read that column from when the data is what is being generated, and writing
+`0` would assert an observation the run never made (gh#829). A stratified
+(long-form) stream is refused for the same reason in a different shape: its
+family shares one file per `source`, which one file per stream would not
+re-load.
 
 `--obs-only` / `--obs-only-dir` suppress only the *loose* trajectory mirror; the
 store leaf still holds `traj.tsv`. In every mode the sampled observations are
@@ -4992,8 +5030,12 @@ backend = "chain_binomial" # generation backend (fits declare their own)
 scenario = "baseline" # optional: scenario for GENERATION only
 ```
 
-`camdl fit run` then generates one wide-format TSV per dataset into
-`<fit_dir>/synthetic/data/`, and runs the declared stages once per dataset. Each
+`camdl fit run` then generates one dataset per sim seed into
+`<fit_dir>/synthetic/data/ds_NN/` — one file per observation stream, under the
+columns that stream declared, exactly as `simulate --obs-dir` writes them — and
+runs the declared stages once per dataset. Each dataset is bound and read back
+through the loader real data uses, so a windowed stream (one declaring
+`window_start`/`window_stop` columns) generates and fits like any other. Each
 grid cell is its own content-addressed fit, readable with `camdl list` / `show`
 / `cat`.
 
@@ -5741,6 +5783,11 @@ Observation output
   --obs-dir DIR               one TSV per stream
   --obs-only FILE             like --obs, suppress trajectory output
   --obs-only-dir DIR          like --obs-dir, suppress trajectory output
+  --design-from FIT_TOML      simulate on the observation design that fit config
+                              binds — its observed labels, each row's own period,
+                              its NA holes — instead of on `emit_schedule`.
+                              Requires --obs-dir/--obs-only-dir; θ from --params
+                              or --draws (one ds_NN/ per draw)
   --emit-every N | NAME=N     override `emit_schedule`, in model time units, for
                               every stream or one by its observation-block label
                               (repeatable; the two forms are exclusive). Only a
