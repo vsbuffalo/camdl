@@ -151,10 +151,10 @@ impl ChainStarts {
 /// Errors specific to chain-start drawing. Returned by
 /// [`draw_chain_starts`] and the per-variant loaders.
 ///
-/// Missing parameters in a `from-mle` / `from-params` / `from-prior`
+/// Missing parameters in a `from_mle` / `from_params` / `from_prior`
 /// source are handled by those loaders via bounds-uniform fall-back +
 /// a stderr warning (per proposal §"Init family"), not by a distinct
-/// error variant. `from-posterior` is the exception: an explicit draws
+/// error variant. `from_posterior` is the exception: an explicit draws
 /// source that can't bind an estimated parameter (missing column or
 /// unparseable cell) is a hard [`InitError::SchemaMismatch`], not a
 /// silent fall-back (gh#274).
@@ -191,7 +191,7 @@ impl std::fmt::Display for InitError {
                 path.display(), expected, msg),
             InitError::NoPriorAndNoBounds { params } => write!(
                 f,
-                "--init from-prior requires either a `~ <dist>` \
+                "--init from_prior requires either a `~ <dist>` \
                  declaration or finite bounds on every estimated \
                  parameter; the following have neither: {}",
                 params.join(", ")),
@@ -423,7 +423,7 @@ fn draw_uniform_unconstrained(
 
 // ─── Step 6 loaders ─────────────────────────────────────────────────────────
 
-/// `--init from-prior`: per-chain draw from each parameter's `~`
+/// `--init from_prior`: per-chain draw from each parameter's `~`
 /// declaration. Parameters with no prior fall back to a bounds-uniform
 /// draw with a startup warning (Decision A).
 fn draw_from_prior(
@@ -462,7 +462,7 @@ fn draw_from_prior(
     }
     if !no_prior_names.is_empty() {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m --init from-prior: no `~` \
+            "\x1b[33mwarning:\x1b[0m --init from_prior: no `~` \
              declared for {}; falling back to bounds-uniform for \
              those parameter(s). Add a `~ <dist>` clause in the \
              model or pass `--fixed {}=<value>` to silence this \
@@ -559,7 +559,7 @@ fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>)
             // Hierarchical priors are evaluated against a ParamEnv that
             // we don't have here. Fall back to the base value with a
             // warning so the user notices.
-            eprintln!("\x1b[33mwarning:\x1b[0m --init from-prior: \
+            eprintln!("\x1b[33mwarning:\x1b[0m --init from_prior: \
                 hierarchical prior cannot be sampled at chain-init \
                 time (needs ParamEnv); using resolved base value.");
             base.unwrap_or({
@@ -607,7 +607,7 @@ fn sample_gamma_shape_rate(rng: &mut StatefulRng, shape: f64, rate: f64) -> f64 
     }
 }
 
-/// `--init from-posterior`: per-chain row draw (uniform with
+/// `--init from_posterior`: per-chain row draw (uniform with
 /// replacement) from a posterior draws TSV.
 ///
 /// The source is explicitly requested, so it must bind every estimated
@@ -645,7 +645,7 @@ fn draw_from_posterior(
         .map(|(i, h)| (h.clone(), i))
         .collect();
     // Every estimated parameter must have a matching column. An
-    // explicitly-requested from-posterior source that cannot bind the
+    // explicitly-requested from_posterior source that cannot bind the
     // parameters we asked for is a HARD ERROR, never a silent
     // bounds-uniform substitution — silently starting a stiff model at
     // extreme uniform draws is the gh#274 failure mode (chains blow up
@@ -709,7 +709,7 @@ fn draw_from_posterior(
     Ok(starts)
 }
 
-/// `--init from-mle`: all chains at the MLE point from a fit-output
+/// `--init from_mle`: all chains at the MLE point from a fit-output
 /// TOML. Knows the fit-output schema — skips `[provenance]` /
 /// `[focal]` / scalar metadata and reads values from either an `[mle]`
 /// section or top-level scalars.
@@ -741,7 +741,7 @@ fn draw_from_mle(
         |path| InitSource::MlePoint { path })
 }
 
-/// `--init from-params`: all chains at a hand-written flat params TOML.
+/// `--init from_params`: all chains at a hand-written flat params TOML.
 fn draw_from_params(
     resolved: &ResolvedParameters,
     path: &Path,
@@ -749,7 +749,7 @@ fn draw_from_params(
 ) -> Result<Vec<ChainStart>, InitError> {
     // Reject files that look like fit-output (have `[focal]` or
     // `[mle]` sections, or a `final_loglik` scalar) — the actionable
-    // hint redirects the user to `--init from-mle`.
+    // hint redirects the user to `--init from_mle`.
     let path_buf: PathBuf = path.to_path_buf();
     let raw = std::fs::read_to_string(path).map_err(|e| InitError::Io {
         path: path_buf.clone(), msg: e.to_string(),
@@ -771,7 +771,7 @@ fn draw_from_params(
             expected: "flat params TOML (top-level keys = parameter names)",
             msg: "this file has `[focal]` / `[mle]` / `final_loglik` \
                   scalars — it looks like an mle.toml. Use \
-                  `--init from-mle --mle <path>` for fit-output \
+                  `--init from_mle --mle <path>` for fit-output \
                   TOMLs.".into(),
         });
     }
@@ -845,7 +845,7 @@ where F: Fn(PathBuf) -> InitSource,
 /// Load an `mle.toml` / `final_params.toml`-shape file. Skips
 /// `[provenance]` / `[focal]` sections, reads parameter values from
 /// either top-level scalars or an `[mle]` section. Mirrors what the
-/// `from-mle` documentation promises and what current fit-output
+/// `from_mle` documentation promises and what current fit-output
 /// emits.
 pub fn load_mle_toml(path: &Path) -> Result<HashMap<String, f64>, InitError> {
     let path_buf: PathBuf = path.to_path_buf();
@@ -1046,7 +1046,7 @@ mod tests {
         p
     }
 
-    // ─── `from-params` ────────────────────────────────────────────────
+    // ─── `from_params` ────────────────────────────────────────────────
 
     #[test]
     fn from_params_loads_flat_toml_and_assigns_to_estimate_set_only() {
@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn from_params_errors_on_mle_toml_shape_with_actionable_hint() {
         // A file with `[focal]` or `[mle]` section is mle.toml-shaped
-        // — `from_params` must refuse and point at `--init from-mle`.
+        // — `from_params` must refuse and point at `--init from_mle`.
         let resolved = mk_resolved(
             vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
             &["beta"],
@@ -1102,14 +1102,14 @@ mod tests {
             1, 42,
         ).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("from-mle"),
-            "error must hint at --init from-mle: {}", msg);
+        assert!(msg.contains("from_mle"),
+            "error must hint at --init from_mle: {}", msg);
         assert!(msg.contains("mle.toml"),
             "error must explain the file looks like mle.toml: {}", msg);
         std::fs::remove_file(&path).ok();
     }
 
-    // ─── `from-mle` ───────────────────────────────────────────────────
+    // ─── `from_mle` ───────────────────────────────────────────────────
 
     #[test]
     fn from_mle_resolves_fitdir_to_mle_toml_first_then_final_params() {
@@ -1178,7 +1178,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    // ─── `from-posterior` ──────────────────────────────────────────────
+    // ─── `from_posterior` ──────────────────────────────────────────────
 
     #[test]
     fn from_posterior_samples_uniformly_with_replacement() {
@@ -1313,7 +1313,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    // ─── `from-prior` ──────────────────────────────────────────────────
+    // ─── `from_prior` ──────────────────────────────────────────────────
 
     #[test]
     fn from_prior_falls_back_to_bounds_uniform_with_warning_for_no_tilde_params() {
