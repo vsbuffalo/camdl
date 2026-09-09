@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
-    diagnostic::{DiagnosticCollector, DiagnosticKind},
+    diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -915,15 +915,28 @@ pub fn run_stage(
     // Render diagnostics, persist them, and bail with a clear error
     // rather than panicking on .unwrap() of an empty results vec.
     if results.is_empty() {
-        collector.render_to_stderr();
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
         let diag_path = stage_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
+        // gh#880. The advice used to end "widen parameter bounds", which is
+        // backwards for the cause that produces this refusal: the drawing
+        // `init` modes map their draws through the bounds, so widening them
+        // widens the range the starts come from and makes an unscoreable
+        // start MORE likely. What helps is a start the filter can score.
         return Err(format!(
             "pmmh stage `{}`: all {} chains failed init-eval with \
-             PFDegenerate. See `diagnostics.json` for per-chain BadInit \
-             diagnostics. Common causes: survey_top_k handed pathological \
-             bound-pinned points to every chain; check `init` method or \
-             widen parameter bounds.",
+             PFDegenerate — the particle filter could not score any chain's \
+             starting parameters. See `diagnostics.json` for the per-chain \
+             BadInit entries and `chain_starts.tsv` for the starts they name. \
+             A start whose projected mean sits several standard deviations \
+             from the observed counts leaves no particle with appreciable \
+             weight, and that standardised distance grows with the square \
+             root of the population — so a relative error that is harmless at \
+             ten thousand people is fatal at a million. Start every chain at \
+             the declared values (`init = \"single\"`), draw the starts from \
+             the priors (`init = \"from_prior\"`), or raise `particles`. Note \
+             that widening the parameter bounds widens the range the starts \
+             are drawn from, so it makes this refusal more likely, not less.",
             stage_name, n_chains));
     }
 
@@ -941,7 +954,7 @@ pub fn run_stage(
     // predicate is false → no fire).
     if results.iter().all(|(_, r)| sim::inference::no_finite_anchor(r.map_loglik)) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr();
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
         let diag_path = stage_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         return Err(format!(
@@ -1150,7 +1163,7 @@ pub fn run_stage(
     }
 
     // Render and persist diagnostics
-    collector.render_to_stderr();
+    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
     let diag_path = stage_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 

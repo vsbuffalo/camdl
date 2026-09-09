@@ -1669,7 +1669,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 provenance::write_mle_params(&mle_path, &all_params, &metadata)
                     .unwrap_or_else(|e| eprintln!("warning: {}", e));
 
-                collector.render_to_stderr();
+                collector.render_to_stderr(sim::inference::diagnostic::HintContext {
+                    chains_completed: Some(chain_results.results.len()),
+                });
 
                 stage_best_loglik = Some(chain_results.best_loglik);
                 stage_best_chain = Some(chain_results.best_chain);

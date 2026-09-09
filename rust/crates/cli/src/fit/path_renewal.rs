@@ -820,9 +820,9 @@ mod tests {
             "and what the aggregate read instead: {msg}");
         assert_eq!(finding.severity(), sim::inference::diagnostic::Severity::Warning,
             "this is a diagnostic and must never be able to fail a run");
-        assert!(finding.hints().iter().any(|h| h.contains("particle")),
+        assert!(finding.hints(sim::inference::diagnostic::HintContext::default()).iter().any(|h| h.contains("particle")),
             "the message must say what to do; the measured remedy is particles: \
-             {:?}", finding.hints());
+             {:?}", finding.hints(sim::inference::diagnostic::HintContext::default()));
     }
 
     /// The negative direction, and the one that matters most: a run renewing
@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn the_hints_say_which_number_to_re_read_after_changing_particles() {
         let finding = one_chain(&[COALESCED]).coalescence_finding().expect("fires");
-        let hints = finding.hints();
+        let hints = finding.hints(sim::inference::diagnostic::HintContext::default());
         let re_read = hints.iter()
             .find(|h| h.contains("re-read"))
             .unwrap_or_else(|| panic!(

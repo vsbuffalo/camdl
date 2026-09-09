@@ -15,7 +15,7 @@ use sim::{
         particle_filter::Observation,
         pmmh::Prior,
         prior::{Density, TransformReq},
-        diagnostic::{DiagnosticCollector, DiagnosticKind},
+        diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
     },
     rng::StatefulRng,
 };
@@ -2104,7 +2104,7 @@ pub fn run_chains_with_per_chain_params(
     // is_empty guard above already handles the all-PFDegenerate case.
     if sim::inference::no_finite_anchor(best_loglik) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr();
+        collector.render_to_stderr(HintContext { chains_completed: Some(results.len()) });
         if let Some(dir) = stage_dir {
             let _ = collector.write_json(&format!("{}/diagnostics.json", dir));
         }

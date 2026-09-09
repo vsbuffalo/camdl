@@ -405,7 +405,7 @@ pub fn run_stage(
     if opts.n_chains > 1 {
         eprint!("{}", diag.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
     }
-    collector.render_to_stderr();
+    collector.render_to_stderr(sim::inference::diagnostic::HintContext::default());
     let diag_path = stage_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 

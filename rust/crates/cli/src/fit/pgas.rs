@@ -13,7 +13,7 @@ use sim::inference::{
     pmmh::Prior,
     prior::Density,
     pgas::{PGASConfig, ChainResumeState, run_pgas, PGASSweep, PGASTrajectory, RENEWAL_BINS},
-    diagnostic::{DiagnosticCollector, DiagnosticKind},
+    diagnostic::{DiagnosticCollector, DiagnosticKind, HintContext},
 };
 use io::trajectories::{
     Granularity, PosteriorDraw, TrajColumnSpec, TrajManifest, write_trajectories_tsv,
@@ -1358,7 +1358,7 @@ pub fn run_stage(
     // to look for.
     if all_results.is_empty() {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr();
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
         let diag_path = stage_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         return Err(format!(
@@ -1672,7 +1672,7 @@ pub fn run_stage(
     // starts finite and walks into a `-inf` region it cannot leave.
     if sim::inference::no_finite_anchor(best_sweep.log_complete_data_ll) {
         collector.push(DiagnosticKind::InitialLoglikInfinite);
-        collector.render_to_stderr();
+        collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
         let diag_path = stage_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
         return Err(format!(
@@ -1818,7 +1818,7 @@ pub fn run_stage(
     }
 
     // Render and persist diagnostics
-    collector.render_to_stderr();
+    collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
     let diag_path = stage_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 

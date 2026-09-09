@@ -356,6 +356,51 @@ pub enum DiagnosticKind {
 /// questions; one constant answering all three would move all three together.
 pub const CONVERGENCE_ERROR_SEVERITY: f64 = 1.5;
 
+/// Below this magnitude a non-zero starting value is printed in scientific
+/// notation. `{:.4}` leaves under one significant digit of anything smaller,
+/// which is the range the rates in these models live in.
+const START_VALUE_SMALL: f64 = 1e-3;
+
+/// At or above this magnitude a starting value is printed in scientific
+/// notation. `{:.4}` on a population-sized number is six digits of integer
+/// part followed by four decimals nobody set.
+const START_VALUE_LARGE: f64 = 1e5;
+
+/// A chain's starting value as the `BadInit` line should print it: scientific
+/// notation where four fixed decimals would hide the number, plain decimals
+/// otherwise.
+///
+/// `{:.4}` alone is not a rendering of a rate. Three chains that started at
+/// `6.678e-5`, `1.375e-4` and `5.922e-5` each printed `0.0001` — the same
+/// string as one another and as the true value — on the one line a reader
+/// consults to judge whether the start was sane. An ordinary bad-start
+/// refusal therefore read as a refusal at the truth, and cost gh#876 its
+/// whole investigation (gh#880).
+fn format_start_value(v: f64) -> String {
+    let mag = v.abs();
+    if v != 0.0 && (mag < START_VALUE_SMALL || mag >= START_VALUE_LARGE) {
+        format!("{:.4e}", v)
+    } else {
+        format!("{:.4}", v)
+    }
+}
+
+/// What a hint needs to know about the run around a finding, as opposed to
+/// about the finding itself.
+///
+/// Advice that is wrong for the run is worse than no advice. The `BadInit`
+/// list told the reader of a run in which every chain was refused to "treat
+/// the surviving chains as the result", three times over, with no surviving
+/// chain to treat (gh#880). Anything a hint asserts about the run is read
+/// from here, and the default asserts nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HintContext {
+    /// Chains that finished and are in the pooled result, where the caller
+    /// knows. `None` means the caller has no count to offer, and a hint that
+    /// would depend on it is withheld rather than guessed.
+    pub chains_completed: Option<usize>,
+}
+
 impl DiagnosticKind {
     pub fn severity(&self) -> Severity {
         match self {
@@ -429,7 +474,7 @@ impl DiagnosticKind {
                 "Initial log-likelihood is -inf at starting parameters.".into(),
             Self::BadInit { chain_id, params, reason, .. } => {
                 let pretty = params.iter()
-                    .map(|(k, v)| format!("{}={:.4}", k, v))
+                    .map(|(k, v)| format!("{}={}", k, format_start_value(*v)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -529,7 +574,10 @@ impl DiagnosticKind {
         }
     }
 
-    pub fn hints(&self) -> Vec<&'static str> {
+    /// Advice to print under this finding, given what `ctx` says about the run
+    /// it came from. A hint whose truth depends on the run and cannot be
+    /// established from `ctx` is omitted.
+    pub fn hints(&self, ctx: HintContext) -> Vec<&'static str> {
         match self {
             Self::LowESSAtMLE { .. } => vec![
                 "Increase particles",
@@ -545,13 +593,22 @@ impl DiagnosticKind {
                 "Check starting values are within parameter bounds",
                 "Run with --verbosity debug for per-substep diagnostics",
             ],
-            Self::BadInit { .. } => vec![
-                "Inspect chain_starts.tsv to see which init was used",
-                "If using survey_top_k, the survey may be putting \
-                 bound-pinned points into the top-K; consider --init lhs",
-                "Other chains in this run completed normally; treat \
-                 the surviving chains as the result",
-            ],
+            Self::BadInit { .. } => {
+                let mut hints = vec![
+                    "Inspect chain_starts.tsv to see which init was used",
+                    "If using survey_top_k, the survey may be putting \
+                     bound-pinned points into the top-K; consider --init lhs",
+                ];
+                // Only when a chain actually finished. A run in which every
+                // chain was refused printed this line once per refusal,
+                // pointing at survivors that did not exist (gh#880).
+                if ctx.chains_completed.is_some_and(|n| n >= 1) {
+                    hints.push(
+                        "Other chains in this run completed normally; treat \
+                         the surviving chains as the result");
+                }
+                hints
+            }
             Self::MaxTreeDepthHits { .. } => vec![
                 "Increase max_treedepth in [pgas] config",
                 "Consider reparameterizing correlated parameters",
@@ -661,7 +718,11 @@ impl DiagnosticCollector {
     }
 
     /// Render all diagnostics to stderr with ANSI coloring.
-    pub fn render_to_stderr(&self) {
+    ///
+    /// `ctx` carries what the hints need to know about the run — the caller is
+    /// the only one who knows how many chains finished — and
+    /// [`HintContext::default`] is the honest answer when it does not.
+    pub fn render_to_stderr(&self, ctx: HintContext) {
         let diags = self.diagnostics.lock().unwrap();
         if diags.is_empty() { return; }
 
@@ -673,7 +734,7 @@ impl DiagnosticCollector {
                 Severity::Error   => "\x1b[31mx\x1b[0m",
             };
             eprintln!("  {} {}", icon, d.message);
-            for hint in d.kind.hints() {
+            for hint in d.kind.hints(ctx) {
                 eprintln!("    -> {}", hint);
             }
         }
@@ -716,6 +777,76 @@ fn chrono_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bad_init(param: &str, value: f64) -> DiagnosticKind {
+        DiagnosticKind::BadInit {
+            chain_id: 0,
+            params: std::collections::BTreeMap::from([(param.to_string(), value)]),
+            reason: "ESS collapsed".into(),
+            attempts: Vec::new(),
+        }
+    }
+
+    /// gh#880. The three chains of gh#876 started at 6.678e-5, 1.375e-4 and
+    /// 5.922e-5 — a 33-41% spread — and `{:.4}` printed `mu=0.0001` for every
+    /// one of them, and for the true value they were being compared against.
+    /// The line exists to let a reader judge the start, so three different
+    /// starts must read as three different numbers.
+    #[test]
+    fn three_nearby_small_rates_render_as_three_different_values() {
+        let rendered: Vec<String> = [6.678e-5, 1.375e-4, 5.922e-5]
+            .iter()
+            .map(|&v| bad_init("mu", v).render())
+            .collect();
+        for (i, a) in rendered.iter().enumerate() {
+            for b in rendered.iter().skip(i + 1) {
+                assert_ne!(a, b,
+                    "two chains that started at different rates must not \
+                     render identically:\n  {a}\n  {b}");
+            }
+            assert!(!a.contains("mu=0.0001"),
+                "a rate below 1e-3 must not collapse to four fixed \
+                 decimals: {a}");
+        }
+        assert!(rendered[0].contains("mu=6.6780e-5"),
+            "the value the chain ran from must be legible: {}", rendered[0]);
+    }
+
+    /// The same rule must leave ordinary-magnitude values alone — a
+    /// probability or a fraction reads worse in scientific notation, and the
+    /// only reason to move a value is that fixed decimals would hide it.
+    #[test]
+    fn an_ordinary_magnitude_start_keeps_four_fixed_decimals() {
+        let m = bad_init("rho", 0.3).render();
+        assert!(m.contains("rho=0.3000"),
+            "0.3 must render as 0.3000, not in scientific notation: {m}");
+        // Zero is not "below 1e-3" for this purpose: `0.0000e0` is noise.
+        let m = bad_init("iota", 0.0).render();
+        assert!(m.contains("iota=0.0000"), "zero renders plainly: {m}");
+    }
+
+    /// gh#880. In the run that motivated this, no chain completed and the
+    /// hint told the reader three times to "treat the surviving chains as the
+    /// result". The claim is about the run, not the finding, so it is made
+    /// only when the caller says at least one chain finished.
+    #[test]
+    fn the_surviving_chains_hint_needs_a_surviving_chain() {
+        let bad = bad_init("mu", 1e-4);
+        let survivors = |h: &[&'static str]| {
+            h.iter().any(|s| s.contains("surviving chains"))
+        };
+        assert!(!survivors(&bad.hints(HintContext { chains_completed: Some(0) })),
+            "no chain completed — the hint must not claim survivors");
+        assert!(!survivors(&bad.hints(HintContext::default())),
+            "an unknown chain count is not evidence of a survivor");
+        assert!(survivors(&bad.hints(HintContext { chains_completed: Some(1) })),
+            "one chain completed — the hint is the right advice and must fire");
+        // The advice that does not depend on the run is unconditional.
+        for ctx in [HintContext::default(), HintContext { chains_completed: Some(0) }] {
+            assert!(bad.hints(ctx).iter().any(|h| h.contains("chain_starts.tsv")),
+                "the chain_starts.tsv pointer holds whatever the run did");
+        }
+    }
 
     /// The threshold in a `RhatHigh` message was formatted `{:.1}`, so every
     /// value in the band camdl actually cares about rendered the same: 1.01,
