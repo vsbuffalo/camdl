@@ -76,6 +76,14 @@ pub struct SimulateJob {
     /// into run identity via `ResolvedEntry.t_end`. `None` = no override
     /// (batch TOML deliberately has no `to` key).
     pub t_end_override: Option<f64>,
+    /// Times every cell must record a trajectory snapshot at, beyond the
+    /// model's own `output { trajectories { … } }` schedule — copied verbatim
+    /// onto each cell's [`crate::util::SimRun`], where
+    /// `apply_required_output_times` folds them into the schedule and raises
+    /// the integration end to reach them. `fit predict` supplies its forecast
+    /// rows' closing boundaries here; empty everywhere else, including the
+    /// batch TOML, which has no key for it.
+    pub required_output_times: Vec<f64>,
     /// gh#641: the loaded `--init-state` file. Shared by every cell (it is one
     /// ensemble of states); the replicate index selects the row. `None` = the
     /// model's own `init {}` (batch TOML deliberately has no key for this —

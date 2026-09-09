@@ -131,6 +131,7 @@ fn synthetic_sim_run(
         // `CompiledModel::new` refuses it by name.
         obs_anchors: None,
         t_end_override: None, // fit refuses horizons (gh#561)
+        required_output_times: Vec::new(), // no forecast rows to close
         init_state: None,     // synthetic data-gen starts from the model's init {}
         integrator: None,     // and uses the model's declared integrator
         backend: spec.backend,

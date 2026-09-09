@@ -486,6 +486,9 @@ pub fn build_cell_sim_run(
         table_files: table_files.clone(),
         scenario_name,
         t_end_override: job.t_end_override,
+        // Copied verbatim onto every cell: the emission grid is one grid for
+        // the whole job, like the observed window below.
+        required_output_times: job.required_output_times.clone(),
         init_state,
         // Copied verbatim onto every cell, so a sweep/draw grid resolves
         // ONE observed window, not one per cell.

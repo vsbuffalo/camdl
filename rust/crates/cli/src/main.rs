@@ -1238,6 +1238,9 @@ fn run_simulate(a: &args::SimulateArgs) {
         table_files,
         scenario_name: None, // set per-scenario in the loop
         t_end_override, // gh#626: keys the CAS identity below; cells get it via the job
+        // `simulate` records the model's own output schedule; only `fit predict`
+        // has forecast-row boundaries to add.
+        required_output_times: Vec::new(),
         // gh#641: assigned PER CELL by `engine::build_cell_sim_run` (replicate i
         // restores particle row i); the base run carries none.
         init_state: None,
@@ -1795,6 +1798,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         source,
         scenarios,
         t_end_override,
+        required_output_times: Vec::new(),
         init_state: init_state_source,
         obs_anchors,
         seeds: job_seeds,
@@ -2470,6 +2474,23 @@ fn build_simulate_cas_sink(
     emit_every: Option<crate::emit_every::EmitEvery>,
     total_runs: usize,
 ) -> Result<crate::batch::CasSink, String> {
+    // A required output time adds a recorded snapshot, and can raise the
+    // integration end to reach it — it changes the leaf's bytes. The leaf is
+    // keyed off the model as loaded here, not off the schedule
+    // `resolve_run_model` hands the backend, so a content-addressed run
+    // carrying one would store two different trajectories under one address.
+    // No such caller exists — only `fit predict` sets them, and its replay
+    // writes no leaf — so this refuses rather than lets a future one discover
+    // it as a stale cache hit.
+    if !run.required_output_times.is_empty() {
+        return Err(
+            "internal: a content-addressed simulate cannot carry required \
+             output times — they change the recorded trajectory but not the \
+             run identity. Fold them into `ResolvedEntry` before routing a \
+             CAS-writing path through them."
+                .to_string(),
+        );
+    }
     // Parse the raw IR (envelope-aware) — params NOT applied (batch parity).
     // `run.ir_path` is already the compiled IR, so this short-circuits; the
     // forward CAS-sink path never reads the state-Jacobian either

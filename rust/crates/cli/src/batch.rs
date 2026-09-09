@@ -733,6 +733,8 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         scenarios: job_scenarios,
         // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
         t_end_override: None,
+        // Nor forecast-row boundaries: batch records the model's own schedule.
+        required_output_times: Vec::new(),
         // gh#641: nor an `init_state` key, for the same reason.
         init_state: None,
         // gh#616: `batch run` has no data-binding surface, so an anchored
@@ -1693,6 +1695,8 @@ fn run_design_experiment(
             scenarios: job_scenarios.clone(),
         // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
         t_end_override: None,
+        // Nor forecast-row boundaries: batch records the model's own schedule.
+        required_output_times: Vec::new(),
         // gh#641: nor an `init_state` key, for the same reason.
         init_state: None,
         // gh#616: `batch run` has no data-binding surface, so an anchored

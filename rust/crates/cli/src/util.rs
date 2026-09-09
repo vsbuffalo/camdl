@@ -2409,6 +2409,19 @@ pub struct SimRun {
     /// differing from both the model's and this value is refused up front in
     /// `run_simulate`) keeps the baked-end guard's `old_end` meaningful.
     pub t_end_override: Option<f64>,
+    /// Times that must be recorded trajectory snapshots for this run, on top of
+    /// whatever `output { trajectories { … } }` enumerates
+    /// (2026-09-08-workflow-first-fit-config §1.5, §3.5).
+    ///
+    /// `fit predict` puts its forecast rows' closing boundaries here. A row's
+    /// value is the difference of the recorded cumulative flow at its two
+    /// boundaries, and a closing `covers` form — `ending_on(time, 7 'days)`
+    /// closes the row labelled `t` at `t + 1 'days` — puts the last forecast
+    /// row's close past the declared horizon, where nothing was integrated.
+    /// [`apply_required_output_times`] extends the run to the furthest of these
+    /// and records a snapshot at each. Empty for every other caller, and then it
+    /// is a no-op.
+    pub required_output_times: Vec<f64>,
     /// gh#641: the one particle row this cell restores instead of building its
     /// initial state from `init {}`. Applied at two seams — `resolve_run_model`
     /// moves `simulation.t_start` to the origin, and `simulate_compiled` hands
@@ -2571,6 +2584,144 @@ pub fn apply_scenario_horizon(
         crate::params_resolver::effective_horizon(model, scenario)
             .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Make every time in `required` a recorded trajectory snapshot, integrating
+/// past the resolved horizon when one lies beyond it
+/// (2026-09-08-workflow-first-fit-config §1.5, §3.5).
+///
+/// A no-op on the empty slice, which is every caller but `fit predict`.
+///
+/// **What it changes.** Two things, both on the emission grid: the run's
+/// integration end, raised to the furthest required time when that is past
+/// `simulation.t_end`; and the output schedule, rewritten as the explicit list
+/// of times the schedule already enumerates (`sim::output::output_times` over
+/// the raised end) plus the required times the list does not already carry.
+/// The rewrite to `AtTimes` is what lets a required time survive a schedule
+/// that would not have enumerated it — `output { trajectories { every = 7 } }`
+/// steps in sevens and a close one day past a weekly label is not a multiple of
+/// seven, so raising the end alone would still leave it unrecorded. A required
+/// time within [`crate::OBS_SNAP_EPS`] of a time the schedule already carries is
+/// dropped rather than added, so the common case (a daily grid that already
+/// carries the close once the end is raised) adds no second snapshot a ULP away
+/// from the first.
+///
+/// **What it does not change.** `simulation.t_end` is read as "the horizon" in
+/// several places — a `value_at(…, last_obs + 8 'weeks)` anchor, the
+/// observation anchors, the scenario-horizon refusal, the `quantities/` sidecar
+/// — and every one of them resolves against the model the *command* holds, not
+/// this per-cell copy. The extension is bookkeeping for the emission grid: it
+/// adds a snapshot so a period the model itself declares can be read, and the
+/// caller keeps reporting the declared horizon.
+///
+/// **Where it runs, and why there.** After the baked-end guards
+/// ([`check_baked_recurring_ends`], [`check_reactive_baked_emit_end`]), which
+/// refuse a horizon a *user* declared — `--to`, a scenario's
+/// `simulate { to }` — that would outrun a recurring campaign's compiler-baked
+/// end. This is not a declared horizon, and routing it through those guards
+/// would restore exactly the refusal it exists to remove. The consequence is
+/// worth stating: a recurring campaign whose end was baked from the model
+/// horizon does not fire over the extension, so the last forecast row's final
+/// sub-interval runs without it.
+///
+/// Before compile, so the schedule every backend builds through carries the
+/// times. A chain-binomial run still refuses a snapshot off its `dt` grid — the
+/// backend's own guard, which this deliberately does not bypass.
+pub fn apply_required_output_times(model: &mut ir::Model, required: &[f64]) {
+    let needed: Vec<f64> = required.iter().copied().filter(|t| t.is_finite()).collect();
+    let Some(furthest) = needed.iter().copied().reduce(f64::max) else { return };
+    if furthest > model.simulation.t_end {
+        model.simulation.t_end = furthest;
+    }
+    let mut times = sim::output::output_times(&model.output.times, model.simulation.t_end);
+    let missing: Vec<f64> = needed
+        .into_iter()
+        .filter(|r| !times.iter().any(|o| (o - r).abs() <= crate::OBS_SNAP_EPS))
+        .collect();
+    times.extend(missing);
+    times.sort_by(f64::total_cmp);
+    times.dedup();
+    model.output.times = ir::model::OutputSchedule::AtTimes(times);
+}
+
+#[cfg(test)]
+mod required_output_times_tests {
+    //! `apply_required_output_times` — the emission-grid widening `fit predict`
+    //! asks for when a forecast row's declared period closes past the horizon.
+
+    use super::apply_required_output_times;
+
+    /// The golden SIR with a chosen output schedule and horizon — the two
+    /// inputs `apply_required_output_times` reads.
+    fn sir_with_output(times: ir::model::OutputSchedule, t_end: f64) -> ir::Model {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/sir_basic.ir.json");
+        let mut m: ir::Model =
+            ir::from_str(&std::fs::read_to_string(&path).expect("read sir_basic"))
+                .expect("parse sir_basic");
+        m.simulation.t_end = t_end;
+        m.output.times = times;
+        m
+    }
+
+    fn regular(start: f64, step: f64) -> ir::model::OutputSchedule {
+        ir::model::OutputSchedule::Regular(ir::model::RegularOutputSchedule { start, step })
+    }
+
+    /// Every caller but `fit predict` passes an empty slice, and a `fit predict`
+    /// whose rows all close on the grid passes one too. A request for nothing
+    /// must leave the model exactly as declared — not the horizon, and not even
+    /// the schedule's representation, so the run is the one the model states.
+    #[test]
+    fn no_required_time_leaves_the_schedule_and_the_horizon_untouched() {
+        let mut m = sir_with_output(regular(0.0, 1.0), 217.0);
+        let before = m.clone();
+        apply_required_output_times(&mut m, &[]);
+        assert_eq!(m.simulation.t_end, before.simulation.t_end);
+        assert_eq!(m.output.times, before.output.times, "the schedule must stay Regular");
+    }
+
+    /// The reported case: `ending_on(time, 7 'days)` closes the row labelled
+    /// 217 at 218, one day past the declared horizon. The run integrates to the
+    /// close and records a snapshot there; the daily schedule then enumerates
+    /// it, so nothing is appended twice.
+    #[test]
+    fn a_close_past_the_horizon_extends_the_run_and_is_recorded() {
+        let mut m = sir_with_output(regular(0.0, 1.0), 217.0);
+        apply_required_output_times(&mut m, &[218.0]);
+        assert_eq!(m.simulation.t_end, 218.0);
+        let times = sim::output::output_times(&m.output.times, m.simulation.t_end);
+        assert_eq!(*times.last().unwrap(), 218.0);
+        assert_eq!(times.len(), 219, "0..=218 once each, no duplicate close");
+    }
+
+    /// A schedule that does not step onto the close: `every = 7 'days` from 0
+    /// enumerates 161 but never 162. Raising the horizon alone would leave the
+    /// boundary unrecorded, so the close is added to the recorded times — the
+    /// fix is the added time, not a dropped row.
+    #[test]
+    fn a_close_the_schedule_never_steps_onto_is_added_to_the_recorded_times() {
+        let mut m = sir_with_output(regular(0.0, 7.0), 161.0);
+        apply_required_output_times(&mut m, &[162.0]);
+        assert_eq!(m.simulation.t_end, 162.0);
+        let times = sim::output::output_times(&m.output.times, m.simulation.t_end);
+        assert!(times.contains(&162.0), "the close must be recorded: {times:?}");
+        assert!(times.contains(&161.0), "the schedule's own times are kept: {times:?}");
+        assert!(!times.contains(&168.0), "nothing past the close: {times:?}");
+    }
+
+    /// A close the schedule already records adds no second snapshot beside it,
+    /// and leaves the horizon where it is.
+    #[test]
+    fn a_close_already_on_the_grid_adds_nothing() {
+        let mut m = sir_with_output(regular(0.0, 1.0), 217.0);
+        apply_required_output_times(&mut m, &[210.0]);
+        assert_eq!(m.simulation.t_end, 217.0);
+        let times = sim::output::output_times(&m.output.times, m.simulation.t_end);
+        assert_eq!(times.iter().filter(|t| **t == 210.0).count(), 1);
+        assert_eq!(times.len(), 218, "0..=217 once each");
+    }
 }
 
 /// Refuse an EXTENDED horizon that would outrun a baked recurring end (gh#561;
@@ -2736,6 +2887,7 @@ impl Default for SimRun {
             table_files: HashMap::new(),
             scenario_name: None,
             t_end_override: None,
+            required_output_times: Vec::new(),
             init_state: None,
             obs_anchors: None,
             adhoc_enable: Vec::new(),
@@ -2901,7 +3053,7 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
 
     crate::params_resolver::print_warnings(&resolved);
 
-    let model = resolved.model;
+    let mut model = resolved.model;
     // The baked-end refusal runs HERE — after the resolver's scenario filter
     // has removed every intervention this scenario does not fire — so it sees
     // exactly the campaigns that would actually run (gh#561; the pre-filter
@@ -2916,6 +3068,9 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     if run.t_end_override.is_some() {
         check_reactive_baked_emit_end(&model, pre_scenario_end, model.simulation.t_end)?;
     }
+    // The caller's required snapshots, after the two guards above and before
+    // compile — see [`apply_required_output_times`] for both reasons.
+    apply_required_output_times(&mut model, &run.required_output_times);
     let compiled = CompiledModel::new(model.clone())
         .map_err(|e| format!("model compile error: {:?}", e))?;
 

@@ -1007,6 +1007,14 @@ impl ConditionedSource {
 /// draws. The quantile reduction runs per scenario after all cells merge.
 struct PredictiveSink {
     compiled: std::sync::Arc<sim::CompiledModel>,
+    /// The horizon the model *declares* (`simulate { to }`, resolved). The
+    /// emission grid may run past it — a forecast row whose declared period
+    /// closes beyond the horizon has a snapshot recorded at that close
+    /// (`required_output_times` on the job) — but `quantities {}` is reported
+    /// over the declared window, so the evaluator reads a trajectory cut back
+    /// to this time. Equal to the trajectory's own end whenever nothing was
+    /// extended, and then the cut is not taken at all.
+    quantity_t_end: f64,
     /// Per leaf (in `model.observations` order): the times to emit at — the
     /// leaf's observation times, then (gh#696) the forecast times continuing
     /// its cadence to the model horizon. NOT the observed-data axis: `last_obs`
@@ -1191,10 +1199,37 @@ impl crate::engine::RunSink for PredictiveSink {
         // the predictive output above. The `value_at` anchors are the two ends of
         // the OBSERVED data axis — the min and max over the leaves' observation
         // times, which predict carries for the predicted-vs-observed join.
+        //
+        // The emission grid may have been widened past the *declared* horizon so
+        // that a forecast row's closing boundary is a recorded snapshot. That
+        // widening is bookkeeping for the observation projection alone: a
+        // quantity is reported over the window `simulate { to }` declares, so a
+        // series must not gain a row past it and a reduction (a `max`, a first
+        // crossing) must not see a day the model does not declare. Cut the
+        // replay back before the evaluator reads it — a clone taken only when
+        // the grid actually ran past the horizon and the model declares
+        // quantities at all, so the ordinary predict pays nothing.
+        let quant_traj: Option<sim::Trajectory> = match self.quant_eval {
+            Some(_) => {
+                let keep = cell
+                    .traj
+                    .snapshots
+                    .iter()
+                    .take_while(|s| s.t <= self.quantity_t_end + crate::OBS_SNAP_EPS)
+                    .count();
+                (keep < cell.traj.snapshots.len()).then(|| {
+                    let mut cut = cell.traj.clone();
+                    cut.snapshots.truncate(keep);
+                    cut
+                })
+            }
+            None => None,
+        };
+        let quant_traj: &sim::Trajectory = quant_traj.as_ref().unwrap_or(&cell.traj);
         let quant_results = self.quant_eval.as_ref().map(|eval| {
             eval.eval_draw(
                 &params,
-                &cell.traj,
+                quant_traj,
                 conditioned,
                 &self.compiled,
                 Some(&obs_set),
@@ -1202,7 +1237,7 @@ impl crate::engine::RunSink for PredictiveSink {
             )
         });
         let snapshot_times: Vec<f64> = if quant_results.is_some() {
-            cell.traj.snapshots.iter().map(|s| s.t).collect()
+            quant_traj.snapshots.iter().map(|s| s.t).collect()
         } else {
             Vec::new()
         };
@@ -1809,6 +1844,65 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             })
             .collect();
 
+        // ── The closing boundary of the last forecast row ──────────────────
+        //
+        // A row's value is the difference of the recorded cumulative flow at
+        // its two boundaries, so both must be recorded output times
+        // (`project_coverages`). Every boundary inside the observed record is
+        // one already — the fit scored those rows. The one that can fall off
+        // the grid is the *close* of the last forecast row, because a uniform
+        // `covers` form with a closing offset puts it past the label:
+        // `ending_on(time, 7 'days)` closes the row labelled `t` at `t + 1`,
+        // and the last forecast label sits at the horizon, so the close sits
+        // one day beyond it, where nothing was integrated. Predict integrates
+        // its own trajectories per draw, so it is predict that decides where
+        // they stop: it asks for a snapshot at that close
+        // (`required_output_times` on the job) and reports the declared
+        // horizon everywhere else. Without that snapshot the only fix left to
+        // the modeller is to move `simulate { to }` by one day, which re-keys
+        // the model and orphans the fit
+        // (2026-09-08-workflow-first-fit-config §1.5, §3.5).
+        //
+        // A windowed stream (`window_start`/`window_stop`) takes the contiguous
+        // continuation `[previous stop, label)` in `leaf_row_coverages`, so its
+        // tail closes at its label and this never fires — the list stays empty,
+        // and an empty list changes nothing about the run.
+        let mut required_output_times: Vec<f64> = Vec::new();
+        let mut extended: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (si, obs_ir) in model.observations.iter().enumerate() {
+            let n_obs = leaf_times[si].len();
+            if ff_emit_times[si].len() <= n_obs {
+                continue; // no forecast tail — nothing past the data to close
+            }
+            // An `Instant` row reads the state at its label, which is an
+            // emitted time and therefore already on the grid.
+            let Some(&(label, sim::inference::Coverage::Interval { start, stop })) =
+                leaf_coverages[si].last()
+            else {
+                continue;
+            };
+            if horizon_output_times.iter().any(|o| (o - stop).abs() <= crate::OBS_SNAP_EPS) {
+                continue; // the schedule already records the close
+            }
+            required_output_times.push(stop);
+            // One note per logical stream, not per stratum leaf.
+            if extended.insert(obs_ir.source.clone()) {
+                eprintln!(
+                    "fit predict: stream '{}': the last forecast row (t = {label}) \
+                     covers [{start}, {stop}) under its `covers` declaration, \
+                     which closes past the declared horizon t = {}. Integrating \
+                     to t = {stop} and recording a snapshot there, so the row's \
+                     closing cumulative flow can be read; `simulate {{ to }}` \
+                     keeps its declared value and the fit is unchanged.",
+                    obs_ir.source,
+                    model.simulation.t_end,
+                );
+            }
+        }
+        required_output_times.sort_by(f64::total_cmp);
+        required_output_times.dedup();
+
         // The free-forward cells (one per sweep-point × scenario, engine canonical
         // order), plus the stacked quantity files — accumulated across the whole
         // sweep grid, since one design cell is a (sweep point, scenario) pair and
@@ -2016,6 +2110,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
             };
             let mut sink = PredictiveSink {
                 compiled: compiled.clone(),
+                quantity_t_end: model.simulation.t_end,
                 leaf_times: ff_emit_times.clone(),
                 leaf_aux: leaf_aux.clone(),
                 leaf_coverages: leaf_coverages.clone(),
@@ -2068,6 +2163,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
                     scenarios: vec![sref.clone()],
                     // gh#626: the predictive window comes from the data.
                     t_end_override: None,
+                    // The forecast rows' closing boundaries, so the
+                    // projection finds a recorded snapshot at each. Empty
+                    // unless a declared period closes off the recorded grid,
+                    // and an empty list leaves the run untouched.
+                    required_output_times: required_output_times.clone(),
                     // gh#641: the predictive replays from the model's init {} at
                     // each posterior draw; a filtered-state restart is a
                     // `simulate --init-state` surface, not a `fit predict` one.
