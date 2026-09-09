@@ -1,0 +1,58 @@
+# Base: none — root model
+# Adds: nothing — this is a context for the data spec's examples, not a
+#   modelling claim
+# Changes: nothing else
+#
+# What this model is
+# ------------------
+# Two provinces, each with a susceptible (S), exposed (E) and confirmed
+# infectious (I) compartment. `exposure` moves a susceptible into E; `confirm`
+# moves an exposed person into I, which is the flow a confirmed-case stream
+# counts. `origin` maps 1 July 2026 to model time t = 0, so an example file can
+# state its times as ISO dates, and the `province` dimension gives the level
+# name (`ituri`) the document's own example indexes.
+#
+# What it is fitted to
+# --------------------
+# Nothing by itself. It carries no `observations { }` block: the data-spec
+# example harness (`tests/data_spec_examples.rs`) appends the stream the
+# document declares, so each documented file is bound under the declaration the
+# document prints beside it. The parameters in `ituri.params.toml` are whatever
+# makes the run finite; no number here is an estimate.
+
+time_unit = 'days
+origin    = date("2026-07-01")
+
+dimensions { province = [ituri, kivu] }
+
+compartments { S, E, I }
+
+stratify(by = province)
+
+parameters {
+  beta     : rate        in [0.001, 5.0]
+  sigma    : rate        in [0.01, 1.0]
+  p_report : probability in [0.01, 1.0]
+  k        : positive    in [0.1, 1000.0]
+}
+
+let N[p in province] = S[p] + E[p] + I[p]
+
+transitions {
+  exposure[p in province] : S[p] --> E[p]  @ beta * S[p] * I[p] / N[p]
+  confirm[p in province]  : E[p] --> I[p]  @ sigma * E[p]
+}
+
+init {
+  S[ituri] = 4000
+  E[ituri] = 40
+  I[ituri] = 10
+  S[kivu]  = 4000
+  E[kivu]  = 40
+  I[kivu]  = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}

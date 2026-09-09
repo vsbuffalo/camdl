@@ -126,6 +126,13 @@ structure and turns passing doc-tests into failures/ICEs. Edit it by hand. Any
 other `.md` with embedded doctest preambles is the same hazard — check before
 formatting.
 
+`docs/camdl-data-spec.md` is executed too (`make test-data-spec`) but is **safe
+to format**: its examples are marked in the fence info string
+(`` ```tsv data-example=hole ``), which `dprint` leaves alone along with the
+fenced body — verified by formatting a copy and diffing. Keep it that way; a
+marker moved into an HTML comment before the fence would inherit the language
+spec's hazard.
+
 ## Commits and tracking
 
 **No AI/Claude trailers in commit messages — ever.** A commit message (and a

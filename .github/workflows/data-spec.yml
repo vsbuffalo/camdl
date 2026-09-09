@@ -1,0 +1,45 @@
+name: Data spec
+
+# Binds every observation-file example in docs/camdl-data-spec.md through the
+# loader `fit run` uses and checks it covers the periods the document states
+# (`make test-data-spec`). The main CI ignores docs/**, so this covers doc-only
+# PRs; a *code* change that breaks a documented file is caught by ci.yml, which
+# runs the same harness as part of the Rust workspace. Needs both toolchains:
+# camdlc compiles the document's stream declaration, camdl binds its file.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/camdl-data-spec.md"
+      - "rust/crates/cli/**"
+      - "ocaml/**"
+      - ".github/workflows/data-spec.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/camdl-data-spec.md"
+      - "rust/crates/cli/**"
+      - "ocaml/**"
+      - ".github/workflows/data-spec.yml"
+
+jobs:
+  data-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+          dune-cache: true
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install OCaml dependencies
+        run: |
+          cd ocaml
+          opam install . --deps-only --with-test --yes
+
+      - name: Execute the data spec's observation-file examples
+        run: opam exec -- make test-data-spec

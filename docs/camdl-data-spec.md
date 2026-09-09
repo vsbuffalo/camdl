@@ -642,7 +642,7 @@ write `day`, `starting_on` or `ending_on`.
 
 The fifth form puts both boundaries in the file, one pair per row:
 
-```camdl
+```camdl data-example=ituri-windows preamble=ituri
 cases_ituri {
   columns     { onset_from : window_start, onset_stop : window_stop,
                 cases_ituri : count }
@@ -651,7 +651,7 @@ cases_ituri {
 }
 ```
 
-```tsv
+```tsv data-example=ituri-windows
 onset_from	onset_stop	cases_ituri
 2026-07-01	2026-07-08	31
 2026-07-08	2026-07-15	44
@@ -688,9 +688,18 @@ count for 8 July whatever date sits in the stop column.
 Some files carry their own width — a `days_covered` column saying how many days
 each row actually represents, because publication slipped. That is what the
 window columns are for, and the conversion is one subtraction done once where
-the file is built:
+the file is built. The stream names the two boundary columns and nothing else:
 
-```tsv
+```camdl data-example=varying-width preamble=daily
+cases {
+  columns   { window_start : window_start, window_stop : window_stop,
+              cases : count }
+  projected = incidence(infection)
+  cases     ~ poisson(rate = rho * projected)
+}
+```
+
+```tsv data-example=varying-width
 window_start	window_stop	cases
 2026-07-07	2026-07-08	12
 2026-07-08	2026-07-09	9
@@ -719,6 +728,28 @@ its label, so consecutive rows whose windows do not touch can only mean a row is
 silently. The error names both windows and the uncovered span between them. Keep
 every scheduled row and write the unobserved one as `NA`; if one row genuinely
 covers the whole span, state that with the window columns.
+
+Written out, with 9 July simply absent:
+
+```camdl data-example=uniform-gap preamble=daily
+cases {
+  columns   { time : time, cases : count }
+  covers    = day(time)
+  projected = incidence(infection)
+  cases     ~ poisson(rate = rho * projected)
+}
+```
+
+```tsv data-example=uniform-gap refused="covered by neither"
+time	cases
+2026-07-07	12
+2026-07-08	9
+2026-07-10	14
+```
+
+`day(time)` gives those three rows the windows `[7 Jul, 8 Jul)`,
+`[8 Jul, 9 Jul)` and `[10 Jul, 11 Jul)`. Nothing covers 9 July, so the load
+stops there instead of quietly scoring the last row against two days of flow.
 
 ### What this changes for an existing file
 
@@ -770,6 +801,28 @@ Both forms are therefore legitimate and mean different things:
 | `2026-07-14  NA`       | scheduled, unobserved — no term, interval closes |
 | `2026-07-14  0`        | observed zero — scored as a zero count           |
 | (no row at 2026-07-14) | not scheduled — the next row's interval spans it |
+
+A daily file with one unobserved day, and the stream that reads it:
+
+```camdl data-example=hole preamble=daily
+cases {
+  columns   { time : time, cases : count }
+  covers    = day(time)
+  projected = incidence(infection)
+  cases     ~ poisson(rate = rho * projected)
+}
+```
+
+```tsv data-example=hole
+time	cases
+2026-07-07	12
+2026-07-08	NA
+2026-07-09	14
+```
+
+The middle row states the window `[8 Jul, 9 Jul)` and scores nothing in it. The
+row after it opens at 9 July, where its own declaration puts it, rather than
+reaching back over the day nobody observed.
 
 **Under a declared `covers`, a hole needs no separate rule.** The two properties
 above were a consequence of inference: the accumulator reset on row spacing, so

@@ -116,7 +116,7 @@ dev-camdlc: build-ocaml
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-.PHONY: test test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-install
+.PHONY: test test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-install
 
 # `make test` runs the full surface. The Rust suite is split into two groups so
 # CI can run and badge them independently (see .github/workflows/): test-rust =
@@ -221,6 +221,21 @@ CLI_DOCS := docs/workflow.md docs/inference.md docs/debugging.md docs/diagnosing
 test-cli-docs: build-rust
 	bash scripts/check_cli_docs.sh --selftest
 	bash scripts/check_cli_docs.sh $(CLI_DOCS)
+
+# Bind every observation-file example in docs/camdl-data-spec.md through the
+# loader `fit run` uses, and check it covers the periods the document says it
+# does (gh#879). The data spec cannot join DOCTEST_DOCS: its examples are TSV
+# files that only mean something under the stream declaration printed beside
+# them, so proving one loads is a run through the real reader, not a compile.
+#
+# The harness is a cargo test, so `make test-rust` (and ci.yml) already run it.
+# This target exists so a DOC-ONLY change can be gated too — ci.yml ignores
+# docs/**, which is how a documented format shipped unloadable in the first
+# place. Mirrored by .github/workflows/data-spec.yml; needs both toolchains
+# (camdlc compiles the document's stream, camdl binds its file).
+test-data-spec: build
+	cd rust && CAMDL_SKIP_VERSION_CHECK=1 $(CARGO_WRAP) \
+	  cargo test --release -p cli --test data_spec_examples
 
 # install.sh fast tier: shellcheck (if present) + offline unit tests
 # (version_ge, the cmake>=3.13 gate, cmake_plat, and the no-sudo contract — a

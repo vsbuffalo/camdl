@@ -387,6 +387,11 @@ workflows, on push to `main` and on PRs:
 - `compiler.yml` — `make test-ocaml` (`dune runtest`)
 - `doctest.yml` — `make test-docs` (camdlc doctest of the spec set)
 - `cli-docs.yml` — `make test-cli-docs`
+- `data-spec.yml` — `make test-data-spec` (binds every observation-file example
+  in `docs/camdl-data-spec.md` through the real loader and checks the periods it
+  covers; the harness is `rust/crates/cli/tests/data_spec_examples.rs`, so
+  `ci.yml` runs it too — this workflow exists because `ci.yml` ignores
+  `docs/**`)
 - `release.yml` — release artifacts (Linux / macOS / Windows)
 
 Statistical `#[ignore]` tests are **not** in CI yet. Run manually before
