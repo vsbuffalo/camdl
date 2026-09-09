@@ -508,6 +508,31 @@ pub fn binom_logpmf(k: u64, n: u64, p: f64) -> f64 {
         + k as f64 * p.ln() + (n - k) as f64 * (1.0 - p).ln()
 }
 
+/// Bernoulli log-PMF: `log P(Y = y)` where `Y ~ Bernoulli(p)` and any `y > 0.5`
+/// counts as a success.
+///
+/// Deliberately not `binom_logpmf(y, 1, p)`: this family *clamps* `p` into
+/// `[0, 1]` and *floors* the probability at
+/// [`LOG_PROB_FLOOR`](crate::inference::types::LOG_PROB_FLOOR) instead of
+/// refusing at the endpoints. Without the clamp an out-of-range `p` — a PGAS
+/// proposal with `p_detect > 1` before the posterior concentrates — gives a
+/// *positive* log-probability, invalid as an SMC weight and silently inflating
+/// posterior mass on the bad region (`docs/dev/reviews/2026-04-30-correctness.md`
+/// C1). The floor then keeps the impossible corner (`p = 0` with `y = 1`) at a
+/// large finite penalty rather than `-inf`.
+pub fn bernoulli_logpmf(y: f64, p: f64) -> f64 {
+    // gh#874, gh#645's rule applied to this family: `f64::clamp` propagates a
+    // NaN receiver and `f64::max` returns the non-NaN operand, so the floor
+    // below launders a NaN argument into a finite `ln(1e-300) ≈ −690.8` — a
+    // plausible-looking penalty where every other family in this module
+    // returns `-inf` for the same input. Checked first, before the clamp,
+    // exactly as the other families check before their own floor.
+    if y.is_nan() || p.is_nan() { return f64::NEG_INFINITY; }
+    let p = p.clamp(0.0, 1.0);
+    let floor = crate::inference::types::LOG_PROB_FLOOR;
+    if y > 0.5 { p.max(floor).ln() } else { (1.0 - p).max(floor).ln() }
+}
+
 /// Beta-Binomial log-PMF.
 ///
 /// log p(k | n, alpha, beta) = lgamma(n+1) - lgamma(k+1) - lgamma(n-k+1)
