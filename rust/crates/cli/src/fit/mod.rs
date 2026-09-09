@@ -1217,6 +1217,33 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // stay silent). Registry-driven so it can't drift from `fit methods`.
         methods::emit_status_banner(stage.method_kind(), stage.backend());
 
+        // gh#506 follow-up, gh#881: a declared `start` that the chosen init
+        // mode discards is a silent no-op. Not an error — the spreading modes
+        // ignore it on purpose — but the user who wrote the value should hear
+        // that it had no effect, rather than inferring a start that never
+        // happened. Every stage kind draws its chain starts the same way, so
+        // this runs once here, before the dispatch. Inside the IF2 arm it
+        // reached only IF2 fits: PMMH, PGAS, MH, NUTS and the NLopt stages
+        // discarded `[estimate].start` without a word, which is how the
+        // gh#876 modeller came to declare the true value and then fit from
+        // starts 33-41% away from it.
+        if effective_starts.is_none()
+            && init::ignores_base_point(&stage.init_method(), stage.chains())
+        {
+            let declared: Vec<&str> = sweep_config.estimate.iter()
+                .filter(|(_, spec)| spec.start.is_some())
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if !declared.is_empty() {
+                eprintln!(
+                    "  \x1b[33mnote:\x1b[0m `init = \"{}\"` draws every chain's \
+                     start, so `[estimate].start` is unused here for: {}. \
+                     Use `init = \"single\"` to start every chain at the \
+                     declared values, or drop the `start` entries.",
+                    stage.init_method(), declared.join(", "));
+            }
+        }
+
         match stage {
             Stage::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, init_method, survey_path, survey_top_k_n, loglik_eval, gate, dt_check, .. } => {
                 // clean_eval comes straight from the stage TOML — it is part of
@@ -1384,27 +1411,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         },
                         None => effective_init.clone(),
                     };
-                // gh#506 follow-up: a declared `start` that the chosen init
-                // mode discards is a silent no-op. Not an error — the
-                // spreading modes ignore it on purpose — but the user who
-                // wrote the value should hear that it had no effect, rather
-                // than inferring a start that never happened.
-                if effective_starts.is_none()
-                    && init::ignores_base_point(&effective_init, *chains)
-                {
-                    let declared: Vec<&str> = sweep_config.estimate.iter()
-                        .filter(|(_, spec)| spec.start.is_some())
-                        .map(|(n, _)| n.as_str())
-                        .collect();
-                    if !declared.is_empty() {
-                        eprintln!(
-                            "  \x1b[33mnote:\x1b[0m `init = \"{}\"` draws every chain's \
-                             start, so `[estimate].start` is unused here for: {}. \
-                             Use `init = \"single\"` to start every chain at the \
-                             declared values, or drop the `start` entries.",
-                            effective_init, declared.join(", "));
-                    }
-                }
                 // For survey_top_k we need to keep the SurveyTopKResult
                 // around (not just the per-chain `chains`) so the
                 // chain_init_source / chain_starts.tsv writers can pull

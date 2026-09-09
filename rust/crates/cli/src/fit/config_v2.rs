@@ -1407,8 +1407,18 @@ impl Stage {
     }
 
     /// The per-chain initialisation method (`single` / `lhs` /
-    /// `survey_top_k`). NLopt-family and PFilter stages do not carry an
-    /// `init_method` field; they report the default (`Lhs`).
+    /// `survey_top_k` / …) this stage declared.
+    ///
+    /// The NLopt-family stages carry one too — `NloptStageConfig::init_method`,
+    /// which `nlopt_stage` reads to build its multi-start points — so it is
+    /// read from there rather than reported as the default. Answering
+    /// `uniform_unconstrained` for a stage that declared `init = "single"`
+    /// makes every caller's judgement about the declared start wrong in the
+    /// one direction the user notices (gh#881).
+    ///
+    /// `PFilter` is the one stage kind with no init of its own: it runs
+    /// replicates of one point, not competing chains, so it reports the
+    /// default and `chains()` of 1 keeps that answer inert.
     pub fn init_method(&self) -> super::init::InitMethod {
         match self {
             Stage::IF2 { init_method, .. }
@@ -1416,9 +1426,8 @@ impl Stage {
             | Stage::PMMH { init_method, .. }
             | Stage::Mh { init_method, .. }
             | Stage::Nuts { init_method, .. } => init_method.clone(),
-            Stage::PFilter { .. } | Stage::NlSbplx(_) | Stage::NlBobyqa(_) => {
-                super::init::InitMethod::default()
-            }
+            Stage::NlSbplx(c) | Stage::NlBobyqa(c) => c.init_method.clone(),
+            Stage::PFilter { .. } => super::init::InitMethod::default(),
         }
     }
 
@@ -3223,6 +3232,41 @@ backend   = "ode"
 chains    = 2
 "#).unwrap();
         cfg.stages["mle"].clone()
+    }
+
+    /// gh#881. `Stage::init_method()` is what the "your declared `start` is
+    /// unused" note reads, so an answer that ignores the stage's own `init`
+    /// makes the note lie: an NLopt stage declaring `init = "single"` uses
+    /// the declared start (and collapses to one chain), yet the accessor
+    /// reported the default and the note would have said the start was
+    /// discarded by `uniform_unconstrained`.
+    #[test]
+    fn an_nlopt_stage_reports_the_init_it_declared() {
+        let stage = |init: &str| parse(&format!(r#"
+[model]
+camdl = "m.camdl"
+
+[estimate]
+beta = {{ bounds = [0.01, 2.0] }}
+
+[fixed]
+N0 = 1000000
+
+[stages.mle]
+algorithm = "nl-sbplx"
+backend   = "ode"
+chains    = 4
+init      = "{init}"
+"#)).unwrap().stages["mle"].clone();
+
+        assert_eq!(stage("single").init_method(), super::super::init::InitMethod::Single,
+            "an NLopt stage that declared `init = \"single\"` must say so");
+        assert_eq!(stage("lhs").init_method(), super::super::init::InitMethod::Lhs,
+            "and must report every other declared mode as declared");
+        // The stage kind with no init of its own still answers the default.
+        assert_eq!(nl_sbplx_stage().init_method(),
+            super::super::init::InitMethod::default(),
+            "an NLopt stage that declared none falls back to the default");
     }
 
     fn scout_stage(init: &str) -> Stage {
