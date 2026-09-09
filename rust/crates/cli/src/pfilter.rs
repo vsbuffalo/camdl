@@ -981,8 +981,8 @@ fn parse_column_cells_raw<'a>(
 }
 
 /// Parse the raw rows of one named TSV column into per-row cells. A cell is
-/// `None` for a HOLE (the missing-value token `NA`) and `Some(v)` for an
-/// observed finite value. The TIME of a hole row is retained (the row is
+/// `None` for a hole (the missing-value token `NA`) and `Some(v)` for an
+/// observed finite value. The time of a hole row is retained (the row is
 /// kept) so the observation grid is unchanged — only the value is absent.
 ///
 /// `NaN`/`inf` are rejected as garbage (a hole is `NA`, not a non-finite
@@ -1938,7 +1938,7 @@ mod tests {
         }
     }
 
-    // ── gh#833: a per-row window boundary is a TIME, dates included ─────
+    // ── gh#833: a per-row window boundary is a time, dates included ─────
 
     /// The same incidence stream stating each row's window in the file — a
     /// `window_start`/`window_stop` pair in place of the `: time` column,

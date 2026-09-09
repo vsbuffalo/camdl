@@ -9,7 +9,7 @@
 //! `init = "uniform_unconstrained"`, fit from starts 33-41% away from it, and
 //! had every chain refused; the note would have said why.
 //!
-//! The defect is at the CALLSITE, not inside `ignores_base_point`, which was
+//! The defect is at the call site, not inside `ignores_base_point`, which was
 //! already right about every mode (`fit::init::tests`). Only running the
 //! dispatch can tell whether the check is reached, so this is end to end.
 //!

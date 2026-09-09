@@ -922,7 +922,7 @@ pub fn run_stage(
         // backwards for the cause that produces this refusal: the drawing
         // `init` modes map their draws through the bounds, so widening them
         // widens the range the starts come from and makes an unscoreable
-        // start MORE likely. What helps is a start the filter can score.
+        // start more likely. What helps is a start the filter can score.
         return Err(format!(
             "pmmh stage `{}`: all {} chains failed init-eval with \
              PFDegenerate — the particle filter could not score any chain's \
