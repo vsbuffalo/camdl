@@ -331,8 +331,8 @@ lexicographically.
 `mle_params.toml`, `final_params.toml`, `chain_starts.tsv`,
 `chain_evaluations.tsv`, `diagnostics.tsv`, and per chain
 `chain_N/parameter_traces.tsv` + `chain_N/final_params.toml`. A PGAS or PMMH
-stage writes `fit_state.toml`, `draws.tsv` (the thinned post-warm-up cloud),
-`diagnostics.json`, and per chain `chain_N/trace.tsv`,
+stage writes `fit_state.toml`, `chain_starts.tsv`, `draws.tsv` (the thinned
+post-warm-up cloud), `diagnostics.json`, and per chain `chain_N/trace.tsv`,
 `chain_N/resume_state.bin`, and — when posterior trajectories are requested —
 `chain_N/trajectories.tsv` with a `chain_N/trajectories.json` manifest.
 
@@ -2592,9 +2592,11 @@ into the stage hash, and the CLI overrides are written into the stage _before_
 the content address is taken (`apply_cli_overrides`, `config_v2.rs:1722`), so
 two runs differing only in `--init` are two artifacts.
 
-Each stage writes `chain_starts.tsv` recording where every chain actually began,
-before any perturbation. That file, not the config, is the authority on what a
-run did.
+An `if2`, `pgas` or `pmmh` stage writes `chain_starts.tsv` recording where every
+chain actually began, before any perturbation, and names the init that supplied
+those values. That file, not the config, is the authority on what a run did. A
+`nuts` or `nlopt` stage writes none, so `chain_init_source` in `fit_state.toml`
+is the only record of where those chains began.
 
 **Base-point precedence** (`runner.rs:235`), lowest to highest: the model's
 declared value, `[fixed]`, `[estimate].start`, then the upstream stage's result

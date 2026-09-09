@@ -168,9 +168,13 @@ So `start` is load-bearing wherever the table says "base point". When a mode
 ignores it, that is deliberate: the mode's whole purpose is to explore, and the
 chain-agreement gate is only informative if the chains genuinely start apart.
 
-Each stage writes a `chain_starts.tsv` recording where every chain actually
-began, before any perturbation. That file, not the config, is the authority on
-what a run did.
+An `if2`, `pgas` or `pmmh` stage writes a `chain_starts.tsv` recording where
+every chain actually began, before any perturbation, and names the init that
+supplied those values. That file, not the config, is the authority on what a run
+did — a stage chained with `init_mle` records `from_mle` on every row, because
+every chain starts at the upstream stage's single point. A `nuts` or `nlopt`
+stage writes no such file; for those, the fit's `chain_init_source` is the only
+record of where the chains began.
 
 > **Unknown keys are rejected.** A misplaced or misspelled key is a hard error
 > naming the offending key — `fit.toml` is parsed strictly. A top-level `dt` (it
