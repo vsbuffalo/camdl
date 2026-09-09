@@ -270,6 +270,209 @@ fn a_synthetic_fit_on_a_windowed_model_completes() {
         "a declared emission has no holes: {rows:?}");
 }
 
+// ── The real-shaped fixture (gh#878) ────────────────────────────────────────
+//
+// `tests/fixtures/real_shaped/` is the same two surfaces on input shaped the
+// way published surveillance is: ISO dates in both window boundaries, one-day
+// rows with a three-day and a five-day row among them, a scheduled row with no
+// count, a stratified stream in long form, and a denominator the file supplies.
+
+fn real_shaped(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/real_shaped").join(name)
+}
+
+/// The committed fixture model, compiled into `dir` through the same helper the
+/// inline models above use.
+fn compile_real_shaped(dir: &Path) -> PathBuf {
+    let src = std::fs::read_to_string(real_shaped("surveillance.camdl")).unwrap();
+    compile(dir, "surveillance", &src)
+}
+
+/// The fixture model's `origin`.
+const REAL_SHAPED_ORIGIN: &str = "2026-06-29";
+
+/// A temporal cell as model time. The bound file states ISO dates; the
+/// re-emitted one states day offsets from the origin (gh#882 — the design
+/// writer does not yet carry the input's representation through). Both name
+/// the same instant, which is what the design must preserve.
+fn as_time(cell: &str) -> f64 {
+    if cell.contains('-') {
+        ir::caltime::date_to_internal(REAL_SHAPED_ORIGIN, cell, "days")
+            .unwrap_or_else(|e| panic!("cannot read '{cell}' through the origin: {e:?}"))
+    } else {
+        cell.parse().unwrap_or_else(|e| panic!("cannot read '{cell}' as a time: {e}"))
+    }
+}
+
+const REAL_SHAPED_STAGES: &str = r#"
+[estimate]
+beta = { bounds = [0.25, 0.5], start = 0.35 }
+
+[fixed]
+gamma = 0.2
+rho   = 0.5
+psi   = 0.3
+k     = 20
+
+[stages.mle]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 2
+particles  = 40
+iterations = 3
+cooling    = 0.7
+"#;
+
+fn real_shaped_truth(dir: &Path) -> PathBuf {
+    let p = dir.join("truth.toml");
+    std::fs::write(&p, "beta = 0.35\ngamma = 0.2\nrho = 0.5\npsi = 0.3\nk = 20\n").unwrap();
+    p
+}
+
+/// A fit config binding the named streams to the named committed files.
+fn real_shaped_fit(dir: &Path, ir: &Path, binds: &[(&str, &str)]) -> PathBuf {
+    let mut s = format!("[model]\ncamdl = \"{}\"\n\n[data.observations]\n", ir.display());
+    for (stream, file) in binds {
+        s.push_str(&format!("{stream} = \"{}\"\n", real_shaped(file).display()));
+    }
+    s.push_str(REAL_SHAPED_STAGES);
+    let p = dir.join("fit.toml");
+    std::fs::write(&p, s).unwrap();
+    p
+}
+
+/// `(start, stop, value)` of a windowed stream's file, the boundaries as model
+/// time and the value as written (`NA` for a hole).
+fn window_periods(path: &Path) -> Vec<(f64, f64, String)> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    assert_eq!(header[..3], ["window_start", "window_stop", "cases"],
+        "the declared columns, so the loader reads the file back");
+    lines.map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (as_time(f[0]), as_time(f[1]), f[2].to_string())
+    }).collect()
+}
+
+/// `simulate --design-from` on the real-shaped bulletin reproduces every row's
+/// own period and its hole. The bound file's boundaries are ISO dates of uneven
+/// width; the generated file's are day offsets naming the same instants — the
+/// representation gap is gh#882, and this asserts the periods, not the cells.
+#[test]
+fn design_from_reproduces_the_real_shaped_windows_and_hole() {
+    let tmp = tempdir("real_shaped_design");
+    let ir = compile_real_shaped(tmp.path());
+    let truth = real_shaped_truth(tmp.path());
+    let fit_toml = real_shaped_fit(
+        tmp.path(), &ir, &[("cases", "bulletin.tsv"), ("in_care", "bulletin.tsv")]);
+
+    let out_dir = tmp.path().join("synth");
+    let output = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--design-from", fit_toml.to_str().unwrap(),
+        "--obs-only-dir", out_dir.to_str().unwrap(),
+        "--backend", "chain_binomial", "--dt", "0.5", "--seed", "11",
+    ]);
+    assert!(output.status.success(),
+        "simulate --design-from must run on the real-shaped design:\n{}",
+        String::from_utf8_lossy(&output.stderr));
+
+    let observed = window_periods(&real_shaped("bulletin.tsv"));
+    let simulated = window_periods(&out_dir.join("cases.tsv"));
+
+    // Non-vacuous: the bound design is the one no uniform `covers` form states.
+    assert!(observed.iter().any(|(a, b, _)| b - a > 2.0),
+        "the bulletin carries a row wider than two days");
+    assert_eq!(observed.iter().filter(|(_, _, v)| v == "NA").count(), 1,
+        "and exactly one scheduled row with no count");
+
+    let periods = |rows: &[(f64, f64, String)]| -> Vec<(f64, f64)> {
+        rows.iter().map(|(a, b, _)| (*a, *b)).collect()
+    };
+    assert_eq!(periods(&simulated), periods(&observed),
+        "every row's own period is reproduced — the three-day and five-day rows \
+         among them");
+    assert_eq!(
+        simulated.iter().map(|(_, _, v)| v == "NA").collect::<Vec<_>>(),
+        observed.iter().map(|(_, _, v)| v == "NA").collect::<Vec<_>>(),
+        "the row with no count stays a row with no count");
+    assert!(simulated.iter().filter(|(_, _, v)| v != "NA").any(|(_, _, v)| v != "0"),
+        "the values are drawn from the model, not written as zeros: {simulated:?}");
+}
+
+/// gh#829 on real-shaped input. The fixture's survey stream reads `tested` from
+/// its file; bound into a design, it is refused by name and nothing is written.
+#[test]
+fn design_from_refuses_the_real_shaped_survey_by_name() {
+    let tmp = tempdir("real_shaped_covariate");
+    let ir = compile_real_shaped(tmp.path());
+    let truth = real_shaped_truth(tmp.path());
+    let fit_toml = real_shaped_fit(
+        tmp.path(), &ir, &[("cases", "bulletin.tsv"), ("survey", "survey.tsv")]);
+
+    let out_dir = tmp.path().join("synth");
+    let output = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--design-from", fit_toml.to_str().unwrap(),
+        "--obs-only-dir", out_dir.to_str().unwrap(),
+        "--backend", "chain_binomial", "--dt", "0.5", "--seed", "11",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(),
+        "a covariate stream must be refused, not written:\n{stderr}");
+    assert!(stderr.contains("'survey'") && stderr.contains("`tested`")
+            && stderr.contains("gh#829"),
+        "the refusal names the stream, the column and the issue:\n{stderr}");
+    assert!(!out_dir.join("survey.tsv").exists() && !out_dir.join("cases.tsv").exists(),
+        "nothing is written once one stream of the design cannot be drawn");
+}
+
+/// A `[synthetic]` fit on the whole real-shaped model is refused by name, and
+/// before anything is written. The declared design covers every stream the
+/// model has, and this model has two the writer cannot produce a loadable file
+/// for: the stratified family (one long-format file per source, which a
+/// one-file-per-stream writer cannot make) and the survey (gh#829). The
+/// stratified one is reached first.
+#[test]
+fn a_synthetic_fit_on_the_real_shaped_model_is_refused_by_name() {
+    let tmp = tempdir("real_shaped_synthetic");
+    let ir = compile_real_shaped(tmp.path());
+    let truth = real_shaped_truth(tmp.path());
+    let out = tmp.path().join("out");
+
+    let fit_toml = tmp.path().join("fit.toml");
+    std::fs::write(&fit_toml, format!(
+        "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
+         [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
+        out.display(), ir.display(), truth.display(), REAL_SHAPED_STAGES)).unwrap();
+
+    let output = run(&["fit", "run", fit_toml.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(),
+        "a [synthetic] fit that cannot write a loadable dataset must be refused:\n{stderr}");
+    assert!(stderr.contains("'province_cases_") && stderr.contains("stratified"),
+        "the refusal names the stream and why its file would not re-load:\n{stderr}");
+    let mut written: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![out.clone()];
+    while let Some(d) = stack.pop() {
+        if let Ok(es) = std::fs::read_dir(&d) {
+            for e in es.flatten() {
+                let p = e.path();
+                if p.is_dir() { stack.push(p); }
+                else if p.extension().map(|x| x == "tsv").unwrap_or(false) {
+                    written.push(p);
+                }
+            }
+        }
+    }
+    assert!(written.is_empty(),
+        "no dataset is written for a model one of whose streams cannot be drawn: {written:?}");
+}
+
 /// gh#829's own reproduction: a binomial denominator the data file supplies and
 /// the model has no term to generate.
 const COVARIATE_MODEL: &str = r#"

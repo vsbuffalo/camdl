@@ -403,3 +403,243 @@ fn a_stated_gap_under_window_columns_discards_exactly_that_span() {
          the omitted window was not discarded",
     );
 }
+
+// ── The real-shaped fixture (gh#878) ────────────────────────────────────────
+//
+// Every fixture above is numeric-time, regular-grid, one stream, no holes, no
+// data-supplied columns. `tests/fixtures/real_shaped/` is not: a model with an
+// `origin` and the three files it is fitted to, carrying the properties a
+// published surveillance table has — ISO dates in both window boundaries,
+// one-day rows with a three-day and a five-day row among them, a scheduled row
+// with no count, a stratified stream in long form beside the wide one, a
+// denominator the file supplies, and a prevalence reading taken at the
+// windows' own closing column.
+
+/// The compiler, which the real-shaped fixture is compiled with rather than
+/// carrying a second committed IR to keep in sync. Built by `build-ocaml`,
+/// which both `make test-rust` and `make test-fast` depend on.
+fn camdlc() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let p = Path::new(&manifest).join("../../../ocaml/_build/default/bin/camdlc.exe");
+    assert!(
+        p.exists(),
+        "camdlc missing: {} - run `make build-ocaml`, or gate with `make test-rust`",
+        p.display()
+    );
+    p
+}
+
+fn real_shaped(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/real_shaped").join(name)
+}
+
+/// Compile the committed fixture model into `dir`.
+fn compile_real_shaped(dir: &Path) -> PathBuf {
+    let ir = dir.join("surveillance.ir.json");
+    let out = Command::new(camdlc())
+        .arg(real_shaped("surveillance.camdl"))
+        .arg("-o")
+        .arg(&ir)
+        .output()
+        .expect("camdlc must invoke");
+    assert!(out.status.success(), "camdlc failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    ir
+}
+
+/// The fixture model's `origin`. Asserted against the model file itself below,
+/// so a change there cannot silently leave this reading the wrong calendar.
+const REAL_SHAPED_ORIGIN: &str = "2026-06-29";
+
+/// An ISO date as the fixture's own model time: days since `origin`.
+fn day_of(date: &str) -> f64 {
+    ir::caltime::date_to_internal(REAL_SHAPED_ORIGIN, date, "days")
+        .unwrap_or_else(|e| panic!("cannot read '{date}' through the origin: {e:?}"))
+}
+
+fn read_tsv(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut lines = text.lines();
+    let header = lines.next().expect("header").split('\t').map(str::to_string).collect();
+    let rows = lines.map(|l| l.split('\t').map(str::to_string).collect()).collect();
+    (header, rows)
+}
+
+/// What one scored observation covers: a period, or an instant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Cov {
+    Interval(f64, f64),
+    Instant(f64),
+}
+
+impl Cov {
+    /// Where on the time axis the observation sits — a period's close, an
+    /// instant's own time. Used only to order the two lists the same way.
+    fn at(self) -> f64 {
+        match self {
+            Cov::Interval(_, stop) => stop,
+            Cov::Instant(t) => t,
+        }
+    }
+}
+
+fn sorted(mut v: Vec<(String, Cov)>) -> Vec<(String, Cov)> {
+    v.sort_by(|a, b| {
+        a.1.at().partial_cmp(&b.1.at()).unwrap().then_with(|| a.0.cmp(&b.0))
+    });
+    v
+}
+
+/// Every observation the fixture's own files state, read off the files rather
+/// than written out here — the dates converted through the model's `origin`,
+/// the uniform form's rule applied to its labels, holes left out.
+fn periods_the_files_state() -> Vec<(String, Cov)> {
+    let mut want: Vec<(String, Cov)> = Vec::new();
+
+    let (header, rows) = read_tsv(&real_shaped("bulletin.tsv"));
+    assert_eq!(header, ["window_start", "window_stop", "cases", "in_care"],
+        "the bulletin's columns are what the model declares");
+    assert!(rows.iter().all(|r| r[0].contains('-') && r[1].contains('-')),
+        "both boundaries are written as ISO dates, which is the point of the fixture");
+    assert!(rows.iter().any(|r| day_of(&r[1]) - day_of(&r[0]) > 1.0),
+        "at least one row is wider than a day — no uniform `covers` form states this file");
+    assert_eq!(rows.iter().filter(|r| r[2] == "NA").count(), 1,
+        "exactly one scheduled row carries no count");
+    for r in &rows {
+        let (start, stop) = (day_of(&r[0]), day_of(&r[1]));
+        if r[2] != "NA" {
+            want.push(("cases".to_string(), Cov::Interval(start, stop)));
+        }
+        // The prevalence stream reads this file's stop column as its `: time`.
+        want.push(("in_care".to_string(), Cov::Instant(stop)));
+    }
+
+    // `covers = ending_on(week_ending, 7 'days)`: the row labelled D covers
+    // [D − 6 days, D + 1 day), the label being the last day included.
+    let (header, rows) = read_tsv(&real_shaped("province_cases.tsv"));
+    assert_eq!(header, ["week_ending", "province", "province_cases"]);
+    assert!(rows.iter().any(|r| r[2] == "NA"), "one province misses a week");
+    for r in &rows {
+        if r[2] == "NA" {
+            continue;
+        }
+        let label = day_of(&r[0]);
+        want.push((format!("province_cases_{}", r[1]), Cov::Interval(label - 6.0, label + 1.0)));
+    }
+
+    let (header, rows) = read_tsv(&real_shaped("survey.tsv"));
+    assert_eq!(header, ["time", "positives", "tested"]);
+    for r in &rows {
+        want.push(("survey".to_string(), Cov::Instant(day_of(&r[0]))));
+    }
+
+    sorted(want)
+}
+
+/// The periods a run actually scored, off the prequential trace.
+fn periods_the_run_scored(trace: &serde_json::Value) -> Vec<(String, Cov)> {
+    let mut got: Vec<(String, Cov)> = Vec::new();
+    for step in trace["steps"].as_array().expect("steps") {
+        let t = step["t"].as_f64().expect("a step time");
+        for ps in step["per_stream"].as_array().expect("per_stream") {
+            let name = ps["stream"].as_str().expect("a stream name").to_string();
+            let c = &ps["coverage"];
+            let cov = match c["kind"].as_str() {
+                Some("interval") => Cov::Interval(
+                    c["start"].as_f64().expect("start"),
+                    c["stop"].as_f64().expect("stop"),
+                ),
+                Some("instant") => Cov::Instant(t),
+                other => panic!("stream '{name}' has coverage kind {other:?}"),
+            };
+            got.push((name, cov));
+        }
+    }
+    sorted(got)
+}
+
+/// The loader binds the real-shaped fixture over exactly the periods its files
+/// state, row by row, with the dates read through the model's own `origin`.
+///
+/// Everything the fixture carries is under test at once, because it is one
+/// bind: the dated window pair (`cases`), the same file's closing column read
+/// as an instant by a second stream (`in_care`), a long-format file routed to
+/// two stratum leaves by name (`province_cases`), and a stream whose
+/// likelihood reads a column the file supplies (`survey`). The expected
+/// periods are computed from the files themselves, so the assertion cannot
+/// drift from the fixture — only from the loader.
+#[test]
+fn the_real_shaped_files_are_bound_over_the_periods_their_dates_name() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("real_shaped");
+    assert!(
+        std::fs::read_to_string(real_shaped("surveillance.camdl"))
+            .unwrap()
+            .contains(&format!("origin    = date(\"{REAL_SHAPED_ORIGIN}\")")),
+        "the fixture's origin is the calendar this test converts through"
+    );
+    let ir = compile_real_shaped(&tmp);
+    let stem = tmp.join("preq");
+
+    let bind = |stream: &str, file: &str| format!("{stream}={}", real_shaped(file).display());
+    let (cases, in_care) = (bind("cases", "bulletin.tsv"), bind("in_care", "bulletin.tsv"));
+    let provinces = bind("province_cases", "province_cases.tsv");
+    let survey = bind("survey", "survey.tsv");
+    let mut args = vec![
+        "pfilter", ir.to_str().unwrap(),
+        "--particles", "100", "--dt", "0.5", "--seed", "1",
+        "--data", &cases,
+        "--data", &in_care,
+        "--data", &provinces,
+        "--data", &survey,
+        "--save-prequential", stem.to_str().unwrap(),
+    ];
+    let params = [
+        "--param", "beta=0.35", "--param", "gamma=0.2", "--param", "rho=0.5",
+        "--param", "psi=0.3", "--param", "k=20",
+    ];
+    args.extend_from_slice(&params);
+    let out = run(&camdl, &args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the real-shaped fixture must bind:\n{stderr}");
+    assert!(
+        !stderr.contains("W326"),
+        "every temporal cell in the fixture is a date; a numeric-cell warning means \
+         one was read as a day offset:\n{stderr}"
+    );
+
+    let trace: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{}.json", stem.display())).unwrap())
+            .unwrap();
+    let want = periods_the_files_state();
+    let got = periods_the_run_scored(&trace);
+    let missing: Vec<_> = want.iter().filter(|w| !got.contains(w)).collect();
+    let extra: Vec<_> = got.iter().filter(|g| !want.contains(g)).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty() && got.len() == want.len(),
+        "the bound periods are the ones the files state\n  \
+         stated but not scored: {missing:#?}\n  scored but not stated: {extra:#?}\n  \
+         counts: scored {} vs stated {}",
+        got.len(),
+        want.len(),
+    );
+    assert_eq!(got, want, "the bound periods are the ones the files state, in order");
+
+    // The row with no count states its period and scores nothing: no `cases`
+    // term closes at its stop, and the row after it opens at its own start
+    // rather than reaching back across the hole.
+    let (_, rows) = read_tsv(&real_shaped("bulletin.tsv"));
+    let hole = rows.iter().position(|r| r[2] == "NA").expect("a hole");
+    let hole_stop = day_of(&rows[hole][1]);
+    assert!(
+        !got.iter().any(|(s, c)| s == "cases" && c.at() == hole_stop),
+        "the row with no count must contribute no likelihood term"
+    );
+    let next = &rows[hole + 1];
+    assert!(
+        got.contains(&(
+            "cases".to_string(),
+            Cov::Interval(day_of(&next[0]), day_of(&next[1]))
+        )),
+        "the row after the hole opens at its own start, not across it"
+    );
+}

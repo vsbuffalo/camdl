@@ -193,6 +193,151 @@ fn a_windowed_stream_round_trips_through_its_own_emitted_file() {
     assert_eq!(scored, written, "the periods scored are the periods written — the round trip closes");
 }
 
+// ── The real-shaped fixture (gh#878) ────────────────────────────────────────
+//
+// `tests/fixtures/real_shaped/` is a model with an `origin` and four streams
+// shaped the way published surveillance is. Two of them the emitter writes
+// readably; two it does not, and those are pinned below as ignored tests
+// against the issues that own them.
+
+/// The compiler, built by `build-ocaml`, which both `make test-rust` and
+/// `make test-fast` depend on.
+fn camdlc() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let p = Path::new(&manifest).join("../../../ocaml/_build/default/bin/camdlc.exe");
+    assert!(
+        p.exists(),
+        "camdlc missing: {} - run `make build-ocaml`, or gate with `make test-rust`",
+        p.display()
+    );
+    p
+}
+
+fn real_shaped(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/real_shaped").join(name)
+}
+
+fn compile_real_shaped(dir: &Path) -> PathBuf {
+    let ir = dir.join("surveillance.ir.json");
+    let out = std::process::Command::new(camdlc())
+        .arg(real_shaped("surveillance.camdl"))
+        .arg("-o")
+        .arg(&ir)
+        .output()
+        .expect("camdlc must invoke");
+    assert!(out.status.success(), "camdlc failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    ir
+}
+
+const REAL_SHAPED_PARAMS: &[&str] = &[
+    "--param", "beta=0.35", "--param", "gamma=0.2", "--param", "rho=0.5",
+    "--param", "psi=0.3", "--param", "k=20",
+];
+
+/// Write the real-shaped model's declared dataset into `out_dir`.
+fn emit_real_shaped(camdl: &Path, ir: &Path, out_dir: &Path) {
+    let mut args = vec![
+        "simulate", ir.to_str().unwrap(), "--backend", "chain_binomial", "--dt", "0.5",
+        "--seed", "3", "--obs-only-dir", out_dir.to_str().unwrap(),
+    ];
+    args.extend_from_slice(REAL_SHAPED_PARAMS);
+    let out = run(camdl, &args);
+    assert!(out.status.success(), "simulate --obs-only-dir failed:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+}
+
+/// Bind the named emitted files back under the model that wrote them.
+fn reload(camdl: &Path, ir: &Path, out_dir: &Path, streams: &[&str]) -> std::process::Output {
+    let binds: Vec<String> = streams.iter()
+        .map(|s| format!("{s}={}", out_dir.join(format!("{s}.tsv")).display()))
+        .collect();
+    let mut args = vec![
+        "pfilter", ir.to_str().unwrap(), "--particles", "50", "--dt", "0.5", "--seed", "1",
+    ];
+    for b in &binds {
+        args.push("--data");
+        args.push(b);
+    }
+    args.extend_from_slice(REAL_SHAPED_PARAMS);
+    run(camdl, &args)
+}
+
+/// The two real-shaped streams the emitter writes readably: a windowed
+/// incidence stream, and a prevalence stream whose `: time` column is the same
+/// bulletin table's closing boundary. Both come back under their declared
+/// column names, and both re-load under the model that wrote them.
+#[test]
+fn the_real_shaped_windowed_and_instant_streams_round_trip() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("real_shaped");
+    let ir = compile_real_shaped(&tmp);
+    let out_dir = tmp.join("o");
+    emit_real_shaped(&camdl, &ir, &out_dir);
+
+    let cases = std::fs::read_to_string(out_dir.join("cases.tsv")).expect("cases.tsv");
+    let lines: Vec<&str> = cases.lines().collect();
+    assert_eq!(lines[0], "window_start\twindow_stop\tcases",
+        "the declared window columns, then the scored column");
+    let written: Vec<(f64, f64)> = lines[1..].iter().map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (f[0].parse().unwrap(), f[1].parse().unwrap())
+    }).collect();
+    assert!(written.windows(2).all(|w| w[0].1 == w[1].0), "contiguous: {written:?}");
+
+    let care = std::fs::read_to_string(out_dir.join("in_care.tsv")).expect("in_care.tsv");
+    assert_eq!(care.lines().next().unwrap(), "window_stop\tin_care",
+        "a stream whose `: time` column is named for a window boundary keeps that name");
+
+    let out = reload(&camdl, &ir, &out_dir, &["cases", "in_care"]);
+    assert!(out.status.success(),
+        "the emitted files must re-load under the model that wrote them:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+}
+
+/// gh#884. The stratified family is written one file per stratum leaf, each
+/// with no `: dim` column, and the loader routes a family's rows by exactly
+/// that column — so neither file can be read back. The design-preserving
+/// writer refuses this shape by name; this writer does not.
+#[test]
+#[ignore = "gh#884 — --obs-dir writes a stratified family unloadably"]
+fn the_real_shaped_stratified_family_round_trips() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("real_shaped_family");
+    let ir = compile_real_shaped(&tmp);
+    let out_dir = tmp.join("o");
+    emit_real_shaped(&camdl, &ir, &out_dir);
+
+    let text = std::fs::read_to_string(out_dir.join("province_cases.tsv"))
+        .expect("one long-format file for the family's source");
+    assert_eq!(text.lines().next().unwrap(), "week_ending\tprovince\tprovince_cases",
+        "the declared columns, the dim column among them");
+    let out = reload(&camdl, &ir, &out_dir, &["province_cases"]);
+    assert!(out.status.success(),
+        "the emitted family file must re-load under the model that wrote it:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+}
+
+/// gh#830. The survey stream declares `tested`, which its likelihood reads;
+/// the writer drops it, so the file it writes has no denominator to be scored
+/// against and does not re-load.
+#[test]
+#[ignore = "gh#830 — --obs-dir drops the covariate column the likelihood reads"]
+fn the_real_shaped_covariate_stream_round_trips() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("real_shaped_covariate");
+    let ir = compile_real_shaped(&tmp);
+    let out_dir = tmp.join("o");
+    emit_real_shaped(&camdl, &ir, &out_dir);
+
+    let text = std::fs::read_to_string(out_dir.join("survey.tsv")).expect("survey.tsv");
+    assert_eq!(text.lines().next().unwrap(), "time\tpositives\ttested",
+        "the declared columns, the denominator among them");
+    let out = reload(&camdl, &ir, &out_dir, &["survey"]);
+    assert!(out.status.success(),
+        "the emitted survey file must re-load under the model that wrote it:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn a_wide_obs_file_refuses_a_windowed_stream_and_names_the_escape() {
     let camdl = camdl_bin();

@@ -1,0 +1,128 @@
+# Base: none — root model
+# Adds: an observation corpus shaped the way published surveillance is —
+#   ISO-dated per-row windows of uneven width, a scheduled row with no count,
+#   a denominator the data file supplies, a stratified stream in long form,
+#   and a prevalence reading taken at the windows' closing boundary
+# Changes: nothing else
+#
+# What this model is
+# ------------------
+# Two provinces (kivu, ituri), each with a susceptible (S), infectious (I) and
+# recovered (R) compartment. A susceptible in a province becomes infectious at
+# a rate proportional to that province's own infectious count (`infection`); an
+# infectious person recovers at a constant per-capita rate (`recovery`). There
+# is no movement between provinces — they are two independent epidemics sharing
+# the transmission and recovery rates, which is the smallest structure that can
+# carry a stratified observation stream.
+#
+# `origin = date("2026-06-29")` maps 29 June 2026 to model time t = 0, which is
+# what lets every temporal cell below be written as an ISO date rather than as
+# a day offset.
+#
+# What it is fitted to
+# --------------------
+# Four streams over three files. The counts were drawn from this model at
+# beta = 0.35, gamma = 0.2, rho = 0.5, psi = 0.3, k = 20, seed 7, on the
+# chain-binomial backend at dt = 0.25, then aggregated into the windows the
+# files state; they are surveillance-shaped, not a recovery target.
+#
+#   cases (bulletin.tsv) — confirmed cases for the country, one row per
+#     published window. The window is in the file, not in a rule: most rows
+#     cover a single day, one covers three days (publication was suspended over
+#     a weekend) and one covers five. The row for 20 July carries `NA`: that day
+#     was scheduled and never reported, so it scores nothing while still closing
+#     its own window.
+#
+#   in_care (bulletin.tsv) — the number of confirmed cases under care on the
+#     day each window closes. It is a stock, not a flow, so it states no period:
+#     it reads the same bulletin table's closing-boundary column as its `: time`
+#     axis, which is where a windowed row sits on the time axis.
+#
+#   province_cases (province_cases.tsv) — the same confirmed cases split by
+#     province, published weekly and labelled by the last day each week covers.
+#     One long-format file carries both provinces; the `province` column routes
+#     each row to its stratum. Ituri published no figure for the week ending
+#     20 July.
+#
+#   survey (survey.tsv) — a serial cross-sectional survey. Its likelihood reads
+#     the `tested` column, a denominator the data file supplies and the model
+#     has no term to generate; the fraction infectious is what the model
+#     predicts against it.
+
+time_unit = 'days
+origin    = date("2026-06-29")
+
+dimensions { province = [kivu, ituri] }
+
+compartments { S, I, R }
+
+stratify(by = province)
+
+parameters {
+  # Transmission rate per infectious individual per day. The prior is centred
+  # on a median of about 0.37/day, which with `gamma` below puts most of its
+  # mass on a basic reproduction number between roughly 1 and 3.
+  beta  : rate        in [0.001, 2.0]     ~ log_normal(mu = -1.0, sigma = 0.5)
+  # Per-capita recovery rate; its reciprocal is the mean infectious period,
+  # with a prior median of 5 days.
+  gamma : rate        in [0.01, 1.0]      ~ log_normal(mu = -1.6, sigma = 0.4)
+  # Fraction of infections that reach the case bulletin.
+  rho   : probability in [0.01, 1.0]      ~ beta(alpha = 2.0, beta = 2.0)
+  # Fraction of infectious people who are under care on a given day.
+  psi   : probability in [0.01, 1.0]      ~ beta(alpha = 2.0, beta = 2.0)
+  # Negative-binomial dispersion shared by the count streams; larger is closer
+  # to Poisson.
+  k     : positive    in [0.1, 1000.0]    ~ log_normal(mu = 3.0, sigma = 1.0)
+}
+
+let N[p in province] = S[p] + I[p] + R[p]
+
+transitions {
+  infection[p in province] : S[p] --> I[p] @ beta * S[p] * I[p] / N[p]
+  recovery[p in province]  : I[p] --> R[p] @ gamma * I[p]
+}
+
+observations {
+  cases {
+    columns       { window_start : window_start, window_stop : window_stop,
+                    cases : count }
+    projected     = sum(p in province, incidence(infection[p]))
+    emit_schedule = every 1 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }
+
+  in_care {
+    columns       { window_stop : time, in_care : count }
+    projected     = sum(p in province, I[p])
+    emit_schedule = every 1 'days
+    in_care       ~ neg_binomial(mean = psi * projected, r = k)
+  }
+
+  province_cases[p in province] {
+    columns        { week_ending : time, province : dim,
+                     province_cases : count }
+    covers         = ending_on(week_ending, 7 'days)
+    projected      = incidence(infection[p])
+    emit_schedule  = every 7 'days
+    province_cases ~ neg_binomial(mean = rho * projected, r = k)
+  }
+
+  survey {
+    columns       { time : time, positives : count, tested : count }
+    projected     = sum(p in province, I[p]) / sum(p in province, N[p])
+    emit_schedule = every 14 'days
+    positives     ~ binomial(n = tested, p = projected)
+  }
+}
+
+init {
+  S[kivu]  = 6000
+  I[kivu]  = 20
+  S[ituri] = 3000
+  I[ituri] = 10
+}
+
+simulate {
+  from = 0 'days
+  to   = 54 'days
+}

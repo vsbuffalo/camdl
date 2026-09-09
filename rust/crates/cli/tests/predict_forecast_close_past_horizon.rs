@@ -358,6 +358,117 @@ fn a_windowed_tail_closes_at_its_label_and_widens_nothing() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+// ── The real-shaped fixture (gh#878) ────────────────────────────────────────
+//
+// The models above are two-compartment decay on a regular weekly grid. The
+// committed fixture is a calendar-anchored two-province model fitted to a
+// bulletin whose rows state ISO-dated windows of uneven width, one of them
+// carrying no count. The forecast tail has to continue from that.
+
+fn real_shaped(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/real_shaped").join(name)
+}
+
+const REAL_SHAPED_ORIGIN: &str = "2026-06-29";
+
+fn day_of(date: &str) -> f64 {
+    ir::caltime::date_to_internal(REAL_SHAPED_ORIGIN, date, "days")
+        .unwrap_or_else(|e| panic!("cannot read '{date}' through the origin: {e:?}"))
+}
+
+/// A short posterior on the fixture's two bulletin streams: enough draws to
+/// band, few enough to run in a second.
+const REAL_SHAPED_FIT_TOML: &str = r#"output_dir = "results"
+
+[model]
+camdl = "surveillance.camdl"
+
+[data.observations]
+cases = "bulletin.tsv"
+in_care = "bulletin.tsv"
+
+[estimate]
+beta = { bounds = [0.25, 0.5], start = 0.35 }
+
+[fixed]
+gamma = 0.2
+rho = 0.5
+psi = 0.3
+k = 20
+
+[stages.posterior]
+algorithm = "pmmh"
+backend = "chain_binomial"
+chains = 2
+particles = 100
+iterations = 120
+burn_in = 40
+thin = 1
+"#;
+
+/// `fit predict` on a short fit of the real-shaped bulletin emits a forecast
+/// row for every day from the end of the record through the declared horizon.
+///
+/// The record is dated, irregular and holed, and it ends fourteen days before
+/// `simulate { to }`; the forecast tail has no data rows to follow, so it
+/// continues the stream's own cadence. Both the windowed incidence stream and
+/// the prevalence stream reading the same file's closing column are checked,
+/// because they reach the horizon by different routes — a period that must
+/// close on the grid, and an instant that must sit on it.
+#[test]
+fn fit_predict_on_the_real_shaped_record_emits_through_the_horizon() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempdir("real_shaped");
+    for f in ["surveillance.camdl", "bulletin.tsv"] {
+        std::fs::copy(real_shaped(f), tmp.join(f)).unwrap();
+    }
+    std::fs::write(tmp.join("fit.toml"), REAL_SHAPED_FIT_TOML).unwrap();
+
+    // The two ends of the forecast, read off the fixture rather than written
+    // out here: the last period the bulletin states, and the model's horizon.
+    let bulletin = std::fs::read_to_string(real_shaped("bulletin.tsv")).unwrap();
+    let last_obs = day_of(bulletin.lines().last().unwrap().split('\t').nth(1).unwrap());
+    let src = std::fs::read_to_string(real_shaped("surveillance.camdl")).unwrap();
+    let horizon: f64 = src
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("to   = ")?.strip_suffix(" 'days")?.parse().ok())
+        .expect("the model states its horizon in days");
+    assert!(horizon > last_obs, "the fixture must have a forecast tail to emit");
+
+    let out = fit_then_predict(&bin, &tmp, &["--horizon", "free_forward"]);
+    assert!(
+        out.status.success(),
+        "fit predict must run on the real-shaped record:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for stream in ["cases", "in_care"] {
+        let tsv = std::fs::read_to_string(
+            find_artifact(&tmp.join("results"), "predictive", stream)
+                .unwrap_or_else(|| panic!("predictive/{stream}.tsv")),
+        )
+        .unwrap();
+        let ff = q50_by_time(&tsv, Some("free_forward"));
+        let mut t = last_obs + 1.0;
+        while t <= horizon {
+            assert!(
+                ff.iter().any(|(rt, _)| (rt - t).abs() < 1e-9),
+                "stream '{stream}': no free_forward row at t = {t}; rows: {ff:?}"
+            );
+            t += 1.0;
+        }
+        let last = ff.iter().map(|(t, _)| *t).fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(
+            last, horizon,
+            "stream '{stream}': the forecast runs to the declared horizon and no \
+             further; rows: {ff:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 // ── The sidecar keeps the declared horizon ──────────────────────────────────
 
 /// The widening is bookkeeping for the observation projection. `quantities {}`
