@@ -892,22 +892,21 @@ pub fn load_data_observations_from_fit_toml(
     Ok(entries)
 }
 
-/// Parse the raw rows of one named TSV column into per-row cells. A cell is
-/// `None` for a HOLE (the missing-value token `NA`) and `Some(v)` for an
-/// observed finite value. The TIME of a hole row is retained (the row is
-/// kept) so the observation grid is unchanged — only the value is absent.
+/// Read the rows of two named TSV columns — the time column and one other —
+/// as their raw cells, one pair per data row, with the file line number of
+/// each row. Nothing is converted here: this half of the reader answers only
+/// "which columns, and what does each row say", so a caller that wants a time
+/// (dates included) and a caller that wants a value share the header lookup
+/// and the row iteration without sharing a conversion only one of them
+/// wants.
 ///
-/// `NaN`/`inf` are rejected as garbage (a hole is `NA`, not a non-finite
-/// number). Strict by-name column binding, no positional fallback (G1).
-///
-/// Shared core of [`load_data_tsv_column`] (which rejects holes for the dense
-/// callers) and [`load_data_tsv_column_cells`] (the sparse/holes pfilter path).
-fn parse_column_cells<'a>(
+/// Strict by-name column binding, no positional fallback (G1).
+fn parse_column_cells_raw<'a>(
     content: &'a str,
     path: &str,
     time_column: &str,
     column: &str,
-) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
+) -> Result<(Vec<&'a str>, Vec<&'a str>, Vec<usize>), String> {
     // gh#344: skip leading `#` comment lines (a provenance/attribution header is
     // a common convention) and blank lines before the column header —
     // consistent with the `interpolated` forcing reader and polars
@@ -957,11 +956,12 @@ fn parse_column_cells<'a>(
 
     let max_idx = time_idx.max(col_idx);
 
-    // Two-pass: collect raw time cells + cells, then convert the whole
-    // time column at once (whole-column detection — proposal §6.3).
+    // Two passes: the raw cells are collected here, and a caller converts
+    // the time column whole, in one go (whole-column detection — proposal
+    // §6.3).
     let mut time_cells: Vec<&str> = Vec::new();
+    let mut value_cells: Vec<&str> = Vec::new();
     let mut rows: Vec<usize> = Vec::new();
-    let mut cells: Vec<Option<f64>> = Vec::new();
     for (line_idx, line) in lines {
         // `line_idx` is the 0-based file line index (enumerate over the whole
         // file), so the human line number is `line_idx + 1` — accurate past any
@@ -972,27 +972,54 @@ fn parse_column_cells<'a>(
             return Err(format!("line {}: expected {}+ columns, got {}",
                 line_idx + 1, max_idx + 1, fields.len()));
         }
-        let raw = fields[col_idx].trim();
+        time_cells.push(fields[time_idx]);
+        value_cells.push(fields[col_idx]);
+        rows.push(line_idx + 1);
+    }
+
+    Ok((time_cells, value_cells, rows))
+}
+
+/// Parse the raw rows of one named TSV column into per-row cells. A cell is
+/// `None` for a HOLE (the missing-value token `NA`) and `Some(v)` for an
+/// observed finite value. The TIME of a hole row is retained (the row is
+/// kept) so the observation grid is unchanged — only the value is absent.
+///
+/// `NaN`/`inf` are rejected as garbage (a hole is `NA`, not a non-finite
+/// number). Strict by-name column binding, no positional fallback (G1).
+///
+/// Shared core of [`load_data_tsv_column`] (which rejects holes for the dense
+/// callers) and [`load_data_tsv_column_cells`] (the sparse/holes pfilter path).
+fn parse_column_cells<'a>(
+    content: &'a str,
+    path: &str,
+    time_column: &str,
+    column: &str,
+) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
+    let (time_cells, value_cells, rows) =
+        parse_column_cells_raw(content, path, time_column, column)?;
+
+    let mut cells: Vec<Option<f64>> = Vec::with_capacity(value_cells.len());
+    for (i, &cell) in value_cells.iter().enumerate() {
+        let raw = cell.trim();
         // TODO: make the missing-value token (`NA`) a user option (CLI flag /
         // config) — hard-coded for now.
-        let cell = if raw == "NA" {
+        let parsed = if raw == "NA" {
             None // hole: time retained, value absent → no likelihood term
         } else {
             let value: f64 = raw.parse()
                 .map_err(|_| format!("line {}: cannot parse value '{}' in column '{}'",
-                    line_idx + 1, fields[col_idx], column))?;
+                    rows[i], cell, column))?;
             if !value.is_finite() {
                 return Err(format!(
                     "line {} (t='{}'): non-finite observation value '{}' in column '{}' \
                      — NaN and infinities are not valid observations (a missing value \
                      is the token `NA`). Fix or remove the row.",
-                    line_idx + 1, fields[time_idx].trim(), fields[col_idx].trim(), column));
+                    rows[i], time_cells[i].trim(), raw, column));
             }
             Some(value)
         };
-        time_cells.push(fields[time_idx]);
-        rows.push(line_idx + 1);
-        cells.push(cell);
+        cells.push(parsed);
     }
 
     Ok((time_cells, cells, rows))
@@ -1030,16 +1057,43 @@ pub(crate) fn column_with_role<'a>(
     obs.columns.iter().find(|c| &c.role == role).map(|c| c.name.as_str())
 }
 
-/// Read one named column of an observation file as raw cells, reusing the
-/// strict by-name parser. The parser wants a time column, so the target column
-/// is passed as both and the unused half discarded — the same trick
-/// [`load_stream_aux`] uses.
-fn read_column_raw<'a>(
+/// Read a per-row window boundary column (`window_start`) as raw cells, with
+/// each row's file line number — the shape [`convert_time_column`] takes.
+///
+/// A boundary is a time, so it is read through the raw half of the parser and
+/// converted by the time path: an ISO date is exactly as legal here as it is
+/// in a `: time` column, which is what the data spec's window examples print.
+/// Putting it through [`parse_column_cells`] instead would run the value
+/// column's `f64` parse over it and reject every dated file before the
+/// conversion that handles dates ever saw the cells.
+///
+/// `NA` is not a boundary. The hole token says a row's observed *value* is
+/// missing — the row keeps its period and contributes no likelihood term — so
+/// a row whose window has no start states no period at all, and there is
+/// nothing to read it as. It is an error naming the row, never a skipped or
+/// defaulted window. (A missing `window_stop` is refused too, a few lines on:
+/// the stop is the stream's time column, so it reaches
+/// [`convert_time_column`], which has no reading for `NA` either.)
+fn read_boundary_column<'a>(
     content: &'a str,
     path: &str,
     column: &str,
-) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
-    parse_column_cells(content, path, column, column)
+) -> Result<(Vec<&'a str>, Vec<usize>), String> {
+    // The raw reader wants a time column and a value column; here they are the
+    // same column, and only one copy of the cells is wanted.
+    let (cells, _same, rows) = parse_column_cells_raw(content, path, column, column)?;
+    for (i, &cell) in cells.iter().enumerate() {
+        if cell.trim() == "NA" {
+            return Err(format!(
+                "line {}: window boundary column '{}' in '{}' is `NA` — every row must \
+                 say what period it covers. `NA` says a row's observed value is missing \
+                 (the row keeps its window and is simply not scored); a window with no \
+                 start has no reading at all. Fix: give the row its boundary, or drop \
+                 the row — dropping it states a gap, and the flow over it is discarded.",
+                rows[i], column, path));
+        }
+    }
+    Ok((cells, rows))
 }
 
 /// The error for an interval stream whose IR carries no `covers`: the compiler
@@ -1100,7 +1154,7 @@ pub fn stream_times_for(
                      `window_start` column", obs.name))?;
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("{}: {}", path, e))?;
-            let (raw, _v, rows) = read_column_raw(&content, path, start_col)?;
+            let (raw, rows) = read_boundary_column(&content, path, start_col)?;
             let row_offset = rows.first().copied().unwrap_or(2);
             let starts = convert_time_column(&raw, opts, row_offset)?;
             if starts.len() != label_times.len() {
@@ -1882,6 +1936,94 @@ mod tests {
             assert!((w[1].0 - w[0].1).abs() <= sim::inference::multi_stream_obs::BOUNDARY_EPS,
                 "consecutive periods share a boundary: {:?} then {:?}", w[0], w[1]);
         }
+    }
+
+    // ── gh#833: a per-row window boundary is a TIME, dates included ─────
+
+    /// The same incidence stream stating each row's window in the file — a
+    /// `window_start`/`window_stop` pair in place of the `: time` column,
+    /// which is what `covers = window_columns` means.
+    fn windowed_incidence_stream() -> ir::observation::ObservationModel {
+        use ir::observation::*;
+        let mut obs = daily_incidence_stream();
+        obs.columns = vec![
+            ObsColumn { name: "window_start".into(), role: ColumnRole::WindowStart },
+            ObsColumn { name: "window_stop".into(), role: ColumnRole::WindowStop },
+            ObsColumn { name: "cases".into(), role: ColumnRole::Value(ir::parameter::ParamKind::Count) },
+        ];
+        obs.covers = Some(Covers::WindowColumns);
+        obs
+    }
+
+    /// A model anchored to a calendar, so a dated cell has an origin to
+    /// convert against.
+    fn dated_opts() -> TimeOpts<'static> {
+        TimeOpts { origin: Some("2026-07-01"), ..numeric_opts() }
+    }
+
+    fn as_internal(dates: &[&str], opts: &TimeOpts) -> Vec<f64> {
+        dates.iter()
+            .map(|d| ir::caltime::date_to_internal(opts.origin.unwrap(), d, opts.time_unit).unwrap())
+            .collect()
+    }
+
+    /// A windowed file writes its boundaries the way the data spec prints them
+    /// — ISO dates in both columns, one row wider than a day because
+    /// publication slipped. Each bound period must be that row's own two
+    /// dates, converted through the model's `origin` and `time_unit`.
+    ///
+    /// No such file loaded at all before this: the start column went through
+    /// the *value* parser on its way to the time conversion, so `2026-07-11`
+    /// was refused as an unparseable `f64` before the conversion that handles
+    /// dates ever saw it. Every other window test writes numeric boundaries,
+    /// which parse as `f64` and so never reach that parse.
+    #[test]
+    fn a_dated_window_column_binds_the_periods_its_dates_name() {
+        let path = write_temp_tsv("dated_windows", concat!(
+            "window_start\twindow_stop\tcases\tdays_covered\n",
+            "2026-07-11\t2026-07-12\t0\t1\n",
+            "2026-07-12\t2026-07-13\t4\t1\n",
+            "2026-07-13\t2026-07-18\t61\t5\n"));
+        let obs = windowed_incidence_stream();
+        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
+        let opts = dated_opts();
+
+        // The stops arrive already converted — they are the stream's time
+        // column, so the caller has put them through the time path.
+        let stops = as_internal(&["2026-07-12", "2026-07-13", "2026-07-18"], &opts);
+        let times = stream_times_for(&obs, &proj, &stops, &path, &opts)
+            .expect("a windowed file with ISO dates must load");
+
+        let starts = as_internal(&["2026-07-11", "2026-07-12", "2026-07-13"], &opts);
+        let expected: Vec<(f64, f64)> =
+            starts.iter().zip(&stops).map(|(&a, &b)| (a, b)).collect();
+        assert_eq!(period_pairs(&times), expected,
+            "each row covers its own two dates, converted through origin + time_unit");
+        // Pin the arithmetic as well, so a conversion that moved could not
+        // satisfy both sides with the same wrong numbers: origin 2026-07-01 on
+        // a days axis puts 11 July at day 10, and the last row spans five days.
+        assert_eq!(period_pairs(&times), vec![(10.0, 11.0), (11.0, 12.0), (12.0, 17.0)],
+            "11 July is day 10 from a 1 July origin, and 13→18 July is five days wide");
+    }
+
+    /// `NA` says a row's observed value is missing — the row keeps its window
+    /// and is not scored. A row whose window has no start states no period at
+    /// all, so it is refused by row rather than skipped or defaulted.
+    #[test]
+    fn an_na_window_start_is_refused_naming_the_row() {
+        let path = write_temp_tsv("na_window_start", concat!(
+            "window_start\twindow_stop\tcases\n",
+            "2026-07-11\t2026-07-12\t0\n",
+            "NA\t2026-07-13\t4\n"));
+        let obs = windowed_incidence_stream();
+        let proj = sim::inference::multi_stream_obs::StreamProjection::FlowSum(vec![0]);
+        let opts = dated_opts();
+        let stops = as_internal(&["2026-07-12", "2026-07-13"], &opts);
+        let err = stream_times_for(&obs, &proj, &stops, &path, &opts)
+            .expect_err("a window with no start has no reading");
+        assert!(err.contains("line 3"), "must name the row: {err}");
+        assert!(err.contains("window_start") && err.contains("NA"),
+            "must name the column and the token: {err}");
     }
 
     #[test]

@@ -89,11 +89,10 @@ fn undeclared_model(dir: &Path) -> PathBuf {
     model_with_covers(dir, "undeclared.ir.json", None)
 }
 
-/// The fixture with the time column REPLACED by a `window_start`/`window_stop`
-/// pair and `covers` set to `window_columns` — the per-row form, the only one
-/// that can state a gap.
-fn windowed_model(dir: &Path) -> PathBuf {
-    let mut v = seed_timing_ir();
+/// Replace a fixture's `: time` column with a `win_start`/`win_stop` pair and
+/// declare `covers = window_columns` — the per-row form, the only one that can
+/// state a gap or a row wider than the file's usual spacing.
+fn to_window_columns(v: &mut serde_json::Value) {
     let obs = &mut v["model"]["observations"][0];
     obs["covers"] = serde_json::json!({ "kind": "window_columns" });
     let cols = obs["columns"].as_array_mut().expect("columns");
@@ -102,7 +101,31 @@ fn windowed_model(dir: &Path) -> PathBuf {
         serde_json::json!({ "name": "win_start", "role": "window_start" }),
         serde_json::json!({ "name": "win_stop", "role": "window_stop" }),
     ]);
+}
+
+/// The fixture with its time column replaced by a `window_start`/`window_stop`
+/// pair and `covers` set to `window_columns`.
+fn windowed_model(dir: &Path) -> PathBuf {
+    let mut v = seed_timing_ir();
+    to_window_columns(&mut v);
     let p = dir.join("windowed.ir.json");
+    std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    p
+}
+
+/// The calendar-anchored sibling fixture (`origin = date("2020-02-24")`), same
+/// dynamics, with its stream put in the per-row window form. An `origin` is
+/// what lets a boundary cell be a date.
+const DATED_ORIGIN: &str = "2020-02-24";
+
+fn dated_windowed_model(dir: &Path) -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let p = Path::new(&manifest).join("../sim/tests/fixtures/seed_timing_dated.ir.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    assert_eq!(v["model"]["origin"], DATED_ORIGIN, "the dated fixture carries the origin");
+    to_window_columns(&mut v);
+    let p = dir.join("windowed_dated.ir.json");
     std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
     p
 }
@@ -132,6 +155,83 @@ fn write_window_counts(path: &Path, skip: u32) {
         s.push_str(&format!("{d}\t{}\t{v}\n", d + 1));
     }
     std::fs::write(path, s).unwrap();
+}
+
+/// Per-row windows over days 3..43, one day wide except that days 30, 31 and
+/// 32 arrive as a single three-day row — the "publication slipped" shape
+/// `docs/camdl-data-spec.md` prints. Each row's value is the counts over the
+/// days it covers, so the two renderings below carry identical numbers.
+fn window_rows() -> Vec<(u32, u32, u32)> {
+    let per_day = |d: u32| if d >= 23 { (d - 22) * 3 } else { 0 };
+    let mut rows = Vec::new();
+    let mut d = 3u32;
+    while d < 43 {
+        let stop = if d == 30 { 33 } else { d + 1 };
+        rows.push((d, stop, (d..stop).map(per_day).sum()));
+        d = stop;
+    }
+    rows
+}
+
+/// Those windows with numeric boundaries — day offsets from the model origin.
+fn write_numeric_windows(path: &Path) {
+    let mut s = String::from("win_start\twin_stop\tcases\n");
+    for (a, b, v) in window_rows() {
+        s.push_str(&format!("{a}\t{b}\t{v}\n"));
+    }
+    std::fs::write(path, s).unwrap();
+}
+
+/// The same windows with ISO-date boundaries, rendered through the model's own
+/// origin — the form the data spec's window examples are written in.
+fn write_dated_windows(path: &Path) {
+    let day = |t: u32| ir::caltime::internal_to_date(DATED_ORIGIN, f64::from(t), "days").unwrap();
+    let mut s = String::from("win_start\twin_stop\tcases\n");
+    for (a, b, v) in window_rows() {
+        s.push_str(&format!("{}\t{}\t{v}\n", day(a), day(b)));
+    }
+    std::fs::write(path, s).unwrap();
+}
+
+/// The counts a windowed file states with ISO dates are read over exactly the
+/// periods those dates name. Stated as an equivalence, which needs no fixture
+/// sensitivity to be meaningful:
+///
+///   the same windows written as dates  ==  written as day offsets from origin
+///
+/// The two files carry the same rows — including the three-day row — so if the
+/// dates are converted through the model's `origin` and `time_unit` the two
+/// score identically, bit for bit; if a boundary landed anywhere else the
+/// periods would differ and so would the number.
+///
+/// Before this, the dated file did not load at all: its start column was put
+/// through the value parser on the way to the time conversion, and `f64` has
+/// no reading for `2020-02-27`.
+#[test]
+fn a_dated_windowed_file_is_read_over_the_periods_its_dates_name() {
+    let camdl = camdl_bin();
+    let tmp = tempdir("dated_windows");
+    let numeric = tmp.join("numeric.tsv");
+    let dated = tmp.join("dated.tsv");
+    write_numeric_windows(&numeric);
+    write_dated_windows(&dated);
+
+    // Non-vacuous: the "dated" file really is dated, and the rows really do
+    // line up — day 3 from a 2020-02-24 origin is 27 February.
+    let first = std::fs::read_to_string(&dated).unwrap();
+    let first = first.lines().nth(1).unwrap().to_string();
+    assert!(first.starts_with("2020-02-27\t2020-02-28\t"), "dated first row: {first}");
+    assert!(window_rows().iter().any(|&(a, b, _)| b - a > 1),
+        "the fixture must contain a row wider than a day");
+
+    let model = dated_windowed_model(&tmp);
+    let by_date = pfilter_loglik(&camdl, &model, &dated);
+    let by_number = pfilter_loglik(&camdl, &model, &numeric);
+    assert_eq!(
+        by_date, by_number,
+        "a boundary written as a date names the same period as the day offset it \
+         converts to (dated={by_date}, numeric={by_number})",
+    );
 }
 
 /// The `closing_at` reading of the same counts: labels shifted +1 (a closing
