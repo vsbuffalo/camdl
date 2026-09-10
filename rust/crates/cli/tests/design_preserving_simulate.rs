@@ -577,3 +577,181 @@ fn a_synthetic_fit_refuses_a_covariate_stream_by_name() {
     assert!(written.is_empty(),
         "no dataset is written for a stream that cannot be drawn: {written:?}");
 }
+
+// ── A ratio stream's denominator comes from the model (proposal 2026-09-09) ──
+
+/// `(label, kivu_cases, cases_split)` rows of the share file, as written.
+fn share_rows(path: &Path) -> Vec<(String, String, String)> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut lines = text.lines();
+    assert_eq!(lines.next().unwrap(), "week_ending\tkivu_cases\tcases_split",
+        "the declared columns — the denominator among them — so the loader reads the file back");
+    lines.map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (f[0].to_string(), f[1].to_string(), f[2].to_string())
+    }).collect()
+}
+
+/// `simulate --design-from` on the real-shaped fixture's `kivu_share` stream —
+/// of the week's cases whose province was recorded, how many were in Kivu,
+/// scored `binomial(n = cases_split, p = projected)` over a ratio of flows —
+/// writes the denominator column from the model: the ratio's own denominator
+/// flow over each row, an integer, with `k` drawn against it. The hole row
+/// keeps its hole in the count and still carries a denominator. The file
+/// re-loads under the model that wrote it.
+///
+/// Before the emitter wrote the column this stream was refused by name, like
+/// the survey's `tested` — which stays refused: surveillance effort is not a
+/// quantity the model generates.
+#[test]
+fn design_from_writes_a_ratio_streams_denominator_from_the_model() {
+    let tmp = tempdir("real_shaped_ratio");
+    let ir = compile_real_shaped(tmp.path());
+    let truth = real_shaped_truth(tmp.path());
+    let fit_toml = real_shaped_fit(
+        tmp.path(), &ir, &[("cases", "bulletin.tsv"), ("kivu_share", "province_share.tsv")]);
+
+    let out_dir = tmp.path().join("synth");
+    let output = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--design-from", fit_toml.to_str().unwrap(),
+        "--obs-only-dir", out_dir.to_str().unwrap(),
+        "--backend", "chain_binomial", "--dt", "0.5", "--seed", "11",
+    ]);
+    assert!(output.status.success(),
+        "a ratio stream's denominator is the model's to write:\n{}",
+        String::from_utf8_lossy(&output.stderr));
+
+    let observed = share_rows(&real_shaped("province_share.tsv"));
+    let simulated = share_rows(&out_dir.join("kivu_share.tsv"));
+    assert_eq!(simulated.len(), observed.len(), "one row per bound row");
+    assert_eq!(
+        simulated.iter().map(|(_, k, _)| k == "NA").collect::<Vec<_>>(),
+        observed.iter().map(|(_, k, _)| k == "NA").collect::<Vec<_>>(),
+        "the week with no recorded split stays a hole in the count"
+    );
+    let mut any_positive = false;
+    for (label, k, n) in &simulated {
+        let n: i64 = n.parse().unwrap_or_else(|_| panic!(
+            "row {label}: the denominator is written from the model as an integer, got {n:?}"));
+        assert!(n >= 0, "row {label}: a count");
+        any_positive |= n > 0;
+        if k != "NA" {
+            let k: i64 = k.parse().unwrap();
+            assert!(k <= n, "row {label}: k = {k} of n = {n} — drawn against the model's own denominator");
+        }
+    }
+    assert!(any_positive, "the epidemic produced cases, so some week has a denominator: {simulated:?}");
+
+    // The file re-loads under the model, with the model's denominators bound.
+    let reload = run(&[
+        "pfilter", ir.to_str().unwrap(), "--particles", "50", "--dt", "0.5", "--seed", "1",
+        "--params", truth.to_str().unwrap(),
+        "--data", &format!("kivu_share={}", out_dir.join("kivu_share.tsv").display()),
+    ]);
+    assert!(reload.status.success(),
+        "the emitted share file must re-load under the model that wrote it:\n{}",
+        String::from_utf8_lossy(&reload.stderr));
+}
+
+/// A proportion-of-flows stream with a data-column denominator, in the smallest
+/// model that has one.
+const RATIO_MODEL: &str = r#"
+time_unit = 'days
+compartments { S, I, H, Dc, Df }
+let N = S + I + H
+parameters {
+  beta : rate in [0.01, 2.0]
+  eta  : rate in [0.01, 1.0]
+  mu_c : rate in [0.001, 0.5]
+  mu_f : rate in [0.001, 0.5]
+}
+transitions {
+  infection   : S --> I  @ beta * S * I / N
+  hospitalise : I --> H  @ eta * I
+  die_comm    : I --> Dc @ mu_c * I
+  die_fac     : H --> Df @ mu_f * H
+}
+observations {
+  comm_frac {
+    columns       { time : time, comm_deaths : count, n_deaths : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+    emit_schedule = every 7 'days
+    comm_deaths   ~ binomial(n = n_deaths, p = projected)
+  }
+}
+init { S = 4990  I = 10 }
+simulate { from = 0 'days  to = 42 'days }
+"#;
+
+const RATIO_STAGES: &str = r#"
+[estimate]
+mu_c = { bounds = [0.001, 0.5], start = 0.05 }
+
+[fixed]
+beta = 0.5
+eta  = 0.15
+mu_f = 0.1
+
+[stages.mle]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 2
+particles  = 50
+iterations = 3
+cooling    = 0.7
+"#;
+
+/// A `[synthetic]` fit on a ratio stream with a data-column denominator
+/// completes: the dataset it writes carries the denominator from the model, and
+/// the fit reads it back. Before the emitter wrote the column this was refused
+/// by name (gh#829), on the very workflow that exists to test whether a
+/// community share is identified.
+#[test]
+fn a_synthetic_fit_on_a_ratio_stream_completes() {
+    let tmp = tempdir("synthetic_ratio");
+    let ir = compile(tmp.path(), "ratio", RATIO_MODEL);
+    let truth = tmp.path().join("truth.toml");
+    std::fs::write(&truth, "beta = 0.5\neta = 0.15\nmu_c = 0.05\nmu_f = 0.1\n").unwrap();
+    let out = tmp.path().join("out");
+
+    let fit_toml = tmp.path().join("fit.toml");
+    std::fs::write(&fit_toml, format!(
+        "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
+         [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
+        out.display(), ir.display(), truth.display(), RATIO_STAGES)).unwrap();
+
+    let output = run(&["fit", "run", fit_toml.to_str().unwrap()]);
+    assert!(output.status.success(),
+        "a [synthetic] fit on a ratio stream must complete:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+    // The dataset carries the model's denominator under the declared column.
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![out.clone()];
+    while let Some(d) = stack.pop() {
+        if let Ok(es) = std::fs::read_dir(&d) {
+            for e in es.flatten() {
+                let p = e.path();
+                if p.is_dir() { stack.push(p); }
+                else if p.file_name().map(|f| f == "comm_frac.tsv").unwrap_or(false) {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    assert_eq!(files.len(), 1, "one dataset for one sim seed: {files:?}");
+    let text = std::fs::read_to_string(&files[0]).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next().unwrap(), "time\tcomm_deaths\tn_deaths");
+    let rows: Vec<(i64, i64)> = lines.map(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        (f[1].parse().unwrap(), f[2].parse().unwrap())
+    }).collect();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|&(k, n)| 0 <= k && k <= n), "k of n, drawn against the model's denominator: {rows:?}");
+    assert!(rows.iter().any(|&(_, n)| n > 0), "the epidemic produced deaths: {rows:?}");
+}

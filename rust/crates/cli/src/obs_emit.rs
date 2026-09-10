@@ -33,6 +33,15 @@
 //!   depends on: simulating on a regular grid would give the synthetic fit more
 //!   information than the real fit has.
 //!
+//! A stream whose likelihood reads a data column is refused by name (gh#829),
+//! with one exception: a `binomial`/`beta_binomial` `n` over a ratio-of-flows
+//! projection (proposal 2026-09-09). That denominator is a quantity the model
+//! generates — the ratio's own denominator flow over the row, the events that
+//! were classified — so the emitter writes the column from the model, rounded
+//! to the count it is, and draws `k ~ binomial(n, ratio)`; the file re-loads
+//! with the design's information and no more. A survey's `tested` is
+//! surveillance effort the model has no term for and stays refused.
+//!
 //! [`simulate_dataset`] runs the forward model once and writes the dataset
 //! either way.
 
@@ -267,7 +276,8 @@ pub(crate) fn design_from_bound_streams(
 ///   when the data is what is being generated, and writing `0` would assert an
 ///   observation the run never made (gh#829): a synthetic file claiming zero
 ///   positives out of zero tests is scored as a real observation when it is
-///   fitted back.
+///   fitted back. The exception is the column [`model_denominator_column`]
+///   names: a ratio stream's `n`, which the model generates.
 /// - a stratified (long-form) stream. Its family's leaves share one `source`
 ///   and one long-form file with `: dim` columns; one file per leaf, with no
 ///   dim column, is a shape the loader would not route.
@@ -277,7 +287,7 @@ pub(crate) fn design_from_bound_streams(
 fn check_streams_round_trip(streams: &[&ObservationModel]) -> Result<(), String> {
     for obs in streams {
         let aux = crate::pfilter::stream_aux_columns(obs);
-        if !aux.is_empty() {
+        if !aux.is_empty() && model_denominator_column(obs).is_none() {
             return Err(format!(
                 "observation stream '{}': its likelihood reads the data column(s) {} — \
                  values a data file supplies and the model has no term to generate. A \
@@ -286,7 +296,8 @@ fn check_streams_round_trip(streams: &[&ObservationModel]) -> Result<(), String>
                  as real when the file is fitted back.\n  \
                  Fix: leave this stream out of the design (bind only the streams whose \
                  likelihood reads the model alone), or wait on gh#829, which lands the \
-                 covariate-conditioned draw.",
+                 covariate-conditioned draw. (A `binomial` `n` over a ratio of flows is \
+                 the one column the model does generate, and is written from it.)",
                 obs.name,
                 aux.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", "),
             ));
@@ -314,6 +325,31 @@ fn check_streams_round_trip(streams: &[&ObservationModel]) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+/// The one data column the emitter can write from the model: a `binomial` /
+/// `beta_binomial` `n` that is exactly a declared column, on a stream whose
+/// projection is a ratio of flows, and which is the only column the likelihood
+/// reads. The ratio's denominator flow over the row is what `n` counts — the
+/// events that were classified — so the model generates it, unlike a survey's
+/// `tested`, which is surveillance effort the model has no term for (gh#829;
+/// proposal 2026-09-09). Returns the column's name and the denominator's
+/// transition names.
+pub(crate) fn model_denominator_column(obs: &ObservationModel) -> Option<(String, Vec<String>)> {
+    use ir::expr::Expr;
+    use ir::observation::{Likelihood, Projection};
+    let Projection::FlowRatio { denominator, .. } = &obs.projection else { return None };
+    let n = match &obs.likelihood {
+        Likelihood::Binomial(b) => &b.n,
+        Likelihood::BetaBinomial(bb) => &bb.n,
+        _ => return None,
+    };
+    let Expr::ObsColumnRef(w) = n else { return None };
+    let col = w.obs_column_ref.clone();
+    if crate::pfilter::stream_aux_columns(obs) != vec![col.clone()] {
+        return None;
+    }
+    Some((col, denominator.clone()))
 }
 
 /// Where a simulated dataset's rows come from.
@@ -404,9 +440,24 @@ pub(crate) fn simulate_dataset(
     // Project every stream before creating any file: a partial dataset beside a
     // failure is worse than none (gh#589 review).
     let mut projected: Vec<Vec<f64>> = Vec::with_capacity(plans.len());
+    // The rows' model denominators, for a ratio stream whose likelihood `n` is
+    // a data column (proposal 2026-09-09): the denominator flow over each row,
+    // rounded to the count it is, written under the declared column and handed
+    // to the sampler as that row's aux. `None` for every other stream.
+    let mut denominators: Vec<Option<(String, Vec<f64>)>> = Vec::with_capacity(plans.len());
     for sp in &plans {
         let obs = declaration(&sp.name)?;
         projected.push(crate::project_coverages(&traj, obs, &model, &sp.plan.coverages())?);
+        denominators.push(match model_denominator_column(obs) {
+            Some((col, flows)) => {
+                let indices = crate::flow_indices_of(&model, &flows);
+                let n = crate::incidence_over_rows(
+                    &traj, &obs.name, &indices, &sp.plan.coverages(),
+                )?;
+                Some((col, n.into_iter().map(f64::round).collect()))
+            }
+            None => None,
+        });
     }
 
     std::fs::create_dir_all(out_dir)
@@ -421,38 +472,49 @@ pub(crate) fn simulate_dataset(
     let mut obs_rng = StatefulRng::new(run.seed ^ crate::util::SEED_MIX_OBS);
 
     let mut written = Vec::with_capacity(plans.len());
-    for (sp, projected) in plans.iter().zip(projected) {
+    for ((sp, projected), denominator) in plans.iter().zip(projected).zip(denominators) {
         let obs = declaration(&sp.name)?;
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs, compiled.clone(), &params,
         );
         // gh#6: the compartment state at each row's label, so likelihood arg
-        // expressions (`p = projected / N`) resolve. The aux slice is empty
-        // because a stream that needs one is refused above (gh#829).
+        // expressions (`p = projected / N`) resolve. The aux slice is the row's
+        // model denominator for a ratio stream and empty otherwise — a stream
+        // needing any other data column was refused above (gh#829). A row
+        // whose denominator is 0 projects NaN and draws 0 of 0, which scores 0
+        // when fitted back.
         let values: Vec<f64> = sp.plan.rows.iter().enumerate()
             .map(|(ti, row)| {
                 let snap = crate::snap_at(&traj, row.label);
-                sampler(projected[ti], row.label, &snap.int_state.counts, &[], &mut obs_rng)
+                let aux: Vec<(String, f64)> = denominator.as_ref()
+                    .map(|(col, n)| vec![(col.clone(), n[ti])])
+                    .unwrap_or_default();
+                sampler(projected[ti], row.label, &snap.int_state.counts, &aux, &mut obs_rng)
             })
             .collect();
         let path = out_dir.join(format!("{}.tsv", sp.name));
-        write_stream_file(&path, &sp.plan, &values)?;
+        let extra: Vec<(String, Vec<f64>)> = denominator.into_iter().collect();
+        write_stream_file(&path, &sp.plan, &values, &extra)?;
         written.push(StreamFile { source: sp.source.clone(), path });
     }
     Ok(written)
 }
 
 /// Write one stream's file: the declared temporal column(s), then the scored
-/// column, one line per planned row.
+/// column, then any `extra` columns, one line per planned row.
 ///
 /// `values` is parallel to `plan.rows`. A row the plan marks unobserved is
 /// written under the loader's hole token `NA`, keeping its period — the row
 /// carries the reset the fit's accumulator needs even though it carries no
-/// likelihood term.
+/// likelihood term. Each `extra` column is a declared data column the model
+/// generated (a ratio stream's denominator, [`model_denominator_column`]),
+/// parallel to the rows and written on hole rows too — the denominator is a
+/// model quantity the row has whether or not its count was observed.
 pub(crate) fn write_stream_file(
     path: &Path,
     plan: &EmitPlan,
     values: &[f64],
+    extra: &[(String, Vec<f64>)],
 ) -> Result<(), String> {
     use std::io::Write;
     if values.len() != plan.rows.len() {
@@ -461,18 +523,30 @@ pub(crate) fn write_stream_file(
             path.display(), plan.rows.len(), values.len()
         ));
     }
+    for (name, column) in extra {
+        if column.len() != plan.rows.len() {
+            return Err(format!(
+                "{}: {} planned row(s) but {} value(s) for column `{name}`",
+                path.display(), plan.rows.len(), column.len()
+            ));
+        }
+    }
     let mut out = std::io::BufWriter::new(
         std::fs::File::create(path)
             .map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
     );
     let io = |e: std::io::Error| format!("{}: {}", path.display(), e);
     match &plan.columns {
-        TemporalColumns::Time(t) => writeln!(out, "{t}\t{}", plan.scored).map_err(io)?,
+        TemporalColumns::Time(t) => write!(out, "{t}\t{}", plan.scored).map_err(io)?,
         TemporalColumns::Window { start, stop } => {
-            writeln!(out, "{start}\t{stop}\t{}", plan.scored).map_err(io)?
+            write!(out, "{start}\t{stop}\t{}", plan.scored).map_err(io)?
         }
     }
-    for (row, &value) in plan.rows.iter().zip(values) {
+    for (name, _) in extra {
+        write!(out, "\t{name}").map_err(io)?;
+    }
+    writeln!(out).map_err(io)?;
+    for (ri, (row, &value)) in plan.rows.iter().zip(values).enumerate() {
         match (&plan.columns, row.coverage) {
             (TemporalColumns::Window { .. }, Coverage::Interval { start, stop }) => {
                 write!(out, "{start}\t{stop}").map_err(io)?
@@ -480,9 +554,13 @@ pub(crate) fn write_stream_file(
             _ => write!(out, "{}", row.label).map_err(io)?,
         }
         match row.observed {
-            true => writeln!(out, "\t{}", format_obs_value(value)).map_err(io)?,
-            false => writeln!(out, "\tNA").map_err(io)?,
+            true => write!(out, "\t{}", format_obs_value(value)).map_err(io)?,
+            false => write!(out, "\tNA").map_err(io)?,
         }
+        for (_, column) in extra {
+            write!(out, "\t{}", format_obs_value(column[ri])).map_err(io)?;
+        }
+        writeln!(out).map_err(io)?;
     }
     out.flush().map_err(io)
 }
@@ -770,6 +848,55 @@ mod tests {
             "every period the fit was bound over must survive the round trip");
         let got_holes: Vec<bool> = reloaded[0].cells.iter().map(|c| c.is_none()).collect();
         assert_eq!(got_holes, want_holes, "and every hole");
+    }
+
+    /// Proposal 2026-09-09: the one data column the model generates. A
+    /// `binomial` `n` that is a declared column, over a ratio of flows, and the
+    /// only column the likelihood reads, is the ratio's denominator; anything
+    /// else that reads a data column stays a gh#829 refusal.
+    #[test]
+    fn the_model_denominator_is_a_binomial_n_over_a_ratio_of_flows_and_nothing_else() {
+        use ir::expr::{BinOp, Expr, ProjectedExpr};
+        use ir::observation::BinomialLikelihood;
+        let ratio = || Projection::FlowRatio {
+            numerator: vec!["die_comm".into()],
+            denominator: vec!["die_comm".into(), "die_fac".into()],
+        };
+        let projected = || Expr::Projected(ProjectedExpr { projected: () });
+        let mut cols = time_cols();
+        cols.push(ObsColumn { name: "n_deaths".into(), role: ColumnRole::Value(ir::parameter::ParamKind::Count) });
+        let with = |projection: Projection, likelihood: Likelihood| {
+            let mut s = stream(projection, Some(Covers::Until { offset: 0.0, span: 7.0 }), cols.clone());
+            s.likelihood = likelihood;
+            s
+        };
+        let binomial_n = || Likelihood::Binomial(BinomialLikelihood {
+            n: Expr::obs_column_ref("n_deaths"),
+            p: ir::Diffable::new(projected()),
+        });
+        assert_eq!(
+            model_denominator_column(&with(ratio(), binomial_n())),
+            Some(("n_deaths".to_string(), vec!["die_comm".to_string(), "die_fac".to_string()])),
+            "a ratio's binomial n is the model's denominator"
+        );
+        assert_eq!(
+            model_denominator_column(&with(incidence(), binomial_n())),
+            None,
+            "a count stream's n is surveillance effort, not a model quantity"
+        );
+        // The likelihood reads a second data column through `p`: not writable.
+        let n_and_effort = Likelihood::Binomial(BinomialLikelihood {
+            n: Expr::obs_column_ref("n_deaths"),
+            p: ir::Diffable::new(Expr::bin_op(BinOp::Mul, projected(), Expr::obs_column_ref("effort"))),
+        });
+        assert_eq!(model_denominator_column(&with(ratio(), n_and_effort)), None);
+        // `n` that is an expression over the column, not the column: not the
+        // declared column's value, so not written.
+        let n_expr = Likelihood::Binomial(BinomialLikelihood {
+            n: Expr::bin_op(BinOp::Mul, Expr::obs_column_ref("n_deaths"), Expr::const_(2.0)),
+            p: ir::Diffable::new(projected()),
+        });
+        assert_eq!(model_denominator_column(&with(ratio(), n_expr)), None);
     }
 
     /// gh#829. A stream whose likelihood reads a data column has no source for

@@ -1964,7 +1964,10 @@ fn write_obs_into_cas(
         // The declared columns, so the file re-loads under its own model
         // (gh#833, gh#830) — the same writer every simulated dataset uses.
         let path = obs_dir.join(format!("{}.tsv", obs_ir.name));
-        crate::obs_emit::write_stream_file(&path, plan, &draws)?;
+        // No extra columns: this writer draws every stream with an empty aux
+        // slice, so a ratio stream's data-column `n` is not written here (the
+        // design-preserving emitter is where it is, proposal 2026-09-09).
+        crate::obs_emit::write_stream_file(&path, plan, &draws, &[])?;
         stream_names.push(obs_ir.name.clone());
     }
 

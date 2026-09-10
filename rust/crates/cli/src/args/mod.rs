@@ -655,7 +655,8 @@ pub struct SimulateArgs {
     /// from --draws (one `ds_NN/` subdirectory per draw). What it produces is
     /// a dataset, not a run: no trajectory and no store leaf are written, with
     /// --obs-dir as with --obs-only-dir. A stream whose likelihood reads a
-    /// data column is refused by name until gh#829 lands.
+    /// data column is refused by name (gh#829), except a binomial `n` over a
+    /// ratio of flows, which the model generates and this writes.
     #[arg(long, value_name = "FIT_TOML", conflicts_with_all = [
         "obs", "obs_only", "output", "stdout", "seeds", "replicates",
         "emit_every", "dates", "init_state", "quantities_out", "event_log",

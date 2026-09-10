@@ -3544,53 +3544,13 @@ pub(crate) fn project_coverages(
     model: &ir::Model,
     rows: &[(f64, sim::inference::Coverage)],
 ) -> Result<Vec<f64>, String> {
-    use sim::inference::Coverage;
     let obs_times: Vec<f64> = rows.iter().map(|r| r.0).collect();
     check_obs_times_on_snapshot_grid(traj, &obs_ir.name, &model.time_unit, &obs_times)?;
-    // Per-interval incidence over a set of transition flow indices: build the
-    // running cumulative flow at each snapshot, then read it at each row's two
-    // boundaries. Shared by CumulativeFlow (one exact transition) and
-    // CumulativeFlowSum (explicit strata family per §25.4).
+    // Per-interval incidence over a set of transition flow indices — shared by
+    // CumulativeFlow (one exact transition), CumulativeFlowSum (explicit strata
+    // family per §25.4) and each side of a FlowRatio.
     let incidence_over = |flow_indices: &[usize]| -> Result<Vec<f64>, String> {
-        // `f64` throughout: ODE flows are real-valued (the chain-binomial /
-        // Gillespie integer flows widen losslessly via `Flows::value`).
-        // `cum_at_snap[i]` is the flow over (run start, snapshots[i].t]: the
-        // trajectory's initial row carries zeroed flows by construction
-        // (`sim::state::Trajectory`), so the running sum needs no offset.
-        let mut cum_at_snap: Vec<(f64, f64)> = Vec::with_capacity(traj.snapshots.len());
-        let mut running = 0.0f64;
-        for snap in &traj.snapshots {
-            for &fi in flow_indices {
-                running += snap.flows.value(fi);
-            }
-            cum_at_snap.push((snap.t, running));
-        }
-        // The cumulative flow at a boundary, which must BE a recorded snapshot.
-        let cum_at = |t: f64| -> Result<f64, String> {
-            let i = resolved_snapshot_index(traj, t)
-                .filter(|_| is_recorded_snapshot(traj, t))
-                .ok_or_else(|| format!(
-                    "observation stream '{}': the period boundary t = {t} is not a \
-                     recorded output time, so the flow accumulated up to it cannot \
-                     be read.\n  \
-                     A row's value is the difference of the recorded cumulative \
-                     flow at its two boundaries.\n  \
-                     Fix: add {t} to the output schedule \
-                     (`output {{ trajectories {{ every = ... }} }}`, or an \
-                     `at = [...]` list containing it), or move the boundary onto \
-                     a recorded output time.",
-                    obs_ir.name,
-                ))?;
-            Ok(cum_at_snap[i].1)
-        };
-        rows.iter().map(|&(label, cov)| match cov {
-            Coverage::Interval { start, stop } => Ok(cum_at(stop)? - cum_at(start)?),
-            Coverage::Instant | Coverage::Unrecorded => Err(format!(
-                "observation stream '{}': an incidence projection needs a period \
-                 for the row at {label}, but it was given {cov:?}",
-                obs_ir.name,
-            )),
-        }).collect()
+        incidence_over_rows(traj, &obs_ir.name, flow_indices, rows)
     };
     match &obs_ir.projection {
         ir::observation::Projection::CumulativeFlow(flow_name) => {
@@ -3674,6 +3634,73 @@ pub(crate) fn project_coverages(
             Ok(num.iter().zip(&den).map(|(&a, &b)| flow_ratio(a, b)).collect())
         }
     }
+}
+
+/// The flow over each row's `[start, stop)` for a set of transition flow
+/// indices, off the recorded trajectory: build the running cumulative flow at
+/// each snapshot, then read it at each row's two boundaries. The one
+/// arithmetic every incidence quantity is read by — a `CumulativeFlow`, a
+/// `CumulativeFlowSum`, each side of a `FlowRatio`, and the denominator the
+/// design-preserving emitter writes for a ratio stream whose `n` is a data
+/// column (proposal 2026-09-09) — so none of them can disagree about what a
+/// row's flow is.
+///
+/// Both endpoints of a row must be recorded snapshots (the gh#589 guard).
+pub(crate) fn incidence_over_rows(
+    traj: &sim::Trajectory,
+    obs_name: &str,
+    flow_indices: &[usize],
+    rows: &[(f64, sim::inference::Coverage)],
+) -> Result<Vec<f64>, String> {
+    use sim::inference::Coverage;
+    // `f64` throughout: ODE flows are real-valued (the chain-binomial /
+    // Gillespie integer flows widen losslessly via `Flows::value`).
+    // `cum_at_snap[i]` is the flow over (run start, snapshots[i].t]: the
+    // trajectory's initial row carries zeroed flows by construction
+    // (`sim::state::Trajectory`), so the running sum needs no offset.
+    let mut cum_at_snap: Vec<(f64, f64)> = Vec::with_capacity(traj.snapshots.len());
+    let mut running = 0.0f64;
+    for snap in &traj.snapshots {
+        for &fi in flow_indices {
+            running += snap.flows.value(fi);
+        }
+        cum_at_snap.push((snap.t, running));
+    }
+    // The cumulative flow at a boundary, which must BE a recorded snapshot.
+    let cum_at = |t: f64| -> Result<f64, String> {
+        let i = resolved_snapshot_index(traj, t)
+            .filter(|_| is_recorded_snapshot(traj, t))
+            .ok_or_else(|| format!(
+                "observation stream '{}': the period boundary t = {t} is not a \
+                 recorded output time, so the flow accumulated up to it cannot \
+                 be read.\n  \
+                 A row's value is the difference of the recorded cumulative \
+                 flow at its two boundaries.\n  \
+                 Fix: add {t} to the output schedule \
+                 (`output {{ trajectories {{ every = ... }} }}`, or an \
+                 `at = [...]` list containing it), or move the boundary onto \
+                 a recorded output time.",
+                obs_name,
+            ))?;
+        Ok(cum_at_snap[i].1)
+    };
+    rows.iter().map(|&(label, cov)| match cov {
+        Coverage::Interval { start, stop } => Ok(cum_at(stop)? - cum_at(start)?),
+        Coverage::Instant | Coverage::Unrecorded => Err(format!(
+            "observation stream '{}': an incidence projection needs a period \
+             for the row at {label}, but it was given {cov:?}",
+            obs_name,
+        )),
+    }).collect()
+}
+
+/// The transition indices of the named flows, in the order named. A name with
+/// no transition is dropped, as the projection arms above do; both validators
+/// refuse such an IR before a run reaches here.
+pub(crate) fn flow_indices_of(model: &ir::Model, names: &[String]) -> Vec<usize> {
+    names.iter()
+        .filter_map(|fname| model.transitions.iter().position(|tr| tr.name == *fname))
+        .collect()
 }
 
 /// Resolved compartment location: integer (local index) or real (local index).

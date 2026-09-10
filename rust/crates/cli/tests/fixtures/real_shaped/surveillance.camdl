@@ -21,7 +21,7 @@
 #
 # What it is fitted to
 # --------------------
-# Four streams over three files. The counts were drawn from this model at
+# Five streams over four files. The counts were drawn from this model at
 # beta = 0.35, gamma = 0.2, rho = 0.5, psi = 0.3, k = 20, seed 7, on the
 # chain-binomial backend at dt = 0.25, then aggregated into the windows the
 # files state; they are surveillance-shaped, not a recovery target.
@@ -48,6 +48,14 @@
 #     the `tested` column, a denominator the data file supplies and the model
 #     has no term to generate; the fraction infectious is what the model
 #     predicts against it.
+#
+#   kivu_share (province_share.tsv) — of the week's cases whose province was
+#     recorded, how many were in Kivu: the Kivu infection flow over the
+#     country's, both accumulated over the same week, labelled like
+#     `province_cases` by the last day each week covers. The denominator
+#     `cases_split` is a column the file supplies; the week in which Ituri
+#     published no figure has no recorded split, so both columns are `NA`
+#     and the row is a hole.
 
 time_unit = 'days
 origin    = date("2026-06-29")
@@ -112,6 +120,14 @@ observations {
     projected     = sum(p in province, I[p]) / sum(p in province, N[p])
     emit_schedule = every 14 'days
     positives     ~ binomial(n = tested, p = projected)
+  }
+
+  kivu_share {
+    columns       { week_ending : time, kivu_cases : count, cases_split : count }
+    covers        = ending_on(week_ending, 7 'days)
+    projected     = incidence(infection[kivu]) / sum(p in province, incidence(infection[p]))
+    emit_schedule = every 7 'days
+    kivu_cases    ~ binomial(n = cases_split, p = projected)
   }
 }
 
