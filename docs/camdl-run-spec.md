@@ -2741,14 +2741,16 @@ perturbation, and every attempt a retry rejected on the way there — under a
 header naming the rule and counting the rejected draws
 (`# camdl chain_starts;
 starts=from_mle @scout; chains=4; kind=point; retried=0`).
-Its columns are `chain_id`, `attempt` (0-based), `status` (`accepted` — the
-start the chain ran from; `rejected` — a draw the filter could not score, a
-redraw followed; `refused` — the last attempt, also unscoreable, the chain did
-not run), `source`, one column per estimated parameter, then `ess` (the filter's
-ESS at refusal, blank otherwise) and `reason` (blank for an accepted row); one
-row per attempt in (chain, attempt) order, so a healthy run has one `accepted`
-row per chain at attempt 0. That file, not the config, is the authority on what
-a run did. `fit_state.toml` carries the same rule as `chain_init_source` beside
+Its columns are `chain_id` (1-based, the number of the `chain_N/` directory
+beside it and the number every stderr refusal and `bad_init` record uses),
+`attempt` (0-based), `status` (`accepted` — the start the chain ran from;
+`rejected` — a draw the filter could not score, a redraw followed; `refused` —
+the last attempt, also unscoreable, the chain did not run), `source`, one column
+per estimated parameter, then `ess` (the filter's ESS at refusal, blank
+otherwise) and `reason` (blank for an accepted row); one row per attempt in
+(chain, attempt) order, so a healthy run has one `accepted` row per chain at
+attempt 0. That file, not the config, is the authority on what a run did.
+`fit_state.toml` carries the same rule as `chain_init_source` beside
 `chain_starts_kind = "spread" | "point"`, and `fit summary` prints both under
 the leaf's identity line:
 
@@ -4874,9 +4876,10 @@ When a chain cannot start — under a spread rule, when none of its
 its one try — the run skips it and continues (`ran K of N chains` on stderr,
 `n_good_chains` in `fit_state.toml`), every attempt is a row of
 `chain_starts.tsv`, and `diagnostics.json` carries a `bad_init` record for it:
-the chain id, the full estimated-parameter vector it was refused at (so the
-refusal is reproducible), a one-line prose `reason` that opens with how many
-starts were tried, and an `attempts` array.
+the chain id (1-based, the number the stderr line, `chain_starts.tsv` and
+`progress.json` all use), the full estimated-parameter vector it was refused at
+(so the refusal is reproducible), a one-line prose `reason` that opens with how
+many starts were tried, and an `attempts` array.
 
 `attempts` is the structured half, and it is what downstream tooling should read
 — the prose is rendered from the same values, so parsing the sentence gets you
@@ -5021,9 +5024,9 @@ not started is neither good nor bad.
 `--parallel` call for opposite responses (respecify, or wait), so a chain that
 has not been picked up by a worker is counted in `not_started` and reports
 nothing. The block is **absent**, not null, for a method with no chains (an
-NLopt search, a profile grid), and `chain` is 1-based here — the opposite of
-`chain_starts.tsv`, whose own `chain_id` column is 0-based and whose header says
-so.
+NLopt search, a profile grid), and `chain` is 1-based here — the same numbering
+`chain_starts.tsv`'s `chain_id` column, the `bad_init` records and the
+`chain_N/` directories use, so joining any two of them takes no arithmetic.
 
 ## 11. Predictive Workflows
 

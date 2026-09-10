@@ -84,7 +84,7 @@ fn chain_one_beta(root: &Path) -> f64 {
     let (beta, id, status) = (col("beta"), col("chain_id"), col("status"));
     let row: Vec<&str> = lines
         .map(|l| l.split('\t').collect::<Vec<_>>())
-        .find(|r| r[id] == "0" && r[status] == "accepted")
+        .find(|r| r[id] == "1" && r[status] == "accepted")
         .expect("chain 1's accepted row");
     row[beta].parse().unwrap_or_else(|_| panic!("non-numeric beta {:?}", row[beta]))
 }

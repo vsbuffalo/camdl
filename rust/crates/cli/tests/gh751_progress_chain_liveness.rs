@@ -186,10 +186,11 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
     }
     refused_ids.sort_unstable();
 
-    // The claim that matters: the ids agree with the artifact written after
+    // The claim that matters: the ids agree with the artifacts written after
     // the stage, which is what a reader would otherwise have had to wait for.
-    // `diagnostics.json` numbers chains 0-based, `progress.json` 1-based (and
-    // says so in its own `numbering` field), so they differ by exactly one.
+    // Every one of them numbers chains the same way (gh#781), so the
+    // comparisons below are equalities — an artifact that needed `+ 1` to line
+    // up with its neighbour is the defect, not the fixture.
     assert_eq!(
         chains["numbering"], "1-based, matching the chain_N/ directories",
         "the file explains its own chain column:\n{progress:#}"
@@ -200,13 +201,46 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
         .expect("diagnostics.json is a list")
         .iter()
         .filter(|d| d["kind"]["type"] == "bad_init")
-        .map(|d| d["kind"]["chain_id"].as_u64().unwrap() + 1)
+        .map(|d| d["kind"]["chain_id"].as_u64().unwrap())
         .collect();
     bad_init.sort_unstable();
     assert_eq!(
         refused_ids, bad_init,
         "the chains progress.json calls refused are the ones diagnostics.json \
-         records a bad_init for:\n{progress:#}"
+         records a bad_init for, under the same numbers:\n{progress:#}"
+    );
+
+    // gh#781: and the rows of `chain_starts.tsv`, which is where a reader goes
+    // next — "which vector did chain N run from?". The ids are the same ids,
+    // so the lookup is a match on the number the refusal printed; before
+    // gh#781 that column counted from zero and the row a reader landed on
+    // described a neighbouring chain's start, with nothing to say so.
+    let starts = std::fs::read_to_string(leaf.join("chain_starts.tsv")).unwrap();
+    let mut body = starts.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let cols: Vec<&str> = body.next().expect("chain_starts.tsv header").split('\t').collect();
+    let id_col = cols.iter().position(|c| *c == "chain_id")
+        .unwrap_or_else(|| panic!("no chain_id column in {cols:?}"));
+    let mut start_ids: Vec<u64> = body
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .map(|r| r[id_col].parse().unwrap())
+        .collect();
+    start_ids.sort_unstable();
+    start_ids.dedup();
+    let progress_ids: Vec<u64> = {
+        let mut v: Vec<u64> = rows.iter().map(|r| r["chain"].as_u64().unwrap()).collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        progress_ids, start_ids,
+        "progress.json names chains {progress_ids:?} and chain_starts.tsv \
+         names them {start_ids:?}; a reader joining the two would need \
+         arithmetic that neither file states:\n{starts}"
+    );
+    assert!(
+        refused_ids.iter().all(|id| start_ids.contains(id)),
+        "every refused chain has a row saying what it started from; refused \
+         {refused_ids:?}, rows for {start_ids:?}:\n{starts}"
     );
 
     // …and the directory each refused chain names holds no draws to read.

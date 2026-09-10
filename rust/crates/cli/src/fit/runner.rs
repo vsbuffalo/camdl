@@ -2146,7 +2146,9 @@ pub fn run_chains_with_per_chain_params(
                     // support at a named measurement — so there is no
                     // `StreamAttempt` to carry.
                     collector.push(DiagnosticKind::BadInit {
-                        chain_id, params, reason: reason.clone(),
+                        // 1-based, like the stderr line below and every other
+                        // artifact naming a chain (gh#781).
+                        chain_id: chain_id + 1, params, reason: reason.clone(),
                         attempts: Vec::new(),
                     });
                     eprintln!("  chain {}: \x1b[31m✗ skipped\x1b[0m — {} ({})",

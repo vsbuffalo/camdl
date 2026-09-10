@@ -1135,7 +1135,9 @@ pub fn run_stage(
                             ))
                             .collect();
                     collector.push(DiagnosticKind::BadInit {
-                        chain_id, params, reason: reason.clone(), attempts,
+                        // 1-based, like the stderr line below and every other
+                        // artifact naming a chain (gh#781).
+                        chain_id: chain_id + 1, params, reason: reason.clone(), attempts,
                     });
                     eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
                         chain_id + 1, reason);
@@ -2422,10 +2424,9 @@ mod tests {
     /// `[1, 3]` — the ids of two OTHER chains, which is worse, because both
     /// exist and neither is the one described.
     ///
-    /// `chain_starts.tsv` is 0-based in its own `chain_id` column and says so
-    /// in its header (`chain_id is 0-based; that chain's outputs are under
-    /// chain_<chain_id + 1>/`), so the two artifacts disagree by exactly one
-    /// and each states which it is. This test pins THIS one.
+    /// `chain_starts.tsv` numbers its own `chain_id` column the same way and
+    /// says so in its header, so the two artifacts name a chain identically
+    /// (gh#781). This test pins THIS one.
     #[test]
     fn the_recorded_chain_id_is_the_surviving_chain_one_based() {
         // Chains 1 and 3 (1-based) were refused, so `retained` — which the

@@ -437,7 +437,9 @@ fn all_chains_refused_is_an_error() {
         hit.expect("a chain_starts.tsv under the run tree")
     };
     let rows = start_rows(&leaf);
-    for chain in 0..2 {
+    // `chain_id` is 1-based in the file (gh#781), like the `chain_N/`
+    // directories and the stderr refusals.
+    for chain in 1..=2 {
         let mine: Vec<&StartRow> = rows.iter().filter(|r| r.chain_id == chain).collect();
         assert_eq!(mine.len(), 10, "chain {chain}: ten attempts on the record: {mine:?}");
         assert_eq!(mine.iter().filter(|r| r.status == "rejected").count(), 9, "{mine:?}");

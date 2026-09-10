@@ -6,9 +6,9 @@
 //! second, IF2-only one that overwrote it. The survivor had no `source`
 //! column, so an IF2 stage's `chain_starts.tsv` could not say whether the
 //! chains were independently initialised — the audit question the file exists
-//! to answer (gh#871) — and it numbered chains from 1 while the sampler stages
-//! numbered them from 0, so one parser could not read both and an off-by-one
-//! was available to anyone who tried.
+//! to answer (gh#871) — and the two writers numbered chains differently, so
+//! one parser could not read both and an off-by-one was available to anyone
+//! who tried.
 //!
 //! The pin is end-to-end and comparative: run one fit with an IF2 stage and a
 //! PGAS stage and require the two files to have the same columns and the same
@@ -206,10 +206,11 @@ starts    = \"uniform_unconstrained\"
 
     let if2_ids = column(&if2_cols, &if2_rows, "chain_id");
     let pgas_ids = column(&pgas_cols, &pgas_rows, "chain_id");
-    assert_eq!(if2_ids, ["0", "1"],
+    assert_eq!(if2_ids, ["1", "2"],
         "chain ids in the IF2 stage's chain_starts.tsv are {if2_ids:?}; the \
-         column is 0-based on every stage that writes this file, and one that \
-         numbers from 1 hands an off-by-one to anyone joining two stages.");
+         column is 1-based on every stage that writes this file — the number \
+         of the `chain_N/` directory beside it (gh#781) — and a stage that \
+         numbers differently hands an off-by-one to anyone joining two.");
     assert_eq!(if2_ids, pgas_ids,
         "the IF2 stage numbers its chains {if2_ids:?} and the PGAS stage \
          numbers them {pgas_ids:?}.");
@@ -219,10 +220,11 @@ starts    = \"uniform_unconstrained\"
     // names its chain and no two rows may share a value.
     let if2_sources = column(&if2_cols, &if2_rows, "source");
     assert_eq!(if2_sources,
-        ["uniform_unconstrained:chain-0", "uniform_unconstrained:chain-1"],
+        ["uniform_unconstrained:chain-1", "uniform_unconstrained:chain-2"],
         "the IF2 stage's per-chain sources are {if2_sources:?}; the stage drew \
          each chain its own point under `starts = \"uniform_unconstrained\"`, and \
-         the file has to say so.");
+         the file has to say so — under the same chain numbers the `chain_id` \
+         column of those rows carries (gh#781).");
 
     let betas: Vec<f64> = column(&if2_cols, &if2_rows, "beta").iter()
         .map(|v| v.parse().unwrap_or_else(|_| panic!("non-numeric beta {v:?}")))

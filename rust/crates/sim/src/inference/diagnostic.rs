@@ -135,6 +135,11 @@ pub enum DiagnosticKind {
     /// diagnostic (e.g. "ESS collapsed at obs 7 after 0.4s") so
     /// the user can tell which init was pathological.
     BadInit {
+        /// **1-based**, matching the `chain_N/` directories, the stderr
+        /// refusal, `chain_starts.tsv`'s `chain_id` column and
+        /// `progress.json`'s per-chain rows (gh#781). The samplers count
+        /// chains from zero internally and add one when they build this
+        /// record, which is the artifact a reader joins the others against.
         chain_id: usize,
         /// Estimated parameter name → starting value on the natural
         /// scale, exactly as offered to the inference engine.
@@ -480,7 +485,7 @@ impl DiagnosticKind {
                 format!(
                     "Chain {} starting parameters were pathological — skipped. \
                      Reason: {}. Init: [{}].",
-                    chain_id + 1, reason, pretty,
+                    chain_id, reason, pretty,
                 )
             }
             Self::MaxTreeDepthHits { n_hits, n_sweeps, max_depth, .. } =>
@@ -780,7 +785,7 @@ mod tests {
 
     fn bad_init(param: &str, value: f64) -> DiagnosticKind {
         DiagnosticKind::BadInit {
-            chain_id: 0,
+            chain_id: 1,
             params: std::collections::BTreeMap::from([(param.to_string(), value)]),
             reason: "ESS collapsed".into(),
             attempts: Vec::new(),
@@ -810,6 +815,22 @@ mod tests {
         }
         assert!(rendered[0].contains("mu=6.6780e-5"),
             "the value the chain ran from must be legible: {}", rendered[0]);
+    }
+
+    /// gh#781: the record's `chain_id` is the number the prose prints and the
+    /// number `chain_starts.tsv`, `progress.json` and the `chain_N/`
+    /// directories use. A renderer that adds one to the stored field would
+    /// leave the JSON a reader parses one behind the sentence beside it.
+    #[test]
+    fn the_rendered_chain_number_is_the_recorded_one() {
+        let d = DiagnosticKind::BadInit {
+            chain_id: 4,
+            params: std::collections::BTreeMap::from([("mu".to_string(), 0.3)]),
+            reason: "ESS collapsed".into(),
+            attempts: Vec::new(),
+        };
+        assert!(d.render().starts_with("Chain 4 "),
+            "the prose must name the chain the record names: {}", d.render());
     }
 
     /// The same rule must leave ordinary-magnitude values alone — a

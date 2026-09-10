@@ -46,10 +46,11 @@
 //! ## Chain numbering
 //!
 //! `chains` is **1-based**, matching the `chain_N/` directories the reader is
-//! looking at while reading this file — not the 0-based `chain` key inside
-//! `draws.tsv` / `trajectories.tsv` / `chain_starts.tsv`. The convention is
-//! stated in the artifact itself (`chain_numbering`) so no consumer has to
-//! infer it.
+//! looking at while reading this file and `chain_starts.tsv`'s `chain_id`
+//! column — not the 0-based `chain` key inside `draws.tsv` /
+//! `trajectories.tsv`, which is a join key between those two files. The
+//! convention is stated in the artifact itself (`chain_numbering`) so no
+//! consumer has to infer it.
 //!
 //! ## Which chains appear
 //!

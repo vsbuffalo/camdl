@@ -107,9 +107,10 @@ pub enum RunState {
 
 /// How the `chain` field of a [`ChainStatus`] is numbered. Stated in the
 /// artifact so a consumer holding only `progress.json` can map a row to a
-/// directory. It agrees with `pgas_summary.json`'s `chain_numbering`, and is
-/// deliberately the opposite of `chain_starts.tsv`, whose own `chain_id`
-/// column is 0-based and whose header says so.
+/// directory. It agrees with `pgas_summary.json`'s `chain_numbering`, with
+/// `chain_starts.tsv`'s `chain_id` column and with `diagnostics.json`'s
+/// `bad_init` records: every artifact that names a chain names it the same
+/// way, so joining two of them takes no arithmetic (gh#781).
 pub const CHAIN_NUMBERING: &str = "1-based, matching the chain_N/ directories";
 
 /// Why a chain did not run.

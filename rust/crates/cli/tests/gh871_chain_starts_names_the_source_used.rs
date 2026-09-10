@@ -4,7 +4,7 @@
 //! A method started from a stored fit with `starts = { from_mle = "@prime" }`
 //! puts every chain at the upstream point estimate. The writer used to be
 //! handed the stage's declared `init` regardless, so the file recorded N
-//! independent per-chain draws (`uniform_unconstrained:chain-0` …) beside N
+//! independent per-chain draws (`uniform_unconstrained:chain-1` …) beside N
 //! identical values. `chain_starts.tsv` is the artifact an auditor reads to
 //! answer "were these chains started apart?" — the question behind any R̂ that
 //! looks too good — so a wrong answer there is durable and looks authoritative.

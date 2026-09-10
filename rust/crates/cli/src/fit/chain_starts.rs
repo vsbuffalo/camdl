@@ -1057,6 +1057,8 @@ fn read_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
 /// One row of `chain_starts.tsv`.
 #[derive(Debug, Clone)]
 pub struct ChainStartRecord {
+    /// 0-based, as the producer counts chains. The writer renders it 1-based,
+    /// which is what the file's `chain_id` column holds (gh#781).
     pub chain_id: usize,
     /// 0-based attempt index within the chain's bounded retry (gh#887).
     pub attempt: usize,
@@ -1116,11 +1118,15 @@ impl DrawnStarts {
 /// point earns `:chain-<id>`; a rule that put every chain at one point does
 /// not, because that suffix reads as independent draws that happen to
 /// coincide (gh#871).
+///
+/// `chain_id` is the 0-based index the producer works in; the suffix is the
+/// 1-based number the `chain_id` column, the `chain_N/` directories and every
+/// stderr line use, so the two columns of one row agree (gh#781).
 pub fn source_label(rule: &ChainStarts, chain_id: usize) -> String {
     if rule.is_point() {
         rule.tag().to_string()
     } else {
-        format!("{}:chain-{}", rule.tag(), chain_id)
+        format!("{}:chain-{}", rule.tag(), chain_id + 1)
     }
 }
 
@@ -1134,9 +1140,15 @@ pub fn source_label(rule: &ChainStarts, chain_id: usize) -> String {
 /// and "did the chains collapse into one basin immediately?", and the
 /// per-chain trace cannot. An IF2 run perturbs its parameter swarm before
 /// the first filter pass (`sim::inference::if2`, the `t=0` perturbation), so
-/// iteration 0 of `chain_<chain_id + 1>/parameter_traces.tsv` already shows
+/// iteration 0 of `chain_<chain_id>/parameter_traces.tsv` already shows
 /// moved values. The file header says so, because a reader who has only the
 /// TSV would otherwise pair the two row-by-row.
+///
+/// The `chain_id` column is **1-based** — the number the `chain_N/`
+/// directories, the stderr refusals and `diagnostics.json` all use — so a
+/// refusal naming "chain 4" leads to the row describing chain 4's start with
+/// no arithmetic (gh#781). [`ChainStartRecord::chain_id`] stays 0-based;
+/// this writer is the boundary.
 pub fn write_chain_starts_tsv(
     dir: &Path,
     base: &[EstimatedParam],
@@ -1159,8 +1171,9 @@ pub fn write_chain_starts_tsv(
         writeln!(f, "# perturbs its swarm before the first filter pass, so \
             a per-chain trace opens on")?;
         writeln!(f, "# values that have already moved.")?;
-        writeln!(f, "# chain_id is 0-based; that chain's outputs are under \
-            chain_<chain_id + 1>/.")?;
+        writeln!(f, "# chain_id is 1-based: that chain's outputs are under \
+            chain_<chain_id>/, and it is")?;
+        writeln!(f, "# the number every stderr refusal and diagnostic uses.")?;
         writeln!(f, "# status: accepted = the start the chain ran from; \
             rejected = a draw the filter")?;
         writeln!(f, "# could not score, so a fresh one was drawn (gh#887); \
@@ -1177,8 +1190,10 @@ pub fn write_chain_starts_tsv(
         cols.push("reason".to_string());
         writeln!(f, "{}", cols.join("\t"))?;
         for rec in records {
+            // 1-based on the way out (gh#781): the producer counts chains from
+            // zero, every artifact a reader joins this against counts from one.
             let mut fields = vec![
-                rec.chain_id.to_string(), rec.attempt.to_string(),
+                (rec.chain_id + 1).to_string(), rec.attempt.to_string(),
                 rec.status.to_string(), rec.source.clone(),
             ];
             for v in &rec.values {
@@ -1581,8 +1596,8 @@ mod tests {
         assert!(text.starts_with("# camdl chain_starts; starts=lhs; chains=2; kind=spread; retried=1\n"), "{text}");
         let header = text.lines().find(|l| !l.starts_with('#')).unwrap();
         assert_eq!(header, "chain_id\tattempt\tstatus\tsource\tbeta\tess\treason");
-        assert!(text.contains("1\t0\trejected\tlhs:chain-1\t0.99\t1.020\tEssCollapsed at obs_window=3"), "{text}");
-        assert!(text.contains("1\t1\taccepted\tlhs:chain-1\t0.42\t\t\n"), "{text}");
+        assert!(text.contains("2\t0\trejected\tlhs:chain-2\t0.99\t1.020\tEssCollapsed at obs_window=3"), "{text}");
+        assert!(text.contains("2\t1\taccepted\tlhs:chain-2\t0.42\t\t\n"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
 
         // A chain whose last attempt failed too is `refused`.
@@ -1917,10 +1932,12 @@ mod tests {
             ChainStarts::from_prior(),
         ] {
             let got: Vec<String> = (0..3).map(|i| source_label(&rule, i)).collect();
-            assert_eq!(got, vec![format!("{rule}:chain-0"),
-                                 format!("{rule}:chain-1"),
-                                 format!("{rule}:chain-2")],
-                "{rule} draws each chain its own point, so each row names its chain");
+            assert_eq!(got, vec![format!("{rule}:chain-1"),
+                                 format!("{rule}:chain-2"),
+                                 format!("{rule}:chain-3")],
+                "{rule} draws each chain its own point, so each row names its \
+                 chain — by the same 1-based number the `chain_id` column of \
+                 the same row carries (gh#781)");
         }
         for rule in [
             ChainStarts::Point(Point::Declared),
@@ -1961,7 +1978,54 @@ mod tests {
         let body: Vec<&str> = txt.lines().filter(|l| !l.starts_with('#')).collect();
         assert!(header.ends_with("retried=0"), "{header}");
         assert_eq!(body[0], "chain_id\tattempt\tstatus\tsource\tbeta\tess\treason");
-        assert_eq!(body[1], "0\t0\taccepted\tfrom_mle\t0.25\t\t");
-        assert_eq!(body[2], "1\t0\taccepted\tfrom_mle\t0.25\t\t");
+        assert_eq!(body[1], "1\t0\taccepted\tfrom_mle\t0.25\t\t");
+        assert_eq!(body[2], "2\t0\taccepted\tfrom_mle\t0.25\t\t");
+    }
+
+    /// gh#781: the file's `chain_id` is the number the reader already has —
+    /// the `chain_N/` directory, the stderr refusal, the `bad_init` record —
+    /// so a refusal naming "chain 2" leads to chain 2's row with no
+    /// arithmetic. The producer's 0-based index stays inside the producer.
+    ///
+    /// The two columns of one row are asserted together: `chain_id` and the
+    /// `:chain-<id>` suffix of `source` used to carry different conventions
+    /// side by side, which is the form the off-by-one took in the file that
+    /// exists to be read while debugging.
+    #[test]
+    fn the_file_numbers_chains_the_way_every_other_artifact_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = vec![
+            EstimatedParam {
+                name: "beta".into(), index: 0, initial: 0.3, rw_sd: 0.1,
+                transform: Transform::None, lower: 0.0, upper: 1.0,
+                rw_sd_auto: false, perturb_only_at_t0: false,
+            },
+        ];
+        let rule = ChainStarts::uniform_unconstrained();
+        let records: Vec<ChainStartRecord> = (0..3).map(|chain_id| ChainStartRecord {
+            chain_id, attempt: 0, status: "accepted",
+            source: source_label(&rule, chain_id),
+            values: vec![0.1 * (chain_id as f64 + 1.0)],
+            ess: None, reason: String::new(),
+        }).collect();
+        write_chain_starts_tsv(dir.path(), &base, &rule, &records).unwrap();
+        let txt = std::fs::read_to_string(dir.path().join("chain_starts.tsv")).unwrap();
+
+        let rows: Vec<Vec<&str>> = txt.lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .skip(1)
+            .map(|l| l.split('\t').collect())
+            .collect();
+        let ids: Vec<&str> = rows.iter().map(|r| r[0]).collect();
+        assert_eq!(ids, ["1", "2", "3"],
+            "chain_id must name the chain_N/ directory the reader opens, \
+             not the producer's 0-based index:\n{txt}");
+        for row in &rows {
+            assert_eq!(row[3], format!("uniform_unconstrained:chain-{}", row[0]),
+                "the `source` suffix and the `chain_id` column of one row must \
+                 name the same chain:\n{txt}");
+        }
+        assert!(txt.contains("# chain_id is 1-based"),
+            "the header states the file's own convention:\n{txt}");
     }
 }
