@@ -201,6 +201,16 @@ For ad-hoc work outside `make test`:
   parallel checkouts depend on; and a binary-adjacent `camdlc-<hash>` from
   `dev-camdlc` can shadow the PATH shims `compile_once`/`ir_cache` inject.
 
+**A stale camdlc fails loudly instead of poisoning the IR cache (gh#888).** The
+handshake compares the two binaries; with it skipped, the emitted document is
+checked instead. IR whose `ir_version` is not the one `ir/VERSION` declares is
+refused — the run stops with a message naming both versions, and nothing is
+written to `~/.cache/camdl/ir`. (Before that check, such a document was filed
+under the _current_ schema's key, so every later run of that model hard-errored
+on the version mismatch until the entry was deleted by hand.) An entry already
+in that state reads as a cache miss and is recompiled in place, so no manual
+deletion is needed.
+
 Mechanism note: the harness pins the compiler via **PATH-prepend**, not the
 `CAMDLC` env var. `compile_once`/`ir_cache` inject their own counting `camdlc`
 shim through PATH; a `CAMDLC` env (`find_camdlc` priority 2) would override

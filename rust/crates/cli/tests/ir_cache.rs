@@ -376,3 +376,181 @@ fn concurrent_simulate_compiles_camdlc_once() {
     assert_eq!(compiles(&counter), 1,
         "a warm run after the concurrent storm must hit the cache (0 new compiles)");
 }
+
+// ─── gh#888: the emitted `ir_version` must agree with the key it is filed under ──
+//
+// The cache key folds the IR schema version the *runtime* expects, never the one
+// the compiler actually emitted. With the camdlc↔camdl handshake skipped
+// (`CAMDL_SKIP_VERSION_CHECK=1` — every test harness, every ad-hoc worktree
+// run) a stale camdlc emitting an older document had its output filed under the
+// current schema's key. Every later read of that model then hard-errored on the
+// version mismatch instead of missing the cache, and only a manual `rm` cleared
+// it. Both halves are pinned below: the mismatched document is never written,
+// and a pre-existing poisoned entry recompiles rather than erroring forever.
+
+/// The IR schema version this checkout declares — the version `camdl` expects a
+/// document to carry. Read from `ir/VERSION`, the same file both toolchains bake
+/// in, so the test never hardcodes a number that a bump would falsify.
+fn expected_ir_version() -> String {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let v = Path::new(&manifest).join("../../../ir/VERSION");
+    std::fs::read_to_string(v).expect("ir/VERSION must be readable").trim().to_string()
+}
+
+/// A camdlc wrapper that stands in for a stale compiler: it compiles for real
+/// (so the document is otherwise valid, and `--emit-deps` still lands) but
+/// rewrites the envelope's `ir_version` to `fake` on the way out. Compiles are
+/// counted as in `counting_shim`; the `--camdl-version` probe passes through
+/// untouched.
+fn stale_version_shim(dir: &Path, real: &Path, counter: &Path, fake: &str) -> PathBuf {
+    let shim = dir.join("camdlc");
+    std::fs::write(&shim, format!(
+        "#!/bin/sh\n\
+         case \"$1\" in\n  \
+           --camdl-version) exec '{real}' \"$@\" ;;\n\
+         esac\n\
+         echo x >> '{counter}'\n\
+         out=$('{real}' \"$@\") || exit $?\n\
+         printf '%s' \"$out\" | sed '1s/\"ir_version\": *\"[^\"]*\"/\"ir_version\":\"{fake}\"/'\n",
+        real = real.display(), counter = counter.display(), fake = fake)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::fs::metadata(&shim).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&shim, p).unwrap();
+    }
+    dir.to_path_buf()
+}
+
+/// Like `run_simulate`, but hands back the process output instead of asserting
+/// success — the gh#888 tests are about what happens when a compile is refused.
+fn try_simulate(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out: &Path)
+    -> std::process::Output
+{
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    Command::new(bin)
+        .args([
+            "simulate", model.to_str().unwrap(),
+            "--backend", "chain_binomial", "--seed", "1",
+            "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
+            "--output-dir", out.to_str().unwrap(), "--progress", "none",
+        ])
+        .env("PATH", format!("{}:{}", shim_dir.display(), old_path))
+        .env("CAMDL_IR_CACHE_DIR", cache_dir)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().expect("spawn")
+}
+
+/// Every published cache entry, by path (`<key>.ir.json`).
+fn cached_entries(cache_dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(cache_dir) else { return Vec::new(); };
+    rd.filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(".ir.json")))
+        .collect()
+}
+
+/// The `ir_version` an IR document on disk declares.
+fn declared_version_of(entry: &Path) -> String {
+    let json = std::fs::read_to_string(entry).unwrap();
+    let key = "\"ir_version\"";
+    let i = json.find(key).expect("an IR document must declare ir_version");
+    let rest = &json[i + key.len()..];
+    let colon = rest.find(':').unwrap();
+    let q1 = rest[colon..].find('"').unwrap() + colon + 1;
+    let q2 = rest[q1..].find('"').unwrap() + q1;
+    rest[q1..q2].to_string()
+}
+
+/// Rewrite the `ir_version` an IR document on disk declares, leaving the rest of
+/// the document (and its `.deps` sidecar) untouched — the shape of a poisoned
+/// entry as observed on 2026-09-09.
+fn poison_entry(entry: &Path, fake: &str) {
+    let json = std::fs::read_to_string(entry).unwrap();
+    let was = declared_version_of(entry);
+    let patched = json.replacen(
+        &format!("\"ir_version\":\"{was}\""),
+        &format!("\"ir_version\":\"{fake}\""),
+        1);
+    assert_ne!(patched, json, "the poisoning rewrite must actually change the document");
+    std::fs::write(entry, patched).unwrap();
+}
+
+/// gh#888, half one: a compiler that emits a document at the wrong schema
+/// version must be refused — and must leave no cache entry behind. Publishing it
+/// under the current key is what poisons the cache: the entry then says one
+/// version by its key and another by its content, so every later read
+/// hard-errors instead of missing.
+#[test]
+fn stale_compiler_output_is_refused_and_never_cached() {
+    let Some((bin, real)) = skip_if_unbuilt() else { return; };
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir.camdl");
+    std::fs::write(&model, SIR).unwrap();
+    let counter = tmp.path().join("compiles.log");
+    let shim = stale_version_shim(tmp.path(), &real, &counter, "0.39");
+    let cache = tmp.path().join("ircache");
+
+    let out = try_simulate(&bin, &shim, &model, &cache, &tmp.path().join("o1"));
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+    let entries = cached_entries(&cache);
+    assert!(entries.is_empty(),
+        "a document at the wrong ir_version must never be published to the cache; \
+         found {entries:?}");
+    assert!(!out.status.success(),
+        "a document at the wrong ir_version must not run. stderr:\n{stderr}");
+
+    let expected = expected_ir_version();
+    assert!(stderr.contains("0.39"),
+        "the error must name the version the compiler emitted. stderr:\n{stderr}");
+    assert!(stderr.contains(&expected),
+        "the error must name the version this camdl expects ({expected}). stderr:\n{stderr}");
+    assert!(stderr.contains("camdlc"),
+        "the error must point at the compiler as the likely cause. stderr:\n{stderr}");
+}
+
+/// gh#888, half two: an entry already on disk whose declared `ir_version`
+/// disagrees with the key it is filed under must read as a cache miss —
+/// recompiled and replaced — not as a hard error. Before the fix this state was
+/// terminal: every run of that model failed until someone deleted the file by
+/// hand.
+#[test]
+fn a_poisoned_cache_entry_recompiles_instead_of_erroring_forever() {
+    let Some((bin, real)) = skip_if_unbuilt() else { return; };
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir.camdl");
+    std::fs::write(&model, SIR).unwrap();
+    let counter = tmp.path().join("compiles.log");
+    let shim = counting_shim(tmp.path(), &real, &counter);
+    let cache = tmp.path().join("ircache");
+
+    // A healthy entry, published by a matching compiler.
+    run_simulate(&bin, &shim, &model, &cache, &tmp.path().join("o1"), false);
+    assert_eq!(compiles(&counter), 1, "first run compiles once (cache miss)");
+    let entries = cached_entries(&cache);
+    assert_eq!(entries.len(), 1, "one model, one entry: {entries:?}");
+    let entry = entries[0].clone();
+    let expected = expected_ir_version();
+    assert_eq!(declared_version_of(&entry), expected);
+
+    // Poison it exactly as a stale compiler would have: the key still says the
+    // current schema, the content now says an older one. The sidecar is left
+    // alone, so read()-freshness still passes — the version is the only defect.
+    poison_entry(&entry, "0.39");
+
+    let out = try_simulate(&bin, &shim, &model, &cache, &tmp.path().join("o2"));
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(),
+        "a version-mismatched entry must be treated as a miss and recompiled, \
+         not surfaced as an error. stderr:\n{stderr}");
+    assert_eq!(compiles(&counter), 2,
+        "the poisoned entry must not be served: the run recompiles");
+    assert_eq!(declared_version_of(&entry), expected,
+        "the recompile republishes the entry, healing it in place");
+
+    // ...and the healed entry is a plain cache hit thereafter.
+    run_simulate(&bin, &shim, &model, &cache, &tmp.path().join("o3"), false);
+    assert_eq!(compiles(&counter), 2, "the healed entry is served like any other");
+}
