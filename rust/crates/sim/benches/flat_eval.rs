@@ -97,6 +97,17 @@ fn main() {
         + vm.binding_progs.iter().map(|p| p.ops.len()).sum::<usize>();
 
     sim::eval_stats::set_allow_degenerate_rates(true);
+    // gh#815: stage the gh#272 per-eval prologue exactly as every forward
+    // backend and inference producer does before its step loop
+    // (`stage_per_eval`), and lend it into BOTH timing closures below as well as
+    // the bit-exactness check, so both evaluators are timed in the configuration
+    // a real run uses. `None` for a model with no hoisted bindings, which is the
+    // pre-gh#815 behaviour unchanged. On a LICM'd model, leaving it `None` times
+    // the on-demand fallback no backend takes: each `PerEvalRef` re-evaluates
+    // its body, so the hoisted model does the same transcendental work as the
+    // inlined one and the whole point of the pass is invisible.
+    let per_eval_scratch =
+        sim::resolved_expr::stage_per_eval(&cm, &params, cm.model.simulation.t_start, 1.0);
     let mk_ctx = |t: f64| EvalCtx {
         model: &cm,
         int_s: &int_s,
@@ -106,7 +117,8 @@ fn main() {
         dt: 1.0,
         projected: None,
         aux: None,
-        int_float_override: None, per_eval: None,
+        int_float_override: None,
+        per_eval: per_eval_scratch.as_deref(),
     };
 
     // ── Bit-exactness: eval_flat must match eval_resolved on every rate ──
@@ -144,7 +156,8 @@ fn main() {
             let ctx = EvalCtx {
                 model: &cm, int_s: &int_s, real_s: &real_s,
                 params: black_box(params.as_slice()), t: black_box(0.0), dt: 1.0,
-                projected: None, aux: None, int_float_override: None, per_eval: None,
+                projected: None, aux: None, int_float_override: None,
+                per_eval: per_eval_scratch.as_deref(),
             };
             for i in 0..n_tr {
                 acc += eval_resolved(&rates[i], &ctx);
@@ -162,7 +175,8 @@ fn main() {
             let ctx = EvalCtx {
                 model: &cm, int_s: &int_s, real_s: &real_s,
                 params: black_box(params.as_slice()), t: black_box(0.0), dt: 1.0,
-                projected: None, aux: None, int_float_override: None, per_eval: None,
+                projected: None, aux: None, int_float_override: None,
+                per_eval: per_eval_scratch.as_deref(),
             };
             for i in 0..n_tr {
                 acc += eval_flat(vm, &vm.rates[i], &ctx, &mut scratch, &mut cache);
@@ -209,9 +223,9 @@ fn main() {
     eprintln!("\n── {label} ── flat-bytecode VM vs eval_resolved ─────────────");
     eprintln!("  transitions={n_tr}  total_flat_ops={total_ops}  scratch_cap={cap}");
     eprintln!(
-        "  op histogram: superinstr(+-*/)={} bin_other={} int_pop_sum={} mixed_pop_sum={} time_func={} projected={} binding={} delegate={} other={}",
+        "  op histogram: superinstr(+-*/)={} bin_other={} int_pop_sum={} mixed_pop_sum={} time_func={} projected={} binding={} per_eval={} delegate={} other={}",
         hist.superinstr, hist.bin_other, hist.int_pop_sum, hist.mixed_pop_sum,
-        hist.time_func, hist.projected, hist.binding, hist.delegate, hist.other,
+        hist.time_func, hist.projected, hist.binding, hist.per_eval, hist.delegate, hist.other,
     );
     eprintln!("  bit-exact ({n_tr} rates): {}", if mm == 0 { "YES" } else { "NO!" });
     eprintln!();
