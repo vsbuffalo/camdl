@@ -130,6 +130,14 @@ pub(crate) fn eval_likelihood_resolved(
             crate::inference::obs_loglik::binom_logpmf(k, n_int, p_val)
         }
         ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
+            // gh#893, the Binomial guard above for the same reason: a NaN
+            // rounds to `0.0` and casts to `k = 0`, so a datum that is not
+            // there scores as an observed zero. Its gradient helper
+            // (`beta_binomial_logpmf_grad`) already returns the zero gradient
+            // of `-inf` for a NaN `k`, so before this the value and the
+            // gradient disagreed about the same observation — the gh#874
+            // shape.
+            if observed.is_nan() { return f64::NEG_INFINITY; }
             let n_val = eval_resolved(n, &ctx(projected));
             let alpha_val = eval_resolved(alpha, &ctx(projected));
             let beta_val = eval_resolved(beta, &ctx(projected));
@@ -1165,5 +1173,77 @@ mod tests {
         );
         assert!(matches!(cause, NegInfCause::ObservationNotFinite),
             "the report must name the observation, got {cause:?}");
+    }
+
+    // ── gh#893: the same hole in BetaBinomial's value arm ──
+
+    /// A `BetaBinomial(n, α, β)` with constant arguments and
+    /// `∂α/∂θ = ∂β/∂θ = ∂α/∂projected = ∂β/∂projected = 1`, so an unguarded
+    /// gradient arm would accumulate `d(log L)/dα + d(log L)/dβ` and a guard
+    /// that fires leaves it at zero.
+    fn beta_binomial_likelihood(n: f64, alpha: f64, beta: f64) -> ResolvedLikelihood {
+        ResolvedLikelihood::BetaBinomial {
+            n: ResolvedExpr::Const(n),
+            alpha: ResolvedExpr::Const(alpha),
+            alpha_grad: vec![(0, ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0)))],
+            alpha_proj: Some(ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0))),
+            beta: ResolvedExpr::Const(beta),
+            beta_grad: vec![(0, ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0)))],
+            beta_proj: Some(ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0))),
+        }
+    }
+
+    /// `(value, ∂/∂θ, ∂/∂projected)` for that likelihood at one observation.
+    fn beta_binomial_arms(n: f64, alpha: f64, beta: f64, observed: f64) -> (f64, f64, f64) {
+        let compiled = compiled_bernoulli_fixture();
+        let likelihood = beta_binomial_likelihood(n, alpha, beta);
+        let int_s = IntState::from_vec(vec![0; compiled.int_local_to_global.len()]);
+        let real_s = RealState::new(compiled.real_local_to_global.len());
+        let params = vec![0.0; compiled.param_index.len()];
+        let value = eval_likelihood_resolved(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        let mut grad = vec![0.0];
+        eval_likelihood_resolved_grad(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled,
+            &int_s, &real_s, &[0], &mut grad,
+        );
+        let d_proj = dlogp_dprojected(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        (value, grad[0], d_proj)
+    }
+
+    /// gh#893, the same class as gh#874 (Bernoulli) and gh#877 (Binomial):
+    /// `NaN.round()` is NaN, `NaN.max(0.0)` is `0.0` and `0.0 as u64` is `0`,
+    /// so a NaN observation was scored as an observed zero — an ordinary
+    /// density for a datum that is not there. A hole is not a zero.
+    ///
+    /// Only the value side was exposed: `beta_binomial_logpmf_grad` already
+    /// guards `k.is_nan()`, so the two arms *disagreed* about the same
+    /// observation. Both halves are asserted here, so the fix is pinned as an
+    /// agreement between them rather than as one arm's behaviour.
+    #[test]
+    fn beta_binomial_rejects_a_nan_observation_instead_of_scoring_it_as_zero() {
+        // Non-vacuity control: an observed zero is a real observation and
+        // still scores the finite density it always scored.
+        let (v, _, _) = beta_binomial_arms(10.0, 2.0, 3.0, 0.0);
+        assert!(v.is_finite() && v < 0.0,
+            "an observed zero out of ten must score an ordinary density, got {v}");
+
+        let (v, d_theta, d_proj) = beta_binomial_arms(10.0, 2.0, 3.0, f64::NAN);
+        assert_eq!(v, f64::NEG_INFINITY,
+            "a NaN observation must score -inf, not the zero-count density: got {v}");
+        assert_eq!(d_theta, 0.0,
+            "and the gradient arm, which already guarded it, must agree: {d_theta}");
+        assert_eq!(d_proj, 0.0,
+            "as must the projection arm: {d_proj}");
+
+        // Non-vacuity for the gradients: at an in-domain k they are not zero,
+        // so the zeros above are the guard firing and not an inert fixture.
+        let (_, d_theta, d_proj) = beta_binomial_arms(10.0, 2.0, 3.0, 3.0);
+        assert!(d_theta != 0.0 && d_proj != 0.0,
+            "an in-domain observation must move both gradient arms: \
+             {d_theta}, {d_proj}");
     }
 }
