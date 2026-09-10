@@ -1588,9 +1588,11 @@ pub fn run_stage(
         // Bayesian path — compound gate doesn't apply to PGAS.
         resolved_gate: None,
         resolved_loglik_eval: None,
-        // The rule that supplied the starts — the same tag `chain_starts.tsv`
-        // rows carry, so the two cannot disagree (gh#871, gh#873).
-        chain_init_source: Some(drawn.rule.tag().to_string()),
+        // The rule that supplied the starts, as `chain_starts.tsv`'s header
+        // spells it, and its kind — what `fit summary` reads to say whether R̂
+        // was assessable (gh#871, gh#873, proposal 2026-09-08 §3.4).
+        chain_init_source: Some(drawn.rule.spelled()),
+        chain_starts_kind: Some(drawn.rule.kind()),
         // gh#52: Richardson dt-check is wired only on IF2 stages in
         // v1 (the inference math is shared but the dispatch site
         // refactor across PGAS/PMMH/NLopt is out of scope here).

@@ -1149,7 +1149,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     drawn.to_estimated_params(&run_config.estimated_params);
                 // The audit sidecar, captured before the first filter pass.
                 runner::record_chain_starts(&stage_dir, &run_config, &drawn);
-                let chain_init_source = drawn.rule.tag().to_string();
+                let chain_init_source = drawn.rule.spelled();
+                let chain_starts_kind = drawn.rule.kind();
                 let stage_dir_str = stage_dir.to_string_lossy();
                 let chain_results = runner::run_chains_with_per_chain_params(
                     &run_config, Some(&per_chain_params), &collector,
@@ -1259,6 +1260,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     resolved_gate: Some(effective_gate.clone()),
                     resolved_loglik_eval: Some(effective_loglik_eval.clone()),
                     chain_init_source: Some(chain_init_source.clone()),
+                    chain_starts_kind: Some(chain_starts_kind),
                     dt_check: if matches!(dt_check_result.verdict,
                         dt_check::DtCheckVerdict::Skipped)
                     {

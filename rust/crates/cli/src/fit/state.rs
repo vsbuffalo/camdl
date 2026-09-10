@@ -124,19 +124,25 @@ pub struct FitState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_loglik_eval: Option<LoglikEvalConfig>,
 
-    /// Provenance of this stage's chain starts (gh#51). One of:
-    /// `single`, `uniform`, `lhs`, or `survey:<full-hash>:top-<K>`
-    /// when `init = "survey_top_k"`. Surfaced as a one-line
-    /// header in `camdl fit summary` ("seeded from: <source>") so
-    /// the survey → fit linkage is visible without parsing
-    /// `chain_starts.tsv`.
+    /// The `starts` rule that supplied this leaf's chain starts, as written
+    /// with its source (`from_prior`, `from_mle @scout`,
+    /// `from_params theta.toml`). Surfaced as the one-line `seeded from`
+    /// header in `camdl fit summary`, so where the chains began is visible
+    /// without parsing `chain_starts.tsv`.
     ///
-    /// `None` on legacy fit_state.toml files written before this
-    /// field existed; summary renders such fits with `seeded from:
-    /// unknown` rather than substituting a default that would
-    /// silently misrepresent provenance.
+    /// `None` on a fit_state.toml written before this field existed; summary
+    /// renders such fits with `seeded from: unknown` rather than substituting
+    /// a default that would silently misrepresent provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_init_source: Option<String>,
+
+    /// Whether that rule gave each chain its own start (`spread`) or put every
+    /// chain at one point (`point`) — the fact the between-chain R̂ needs
+    /// (proposal 2026-09-08, §3.4). A multi-chain sampler leaf whose kind is
+    /// `point` is read with R̂ not assessed for every parameter, never as a
+    /// pass. `None` on a fit_state.toml written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_starts_kind: Option<crate::fit::starts::ChainStartsKind>,
 
     /// Post-fit Richardson dt-convergence check at θ̂ (gh#52).
     /// `None` on legacy fit_state.toml files or stages where
@@ -256,6 +262,7 @@ mod tests {
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
             chain_init_source: Some("lhs".into()),
+            chain_starts_kind: Some(crate::fit::starts::ChainStartsKind::Spread),
             dt_check: None,
             pf_noise: None,
         }
@@ -338,5 +345,22 @@ beta = 0.8
         assert!(loaded.resolved_loglik_eval.is_none(),
             "legacy file must surface resolved_loglik_eval as None");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The kind round-trips as its snake_case name and is absent on a state
+    /// that never had it, so a pre-split leaf reads back as `None` — not as
+    /// a guessed `spread`.
+    #[test]
+    fn chain_starts_kind_round_trips_and_is_optional() {
+        let mut state = synthetic_state();
+        state.chain_starts_kind = Some(crate::fit::starts::ChainStartsKind::Point);
+        let body = toml::to_string_pretty(&state).unwrap();
+        assert!(body.contains("chain_starts_kind = \"point\""), "{body}");
+        let back: FitState = toml::from_str(&body).unwrap();
+        assert_eq!(back.chain_starts_kind, Some(crate::fit::starts::ChainStartsKind::Point));
+
+        let legacy = body.replace("chain_starts_kind = \"point\"\n", "");
+        let back: FitState = toml::from_str(&legacy).unwrap();
+        assert_eq!(back.chain_starts_kind, None, "a leaf without the field says nothing");
     }
 }

@@ -231,4 +231,28 @@ starts    = \"uniform_unconstrained\"
     assert!(header.contains("starts=uniform_unconstrained") && header.contains("kind=spread"),
         "the IF2 stage's header is {header:?} and does not name the rule that \
          supplied the starts, or its kind.");
+
+    // The control for the point-start demotion (proposal 2026-09-08 §3.4):
+    // both leaves record a spread start, and the PGAS leaf's R̂ is assessed.
+    for method in ["if2", "pgas"] {
+        let leaf = chain_starts_for_stage(&results, method);
+        let state = std::fs::read_to_string(leaf.parent().unwrap().join("fit_state.toml")).unwrap();
+        assert!(state.contains("chain_starts_kind = \"spread\""), "{method}: {state}");
+    }
+    let pgas_leaf = chain_starts_for_stage(&results, "pgas");
+    let segment = pgas_leaf.parent().unwrap().parent().unwrap().parent().unwrap();
+    let out = Command::new(&bin)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args(["fit", "summary", &segment.to_string_lossy()])
+        .output()
+        .expect("spawn fit summary");
+    let summary = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "fit summary failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(summary.contains("seeded from:  uniform_unconstrained (one independent draw per chain)"),
+        "{summary}");
+    // Whatever this tiny fit's R̂ turns out to be (a chain of a 4-sweep run
+    // can be refused at its start), it is never withheld for the reason a
+    // point start is: the chains began apart.
+    assert!(!summary.contains("started at one point"),
+        "a spread start's R̂ is not demoted for its starts:\n{summary}");
 }

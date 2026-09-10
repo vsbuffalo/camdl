@@ -146,6 +146,9 @@ pub fn run_stage(
     .map_err(|e| format!("nuts: {e}"))?;
     let chain_starts: Vec<Vec<f64>> =
         drawn.to_param_vecs(&config.estimated_params, &config.base_params);
+    // The audit sidecar every multi-chain sampler writes, captured before
+    // warm-up moves anything.
+    super::runner::record_chain_starts(stage_dir, &config, &drawn);
 
     // Chains are independent (own seed, own RNG, own trace file) and their outputs
     // reduce order-independently (max-loglik chain + summed divergences), so run
@@ -415,7 +418,8 @@ pub fn run_stage(
         chain_eval_ses: Vec::new(),
         resolved_gate: None,
         resolved_loglik_eval: None,
-        chain_init_source: Some(drawn.rule.tag().to_string()),
+        chain_init_source: Some(drawn.rule.spelled()),
+        chain_starts_kind: Some(drawn.rule.kind()),
         dt_check: None,
         // gh#764: NUTS scores a deterministic ODE likelihood — no filter, no
         // noise, nothing to measure.

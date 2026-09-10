@@ -27,8 +27,9 @@ use crate::fit::gating::AgreementBand;
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    If2StageResult, MaxRhat, MethodResult, MinEss, NutsStageResult, PgasStageResult,
-    PmmhStageResult, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD, Stat,
+    If2StageResult, MaxRhat, MethodResult, MinEss, NutsStageResult, ParamConvergence,
+    PgasStageResult, PmmhStageResult, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD,
+    Stat,
 };
 use crate::fit::state::FitState;
 use crate::fit::table_row::{self, TableRow};
@@ -67,6 +68,9 @@ fn recompute_over_subset(
         selection,
         &param_names,
     )?;
+    // A subset of chains that began at one point still began at one point:
+    // the recomputed R̂ is no more informative than the stored one.
+    let point = crate::fit::method_result::point_start(stage_dir);
 
     // Posterior means over the retained rows — summary-specific, so computed
     // here from the shared recompute's `kept` rows rather than in the shared fn.
@@ -82,6 +86,9 @@ fn recompute_over_subset(
     }
 
     diag.per_param = sub.per_param;
+    if let Some((n, starts)) = &point {
+        diag.demote_point_start(*n, starts);
+    }
     diag.n_samples = sub.n_samples;
     diag.n_chains = sub.n_chains;
     // `thin` and `wall_time_secs` are properties of the whole run, unchanged by
@@ -1181,6 +1188,30 @@ impl Formatter {
         format!("  {}{}\n", lead, parts.join(" · "))
     }
 
+    /// Where the chains began — the rule as written and whether it spread
+    /// them — under every leaf's identity line, so the reader of an R̂ (or an
+    /// Â) knows what it can and cannot say. A leaf written before the fields
+    /// existed says `unknown` rather than a guess.
+    fn seeded_from_line(
+        &self,
+        source: Option<&str>,
+        kind: Option<crate::fit::starts::ChainStartsKind>,
+    ) -> String {
+        let what = match (source, kind) {
+            (Some(src), Some(k)) => format!(
+                "{} ({})",
+                src,
+                match k {
+                    crate::fit::starts::ChainStartsKind::Spread => "one independent draw per chain",
+                    crate::fit::starts::ChainStartsKind::Point => "every chain at one point",
+                }
+            ),
+            (Some(src), None) => src.to_string(),
+            (None, _) => "unknown".to_string(),
+        };
+        format!("  seeded from:  {}\n", what)
+    }
+
     fn stage_block(
         &self,
         lead: &str,
@@ -1197,6 +1228,7 @@ impl Formatter {
             lead, stage, "if2",
             &[format!("{} chains", state.n_chains)],
         ));
+        s.push_str(&self.seeded_from_line(state.chain_init_source.as_deref(), state.chain_starts_kind));
         s.push('\n');
 
         // Headline — type tag *after* the number (gh#280), so a scraper
@@ -1584,6 +1616,11 @@ impl Formatter {
             extra.push(format!("MAP loglik {:.1}", ll));
         }
         s.push_str(&self.identity_line(lead, stage, method, &extra));
+        let state = FitState::load(&stage_dir.to_string_lossy()).ok();
+        s.push_str(&self.seeded_from_line(
+            state.as_ref().and_then(|st| st.chain_init_source.as_deref()),
+            state.as_ref().and_then(|st| st.chain_starts_kind),
+        ));
 
         s.push_str(&self.verdict_block(diag, &facts, subset, forkable));
         s.push_str(&self.posterior_section(diag, posterior_mean));
@@ -1669,10 +1706,21 @@ impl Formatter {
             }
             MaxRhat::NotApplicable { reason } => {
                 s.push_str(&format!("  {} not assessed\n", self.dim("—")));
-                s.push_str(&format!(
-                    "    a between-chain statistic was never possible here: {}\n",
-                    reason.describe()
-                ));
+                // The refusal with its numbers, when the leaf carries them:
+                // "all 4 chains started at one point (starts = from_mle @mle)"
+                // says what the bare classification cannot.
+                let detail = diag.per_param.values().find_map(|p| match p {
+                    ParamConvergence::Scored { rhat_withheld: Some(e), .. }
+                    | ParamConvergence::NotScored { detail: Some(e), .. } => Some(e.to_string()),
+                    _ => None,
+                });
+                match detail {
+                    Some(d) => s.push_str(&format!("    R̂ — not assessed: {}\n", d)),
+                    None => s.push_str(&format!(
+                        "    a between-chain statistic was never possible here: {}\n",
+                        reason.describe()
+                    )),
+                }
                 s.push_str(&self.verdict_facts(None, facts, subset, forkable));
             }
             MaxRhat::NoParams => {
@@ -3508,6 +3556,7 @@ mod tests {
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
             chain_init_source: Some("lhs".into()),
+            chain_starts_kind: Some(crate::fit::starts::ChainStartsKind::Spread),
             dt_check: None,
             pf_noise: None,
         }
@@ -4421,6 +4470,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── the `seeded from` header (proposal 2026-09-08 §3.4) ──────────────
+
+    /// Every leaf says where its chains began and whether they began apart;
+    /// a leaf written before the fields existed says `unknown`, never a guess.
+    #[test]
+    fn seeded_from_line_names_the_rule_and_its_kind() {
+        use crate::fit::starts::ChainStartsKind;
+        let fmt = plain_formatter();
+        assert_eq!(
+            fmt.seeded_from_line(Some("from_mle @mle"), Some(ChainStartsKind::Point)),
+            "  seeded from:  from_mle @mle (every chain at one point)\n"
+        );
+        assert_eq!(
+            fmt.seeded_from_line(Some("from_prior"), Some(ChainStartsKind::Spread)),
+            "  seeded from:  from_prior (one independent draw per chain)\n"
+        );
+        assert_eq!(fmt.seeded_from_line(Some("lhs"), None), "  seeded from:  lhs\n");
+        assert_eq!(fmt.seeded_from_line(None, None), "  seeded from:  unknown\n");
+    }
+
     // ── the redesigned text layout ───────────────────────────────────────
     //
     // Every case here compares a rendered SECTION whole rather than probing it
@@ -4451,6 +4520,7 @@ mod tests {
                 ess_tail: Stat::Value(tail),
                 ess_per_chain: per_chain,
                 all_chains_frozen: false,
+                rhat_withheld: None,
             }
         };
         PgasStageResult {
@@ -4511,6 +4581,9 @@ mod tests {
         let head: Vec<&str> = out.lines().take_while(|l| !l.starts_with("── ")).collect();
         assert_eq!(head, vec![
             "  posterior · pgas · 4 chains · 4000 draws",
+            // No fit_state.toml under the fixture: the header says so rather
+            // than guessing a rule.
+            "  seeded from:  unknown",
             "",
             // 4.870 is past the severe band, so the verdict names what that
             // means rather than leaving the glyph to carry it.

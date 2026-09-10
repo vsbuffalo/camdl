@@ -168,7 +168,8 @@ pub fn reduce(grouped: &[Vec<f64>]) -> Option<RowConvergence> {
             | ConvergenceError::TooFewDraws { .. }
             | ConvergenceError::UnequalChainLengths { .. }
             | ConvergenceError::NonFiniteDraw { .. }
-            | ConvergenceError::ConstantDraws { .. },
+            | ConvergenceError::ConstantDraws { .. }
+            | ConvergenceError::PointStart { .. },
         ) => None,
     }
 }

@@ -89,6 +89,13 @@ pub enum ConvergenceError {
     /// [`DEGENERATE_REL_TOL`] of the parameter's own scale. The total variance
     /// is zero, so R̂'s denominator is zero and the rank transform is constant.
     ConstantDraws { value: f64 },
+    /// Every chain began at one point (`starts = "single"`, `from_mle`,
+    /// `from_params`). The estimator runs, but chains that began together
+    /// agree by construction, so the between-chain statistic cannot say
+    /// whether the posterior was explored; the reader that knows how the
+    /// chains were started raises this instead of reporting the number.
+    /// `starts` is the rule as written, for the report.
+    PointStart { n_chains: usize, starts: String },
 }
 
 /// `f64` as its `Display` string, for the one field that is non-finite by
@@ -139,6 +146,10 @@ pub enum RhatRefusal {
     /// column cannot be told from a pinned one and no honest classification is
     /// available.
     EstimatedSetUnknown,
+    /// Every chain began at one point, so the statistic was never given the
+    /// spread it needs. Not a pathology: writing the point rule was the
+    /// acknowledgement (proposal 2026-09-08, §3.4).
+    PointStart,
 }
 
 impl RhatRefusal {
@@ -152,7 +163,8 @@ impl RhatRefusal {
             Self::TooFewChains
             | Self::TooFewDraws
             | Self::UnequalChainLengths
-            | Self::EstimatedSetUnknown => false,
+            | Self::EstimatedSetUnknown
+            | Self::PointStart => false,
         }
     }
 
@@ -166,6 +178,7 @@ impl RhatRefusal {
             Self::TooFewDraws => "fewer than 4 draws per chain",
             Self::UnequalChainLengths => "chains of differing length",
             Self::EstimatedSetUnknown => "the estimated parameter set is unknown",
+            Self::PointStart => "every chain started at one point",
         }
     }
 }
@@ -179,6 +192,7 @@ impl ConvergenceError {
             Self::UnequalChainLengths { .. } => RhatRefusal::UnequalChainLengths,
             Self::NonFiniteDraw { .. } => RhatRefusal::NonFiniteDraw,
             Self::ConstantDraws { .. } => RhatRefusal::ConstantDraws,
+            Self::PointStart { .. } => RhatRefusal::PointStart,
         }
     }
 }
@@ -199,6 +213,8 @@ impl fmt::Display for ConvergenceError {
             Self::ConstantDraws { value } => write!(
                 f, "every draw is {value}: the parameter did not move, so R̂ \
                     has no within-chain variance to divide by"),
+            Self::PointStart { n_chains, starts } => write!(
+                f, "all {n_chains} chains started at one point (starts = {starts})"),
 
         }
     }

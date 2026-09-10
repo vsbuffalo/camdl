@@ -210,6 +210,13 @@ pub enum ParamConvergence {
         /// reader to infer the cause.
         #[serde(default, skip_serializing_if = "core::ops::Not::not")]
         all_chains_frozen: bool,
+        /// The R̂ was withheld for a reason that is a property of how the
+        /// chains were started — every chain at one point (proposal
+        /// 2026-09-08, §3.4) — so the four R̂ fields are `Undefined` while the
+        /// ESS fields, which the start does not invalidate the same way, are
+        /// kept. Carries the refusal with its numbers for the report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rhat_withheld: Option<ConvergenceError>,
     },
     /// The estimator could not run at all — a structural precondition, or a
     /// non-finite draw.
@@ -320,6 +327,7 @@ impl ParamConvergence {
     /// classifies it.
     pub fn why_no_rhat(&self) -> Option<String> {
         match self {
+            Self::Scored { rhat_withheld: Some(e), .. } => Some(e.to_string()),
             Self::NotScored { detail: Some(e), .. } => Some(e.to_string()),
             Self::NotScored { reason, detail: None } => Some(reason.describe().to_string()),
             Self::Scored { all_chains_frozen: true, .. } => Some(
@@ -378,6 +386,30 @@ pub struct PosteriorDiagnostics {
 }
 
 impl PosteriorDiagnostics {
+    /// Every scored parameter's R̂ becomes "not assessed: every chain started
+    /// at one point", carrying the refusal with its numbers. The between-chain
+    /// statistic over chains that began together agrees by construction, so
+    /// the leaf's stored R̂ is not read as a verdict (proposal 2026-09-08,
+    /// §3.4); the ESS is kept, and a parameter the estimator refused for its
+    /// own reason keeps that reason. The R̂ numbers stay in the leaf's summary
+    /// JSON for anyone who wants them.
+    pub fn demote_point_start(&mut self, n_chains: usize, starts: &str) {
+        let refusal = ConvergenceError::PointStart { n_chains, starts: starts.to_string() };
+        for entry in self.per_param.values_mut() {
+            if let ParamConvergence::Scored {
+                rhat, rhat_bulk, rhat_folded, rhat_classic, all_chains_frozen, rhat_withheld, ..
+            } = entry
+            {
+                *rhat = Stat::Undefined;
+                *rhat_bulk = Stat::Undefined;
+                *rhat_folded = Stat::Undefined;
+                *rhat_classic = Stat::Undefined;
+                *all_chains_frozen = false;
+                *rhat_withheld = Some(refusal.clone());
+            }
+        }
+    }
+
     /// The worst R̂ over the assessed params — **or the reason there isn't
     /// one**. The convergence headline; **R̂, not IF2's Â**. See [`MaxRhat`].
     pub fn max_rhat_status(&self) -> MaxRhat {
@@ -395,6 +427,14 @@ impl PosteriorDiagnostics {
             .collect();
         if !bad.is_empty() {
             return MaxRhat::Unassessable { params: bad };
+        }
+        // An R̂ withheld for how the chains were started is not a number and
+        // not a pathology: the question was never answerable here.
+        if let Some(reason) = self.per_param.values().find_map(|p| match p {
+            ParamConvergence::Scored { rhat_withheld: Some(e), .. } => Some(e.refusal()),
+            _ => None,
+        }) {
+            return MaxRhat::NotApplicable { reason };
         }
         let mut worst = f64::NEG_INFINITY;
         let mut any = false;
@@ -884,6 +924,43 @@ fn inputs_n_chains(inputs: &serde_json::Value) -> usize {
     inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize
 }
 
+/// A multi-chain leaf whose `fit_state.toml` says every chain started at one
+/// point, with the rule as written. `None` for a spread start, one chain, a
+/// leaf written before `chain_starts_kind` existed, or no state at all — a
+/// missing record never demotes, because the demotion is a claim about how
+/// the chains were started and an absent field makes no claim.
+pub fn point_start(stage_dir: &Path) -> Option<(usize, String)> {
+    let state = FitState::load(&stage_dir.to_string_lossy()).ok()?;
+    if state.chain_starts_kind != Some(crate::fit::starts::ChainStartsKind::Point) {
+        return None;
+    }
+    if state.n_chains < 2 {
+        return None;
+    }
+    Some((
+        state.n_chains,
+        state.chain_init_source.unwrap_or_else(|| "a point rule".to_string()),
+    ))
+}
+
+/// The one place a sampler leaf's diagnostics are read into a
+/// [`PosteriorDiagnostics`], so the point-start demotion cannot be missed by
+/// a loader that forgot it.
+fn posterior_diagnostics(
+    stage_dir: &Path,
+    per_param: BTreeMap<String, ParamConvergence>,
+    n_samples: usize,
+    thin: usize,
+    wall_time_secs: Option<f64>,
+    n_chains: usize,
+) -> PosteriorDiagnostics {
+    let mut diag = PosteriorDiagnostics { per_param, n_samples, thin, wall_time_secs, n_chains };
+    if let Some((n, starts)) = point_start(stage_dir) {
+        diag.demote_point_start(n, &starts);
+    }
+    diag
+}
+
 // ── NloptStageResult ────────────────────────────────────────────────
 
 impl NloptStageResult {
@@ -1158,13 +1235,9 @@ impl PgasStageResult {
         };
 
         Ok(PgasStageResult {
-            diagnostics: PosteriorDiagnostics {
-                per_param: conv.per_param(),
-                n_samples,
-                thin,
-                wall_time_secs,
-                n_chains,
-            },
+            diagnostics: posterior_diagnostics(
+                stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+            ),
             posterior_mean,
             posterior_q025,
             posterior_q975,
@@ -1216,13 +1289,9 @@ impl PmmhStageResult {
             .unwrap_or(f64::NEG_INFINITY);
 
         Ok(PmmhStageResult {
-            diagnostics: PosteriorDiagnostics {
-                per_param: conv.per_param(),
-                n_samples,
-                thin,
-                wall_time_secs,
-                n_chains,
-            },
+            diagnostics: posterior_diagnostics(
+                stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+            ),
             posterior_mean,
             acceptance_rate,
             map_loglik,
@@ -1259,13 +1328,9 @@ impl NutsStageResult {
             .unwrap_or(f64::NEG_INFINITY);
 
         Ok(NutsStageResult {
-            diagnostics: PosteriorDiagnostics {
-                per_param: conv.per_param(),
-                n_samples,
-                thin,
-                wall_time_secs,
-                n_chains,
-            },
+            diagnostics: posterior_diagnostics(
+                stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
+            ),
             posterior_mean,
             posterior_q025,
             posterior_q975,
@@ -1364,6 +1429,7 @@ impl ConvergenceMaps {
                             .cloned()
                             .unwrap_or_default(),
                         all_chains_frozen: matches!(reason, Some(RhatRefusal::NonFiniteRhat)),
+                        rhat_withheld: None,
                     },
                 };
                 (name, entry)
@@ -1605,6 +1671,7 @@ mod tests {
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
             chain_init_source: Some("lhs".into()),
+            chain_starts_kind: Some(crate::fit::starts::ChainStartsKind::Spread),
             dt_check: None,
             pf_noise: None,
         }
@@ -1753,6 +1820,91 @@ mod tests {
         assert!((r.acceptance_per_param["R0"] - 0.30).abs() < 1e-9);
         // ESS comes through.
         assert!((r.diagnostics.ess_per_param()["sigma"] - 412.0).abs() < 1e-9);
+    }
+
+    /// A `fit_state.toml` with only the fields the point-start check reads.
+    fn write_state_with_starts(dir: &Path, n_chains: usize, kind: Option<&str>, source: &str) {
+        let mut body = format!(
+            "stage = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = {n_chains}\n\
+             chain_init_source = \"{source}\"\n"
+        );
+        if let Some(k) = kind {
+            body.push_str(&format!("chain_starts_kind = \"{k}\"\n"));
+        }
+        body.push_str("\n[start_values]\n\n[rw_sd]\n");
+        std::fs::write(dir.join("fit_state.toml"), body).unwrap();
+    }
+
+    /// Proposal 2026-09-08 §3.4: a multi-chain sampler leaf whose chains all
+    /// began at one point is read with R̂ not assessed for every parameter,
+    /// carrying the rule that put them there. The stored numbers are not a
+    /// verdict, and the demotion is a fact about the starts, so the same
+    /// summary under a spread start reports the R̂ it stored.
+    #[test]
+    fn a_point_started_sampler_leaf_reads_as_not_assessed() {
+        let tmp = tempdir("point_start");
+        let dir = tmp.path();
+        write_stage_run(
+            dir,
+            crate::run_meta::FitAlgorithm::Pgas,
+            4,
+            serde_json::json!({"method": "pgas", "sweeps": 100}),
+        );
+        std::fs::write(
+            dir.join("pgas_summary.json"),
+            r#"{"stage":"pgas","n_chains":4,"acceptance_rates":[],
+                "rhat":{"R0":1.001,"sigma":1.002},"ess":{"R0":900.0,"sigma":880.0}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("draws.tsv"), "R0\tsigma\n56.8\t0.115\n57.1\t0.110\n").unwrap();
+
+        // Every chain at @mle's estimate: the R̂ of 1.001 is agreement by
+        // construction and must not be reported.
+        write_state_with_starts(dir, 4, Some("point"), "from_mle @mle");
+        let r = PgasStageResult::load(dir).unwrap();
+        match r.diagnostics.max_rhat_status() {
+            MaxRhat::NotApplicable { reason } => assert_eq!(reason, RhatRefusal::PointStart),
+            other => panic!("a point start must read as not assessed, got {other:?}"),
+        }
+        assert!(!r.diagnostics.converged_at(RHAT_CONVERGED_THRESHOLD),
+            "not assessed is never converged");
+        for (name, p) in &r.diagnostics.per_param {
+            let why = p.why_no_rhat().unwrap_or_else(|| panic!("{name} must carry the reason"));
+            assert_eq!(why, "all 4 chains started at one point (starts = from_mle @mle)");
+            assert!(!p.is_pathology(), "a point start is not a sampler failure");
+            assert_eq!(p.rhat(), Stat::Undefined, "{name}: the R̂ is withheld");
+        }
+        assert_eq!(r.diagnostics.rhat_cell("R0", "—"), "—");
+        // The ESS is a within-chain fact the start does not invalidate the
+        // same way, so it is kept and the efficiency lines still report.
+        assert!((r.diagnostics.ess_per_param()["R0"] - 900.0).abs() < 1e-9);
+        assert!((r.diagnostics.min_ess().unwrap() - 880.0).abs() < 1e-9);
+
+        // The same leaf under a spread start reports what it stored.
+        write_state_with_starts(dir, 4, Some("spread"), "from_prior");
+        let r = PgasStageResult::load(dir).unwrap();
+        assert!((r.diagnostics.max_rhat().unwrap() - 1.002).abs() < 1e-9);
+        assert!(r.diagnostics.converged_at(RHAT_CONVERGED_THRESHOLD));
+    }
+
+    /// The demotion is a claim about how the chains were started, so it fires
+    /// only when the leaf makes that claim: a leaf written before
+    /// `chain_starts_kind` existed, a one-chain leaf (R̂ was never applicable),
+    /// and a leaf with no state at all are all left alone.
+    #[test]
+    fn point_start_needs_the_recorded_kind_and_two_chains() {
+        let tmp = tempdir("point_start_guard");
+        let dir = tmp.path();
+        assert!(point_start(dir).is_none(), "no state, no claim");
+        write_state_with_starts(dir, 4, None, "from_mle @mle");
+        assert!(point_start(dir).is_none(), "a pre-split leaf makes no claim");
+        write_state_with_starts(dir, 1, Some("point"), "single");
+        assert!(point_start(dir).is_none(), "one chain: R̂ was never applicable");
+        write_state_with_starts(dir, 4, Some("point"), "single");
+        assert_eq!(point_start(dir), Some((4, "single".to_string())));
+        write_state_with_starts(dir, 4, Some("spread"), "lhs");
+        assert!(point_start(dir).is_none(), "a spread start is assessed");
     }
 
     #[test]
@@ -2110,6 +2262,7 @@ mod tests {
                     ess_tail: Stat::Value(850.0),
                     ess_per_chain: Vec::new(),
                     all_chains_frozen: false,
+                    rhat_withheld: None,
                 }),
                 ("frozen".to_string(), ParamConvergence::Scored {
                     rhat: Stat::Infinite,
@@ -2120,6 +2273,7 @@ mod tests {
                     ess_tail: Stat::Undefined,
                     ess_per_chain: Vec::new(),
                     all_chains_frozen: true,
+                    rhat_withheld: None,
                 }),
             ]),
             n_samples: 4000,
@@ -2149,7 +2303,7 @@ mod tests {
             rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
             rhat_classic: Stat::Infinite,
             ess_bulk: Stat::Value(3.0), ess_tail: Stat::Undefined,
-            ess_per_chain: Vec::new(), all_chains_frozen: true,
+            ess_per_chain: Vec::new(), all_chains_frozen: true, rhat_withheld: None,
         };
         assert!(frozen.why_no_rhat().expect("frozen explains itself").contains("never accepted"));
         assert!(frozen.is_pathology());
@@ -2159,7 +2313,7 @@ mod tests {
             rhat_bulk: Stat::Value(1.02), rhat_folded: Stat::Undefined,
             rhat_classic: Stat::Value(1.02),
             ess_bulk: Stat::Value(500.0), ess_tail: Stat::Value(400.0),
-            ess_per_chain: Vec::new(), all_chains_frozen: false,
+            ess_per_chain: Vec::new(), all_chains_frozen: false, rhat_withheld: None,
         };
         assert!(undefined_fold.why_no_rhat().expect("an undefined R̂ explains itself")
             .contains("folded"));
@@ -2184,7 +2338,7 @@ mod tests {
             rhat_bulk: Stat::Infinite, rhat_folded: Stat::Undefined,
             rhat_classic: Stat::Infinite,
             ess_bulk: Stat::Value(4.0), ess_tail: Stat::Undefined,
-            ess_per_chain: Vec::new(), all_chains_frozen: false,
+            ess_per_chain: Vec::new(), all_chains_frozen: false, rhat_withheld: None,
         };
         assert!(inf_only.is_pathology(),
             "R̂ = ∞ is a pathology by itself, not only when the flag agrees");
@@ -2195,7 +2349,7 @@ mod tests {
             rhat_bulk: Stat::Value(1.01), rhat_folded: Stat::Value(1.00),
             rhat_classic: Stat::Value(1.00),
             ess_bulk: Stat::Value(900.0), ess_tail: Stat::Value(850.0),
-            ess_per_chain: Vec::new(), all_chains_frozen: false,
+            ess_per_chain: Vec::new(), all_chains_frozen: false, rhat_withheld: None,
         };
         assert_eq!(ok.why_no_rhat(), None);
         assert!(!ok.is_pathology());

@@ -278,7 +278,8 @@ pub fn run_stage(
         chain_eval_ses: Vec::new(),
         resolved_gate: Some(knobs.gate.clone()),
         resolved_loglik_eval: None,
-        chain_init_source: Some(drawn.rule.tag().to_string()),
+        chain_init_source: Some(drawn.rule.spelled()),
+        chain_starts_kind: Some(drawn.rule.kind()),
         // gh#52, gh#227: deterministic ODE dt-check at θ̂ (above). Skipped →
         // omit the block, mirroring the IF2 path's legacy semantics.
         dt_check: if matches!(dt_check_result.verdict, dt_check::DtCheckVerdict::Skipped) {

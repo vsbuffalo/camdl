@@ -186,6 +186,13 @@ fn nuts_ode_coarse_burnin_prevalence_recovers() {
 
     let traces = find_traces(&out_dir);
     assert!(!traces.is_empty(), "no chain trace.tsv under {}", out_dir.display());
+    // Every multi-chain sampler writes the audit sidecar through the one
+    // writer, NUTS included (proposal 2026-09-08 §3.4): the leaf holding the
+    // traces holds `chain_starts.tsv` beside them, naming the rule.
+    let leaf = traces[0].parent().unwrap().parent().unwrap();
+    let starts = std::fs::read_to_string(leaf.join("chain_starts.tsv"))
+        .unwrap_or_else(|e| panic!("nuts must write chain_starts.tsv in {}: {e}", leaf.display()));
+    assert!(starts.starts_with("# camdl chain_starts; starts=single;"), "{starts}");
     let (mean, n) = beta_mean(&traces, 50);
     assert!(n >= 100, "too few post-warmup samples ({n})");
     eprintln!("coarse burnin_dt=5: posterior mean beta = {mean:.4} (true {TRUE_BETA}), n={n}");

@@ -499,6 +499,7 @@ mod tests {
             resolved_gate: None,
             resolved_loglik_eval: None,
             chain_init_source: None,
+            chain_starts_kind: None,
             dt_check: None,
             pf_noise: None,
         }

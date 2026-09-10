@@ -22,9 +22,10 @@
 //! and the recorded values must really be one point repeated, so that the
 //! source assertion is about this defect rather than an unrelated run.
 //!
-//! Cheap on purpose — 2 chains, 20 particles, 1 IF2 iteration, 4 PGAS sweeps.
-//! Starting points are fixed before any sweep runs, so nothing here depends on
-//! either fit converging.
+//! Cheap on purpose — 2 chains, 20 particles, 1 IF2 iteration, 12 PGAS sweeps
+//! (enough retained draws per chain for the R̂ estimator to run, so the
+//! point-start demotion is what withholds it). Starting points are fixed
+//! before any sweep runs, so nothing here depends on either fit converging.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -152,8 +153,9 @@ algorithm = \"pgas\"
 backend   = \"chain_binomial\"
 chains    = 2
 particles = 20
-sweeps    = 4
-burn_in   = 1
+sweeps    = 12
+burn_in   = 2
+thin      = 1
 starts    = {{ from_mle = \"@prime\" }}
 ")).unwrap();
 
@@ -227,4 +229,28 @@ starts    = {{ from_mle = \"@prime\" }}
          skims the header gets the same wrong answer as gh#871's row labels.");
     assert!(header.contains("starts=from_mle @prime") && header.contains("kind=point"),
         "the file header must name the rule the starts came from and its kind: {header:?}");
+
+    // Proposal 2026-09-08 §3.4 — the honesty of the point start, in the leaf
+    // and on the summary. `fit_state.toml` records the kind; `fit summary`
+    // says where the chains began and reports R̂ as not assessed, with the
+    // rule that made it so, rather than the pass two chains that began
+    // together would otherwise earn.
+    let leaf = path.parent().unwrap();
+    let state = std::fs::read_to_string(leaf.join("fit_state.toml")).unwrap();
+    assert!(state.contains("chain_starts_kind = \"point\""), "{state}");
+    assert!(state.contains("chain_init_source = \"from_mle @prime\""), "{state}");
+    let segment = leaf.parent().unwrap().parent().unwrap();
+    let out = Command::new(&bin)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .args(["fit", "summary", &segment.to_string_lossy()])
+        .output()
+        .expect("spawn fit summary");
+    let summary = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "fit summary failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(summary.contains("seeded from:  from_mle @prime (every chain at one point)"),
+        "the summary must say where the chains began:\n{summary}");
+    assert!(summary.contains("R̂ — not assessed: all 2 chains started at one point (starts = from_mle @prime)"),
+        "R̂ over chains that began together must be reported as not assessed, with the rule:\n{summary}");
+    assert!(!summary.contains("max R̂"),
+        "no R̂ number may be reported as a verdict for a point start:\n{summary}");
 }

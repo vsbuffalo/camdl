@@ -778,6 +778,12 @@ impl FitResult {
 /// [`ConvergenceStatus::NotAssessed`] when no summary or no R̂ is present (a
 /// single-chain stage), so a band is never silently "converged".
 fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
+    // Chains that began at one point agree by construction; the leaf's R̂
+    // is not a verdict (proposal 2026-09-08, §3.4), so the band carries no
+    // number — the same demotion `fit summary` applies.
+    if crate::fit::method_result::point_start(stage_dir).is_some() {
+        return ConvergenceStatus::NotAssessed;
+    }
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
         let bytes = std::fs::read(stage_dir.join(name)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -841,6 +847,12 @@ fn subset_convergence(
     let Some(estimated) = crate::run_meta::read_fit_sidecar(segment).map(|s| s.estimated) else {
         return Ok(ConvergenceStatus::NotAssessed);
     };
+    // A subset of chains that began at one point still began at one point.
+    if let Some(leaf) = draws_path.parent() {
+        if crate::fit::method_result::point_start(leaf).is_some() {
+            return Ok(ConvergenceStatus::NotAssessed);
+        }
+    }
     let sub =
         crate::chain_selection::recompute_subset_diagnostics(draws_path, selection, &estimated)?;
 
@@ -3714,6 +3726,42 @@ mod tests {
     /// `rhat_not_reported`, and reading only the numeric maps dropped them —
     /// silently promoting "we could not assess this parameter" to "assessed,
     /// and here is the max over the ones that were".
+    /// Proposal 2026-09-08 §3.4: a band drawn from a fit whose chains all
+    /// began at one point carries no convergence stamp — the same demotion
+    /// `fit summary` applies, so the two cannot disagree about one fit.
+    #[test]
+    fn read_convergence_is_not_assessed_for_a_point_start() {
+        let dir = std::env::temp_dir().join("camdl_read_convergence_point_start_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pgas_summary.json"),
+            r#"{"rhat": {"beta": 1.001}, "ess": {"beta": 900.0}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("fit_state.toml"),
+            "stage = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = 4\n\
+             chain_init_source = \"from_mle @mle\"\nchain_starts_kind = \"point\"\n\n\
+             [start_values]\n\n[rw_sd]\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            read_convergence(&dir, Some(FitAlgorithm::Pgas)),
+            ConvergenceStatus::NotAssessed
+        ), "chains that began together agree by construction; the band must not be stamped");
+        // The spread counterpart of the same leaf reports its R̂.
+        let state = std::fs::read_to_string(dir.join("fit_state.toml")).unwrap()
+            .replace("chain_starts_kind = \"point\"", "chain_starts_kind = \"spread\"");
+        std::fs::write(dir.join("fit_state.toml"), state).unwrap();
+        assert!(matches!(
+            read_convergence(&dir, Some(FitAlgorithm::Pgas)),
+            ConvergenceStatus::Reported { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn read_convergence_is_not_reported_when_the_summary_carries_a_refusal() {
         let dir = std::env::temp_dir().join("camdl_read_convergence_refusal_test");

@@ -358,6 +358,7 @@ fn d_to_param(
             ess_tail: Stat::from_f64(r.ess_tail),
             ess_per_chain: d.ess_per_chain().to_vec(),
             all_chains_frozen: r.all_chains_frozen,
+            rhat_withheld: None,
         },
     }
 }
