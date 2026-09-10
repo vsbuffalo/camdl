@@ -115,6 +115,14 @@ pub(crate) fn eval_likelihood_resolved(
             poisson_logpmf(observed, r)
         }
         ResolvedLikelihood::Binomial { n, p, .. } => {
+            // gh#877: `NaN.round()` is NaN, `NaN.max(0.0)` is `0.0` (`f64::max`
+            // returns the non-NaN operand) and `0.0 as u64` is `0`, so without
+            // this a NaN observation is scored as an observed zero — a
+            // perfectly ordinary density for a datum that is not there. A hole
+            // is not a zero, and every family whose log-pmf takes the observed
+            // value as an `f64` refuses a NaN in `obs_loglik.rs`; this family
+            // rounds to `u64` first, which is why the refusal has to be here.
+            if observed.is_nan() { return f64::NEG_INFINITY; }
             let n_val = eval_resolved(n, &ctx(projected));
             let p_val = eval_resolved(p, &ctx(projected));
             let k = observed.round().max(0.0) as u64;
@@ -420,6 +428,13 @@ pub(crate) fn eval_likelihood_resolved_grad(
             // log p(k|n,p) = log C(n,k) + k·log(p) + (n-k)·log(1-p)
             // n is integer-valued (rounded) and θ-independent (gated by P5);
             // it carries no gradient. d/dp = k/p - (n-k)/(1-p)
+            // gh#877: the zero gradient of the value arm's `-inf`, as every
+            // `*_logpmf_grad` in `obs_loglik.rs` returns for a NaN argument.
+            // Without it the NaN became `k = 0` and this accumulated a finite
+            // `-n/(1 - p)` at a point the value function rejects — a NaN-safe
+            // value paired with a nonzero gradient, the gh#197/gh#200
+            // divergence shape.
+            if observed.is_nan() { return; }
             let n_val = eval_resolved(n, &ctx);
             let p_val = eval_resolved(p, &ctx);
             let n_int = n_val.round().max(0.0) as u64;
@@ -579,6 +594,11 @@ pub(crate) fn dlogp_dprojected(
         ResolvedLikelihood::Binomial { n, p, p_proj, .. } => {
             // `n` is θ- AND projection-independent (the §1h gate refuses a `Projected`
             // in `n`), so only `p`'s projection derivative contributes to factor 2.
+            // Same guard, same reason as the parameter-gradient arm
+            // (gh#877): the caller sums the two factors, so a NaN observation
+            // must contribute zero to both or the sum disagrees with the value
+            // function that rejected it.
+            if observed.is_nan() { return 0.0; }
             let n_val = eval_resolved(n, &ctx);
             let p_val = eval_resolved(p, &ctx);
             let n_int = n_val.round().max(0.0) as u64;
@@ -1055,5 +1075,95 @@ mod tests {
         // two guards cannot drift apart.
         let g = bernoulli_grad(ResolvedExpr::Const(f64::NAN), 1.0);
         assert_eq!(g, 0.0, "NaN p must accumulate nothing, got {}", g);
+    }
+
+    // ── gh#877: a NaN observation under a Binomial is not an observed zero ──
+
+    /// A `Binomial(n, p)` with constant arguments and `∂p/∂θ = ∂p/∂projected
+    /// = 1`, so the accumulated gradient is exactly `d(log L)/dp` on both
+    /// arms and a guard that fires leaves it at zero.
+    fn binomial_likelihood(n: f64, p: f64) -> ResolvedLikelihood {
+        ResolvedLikelihood::Binomial {
+            n: ResolvedExpr::Const(n),
+            p: ResolvedExpr::Const(p),
+            p_grad: vec![(0, ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0)))],
+            p_proj: Some(ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0))),
+        }
+    }
+
+    /// `(value, ∂/∂θ, ∂/∂projected)` for that likelihood at one observation —
+    /// the three arms gh#877 names, evaluated on the same inputs.
+    fn binomial_arms(n: f64, p: f64, observed: f64) -> (f64, f64, f64) {
+        let compiled = compiled_bernoulli_fixture();
+        let likelihood = binomial_likelihood(n, p);
+        let int_s = IntState::from_vec(vec![0; compiled.int_local_to_global.len()]);
+        let real_s = RealState::new(compiled.real_local_to_global.len());
+        let params = vec![0.0; compiled.param_index.len()];
+        let value = eval_likelihood_resolved(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        let mut grad = vec![0.0];
+        eval_likelihood_resolved_grad(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled,
+            &int_s, &real_s, &[0], &mut grad,
+        );
+        let d_proj = dlogp_dprojected(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        (value, grad[0], d_proj)
+    }
+
+    /// gh#877, value arm: `NaN.round()` is NaN, `NaN.max(0.0)` is `0.0` and
+    /// `0.0 as u64` is `0`, so a NaN observation was scored as an observed
+    /// zero — `log C(10,0) + 10·log(0.5)`, a perfectly ordinary density for a
+    /// datum that is not there. "A hole is not a zero" is the distinction the
+    /// data spec is explicit about, and every other family in this module
+    /// returns `-inf` for the same input.
+    #[test]
+    fn binomial_rejects_a_nan_observation_instead_of_scoring_it_as_zero() {
+        // Non-vacuity control: an observed zero is a real observation and
+        // still scores what it always scored.
+        let (v, _, _) = binomial_arms(10.0, 0.5, 0.0);
+        assert!((v - 10.0 * 0.5_f64.ln()).abs() < 1e-12,
+            "an observed zero out of ten must score 10·log(0.5), got {v}");
+
+        let (v, _, _) = binomial_arms(10.0, 0.5, f64::NAN);
+        assert_eq!(v, f64::NEG_INFINITY,
+            "a NaN observation must score -inf, not the zero-count density: got {v}");
+    }
+
+    /// gh#877, both gradient arms: the zero gradient of the value arm's
+    /// `-inf`, as every `*_logpmf_grad` in `obs_loglik.rs` returns. Before the
+    /// guard the NaN became `k = 0` and each arm accumulated a finite
+    /// `-n/(1 - p)`.
+    #[test]
+    fn binomial_gradients_are_zero_for_a_nan_observation() {
+        // Non-vacuity control: at k = 3, n = 10, p = 0.5,
+        // d(log L)/dp = k/p - (n-k)/(1-p) = 6 - 14 = -8, on both arms.
+        let (_, d_theta, d_proj) = binomial_arms(10.0, 0.5, 3.0);
+        assert!((d_theta + 8.0).abs() < 1e-12, "in-domain ∂/∂θ must be -8, got {d_theta}");
+        assert!((d_proj + 8.0).abs() < 1e-12, "in-domain ∂/∂projected must be -8, got {d_proj}");
+
+        let (_, d_theta, d_proj) = binomial_arms(10.0, 0.5, f64::NAN);
+        assert_eq!(d_theta, 0.0, "NaN observed must accumulate nothing in ∂/∂θ, got {d_theta}");
+        assert_eq!(d_proj, 0.0, "NaN observed must contribute nothing to ∂/∂projected, got {d_proj}");
+    }
+
+    /// The collapse report already had the arm: `explain_likelihood_neg_inf`
+    /// returns `ObservationNotFinite` for a NaN observation before it reaches
+    /// any family. It was unreachable for a Binomial because the value
+    /// function never returned `-inf` there; this pins that the two now agree.
+    #[test]
+    fn a_nan_binomial_observation_is_explained_as_a_non_finite_observation() {
+        let compiled = compiled_bernoulli_fixture();
+        let int_s = IntState::from_vec(vec![0; compiled.int_local_to_global.len()]);
+        let real_s = RealState::new(compiled.real_local_to_global.len());
+        let params = vec![0.0; compiled.param_index.len()];
+        let cause = explain_likelihood_neg_inf(
+            &binomial_likelihood(10.0, 0.5), 0.0, 0.0, f64::NAN, &[], &params,
+            &compiled, &int_s, &real_s,
+        );
+        assert!(matches!(cause, NegInfCause::ObservationNotFinite),
+            "the report must name the observation, got {cause:?}");
     }
 }
