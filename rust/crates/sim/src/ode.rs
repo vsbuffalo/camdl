@@ -717,7 +717,9 @@ impl OdeStepper for Dopri5 {
         per_eval: Option<&[f64]>,
     ) -> Result<f64, SimError> {
         let mut h = self.h.min(h_max);
-        if !(h > 0.0) { h = h_max; }
+        // NaN arm explicit: a NaN step must fall back to h_max, and
+        // `h <= 0.0` alone is false for NaN.
+        if h.is_nan() || h <= 0.0 { h = h_max; }
         let mut rejections = 0u32;
         loop {
             let (y5_int, y5_real, flow_inc, err) =

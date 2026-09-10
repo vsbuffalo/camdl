@@ -329,7 +329,8 @@ fn validate_after_substitution(model: &ir::Model) -> Result<(), String> {
             ));
         }
         for w in knots.windows(2) {
-            if !(w[1] >= w[0]) {
+            // NaN arm explicit: `w[1] < w[0]` alone is false for NaN.
+            if w[0].is_nan() || w[1].is_nan() || w[1] < w[0] {
                 return Err(format!(
                     "forcing '{}' has non-monotone breakpoints after resolving its \
                      observation anchors: {:?}. The runtime reads a piecewise \

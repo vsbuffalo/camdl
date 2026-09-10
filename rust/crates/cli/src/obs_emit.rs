@@ -199,7 +199,8 @@ pub(crate) fn plan_emission(
             for &t in emit_times {
                 let (start, stop) = covers.period_of(t)
                     .expect("a uniform form assigns every label a period");
-                if !(stop > start) {
+                // NaN arm explicit: `stop <= start` alone is false for NaN.
+                if start.is_nan() || stop.is_nan() || stop <= start {
                     return Err(format!(
                         "observation stream '{}': `covers` gives the row labelled {} the \
                          empty period [{}, {}) — its width must be positive",

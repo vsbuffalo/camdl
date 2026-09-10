@@ -577,8 +577,14 @@ impl StatefulRng {
     pub fn neg_binomial_dispersion(&mut self, mean: f64, k: f64) -> u64 {
         if mean <= 0.0 { return 0; }
         // k <= 0 is outside the family; the density returns -inf there, so the
-        // nearest well-defined draw is the k → ∞ limit.
-        if !(k > 0.0) || !k.is_finite() { return self.poisson(mean); }
+        // nearest well-defined draw is the k → ∞ limit, and a non-finite k (NaN
+        // or ±inf) takes that same limit. The finiteness test is what carries
+        // the NaN arm, `k <= 0.0` being false for NaN. It states the domain
+        // rather than being the only thing enforcing it: `Gamma::new` refuses a
+        // non-finite or non-positive shape (`ShapeTooSmall`), and the `Err`
+        // fallback below lands on the same draw — so no test can tell the two
+        // paths apart from outside.
+        if !k.is_finite() || k <= 0.0 { return self.poisson(mean); }
         // Unit-mean Gamma(k, 1/k) mixed into a Poisson: E[G] = 1,
         // Var[G] = 1/k, so Var[count] = mu + mu²/k.
         let g = match Gamma::new(k, 1.0 / k) {

@@ -147,7 +147,9 @@ where
     let lower: Vec<f64> = bounds.iter().map(|&(lo, _)| lo).collect();
     let upper: Vec<f64> = bounds.iter().map(|&(_, hi)| hi).collect();
     for (i, (l, u)) in lower.iter().zip(&upper).enumerate() {
-        if !(l < u) {
+        // NaN arm explicit: a NaN bound is not a valid interval, and `l >= u`
+        // alone is false for NaN.
+        if l.is_nan() || u.is_nan() || l >= u {
             return Err(format!(
                 "optimize_det: bounds[{}] has lower {} >= upper {}",
                 i, l, u
@@ -294,6 +296,36 @@ mod tests {
         assert_eq!(result.status, OptStatus::MaxEvalReached);
         assert!(!result.status.is_converged());
         assert!(result.n_evals <= 3); // budget + maybe 1 final eval
+    }
+
+    /// A NaN bound is not a valid interval. `l >= u` alone is false for NaN,
+    /// so without the explicit NaN arm a NaN bound would pass validation and
+    /// reach NLopt, which is not a diagnosable failure for the caller.
+    #[test]
+    fn nan_bounds_are_rejected() {
+        for bad in [(f64::NAN, 10.0), (-10.0, f64::NAN), (f64::NAN, f64::NAN)] {
+            let r = optimize_det(
+                NloptAlgorithm::Sbplx,
+                &[0.0, 0.0],
+                &[(-10.0, 10.0), bad],
+                1e-8,
+                500,
+                quadratic,
+            );
+            assert!(r.is_err(), "bounds {bad:?} must be rejected, got Ok");
+        }
+        // Negative control: the same call with finite bounds still runs.
+        assert!(
+            optimize_det(
+                NloptAlgorithm::Sbplx,
+                &[0.0, 0.0],
+                &[(-10.0, 10.0), (-10.0, 10.0)],
+                1e-8,
+                500,
+                quadratic,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
