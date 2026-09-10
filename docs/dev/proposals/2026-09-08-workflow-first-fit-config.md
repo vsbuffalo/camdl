@@ -1062,10 +1062,10 @@ wrong), _leaning_ (a reasonable person could choose the other way), _need-you_
 
 15. **`fit predict` writes the one-step artifact when the free-forward tail
     fails, records the failure, and exits 1; `--allow-missing-free-forward`
-    goes** (§3.5). _Leaning._ This is fail-closed on the exit status and the
-    report, and it stops discarding a complete object for an unrelated reason.
-    The alternative keeps the refusal and the flag; the §1.5 team endorsed
-    fail-closed and did not ask for the change, so this is offered, not owed.
+    goes** (§3.5). _Ruled 2026-09-09._ Fail-closed on the exit status and the
+    report; a complete object is no longer discarded for an unrelated reason.
+    The flag the §1.5 team named does not exist under that spelling;
+    `--horizon one_step` is the existing way to skip the tail, and it stays.
 16. **The design-preserving simulate is one primitive with two verbs on it:
     `fit preflight` (prior draws) and `fit recovery` (`--truth`)** (§3.5).
     _Leaning._ gh#831 asked for `simulate --design-from <fit.toml>` as well;
