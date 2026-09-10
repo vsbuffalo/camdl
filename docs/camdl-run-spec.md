@@ -453,18 +453,24 @@ observable as quantiles of sampled `y_rep` per
 predictive cell is more rows and never new consumer code. The `horizon` column
 is `free_forward` (run the fitted model forward from the start, `p(y_t | θ)`) or
 `one_step` (`p(y_t | y_{1:t-1})`, re-running a bootstrap filter per posterior
-draw and pooling over particles × draws); both stack under one header. The
-`treatment` column is `posterior` when the band averages over the whole draw
-cloud — the only treatment the band-builder accepts today, enforced by typing
-rather than a runtime check, so a posterior-labelled band over a single point
-estimate is unrepresentable — with `plug_in` reserved. `fit_rhat_max`/
-`fit_ess_min` are the producing leaf's **rank-normalized split R̂** and
-**bulk-ESS** of Vehtari et al. (2021) — the maximum R̂ and the minimum ESS over
-the leaf's estimated parameters — empty when the leaf reported none, and
-`fit_ess_min` withheld entirely whenever any assessed parameter has no pooled
-ESS rather than minimized over the ones that do. Their names say whose numbers
-they are: the fit's worst parameter, repeated identically on every row —
-provenance, not a statement about the value beside them.
+draw and pooling over particles × draws); both stack under one header. The two
+horizons walk **different step grids, on purpose**: `free_forward` is a replay
+of the model and takes the model's own `simulate { dt }`, while `one_step` is an
+inference operation — it re-filters the observed series — and takes the fit's
+`[config] dt`, the grid the likelihood walked. The two differ only when a model
+declares `simulate { dt }` and its fit declares a different `[config] dt`; when
+they do, the run says which grid the one-step band used. The `treatment` column
+is `posterior` when the band averages over the whole draw cloud — the only
+treatment the band-builder accepts today, enforced by typing rather than a
+runtime check, so a posterior-labelled band over a single point estimate is
+unrepresentable — with `plug_in` reserved. `fit_rhat_max`/ `fit_ess_min` are the
+producing leaf's **rank-normalized split R̂** and **bulk-ESS** of Vehtari et al.
+(2021) — the maximum R̂ and the minimum ESS over the leaf's estimated parameters
+— empty when the leaf reported none, and `fit_ess_min` withheld entirely
+whenever any assessed parameter has no pooled ESS rather than minimized over the
+ones that do. Their names say whose numbers they are: the fit's worst parameter,
+repeated identically on every row — provenance, not a statement about the value
+beside them.
 
 Beside them sit two per-row convergence channels, both reducing the same draws
 the quantiles pool over but grouped by the chain each draw came from.

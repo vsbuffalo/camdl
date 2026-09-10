@@ -1508,7 +1508,23 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = io::CalendarMeta::from_model(&model);
+    // Two step grids, because this command does two different things with a
+    // step (gh#708). `dt` is the model's own — what a forward replay of this
+    // model uses, which is what the free-forward horizon is. `one_step_dt` is
+    // the grid the FIT walked, from its `[config] dt`, and the one-step band
+    // re-filters the observed series through the fitted model, so it belongs
+    // on that one. They are the same number on every fit that does not declare
+    // both, which is most of them; the pair is named here so a reader can see
+    // which is which at the two call sites.
     let dt = model.simulation.dt.unwrap_or(1.0);
+    let one_step_dt = config.config.dt;
+    if (one_step_dt - dt).abs() > 1e-12 {
+        eprintln!(
+            "fit predict: the one-step band is filtered on the fit's dt = {one_step_dt} \
+             (the model declares `simulate {{ dt = {dt} }}`, which the free-forward \
+             replay uses)"
+        );
+    }
 
     // 3b. Parse the prospective scenario overlay (reusing simulate's ScenarioRef
     // surface). No `--scenario` → a single `fitted` row (the fitted model, no
@@ -2390,7 +2406,16 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             compiled.clone(),
             &model,
             &config,
-            dt,
+            // gh#708: the fit's `[config] dt`, not the model's `simulate { dt }`.
+            // The one-step band is an INFERENCE operation — it re-filters the
+            // observed series through the fitted model — so it must walk the
+            // grid the likelihood walked. Under `chain_binomial` the step sets
+            // the transition probability `1 - exp(-rate·dt)`, so a different dt
+            // is a different process, and the band would be plotted against the
+            // data as though it came from the one the posterior describes. The
+            // free-forward horizon below takes the model's own dt; that one is
+            // a forward replay of the model, which is a different question.
+            one_step_dt,
             args.stream.as_deref(),
             fit,
             n_draws_cap,
