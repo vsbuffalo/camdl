@@ -620,11 +620,19 @@ pub fn run_stage(
     // number. On clean completion we write `Done`; any error/panic drops the
     // heartbeat, leaving the last `Running` to go stale → consumer reads
     // `PresumedDead`.
+    // gh#751: the roster goes in with it, so the artifact can say "1 of 24
+    // sampling" from the first write. A chain is refused at its START, so how
+    // many of the chains paid for are running is knowable in the first minutes;
+    // `fit_state.toml` and `diagnostics.json` report the same thing only after
+    // the stage finishes, which on a multi-hour fit is hours too late to act
+    // on. Each chain reports below when a worker picks it up, when it is
+    // refused, and when it finishes.
     let heartbeat = Heartbeat::mcmc(
         stage_dir.to_path_buf(),
         burn_in as u64,
         n_sweeps as u64,
         std::time::Duration::from_secs(5),
+        n_chains,
     );
 
     // Posterior-trajectory output metadata, computed once and shared across the
@@ -663,6 +671,11 @@ pub fn run_stage(
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
             let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
             let task = &bars[chain_id];
+            // gh#751. HERE, at the top of the closure, is the moment a worker
+            // picked this chain up — a chain still queued behind the pool has
+            // not run this line and so has no row, which is what separates
+            // "queued" from "refused" in the artifact.
+            heartbeat.chain(chain_id, io::progress::ChainState::Running);
 
             let pgas_config = PGASConfig {
                 // gh#747: from the stage field, so the sampler that runs is the
@@ -1126,6 +1139,13 @@ pub fn run_stage(
                     });
                     eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
                         chain_id + 1, reason);
+                    // gh#751: and in `progress.json`, where a watcher sees it
+                    // now rather than when the stage ends. The short tag is the
+                    // machine-readable half of the same finding the `BadInit`
+                    // diagnostic carries in full.
+                    heartbeat.chain(chain_id, io::progress::ChainState::Refused {
+                        reason: io::progress::RefusedReason::NonFiniteStart,
+                    });
                     // The bar is cleared in the post-loop finish; the skip
                     // is already loud on stderr above.
                     return Ok(None);
@@ -1228,6 +1248,11 @@ pub fn run_stage(
                 ));
             }
 
+            // gh#751: this chain ran its sweeps. A structural error instead
+            // returns `Err` above and takes the whole fit down, so the chain is
+            // left saying `running` and the artifact goes stale with the run —
+            // which is the honest report for a fit that died.
+            heartbeat.chain(chain_id, io::progress::ChainState::Completed);
             Ok(Some((chain_id, result.sweeps, result.acceptance_rates)))
         })
         .collect();

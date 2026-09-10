@@ -4842,7 +4842,7 @@ A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
 | `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared                                                                                                                                                                                                                                                                     |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
-| `progress.json`             | sampler progress, written live                                                                                                                                                                                                                                                                                                                                                                           |
+| `progress.json`             | sampler progress, written live, plus per-chain liveness (§10.10)                                                                                                                                                                                                                                                                                                                                         |
 
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
 `{name}={value:.12}\0` pairs, truncated to 8 hex — so a hand-edited parameter
@@ -4962,6 +4962,49 @@ omitted from `run.json` when empty.
 > summarize`
 > subcommand that produced those was removed. Equivalent reductions are
 > expressed in the model's `quantities {}` block (§10.8).
+
+### 10.10 `progress.json`'s per-chain liveness
+
+A background thread rewrites `progress.json` on a fixed wall-clock timer, so it
+is the one thing a watcher can read while a stage runs. Alongside `updated_at`,
+`pid` and the `state` counter it carries a `chains` block for any method that
+has chains:
+
+```json
+{
+  "updated_at": 1789038341,
+  "pid": 2882,
+  "state": { "running": { "phase": "burn_in", "step": 276, "total": 2000 } },
+  "chains": {
+    "total": 24,
+    "running": 1,
+    "completed": 0,
+    "refused": 23,
+    "not_started": 0,
+    "chains": [
+      { "chain": 1, "status": "refused", "reason": "non_finite_start" },
+      { "chain": 8, "status": "running" }
+    ],
+    "numbering": "1-based, matching the chain_N/ directories"
+  }
+}
+```
+
+A chain is refused at its **start** (§10.7), so how many of the chains a run
+paid for are sampling is knowable in its first minutes; `fit_state.toml`'s
+`n_good_chains` and the `bad_init` records report the same thing only once the
+stage has finished. `running + completed` is the number that got past their
+start — `total - refused` is not the same thing mid-run, since a chain that has
+not started is neither good nor bad.
+
+**A chain with no row has not started.** That is the distinction an empty
+`chain_N/` directory cannot make: a refused chain and one queued behind
+`--parallel` call for opposite responses (respecify, or wait), so a chain that
+has not been picked up by a worker is counted in `not_started` and reports
+nothing. The block is **absent**, not null, for a method with no chains (an
+NLopt search, a profile grid), and `chain` is 1-based here — the opposite of
+`chain_starts.tsv`, whose own `chain_id` column is 0-based and whose header says
+so.
 
 ## 11. Predictive Workflows
 
