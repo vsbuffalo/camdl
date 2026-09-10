@@ -1316,7 +1316,7 @@ pub fn run_stage(
         // This message keeps its own first sentence, because what was refused
         // here is specific: a complete-data log-posterior that stayed
         // non-finite through the trajectory update, not a filter degeneracy.
-        return Err(format!(
+        let reason = format!(
             "pgas stage `{}`: all {} chain(s) were refused at their starting \
              point — the complete-data log-posterior is non-finite for every \
              one and stayed non-finite through its first trajectory update, so \
@@ -1324,7 +1324,17 @@ pub fn run_stage(
              `bad_init` entries and `chain_starts.tsv` for the starts they \
              name. {}",
             stage_name, n_chains,
-            super::chain_starts::UNSCOREABLE_START_ADVICE));
+            super::chain_starts::UNSCOREABLE_START_ADVICE);
+        // gh#891: the worst case a fit can have — nothing ran — was the one
+        // whose `progress.json` said the least. Returning here dropped the
+        // heartbeat without a terminal write, leaving the last periodic
+        // `Running` (up to five seconds stale, possibly from before any chain
+        // reported) as the file's final word, so an agent polling it saw
+        // `running` for ever. `finish` writes `failed` with this reason, and
+        // the per-chain block beside it already shows every chain refused —
+        // each one reported it as it happened.
+        heartbeat.finish(RunState::Failed { reason: reason.clone() });
+        return Err(reason);
     }
 
     let elapsed = t0.elapsed();

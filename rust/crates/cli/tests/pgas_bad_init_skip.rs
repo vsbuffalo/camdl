@@ -465,6 +465,36 @@ fn all_chains_refused_is_an_error() {
         run.stderr);
     assert!(run.stderr.contains("refused at their starting point"),
         "the error must say what happened.\nstderr:\n{}", run.stderr);
+
+    // gh#891: and `progress.json` says it too. This is the worst case a fit
+    // can have — nothing ran — and it used to be the case whose progress file
+    // said the least: the stage returned without a terminal write, so the last
+    // periodic `running` (up to five seconds stale, possibly from before any
+    // chain reported) stayed on disk and an agent polling the file saw
+    // `running` for ever.
+    let progress: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(leaf.join("progress.json"))
+            .expect("a stage that ran at all writes progress.json"),
+    ).expect("progress.json parses");
+    let failed = progress["state"]["failed"].as_object()
+        .unwrap_or_else(|| panic!(
+            "the run's last self-report must be `failed`, not a stale \
+             `running`:\n{progress:#}"));
+    let why = failed["reason"].as_str().expect("a failure carries its reason");
+    assert!(why.contains("refused at their starting point"),
+        "the reason is the one the command printed, not a bare tag: {why}");
+    // And the per-chain block beside it names every chain, all refused, so a
+    // reader needs nothing else to know what happened.
+    let chains = &progress["chains"];
+    assert_eq!(chains["total"], 2, "{progress:#}");
+    assert_eq!(chains["refused"], 2, "every chain refused:\n{progress:#}");
+    assert_eq!(chains["running"], 0, "and none left claiming to run:\n{progress:#}");
+    let rows = chains["chains"].as_array().expect("per-chain rows");
+    assert_eq!(rows.len(), 2, "{progress:#}");
+    for r in rows {
+        assert_eq!(r["status"], "refused", "{r:#}");
+        assert_eq!(r["reason"], "non_finite_start", "{r:#}");
+    }
 }
 
 /// gh#607, the OTHER half of the predicate. A chain whose start is `-inf` only
