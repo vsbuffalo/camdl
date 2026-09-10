@@ -1,9 +1,10 @@
 # Key the camdlc↔camdl guard on IR schema version, not git hash
 
-Status: Proposed. A workaround landed
+Status: Accepted — the two-signal design (hard schema gate, soft hash warning)
+is settled; what remains is implementation. A workaround landed
 (`build(make): resolve fresh camdlc
 via PATH-prepend in test-rust`, 458c8cb);
-this proposes the root-cause fix so the dev workaround is no longer needed.
+this is the root-cause fix that lets the dev workaround be removed.
 
 ## Problem
 
@@ -41,6 +42,22 @@ unchanged → a stale `camdl` is schema-compatible with a fresh `camdlc` by
 construction**. It works, but it is a workaround: the guard is muted in the
 harness rather than passing on its merits.
 
+### The skip has a downstream cost (gh#888)
+
+Because the skip is universal — every test harness and every ad-hoc worktree run
+sets it — a second defect becomes reachable through it. The compiled-IR cache
+(`~/.cache/camdl/ir`) keys an entry on (model, compiler, the schema the runtime
+expects) and does **not** check the `ir_version` the compiler actually emitted
+before publishing. With the handshake skipped and a stale `camdlc` on PATH, a
+0.39 document is written under a 0.40 key; every later read of that model then
+hard-errors on the version mismatch rather than missing the cache and
+recompiling. Three such poisoned entries were observed on 2026-09-09, cleared
+only by hand.
+
+gh#888 fixes the cache's own missing check and does not depend on this proposal.
+But the reason the skip is on everywhere is this guard, so landing the
+two-signal gate removes the precondition rather than only the symptom.
+
 ## Proposed fix
 
 Gate on **IR schema compatibility**, not git hash. The load-bearing design
@@ -68,21 +85,22 @@ With a schema-content gate, a matched-schema pair passes _on its own merits_ —
 no skip in dev or prod, no PATH-prepend needed — and a genuine schema change
 still trips it.
 
-## Tradeoff to settle
+## The gate is coarser than a git hash, and that is why there are two of them
 
 Schema version is **coarser** than git hash: it will not catch an
 expander/codegen behavior change that alters emitted IR _without_ bumping the
 schema — e.g. an autodiff/`rate_grad` fix, or a dimensional-rescale correction.
 Those change the _values_ in the IR, not its shape, so a schema-version guard
-would treat a fixed and an unfixed `camdlc` as interchangeable.
+alone would treat a fixed and an unfixed `camdlc` as interchangeable.
 
-Whether that matters depends on the guard's job. For the _deserialization_ risk
-it nominally protects against (runtime can't read the compiler's IR), schema
-version is exactly right. For "am I running the camdlc I think I am," it is not.
-The honest design is probably two signals:
+That is not a reason to keep the hash as the gate; it is a reason to carry both
+signals, because they answer different questions. For the _deserialization_ risk
+the guard nominally protects against (runtime cannot read the compiler's IR),
+schema version is exactly right. For "am I running the camdlc I think I am," it
+is not. So:
 
 1. **Schema version — hard gate** (refuse on mismatch). This is the real
-   incompatibility.
+   incompatibility, and the only one worth refusing over.
 2. **Git hash — soft warning** (print, do not exit) when it drifts, so an
    operator running a knowingly-mismatched pair is told, without blocking dev
    iteration.
