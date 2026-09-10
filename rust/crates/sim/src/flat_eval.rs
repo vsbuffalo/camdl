@@ -88,6 +88,11 @@ pub enum Op {
     /// Inlined binding cache lookup; payload is the binding slot. On a hit the
     /// cached value is pushed; on a miss `FlatProg::binding_progs[slot]` runs.
     Binding(u32),
+    /// gh#815: a gh#272 LICM-hoisted (per-eval) binding read; payload is the
+    /// per-eval slot. Pushes the staged prologue value when the caller lent one
+    /// (`EvalCtx::per_eval`), else evaluates the body on demand — the exact
+    /// mirror of `ResolvedExpr::PerEvalRef`.
+    PerEval(u32),
     /// `TableLookup`: push `eval_resolved(&subs[i], ctx)`. The only delegated
     /// node — its table-OOB thread-local recording is complex and rare.
     Delegate(u32),
@@ -180,6 +185,12 @@ pub fn flatten(e: &ResolvedExpr) -> FlatProg {
 }
 
 /// Build the full `FlatVm` from a compiled model's resolved surface.
+///
+/// `bindings` are the ordinary (per-state) bindings, each flattened to its own
+/// tape. The gh#272 per-eval bindings are deliberately NOT flattened: a
+/// `PerEvalRef` compiles to `Op::PerEval`, which reads the caller's staged
+/// prologue and only falls back to `eval_resolved` on the body when nothing was
+/// staged (gh#815).
 pub fn build(rates: &[ResolvedExpr], bindings: &[ResolvedExpr]) -> FlatVm {
     FlatVm {
         rates: rates.iter().map(flatten).collect(),
@@ -252,11 +263,12 @@ fn emit(e: &ResolvedExpr, f: &mut FlatProg) {
         }
         ResolvedExpr::UncheckedDim { inner } => emit(inner, f), // transparent
         ResolvedExpr::BindingRef(slot) => f.ops.push(Op::Binding(*slot as u32)),
-        // gh#272: the flat VM's per-eval tape is deferred (step 1.4). Until then
-        // `build` is gated off for models with per-eval bindings (see
-        // `CompiledModel::new`), so this node never reaches the emitter.
-        ResolvedExpr::PerEvalRef(_) =>
-            unreachable!("flat VM emitted for a per-eval model; build() must be gated off"),
+        // gh#815: a gh#272 LICM-hoisted binding becomes a dedicated op whose
+        // executor arm mirrors `eval_resolved`'s `PerEvalRef` arm (staged read,
+        // else on-demand body eval). The body itself is NOT flattened — the
+        // on-demand arm delegates it to `eval_resolved`, which is what makes the
+        // two paths byte-identical without a second tape kind.
+        ResolvedExpr::PerEvalRef(slot) => f.ops.push(Op::PerEval(*slot as u32)),
         // The one deliberately-delegated node: TableLookup. Reimplementing the
         // OOB thread-local recording + per-policy machinery as opcodes is large
         // and risky for a rare node; delegating its whole sub-tree to
@@ -295,7 +307,7 @@ fn compute_max_depth(f: &FlatProg) -> u32 {
             Op::Const(_) | Op::Param(_) | Op::IntPop(_) | Op::RealPop(_)
             | Op::Time | Op::Dt | Op::Projected | Op::TimeFunc(_)
             | Op::IntPopSum(_) | Op::MixedPopSum(_)
-            | Op::Binding(_) | Op::Delegate(_) => depth += 1, // push 1
+            | Op::Binding(_) | Op::PerEval(_) | Op::Delegate(_) => depth += 1, // push 1
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::BinOther(_) => depth -= 1, // pop 2, push 1
             Op::Un(_) => {}                  // pop 1, push 1
             Op::SumN(n) => depth -= *n as i64 - 1, // pop n, push 1
@@ -573,6 +585,25 @@ unsafe fn run(
                 };
                 push!(v);
             }
+            Op::PerEval(slot) => {
+                // gh#815. Mirrors `eval_resolved`'s `PerEvalRef` arm exactly,
+                // BOTH arms. `Some` — the caller staged the per-eval prologue for
+                // this θ-stable span, so the read is one array index (the whole
+                // point of the gh#272 hoist). `None` — no scratch was staged, so
+                // evaluate the body on demand; `eval_resolved` handles the body's
+                // own references to earlier per-eval slots, and does NOT touch
+                // `buf`, so calling it mid-tape is safe (same argument as
+                // `Op::Delegate`). Indexing is bounds-checked, matching
+                // `scratch[*slot]` on the resolved path: a staged prefix slice is
+                // shorter than the full scratch, so an out-of-range slot must
+                // panic, not read past the end.
+                let s = *slot as usize;
+                let v = match ctx.per_eval {
+                    Some(scratch) => scratch[s],
+                    None => eval_resolved(&ctx.model.resolved.per_eval_bindings[s], ctx),
+                };
+                push!(v);
+            }
             Op::Delegate(i) => {
                 // eval_resolved does NOT touch `buf` — safe to call mid-tape.
                 let v = eval_resolved(prog.subs.get_unchecked(*i as usize), ctx);
@@ -595,6 +626,7 @@ pub fn op_histogram(vm: &FlatVm) -> OpHistogram {
                     Op::BinOther(_) => h.bin_other += 1,
                     Op::Delegate(_) => h.delegate += 1,
                     Op::Binding(_) => h.binding += 1,
+                    Op::PerEval(_) => h.per_eval += 1,
                     Op::IntPopSum(_) => h.int_pop_sum += 1,
                     Op::MixedPopSum(_) => h.mixed_pop_sum += 1,
                     Op::TimeFunc(_) => h.time_func += 1,
@@ -620,6 +652,8 @@ pub struct OpHistogram {
     pub time_func: usize,
     pub projected: usize,
     pub binding: usize,
+    /// gh#815 LICM-hoisted per-eval reads (`Op::PerEval`).
+    pub per_eval: usize,
     pub delegate: usize,
     /// Const/Param/Pop/Un/SumN/Jump/etc.
     pub other: usize,

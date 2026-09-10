@@ -1928,12 +1928,13 @@ impl CompiledModel {
 
         // gh#209: build the flat-bytecode VM once, only when the toggle is on,
         // so default models pay nothing. Mirrors `cm.resolved.{rates,bindings}`.
-        // gh#272: the flat VM's per-eval tape is deferred (step 1.4), so skip the
-        // flat path for per-eval models — they fall back to `eval_resolved`, which
-        // handles `PerEvalRef`. (Default-off LICM ⇒ this is never hit today.)
-        let flat_vm = if crate::flat_eval::eval_flat_enabled()
-            && model.per_eval_bindings.is_empty()
-        {
+        // gh#815: a gh#272 LICM-hoisted `PerEvalRef` now lowers to `Op::PerEval`,
+        // so the flat path composes with LICM and the build is gated on the
+        // toggle alone. It used to be gated on `per_eval_bindings.is_empty()`
+        // too; since LICM is ON by default (`ocaml/lib/compiler/compiler.ml`,
+        // `maybe_licm`), that clause silently turned `CAMDL_EVAL_FLAT` into a
+        // no-op on every model the pass fires on.
+        let flat_vm = if crate::flat_eval::eval_flat_enabled() {
             Some(crate::flat_eval::build(&rates, &resolved_bindings))
         } else {
             None
