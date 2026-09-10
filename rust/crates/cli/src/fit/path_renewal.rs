@@ -940,6 +940,10 @@ mod tests {
     /// is `a_measured_working_short_run_is_not_flagged` that rules out the
     /// bottom of that range. The two anchors are complementary, and 0.75 sits
     /// near the top of the gap for that reason rather than in its middle.
+    // Both sides are named constants, so clippy reads the comparison as
+    // trivially decidable. It is: that is the point. The test exists so that
+    // moving the bar fails here, with the cohort's own numbers in the message.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn the_bar_lies_inside_the_validation_cohorts_empty_gap() {
         const HIGHEST_CONVERGED: f64 = 0.172;

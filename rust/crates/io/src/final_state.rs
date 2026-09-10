@@ -50,6 +50,11 @@
 //! represented here at all — the reader refuses such a model by name rather
 //! than defaulting the reservoir to zero.
 
+// The ````text` block above is a specimen of the on-disk file, which is
+// tab-separated. The tabs in it are the format being documented; replacing them
+// with spaces, as the lint asks, would document a file we do not write.
+#![allow(clippy::tabs_in_doc_comments)]
+
 use std::io::Write;
 use std::path::Path;
 

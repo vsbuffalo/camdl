@@ -887,6 +887,8 @@ fn draw_from_posterior(
         }
         parsed.push(vals);
     }
+    // The literal is grouped to spell its mnemonic, not in equal-width groups.
+    #[allow(clippy::unusual_byte_groupings)]
     let mut rng = StatefulRng::new(seed ^ 0xb05_e_05u64);
     let starts: Vec<ChainStart> = (0..n_chains).map(|chain_id| {
         let row_idx = (rng.uniform() * rows.len() as f64).floor() as usize;
@@ -1736,8 +1738,8 @@ mod tests {
             assert!(cs.values.contains_key("gamma"));
             let b = cs.values["beta"];
             let g = cs.values["gamma"];
-            assert!(b >= 0.0 && b <= 1.0);
-            assert!(g >= 0.0 && g <= 1.0);
+            assert!((0.0..=1.0).contains(&b));
+            assert!((0.0..=1.0).contains(&g));
             match &cs.source {
                 InitSource::PriorDraw { .. } => {}
                 other => panic!("unexpected source: {:?}", other),
@@ -1767,7 +1769,7 @@ mod tests {
         ).unwrap();
         for cs in &starts.starts {
             let v = cs.values["beta"];
-            assert!(v >= 0.4 - 1e-9 && v <= 0.5 + 1e-9,
+            assert!((0.4 - 1e-9..=0.5 + 1e-9).contains(&v),
                 "draw {} outside the resolved prior [0.4, 0.5]", v);
         }
     }

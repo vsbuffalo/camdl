@@ -764,7 +764,7 @@ impl AcceptRatioTally {
         }
         let mut xs = self.log_alphas.clone();
         xs.sort_by(|a, b| a.partial_cmp(b).expect("finite by construction"));
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             (xs[n / 2 - 1] + xs[n / 2]) / 2.0
         } else {
             xs[n / 2]
@@ -5051,7 +5051,7 @@ mod grid_tests {
             assert!((ed - sd).abs() <= 1e-12, "dt_substep differs by > 1 ULP at substep {i}: {ed} vs {sd}");
         }
         // EXACT lands exactly on each obs (within FP), where SNAP rounds.
-        for (&idx, _) in &exact.obs_at_substep {
+        for &idx in exact.obs_at_substep.keys() {
             let (t0, d) = exact.steps[idx];
             let obs_t = if t0 < 4.0 { 3.0 } else { 5.0 };
             assert!((t0 + d - obs_t).abs() < 1e-9, "exact substep {idx} must land on its obs");

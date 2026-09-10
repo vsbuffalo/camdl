@@ -382,7 +382,7 @@ fn fit_run_announces_the_real_leaf_directory() {
 
     // And the segment really contains the method tree (an `if2-<h8>` child,
     // labelled by the algorithm).
-    let has_method_child = std::fs::read_dir(&fit_segment)
+    let has_method_child = std::fs::read_dir(fit_segment)
         .unwrap()
         .flatten()
         .any(|e| e.path().is_dir() && e.file_name().to_string_lossy().starts_with("if2-"));

@@ -196,11 +196,11 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
         .filter_map(|l| l.split('\t').nth(2))
         .collect();
     assert!(
-        horizons.iter().any(|h| *h == "one_step"),
+        horizons.contains(&"one_step"),
         "the written rows are the one-step band:\n{text}"
     );
     assert!(
-        !horizons.iter().any(|h| *h == "free_forward"),
+        !horizons.contains(&"free_forward"),
         "no free-forward row may be written when the tail refused — a partial \
          tail reads as a complete one:\n{text}"
     );

@@ -1378,18 +1378,6 @@ mod btrs_tests {
         assert!(hi >= 995, "p→1 should draw near n, got {hi}");
     }
 
-    /// The seam's containment argument, as a test rather than a convention.
-    ///
-    /// `set_binomial_algorithm` is unconditionally `pub` on a `pub mod` (it
-    /// cannot be `#[cfg(test)]`: the bench is a separate crate), so "the
-    /// thread-local is the only door" rests entirely on no production code
-    /// calling it. That is exactly the kind of claim that rots silently — one
-    /// future perf experiment in `cli`, and a release binary draws from BTRS
-    /// under a BTPE run address, with nothing in the stored artifact recording
-    /// which sampler produced it.
-    ///
-    /// Asserted as a whitelist of FILES rather than by parsing `#[cfg(test)]`
-
     /// A non-finite `p` must return, under either sampler.
     ///
     /// NaN passes both of `binomial`'s range guards — every NaN comparison is

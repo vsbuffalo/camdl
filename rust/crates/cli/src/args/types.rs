@@ -158,13 +158,13 @@ impl std::fmt::Display for ForwardBackend {
 /// Controls how long-running subcommands (`fit run`, `simulate`, `pfilter`,
 /// ...) report progress. Rationale and semantics: see GH #14.
 ///
-/// - `auto`   — pretty indicatif bars if stderr is a TTY, otherwise plain
-///              timestamped log lines. The default.
+/// - `auto` — pretty indicatif bars if stderr is a TTY, otherwise plain
+///   timestamped log lines. The default.
 /// - `pretty` — force indicatif bars regardless of TTY detection.
-/// - `plain`  — force plain text lines (no `\r`, no ANSI). The mode to use
-///              under `tee`, `&> log`, `ssh`, CI, or any non-interactive
-///              driver that wants to tail/grep progress.
-/// - `none`   — suppress progress output entirely.
+/// - `plain` — force plain text lines (no `\r`, no ANSI). The mode to use
+///   under `tee`, `&> log`, `ssh`, CI, or any non-interactive driver that
+///   wants to tail/grep progress.
+/// - `none` — suppress progress output entirely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ProgressMode {
     #[default]

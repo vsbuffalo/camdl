@@ -272,10 +272,16 @@ fn test_density_seir_spatial_5_vignette_regression() {
                 for &tr_idx in group {
                     let rate = propensities[tr_idx];
                     let flow = rec.flows[tr_idx];
-                    if (rate <= 0.0 && flow > 0) || (flow > 0) {
-                        eprintln!("    {} (idx={}): rate={:.6e}, flow={}, src_count={}",
+                    if flow > 0 {
+                        // The pathology this diagnostic exists to find is flow
+                        // out of a transition with no propensity. Mark it: the
+                        // condition was `(rate <= 0.0 && flow > 0) || (flow > 0)`,
+                        // which is just `flow > 0`, so the rows printed were the
+                        // same either way and the marked case was invisible.
+                        let mark = if rate <= 0.0 { "  <-- flow with no propensity" } else { "" };
+                        eprintln!("    {} (idx={}): rate={:.6e}, flow={}, src_count={}{}",
                             compiled.model.transitions[tr_idx].name, tr_idx,
-                            rate, flow, counts_before[src_local]);
+                            rate, flow, counts_before[src_local], mark);
                     }
                 }
             }

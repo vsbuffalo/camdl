@@ -83,7 +83,7 @@ pub fn acceptance_diagnostic(
 ) -> Option<DiagnosticKind> {
     let (lo, hi) = kernel.healthy_band();
     (!(lo..=hi).contains(&rate))
-        .then(|| DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel })
+        .then_some(DiagnosticKind::AcceptanceRateUnhealthy { rate, param, kernel })
 }
 
 /// Machine-readable diagnostic classification.
@@ -383,7 +383,10 @@ const START_VALUE_LARGE: f64 = 1e5;
 /// whole investigation (gh#880).
 fn format_start_value(v: f64) -> String {
     let mag = v.abs();
-    if v != 0.0 && (mag < START_VALUE_SMALL || mag >= START_VALUE_LARGE) {
+    // A NaN `mag` takes the exponential branch here where the two-comparison
+    // form took the decimal one; both render NaN and ±inf identically, so the
+    // output is unchanged.
+    if v != 0.0 && !(START_VALUE_SMALL..START_VALUE_LARGE).contains(&mag) {
         format!("{:.4e}", v)
     } else {
         format!("{:.4}", v)

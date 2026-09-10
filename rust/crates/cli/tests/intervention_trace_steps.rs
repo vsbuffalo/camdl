@@ -22,6 +22,7 @@ fn binary() -> PathBuf {
 ///   - a toggleable intervention `sia` that `fraction_transfer`s 50%
 ///     of S → V at t=10 (routes through `apply_intervention` →
 ///     Action::FractionTransfer; fires only when `--enable`'d)
+///
 /// No transitions, so state moves only via these actions.
 fn trace_model_ir() -> String {
     // `__IR_VERSION__` → the build's IR_VERSION (envelope-checked on load), so a

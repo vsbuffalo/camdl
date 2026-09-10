@@ -1217,6 +1217,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // identity-defining). --dt-check-strict is resolved into the
                 // stored threshold the same way (gh#730).
                 let effective_dt_check = dt_check.clone();
+                // Grouped to spell its mnemonic, not in equal-width groups.
+                #[allow(clippy::unusual_byte_groupings)]
                 let dt_check_seed = seed.wrapping_add(0xd7c4ec_5eed); // "dtchec seed"
                 let dt_check_result = dt_check::run_richardson_ladder(
                     &run_config,

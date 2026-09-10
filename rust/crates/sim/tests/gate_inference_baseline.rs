@@ -23,6 +23,12 @@
 //!   CAMDL_CAPTURE_BASELINE=1 cargo test -p sim --test gate_inference_baseline -- --nocapture
 //! and paste the printed table into BASELINES.
 
+// `BASELINES` is pasted verbatim from the capture run, which prints `{ll:.17e}`
+// — more digits than an f64 carries. Shortening the literals by hand is undone
+// the next time someone re-captures, so the lint would fire again on the next
+// baseline move.
+#![allow(clippy::excessive_precision)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -70,7 +76,7 @@ fn div(a: Expr, b: Expr) -> Expr {
     Expr::BinOp(BinOpWrap { bin_op: BinOpExpr { op: BinOp::Div, left: Box::new(a), right: Box::new(b) } })
 }
 fn param(name: &str, value: f64) -> Parameter {
-    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value: value }, param_kind: None, param_dim: None }
+    Parameter { name: name.into(), value: ir::parameter::ParamValue::Fixed { value }, param_kind: None, param_dim: None }
 }
 fn transition(name: &str, sto: Vec<StoichiometryEntry>, rate: Expr) -> Transition {
     Transition {

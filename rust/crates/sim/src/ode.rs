@@ -260,8 +260,8 @@ fn sensitivity_derivs(
 /// left to the caller (the `Expr::Dt` / RUNTIME_DT Euler path).
 fn rk4_step(
     model: &CompiledModel,
-    int_vals: &mut Vec<f64>,
-    real_vals: &mut Vec<f64>,
+    int_vals: &mut [f64],
+    real_vals: &mut [f64],
     flow: Option<&mut Vec<f64>>,
     params: &[f64],
     t: f64,
@@ -814,7 +814,7 @@ pub fn run_ode(
     // neutral for scoring (no obs lies before `cond_from`). EFFECT boundaries are
     // KEPT, so an intervention in the warm-up still clips the coarse step exactly
     // onto it (per-substep `events`/`balance` are refused by the caller's gate).
-    let use_coarse = coarse.map_or(false, |c| c.active(cfg.dt, cfg.t_start));
+    let use_coarse = coarse.is_some_and(|c| c.active(cfg.dt, cfg.t_start));
 
     // Coarse burn-in is valid only for a forcing-only warm-up (Phase 0 scope). A
     // per-substep construct — `balance {}` or an `events {}` intervention — fires
@@ -1415,7 +1415,8 @@ mod tests {
         let mut int = vec![100.0];
         let mut real: Vec<f64> = vec![];
         let mut flow = vec![0.0; nf];
-        let mut sens = Sens { state: vec![0.0; 1 * pmi.len()], flow: vec![0.0; nf * pmi.len()] };
+        let mut sens =
+            Sens { state: vec![0.0; int.len() * pmi.len()], flow: vec![0.0; nf * pmi.len()] };
         let res = rk4_step(
             &cm, &mut int, &mut real, Some(&mut flow), &params, 0.0, 200.0, None,
             Some(&mut sens), &pmi,
@@ -1491,12 +1492,11 @@ mod tests {
 
         // Control: the refusal is coarse-SPECIFIC. Without coarse the balance gate
         // must NOT fire (any other outcome — Ok or an unrelated error — is fine).
-        match run_ode(&compiled, &params, &cfg, None, None) {
-            Err(SimError::Validation(m)) => assert!(
+        if let Err(SimError::Validation(m)) = run_ode(&compiled, &params, &cfg, None, None) {
+            assert!(
                 !(m.contains("balance") && m.contains("burnin_dt")),
                 "the balance/burnin_dt refusal must not fire without coarse: {m}"
-            ),
-            _ => {}
+            );
         }
     }
 

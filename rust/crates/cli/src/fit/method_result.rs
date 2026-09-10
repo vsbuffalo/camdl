@@ -1078,12 +1078,8 @@ impl If2StageResult {
 /// the leg is inconclusive and we judge on Â alone.
 fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
     use crate::evidence::NATS_TO_DB;
-    use crate::fit::config_v2::GateConfig;
 
-    let gate = state
-        .resolved_gate
-        .clone()
-        .unwrap_or_else(GateConfig::default);
+    let gate = state.resolved_gate.clone().unwrap_or_default();
 
     let max_a = state
         .tail_chain_agreement

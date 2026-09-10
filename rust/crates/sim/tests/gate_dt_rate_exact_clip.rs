@@ -12,6 +12,7 @@
 //!   - `pgas_exact_tiling` DOES clip, but `seir_vaccine_seasonal`'s
 //!     `dt_substep` sensitivity comes from the `1-exp(-rate·dt)` KERNEL and the
 //!     seasonal `t0`, NOT from a rate expression that reads `dt`.
+//!
 //! So before this gate, the exact path StepClock's `EvalCtx.dt = dt_actual`
 //! decision governs — a rate FORMULA that contains `dt` — was unguarded in the
 //! clipped regime. Feeding the grid `dt` there instead would silently change

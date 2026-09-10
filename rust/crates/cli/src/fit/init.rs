@@ -265,7 +265,7 @@ mod tests {
         // LHS guarantees exactly one sample per stratum at the dim level.
         // With 100 chains and 10 bins, each stratum aligns 10:1 with bins.
         for &c in &bin_counts {
-            assert!(c >= 8 && c <= 12,
+            assert!((8..=12).contains(&c),
                 "LHS strata uneven: counts = {:?}", bin_counts);
         }
     }
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn chain_starts_to_param_vecs_overwrites_estimated_indices() {
-        let base_specs = vec![
+        let base_specs = [
             ep_with_idx("beta",  0, 0.0, 1.0, Transform::None, 0.5),
             ep_with_idx("gamma", 2, 0.0, 1.0, Transform::None, 0.3),
         ];

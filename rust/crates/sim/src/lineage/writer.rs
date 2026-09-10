@@ -45,6 +45,7 @@ pub struct LineListEntry {
     ///   - recovery / progression (uniform within the source pool of size
     ///     `|I_b|`): `log(1/|I_b|)`;
     ///   - import / seed / non-routable: `0.0` (no attribution choice).
+    ///
     /// Summing this column over a line list gives
     /// `log P(line list | event log)` — the only clean exact likelihood the
     /// architecture provides.

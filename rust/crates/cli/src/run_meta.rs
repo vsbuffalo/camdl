@@ -721,7 +721,7 @@ pub fn write_fit_sidecar(
         merged.training_window = effective_window;
         serde_json::to_vec_pretty(&merged)
     }
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
     std::fs::write(fit_segment.join("fit.meta.json"), bytes)
 }
 
@@ -1007,7 +1007,7 @@ mod tests {
         };
         // Build one entry per `ValueSource` variant tag — exercises
         // every branch of `ValueSource::tag()` through the round-trip.
-        let resolved_entries = vec![
+        let resolved_entries = [
             ResolvedParameter {
                 name:  "beta".into(),
                 value: 0.42,

@@ -647,6 +647,11 @@ pub fn beta_logpdf(x: f64, mean: f64, concentration: f64) -> f64 {
 /// Returns `(0.0, 0.0)` outside the domain, matching the value function's
 /// `NEG_INFINITY` clamp — the gradient of a constant `-inf` floor is zero, as in
 /// the other helpers.
+// The three domain guards below are kept as separate negated terms rather than
+// folded into one negation: each is an independent NaN guard (see the note
+// inside), and De Morgan's rewrite would leave that comment describing an
+// expression the reader can no longer see.
+#[allow(clippy::nonminimal_bool)]
 pub fn beta_logpdf_grad(x: f64, mean: f64, concentration: f64) -> (f64, f64) {
     let a = mean * concentration;
     let b = (1.0 - mean) * concentration;

@@ -1166,7 +1166,7 @@ mod tests {
             QuantityDrawValue::Value(f64::NAN),
         ];
         let draws: Vec<Vec<QuantityResult>> =
-            vals.iter().map(|v| vec![QuantityResult::Scalar(v.clone())]).collect();
+            vals.iter().map(|v| vec![QuantityResult::Scalar(*v)]).collect();
 
         let rendered = render_quantities(
             &quantities, &draws, &[], Mode::Banded,

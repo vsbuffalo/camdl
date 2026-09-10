@@ -1177,7 +1177,7 @@ pub fn run_stage(
                     .map(|(o, u)| (o.as_str(), u.as_str()));
                 let tsv_path = chain_dir.join("trajectories.tsv");
                 write_trajectories_tsv(
-                    &tsv_path, &draws, &traj_columns, date_origin,
+                    &tsv_path, &draws, traj_columns, date_origin,
                     &traj_model_hash, "pgas", Granularity::Substep,
                 ).map_err(|e| format!("pgas chain {}: {}", chain_id + 1, e))?;
 
@@ -1213,7 +1213,7 @@ pub fn run_stage(
 
                 // The writer above already validated every draw's shape, so a
                 // refusal here is a defect, not a data condition.
-                let flat = super::latent_convergence::ChainPaths::from_draws(&draws, &traj_columns)
+                let flat = super::latent_convergence::ChainPaths::from_draws(&draws, traj_columns)
                     .map_err(|e| format!("pgas chain {}: {}", chain_id + 1, e))?;
                 chain_paths.lock().unwrap()[chain_id] = flat;
             }

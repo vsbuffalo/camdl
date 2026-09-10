@@ -189,24 +189,22 @@ fn check_camdlc_version_once(camdlc: &std::path::Path) {
         if version_check_disabled() {
             return;
         }
-        match std::process::Command::new(camdlc)
+        // A failed spawn is ignored: there is nothing useful to report.
+        if let Ok(out) = std::process::Command::new(camdlc)
             .arg("--camdl-version")
             .output()
         {
-            Ok(out) => {
-                let hint = detect_camdl_shadowing(camdlc);
-                if let Err(msg) = eval_version_output(
-                    &out.stdout,
-                    out.status.success(),
-                    crate::version::GIT_HASH,
-                    &camdlc.display().to_string(),
-                    hint.as_deref(),
-                ) {
-                    eprintln!("{msg}");
-                    std::process::exit(1);
-                }
+            let hint = detect_camdl_shadowing(camdlc);
+            if let Err(msg) = eval_version_output(
+                &out.stdout,
+                out.status.success(),
+                crate::version::GIT_HASH,
+                &camdlc.display().to_string(),
+                hint.as_deref(),
+            ) {
+                eprintln!("{msg}");
+                std::process::exit(1);
             }
-            Err(_) => {} // spawn failed; nothing useful to report
         }
     });
 }
@@ -816,7 +814,7 @@ fn write_deps_sidecar(cache_path: &std::path::Path, deps: &[ReadDep]) -> std::io
     let sidecar = deps_sidecar_path(cache_path);
     let payload = DepsSidecar { schema: SIDECAR_SCHEMA, reads: deps.to_vec() };
     let json = serde_json::to_vec(&payload)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     let mut staging = sidecar.clone().into_os_string();
     staging.push(format!(".{}.tmp", std::process::id()));
     let staging = std::path::PathBuf::from(staging);
@@ -2368,20 +2366,6 @@ pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
     Ok(out)
 }
 
-/// Load a TOML params file and apply values to the model's parameters.
-///
-/// **Used only by the simulate CAS-identity path** (`build_simulate_cas_sink`)
-/// for partial parameter resolution: it deliberately holds back the scenario
-/// half so the base params and the scenario delta hash into separate identity
-/// levels (the `params` vs `scenario` levels). Every other subcommand routes
-/// through `params_resolver::resolve_parameters` instead.
-///
-/// Validates the resulting `model.parameters` after applying — if the
-/// supplied file leaves any *resolved* parameter with a non-finite
-/// value or out-of-bounds value, returns an error. Params still at
-/// `value = None` (i.e. waiting on the scenario half) are skipped by
-/// `validate_parameter_values`.
-
 /// One-row column-per-parameter TSV → parameter map (gh#637). Bookkeeping
 /// columns (`chain`, `draw`, `replicate`, `seed`, `scenario`) are skipped so
 /// a row cut from `draws.tsv` or written by `--draws-out` reads back as-is.
@@ -2415,6 +2399,19 @@ fn load_params_single_row_tsv(path: &str) -> Result<HashMap<String, f64>, String
     }
     Ok(out)
 }
+/// Load a TOML params file and apply values to the model's parameters.
+///
+/// **Used only by the simulate CAS-identity path** (`build_simulate_cas_sink`)
+/// for partial parameter resolution: it deliberately holds back the scenario
+/// half so the base params and the scenario delta hash into separate identity
+/// levels (the `params` vs `scenario` levels). Every other subcommand routes
+/// through `params_resolver::resolve_parameters` instead.
+///
+/// Validates the resulting `model.parameters` after applying — if the
+/// supplied file leaves any *resolved* parameter with a non-finite
+/// value or out-of-bounds value, returns an error. Params still at
+/// `value = None` (i.e. waiting on the scenario half) are skipped by
+/// `validate_parameter_values`.
 pub fn apply_params_file(model: &mut ir::Model, path: &str) -> Result<(), String> {
     let vals = load_params_toml(path)?;
     for p in &mut model.parameters {
@@ -3544,7 +3541,7 @@ pub fn simulate_compiled(
             let cfg = OdeConfig { t_start, t_end, dt: run.dt };
             // Forward simulate never coarsens — coarse burn-in is a fit-time
             // likelihood option (see `compute_ode_loglik`), not a simulate surface.
-            sim::ode::run_ode(compiled, &params, &cfg, tick_opt.as_deref_mut(), None)
+            sim::ode::run_ode(compiled, &params, &cfg, tick_opt, None)
         }
     }
     .map_err(|e| format!("simulation error: {:?}", e))?;
