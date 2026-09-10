@@ -648,12 +648,18 @@ pub const ESS_COLLAPSE_FRACTION: f64 = 0.1;
 /// probability zero and `u` reduces to the empirical CDF as before.
 ///
 /// Czado, Gneiting & Held (2009) is the count-data assessment
-/// reference; their own *nonrandomized* PIT is the mean of this
-/// quantity over `v` (`v = 0.5` at a sample predictive). The
-/// randomized form is chosen so each scored value is itself uniform
-/// and every existing consumer (coverage, histogram) reads it
-/// unchanged; see §3.3 of the 2026-08-29 honest-predictive-evaluation
-/// proposal.
+/// reference. Their *nonrandomized* PIT is not a per-observation
+/// value: they average over the randomization to obtain, for each
+/// observation, the conditional CDF of `u` given `y` — a ramp across
+/// the atom's interval — then aggregate those CDFs over observations
+/// and difference the aggregate on a grid into a histogram. `v = 0.5`
+/// is the mean of that per-observation distribution, not a drop-in
+/// nonrandomized PIT: histogramming `v = 0.5` values gives a picket
+/// fence of atom midpoints (on Poisson(3) there are only 15 distinct
+/// ones with any mass), not a calibration plot. The randomized form
+/// is chosen so each scored value is itself uniform and every
+/// existing consumer (coverage, histogram) reads it unchanged; see
+/// §3.3 of the 2026-08-29 honest-predictive-evaluation proposal.
 ///
 /// Tie detection is exact `f64` equality: count predictive draws are
 /// integers stored exactly, and for continuous draws equality is
@@ -1143,7 +1149,8 @@ mod tests {
         // u = P̂(X < y) + v·P̂(X = y). With samples [1, 2, 2, 3] and y = 2:
         // P̂(X < 2) = 1/4, P̂(X = 2) = 1/2. v = 0 gives the lower CDF limit,
         // v = 1 the naive P̂(X ≤ y) (the old, tie-biased value), v = 0.5 the
-        // CGH nonrandomized midpoint.
+        // midpoint of the atom's interval (the conditional mean, not CGH's
+        // nonrandomized PIT).
         let s = [1.0, 2.0, 2.0, 3.0];
         assert!(approx_eq(pit_sample_randomized(&s, 2.0, 0.0), 0.25, 1e-12));
         assert!(approx_eq(pit_sample_randomized(&s, 2.0, 0.5), 0.50, 1e-12));
@@ -1161,7 +1168,10 @@ mod tests {
         // samples from the SAME count distribution (Poisson(3)), so the
         // forecast is calibrated by construction. The randomized PIT must
         // be uniform; the naive P̂(X ≤ y) (= v = 1) must sit visibly above
-        // 0.5 on average, by ~half the mean atom mass Σ p(k)²/2 ≈ 0.06.
+        // 0.5 on average, by half the mean atom mass Σ p(k)²/2: for
+        // Poisson(3), Σ p(k)² = 0.1667, so the bias is 0.0833 and the naive
+        // mean is 0.5833 (measured 0.5828). The 0.03 threshold below is well
+        // inside that.
         let mut rng = crate::rng::StatefulRng::new_stream(42, 0);
         let n_rep = 2000;
         let s_size = 400;
