@@ -76,7 +76,12 @@ jobs:
           components: clippy
 
       - name: Clippy
-        run: cd rust && cargo clippy --all-targets -- -D warnings
+        # `--workspace` is required, not decoration. `rust/Cargo.toml` declares
+        # the workspace root as a package of its own (`camdl-tests`), so a bare
+        # `cargo clippy` lints only that package and compiles `sim`, `cli` and
+        # `io` as dependencies, which clippy-driver never inspects. Without it
+        # the gate cannot go red for anything in the real crates (gh#743).
+        run: cd rust && cargo clippy --workspace --all-targets -- -D warnings
 
       # make test-rust builds camdlc + the release binaries, symlinks camdlc onto
       # PATH (so spawned `camdl` finds it), and runs `cargo test --workspace
