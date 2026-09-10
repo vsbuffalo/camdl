@@ -562,6 +562,12 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
         }
     }
     let mut manifests: Vec<String> = keyed_children(segment, "predictive", false);
+    // gh#892: `fit predict` writes `report.json` on every run — the list of
+    // deterministic failures, empty when nothing refused — keyed by chain
+    // selection like the predictive itself (`report-excl3,5.json`). It is the
+    // file that says whether a predictive is complete, so it belongs beside
+    // the predictive rather than being reachable only by knowing it is there.
+    manifests.extend(keyed_children(segment, "report", false));
     manifests.extend(keyed_children(segment, "quantities", false));
     manifests.push("fit.meta.json".into());
     for manifest in &manifests {

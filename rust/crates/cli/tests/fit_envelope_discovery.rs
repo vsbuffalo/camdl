@@ -170,6 +170,15 @@ thin = 1
         show.contains("quantities/peak.tsv"),
         "show envelope must list a quantities/ output path; got:\n{show}"
     );
+    // gh#892: and the file that says whether that predictive is complete.
+    // `fit predict` writes `report.json` on every run — the deterministic
+    // failures, empty when nothing refused — so a listing that omits it sends
+    // a reader to the band without the record of what did not make it.
+    assert!(
+        show.contains("report.json"),
+        "show envelope must list the predictive's report.json beside it; \
+         got:\n{show}"
+    );
     // The header fields the proposal specifies are present.
     assert!(show.contains("kind") && show.contains("fit"), "kind=fit header; got:\n{show}");
     assert!(show.contains("foo"), "label is surfaced; got:\n{show}");
