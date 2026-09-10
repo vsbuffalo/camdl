@@ -2384,4 +2384,42 @@ mod tests {
         assert_eq!(counts.n_saved, vec![3, 2]);
         assert_eq!(counts.n_forkable, vec![2, 2]);
     }
+
+    /// gh#823: the `chain_id` the summary records is the CHAIN, 1-based to
+    /// match the `chain_N/` directories — never the row's position in the
+    /// block, and never the 0-based index the producer works in.
+    ///
+    /// `retained` holds only the chains that survived their start (gh#607), so
+    /// on a stage where any chain was refused the two differ. Here chains 1 and
+    /// 3 of 4 refused, leaving chains 2 and 4: the block must say `[2, 4]`. A
+    /// positional emitter says `[1, 2]` and sends a reader inspecting "chain 1"
+    /// to a directory holding only `trace.tsv`, while a 0-based one says
+    /// `[1, 3]` — the ids of two OTHER chains, which is worse, because both
+    /// exist and neither is the one described.
+    ///
+    /// `chain_starts.tsv` is 0-based in its own `chain_id` column and says so
+    /// in its header (`chain_id is 0-based; that chain's outputs are under
+    /// chain_<chain_id + 1>/`), so the two artifacts disagree by exactly one
+    /// and each states which it is. This test pins THIS one.
+    #[test]
+    fn the_recorded_chain_id_is_the_surviving_chain_one_based() {
+        // Chains 1 and 3 (1-based) were refused, so `retained` — which the
+        // caller builds from `all_results`, the survivors in 0-based chain
+        // order — holds 0-based 1 and 3.
+        let retained = vec![(1usize, vec![10, 12]), (3usize, vec![10, 12])];
+        // Indexed by 0-based chain id over ALL chains, refused ones included:
+        // the refused chains' slots are empty because they never ran.
+        let saved_sweeps = vec![vec![], vec![10, 12], vec![], vec![10]];
+        let counts = SavedPathCounts::measure(&retained, &saved_sweeps);
+        assert_eq!(
+            counts.chain_id,
+            vec![2, 4],
+            "the surviving chains' own ids, matching chain_2/ and chain_4/"
+        );
+        // And the counts are read from each survivor's OWN slot, not from the
+        // row's position — chain 4 wrote one path, chain 2 wrote two. A
+        // positional lookup would report chain 2's counts against chain 4.
+        assert_eq!(counts.n_saved, vec![2, 1]);
+        assert_eq!(counts.n_forkable, vec![2, 1]);
+    }
 }
