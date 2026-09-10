@@ -815,20 +815,18 @@ Examples:
   # Force rerun even if cached results match
   camdl fit run fit.toml --seed 1 --force
 
-  # Override the stage's init mode via the new `--init` flag (renamed
-  # from --init-method per 2026-05-25 CLI UX rev 2)
-  camdl fit run fit.toml --stage scout --init lhs
+  # Override the file's `starts` rule: draw every chain's start apart
+  camdl fit run fit.toml --starts lhs
 
-  # Warm-start every chain from a prior fit's MLE (replaces the
-  # removed --starts-from <dir> flag)
-  camdl fit run fit.toml --stage refine --init from_mle --mle fits/scout/
+  # Chain two files by handle: label the first, source the second from it
+  camdl fit run scout.toml --seed 1 --label scout
+  camdl fit run posterior.toml --seed 1 --starts from_posterior=@scout
 
-  # Warm-start from a posterior draws TSV / fit-results directory
-  camdl fit run fit.toml --stage pgas --init from_posterior \\
-      --posterior fits/scout/draws.tsv
+  # Every chain at a stored fit's estimate (R̂ is then not assessed)
+  camdl fit run posterior.toml --starts from_mle=@scout
 
-  # Warm-start from a hand-written flat params TOML
-  camdl fit run fit.toml --stage refine --init from_params --params truth.toml
+  # Every chain at the point in a hand-written flat params TOML
+  camdl fit run fit.toml --starts from_params=truth.toml
 
 Notes:
   - PGAS/PMMH fits can resume a partial run with `--resume`.
@@ -990,7 +988,7 @@ pub struct FitRunArgs {
     /// Binomial sampler for a PGAS stage's chain-binomial draws: `btpe`
     /// (default) or `btrs` (Hörmann 1993; faster, gh#747).
     ///
-    /// Requires --stage, and for the same reason as the flags above: the two
+    /// For the same reason as the flags above: the two
     /// samplers are NOT bit-compatible — a different rejection scheme accepts
     /// different draws from the same stream — so this is resolved into the
     /// stage's `binomial` field and keyed into its identity. Two runs differing
@@ -1063,8 +1061,7 @@ pub struct FitRunArgs {
     /// sweep as plain particle Gibbs, without the ancestor-sampling move.
     /// A diagnostic control (what does AS contribute, and what does its
     /// density pass cost?); changes the sampled draws, so the run stores
-    /// under its own address. One-way: edit TOML to flip back. Requires
-    /// --stage.
+    /// under its own address. One-way: edit TOML to flip back.
     #[arg(long)]
     pub no_ancestor_sampling: bool,
 
@@ -1090,14 +1087,12 @@ pub struct FitRunArgs {
     // ── PFilter-specific algorithm overrides  ───────
 
     /// Override [method.record_ancestry] to true (record
-    /// ancestor indices for smoothing-path reconstruction). Requires
-    /// --stage.
+    /// ancestor indices for smoothing-path reconstruction).
     #[arg(long)]
     pub record_ancestry: bool,
 
     /// Override [method.record_prequential] to true (record
-    /// per-step predictive samples for `camdl compare`). Requires
-    /// --stage.
+    /// per-step predictive samples for `camdl compare`).
     #[arg(long)]
     pub record_prequential: bool,
 }
