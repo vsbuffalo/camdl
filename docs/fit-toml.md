@@ -1,10 +1,10 @@
 # The `fit.toml` reference
 
 A `fit.toml` is the runtime config for `camdl fit run` — it names the model, the
-data, what to estimate, what to fix, and the inference stages. It is **not**
-part of the model language: the `.camdl` file declares parameter names, bounds,
-and priors; the `fit.toml` selects which parameters to estimate and how. Every
-field below is verified against the parser (`config_v2.rs`).
+data, what to estimate, what to fix, and the one inference method to fit with.
+It is **not** part of the model language: the `.camdl` file declares parameter
+names, bounds, and priors; the `fit.toml` selects which parameters to estimate
+and how. Every field below is verified against the parser (`config_v2.rs`).
 
 For the workflow these configs drive, see `camdl docs workflow`.
 
@@ -31,22 +31,26 @@ s0    = { bounds = [0.01, 0.30], perturb_only_at_t0 = true }  # initial state
 rho = 0.6
 k   = 10.0
 
-[stages.scout]                    # find the basin (MLE)
-algorithm  = "if2"
-backend    = "chain_binomial"
-chains     = 8
-particles  = 2000
-iterations = 150
-cooling    = 0.7
-
-[stages.posterior]                # sample the posterior, warm-started from scout
+[method]                          # the one way this file fits the problem
 algorithm = "pgas"
 backend   = "chain_binomial"
 chains    = 4
 particles = 600
 sweeps    = 300
-init_mle  = "scout"               # take this stage's base point from the scout stage
+# starts = "from_prior"           # the default here: every parameter has a prior
 ```
+
+The file has two halves. Everything above `[method]` is the **problem** — the
+model, the data, the estimate/fixed partition, the priors — and every reader of
+a fit config reads it: `simulate --draws prior --fit`, `pfilter --fit`,
+`survey --fit`, `profile --fit`. A file with no `[method]` at all is a complete
+problem for those. `[method]` is the **inference**: how `fit run` fits that
+problem. A second way of fitting the same problem is a second file with the same
+problem half and a different `[method]`
+(`camdl fit new --from fit.toml
+fit-if2.toml` copies the file with provenance;
+edit the table). The store puts both under one `fits/<stem>-<h8>/` segment,
+because that level hashes the problem alone.
 
 ## Sections
 
@@ -69,43 +73,48 @@ starts the filter from the prior with nothing assimilated from the training
 window, which is a different (and unfairly harsh) quantity. The recipe is
 spelled out under "Out-of-sample validation" in `camdl docs inference`.
 
+`[synthetic]` may stand beside `[data]`: `fit run` then fits the real data, and
+the synthetic block records the truth a recovery check reads.
+
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
 
-| key                                          | meaning                                                                                                                                                                                                                                                                                                           |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                                                                                                        |
-| `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                                                                                                            |
-| `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh` stage; `if2` ignores it. See "Priors" below.                                                                                                                                                                                                                 |
-| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type if omitted.                                                                                                                                                                                                                     |
-| `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is an IF2 perturbation schedule: `if2` reads it and every other stage ignores it, which is fine. A config-load error only when the fit has **no** `if2` stage at all, since there the declaration does nothing. |
-| `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds.                                                                                                                                                                                                                                             |
+| key                                          | meaning                                                                                                                                                                                                                     |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                  |
+| `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                      |
+| `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh`/`mh`/`nuts` method; `if2` ignores it. See "Priors" below.                                                                                                              |
+| `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type if omitted.                                                                                                                               |
+| `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is an IF2 perturbation schedule: `if2` reads it and every other method ignores it, so a shared problem half can carry it. |
+| `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds. Ignored by every other method.                                                                                                                        |
 
 **`[fixed]`** — `param = value` for every model parameter you are _not_
 estimating. camdl requires every declared parameter to be either estimated or
 fixed.
 
-**`[stages.<name>]`** — stages are **user-named**, and the order they appear in
-the file is the order they run. `algorithm` picks the method and `backend` the
-simulator it fits against: `chain_binomial` for the stochastic-process methods
-(`if2`, `pgas`, `pmmh`, `pfilter` — the ones that need chain-binomial process
-noise and `balance`), or `ode` for the deterministic-likelihood methods
-(`nl-sbplx` / `nl-bobyqa` MLE and the Bayesian `mh` / `nuts`). Each algorithm is
-valid on exactly one backend — `camdl fit methods` lists the pairs, and an
-invalid pair is rejected at load. A downstream stage warm-starts from an
-upstream one with `init_mle = "<stage-name>"`.
+**`[method]`** — the one inference method. `algorithm` picks the method and
+`backend` the simulator it fits against: `chain_binomial` for the
+stochastic-process methods (`if2`, `pgas`, `pmmh`, `pfilter` — the ones that
+need chain-binomial process noise and `balance`), or `ode` for the
+deterministic-likelihood methods (`nl-sbplx` / `nl-bobyqa` MLE and the Bayesian
+`mh` / `nuts`). Each algorithm is valid on exactly one backend —
+`camdl fit methods` lists the pairs, and an invalid pair is rejected at load.
+`starts` says where the chains begin (below). There is no map of named stages
+and no execution order: a file declares one method, and a pipeline is two files
+run in turn.
 
 **`[config]`** — fit-wide simulator settings: `dt` (the integrator step, default
 `1.0`). The `dt` you care about lives here; a `dt` written at the top level of
 the file is a typo, not a setting. (The forward backend for synthetic-data
-generation is `[synthetic].backend`, not a `[config]` setting — gh#241; the fit
-stages declare their own `backend`.)
+generation is `[synthetic].backend`, not a `[config]` setting — gh#241; the
+method declares its own `backend`.)
 
 ## How paths resolve
 
 **Every path written in the `fit.toml` is relative to the `fit.toml` itself** —
 `[model].camdl`, `[data].file`, each `[data.observations]` and `[data.holdout]`
-stream, and `output_dir`. Absolute paths pass through unchanged (and draw a
-portability warning, since they pin the config to one machine's layout).
+stream, `output_dir`, and a `starts` source that is a file
+(`from_params = "theta.toml"`). Absolute paths pass through unchanged (and draw
+a portability warning, since they pin the config to one machine's layout).
 
 The rule is the one Cargo and `pyproject.toml` use: a path written **in a file**
 anchors at that file, so the config is relocatable as a unit and runs the same
@@ -138,49 +147,122 @@ so you can confirm where the run tree is going before it is written.
 
 ## Where a chain starts
 
-Two settings decide this, and they answer different questions.
+`starts`, under `[method]`, is one key for one concept: where the chains begin.
+Its value is a bare rule name, or a one-key table naming a rule and its source.
 
-**`[estimate].start` sets the base point** — one θ for the whole stage. It is
-the top of a precedence chain: an upstream stage's result (`init_mle`) beats it,
-and below it sit `[fixed]`, the model's declared parameter value, and finally a
-draw from bounds if nothing else supplies one.
+```toml
+[method]
+starts = "from_prior" # one independent draw per chain
+starts = "uniform_unconstrained"
+starts = "lhs"
+starts = "uniform"
+starts = "single" # every chain at the base point
+starts = { from_posterior = "@base" } # one row of @base's posterior per chain
+starts = { from_mle = "@mle" } # every chain at @mle's point estimate
+starts = { from_params = "theta.toml" } # every chain at the values in the file
+```
 
-**`init` decides how the chains are spread around that base point.** A stage
-with `chains = 1`, or with `init = "single"`, has nothing to spread, so every
-chain runs from the base point itself.
+The rules fall into two kinds, and the kind is what R̂ needs to know.
 
-| `init`                                        | where the chains start                                                                                                                                         |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `single`                                      | every chain at the base point                                                                                                                                  |
-| `uniform`                                     | chain 1 at the base point; the rest uniform within `bounds`                                                                                                    |
-| `lhs`                                         | Latin-hypercube stratified over `bounds`; base point unused                                                                                                    |
-| `uniform_unconstrained` (default)             | spread on the unconstrained scale; base point unused                                                                                                           |
-| `survey_top_k`                                | the top-K points from a `camdl survey` run; base point used only for a parameter the survey did not sweep                                                      |
-| `from_prior`                                  | draws from the declared priors; base point unused                                                                                                              |
-| `from_posterior` / `from_mle` / `from_params` | rows or values read from the named source; a name missing from that source falls back to bounds-uniform, or to the base point when the model declares no range |
+**Spread** rules give each chain its own start, so the between-chain R̂ can say
+whether the chains found the same posterior:
 
-The three spreading modes — `uniform`, `lhs`, `uniform_unconstrained` — fall
-back to the base point at `chains = 1`, since with one chain there is nothing to
-spread. The source-reading modes do not: they read one row from their source
-however many chains you asked for.
+| `starts`                          | where the chains start                                                                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `from_prior`                      | one draw from the declared priors per chain; base point unused                                                                                    |
+| `uniform_unconstrained`           | Stan-style boundary-avoiding draws on the unconstrained scale; base point unused                                                                  |
+| `lhs`                             | Latin-hypercube stratified over `bounds`; base point unused                                                                                       |
+| `uniform`                         | chain 1 at the base point; the rest uniform within `bounds`                                                                                       |
+| `{ from_posterior = "<handle>" }` | one row of a stored fit's posterior per chain (or of a draws TSV named directly); a parameter absent from the source falls back to bounds-uniform |
 
-So `start` is load-bearing wherever the table says "base point". When a mode
-ignores it, that is deliberate: the mode's whole purpose is to explore, and the
-chain-agreement gate is only informative if the chains genuinely start apart.
+**Point** rules put every chain at one point. R̂ is then _not assessed_ — chains
+that began together agree by construction, and the summary says so instead of
+reporting a pass:
 
-An `if2`, `pgas` or `pmmh` stage writes a `chain_starts.tsv` recording where
-every chain actually began, before any perturbation, and names the init that
-supplied those values. That file, not the config, is the authority on what a run
-did — a stage chained with `init_mle` records `from_mle` on every row, because
-every chain starts at the upstream stage's single point. A `nuts` or `nlopt`
-stage writes no such file; for those, the fit's `chain_init_source` is the only
-record of where the chains began.
+| `starts`                     | where the chains start                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `single`                     | every chain at the base point                                                                                 |
+| `{ from_mle = "<handle>" }`  | every chain at a stored fit's point estimate; a parameter absent from the source falls back to bounds-uniform |
+| `{ from_params = "<toml>" }` | every chain at the values in a flat params TOML                                                               |
+
+A **handle** is any fit reference: `@label`, a fit-id prefix, a method leaf's
+`run_id` prefix, the leaf directory, or a `fit.toml`. A source whose stored
+verdict is not converged is refused, since starting from an unconverged fit
+launders its multi-modality into this one; `fit run --allow-nonconverged-source`
+records the choice to start from it anyway. A `@label` names the fit segment,
+which two method files of one problem share: while it holds one leaf the label
+is enough, and once it holds several the refusal lists them — name the leaf by
+its directory or its `run_id` prefix.
+
+**The default.** When the file does not say, `starts` is `from_prior` if every
+estimated parameter has a prior the chains can be drawn from, and
+`uniform_unconstrained` otherwise; `fit run` prints which, and why. A
+bounds-uniform draw at province scale is routinely a start the filter cannot
+score, because a fixed relative error in a rate is a standardised residual that
+grows with the square root of the population; a prior carries the scale.
+
+**`[estimate].start` sets the base point** — one θ. It is load-bearing under
+`single` and `uniform` (and for a parameter a `from_mle` / `from_params` source
+does not name); the other rules ignore it on purpose, and `fit run` notes when a
+declared `start` was unused. The three spreading rules — `uniform`, `lhs`,
+`uniform_unconstrained` — fall back to the base point at `chains = 1`, since
+with one chain there is nothing to spread. The source-reading rules do not: they
+read from their source however many chains you asked for.
+
+`starts` is part of the method's identity: the same method under a different
+rule is a different run, and a sourced rule folds the source file's content into
+the run's dependencies, so a regenerated upstream re-keys the fits that started
+from it. `fit run --starts <spec>` overrides the file with the same spellings
+(`--starts from_prior`, `--starts from_mle=@mle`).
+
+Every multi-chain sampler (`if2`, `pgas`, `pmmh`, `mh`, `nuts`) writes a
+`chain_starts.tsv` recording where every chain actually began, before any
+perturbation, and names the rule that supplied those values. That file, not the
+config, is the authority on what a run did — a fit started with `from_mle`
+records `from_mle` on every row, because every chain starts at the upstream
+fit's single point. The optimizer-only methods (`nl-sbplx`, `nl-bobyqa`) write
+none.
+
+A spread rule is a lottery over one draw, so a start the filter cannot score is
+one unlucky draw rather than a verdict on the chain: it is redrawn under the
+same rule, up to ten times per chain, and the chain is refused only when every
+attempt fails. Every attempt is in `chain_starts.tsv` — one row per attempt,
+with `attempt`, `status` (`accepted`, `rejected`, or `refused`), the filter's
+`ess` at refusal and the `reason` — and the header line counts the redraws
+(`retried=K`). A point rule has nothing to redraw and gets its one try.
 
 > **Unknown keys are rejected.** A misplaced or misspelled key is a hard error
 > naming the offending key — `fit.toml` is parsed strictly. A top-level `dt` (it
-> belongs in `[config]`) or `particle` (it is `particles`, under a stage) fails
-> at load rather than being silently dropped, so a sweep that varies a typo'd
-> knob can't quietly produce identical fits.
+> belongs in `[config]`) or `particle` (it is `particles`, under `[method]`)
+> fails at load rather than being silently dropped, so a sweep that varies a
+> typo'd knob can't quietly produce identical fits.
+
+## Migrating a `[stages]` file
+
+A file that still carries the stage map is refused at load, and the message
+spells the rewrite for that file:
+
+```
+legacy table `[stages.posterior]`
+  replacement: rename to `[method]` and run it with
+    camdl fit run fit.toml
+  a file carries one `[method]`; put `[stages.scout]` in its own file
+  `init_mle = "scout"` has no replacement in the file: it started every chain at
+  scout's point estimate, which makes R̂ uninformative. Run scout first and, if a
+  warm start is wanted, write one of
+    starts = { from_posterior = "@scout" }   # one draw per chain (keeps R̂ meaningful)
+    starts = { from_mle = "@scout" }         # every chain at one point (R̂ not assessed)
+  `init = "lhs"` becomes `starts = "lhs"`
+  See `camdl docs fit-toml`.
+```
+
+Nothing is converted silently. `init` is `starts`; `init_mle` is one of the two
+sourced rules, chosen by the author, with the upstream run first and named by
+handle; `survey_top_k` with `survey_path` / `survey_top_k_n` is gone — a survey
+landscape is not a posterior — and `from_prior`, or `from_posterior` from a
+short run, takes its place; the top-level `fit_starts` key, which no runner
+read, is gone with it (`from_prior` is now the default whenever every estimated
+parameter declares a prior).
 
 ## Where scoring begins
 
@@ -236,12 +318,14 @@ those sources. `truncated_normal`'s `lower`/`upper` must equal the parameter's
 bounds (the prior's support and the search box are the same interval).
 
 **Precedence:** a `fit.toml` `[estimate].prior` overrides the model's `~`
-declaration; if neither is present, a Bayesian stage falls back to flat **with a
-warning** — camdl refuses _silent_ implicit-flat priors, because the prior shows
-up in the posterior. The explicit `{ flat = {} }` is how you say "flat here, on
-purpose" without the warning.
+declaration; if neither is present, a Bayesian method falls back to flat **with
+a warning** — camdl refuses _silent_ implicit-flat priors, because the prior
+shows up in the posterior. The explicit `{ flat = {} }` is how you say "flat
+here, on purpose" without the warning. A flat prior is not a distribution the
+chains can be drawn from, so a parameter left flat also moves the default
+`starts` from `from_prior` to `uniform_unconstrained`.
 
-## Stage algorithms
+## Method algorithms
 
 | `algorithm`              | backend          | role                                              | key fields                                                                            |
 | ------------------------ | ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -264,7 +348,7 @@ is gradient-free and carries no such requirement. See `camdl docs inference`
 
 ```toml
 # A gradient-based Bayesian fit on the ODE skeleton.
-[stages.posterior]
+[method]
 algorithm = "nuts" # or "mh" for the gradient-free sampler (`iterations` + `burn_in`)
 backend = "ode"
 chains = 4
@@ -272,24 +356,8 @@ warmup = 500 # step-size adaptation draws (discarded)
 samples = 500 # posterior draws kept per chain
 ```
 
-Common to every stage:
-
-- `init = "uniform_unconstrained"` (default, Stan-style boundary-avoiding draws
-  on the unconstrained scale) `| "lhs" | "single" | "uniform" | "survey_top_k"`
-  — how per-chain starting points are drawn.
-- `init_mle = "<upstream-stage>"` — where this stage's base point comes from.
-
-### Seeding chains from a survey
-
-The survey → fit handoff (workflow step 3 → 4):
-
-```toml
-[stages.scout]
-algorithm = "if2"
-init = "survey_top_k" # draw chain starts from a survey landscape
-survey_path = "results/surveys/<survey-run-dir>"
-# survey_top_k_n defaults to `chains`
-```
+Common to every method: `starts` (above), and the `dt_check` sub-table where the
+method runs a dt-convergence audit.
 
 ### Tempering (PGAS)
 
@@ -316,4 +384,4 @@ The model file is the source of truth for what _can_ be estimated; the
 
 So the minimal `fit.toml` for a model that already declares bounds and priors is
 just `[model]`, `[data]`, an `[estimate]` listing names (no per-param fields),
-`[fixed]`, and the stages.
+`[fixed]`, and a `[method]`.

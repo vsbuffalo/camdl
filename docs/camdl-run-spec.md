@@ -52,7 +52,7 @@ algorithm explores and which it treats as known constants.
 ```
 model.camdl      → what the model IS (structure, priors, scenarios)
 params.toml      → a point m ∈ M (concrete parameter values)
-fit.toml         → how inference RUNS (what to estimate, priors, stages, data)
+fit.toml         → how inference RUNS (what to estimate, priors, data, one method)
 batch TOML       → how a batch RUNS (sweep/design/scenarios/seeds)
 ```
 
@@ -69,11 +69,11 @@ outside a preset.
 | Scenarios (σ)         | `.camdl scenarios { }`                      | CLI `--enable`/`--disable`, batch `[[scenario]]`   |
 | Interventions         | `.camdl` only                               | scenarios and `--enable`/`--disable` toggle them   |
 | Priors                | `.camdl` `~`, `fit.toml [estimate.p.prior]` | fit.toml wins over the model                       |
-| Backend / `dt`        | CLI, batch `[config]`, fit.toml stage       | `--backend` / `--dt` on the simulate-side commands |
+| Backend / `dt`        | CLI, batch `[config]`, fit.toml `[method]`  | `--backend` / `--dt` on the simulate-side commands |
 | Seeds                 | CLI, batch `[config.seeds]`, `fit_seeds`    | `--seed` / `--seeds`                               |
 | Sweep / design        | CLI `--sweep`, batch `[sweep]`/`[design.*]` | never                                              |
 | Estimate vs fixed     | `fit.toml` only                             | `fit run --sweep` varies a `[fixed]` parameter     |
-| Which stages run      | `fit.toml [stages.*]`                       | `fit run --stage NAME` selects one                 |
+| Which method runs     | `fit.toml [method]`                         | never — a second method is a second file           |
 
 **The model file is self-contained for a single run** provided every parameter
 gets a value from somewhere: a `.camdl` default, a params TOML, a scenario, or a
@@ -204,7 +204,7 @@ results/
 ├── .staging/             # atomic-commit scratch (§2.7)
 ├── sims/                 # one leaf per simulated cell
 ├── ensembles/            # combined wide-format TSV across a multi-cell simulate
-├── fits/                 # fit segments, each holding its stage leaves
+├── fits/                 # fit segments, each holding its method leaves
 ├── pfilters/             # standalone particle-filter loglik evaluations
 ├── surveys/              # likelihood-landscape scans
 └── profiles/             # profile-likelihood grid points
@@ -236,7 +236,7 @@ The levels per kind:
 | --------------- | ----------- | ----------------------------------------- |
 | `sim`           | `sims`      | model · config · params · scenario · seed |
 | `sim_ensemble`  | `ensembles` | model · config · params · grid            |
-| `fit_stage`     | `fits`      | fit · stage · seed                        |
+| `fit_stage`     | `fits`      | fit · method · seed                       |
 | `pfilter`       | `pfilters`  | model · config · params · seed            |
 | `survey`        | `surveys`   | model · config · box · seed               |
 | `profile_point` | `profiles`  | profile · point · stage · seed · start    |
@@ -247,7 +247,7 @@ navigation only. Do not infer kind, parameters, seed, or lineage from a path.
 
 Two mechanics constrain the segment strings. A label is lowercased and every
 character outside `[a-z0-9._-]` is mapped to `_`, so hyphens and dots survive
-(`chain_binomial-dt1`, `01-scout`, `seed_42`); a label longer than 200 bytes is
+(`chain_binomial-dt1`, `nl-sbplx`, `seed_42`); a label longer than 200 bytes is
 truncated to a prefix and suffixed `..{hash16}` so it fits inside the POSIX
 255-byte `NAME_MAX`. If two distinct leaves would land on the same directory
 name because their short hashes collide at every level, the later one's final
@@ -269,7 +269,9 @@ deliberate, version-bumped events: a per-struct `schema_version`, the crate-wide
 A fit occupies a **segment** directory `results/fits/{stem}-{fit_hash8}/`, where
 `stem` is the slugged basename of the `fit.toml` and `fit_hash8` is the
 fit-level content hash. The segment has **no `run.json` of its own** — it is a
-path level, not a leaf. Under it, one leaf per (stage × fit seed):
+path level, not a leaf. Under it, one leaf per fit seed for the file's
+`[method]`; a second method file of the same problem shares the fit hash and
+lands in a sibling segment named by its own stem:
 
 ```
 results/fits/{stem}-{fit_hash8}/
@@ -279,7 +281,6 @@ results/fits/{stem}-{fit_hash8}/
   model.ir.json                     # archived compiled IR
   model.render.json                 # archived display render (when given as .camdl)
   model.graph.json                  # archived flow graph (when given as .camdl)
-  sweep_failures.tsv                # gate failures across a --sweep grid, when any
   synthetic/truth.toml              # [synthetic] fits only
   synthetic/data/ds_NN/<stream>.tsv # [synthetic] fits only, one directory per
                                     #   sim seed, one file per stream
@@ -289,7 +290,7 @@ results/fits/{stem}-{fit_hash8}/
   observed.json
   quantities/<name>.tsv             # `quantities {}` sidecar, when requested
   quantities.json
-  {NN}-{stage}-{stage_hash8}/       # one per stage, NN = topological ordinal
+  {method}-{method_hash8}/          # the [method], labelled by its algorithm
     seed_{n}-{seed_hash8}/          # one per fit seed — the leaf
       run.json
       ...method-specific artifacts...
@@ -303,36 +304,35 @@ no `run_id`, and are overwritten in place.
 model IR digest (which itself folds `ir/VERSION` and the engine version), the
 content digests of every training data stream, the content digests of every
 explicit `[data.holdout]` stream, the engine version, and the canonical JSON of
-the resolved fit config with three slices normalized out: `stages` (each stage
-owns its own block at the stage level), `fit_seeds` (the seed level owns the
-seed), and `output_dir` (pure write-location provenance). Consequently **editing
-a `[stages.*]` block does not move the fit segment** — it re-keys only that
-stage's leaf, which is what lets you retune a posterior stage without
-invalidating the scout that feeds it. Two `fit.toml` files that differ only in
-stage blocks share one fit hash and are separated on disk only by their
-differing stems.
+the resolved fit config with three slices normalized out: `method` (the method
+level owns it), `fit_seeds` (the seed level owns the seed), and `output_dir`
+(pure write-location provenance). The fit level therefore hashes the _problem_
+alone: two `fit.toml` files that share a problem and differ in `[method]` share
+one fit hash and are separated on disk only by their stems, and editing a
+`[method]` key re-keys that file's method leaf and nothing else.
 
 Data files enter by **content**, not path: rewriting a holdout or training TSV
 in place re-keys the fit, so a stale held-out score cannot be reused. The same
-holds for chain-start sources — `--posterior`'s `draws.tsv`, `--params`' TOML,
-and a `survey_top_k` landscape all fold their file digest into the stage's
-`deps`.
+holds for chain-start sources — a `from_posterior` source's `draws.tsv`, a
+`from_mle` source's `fit_state.toml`, and a `from_params` TOML all fold their
+file digest into the method's `deps`.
 
-**Stage levels and lineage.** The stage level hashes the stage's identity
-payload (algorithm and its settings), the number of stored posterior
-trajectories, the target chain length, the _resolved_ observation alignment
-(`exact` or `snap`, per algorithm), and the stage's `deps` — the upstream
-artifacts it consumes. Folding `deps` in is what makes cross-stage invalidation
-work: `02-posterior`'s hash contains `01-scout`'s identity, so regenerating the
-scout re-keys the posterior. The stage's path label carries a zero-padded
-topological ordinal (`01-scout`, `02-posterior`) so execution order sorts
-lexicographically.
+**Method levels and lineage.** The method level hashes the method's identity
+payload (the algorithm block and the resolved `starts` rule), the number of
+stored posterior trajectories, the target chain length, the _resolved_
+observation alignment (`exact` or `snap`, per algorithm), and the method's
+`deps` — the upstream artifacts a sourced `starts` rule consumes. Folding `deps`
+in is what makes cross-file invalidation work: a posterior file's hash contains
+the leaf its `from_mle = "@scout"` names, so regenerating the scout re-keys the
+posterior. The method's path label is the algorithm's name (`if2-<h8>`,
+`pgas-<h8>`); there is no execution order among methods and nothing for an
+ordinal to encode.
 
-**Leaf contents by method.** An IF2 stage writes `fit_state.toml`,
+**Leaf contents by method.** An IF2 leaf holds `fit_state.toml`,
 `mle_params.toml`, `final_params.toml`, `chain_starts.tsv`,
 `chain_evaluations.tsv`, `diagnostics.tsv`, and per chain
 `chain_N/parameter_traces.tsv` + `chain_N/final_params.toml`. A PGAS or PMMH
-stage writes `fit_state.toml`, `chain_starts.tsv`, `draws.tsv` (the thinned
+leaf holds `fit_state.toml`, `chain_starts.tsv`, `draws.tsv` (the thinned
 post-warm-up cloud), `diagnostics.json`, and per chain `chain_N/trace.tsv`,
 `chain_N/resume_state.bin`, and — when posterior trajectories are requested —
 `chain_N/trajectories.tsv` with a `chain_N/trajectories.json` manifest.
@@ -358,8 +358,8 @@ hash. Its keys serialize in sorted order (the maps are `BTreeMap`s) so two
 identical runs produce byte-identical sidecars and a diff of two runs' metadata
 is meaningful.
 
-Fields: `label` (the sticky user `--label`; a later stage-only re-run that
-passes no label preserves the one already on disk), `model_path`,
+Fields: `label` (the sticky user `--label`; a later run into the same segment
+that passes no label preserves the one already on disk), `model_path`,
 `model_identity` (the hex structural model hash), `fit_toml_path` (where the
 producing config lived — the directory its relative `[model]` / `[data]` paths
 resolve against when the config is recovered from the segment), `fit_toml_hash`
@@ -368,7 +368,7 @@ bytes produced this fit; a `fit.toml` handle is NOT looked up by it, see below),
 `data_hashes`, `estimated`, `fixed`, `resolved_priors` (one `{param, source}`
 entry per estimated parameter, `source ∈ {fit_toml,
 model_ir, flat_explicit}`,
-emitted only when the fit has a Bayesian stage), `schema` (the
+emitted only when the method is a posterior sampler), `schema` (the
 observation/dimension schema below), and `docs` (the model's `#'` documentation
 dictionary, keyed by declaration name, so a consumer can label any output
 column).
@@ -388,7 +388,7 @@ this fit — and nothing resolves a handle by it. Handing a config to a verb
 (`camdl compare fit.toml`, `camdl fit summary fit.toml`) asks a different
 question: does this config MEAN what the stored fit was run from? That is
 answered by canonicalising the parsed value tree — comments, whitespace, table
-order, and the spelling of a float all discarded, `[stages.*]` / `[estimate]` /
+order, and the spelling of a float all discarded, `[estimate]` /
 `[data.observations]` order preserved because camdl reads those in order — and
 comparing it against the same canonicalisation of the segment's
 `fit.toml.original`. The archive is read at lookup time, so a fit stored before
@@ -456,9 +456,9 @@ draw and pooling over particles × draws); both stack under one header. The
 cloud — the only treatment the band-builder accepts today, enforced by typing
 rather than a runtime check, so a posterior-labelled band over a single point
 estimate is unrepresentable — with `plug_in` reserved. `fit_rhat_max`/
-`fit_ess_min` are the producing stage's **rank-normalized split R̂** and
+`fit_ess_min` are the producing leaf's **rank-normalized split R̂** and
 **bulk-ESS** of Vehtari et al. (2021) — the maximum R̂ and the minimum ESS over
-the stage's estimated parameters — empty when the stage reported none, and
+the leaf's estimated parameters — empty when the leaf reported none, and
 `fit_ess_min` withheld entirely whenever any assessed parameter has no pooled
 ESS rather than minimized over the ones that do. Their names say whose numbers
 they are: the fit's worst parameter, repeated identically on every row —
@@ -656,15 +656,12 @@ a different fit — different `[fixed]` values give a different `FitDigest` — 
 each point gets **its own fit segment**, a sibling directory sharing the stem:
 
 ```
-results/fits/03_rho_sweep-{h8_for_rho_0.5}/01-scout-{h8}/seed_1-{h8}/
-results/fits/03_rho_sweep-{h8_for_rho_0.7}/01-scout-{h8}/seed_1-{h8}/
+results/fits/03_rho_sweep-{h8_for_rho_0.5}/if2-{h8}/seed_1-{h8}/
+results/fits/03_rho_sweep-{h8_for_rho_0.7}/if2-{h8}/seed_1-{h8}/
 ```
 
 There is no nesting of sweep points under a shared fit directory: within a
-segment, the layout of a swept fit is identical to that of an unswept one. When
-one or more sweep cells fail their convergence gate, a `sweep_failures.tsv`
-(`cell`, `sweep_point`, `sweep_values`, `stage`, `reason`) is written to the
-segment for the _unswept_ base configuration.
+segment, the layout of a swept fit is identical to that of an unswept one.
 
 ### 2.3.1 Concurrency: the leaf lock
 
@@ -677,7 +674,7 @@ artifact, then `run.json`, then the directory), then moved into place by
 `rename`. The staging name carries the process id and a process-local counter,
 so two concurrent same-identity commits never share a staging directory.
 
-**Mode B (streaming)** — used by fit stages, `pfilter`, `survey`, and profile
+**Mode B (streaming)** — used by fit methods, `pfilter`, `survey`, and profile
 points, which write into the leaf as they go and whose display summary (a
 loglik, a landscape score) is only known at the end. The writer creates `.lock`
 with `O_EXCL` inside the leaf directory, writes a `Running` `run.json`, streams
@@ -1086,10 +1083,10 @@ bounds, falling back to a parameter's resolved default when it declares no
 bounds, and erroring when it has neither. This is space-filling exploration for
 model debugging, not a prior.
 
-`--draws posterior --fit <fit results dir>` reads the draws the terminal
-Bayesian stage (PGAS / PMMH / MH / NUTS) wrote — `<stage_dir>/draws.tsv`, which
-is post-warm-up and thinned and carries every model parameter. Resolution is by
-artifact, not by method name: a stage has a posterior iff it wrote a
+`--draws posterior --fit <fit results dir>` reads the draws the fit's sampler
+(PGAS / PMMH / MH / NUTS) wrote — the method leaf's `draws.tsv`, which is
+post-warm-up and thinned and carries every model parameter. Resolution is by
+artifact, not by method name: a leaf has a posterior iff it wrote a
 `draws.tsv`, so an optimizer-only fit (IF2 / NLopt) resolves to an error rather
 than to a single point dressed up as a distribution
 (`rust/crates/cli/src/posterior_draws.rs`).
@@ -2252,34 +2249,41 @@ source it reports `(cannot parse model …: IR JSON parse error …)` and no cou
 
 ### 6.1 Overview
 
-A `fit.toml` specifies a single inference task: which model to fit, what data to
-fit it to, which parameters to estimate versus hold fixed, and what inference
-algorithm to run. It defines a _view_ of the parameter space — the partition of
-the model's parameter set into free parameters (explored by the algorithm) and
-fixed parameters (held constant). The algorithm then operates in the reduced
-space of free parameters. (See Buffalo 2026 for the formal treatment of
-parameter views, transforms, and the downward chain from inference coordinates
-to simulator output.)
+A `fit.toml` is one (problem, method) pair: which model to fit, what data to fit
+it to, which parameters to estimate versus hold fixed — the _problem_, which
+every command that takes `--fit` reads — and one `[method]`, the algorithm that
+fits it, which only `fit run` reads. It defines a _view_ of the parameter space
+— the partition of the model's parameter set into free parameters (explored by
+the algorithm) and fixed parameters (held constant). The algorithm then operates
+in the reduced space of free parameters. (See Buffalo 2026 for the formal
+treatment of parameter views, transforms, and the downward chain from inference
+coordinates to simulator output.)
 
-The runtime type is `FitConfigV2` (`rust/crates/cli/src/fit/config_v2.rs:26`).
-It is the only fit-config schema, and `camdl fit run` — the sole entry point
-that executes a fit — deserializes it directly.
+The runtime type is `FitConfig` (`rust/crates/cli/src/fit/config_v2.rs`), a
+`Problem` and an `Inference` split from one flat parse. `Problem::load` is the
+entry point for every non-fit reader (`simulate --draws prior --fit`,
+`pfilter --fit`, `survey --fit`, `profile --fit`) and discards the inference
+half, so a file with no `[method]` is a complete problem for them;
+`camdl fit
+run` — the sole entry point that executes a fit — reads both and
+refuses a file with no `[method]` by name.
 
 Three properties govern the whole surface:
 
-- **Strict parsing.** `FitConfigV2` and every nested config struct carry
+- **Strict parsing.** The flat wire struct and every nested config struct carry
   `#[serde(deny_unknown_fields)]`, so a misplaced or misspelled key is a load
   error, not a silent drop. The one exception is `[fixed]`, whose
   `#[serde(flatten)]` map of arbitrary `param = value` entries is incompatible
-  with the attribute. `[stages.*]` blocks need a separate mechanism — see §6.5.
+  with the attribute. The `[method]` table needs a separate mechanism — see
+  §6.9.
 - **Paths in the file anchor at the file.** `[model] camdl`, `output_dir`,
   `[data] file`, `[data.observations]`, and `[data.holdout]` are resolved
   against the `fit.toml`'s own directory at load time
   (`config_v2.rs:2361`–`2398`), so a config is relocatable as a unit and runs
-  the same from any working directory. Three path-bearing keys are **not** in
-  that set and anchor at the process working directory instead:
-  `[fixed]
-  from_file`, `[synthetic] true_params`, and a stage's `survey_path`.
+  the same from any working directory. Two path-bearing keys are **not** in that
+  set and anchor at the process working directory instead: `[fixed]
+  from_file`
+  and `[synthetic] true_params`.
 - **Absolute paths warn.** `absolute_path_warnings` (`config_v2.rs:2314`) emits
   one stderr line per absolute reference in `[model] camdl`, `output_dir`,
   `[data] file`, or `[data.observations]`, because an absolute path pins the
@@ -2287,27 +2291,26 @@ Three properties govern the whole surface:
 
 ### 6.2 Top-level keys
 
-Every key `FitConfigV2` accepts at the top level. Anything else fails at load
+Every key a `fit.toml` accepts at the top level. Anything else fails at load
 with the serde list quoted in §6.9.
 
-| key              | type                        | required | default                | meaning                                                                                                                                                                                                                                                                                                                                         |
-| ---------------- | --------------------------- | -------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `[model]`        | table                       | **yes**  | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                                                                                                                                                                                                                                     |
-| `[data]`         | table                       | one of   | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                                                                                                                                                                                                                           |
-| `[synthetic]`    | table                       | one of   | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                                                                                                                                                                                                                               |
-| `[estimate]`     | table of tables             | **yes**  | —                      | The free parameters. See §6.3.                                                                                                                                                                                                                                                                                                                  |
-| `[fixed]`        | table                       | **yes**  | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                         |
-| `[stages.<n>]`   | table of tables             | **yes**  | —                      | The inference pipeline, executed in declaration order. See §6.5.                                                                                                                                                                                                                                                                                |
-| `[config]`       | table                       | no       | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                           |
-| `output_dir`     | string                      | no       | `results`              | Output root. Anchored at the `fit.toml`. Not part of the fit identity.                                                                                                                                                                                                                                                                          |
-| `fit_seeds`      | list of ints                | no       | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                   |
-| `simplex_groups` | array of tables             | no       | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                |
-| `fit_starts`     | `"model_default"`/`"prior"` | no       | `model_default`        | **Inert.** Parsed and hashed, but no runner reads it (see §6.9, note).                                                                                                                                                                                                                                                                          |
-| `scenario`       | string                      | no       | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                        |
-| `enable`         | list of strings             | no       | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                                                                                                                                   |
-| `disable`        | list of strings             | no       | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                                                                                                                                    |
-| `ic_free`        | bool                        | no       | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/plain `pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — a `perturb_only_at_t0 = true` parameter. |
-| `[provenance]`   | table                       | no       | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                                     |
+| key              | type            | required  | default                | meaning                                                                                                                                                                                                                                                                                                                                         |
+| ---------------- | --------------- | --------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[model]`        | table           | **yes**   | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                                                                                                                                                                                                                                     |
+| `[data]`         | table           | one of    | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                                                                                                                                                                                                                           |
+| `[synthetic]`    | table           | one of    | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                                                                                                                                                                                                                               |
+| `[estimate]`     | table of tables | **yes**   | —                      | The free parameters. See §6.3.                                                                                                                                                                                                                                                                                                                  |
+| `[fixed]`        | table           | **yes**   | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                         |
+| `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                        |
+| `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                           |
+| `output_dir`     | string          | no        | `results`              | Output root. Anchored at the `fit.toml`. Not part of the fit identity.                                                                                                                                                                                                                                                                          |
+| `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                   |
+| `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                |
+| `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                        |
+| `enable`         | list of strings | no        | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                                                                                                                                   |
+| `disable`        | list of strings | no        | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                                                                                                                                    |
+| `ic_free`        | bool            | no        | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/plain `pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — a `perturb_only_at_t0 = true` parameter. |
+| `[provenance]`   | table           | no        | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                                     |
 
 `[config]` (`FitBackendConfig`, `config_v2.rs:294`):
 
@@ -2322,12 +2325,12 @@ rejected with a migration message.
 
 `[data]` (`DataSpec`, `config_v2.rs:340`):
 
-| key             | type            | meaning                                                                                                       |
-| --------------- | --------------- | ------------------------------------------------------------------------------------------------------------- |
-| `file`          | string          | Single wide TSV holding one column per model-declared observation stream. Exclusive with `observations`.      |
-| `observations`  | map name → path | Per-stream file paths, keyed on the `observations { }` block names in the `.camdl`. Exclusive with `file`.    |
-| `holdout_after` | float           | Accepted and mutually-exclusive-checked, but **no fit-path consumer reads it**. Exclusive with `holdout`.     |
-| `holdout`       | map name → path | Accepted; the files' bytes are digested into the fit `run_id`, but **no fit stage withholds or scores them**. |
+| key             | type            | meaning                                                                                                    |
+| --------------- | --------------- | ---------------------------------------------------------------------------------------------------------- |
+| `file`          | string          | Single wide TSV holding one column per model-declared observation stream. Exclusive with `observations`.   |
+| `observations`  | map name → path | Per-stream file paths, keyed on the `observations { }` block names in the `.camdl`. Exclusive with `file`. |
+| `holdout_after` | float           | Accepted and mutually-exclusive-checked, but **no fit-path consumer reads it**. Exclusive with `holdout`.  |
+| `holdout`       | map name → path | Accepted; the files' bytes are digested into the fit `run_id`, but **no method withholds or scores them**. |
 
 Exactly one of `file` / `observations` must be set. The observation model
 (likelihood family) and projection (which flow or compartment is accumulated)
@@ -2340,13 +2343,13 @@ holdout` / `holdout_after` do not perform it.
 
 `[synthetic]` (`SyntheticSpec`, `config_v2.rs:453`):
 
-| key           | type                               | required | default          | meaning                                                                           |
-| ------------- | ---------------------------------- | -------- | ---------------- | --------------------------------------------------------------------------------- |
-| `true_params` | string                             | **yes**  | —                | Flat TOML of `name = value` ground truth. Anchored at the working directory.      |
-| `sim_seeds`   | `"N:M"` range **or** list of ints  | **yes**  | —                | One dataset per seed. Duplicates rejected; a malformed range (`"1-20"`) errors.   |
-| `datasets`    | int                                | no       | `len(sim_seeds)` | Must equal `len(sim_seeds)` when supplied.                                        |
-| `scenario`    | string                             | no       | none             | Scenario applied during **generation** only, not during fitting.                  |
-| `backend`     | `chain_binomial`/`gillespie`/`ode` | no       | `chain_binomial` | Forward backend used to generate the datasets. Distinct from a stage's `backend`. |
+| key           | type                               | required | default          | meaning                                                                              |
+| ------------- | ---------------------------------- | -------- | ---------------- | ------------------------------------------------------------------------------------ |
+| `true_params` | string                             | **yes**  | —                | Flat TOML of `name = value` ground truth. Anchored at the working directory.         |
+| `sim_seeds`   | `"N:M"` range **or** list of ints  | **yes**  | —                | One dataset per seed. Duplicates rejected; a malformed range (`"1-20"`) errors.      |
+| `datasets`    | int                                | no       | `len(sim_seeds)` | Must equal `len(sim_seeds)` when supplied.                                           |
+| `scenario`    | string                             | no       | none             | Scenario applied during **generation** only, not during fitting.                     |
+| `backend`     | `chain_binomial`/`gillespie`/`ode` | no       | `chain_binomial` | Forward backend used to generate the datasets. Distinct from the method's `backend`. |
 
 **Where scoring begins** is not a `fit.toml` concern. Every incidence stream
 declares what each row covers (`covers = ...`, or `window_start`/`window_stop`
@@ -2368,14 +2371,14 @@ scored.
 Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
 `EstimateSpecV2` (`config_v2.rs:607`):
 
-| key                  | type                                 | default                       | meaning                                                                                                                                                                                                                                                                                                                      |
-| -------------------- | ------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bounds`             | `[lo, hi]`                           | the model's `in [lo, hi]`     | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                           |
-| `start`              | float                                | model value, else bounds draw | The stage's base point. An upstream stage's result (`init_mle`) overrides it.                                                                                                                                                                                                                                                |
-| `prior`              | inline table                         | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`/`nuts`.                                                                                                                                                                                                                                              |
-| `transform`          | `"log"` \| `"logit"` \| `"identity"` | derived from the param's type | Inference-scale transform. Also sets the clamp box IF2 keeps particles inside.                                                                                                                                                                                                                                               |
-| `perturb_only_at_t0` | bool                                 | `false`                       | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Read by `if2` stages and ignored by the rest; a config-load error only when the fit declares no `if2` stage at all. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
-| `rw_sd`              | float                                | auto-scaled from bounds       | IF2 per-parameter random-walk SD, on the natural scale.                                                                                                                                                                                                                                                                      |
+| key                  | type                                 | default                       | meaning                                                                                                                                                                                                                                                                                                               |
+| -------------------- | ------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bounds`             | `[lo, hi]`                           | the model's `in [lo, hi]`     | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                    |
+| `start`              | float                                | model value, else bounds draw | The base point: where `starts = "single"` puts every chain, and what a spread rule draws around. A sourced point rule (`from_mle`, `from_params`) replaces it.                                                                                                                                                        |
+| `prior`              | inline table                         | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`/`nuts`.                                                                                                                                                                                                                                       |
+| `transform`          | `"log"` \| `"logit"` \| `"identity"` | derived from the param's type | Inference-scale transform. Also sets the clamp box IF2 keeps particles inside.                                                                                                                                                                                                                                        |
+| `perturb_only_at_t0` | bool                                 | `false`                       | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Read by `if2` and inert for every other method, so a problem's IF2 file and its PGAS file can share the key. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
+| `rw_sd`              | float                                | auto-scaled from bounds       | IF2 per-parameter random-walk SD, on the natural scale.                                                                                                                                                                                                                                                               |
 
 An entry with no fields at all (`beta = {}`) is legal: it means "estimate this,
 take everything from the model."
@@ -2425,7 +2428,7 @@ in provenance as `flat_explicit`.
 
 **Prior precedence** (three tiers, `validate_priors_present`,
 `config_v2.rs:2809`): a `fit.toml` `prior` wins over the model's `~`
-declaration; an explicit `{ flat = {} }` counts as declared. A Bayesian stage
+declaration; an explicit `{ flat = {} }` counts as declared. A sampler method
 whose estimated parameter has none of the three is a **hard error** — `fit run`
 never falls back to flat silently, because downstream consumers treat the chain
 as the canonical posterior. (`camdl profile` warns instead of erroring; the bar
@@ -2453,12 +2456,15 @@ the `.camdl`. The one carve-out is structural — a scenario parameter that also
 appears in `[estimate]` is skipped on import, so a single `baseline` scenario
 can serve both forward simulation and a fit's `[fixed]`.
 
-### 6.5 `[stages.<name>]` — the inference pipeline
+### 6.5 `[method]` — the inference method
 
-Stages are user-named and execute in declaration order. Each block is tagged by
-`algorithm` (`Stage`, `config_v2.rs:987`, `#[serde(tag = "algorithm")]`) and
-carries an explicit `backend`. Each algorithm is valid on exactly one backend;
-the pair is checked at load against the `METHODS` registry
+A file carries one `[method]`: one algorithm with its settings and the chains'
+`starts` rule (§6.6). A second way of fitting the same problem is a second file
+— `camdl fit new --from fit.toml fit-pgas.toml` — and the two share a fit-level
+hash (§6.8). The table is tagged by `algorithm` (`Method`, `config_v2.rs`,
+`Algorithm` with `#[serde(tag = "algorithm")]`) and carries an explicit
+`backend`. Each algorithm is valid on exactly one backend; the pair is checked
+at load against the `METHODS` registry
 (`rust/crates/cli/src/fit/methods.rs:68`), which is the single source of truth
 for `camdl fit methods`, the runtime banners, and the invalid-pair error.
 
@@ -2479,10 +2485,7 @@ statistical object, appropriate for equilibrium or large-population models.
 `gillespie` is a forward-simulation backend with no inference interface and is
 rejected at parse.
 
-Keys common to every stage: `algorithm`, `backend`, `init_mle` (§6.6). All
-algorithms except `pfilter` and the two NLopt variants also take `init`,
-`survey_path`, and `survey_top_k_n`; the NLopt variants take them in the
-`fit.toml` but ignore the corresponding CLI overrides.
+Keys common to every method: `algorithm`, `backend`, `starts` (§6.6).
 
 **`if2`** — `chains`, `particles`, `iterations`, `cooling` required.
 
@@ -2500,19 +2503,19 @@ restarting mid-schedule is statistically incoherent.
 
 **`pgas`** — `chains`, `particles`, `sweeps` required.
 
-| key                    | default | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `burn_in`              | `2000`  | Discarded sweeps. Must be `< sweeps`.                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `thin`                 | `5`     | Retain every k-th post-burn-in sweep.                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `tempering`            | `[1.0]` | Parallel-tempering ladder of β ∈ (0,1]. First entry must be `1.0`; only the cold rung samples.                                                                                                                                                                                                                                                                                                                                                                      |
-| `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible).                                                                                                                                                                                                                                                                                                                                                                      |
-| `csmc_sweeps_per_nuts` | `1`     | CSMC trajectory updates per parameter update.                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `use_nuts`             | `true`  | `false` falls back to MH-within-Gibbs for θ\|X.                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `ancestor_sampling`    | `true`  | `false` runs plain particle Gibbs without the ancestor-sampling move — a valid kernel on its own, since ancestor sampling is a mixing addition and removing it leaves the invariant distribution intact. A diagnostic control, not a recommendation: run a stage both ways to measure how much the ancestor move is buying on this model. If path renewal is unchanged with it off, the move is contributing nothing and the freeze is structural in the genealogy. |
+| key                    | default | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `burn_in`              | `2000`  | Discarded sweeps. Must be `< sweeps`.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `thin`                 | `5`     | Retain every k-th post-burn-in sweep.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `tempering`            | `[1.0]` | Parallel-tempering ladder of β ∈ (0,1]. First entry must be `1.0`; only the cold rung samples.                                                                                                                                                                                                                                                                                                                                                                         |
+| `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible).                                                                                                                                                                                                                                                                                                                                                                         |
+| `csmc_sweeps_per_nuts` | `1`     | CSMC trajectory updates per parameter update.                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `use_nuts`             | `true`  | `false` falls back to MH-within-Gibbs for θ\|X.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `ancestor_sampling`    | `true`  | `false` runs plain particle Gibbs without the ancestor-sampling move — a valid kernel on its own, since ancestor sampling is a mixing addition and removing it leaves the invariant distribution intact. A diagnostic control, not a recommendation: run the method both ways to measure how much the ancestor move is buying on this model. If path renewal is unchanged with it off, the move is contributing nothing and the freeze is structural in the genealogy. |
 
 **`pmmh`** — `chains`, `particles`, `iterations` required.
 
@@ -2549,11 +2552,13 @@ deterministic ODE evaluation, so it carries neither `particles` nor `rho`.
 
 `nuts` has no `burn_in`/`thin` — `warmup` is the discard.
 
-**`pfilter`** — `particles` required. No `chains` (it is always one), no `init`.
+**`pfilter`** — `particles` required. No `chains` (it is always one); `starts`
+names the one point it scores — the base point, or the point a sourced rule such
+as `{ from_mle = "@scout" }` names.
 
 | key                  | default | meaning                                                                     |
 | -------------------- | ------- | --------------------------------------------------------------------------- |
-| `replicates`         | none    | Independent filter passes; the stage reports loglik mean ± SD across them.  |
+| `replicates`         | none    | Independent filter passes; the run reports loglik mean ± SD across them.    |
 | `record_ancestry`    | `false` | Record per-step ancestor indices for smoothing-path reconstruction.         |
 | `record_prequential` | `true`  | Record per-step predictive samples and log-likelihoods for `camdl compare`. |
 
@@ -2567,9 +2572,8 @@ deterministic ODE evaluation, so it carries neither `particles` nor `rho`.
 | `gate`      | table   | Two-leg convergence gate, same shape as IF2's.                       |
 
 `chains` here is the number of independent multi-start optimizations;
-`init =
-"single"` defeats multi-start, since every chain then converges from the
-same point.
+`starts = "single"` defeats multi-start, since every chain then converges from
+the same point.
 
 **Observation alignment.** `[config] obs_alignment` is resolved per algorithm
 (`methods.rs:495`). `if2` and `pfilter` step exactly to observation times and
@@ -2590,56 +2594,120 @@ banner claiming otherwise. `pfilter` / plain `pmmh` on a _deterministic_
 per particle, but every such draw returns the same state, so the first reweight
 has nothing to discriminate between (gh#732).
 
-### 6.6 Chain starts: `init` and `init_mle`
+### 6.6 Chain starts: `starts`
 
-Two orthogonal keys answer different questions, and both live on the stage.
+One key on `[method]` answers where the chains begin. Its wire form is a bare
+string for a rule that needs no source, or a one-key table naming the source
+(`ChainStarts`, `rust/crates/cli/src/fit/starts.rs`):
 
-**`init_mle` — where the stage's base point comes from.** Deserialized into
-`StartsFrom` (`config_v2.rs:2069`) by inspecting the string: containing `/` or
-`\` → an external results directory; the literal `"random"` → no upstream; any
-other bare word → the name of an earlier stage in this file. Default `"random"`.
-A stage reference must name a stage declared **before** this one; the DAG is
-validated at load. When an upstream stage is named, its identity and consumed
-`fit_state.toml` are folded into this stage's content hash, so re-running the
-upstream re-keys the downstream.
+```toml
+starts = "from_prior"
+starts = { from_posterior = "@scout" }
+```
 
-**`init` — how the per-chain starts are spread around that base point.**
-`InitMethod` (`rust/crates/cli/src/fit/init.rs:69`); the default is
-`uniform_unconstrained` (`init.rs:167`).
+A rule is one of two kinds, and the kind is what the diagnostics act on. A
+**spread** rule gives every chain its own independent point, so a between-chain
+R̂ over the chains is a verdict; a **point** rule puts every chain at one point,
+so the chains agree by construction and R̂ cannot say whether the posterior was
+explored.
 
-| `init`                  | where the chains start                                                                                                                                             |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `uniform_unconstrained` | (default) i.i.d. `U(-2, 2)` on the unconstrained scale, squashed and mapped into bounds. Boundary-avoiding and scale-invariant; Stan's default. Base point unused. |
-| `lhs`                   | Latin-hypercube stratified over bounds, log-scale-aware for `Log` parameters. Best full-bounds coverage at low chain counts. Base point unused.                    |
-| `uniform`               | Per-chain uniform draw within natural-scale bounds. Legacy; clumps for `Log` parameters.                                                                           |
-| `single`                | Every chain at the base point.                                                                                                                                     |
-| `survey_top_k`          | Top-K rows of a `camdl survey` landscape. Requires `survey_path`; `survey_top_k_n` defaults to `chains` and must equal it.                                         |
-| `from_prior`            | One draw per chain from each parameter's `~` declaration in the model IR.                                                                                          |
-| `from_posterior`        | One row per chain, drawn uniformly with replacement from a posterior draws TSV or a fit directory's `draws.tsv`.                                                   |
-| `from_mle`              | Every chain at the MLE point of a prior fit (`mle.toml`, else `final_params.toml`).                                                                                |
-| `from_params`           | Every chain at the point in a hand-written flat params TOML.                                                                                                       |
+| `starts`                          | kind   | where the chains start                                                                                                                                            |
+| --------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `from_prior`                      | spread | One draw per chain from each parameter's resolved prior (`fit.toml` `prior` over the model's `~`, §12.1). The default whenever every estimated parameter has one. |
+| `uniform_unconstrained`           | spread | i.i.d. `U(-2, 2)` on the unconstrained scale, squashed and mapped into bounds. Boundary-avoiding and scale-invariant; Stan's default. The fallback default.       |
+| `lhs`                             | spread | Latin-hypercube stratified over bounds, log-scale-aware for `Log` parameters. Best full-bounds coverage at low chain counts.                                      |
+| `uniform`                         | spread | Per-chain uniform draw within natural-scale bounds. Clumps for `Log` parameters.                                                                                  |
+| `{ from_posterior = "<handle>" }` | spread | One row per chain, drawn uniformly with replacement from a fit's `draws.tsv` (or a draws TSV path). Refused on a source that wrote no `draws.tsv`.                |
+| `single`                          | point  | Every chain at the base point (`[estimate].start`, else the model's value).                                                                                       |
+| `{ from_mle = "<handle>" }`       | point  | Every chain at a stored fit's estimate (its leaf's `fit_state.toml`).                                                                                             |
+| `{ from_params = "<path>" }`      | point  | Every chain at the point in a hand-written flat params TOML.                                                                                                      |
 
 `uniform`, `lhs`, and `uniform_unconstrained` collapse to the base point at
-`chains = 1`; the source-reading modes do not. `from_posterior`, `from_mle`, and
-`from_params` are constructed by the CLI (`--init` plus `--posterior` / `--mle`
-/ `--params`) and cannot be written as bare strings in `fit.toml`.
+`chains = 1`; the source-reading rules do not. A rule applies only to parameters
+in `[estimate]`; anything in `[fixed]` takes its declared value.
 
-`init` and its companions are identity-bearing: `identity_payload`
-(`config_v2.rs:1526`) folds `init_method`, `survey_path`, and `survey_top_k_n`
-into the stage hash, and the CLI overrides are written into the stage _before_
-the content address is taken (`apply_cli_overrides`, `config_v2.rs:1722`), so
-two runs differing only in `--init` are two artifacts.
+**The default.** With no `starts` in the file and no `--starts` on the command
+line, `fit run` resolves the rule against the problem before the identity is
+taken (`Method::resolve_starts`): `from_prior` when every estimated parameter's
+resolved prior is a distribution the chains can be drawn from,
+`uniform_unconstrained` otherwise. The startup block says which and why —
+`starts:   from_prior (one independent draw per chain) — default: every
+estimated parameter declares a prior`,
+or `… uniform_unconstrained … —
+default: no sampleable prior on beta`. A file
+that spells the default out hashes the same as one that omits it, because the
+hashed payload always carries the resolved rule.
 
-An `if2`, `pgas` or `pmmh` stage writes `chain_starts.tsv` recording where every
-chain actually began, before any perturbation, and names the init that supplied
-those values. That file, not the config, is the authority on what a run did. A
-`nuts` or `nlopt` stage writes none, so `chain_init_source` in `fit_state.toml`
-is the only record of where those chains began.
+**Handles.** A sourced rule names its source by a fit handle (`handle.rs`):
+`@<label>` (the `--label` the source was run with), the source's `fit.toml`
+path, its segment directory, a fit-id prefix, its leaf directory, or a prefix of
+the leaf's own `run_id`. A segment handle names a leaf only while the segment
+holds exactly one — two method files of one problem share the segment label —
+and a handle resolving to several leaves is refused with the leaves listed. The
+source is resolved before the model is loaded, and its stored convergence
+verdict is checked where it is consumed: a `from_mle` or `from_posterior` source
+whose verdict is not converged is refused, naming the verdict, unless
+`--allow-nonconverged-source` is passed (§7.3).
 
-**Base-point precedence** (`runner.rs:235`), lowest to highest: the model's
-declared value, `[fixed]`, `[estimate].start`, then the upstream stage's result
-via `init_mle`. The upstream result wins last so `init_mle = "scout"` is not
-silently overwritten by a stale `start` left in the file.
+`starts` is identity-bearing: `Method::identity_payload` folds the resolved rule
+into the method hash, and a sourced rule's consumed file (the leaf's
+`fit_state.toml` or `draws.tsv`, a params TOML) enters the method's `deps` by
+content, so two runs differing only in `starts` are two artifacts and a
+regenerated source re-keys its consumer (§9.2.4).
+
+**A refused spread start is redrawn** (gh#887). A spread rule is a lottery over
+one draw, so a start the filter cannot score is one unlucky draw rather than a
+verdict on the chain: it is redrawn under the same rule, at a seed derived from
+the run's seed and the attempt index, up to `MAX_START_ATTEMPTS = 10` per chain,
+and the chain is refused only when every attempt fails. A point rule has nothing
+to redraw and gets one try; so do `uniform`, `lhs` and `uniform_unconstrained`
+at one chain, whose single draw is the base point. IF2 scores every chain's
+start with one particle-filter pass before the swarm is perturbed
+(`runner::preflight_spread_starts`); PGAS retries on a start whose complete-data
+log-posterior is still non-finite after the first trajectory update; PMMH
+retries on the init-eval's `PFDegenerate`. Each attempt is announced
+(`chain 1: start 3 of 10 refused (…); drawing another`) and the refusal, when it
+comes, says how many were tried: `none of 10 starts drawn
+under`starts =
+from_posterior
+<file>`could be scored by the filter; the
+last: EssCollapsed at obs_window=…`.
+Skip-and-continue after a refusal is unchanged (§10.7).
+
+**What a run records.** Every multi-chain sampler and IF2 write
+`chain_starts.tsv` — the point every chain actually began at, before any
+perturbation, and every attempt a retry rejected on the way there — under a
+header naming the rule and counting the rejected draws
+(`# camdl chain_starts;
+starts=from_mle @scout; chains=4; kind=point; retried=0`).
+Its columns are `chain_id`, `attempt` (0-based), `status` (`accepted` — the
+start the chain ran from; `rejected` — a draw the filter could not score, a
+redraw followed; `refused` — the last attempt, also unscoreable, the chain did
+not run), `source`, one column per estimated parameter, then `ess` (the filter's
+ESS at refusal, blank otherwise) and `reason` (blank for an accepted row); one
+row per attempt in (chain, attempt) order, so a healthy run has one `accepted`
+row per chain at attempt 0. That file, not the config, is the authority on what
+a run did. `fit_state.toml` carries the same rule as `chain_init_source` beside
+`chain_starts_kind = "spread" | "point"`, and `fit summary` prints both under
+the leaf's identity line:
+
+```
+seeded from:  from_mle @scout (every chain at one point)
+```
+
+A multi-chain sampler leaf whose kind is `point` is read with its R̂ withheld:
+`fit summary` reports
+`R̂ — not assessed: all 2 chains started at one point
+(starts = from_mle @scout)`
+in place of a verdict, `fit predict` stamps its bands the same way, and the ESS
+— a within-chain quantity — is kept. Writing the point rule is the
+acknowledgement; `fit run` says so once at startup for a sampler with
+`chains > 1`. An IF2 run keeps its Â band under the same header, since IF2's
+perturbation re-spreads the swarm after the start.
+
+**Base-point precedence** (`runner.rs`), lowest to highest: the model's declared
+value, `[fixed]`, `[estimate].start`. A sourced point rule replaces the base
+point for every estimated parameter it carries.
 
 ### 6.7 `[provenance]` — lineage metadata
 
@@ -2654,9 +2722,9 @@ runner reads them; `camdl fit new` writes `derived_from` when deriving one
 config from another, and the block is otherwise for human navigation.
 
 It is nonetheless **identity-bearing**: the fit-level hash covers the whole
-serialized config with only `stages`, `fit_seeds`, and `output_dir` removed
-(`cas.rs:304`), so editing `reason` changes the fit hash and forces a re-fit
-into a new segment.
+serialized config with only `method`, `fit_seeds`, and `output_dir` removed
+(`cas.rs`), so editing `reason` changes the fit hash and forces a re-fit into a
+new segment.
 
 ### 6.8 Where output goes
 
@@ -2668,7 +2736,7 @@ three levels (`cas.rs:1`–`24`):
 <root>/fits/<stem>-<h8>/                          fit level
         model.ir.json  model.render.json  model.graph.json
         model.camdl.original  fit.toml.original  fit.meta.json
-    <NN>-<stage>-<h8>/                            stage level
+    <method>-<h8>/                                method level
         <seed_N>-<h8>/                            seed level (the leaf)
             run.json  fit_state.toml  chain_starts.tsv
             chain_1/ … chain_N/
@@ -2680,10 +2748,13 @@ three levels (`cas.rs:1`–`24`):
 - **`<stem>`** is the `fit.toml`'s file stem; **`<h8>`** at the fit level is the
   first eight hex digits of the fit hash — the whole-IR model digest, the
   per-stream training and holdout data digests, the canonicalized config (less
-  `stages` / `fit_seeds` / `output_dir`), and the engine version.
-- **`<NN>`** is the stage's zero-padded topological position; the stage `<h8>`
-  folds the stage's `identity_payload` with its `deps`, so `02-posterior` keys
-  on `01-scout`'s identity.
+  `method` / `fit_seeds` / `output_dir`), and the engine version. Two files that
+  share a problem and differ in `[method]` share this hash and sit in sibling
+  segments named by their stems.
+- **`<method>`** is the algorithm's name; the method `<h8>` folds the method's
+  `identity_payload` (its settings and the resolved `starts` rule) with its
+  `deps`, so a posterior file starting `from_mle = "@scout"` keys on the scout
+  leaf's identity.
 - **The leaf** is per seed. `run.json` is the CAS record; there is no manifest
   and no fit-wide `run.json` — the fit level is a path segment, and
   `fit.meta.json` is its sidecar (label, model hash, config archive).
@@ -2694,8 +2765,8 @@ Per-algorithm leaf contents: IF2 writes `mle_params.toml`, `final_params.toml`,
 `draws.tsv`, `<algorithm>_summary.json` (`pgas_summary.json`,
 `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json`), and
 `chain_N/trace.tsv`; PGAS and PMMH also write `chain_N/resume_state.bin`. The
-NLopt stages write `mle_params.toml` and `chain_results.tsv`. A `pfilter` stage
-with `record_prequential` writes `prequential.{tsv,json}`.
+NLopt optimizers write `mle_params.toml` and `chain_results.tsv`. A `pfilter`
+method with `record_prequential` writes `prequential.{tsv,json}`.
 
 A completed leaf is reused on a second identical invocation ("cache hit"); pass
 `--force` to re-run and overwrite.
@@ -2706,12 +2777,12 @@ rather than guessed.
 
 ### 6.9 Load-time validation
 
-`FitConfigV2::from_toml_str` (`config_v2.rs:2291`) runs three passes before the
-typed parse or on its result; `FitConfigV2::validate` (`config_v2.rs:2548`) then
-runs the semantic checks once the model IR is loaded and `[fixed]
-from_scenario`
-has been expanded (`mod.rs:312`–`327`). Everything below fires before any stage
-executes.
+`FitConfig::from_toml_str` (`config_v2.rs`) runs the migration detectors before
+the typed parse and the `[method]` key check on its result;
+`FitConfig::validate` then runs the semantic checks once the model IR is loaded
+and `[fixed]
+from_scenario` has been expanded. Everything below fires before the
+method executes.
 
 **Parse-time.**
 
@@ -2719,35 +2790,67 @@ executes.
 
   > `` `[config].backend` has moved to `[synthetic].backend` (gh#241). ``
 
-- The renamed stage keys, bundled so all offenders are fixable in one pass:
+- A `[stages]` table. There is no silent conversion: the loader prints the
+  rewrite, in the file's own declaration order, naming the last-declared stage
+  as the file's `[method]` and every other stage as a file of its own. A chained
+  stage (`init_mle`) is a decision the message hands back, because the file
+  cannot name a handle that does not exist until the upstream has run:
 
-  > `fit.toml uses legacy stage keys removed in CLI UX rev 2 …`
-  > `error: legacy key`init_method`on stage(s):`s``> `  replacement: rename to `init` (matches CLI `--init`).`
-  > `  error: legacy key `starts_from` on stage(s): `s``
-  > `replacement: rename to`init_mle`(one toml key per concept).`
+  ```
+  error: legacy table `[stages.posterior]`
+    replacement: rename to `[method]` and run it with
+      camdl fit run fit.toml
+    a file carries one `[method]`; put `[stages.scout]` in its own file
+    `init_mle = "scout"` has no replacement in the file: it started every chain at
+    scout's point estimate, which makes R̂ uninformative. Run scout first and, if a
+    warm start is wanted, write one of
+      starts = { from_posterior = "@scout" }   # one draw per chain (keeps R̂ meaningful)
+      starts = { from_mle = "@scout" }         # every chain at one point (R̂ not assessed)
+    `init = "uniform_unconstrained"` becomes `starts = "uniform_unconstrained"`
+    See `camdl docs fit-toml`.
+  ```
+
+  An `init = "survey_top_k"` (or a `survey_path` / `survey_top_k_n`) adds
+  `` `init = "survey_top_k"` … was removed: a survey landscape is not a
+  posterior. Use `starts = "from_prior"`, or run a short fit and write `starts
+  = { from_posterior = "@handle" }`. ``
+  An empty `[stages]` is refused with `replacement: delete it`.
+
+- The removed top-level `fit_starts`:
+
+  > `` `fit_starts` is no longer a fit.toml key. Chain starts are the `starts` key of `[method]`: `from_prior` is the default whenever every estimated parameter declares a prior, so `fit_starts = "prior"` is simply deleted; `fit_starts = "model_default"` is `starts = "single"`. See `camdl docs fit-toml`. ``
 
 - An unknown top-level key:
 
-  > `` unknown field `dt`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `fit_starts`, `output_dir`, `estimate`, `fixed`, `stages`, `config`, `scenario`, `enable`, `disable`, `ic_free`, `provenance` ``
+  > `` unknown field `dt`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `output_dir`, `estimate`, `fixed`, `method`, `config`, `scenario`, `enable`, `disable`, `ic_free`, `provenance` ``
 
-- An unknown key inside a `[stages.*]` block. `Stage` is internally tagged, so
-  serde cannot deny unknown fields on it; a post-parse pass compares the raw
-  keys against the set the parsed stage serializes back to
-  (`validate_stage_keys`, `config_v2.rs:2251`):
+- An unknown key inside `[method]`. `Algorithm` is internally tagged, so serde
+  cannot deny unknown fields on it; a post-parse pass compares the raw keys
+  against the set the parsed method serializes back to, plus `starts`
+  (`validate_method_keys`, `config_v2.rs`):
 
-  > ``unknown key `chains` in [stages.s] (algorithm = "pfilter").``
-  > `allowed keys: algorithm, backend, init_mle, particles, record_ancestry, record_prequential, replicates`
+  > ``unknown key `chains` in [method] (algorithm = "pfilter").``
+  > `allowed keys: algorithm, backend, particles, record_ancestry, record_prequential, replicates, starts`
 
-  The two NLopt variants are newtype-wrapped structs and get plain serde
-  `deny_unknown_fields` instead:
-  `` unknown field `zzz`, expected one of `backend`, `chains`, `tolerance`, `max_evals`, `init_mle`, `init`, `survey_path`, `survey_top_k_n`, `gate` ``.
+  The keys the split retired name their replacement instead of "unknown": `init`
+  → `` `init` is now `starts`: write `starts = "lhs"`. ``, `init_mle` →
+  `` `init_mle` has no replacement key: a warm start from a stored fit is
+  `starts = { from_posterior = "@handle" }` (one draw per chain, keeps R̂
+  meaningful) or `starts = { from_mle = "@handle" }` (every chain at one point,
+  R̂ not assessed). ``,
+  and `survey_path` / `survey_top_k_n` → the survey message above. The two NLopt
+  variants are newtype-wrapped structs and get plain serde `deny_unknown_fields`
+  for their own keys:
+  `` unknown field `zzz`, expected one of `backend`, `chains`, `tolerance`, `max_evals`, `gate` ``.
 
 - Unknown enum values — an unrecognized `algorithm` (via a missing tag),
   `backend`
   (`` unknown variant `gillespie`, expected `chain_binomial` or
-  `ode` ``),
-  `init`, or a prior whose field names do not match a catalogue entry
-  (`data did not match any variant of untagged enum EstimatePriorSpec`).
+  `ode` ``), or
+  a prior whose field names do not match a catalogue entry
+  (`data did not match any variant of untagged enum EstimatePriorSpec`); an
+  unknown `starts` rule
+  (``unknown starts rule `foo`; expected one of uniform_unconstrained, lhs, uniform, from_prior, single, or a sourced rule { from_posterior = "@handle" }, { from_mle = "@handle" }, { from_params = "params.toml" }``).
 
 **Semantic, in the order `validate` applies them.**
 
@@ -2768,38 +2871,34 @@ executes.
    > `parameters not in model: nope`
 8. **(algorithm, backend)** against the registry. The error names the structural
    reason, suggests the right alternative, and lists the supported pairs:
-   > `stage 's': stage has algorithm = "if2" with backend = "ode", which is not a supported inference method.`
-9. `ic_free` support per stage.
+   > `[method]: stage has algorithm = "if2" with backend = "ode", which is not a supported inference method.`
+9. `ic_free` support for the method.
 10. IF2 `iterations ≥ 1`.
 11. `burn_in < iterations` (`pmmh`, `mh`) and `burn_in < sweeps` (`pgas`), using
     the **defaults** when unset — so a short sampler run must set `burn_in`
     explicitly:
-    > `stage 's': burn_in (2000) ≥ sweeps (5) — every sample is discarded as burn-in, so the fit retains no posterior draws (and the post-burn acceptance rate degenerates to 0%). Reduce burn_in or raise sweeps. (burn_in defaults to 2000 when unset.)`
-12. **Stage DAG.** `init_mle` must name a declared, earlier stage. Both errors
-    print `starts_from` — the internal Rust field name
-    (`fit/config_v2.rs:2956`), not the TOML key. The key to edit is `init_mle`;
-    writing `starts_from` is rejected as a legacy key (§7.2).
-    > `stage 'a': starts_from = "nope" does not match any stage.`
-    > `stage 'a': starts_from = "b" but 'b' is declared after 'a'.`
-13. Non-empty `bounds` on every entry that declares them.
+    > `[method]: burn_in (2000) ≥ sweeps (5) — every sample is discarded as burn-in, so the fit retains no posterior draws (and the post-burn acceptance rate degenerates to 0%). Reduce burn_in or raise sweeps. (burn_in defaults to 2000 when unset.)`
+12. Non-empty `bounds` on every entry that declares them.
     > `estimate.beta: bounds [0.6, 0.15] are empty (lo must be < hi)`
-14. Simplex groups: ≥ 2 members, every member in `[estimate]`, no member in two
+13. Simplex groups: ≥ 2 members, every member in `[estimate]`, no member in two
     groups, no member with `perturb_only_at_t0 = true`, no negative lower bound.
 
 `validate_priors_present` runs next, with the model IR in scope so the `~`
-fallback is honored; then two warnings that do not stop the run — priors
-declared but consumed by no stage, and a posterior sampler using
-`init =
-"single"` with `chains > 1` (which makes R̂ uninformative).
+fallback is honored — for a sampler method only; priors an optimizer ignores are
+the normal case under one method per file and draw no warning. Then one note
+that does not stop the run: a posterior sampler under a point rule (`single`,
+`from_mle`, `from_params`) with `chains > 1`, whose R̂ `fit summary` will report
+as not assessed (§6.6).
 
-Two checks fire later, at stage build rather than at load: the
-bounds-may-narrow-not-loosen rule (`runner.rs:1113`) and `burnin_dt` validity
-(`config_v2.rs:1894`).
+Two checks fire later, at method build rather than at load: the
+bounds-may-narrow-not-loosen rule (`runner.rs`) and `burnin_dt` validity
+(`config_v2.rs`).
 
-> **Note — `fit_starts` is inert.** The key parses, is hashed into the fit
-> identity, and suppresses the dangling-priors warning, but no runner reads it:
-> setting `fit_starts = "prior"` does **not** draw chain starts from the priors.
-> The working knob is `[stages.<name>] init = "from_prior"`.
+A file with no `[method]` passes every check above for the readers that take
+`--fit`; `fit run` alone refuses it:
+
+> `this fit.toml declares no`[method]`table, so there is nothing to run. It is a complete problem for`simulate
+> --fit`,`pfilter --fit`,`survey --fit`and`profile --fit`; to fit it, add …`
 
 ## 7. The Fit CLI
 
@@ -2808,7 +2907,7 @@ a run left behind; two work on configs; one is a static capability listing.
 
 | subcommand    | what it does                                                                                                                                           |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fit run`     | execute the stages declared in a `fit.toml`                                                                                                            |
+| `fit run`     | run the `[method]` of a `fit.toml`                                                                                                                     |
 | `fit summary` | render one fit's convergence verdict, θ̂ table and provenance checks; `--explain` defines each column, `--parameters` adds the model's parameter legend |
 | `fit table`   | walk a results tree and render one row per fit                                                                                                         |
 | `fit diff`    | compare two `fit.toml` configs                                                                                                                         |
@@ -2826,14 +2925,11 @@ Every command below was run against the worked project of §8 (`models/`,
 `data/`, `fits/`, `results/`).
 
 ```bash
-# Run every stage in the config.
+# Run the file's [method].
 camdl fit run fits/01_mle.toml --seed 1
 
 # Long fits: force plain progress lines and capture them.
 camdl fit run fits/01_mle.toml --seed 1 --progress plain 2>&1 | tee fit.log
-
-# Run one stage by name. See the caveat below on staged pipelines.
-camdl fit run fits/01_mle.toml --stage mle
 
 # Sweep a [fixed] parameter; repeat the flag for a Cartesian grid.
 camdl fit run fits/01_mle.toml --sweep "rho=0.5,0.6"
@@ -2841,12 +2937,14 @@ camdl fit run fits/01_mle.toml --sweep "rho=0.5,0.6" --sweep "k=5,10"
 camdl fit run fits/01_mle.toml --sweep "k=lin(5,15,3)"
 camdl fit run fits/01_mle.toml --sweep "k=log10(1,100,3)"
 
-# Tag the run so it is findable later.
-camdl fit run fits/01_mle.toml --label "auto rw_sd, take 1"
+# Tag the run so it is findable later, and by another file's `starts`.
+camdl fit run fits/01_mle.toml --label mle
 
-# Warm-start a stage from another fit's MLE leaf.
-camdl fit run fits/09_pgas_only.toml --stage posterior \
-    --init from_mle --mle results/fits/01_mle-2030ba2b/01-mle-fee126b1/seed_1-06cbd6b3
+# Start the chains from another fit, overriding the file's `starts`.
+camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
+camdl fit run fits/09_pgas_only.toml --starts from_posterior=@short-run
+camdl fit run fits/09_pgas_only.toml \
+    --starts from_mle=results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-06cbd6b3
 
 # Read side.
 camdl fit summary results/fits/01_mle-2030ba2b
@@ -2876,54 +2974,49 @@ error: fits/01_mle.toml resolves to 2 fits:
   Pass a run directory or a longer hash prefix to disambiguate.
 ```
 
-**`--stage` and staged pipelines.** `--stage <name>` reduces the run to that one
-stage. A stage that declares `init_mle = "<upstream-stage>"` cannot be run this
-way, even when the upstream stage's results are already on disk — the upstream
-identity is only known for stages executed in the same invocation:
+**Chaining files by handle.** A `fit.toml` carries one `[method]`, so a pipeline
+— an IF2 scout that finds the basin, a PGAS file that samples it — is two files,
+and the second names the first through its `starts`:
 
-```
-$ camdl fit run fits/02_posterior.toml --stage posterior
-── stage: posterior (method=pgas) ──
-error: stage 'posterior' starts_from 'scout', which has not run in this pipeline
-```
-
-Re-running the whole pipeline is cheap in that situation: completed stages are
-served from the content-addressed store.
-
-```
-── stage: scout (method=if2) ──
-  cache hit — reusing fits/02_posterior-77595169/01-scout-fee126b1/seed_1-06cbd6b3
+```toml
+# fits/02_posterior.toml
+[method]
+algorithm = "pgas"
+…
+starts = { from_mle = "@scout" }
 ```
 
-**Two flag spellings are parsed only to reject them**, so the error can name the
-replacement rather than printing `unexpected argument`:
+The handle is resolved when the second file runs, so the scout has to have run
+(and been labelled) first; a handle that names nothing, or a source that did not
+converge, is refused where it is consumed (§7.3). A completed leaf is served
+from the content-addressed store, so re-running the first file is a cache hit:
 
 ```
-$ camdl fit run fits/01_mle.toml --stage mle --starts-from results/x
-error: --starts-from is no longer accepted on `camdl fit run`. Replacement:
-  --init from_mle --mle <fit-dir>       (warm-start every chain from a prior fit's MLE)
-  --init from_params --params <toml>    (warm-start from a hand-written params TOML)
-Saw --starts-from results/x.
-See `camdl fit run --help` (INIT MODES section).
-
-$ camdl fit run fits/01_mle.toml --stage mle --init-method lhs
-error: --init-method is no longer accepted on `camdl fit run`. It was renamed to --init for parity with `camdl profile`.
-Saw --init-method lhs.
-See `camdl fit run --help` (INIT MODES section).
+$ camdl fit run fits/01_scout.toml --label scout
+── method: if2 ──
+  cache hit — reusing fits/01_scout-77595169/if2-fee126b1/seed_1-06cbd6b3
 ```
 
-The same rename reached the `fit.toml`. The stage key `starts_from` is rejected
-with its replacement spelled out:
+**The flags the split removed are parsed only to reject them**, so the error
+names each one's replacement rather than printing `unexpected argument`:
 
 ```
-$ camdl fit run fits/bad_startsfrom.toml
-error: error in fits/bad_startsfrom.toml:
-fit.toml uses legacy stage keys removed in CLI UX rev 2 (proposal 2026-05-25-cli-init-and-params-ux §"fit.toml schema").
-
-  error: legacy key `starts_from` on stage(s): `scout`
-  replacement: rename to `init_mle` (one toml key per concept).
-  example: `[stages.scout]\n  init_mle = "<prior-stage>"` (was: `starts_from = "<prior-stage>"`).
+$ camdl fit run fits/09_pgas_only.toml --stage posterior --init from_prior
+error: these `camdl fit run` flags were removed with the `[stages]` → `[method]` split (proposal 2026-09-08-workflow-first-fit-config):
+  --stage posterior: a fit.toml carries one `[method]`, so there is nothing to select; drop the flag. A second way of fitting the same problem is a second file (`camdl fit new --from fit.toml fit-posterior.toml`).
+  --init from_prior: write `--starts from_prior`.
+  See `camdl fit run --help` and `camdl docs fit-toml`.
 ```
+
+`--posterior <P>`, `--mle <P>` and `--params <P>` are answered with
+`--starts from_posterior=<P>` / `from_mle=<P>` / `from_params=<P>`;
+`--survey-path` / `--survey-top-k` with the note that the `survey_top_k` rule
+was removed (a survey landscape is not a posterior) and `--starts from_prior` or
+a `from_posterior` from a short run is the replacement;
+`--allow-nonconverged-scout` with `--allow-nonconverged-source`; and the older
+`--starts-from` / `--init-method` spellings likewise.
+
+The `fit.toml` side is the `[stages]` rejection of §6.9.
 
 ### 7.2 CLI Type
 
@@ -2936,9 +3029,15 @@ pub struct FitRunArgs {
     /// Fit configuration file (v2 TOML)
     pub config: PathBuf,
 
-    /// Run only this stage by name
+    /// Where the chains begin, overriding the file's `starts`: a rule name,
+    /// or `name=source` for a sourced rule (`from_mle=@scout`).
+    #[arg(long, value_name = "SPEC")]
+    pub starts: Option<ChainStarts>,
+
+    /// Start from a `from_mle` / `from_posterior` source whose stored
+    /// verdict is not converged.
     #[arg(long)]
-    pub stage: Option<String>,
+    pub allow_nonconverged_source: bool,
 
     /// Rayon thread cap; 0 = all logical cores. Bit-identical regardless.
     #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
@@ -2951,19 +3050,15 @@ pub struct FitRunArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Extend a completed PGAS/PMMH stage from a base run, addressed by
+    /// Extend a completed PGAS/PMMH run from a base run, addressed by
     /// run_id prefix or leaf path.
-    #[arg(long, value_name = "BASE_REF", requires = "stage", conflicts_with = "force")]
+    #[arg(long, value_name = "BASE_REF", conflicts_with = "force")]
     pub resume: Option<String>,
 
     /// Cartesian sweep over a [fixed] parameter (repeatable).
     /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
     #[arg(long, value_name = "NAME=SPEC")]
     pub sweep: Vec<SweepSpec>,
-
-    /// Proceed even if the prior stage failed its convergence gate.
-    #[arg(long)]
-    pub allow_nonconverged_scout: bool,
 
     /// Display label, 1–64 chars of `[A-Za-z0-9 ,._-]`.
     #[arg(long, value_name = "TEXT")]
@@ -2978,72 +3073,68 @@ Note the shapes. `--resume` carries a **base reference**, not a boolean;
 is a read-side view: `fit summary --exclude-chains`,
 `fit predict --exclude-chains`, `fit table --exclude-chains`).
 
-> **`--force` does not currently work on `fit run`.** On a fit whose stage leaf
+> **`--force` does not currently work on `fit run`.** On a fit whose method leaf
 > already exists it aborts rather than recomputing:
 >
 > ```
 > $ camdl fit run fits/08_holdoutfiles.toml --seed 1 --force
-> ── stage: scout (method=if2) ──
-> error: claim fit stage …/01-scout-c3b8cbc0/seed_1-06cbd6b3: artifact already completed at …/01-scout-c3b8cbc0/seed_1-06cbd6b3
+> ── method: if2 ──
+> error: claim fit stage …/if2-c3b8cbc0/seed_1-06cbd6b3: artifact already completed at …/if2-c3b8cbc0/seed_1-06cbd6b3
 > ```
 >
 > Without the flag the same command reports a cache hit and exits 0. To force a
-> recompute today, delete the stage leaf (or the whole fit segment) first. This
+> recompute today, delete the method leaf (or the whole fit segment) first. This
 > is the opposite of `camdl simulate --force`, which re-stores in place.
 
-`--resume <BASE_REF>` extends a completed PGAS or PMMH stage: the base leaf is
+`--resume <BASE_REF>` extends a completed PGAS or PMMH run: the base leaf is
 read read-only and the longer chain is written to a new content-addressed leaf
 keyed on the new `sweeps` / `iterations` with a dependency on the base — a
 distinct deterministic artifact, not bit-identical to an uninterrupted fit of
-the same length. It requires `--stage`, so it inherits the staged-pipeline
-restriction described in §7.1: a PGAS stage declaring `init_mle = "<upstream>"`
-cannot be resumed today. Give the resumable stage its own `fit.toml` and take
-its start from a path instead of from a sibling stage:
+the same length. The file's `starts` (or `--starts`) is resolved as on any run,
+so a file that starts from another fit resumes like any other:
 
 ```
-$ camdl fit run fits/09_pgas_only.toml --stage posterior \
-    --init from_mle --mle results/fits/01_mle-2030ba2b/01-mle-fee126b1/seed_1-06cbd6b3
-   stored posterior · …/09_pgas_only-649b2ecc/01-posterior-7107153d/seed_1-06cbd6b3 · 1.5s
+$ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
+   stored pgas · …/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-06cbd6b3/
 
 # raise `sweeps` in the toml, then extend that leaf
-$ camdl fit run fits/09_pgas_only.toml --stage posterior \
-    --init from_mle --mle results/fits/01_mle-2030ba2b/01-mle-fee126b1/seed_1-06cbd6b3 \
-    --resume results/fits/09_pgas_only-649b2ecc/01-posterior-7107153d/seed_1-06cbd6b3
+$ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle \
+    --resume results/fits/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-06cbd6b3
   chain 1: resuming from sweep 100
   chain 2: resuming from sweep 100
-   stored posterior · …/09_pgas_only-649b2ecc/01-posterior-05ea6411/seed_1-06cbd6b3 · 2.3s
+   stored pgas · …/09_pgas_only-649b2ecc/pgas-05ea6411/seed_1-06cbd6b3/
 ```
 
-**Chain starts.** `--init <MODE>` overrides the stage's `init` and requires
-`--stage`. Modes and their companion flags:
+**Chain starts.** `--starts <SPEC>` overrides the file's `starts` with the same
+rules §6.6 lists — a bare name, or `name=source` for a sourced rule:
 
-| `--init`                | companion         | where the chains start                                             |
-| ----------------------- | ----------------- | ------------------------------------------------------------------ |
-| `uniform_unconstrained` | —                 | default; i.i.d. U(−2, 2) on the unconstrained scale, mapped inward |
-| `single`                | —                 | every chain at the seeded base point                               |
-| `uniform`               | —                 | per-chain uniform draw inside `[estimate]` bounds                  |
-| `lhs`                   | —                 | Latin-hypercube stratified inside bounds                           |
-| `from_prior`            | —                 | one draw per chain from each parameter's `~ <dist>` declaration    |
-| `from_posterior`        | `--posterior <P>` | rows from a draws TSV or a fit-results directory                   |
-| `from_mle`              | `--mle <P>`       | every chain at a prior fit's MLE                                   |
-| `from_params`           | `--params <TOML>` | every chain at a point in a flat params TOML                       |
-| `survey_top_k`          | `--survey-path`   | top-K rows of a `camdl survey` landscape (`--survey-top-k <N>`)    |
+| `--starts`                | where the chains start                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------------------------ |
+| `from_prior`              | one draw per chain from each parameter's resolved prior (the default when every one has a prior) |
+| `uniform_unconstrained`   | i.i.d. U(−2, 2) on the unconstrained scale, mapped inward (the default otherwise)                |
+| `lhs`                     | Latin-hypercube stratified inside bounds                                                         |
+| `uniform`                 | per-chain uniform draw inside `[estimate]` bounds                                                |
+| `from_posterior=<handle>` | one row per chain from a fit's `draws.tsv` (or a draws TSV path)                                 |
+| `single`                  | every chain at the seeded base point                                                             |
+| `from_mle=<handle>`       | every chain at a fit's estimate                                                                  |
+| `from_params=<toml>`      | every chain at the point in a flat params TOML                                                   |
 
-Init applies only to parameters in `[estimate]`; anything in `[fixed]` takes its
-declared value regardless of mode.
+The override is keyed into the run's identity like the file's own `starts`, and
+a sourced rule's source is refused when its stored verdict is not converged
+unless `--allow-nonconverged-source` is passed.
 
 **The dt audit.** `--no-dt-check` skips the post-fit Richardson dt-convergence
 check, `--dt-check-strict` tightens its threshold (0.5 nats for chain_binomial,
 0.1 for ode_rk4, against routine defaults of 2.0 / 0.5), and
 `--dt-check-halvings <N>` sets how many halvings it evaluates (default 2).
 
-**Per-algorithm overrides.** Each requires `--stage`. Each writes through to the
-stage identity, so an overridden run is a distinct artifact rather than a cache
-hit on the un-overridden one — with the exception noted after the table.
+**Per-algorithm overrides.** Each writes through to the method identity, so an
+overridden run is a distinct artifact rather than a cache hit on the
+un-overridden one — with the exception noted after the table.
 
 | flag                      | overrides                             | algorithm |
 | ------------------------- | ------------------------------------- | --------- |
-| `--decibans-thresh <DB>`  | `[stages.<s>.gate].decibans_thresh`   | gate      |
+| `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh`       | gate      |
 | `--cooling-target-iters`  | `cooling_target_iters`                | IF2       |
 | `--tempering <B1,B2,...>` | `tempering` (first value must be 1.0) | PGAS      |
 | `--max-tree-depth <N>`    | `max_tree_depth`                      | PGAS/NUTS |
@@ -3058,23 +3149,23 @@ hit on the un-overridden one — with the exception noted after the table.
 | `--record-ancestry`       | `record_ancestry = true`              | PFilter   |
 | `--record-prequential`    | `record_prequential = true`           | PFilter   |
 
-The boolean overrides are one-way: they can switch a stage off, and switching it
-back means editing the TOML.
+The boolean overrides are one-way: they can switch a setting off, and switching
+it back means editing the TOML.
 
 > **Four flags do not re-key.** `--decibans-thresh`, `--no-dt-check`,
 > `--dt-check-strict` and `--dt-check-halvings` are applied after the run is
-> looked up in the store, so on an already-completed stage they are silently
+> looked up in the store, so on an already-completed leaf they are silently
 > ignored and the prior verdict is served:
 >
 > ```
-> $ camdl fit run fits/01_mle.toml --stage mle --decibans-thresh 0.1
-> ── stage: mle (method=if2) ──
->   cache hit — reusing fits/01_mle-2030ba2b/01-mle-fee126b1/seed_1-06cbd6b3
+> $ camdl fit run fits/01_mle.toml --decibans-thresh 0.1
+> ── method: if2 ──
+>   cache hit — reusing fits/01_mle-2030ba2b/if2-fee126b1/seed_1-06cbd6b3
 > $ camdl fit summary results/fits/01_mle-2030ba2b
 >     decibans leg:    Δ = 0.9 dB / threshold 30.0 dB  ✓  (σ_max=0.02)
 > ```
 >
-> Delete the stage leaf before rerunning with any of them. Every other flag in
+> Delete the method leaf before rerunning with any of them. Every other flag in
 > the table above re-keys correctly.
 
 **Seeds and fits.** A fit runs at a single base seed — `--seed N`, default 1 —
@@ -3089,9 +3180,9 @@ fit_seeds = [1, 2]
 
 ```
 ━━━ cell 1/2: fit_seed=1 ━━━
-   stored mle · …/01-mle-fee126b1/seed_1-06cbd6b3
+   stored if2 · …/if2-fee126b1/seed_1-06cbd6b3/
 ━━━ cell 2/2: fit_seed=2 ━━━
-   stored mle · …/01-mle-fee126b1/seed_2-f69dd668
+   stored if2 · …/if2-fee126b1/seed_2-f69dd668/
 ```
 
 `fit_seeds` is stripped from the fit-level hash, so adding seeds extends a fit
@@ -3123,8 +3214,8 @@ rho = 0.6
 camdl fit run fits/01_mle.toml --sweep "rho=0.4,0.6"
 ```
 
-Repeating the flag takes the Cartesian product, and each point runs the full
-stage pipeline independently into its own content-addressed fit segment:
+Repeating the flag takes the Cartesian product, and each point runs the method
+independently into its own content-addressed fit segment:
 
 ```
 $ camdl fit run fits/01_mle.toml --sweep "rho=0.5,0.6" --sweep "k=5,10"
@@ -3138,81 +3229,45 @@ sweep: 4 points
 ═══ sweep point 4/4: rho_0.600__k_10.000 ═══
 ```
 
-**Convergence gates.** A stage that consumes an upstream stage
-(`init_mle = "<stage>"`) is gated on that upstream's convergence before it runs,
-and on not regressing below it afterwards. Both gates live on the IF2 stage
-kind, so they apply to a `scout → refine` handoff; a PGAS, PMMH or NLopt stage
-consuming an upstream MLE is not gated.
-
-At a **single grid point** a gate failure halts the run with exit status 1:
+**Source convergence.** A file that starts from a stored fit
+(`starts = { from_mle = "@scout" }`, `{ from_posterior = "@short" }`, or the
+`--starts` override) is checked against that source's stored verdict where the
+handle is resolved, before the model is loaded. An IF2 source is judged by its
+own gate — the tail chain-agreement Â leg and the inter-chain log-likelihood
+spread in decibans — and a sampler source by the same R̂ classification
+`fit summary` renders. A source that did not converge is refused with the
+verdict, so a warm start cannot launder one fit's multi-modality into the next:
 
 ```
-$ camdl fit run fits/03_scout_refine.toml
-── stage: refine (method=if2) ──
-error: refine stage requires scout convergence.
+$ camdl fit run fits/02_posterior.toml
+error: starts source @scout: it did not converge.
 
-  Scout tail Â (last half of iterations):
-    ✗ gamma      Â =  1.145   (> 1.10)
+  Tail Â (IF2 chain agreement over the last half of iterations), threshold 1.01:
+    ✗ gamma      Â =  1.145   (>= 1.01)
       beta       Â =  0.965
 
-  Scout loglik spread: 0.2 (best chain loglik -58.4)
+  Loglik spread: 0.2 (best chain loglik -58.4)
 
   Failing: gamma (Â=1.15)
 
   Pick one:
-    - re-run scout with more chains or iterations
-    - narrow bounds to the basin scout's best chain found
+    - re-run it with more chains or iterations
+    - narrow bounds to the basin its best chain found
     - mark weakly-identified initial-state params as `perturb_only_at_t0 = true`
       (reported but not gated)
 
-  To run refine anyway (results may launder multi-modality):
-    camdl fit run fit.toml --allow-nonconverged-scout
+  To start from it anyway (the starts may launder multi-modality):
+    camdl fit run fit.toml --allow-nonconverged-source
 ```
 
-**Under `--sweep` a gate failure does not halt the sweep.** The point is
-recorded, its remaining stages are skipped, and the next point runs. The command
-exits 0 even when every cell failed, so downstream tooling must read the failure
-file rather than the exit status:
+`--allow-nonconverged-source` downgrades the refusal to a warning that repeats
+the verdict and says `starting from it anyway`. A source between the soft and
+hard agreement bands is accepted with a warning naming the parameters its chains
+only nearly agreed on. There is no gate after the run: a regression is visible
+in `fit table`, and the consumer's own verdict is its own.
 
-```
-━━━ sweep summary ━━━
-  2 / 2 cells skipped gate
-    cell  1 / pt  1 (rho=0.500) stage=refine reason=scout_tail_agreement_gate
-    cell  1 / pt  2 (rho=0.600) stage=refine reason=scout_tail_agreement_gate
-  details: results/fits/03_scout_refine-a5aae294/sweep_failures.tsv
-```
-
-```
-$ cat results/fits/03_scout_refine-a5aae294/sweep_failures.tsv
-cell	sweep_point	sweep_values	stage	reason
-0	0	rho=0.500000	refine	scout_tail_agreement_gate
-0	1	rho=0.600000	refine	scout_tail_agreement_gate
-```
-
-`reason` is one of `scout_tail_agreement_gate`, `scout_decibans_spread_gate`, or
-`regression_gate`. The file is written only when at least one cell failed, so
-its absence means every cell cleared its gate. A plotting script should treat a
-missing sweep point as "did not run" and a listed one as "ran and failed to
-converge".
-
-`--allow-nonconverged-scout` downgrades the pre-stage gate to a warning in both
-modes. The post-stage regression gate is not overridable.
-
-The gate reads whatever supplied the stage's starting point, including an
-_external_ fit passed as `--init from_mle --mle <leaf>`. On an IF2 stage that
-means warm-starting from another fit's MLE also imports that fit's convergence
-verdict, and the refusal is phrased in terms of the `scout → refine` handoff
-regardless of what the stage is called:
-
-```
-$ camdl fit run fits/03_scout_refine.toml --stage scout \
-    --init from_mle --mle results/fits/01_mle-2030ba2b/01-mle-fee126b1/seed_1-06cbd6b3
-── stage: scout (method=if2) ──
-error: refine stage requires scout convergence.
-```
-
-Pass `--allow-nonconverged-scout`, or warm-start a Bayesian stage instead, where
-no gate is applied.
+Under `--sweep` every point resolves the same source, so a refused source
+refuses the whole sweep before any point runs.
 
 For a dedicated profile-likelihood workflow — fix a focal parameter, maximise
 over the rest at each grid point — use `camdl profile`, which runs IF2 per cell
@@ -3239,7 +3294,7 @@ Real fits want one to two orders of magnitude more of everything.
 
 ### 8.1 MLE with IF2
 
-The minimum useful fit: one IF2 stage maximising the stochastic-process
+The minimum useful fit: an IF2 method maximising the stochastic-process
 likelihood.
 
 ```toml
@@ -3264,7 +3319,7 @@ k = 10.0
 [config]
 dt = 1.0
 
-[stages.mle]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 4
@@ -3274,16 +3329,17 @@ cooling = 0.7
 ```
 
 ```
-$ camdl fit run fits/01_mle.toml --seed 1
+$ camdl fit run fits/01_mle.toml --seed 1 --label mle
    cached IR for sir.camdl (97c3d4c1)
-fit: fits/01_mle.toml (1 stage)
+fit: fits/01_mle.toml (method=if2)
   model:    fits/../models/sir.camdl
   estimate: beta, gamma
   fixed:    N0, I0, rho, k
+  starts:   uniform_unconstrained (one independent draw per chain) — default: no sampleable prior on beta, gamma
   output:   …/results/fits/01_mle-2030ba2b
 
-── stage: mle (method=if2) ──
-  note: `init = "uniform_unconstrained"` draws every chain's start, so `[estimate].start` is unused here for: beta, gamma. Use `init = "single"` to start every chain at the declared values, or drop the `start` entries.
+── method: if2 ──
+  note: `starts = "uniform_unconstrained"` draws every chain's start, so `[estimate].start` is unused here for: beta, gamma. Use `starts = "single"` to start every chain at the declared values, or drop the `start` entries.
 running 4 chains × 200 particles × 10 iterations, cooling=0.7, dt=1
 
 transforms (chain 1 of 4; chains start at different points — see chain_starts.tsv):
@@ -3317,23 +3373,25 @@ dt-convergence at θ̂: PASS  (|Δ_leg1| = 0.65, |Δ_leg2| = 1.16 nats (vs τ = 
   ! 1/2 parameters have Â > 1.1 (max 1.15).
   0 error(s), 1 warning(s), 2 info
 
-   stored mle · fits/../results/fits/01_mle-2030ba2b/01-mle-fee126b1/seed_1-06cbd6b3/
+   stored if2 · fits/../results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-06cbd6b3/
           best ll=-58.4 (chain 2) in 8.5s
 ```
 
-Two things the run says that are worth reading. The `note` about `start`: the
-default `init = "uniform_unconstrained"` draws each chain's start, so the
-`start` values in `[estimate]` are inert unless you also set `init = "single"`.
-And the `Â` block: chain agreement on `gamma` is 1.145, which at ten iterations
-means the chains have not agreed on a basin. `camdl fit summary` renders the
-same run as a verdict:
+Two things the run says that are worth reading. The `starts` line and its
+`note`: no parameter here declares a prior, so the default rule is
+`uniform_unconstrained`, which draws each chain's start, and the `start` values
+in `[estimate]` are inert unless you set `starts = "single"`. And the `Â` block:
+chain agreement on `gamma` is 1.145, which at ten iterations means the chains
+have not agreed on a basin. `camdl fit summary` renders the same run as a
+verdict:
 
 ```
 $ camdl fit summary results/fits/01_mle-2030ba2b
 results/fits/01_mle-2030ba2b/
   camdl 0.1.0+3e2b2888
 
-══ mle ═══════════════════════════════════════════════════════════════════════
+══ if2 ═══════════════════════════════════════════════════════════════════════
+  seeded from:  uniform_unconstrained (one independent draw per chain)
   best loglik:  -58.4 (if2)  (loglik-eval, max across chains)
   chains:       4
 
@@ -3364,16 +3422,21 @@ results/fits/01_mle-2030ba2b/
     fit_state.toml ↔ final_params.toml:   ✓ params match
 ```
 
-The gate verdict here is informational — nothing consumes this stage. It becomes
-binding the moment a downstream stage declares `init_mle = "mle"` (§8.2).
+The gate verdict here is informational — nothing consumes this fit. It becomes
+binding the moment another file starts from it
+(`starts = { from_mle = "@mle"
+}`, §8.2): that file is refused until the scout
+converges, or `--allow-nonconverged-source` is passed (§7.3).
 
 ### 8.2 MLE, posterior sampling, and a filter evaluation
 
-A three-stage pipeline: IF2 finds the basin, PGAS samples the posterior
-warm-started from it, and a particle filter re-scores θ̂ with a replicate spread.
+A pipeline of three files: IF2 finds the basin, PGAS samples the posterior
+starting from it, and a particle filter re-scores θ̂ with a replicate spread.
+Each file carries one `[method]`; the second and third name the first by the
+label it was run with.
 
-Priors are **required** for a Bayesian stage. They are externally-tagged inline
-tables keyed by the distribution name —
+Priors are **required** for a sampler. They are externally-tagged inline tables
+keyed by the distribution name —
 `prior = { log_normal = { mu = …, sigma
 = … } }`, not
 `prior = { dist = "log_normal", … }`. A `fit.toml` prior overrides the model's
@@ -3381,12 +3444,16 @@ tables keyed by the distribution name —
 to flat, and `prior = { flat = {} }` is how you ask for flat on purpose without
 the warning.
 
+The problem half is the same in all three files; the scout is `01_mle.toml` with
+priors added:
+
 ```toml
+# fits/02_scout.toml
 output_dir = "../results"
 
 [provenance]
 derived_from = "01_mle.toml"
-reason = "add a Bayesian stage; scout finds the basin, PGAS samples it"
+reason = "priors, so PGAS can sample the basin scout finds"
 
 [model]
 camdl = "../models/sir.camdl"
@@ -3407,29 +3474,46 @@ k = 10.0
 [config]
 dt = 1.0
 
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 4
 particles = 200
 iterations = 10
 cooling = 0.7
+```
 
-[stages.posterior]
+The posterior and evaluation files repeat the problem half and change only
+`[method]`; `camdl fit new --from fits/02_scout.toml fits/02_posterior.toml`
+copies it. Because the problem is the same, all three land under one fit-level
+hash, in sibling segments named by their stems.
+
+```toml
+# fits/02_posterior.toml — [method] only; the rest as 02_scout.toml
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
 particles = 50
 sweeps = 200
 burn_in = 50
-init_mle = "scout"
+starts = { from_mle = "@scout" }
+```
 
-[stages.evaluate]
+```toml
+# fits/02_evaluate.toml — [method] only
+[method]
 algorithm = "pfilter"
 backend = "chain_binomial"
 particles = 500
 replicates = 5
-init_mle = "scout"
+starts = { from_mle = "@scout" }
+```
+
+```
+$ camdl fit run fits/02_scout.toml --seed 1 --label scout
+$ camdl fit run fits/02_posterior.toml --seed 1
+$ camdl fit run fits/02_evaluate.toml --seed 1
 ```
 
 TOML ordering bites here: `output_dir` is a top-level key, so it must appear
@@ -3445,10 +3529,12 @@ parse error: TOML parse error at line 5, column 1
 unknown field `output_dir`, expected `derived_from` or `reason`
 ```
 
-The PGAS stage runs NUTS on θ given the conditioned trajectory:
+The PGAS file resolves its source first, then runs NUTS on θ given the
+conditioned trajectory:
 
 ```
-── stage: posterior (method=pgas) ──
+  starts source: …/02_scout-77595169/if2-fee126b1/seed_1-06cbd6b3 (fit_state.toml)
+── method: pgas ──
   NUTS enabled (gradient expressions found in IR)
   dense mass matrix estimated (sweep 35):
     beta         sd=0.017766
@@ -3468,8 +3554,10 @@ Rhat / ESS:
   x parameter acceptance rate 92.5% is outside healthy range [15%, 50%].
   x Rhat for 'beta' is 2.065 (threshold 1.1). Chain estimates have not converged.
   6 error(s), 0 warning(s), 0 info
+```
 
-── stage: evaluate (method=pfilter) ──
+```
+── method: pfilter ──
   pfilter rep 1/5: loglik=-58.3
   pfilter rep 2/5: loglik=-58.3
   pfilter rep 3/5: loglik=-58.5
@@ -3481,12 +3569,22 @@ Rhat / ESS:
 ```
 
 R̂ of 2.07 at 200 sweeps is a not-converged posterior, reported as errors rather
-than buried — a real run needs thousands of sweeps. The `pfilter` stage writes
+than buried — a real run needs thousands of sweeps. There is a second thing to
+read here: `from_mle` is a point rule, so both chains began at the scout's
+estimate and the between-chain R̂ cannot say whether the posterior was explored.
+`fit summary` on this leaf prints
+`seeded from:  from_mle @scout
+(every chain at one point)` and
+`R̂ — not assessed: all 2 chains started at
+one point (starts = from_mle @scout)`
+in place of a verdict (§6.6). To keep R̂ meaningful, start from the priors (drop
+`starts`; every parameter here has one) or from a short sampler run's cloud
+(`starts = { from_posterior = "@short" }`). The `pfilter` file writes
 `prequential.tsv` and `prequential.json`; the JSON is what `camdl compare` reads
 to score fits against each other.
 
 Beneath the `prequential:` line, whenever at least one observation was scored,
-the stage prints the **surprise table**: the five worst-scored observations of
+the filter prints the **surprise table**: the five worst-scored observations of
 the trace, worst first (`camdl pfilter --save-prequential` prints the same table
 after its own `prequential trace written:` line). The elpd is a sum, and a sum
 hides which terms carry it; the table is the answer to "which observations did
@@ -3515,14 +3613,14 @@ elpd by itself, with `pit` at 0 or 1 and `ess` in the single digits, is one
 observation the filter could not explain — check the data row at that `t` before
 anything else.
 
-Once a Bayesian stage exists, `fit predict` replays the posterior forward and
+Once a sampler leaf exists, `fit predict` replays the posterior forward and
 writes the predicted-vs-observed pair:
 
 ```
 $ camdl fit predict fits/02_posterior.toml --n-draws 20
 fit predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
-fit predict: horizon=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas stage 'posterior'
+fit predict: horizon=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas stage 'pgas'
 wrote fits/../results/fits/02_posterior-77595169/predictive/weekly_cases.tsv
 wrote fits/../results/fits/02_posterior-77595169/predictive.json
 wrote fits/../results/fits/02_posterior-77595169/observed/weekly_cases.tsv
@@ -3540,12 +3638,10 @@ fitted	7	free_forward	posterior	2.0652
 `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels, `n_draws`, and the
 `q05…q95` band.)
 
-> **Current limitation.** A fit whose stage list contains a `pfilter` stage is
-> dropped from `camdl fit table` with a `unknown fit-stage method 'pfilter'`
-> warning, and `fit summary --format json` emits an empty `table_row` for it.
-> The text `fit summary` still renders the IF2 and PGAS stanzas correctly. If
-> you rely on the cross-fit table, keep the filter evaluation in a separate
-> `fit.toml`.
+> **Current limitation.** A `pfilter` leaf is dropped from `camdl fit table`
+> with a `unknown fit-stage method 'pfilter'` warning, and
+> `fit summary --format json` emits an empty `table_row` for it. The text
+> `fit summary` still renders the IF2 and PGAS leaves correctly.
 
 ### 8.3 Deterministic ODE backend
 
@@ -3556,7 +3652,7 @@ backend) pair; an invalid pair is rejected at load.
 
 This is a **different statistical object** — `p(y | θ, ODE skeleton)`, not
 `p(y | θ)` — appropriate for equilibrium or large-population models where the
-particle filter is structurally redundant. The runtime says so at every stage:
+particle filter is structurally redundant. The runtime says so for every method:
 
 ```
 ℹ nl-sbplx (Subspace simplex; robust to boundary non-smoothness): deterministic MLE on the ODE-skeleton likelihood.
@@ -3585,24 +3681,27 @@ k = 10.0
 [config]
 dt = 0.5
 
-[stages.mle]
+[method]
 algorithm = "nl-sbplx"
 backend = "ode"
 chains = 3
 max_evals = 200
+```
 
-[stages.posterior]
+```toml
+# fits/05_ode_posterior.toml — [method] only; the rest as 05_ode.toml
+[method]
 algorithm = "mh"
 backend = "ode"
 chains = 2
 iterations = 400
 burn_in = 100
-init_mle = "mle"
+starts = { from_mle = "@ode-mle" }
 ```
 
 ```
-$ camdl fit run fits/05_ode.toml --seed 1
-── stage: mle (method=nl-sbplx) ──
+$ camdl fit run fits/05_ode.toml --seed 1 --label ode-mle
+── method: nl-sbplx ──
 ⚠ Phase 1 typhoid validation passed; other model classes still gathering downstream feedback.
 
   status: 1 converged, 2 max-eval, 0 failed (of 3)
@@ -3612,7 +3711,8 @@ $ camdl fit run fits/05_ode.toml --seed 1
 
 dt-convergence at θ̂: PASS  (|Δ_leg1| = 0.00, |Δ_leg2| = 0.00 nats (vs τ = 0.50); converged.)
 
-── stage: posterior (method=mh) ──
+$ camdl fit run fits/05_ode_posterior.toml --seed 1 --allow-nonconverged-source
+── method: mh ──
 
 ODE marginal-likelihood check at base θ (deterministic)...
   ODE log L = -57.8 (deterministic; no PF variance)
@@ -3679,7 +3779,7 @@ gamma = { bounds = [0.01, 0.5] }
 [fixed]
 from_file = "params/sir_fixed.toml"
 
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -3692,7 +3792,7 @@ cooling = 0.7
 $ camdl fit run fits/08_holdoutfiles.toml --seed 1
 cooling: cf50=0.70, reached at iter 50 (target), over a 5-iteration run × 9 observations
 best chain: 1 (loglik=-48.01 ± 0.01)
-   stored scout · …/results/fits/08_holdoutfiles-812b33c5/01-scout-c3b8cbc0/seed_1-06cbd6b3
+   stored if2 · …/results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-06cbd6b3/
 ```
 
 Nine observations, as the split promised. `fit summary --params-only` emits θ̂ as
@@ -3701,8 +3801,8 @@ is scored in two commands:
 
 ```
 $ camdl fit summary results/fits/08_holdoutfiles-812b33c5 --params-only
-# camdl fit summary --params-only --stage scout
-# source: results/fits/08_holdoutfiles-812b33c5/01-scout-c3b8cbc0/seed_1-06cbd6b3/final_params.toml
+# camdl fit summary --params-only (if2)
+# source: results/fits/08_holdoutfiles-812b33c5/if2-c3b8cbc0/seed_1-06cbd6b3/final_params.toml
 # camdl: 0.1.0+3e2b2888
 
 I0 = 10.0
@@ -3734,7 +3834,7 @@ log-likelihood.
 
 > **Current limitation.** `[data] holdout_after = <t>` and the `[data.holdout]`
 > file block are accepted by the parser and folded into the fit hash, but no
-> stage reads them: a fit declaring `holdout_after` trains on the **full**
+> method reads them: a fit declaring `holdout_after` trains on the **full**
 > series, with the same θ̂ and the same log-likelihood as one that omits the key.
 > Split the file instead.
 
@@ -3752,26 +3852,28 @@ diff: fits/01_mle.toml → fits/02_posterior.toml
   beta: prior (none) → log_normal(mu=-1, sigma=0.5)
   gamma: prior (none) → log_normal(mu=-2, sigma=0.5)
 
-Stages:
-  stage 'evaluate': (new) pfilter
-  stage 'posterior': (new) pgas
-  stage 'scout': (new) if2
-  stage 'mle': (removed)
+Method:
+  algorithm: "if2" → "pgas"
+  burn_in: null → 50
+  cooling: 0.7 → null
+  iterations: 10 → null
+  particles: 200 → 50
+  starts: null → {"from_mle":"@scout"}
+  sweeps: null → 200
 ```
 
-`fit new` copies a config, stamps a `[provenance]` block onto it, and points at
-the source fit's results so the new one can warm-start from them:
+`fit new` copies a config, stamps a `[provenance]` block onto it, and says how
+the new file can start from the source fit's results:
 
 ```
 $ camdl fit new --from fits/01_mle.toml fits/04_derived.toml
   [provenance] derived_from = "fits/01_mle.toml"
-  hint: set starts_from on your first stage to the last stage leaf under fits/../results/fits/01_mle-2030ba2b
-        (run `camdl list` to find the exact stage-leaf path)
+  hint: to warm-start the derived fit from fits/../results/fits/01_mle-2030ba2b, write under its [method]
+        starts = { from_posterior = "@<label>" }   # one draw per chain
+        starts = { from_mle = "@<label>" }         # every chain at its estimate
+        (a handle is @label, a fit-id prefix, or the leaf directory; `camdl list` shows them)
 created fits/04_derived.toml
 ```
-
-The key that hint means is `init_mle` (`starts_from` is the retired spelling and
-is rejected at load).
 
 `fit table` renders every fit under a results root, one row each:
 
@@ -3779,45 +3881,45 @@ is rejected at load).
 $ camdl fit table results/fits
 fit_id     label                  stem           method   stages converged     best_ll ll_type          age
 --------------------------------------------------------------------------------------------------------------
-649b2ecc   <unlabelled>           09_pgas_only   pgas     poste… no                  — complete_data     4m
-2030ba2b   auto rw_sd, take 1     01_mle         if2      mle    no              -58.4 if2              11m
-812b33c5   <unlabelled>           08_holdoutfil… if2      scout  no              -48.0 if2              13m
-a5aae294   <unlabelled>           03_scout_refi… if2      scout… no              -58.4 if2              23m
-8e6e8964   <unlabelled>           05_ode         mh       mle+p… no              -58.9 marginal         23m
+649b2ecc   <unlabelled>           09_pgas_only   pgas     pgas   no                  — complete_data     4m
+2030ba2b   mle                    01_mle         if2      if2    no              -58.4 if2              11m
+812b33c5   <unlabelled>           08_holdoutfil… if2      if2    no              -48.0 if2              13m
+77595169   scout                  02_scout       if2      if2    no              -58.4 if2              23m
+8e6e8964   ode-mle                05_ode         nl-sbplx nl-sb… no              -58.9 marginal         23m
 ```
 
 Labels come from `--label` at run time or from the top-level `camdl label`
 afterwards:
 
 ```
-$ camdl label 2030ba2b "auto rw_sd, take 1"
-ok: label set to "auto rw_sd, take 1" on ./results/fits/01_mle-2030ba2b
+$ camdl label 2030ba2b mle
+ok: label set to "mle" on ./results/fits/01_mle-2030ba2b
 ```
 
-Filters: `--converged` / `--gate-failed`, `--with-stage <name>`,
-`--with-method if2|pgas|pmmh`, `--model <hash-prefix>`, `--hash <hash-prefix>`,
-`--since-seconds <n>`, `--label-pattern <glob>`. Formats: `text` (default),
-`json`, `md`, `csv`. `--quantity <name>` adds a column carrying the posterior
-median of a scalar generated quantity, deriving it on demand for a fit that has
-not been predicted yet.
+Filters: `--converged` / `--gate-failed`, `--with-method if2|pgas|pmmh`,
+`--model <hash-prefix>`, `--hash <hash-prefix>`, `--since-seconds <n>`,
+`--label-pattern <glob>`. Formats: `text` (default), `json`, `md`, `csv`.
+`--quantity <name>` adds a column carrying the posterior median of a scalar
+generated quantity, deriving it on demand for a fit that has not been predicted
+yet.
 
 Note that `fit_id` is the **fit-level** hash — model, data, `[estimate]`,
-`[fixed]` — computed with `stages`, `fit_seeds` and `output_dir` deliberately
-excluded. Two configs that differ only in their stage list therefore share a
-`fit_id`, and `--hash <prefix>` can return more than one row; the directory stem
-is what separates them.
+`[fixed]` — computed with `method`, `fit_seeds` and `output_dir` deliberately
+excluded. Two configs that differ only in `[method]` therefore share a `fit_id`,
+and `--hash <prefix>` can return more than one row; the directory stem is what
+separates them.
 
 ## 9. Provenance and Cache Invalidation
 
 ### 9.1 The identity model
 
-Every artifact camdl writes — a forward trajectory, a fit stage, a particle
-filter evaluation, a survey, a profile grid point, a multi-cell ensemble — is
-stored as a **content-addressed leaf** in one store rooted at the output
-directory (default `results/`, see `run_paths::DEFAULT_OUTPUT_ROOT`). There is
-no second scheme: fits are content-addressed exactly like simulations. The only
-thing that is "named" about a fit directory is the human-readable _label_ in
-each path segment, which is provenance and never identity.
+Every artifact camdl writes — a forward trajectory, a fit's method leaf, a
+particle filter evaluation, a survey, a profile grid point, a multi-cell
+ensemble — is stored as a **content-addressed leaf** in one store rooted at the
+output directory (default `results/`, see `run_paths::DEFAULT_OUTPUT_ROOT`).
+There is no second scheme: fits are content-addressed exactly like simulations.
+The only thing that is "named" about a fit directory is the human-readable
+_label_ in each path segment, which is provenance and never identity.
 
 A leaf's identity is **not** one flat hash. It is an ordered tuple of per-level
 content hashes, and the leaf address is derived from that tuple:
@@ -3937,7 +4039,7 @@ if the field did not exist.
 | ---------------------------- | ----------------------------------------- | -------------------------------- |
 | `Sim` (`sims/`)              | model · config · params · scenario · seed | `cli/src/resolve.rs:179`         |
 | `SimEnsemble` (`ensembles/`) | model · config · params · grid            | `cli/src/sim_ensemble_cas.rs:88` |
-| `FitStage` (`fits/`)         | fit · stage · seed                        | `cli/src/fit/cas.rs:420`         |
+| `FitStage` (`fits/`)         | fit · method · seed                       | `cli/src/fit/cas.rs`             |
 | `Pfilter` (`pfilters/`)      | model · config · params · seed            | `cli/src/pfilter_cas.rs:65`      |
 | `Survey` (`surveys/`)        | model · config · box · seed               | `cli/src/survey_cas.rs:61`       |
 | `ProfilePoint` (`profiles/`) | profile · point · stage · seed · start    | `cli/src/profile_cas.rs`         |
@@ -3974,18 +4076,21 @@ if the field did not exist.
 
 - `fit` — `FitDigest`: the `ModelDigest`; the content digest of each resolved
   _training_ stream; the content digest of each `[data.holdout]` stream; the
-  digest of the whole canonicalized fit.toml **less** `stages`, `fit_seeds` and
-  `output_dir`; and the engine version. Excluding `stages` is what lets editing
-  the posterior block leave the scout leaf reusable. Model and data _paths_ stay
-  in the blob — a rename over-invalidates harmlessly.
-- `stage` — `StageLevel` = `StageConfig` folded with `deps`. `StageConfig`
-  carries the digest of `Stage::identity_payload()` re-augmented with
-  `n_trajectories`, plus `target_length` and the **resolved** (not requested)
-  observation-time alignment (`Exact` vs `Snap`). Folding `deps` here is what
-  makes `02-posterior` re-key when `01-scout` changes.
+  digest of the whole canonicalized fit.toml **less** `method`, `fit_seeds` and
+  `output_dir`; and the engine version. The fit level hashes the problem alone,
+  so two files that differ only in `[method]` share it. Model and data _paths_
+  stay in the blob — a rename over-invalidates harmlessly.
+- `method` — `StageLevel` = `StageConfig` folded with `deps`. `StageConfig`
+  carries the digest of `Method::identity_payload()` — the algorithm block and
+  the resolved `starts` rule — re-augmented with `n_trajectories`, plus
+  `target_length` and the **resolved** (not requested) observation-time
+  alignment (`Exact` vs `Snap`). Folding `deps` here is what makes a posterior
+  file re-key when the scout its `starts` names changes. The label is the
+  algorithm's name. (The `runid` input types keep their `Stage*` names: they are
+  that crate's vocabulary for the level below the fit.)
 - `seed` — the resolved fit RNG seed.
 
-`Stage::identity_payload()` deliberately omits the _extension dimension_ (PGAS
+`Method::identity_payload()` deliberately omits the _extension dimension_ (PGAS
 sweeps, PMMH iterations) so `--resume` can lengthen a chain without re-keying;
 the resume length is keyed separately as `target_length`.
 
@@ -4055,10 +4160,10 @@ done by `FiniteF64`'s constructor.
       model.ir.json
       model.graph.json
       model.render.json
-      {NN}-{stage}-{h8}/
+      {method}-{h8}/
         seed_{n}-{h8}/
           run.json                 # RunRecord, kind = fit_stage
-          … stage artifacts (§10.6)
+          … method artifacts (§10.6)
   pfilters/ surveys/ profiles/     # same {label}-{h8} factoring per §9.2.4
 ```
 
@@ -4156,23 +4261,24 @@ re-run, and no `--force` prompt on the fit path.
 
 What each edit does:
 
-| edit                                                                                    | effect                                               |
-| --------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| model, training data bytes, holdout data bytes                                          | new `fit` level → every stage re-runs                |
-| any fit.toml field outside `stages`/`fit_seeds`/`output_dir`                            | new `fit` level → every stage re-runs                |
-| a `[stages.X]` field                                                                    | new `stage` level for X only; upstream stages reused |
-| a stage's upstream (`starts_from`, `--mle`, `--survey-path`, `--posterior`, `--params`) | new `deps` → new `stage` level downstream            |
-| `fit_seeds`                                                                             | new `seed` level                                     |
-| `output_dir`                                                                            | nothing (write location is provenance)               |
+| edit                                                                   | effect                                                 |
+| ---------------------------------------------------------------------- | ------------------------------------------------------ |
+| model, training data bytes, holdout data bytes                         | new `fit` level → the method re-runs                   |
+| any fit.toml field outside `method`/`fit_seeds`/`output_dir`           | new `fit` level → the method re-runs                   |
+| a `[method]` field, `starts` included                                  | new `method` level for this file only; siblings reused |
+| a sourced start's source (`from_mle`, `from_posterior`, `from_params`) | new `deps` → new `method` level for the consumer       |
+| `fit_seeds`                                                            | new `seed` level                                       |
+| `output_dir`                                                           | nothing (write location is provenance)                 |
 
-Chain-start _sources_ are keyed by content, not path: `--posterior`'s
-`draws.tsv` and `--params`' TOML each enter `deps` as their file digest, so
-rewriting the file in place re-keys the fit.
+Chain-start _sources_ are keyed by content, not path: a `from_posterior`
+source's `draws.tsv`, a `from_mle` source's `fit_state.toml` and a `from_params`
+TOML each enter `deps` as their file digest, so rewriting the file in place
+re-keys the fit.
 
 **A separate, narrower hash guards `--resume`.**
 `fit::provenance::fit_stage_hash` digests
 `model_ir_json ++ data bytes ++ [estimate] specs ++ resolved [fixed] ++
-simplex groups ++ stage_name ++ Stage::identity_payload() ++ seed ++
+simplex groups ++ Method::identity_payload() ++ seed ++
 camdl version`,
 and is stored in each chain's `resume_state.bin`. PMMH and PGAS refuse to resume
 when it differs:
@@ -4278,8 +4384,8 @@ A real `sims/` leaf record (hashes and paths abbreviated):
 }
 ```
 
-A `fits/` stage leaf adds `deps` (when it consumed an upstream), nests artifact
-keys (`chain_1/trace.tsv`), keys per-chain schema entries under a `{n}`
+A `fits/` method leaf adds `deps` (when its `starts` consumed a source), nests
+artifact keys (`chain_1/trace.tsv`), keys per-chain schema entries under a `{n}`
 wildcard, and carries a populated `inputs`:
 
 ```json
@@ -4289,12 +4395,13 @@ wildcard, and carries a populated `inputs`:
   "backend": "chain_binomial",
   "best_chain": 1,
   "best_loglik": -163.87886531306089,
+  "chain_starts_kind": "spread",
   "fit_hash": "7aac3a33…a90a",
   "method": "if2",
   "n_chains": 2,
   "seed": 1,
-  "stage": "scout",
-  "starts_from": null,
+  "stage": "if2",
+  "starts": "from_prior",
   "wall_time_seconds": 25.255000542
 }
 ```
@@ -4471,8 +4578,8 @@ whole result.
 
 ### 10.3 Posterior draws (`draws.tsv`)
 
-Written by the Bayesian samplers at the end of a stage, into the stage leaf. IF2
-and the optimizer stages write none.
+Written by the samplers at the end of a run, into the method leaf. IF2 and the
+optimizers write none.
 
 PGAS and PMMH write **all** model parameters — estimated first in `[estimate]`
 order, then every remaining model parameter as a constant column — behind two
@@ -4569,7 +4676,7 @@ render `{:.4}`; parameter columns use the shortest round-trippable `Display` (a
 fixed `{:.6}` previously zeroed any parameter below ~5e-7, faking a frozen chain
 and corrupting R̂/ESS).
 
-IF2 and the NLopt stages write `parameter_traces.tsv` instead, e.g.
+IF2 and the NLopt optimizers write `parameter_traces.tsv` instead, e.g.
 
 ```
 iteration	loglik	if2_perturbed_loglik	beta	gamma
@@ -4659,17 +4766,17 @@ checked):
 | `model.graph.json`     | the model flow graph                                                                                                                                                        |
 | `model.render.json`    | the display/LaTeX rendering payload                                                                                                                                         |
 
-Per stage leaf, alongside `run.json`. The set is method-dependent; every file
+Per method leaf, alongside `run.json`. The set is method-dependent; every file
 present is listed in `run.json.artifacts` and subject to the exact-set gate.
 
 Common to both families:
 
-| file               | content                                                                    |
-| ------------------ | -------------------------------------------------------------------------- |
-| `fit_state.toml`   | θ̂ + stage state; the artifact a downstream stage consumes as a `deps` edge |
-| `chain_starts.tsv` | the initial point each chain was given                                     |
+| file               | content                                                                                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fit_state.toml`   | θ̂ + run state, with `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge                                                                               |
+| `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6) |
 
-An optimizer stage (IF2, NLopt) additionally writes:
+An optimizer leaf (IF2, NLopt) additionally holds:
 
 | file                           | content                                                                                                                                                                                                                                                  |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -4680,7 +4787,7 @@ An optimizer stage (IF2, NLopt) additionally writes:
 | `chain_evaluations.tsv`        | per-chain loglik evaluation summary                                                                                                                                                                                                                      |
 | `diagnostics.tsv`              | per-parameter convergence diagnostics                                                                                                                                                                                                                    |
 
-A sampler stage (PGAS, PMMH, NUTS, MH) additionally writes:
+A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 
 | file                        | content                                                                                                                                                                                                                                                                                                                                                                                                  |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -4689,7 +4796,7 @@ A sampler stage (PGAS, PMMH, NUTS, MH) additionally writes:
 | `chain_N/resume_state.bin`  | bincode resume state, guarded by its own config hash (§9.4)                                                                                                                                                                                                                                                                                                                                              |
 | `chain_N/trajectories.tsv`  | PGAS only — the smoothed latent paths, tidy/long, keyed `chain draw time t_start t_stop [date date_start date_stop]` (§10.1 for the period columns), with a `# camdl-trajectories v1` header line                                                                                                                                                                                                        |
 | `chain_N/trajectories.json` | the matching manifest (`format`, `version`, `method`, `granularity`, `n_chains`, `n_draws`, `columns`, `model_hash`, `conditioned`, `calendar`, …)                                                                                                                                                                                                                                                       |
-| `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at stage end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                               |
+| `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at run end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                                 |
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
 | `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared                                                                                                                                                                                                                                                                     |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
@@ -4701,9 +4808,14 @@ value is detectable. It is not a content hash of the file.
 
 ### 10.7 A refused chain's `bad_init` record
 
-When a chain cannot start, `diagnostics.json` carries a `bad_init` record for
-it: the chain id, the full estimated-parameter vector it was refused at (so the
-refusal is reproducible), a one-line prose `reason`, and an `attempts` array.
+When a chain cannot start — under a spread rule, when none of its
+`MAX_START_ATTEMPTS = 10` draws could be scored (§6.6); under a point rule, on
+its one try — the run skips it and continues (`ran K of N chains` on stderr,
+`n_good_chains` in `fit_state.toml`), every attempt is a row of
+`chain_starts.tsv`, and `diagnostics.json` carries a `bad_init` record for it:
+the chain id, the full estimated-parameter vector it was refused at (so the
+refusal is reproducible), a one-line prose `reason` that opens with how many
+starts were tried, and an `attempts` array.
 
 `attempts` is the structured half, and it is what downstream tooling should read
 — the prose is rendered from the same values, so parsing the sentence gets you
@@ -4788,7 +4900,7 @@ method (`sweep`, `step`, `draw`, `iteration`), a consumer reads the role and
 never the name.
 
 Two producers emit a schema today. A `sim` leaf declares `traj.tsv` (table role
-`trajectory`, unrecognized columns defaulting to `state`). A completed fit stage
+`trajectory`, unrecognized columns defaulting to `state`). A completed fit leaf
 declares `draws.tsv` (role `posterior_cloud`) plus one entry per per-chain trace
 filename — `trace.tsv` for PGAS/PMMH/MH/NUTS, `parameter_traces.tsv` for
 IF2/nlopt — read from the first chain directory with a readable file, so an
@@ -4901,16 +5013,16 @@ camdl simulate models/sir.camdl \
 It prints what it resolved:
 
 ```
-draws: posterior — 2 draws from pgas stage 'post' (…/01-post-a0b1da4f/seed_1-06cbd6b3/draws.tsv)
+draws: posterior — 2 draws from pgas stage 'pgas' (…/pgas-a0b1da4f/seed_1-06cbd6b3/draws.tsv)
 ```
 
-Resolution is **by artifact, not by method name**: a stage has a posterior iff
-it wrote `draws.tsv`. An optimizer-only fit (IF2, `nl-sbplx`, `nl-bobyqa`)
-resolves to an error rather than dressing a single point up as a distribution.
-The canonical file is the stage leaf's `draws.tsv` — post-warm-up and thinned —
+Resolution is **by artifact, not by method name**: a leaf has a posterior iff it
+wrote `draws.tsv`. An optimizer-only fit (IF2, `nl-sbplx`, `nl-bobyqa`) resolves
+to an error rather than dressing a single point up as a distribution. The
+canonical file is the method leaf's `draws.tsv` — post-warm-up and thinned —
 **not** `trace.tsv`, which carries warm-up rows for live observability. There is
 no `<fit-dir>/posterior/` directory; the path is
-`<fit-dir>/<NN>-<stage>-<h8>/seed_<N>-<h8>/draws.tsv`.
+`<fit-dir>/<method>-<h8>/seed_<N>-<h8>/draws.tsv`.
 
 A raw TSV path still works. If the file carries only the estimated columns (a
 posterior trace tail), pass `--fit` alongside it and the fit's `[fixed]` block
@@ -5033,7 +5145,7 @@ scenario = "baseline" # optional: scenario for GENERATION only
 `camdl fit run` then generates one dataset per sim seed into
 `<fit_dir>/synthetic/data/ds_NN/` — one file per observation stream, under the
 columns that stream declared, exactly as `simulate --obs-dir` writes them — and
-runs the declared stages once per dataset. Each dataset is bound and read back
+runs the `[method]` once per dataset. Each dataset is bound and read back
 through the loader real data uses, so a windowed stream (one declaring
 `window_start`/`window_stop` columns) generates and fits like any other. Each
 grid cell is its own content-addressed fit, readable with `camdl list` / `show`
@@ -5084,7 +5196,7 @@ Two chains, resolved by the same code (`rust/crates/cli/src/fit/runner.rs:2744`
 `resolve_prior`) but with a **different tier-3**. The difference is deliberate
 and load-bearing.
 
-`camdl fit run`, Bayesian stages (`pgas`, `pmmh`, `mh`, `nuts`):
+`camdl fit run`, sampler methods (`pgas`, `pmmh`, `mh`, `nuts`):
 
 ```
 1. fit.toml [estimate.<p>.prior] = { <dist> = { ... } }   → source "fit.toml"
@@ -5102,7 +5214,7 @@ not allowed. The refusal names every parameter and all three remedies:
 
 ```
 $ camdl fit run fit_noprior.toml --seed 1
-error: stage 'post' (method=pgas) has parameters with no resolved prior:
+error: [method] (algorithm = "pgas") has parameters with no resolved prior:
 
   beta        no prior in fit toml, no `~` in model file
 
@@ -5215,30 +5327,30 @@ prior's source.
 
 ### 13.1 `camdl fit table`
 
-Walks a results tree and renders one row per fit — terminal-stage method,
-convergence verdict, best log-likelihood and its type, age. The `<ROOT>`
-argument is **required**.
+Walks a results tree and renders one row per fit — its method, convergence
+verdict, best log-likelihood and its type, age. The `<ROOT>` argument is
+**required**.
 
 ```
 $ camdl fit table results/fits
 fit_id     label                  stem           method   stages converged     best_ll ll_type          age
 --------------------------------------------------------------------------------------------------------------
-4dadedae   <unlabelled>           fit_pgas       pgas     post   yes                 — complete_data    15s
+4dadedae   <unlabelled>           fit_pgas       pgas     pgas   yes                 — complete_data    15s
 ```
 
 Read-only by default: every cell is recovered from the on-disk `run.json` and
-per-stage outputs. **One flag breaks that rule** — `--quantity <NAME>` may
+the leaf's outputs. **One flag breaks that rule** — `--quantity <NAME>` may
 _derive_ a value on demand, running `fit predict --horizon free_forward` for any
 fit that has not been predicted yet, and writing that fit's `quantities/`
 outputs. Optimizer fits have no posterior cloud, so their cell renders `—`.
 
-Filters: `--converged`, `--gate-failed`, `--with-stage <STAGE>`,
-`--with-method if2|pgas|pmmh`, `--model <HASH_PREFIX>`, `--hash <HASH_PREFIX>`,
-`--since-seconds <N>`, `--label-pattern <GLOB>`. `--baseline <HASH_PREFIX>`
-picks the fit that the Δ columns are measured against (default: lowest hash in
-the surviving cohort). `--exclude-chains <IDS>` applies only to derived
-`--quantity` cells and always warns, because post-hoc chain exclusion biases the
-posterior toward the retained mode.
+Filters: `--converged`, `--gate-failed`, `--with-method if2|pgas|pmmh`,
+`--model <HASH_PREFIX>`, `--hash <HASH_PREFIX>`, `--since-seconds <N>`,
+`--label-pattern <GLOB>`. `--baseline <HASH_PREFIX>` picks the fit that the Δ
+columns are measured against (default: lowest hash in the surviving cohort).
+`--exclude-chains <IDS>` applies only to derived `--quantity` cells and always
+warns, because post-hoc chain exclusion biases the posterior toward the retained
+mode.
 
 `--format text|json|md|csv`. The JSON document is schema-pinned; each row
 carries considerably more than the text view:
@@ -5251,10 +5363,10 @@ ess_per_iter, ess_per_sec, params, delta_ll_vs_best, age_seconds, created_at,
 stale, stale_reason
 ```
 
-A fit directory with no completed stage leaf is reported as a warning line and
+A fit directory with no completed method leaf is reported as a warning line and
 skipped, not silently dropped.
 
-To enumerate runs of any kind without the per-stage projection, use the generic
+To enumerate runs of any kind without the per-fit projection, use the generic
 run browser: `camdl list --kind fit`. For one fit's full interpretation, use
 `camdl fit summary <handle>`.
 
@@ -5270,17 +5382,19 @@ diff: fit_a.toml → fit_b.toml
   beta: [estimate] → [fixed] = 0.31
   sigma: [fixed] = 0.2 → [estimate]
 
-Stages:
-  stage 'eval': (new) pfilter
-  stage 'post': chains 1→4
+Method:
+  chains: 1 → 4
 ```
 
 Parameter-side coverage is complete: estimate↔fixed moves, changed fixed values,
 changed bounds (including the omit↔explicit transition, which is meaningful
 because omitting means "fall back to the model file"), and changed priors.
 
-**Stage-side coverage is not.** Only `algorithm` and `chains` are named; every
-other stage setting collapses to the string `settings changed`:
+Method-side coverage is every key the `[method]` serializes to, one line per
+changed key in key order, with nested tables flattened to dotted paths
+(`gate.a_thresh`) and arrays diffed whole (`tempering`); a key one side lacks
+reads `null`. A file with no `[method]` against one with reads
+`[method]: (new) pgas` / `[method]: (removed)`:
 
 ```
 $ camdl fit diff if2_a.toml if2_c.toml     # particles 1000→2000, cooling 0.70→0.95
@@ -5288,27 +5402,28 @@ diff: if2_a.toml → if2_c.toml
 
   (no parameter changes)
 
-Stages:
-  stage 'mle': settings changed
+Method:
+  cooling: 0.7 → 0.95
+  particles: 1000 → 2000
 ```
 
-and when `chains` also changed, the particles/cooling deltas are dropped from
-the output entirely rather than appended. The typed per-key stage diff exists
-(`ConfigDiff` in `rust/crates/cli/src/fit/config_diff.rs`, covering particles,
-sweeps, iterations, cooling, burn_in, thin, tolerances, gate thresholds) and is
-what `fit table --format json` reports under `config_diff_from_baseline` — use
-that when you need the full delta.
+The same per-key delta is what `fit table --format json` reports under
+`config_diff_from_baseline` (`ConfigDiff` in
+`rust/crates/cli/src/fit/config_diff.rs`).
 
 ### 13.3 `camdl fit new`
 
 Copies a fit config to a new path and injects a `[provenance]` block. It does
-**not** rewrite stages, wire up cross-stage chaining, or fill in `reason`.
+**not** change `[method]`, write a `starts` that names the source fit, or fill
+in `reason`.
 
 ```
 $ camdl fit new --from fit_pgas.toml fit_v2.toml
   [provenance] derived_from = "fit_pgas.toml"
-  hint: set starts_from on your first stage to the last stage leaf under …/results/fits/fit_pgas-4dadedae
-        (run `camdl list` to find the exact stage-leaf path)
+  hint: to warm-start the derived fit from …/results/fits/fit_pgas-4dadedae, write under its [method]
+        starts = { from_posterior = "@<label>" }   # one draw per chain
+        starts = { from_mle = "@<label>" }         # every chain at its estimate
+        (a handle is @label, a fit-id prefix, or the leaf directory; `camdl list` shows them)
 created fit_v2.toml
 ```
 
@@ -5323,18 +5438,18 @@ reason = ""
 inserted before the first table. Refuses to overwrite an existing destination.
 If the source already has a `[provenance]` block it says so and leaves it alone.
 
-**The hint names a removed key.** Cross-stage chaining is spelled `init_mle`,
-not `starts_from`; a config with `starts_from` is rejected at load with a
-migration error. Write:
+**The hint is the whole of the chaining story.** The derived file names its
+source by handle under `[method]`, and the handle resolves when the derived file
+runs (§6.6):
 
 ```toml
-[stages.refine]
-init = "from_mle"
-init_mle = "results/fits/<stem>-<h8>/01-scout-<h8>/seed_1-<h8>"
+[method]
+algorithm = "pgas"
+…
+starts = { from_posterior = "@<label>" }
 ```
 
-or pass it per-run as
-`camdl fit run … --stage refine --init from_mle --mle <path>`.
+or per run, as `camdl fit run … --starts from_posterior=@<label>`.
 
 ### 13.4 Reading results back
 
@@ -5623,21 +5738,21 @@ is to move `simulate.from` back or drop the rows the model cannot cover. Under
 instead. There is no zero-width bin to reason about: a row's period is never
 inferred from its neighbours.
 
-**The startup block prints the pairing — on three of the stage types.** `pgas`,
-`pmmh`, and `nuts` stages print each stream's projection kind and likelihood
-family before running, and warn when a `neg_binomial` is paired with a snapshot
+**The startup block prints the pairing — for three of the algorithms.** `pgas`,
+`pmmh`, and `nuts` print each stream's projection kind and likelihood family
+before running, and warn when a `neg_binomial` is paired with a snapshot
 projection:
 
 ```
-── stage: post (method=pgas) ──
+── method: pgas ──
   2 observation streams: detection, weekly_cases
   observations (2 streams):
     ✓ weekly_cases     incidence(infection)         NegBinomial
     ✓ detection        prevalence(I)                Bernoulli
 ```
 
-`camdl pfilter`, `if2`, `mh`, and the NLopt stages print only the bound-stream
-line
+`camdl pfilter`, `if2`, `mh`, and the NLopt optimizers print only the
+bound-stream line
 (`pfilter: bound streams: detection(bernoulli), weekly_cases(neg_binomial)`) —
 the projection kind is not shown there. Read the model, or run `camdl inspect`,
 when you need to confirm a pairing on those paths.
@@ -5675,7 +5790,7 @@ camdl
 │   ├── run FILE                sweep from a TOML manifest
 │   └── status FILE             completion status of a sweep
 ├── fit
-│   ├── run CONFIG              run the stages in a fit.toml
+│   ├── run CONFIG              run the [method] of a fit.toml
 │   ├── summary FIT             R̂ / gate verdict / MLE table for one fit
 │   ├── diff A B                compare two fit.toml configs
 │   ├── table ROOT              one row per fit under a results tree
@@ -5834,28 +5949,25 @@ overrides it.
 ### `camdl fit run CONFIG`
 
 ```
-  --stage NAME                run only this stage
   --seed N                    RNG seed (default 1)
   --parallel N                Rayon thread cap; bit-identical regardless of value
                               (default 0 = all cores; env CAMDL_PARALLEL)
   --force                     re-run and overwrite stale cache
-  --resume BASE_REF           extend a completed PGAS/PMMH stage from a base run
-                              (run_id prefix or leaf path). Requires --stage;
-                              conflicts with --force
+  --resume BASE_REF           extend a completed PGAS/PMMH run from a base run
+                              (run_id prefix or leaf path); conflicts with --force
   --sweep NAME=SPEC           Cartesian sweep over a fixed parameter (repeatable).
                               SPEC = V1,V2,... | lin(min,max,n) | log10(min,max,n)
-  --label TEXT                display label
-  --allow-nonconverged-scout  proceed past a failed convergence gate
+  --label TEXT                display label; what `@label` in another file's
+                              `starts` resolves to
 
-Chain initialisation
-  --init MODE                 single | uniform | lhs | uniform_unconstrained (default)
-                              | from_prior | from_posterior | from_mle | from_params
-                              | survey_top_k
-  --posterior PATH            companion for --init from_posterior
-  --mle PATH                  companion for --init from_mle
-  --params TOML               companion for --init from_params
-  --survey-path DIR           companion for --init survey_top_k (requires --stage)
-  --survey-top-k N            top-K count; defaults to the stage's `chains`
+Chain starts
+  --starts SPEC               uniform_unconstrained | lhs | uniform | from_prior | single
+                              | from_posterior=<handle> | from_mle=<handle>
+                              | from_params=<toml>. Default: from_prior when every
+                              estimated parameter declares a prior, else
+                              uniform_unconstrained
+  --allow-nonconverged-source start from a from_mle / from_posterior source whose
+                              stored verdict is not converged
 
 Post-fit audit
   --no-dt-check               skip the Richardson dt-convergence check at θ̂
@@ -5863,7 +5975,7 @@ Post-fit audit
                               0.1 nats ode) instead of the routine 2.0 / 0.5
   --dt-check-halvings N       default 2 (dt, dt/2, dt/4)
 
-Per-stage overrides (each requires --stage)
+Per-algorithm overrides
   --decibans-thresh DB        gate's inter-chain loglik-spread floor
   --cooling-target-iters N    IF2 cooling target
   --tempering B1,B2,...       parallel-tempering ladder; first value must be 1.0
@@ -5880,15 +5992,16 @@ Per-stage overrides (each requires --stage)
   --record-prequential        record per-step predictive samples for `camdl compare`
 ```
 
-`--starts-from` no longer exists in any form; use `--init from_mle --mle <path>`
-or the fit.toml key `init_mle`.
+`--stage`, `--init`, `--posterior`, `--mle`, `--params`, `--survey-path`,
+`--survey-top-k`, `--allow-nonconverged-scout`, `--starts-from` and
+`--init-method` are parsed only to be refused, each naming its replacement
+(§7.1).
 
 ### `camdl fit` — the other subcommands
 
 ```
 camdl fit summary FIT
   FIT is a handle: @label, a fit-level hash prefix, a results directory, or a fit.toml
-  --stage STAGE               render only one stage's stanza
   --format text|json|md|latex (default text)
   --params-only               print only θ̂ as a flat params TOML (pipeable)
   --no-color                  disable ANSI colour (NO_COLOR is honoured regardless)
@@ -5904,7 +6017,6 @@ camdl fit methods             list (algorithm, backend) pairs with stability tie
 camdl fit predict [FIT]
   --fit FIT                   same handle grammar as `fit summary`
   --stream NAME               one logical stream, or an expanded leaf name
-  --stage STAGE               use this stage's posterior cloud
   --scenario NAMES            prospective scenario overlay (repeatable). `fitted` is
                               reserved for the no-overlay row
   --enable / --disable NAME   ad-hoc overlay; conflicts with --scenario
@@ -5961,8 +6073,9 @@ mirror).
 --fixed-file TOML           bulk form of the above (repeatable, later files win)
 --iterations N              IF2 iterations per grid point (default 50)
 --starts N                  independent starts per grid point (default 3)
---init MODE                 as on `fit run`; note the default here is `uniform`
---posterior / --mle / --params / (companions for the init modes)
+--init MODE                 the same rules `fit run --starts` spells, as a bare
+                            mode; note the default here is `uniform`
+--posterior / --mle / --params / (companions for the sourced init modes)
 --cooling F                 (default 0.95)          --rw-sd SPEC
 --algorithm NAME            per-cell algorithm (default if2); pair with --backend
 --backend NAME              chain_binomial (default) or ode
@@ -5999,7 +6112,7 @@ mirror).
 
 ```
 PATHS                       ≥2 when --config is absent. Each is a prequential.json
-                            (or a stage dir holding one), read as-is, OR a fit
+                            (or a method leaf holding one), read as-is, OR a fit
                             handle whose prequential is auto-derived from its θ̂
 --explain                   print the model-comparison methods guide and exit
                             (the same text as `camdl docs model-comparison`);
@@ -6155,7 +6268,7 @@ I0 = 10
 ```
 
 Consumed by `camdl simulate --params`, `camdl pfilter --params`,
-`camdl profile --fixed-file`, `camdl fit run --init from_params --params`, and
+`camdl profile --fixed-file`, `camdl fit run --starts from_params=<file>`, and
 fit.toml's `[fixed] from_file`. `--params` is repeatable; later files override
 earlier ones.
 

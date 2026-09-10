@@ -38,7 +38,7 @@ Each CAS-emitting command resolves CLI inputs into `runid` levels at one site:
   `ArtifactKind::Sim` levels (`model` / `config` / `params` / `scenario` /
   `seed`).
 - `cli/src/fit/cas.rs` — `resolve_fit_stage`: a fit stage →
-  `ArtifactKind::FitStage` levels (`fit` / `NN-stage` / `seed`).
+  `ArtifactKind::FitStage` levels (`fit` / `method` / `seed`).
 - `cli/src/profile_cas.rs` — `resolve_profile_point`:
   `ArtifactKind::ProfilePoint` levels (`profile` / `point` / `stage` / `seed` /
   `start`).
@@ -65,7 +65,13 @@ content hashes type-distinct from arbitrary strings.
 
 ## Fit config schema
 
-`cli/src/fit/config_v2.rs` — `FitConfigV2` is the only fit-config schema; a
-stage is a `Stage` enum (`IF2` / `PGAS` / `PMMH` / `PFilter` / NLopt). The fit
-identity excludes the `[stages.*]` blocks (so editing one stage doesn't re-key
-the others); cross-stage invalidation rides the `deps` DAG.
+`cli/src/fit/config_v2.rs` —
+`FitConfig { problem: Problem, inference:
+Inference }` is the only fit-config
+schema; `Inference` holds the one
+`Method
+{ algorithm: Algorithm, starts: Option<ChainStarts> }`, and `Algorithm`
+is the tagged enum (`IF2` / `PGAS` / `PMMH` / `Mh` / `Nuts` / `PFilter` /
+NLopt). `ChainStarts` (`fit/starts.rs`) is `Spread` or `Point`. The fit identity
+hashes the problem alone (so a second method file shares it); a sourced `starts`
+folds its source's content into the method leaf's `deps`.

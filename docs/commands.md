@@ -22,11 +22,11 @@ transform. A few commands delegate to the compiler.
 
 ### Produce inference artifacts
 
-| Command   | Produces                                                                                                                                                                                   |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fit run` | The full inference pipeline: a `fit.toml`'s named stages, in order — MLE, posterior, diagnostics. The production path. An MLE-only fit is a `fit.toml` with one `algorithm = "if2"` stage. |
-| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation).                                                                                                    |
-| `profile` | A profile-likelihood curve — parallel IF2 over a grid of one focal parameter.                                                                                                              |
+| Command   | Produces                                                                                                                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fit run` | Fit a `fit.toml`'s problem with its one `[method]` — an MLE (`if2`, the NLopt optimizers), a posterior (`pgas`, `pmmh`, `mh`, `nuts`) or a filter evaluation (`pfilter`), with its diagnostics. The production path. |
+| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation).                                                                                                                              |
+| `profile` | A profile-likelihood curve — parallel IF2 over a grid of one focal parameter.                                                                                                                                        |
 
 ### Produce diagnostic artifacts
 
@@ -108,56 +108,38 @@ Before burning hours on a fit, map the likelihood:
 camdl survey model.camdl --fit fit.toml       # LHS landscape → landscape.tsv
 ```
 
-A fit stage can then **start from the survey's best regions** rather than from
-random points, by reading the top-K landscape rows:
+The survey is a diagnostic, not a starting-point source: a landscape is not a
+posterior. A fit whose chains should begin somewhere informed starts
+`from_prior` (the default when every parameter has one), or from a short fit's
+posterior.
+
+### The fit: one problem, one method
+
+A `fit.toml` is a problem — model, data, what to estimate, what to fix, priors —
+and one `[method]` that fits it. **One `pgas` method, started from the priors,
+is the ordinary shape** — a Bayesian fit does not need an optimizer to find the
+mode first, and starting from a point estimate concentrates the chains before
+they have earned it.
+
+A pipeline is two files run in turn: a cheap pass to rule a region out, a coarse
+fit whose posterior seeds a finer one. The second file names the first by
+handle, and says what kind of start it takes:
 
 ```toml
-[stages.scout]
-algorithm = "if2"
-init = "survey_top_k"
-survey_path = "results/surveys/model-abc123/"
-survey_top_k_n = 10
-```
-
-The survey is consumed as a starting-point source; it never becomes a stage.
-
-### The fit pipeline: stages
-
-A `fit.toml` declares named stages that run in order. **One `pgas` stage,
-started from the prior or from the default boundary-avoiding draws, is the
-ordinary shape** — a Bayesian fit does not need an optimizer to find the mode
-first, and starting from a point estimate concentrates the chains before they
-have earned it.
-
-Stages exist for pipelines that genuinely have a sequence: a cheap pass to rule
-a region out, a coarse fit whose posterior seeds a finer one, or a run extended
-in stages under a compute budget. The example below shows the machinery on the
-MLE-scout-then-posterior shape because it exercises every knob; read it as a
-demonstration of staging, not as the recommended default:
-
-```toml
-[stages.scout]
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 10
-particles = 500
-iterations = 50
-
-[stages.posterior]
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 4
 particles = 1000
 sweeps = 1000
-init_mle = "scout" # start from scout's MLE
-init = "single" # all chains at that point
+starts = { from_posterior = "@coarse" } # one draw of @coarse's posterior per chain
 ```
 
 ```bash
-camdl fit run fit.toml                              # all stages, in order
-camdl fit run fit.toml --stage scout                # one stage only
-camdl fit run fit.toml --resume <base-run-id> --stage posterior   # extend a completed run
-camdl fit summary results/fits/<dir>/               # Â / gate verdict / MLE table
+camdl fit run fit.toml                              # the file's one [method]
+camdl fit run fit.toml --starts from_prior          # override where the chains begin
+camdl fit run fit.toml --resume <base-run-id>       # extend a completed run
+camdl fit summary results/fits/<dir>/               # Â or R̂ / verdict / MLE table
 camdl fit predict --fit fit.toml --stream onset     # predicted-vs-observed artifact
 ```
 
@@ -175,25 +157,19 @@ A resumed fit reads the base run read-only and writes a _new_ run keyed on the
 extended length. It is a distinct deterministic artifact — not bit-identical to
 an uninterrupted fit of the same length (both are valid posterior samples).
 
-**Initialization and staging.** Each stage, on completion, records its best
-estimate (θ̂). A downstream stage picks where to start with two knobs:
+**Where the chains begin.** `starts` is one key for one concept. A _spread_ rule
+gives each chain its own start — `from_prior`, `uniform_unconstrained`, `lhs`,
+`uniform`, or `{ from_posterior = "<handle>" }` — so the between-chain R̂ can say
+whether the chains found the same posterior. A _point_ rule puts every chain at
+one point — `single`, `{ from_mle = "<handle>" }`, `{ from_params = "<toml>" }`
+— and R̂ is then reported as not assessed rather than as a pass. A handle is
+`@label`, a fit-id or leaf `run_id` prefix, a leaf directory, or a `fit.toml`.
 
-- **the source** — where the starting point comes from: random bounds, a prior,
-  an _upstream stage's_ MLE or posterior, an explicit params file, or a survey's
-  top-K rows;
-- **the spread** — how chains are distributed around it: Stan-style
-  boundary-avoiding draws on the unconstrained scale (`uniform_unconstrained`,
-  the default), all at one point (`single`), Latin-hypercube perturbation
-  (`lhs`), or uniform over bounds.
-
-Both PGAS and PMMH can start from an IF2 scout's MLE this way — there is no
-asymmetry between them. A posterior stage can equally start `from_posterior`
-(another PGAS stage), `from_params` (a file), or `from_prior`.
-
-Stages are chained by a **convergence gate**: before a downstream stage runs,
-the runner checks that its upstream dependency actually converged (tail
-chain-agreement Â), and refuses to proceed otherwise. A poor scout blocks the
-refine rather than silently seeding it with a bad mode.
+A source that did not converge is refused where it is consumed: starting from an
+unconverged fit launders its multi-modality into this one, and
+`--allow-nonconverged-source` records the choice to do it anyway. Every
+multi-chain sampler writes `chain_starts.tsv`, the record of where each chain
+actually began.
 
 ### Scenario sweeps: batch
 
@@ -302,7 +278,7 @@ streams that differ (gh#570).
   posterior.
 - **`pfilter` is a shortcut into machinery `fit run` also uses.** The same
   particle-filter core backs both surfaces; the standalone command exposes a
-  smaller set of knobs for a quick fixed-θ log-likelihood, while `fit.toml`
-  stages add initialization sources, convergence gates, and post-fit audits. An
-  MLE-only run is not a separate command — it is a `fit.toml` with a single
-  `algorithm = "if2"` stage, run through `camdl fit run`.
+  smaller set of knobs for a quick fixed-θ log-likelihood, while a `fit.toml`
+  `[method]` adds a start rule, the convergence diagnostics, and post-fit
+  audits. An MLE-only run is not a separate command — it is a `fit.toml` whose
+  `[method]` is `algorithm = "if2"`, run through `camdl fit run`.

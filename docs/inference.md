@@ -111,7 +111,8 @@ ability to evaluate transition densities — currently only the chain-binomial
 ### The recommended workflow
 
 ```
-IF2 (scout → refine) → PGAS ([stages.pgas] init_mle = "refine")
+fit-if2.toml  [method] algorithm = "if2"                                → @mle
+fit.toml      [method] algorithm = "pgas", starts = { from_posterior = "@short" }
 ```
 
 IF2 finds the right basin quickly (global exploration via many particles). PGAS
@@ -576,12 +577,12 @@ suggested adjustments.
 ### Multi-chain and chain-agreement Â
 
 Run multiple independent IF2 chains from different random seeds to detect
-multimodality and assess convergence. A single-method IF2 fit is a fit with one
-`algorithm = "if2"` stage:
+multimodality and assess convergence. An IF2 fit is a fit whose `[method]` is
+`algorithm = "if2"`:
 
 ```toml
 # fit.toml
-[stages.fit]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 4
@@ -605,28 +606,28 @@ a posterior has mixed). Computed from the last half of iterations:
 - Â > 1.5: not converged (✗) — surface may be multimodal
 
 Note: Bayesian (PGAS, PMMH) outputs continue to use the name `rhat` for their
-own posterior-mixing diagnostics; only the MLE pipeline (scout / refine /
-validate) uses `chain_agreement` / Â.
+own posterior-mixing diagnostics; only IF2 uses `chain_agreement` / Â.
 
-### Staging an IF2 fit: scout → refine → validate
+### Two IF2 files: scout, then refine
 
-A common MLE workflow runs a few `[stages.X] algorithm = "if2"` blocks in a
-`fit.toml` in order (`camdl fit run`), each warm-starting from an earlier one
-via `init_mle = "<stage>"`. Scout, refine, and validate below are a convention —
-the stages are user-named, and the knobs (chains, particles, iterations,
-cooling) are starting points to adapt, not defaults the tool enforces:
+A common MLE workflow is a cheap exploratory IF2 file followed by a sharper one
+that starts from its result. Each is a `fit.toml` with the same problem half and
+its own `[method]`; the second names the first by handle. Scout and refine are a
+convention, and the knobs (chains, particles, iterations, cooling) are starting
+points to adapt, not defaults the tool enforces:
 
 **Scout** — 8 chains, 500 particles, 30 iterations, **cooling = 0.70 (mild)**.
 Exploration: chains stay hot enough to wander across basins rather than
-quenching onto the first local optimum. Over the 30-iter stage the perturbation
+quenching onto the first local optimum. Over the 30 iterations the perturbation
 SD shrinks only from 1.0× to 0.49× initial. Run this first to find problems: Is
 the surface multimodal? Which parameters are identifiable? Is the observation
-model appropriate? The cross-chain Â at the end of the scout, combined with the
-loglik-eval decibans-spread gate (see camdl-inference-spec §6.1.1), is the
-multi-modality diagnostic.
+model appropriate? The cross-chain Â at the end, combined with the loglik-eval
+decibans-spread gate (see camdl-inference-spec §6.1.1), is the multi-modality
+diagnostic.
 
 ```toml
-[stages.scout]
+# scout.toml
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 8
@@ -636,13 +637,25 @@ cooling = 0.70
 ```
 
 **Refine** — 4 chains, 1000 particles, 50 iterations, **cooling = 0.05
-(aggressive)**, `init_mle = "scout"`. Starts from the scout's best-chain
-parameters and collapses chains tightly onto the local MLE — final SD is 0.25%
-of initial, so particle clouds concentrate near the scout's endpoint. Check Â
-for convergence across chains.
+(aggressive)**, `starts = { from_mle = "@scout" }`. Starts every chain at the
+scout's best-chain parameters and collapses them tightly onto the local MLE —
+final SD is 0.25% of initial, so particle clouds concentrate near the scout's
+endpoint. Â is then a statement about IF2's own perturbation re-spreading the
+swarm, not about independent starts; the summary's `seeded from` line says so. A
+scout whose verdict is not converged is refused as a source unless
+`--allow-nonconverged-source` records the choice.
 
-**Validate** — 4 chains, 5000 particles, 100 iterations, **cooling = 0.05**,
-`init_mle = "refine"`. Full convergence for publication-quality estimates.
+```toml
+# refine.toml
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 4
+particles = 1000
+iterations = 50
+cooling = 0.05
+starts = { from_mle = "@scout" }
+```
 
 Cooling is pomp's `cooling.fraction.50` (cf50) convention: the parameter is the
 halfway-point SD fraction, the end-of-stage SD is its square. Formula, worked
@@ -801,7 +814,7 @@ camdl profile model.camdl --data cases.tsv \
     --output results/profile_tau_posterior.tsv
 
 # Bayesian fit with priors in the model file (no duplication in N fits)
-camdl fit run fits/synth.toml --seed 0 --stage posterior
+camdl fit run fits/synth.toml --seed 0
 ```
 
 **Precedence rules** for parameter values (the unified chain shipped in the
@@ -831,9 +844,10 @@ if2, fit run, survey) were removed in the same revision. Their replacements are:
 
 - `--fixed-file <toml>` for the "load many values from a file" case.
 - `--fixed NAME=VALUE` for the "change one value" case.
-- `--init from_params --params <toml>` (a _companion_ of `--init`, not a
-  top-level flag) for the _warm-start chain origin_ case — when the file is a
-  starting point for inference, not a pin.
+- `--starts from_params=<toml>` on `fit run` (and
+  `--init from_params --params
+  <toml>` on `profile`) for the _warm-start chain
+  origin_ case — when the file is a starting point for inference, not a pin.
 
 `--fixed`/`--fixed-file` on inference subcommands also removes the listed
 parameter from the `[estimate]` set if it was there — so
@@ -1028,22 +1042,24 @@ variance, so NUTS takes appropriately-sized steps in every direction.
 ### Running PGAS
 
 ```bash
-# From IF2 starting point: declare in fit.toml as
-#   [stages.pgas] init_mle = "validate"
-camdl fit run fit.toml --stage pgas
+# From the priors (the default whenever every estimated parameter has one):
+camdl fit run fit.toml --seed 42
 
-# From random starts (overdispersed initialization):
-#   [stages.pgas] init = "uniform_unconstrained"  (or omit; it's the default)
-camdl fit run fit.toml --stage pgas --seed 42
+# From a stored fit's posterior, one draw per chain — R̂ stays meaningful:
+#   [method] starts = { from_posterior = "@short" }
+camdl fit run fit.toml
+
+# Every chain at a stored point estimate — R̂ is then not assessed:
+camdl fit run fit.toml --starts from_mle=@mle
 
 # Force MH-within-Gibbs instead of NUTS
-camdl fit run fit.toml --stage pgas --no-nuts
+camdl fit run fit.toml --no-nuts
 ```
 
 Configuration in `fit.toml`:
 
 ```toml
-[stages.posterior]
+[method]
 algorithm = "pgas"
 chains = 4
 sweeps = 10000
@@ -1222,19 +1238,18 @@ with only 4 chains can land in the wrong basin (e.g., R0≈28 instead of the tru
 R0≈20), and PGAS initialized there may never cross the barrier. More IF2 scout
 chains is the fix — tempering can't bridge 50+ nat gaps either.
 
-**Where priors live, and what `init = "from_prior"` reads.** Parameter priors
+**Where priors live, and what `starts = "from_prior"` reads.** Parameter priors
 belong in the **model**, declared with `~`:
-`param : <kind> in [<lo>, <hi>] ~ <dist>(...)`. The fit TOML `[estimate]` block
-_names_ the estimated parameters (with optional `bounds` / start overrides) — it
-is not where you put a prior. This coupling is load-bearing:
-`init = "from_prior"` draws each chain's start from the model's `~` declarations
-**only**. A prior set in `[estimate].<param>.prior` defines the MH **target**
-but is **not** seen by `from_prior`; any parameter with no model `~` falls back
-to **bounds-uniform** starts (you get a single startup `warning:` line naming
-those parameters). The fix is to move the prior into the model `~` clause — then
-`from_prior` draws every parameter from its prior with no warning. (The same
-applies to `init = "from_posterior"` for parameters absent from the posterior
-source.)
+`param : <kind> in [<lo>, <hi>] ~ <dist>(...)`; a `fit.toml`
+`[estimate].<param>.prior` overrides the model's declaration for one fit.
+`from_prior` draws each chain's start from the prior the sampler scores against
+— the same precedence, fit.toml over model — so the start and the target cannot
+disagree. A parameter whose resolved prior is flat (or hierarchical, with no
+hyperparameter values at start time) has no distribution to draw from and falls
+back to a **bounds-uniform** start, with a single startup `warning:` line naming
+it; declare a proper prior in either place to draw it from one. The same
+fallback applies to `starts = { from_posterior = … }` for parameters absent from
+the posterior source.
 
 ---
 
@@ -1322,12 +1337,12 @@ which handle scheduled effects and estimated initial states.
 
 ### Running an ODE Bayesian fit
 
-`mh` and `nuts` are stages like any other: pick the algorithm, set
-`backend = "ode"`, and give each estimated parameter a prior (Bayesian stages
+`mh` and `nuts` are methods like any other: pick the algorithm, set
+`backend = "ode"`, and give each estimated parameter a prior (Bayesian methods
 require one — see "Priors and precedence").
 
 ```toml
-[stages.posterior]
+[method]
 algorithm = "nuts" # gradient-based; needs a differentiable model
 backend = "ode"
 chains = 4
@@ -1339,7 +1354,7 @@ Gradient-free `mh` takes `iterations` (total MCMC steps) with an optional
 `burn_in`, in place of NUTS's `warmup` / `samples`:
 
 ```toml
-[stages.posterior]
+[method]
 algorithm = "mh"
 backend = "ode"
 chains = 4
@@ -1348,7 +1363,7 @@ burn_in = 1000
 ```
 
 ```bash
-camdl fit run fit.toml --stage posterior
+camdl fit run fit.toml
 ```
 
 `camdl fit methods` prints the live registry — the one-liner, the "use for", and
@@ -1417,53 +1432,32 @@ distinguish.
 ## The fit workflow
 
 The low-level commands (`camdl pfilter`, `camdl profile`) are building blocks.
-IF2 is not a standalone command — a single-method IF2 fit is just a fit with one
-`algorithm = "if2"` stage. For all model fitting, `camdl fit` provides a
-structured workflow driven by a `fit.toml` configuration file:
+IF2 is not a standalone command — an IF2 fit is a fit whose `[method]` is
+`algorithm = "if2"`. For all model fitting, `camdl fit` provides a structured
+workflow driven by a `fit.toml` configuration file, one problem and one method
+per file:
 
 ```
-fit.toml + model.camdl + data.tsv
+scout.toml + model.camdl + data.tsv
     │
-    └── camdl fit run fit.toml
-            <fit_dir>/real/fit_<seed>/
-              ├── scout/    fit_state.toml      (stage, init = "lhs")
-              ├── refine/   mle_params.toml     (stage, init_mle = "scout")
-              ├── validate/ mle_params.toml     (stage, init_mle = "refine")
-              └── pgas/     chain_N/trace.tsv   (stage, init_mle = "refine")
+    ├── camdl fit run scout.toml --label scout
+    │       results/fits/scout-<h8>/if2-<h8>/seed_1-<h8>/   fit_state.toml, mle_params.toml, chain_starts.tsv
+    │
+    └── camdl fit run posterior.toml         # [method] starts = { from_posterior = "@scout" }
+            results/fits/posterior-<h8>/pgas-<h8>/seed_1-<h8>/   draws.tsv, chain_N/trace.tsv
 ```
 
-> **v2 layout note.** Stage directories live under
-> `<fit_dir>/real/fit_<seed>/<stage>/` (or
-> `<fit_dir>/synthetic/ds_NN/fit_<seed>/<stage>/` for SBC replicates). The
-> `real/fit_<seed>/` and `synthetic/...` wrappers were introduced in commit
-> `5f1e704` (2026-04-18) to support start-sensitivity and synthetic-data
-> replicate grids; pre-2026-04-18 diagrams that show stages directly under
-> `<fit_dir>/` are stale.
-
-Each named block under `[stages.NAME]` in `fit.toml` chains via the
-`init_mle = "<prior-stage>"` key. The default set is scout → refine → validate
-(+ pgas), but users can define any sequence.
-
-The three stages do different jobs — scout explores for the basin (hot, random
-starts, MAD-calibrated `rw_sd`), refine collapses onto the local MLE from
-scout's best parameters, and validate adds particles and profile likelihoods for
-a publication-quality estimate with a precise pfilter at the MLE. The per-stage
-knobs (chains, particles, iterations, cooling) are detailed in the staging
-section above; treat them as conventions to adapt, not a mandatory recipe.
-
-Each stage reads the previous stage's `fit_state.toml` and writes its own. The
-final output is `mle_params.toml` — a standard params file with provenance
-hashing that feeds directly into `camdl simulate` and `camdl batch run`.
+Two files that share a problem half share the fit-level hash (`<h8>`); each is
+its own segment, named by its stem, with its own `--label`. A method reads a
+stored fit only through a `starts` handle, and every multi-chain sampler writes
+`chain_starts.tsv`, the record of where each chain actually began. An IF2 leaf's
+`mle_params.toml` is a standard params file with provenance hashing that feeds
+directly into `camdl simulate` and `camdl batch run`.
 
 ```bash
-# Full pipeline (all stages declared in fit.toml run in order)
-camdl fit run    fit.toml --seed 1
-
-# Re-run a single stage from a prior stage's output
-#   (configured in fit.toml as `[stages.refine]
-#    init_mle = "fit/he2010/real/fit_1/scout/"`)
-camdl fit run    fit.toml --stage refine
-camdl fit run    fit.toml --stage validate
+camdl fit run    scout.toml --seed 1 --label scout
+camdl fit run    posterior.toml --seed 1
+camdl fit summary @scout
 camdl fit summary results/fits/<dir>/
 ```
 
@@ -1494,33 +1488,47 @@ parameters.
 This replaces an earlier bounds-midpoint heuristic that gave the same point at
 every seed and ignored the parameter's transform.
 
-### Per-chain init: `init`
+### Where the chains begin: `starts`
 
-How chain (or per-cell) starting points are drawn. Set on each stage in
-`fit.toml` via the `init = "<mode>"` key (or override per-stage on the CLI with
-`--init`); also available as `--init` on `camdl profile` for per-cell starts.
-Honoured by **IF2**, **PGAS**, **PMMH**, **NLopt** (`nl_sbplx`, `nl_bobyqa`),
-and **profile**.
+How chain (or per-cell) starting points are drawn. Set under `[method]` with the
+`starts` key, or overridden on the CLI with `fit run --starts <spec>`;
+`camdl profile --init <mode>` takes the same rules for its per-cell starts.
+Honoured by every method: **IF2**, **PGAS**, **PMMH**, **mh**, **nuts**,
+**NLopt** (`nl-sbplx`, `nl-bobyqa`), and **profile**.
 
 ```toml
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 16
-init = "uniform_unconstrained" # this is the default; shown for clarity
+starts = "uniform_unconstrained" # every parameter has a prior? then the default is from_prior
 ```
 
-| Mode                              | Behaviour                                                                                                                                                                                                                                                                                                                                                               | When to use                                                                                                                                                                                                 |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `uniform_unconstrained` (default) | Stan-style: each chain draws `z ~ Uniform(-2, 2)` i.i.d. per parameter on the **unconstrained** scale, squashes it to `u = σ(z)`, and maps that into bounds the transform-aware way `lhs` does (log-uniform for `Log` rates, linear otherwise). `σ(±2) ≈ (0.119, 0.881)` is a fixed interior band, so starts never sit on a bound and the radius is bounds-independent. | The default for every multi-chain stage. Boundary-avoiding (no `-inf`/zero-gradient starts) and scale-invariant; Stan's well-tested default. Over-dispersed i.i.d. starts are the textbook basis for R-hat. |
-| `lhs`                             | Latin-hypercube stratified sampling, **scale-aware via the parameter's transform**: `Log`-typed rates are sampled in log space and exponentiated, so a single LHS pass spans orders of magnitude. `Logit`/`None`-typed parameters are sampled linearly in `[lo, hi]`.                                                                                                   | When you want _stratified_ full-bounds coverage rather than i.i.d. draws — most useful for low-chain-count IF2 scout basin-finding.                                                                         |
-| `uniform`                         | Per-chain uniform random within natural-scale bounds. Chain 0 keeps the seeded start.                                                                                                                                                                                                                                                                                   | Legacy mode. Linear in natural space, so it clumps for `Log`-typed parameters at low chain count. Kept for reproducibility of pre-`lhs` results.                                                            |
-| `single`                          | Every chain at the seeded `[estimate].start` (or its `Transform`-aware uniform fallback when `start` is omitted). Chains differ only by per-chain RNG.                                                                                                                                                                                                                  | See "When `single` is the right choice" below.                                                                                                                                                              |
+The rules fall into two kinds. A **spread** rule gives each chain its own start:
 
-When a stage uses `init_mle = "<prior>"`, every chain starts from the prior
-stage's MLE — that's the intent of the handoff.
+| `starts`                          | Behaviour                                                                                                                                                                                                                                                                                                                                                               | When to use                                                                                                                                                                                                      |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `from_prior`                      | One draw per chain from each parameter's resolved prior (fit.toml over model). A parameter with a flat prior falls back to bounds-uniform, with a warning.                                                                                                                                                                                                              | The default whenever every estimated parameter declares a prior. Carries the scale a wide bound does not: at province scale a bounds-uniform draw is routinely a start the filter cannot score.                  |
+| `uniform_unconstrained`           | Stan-style: each chain draws `z ~ Uniform(-2, 2)` i.i.d. per parameter on the **unconstrained** scale, squashes it to `u = σ(z)`, and maps that into bounds the transform-aware way `lhs` does (log-uniform for `Log` rates, linear otherwise). `σ(±2) ≈ (0.119, 0.881)` is a fixed interior band, so starts never sit on a bound and the radius is bounds-independent. | The default when some parameter has no prior. Boundary-avoiding (no `-inf`/zero-gradient starts) and scale-invariant; Stan's well-tested default. Over-dispersed i.i.d. starts are the textbook basis for R-hat. |
+| `lhs`                             | Latin-hypercube stratified sampling, **scale-aware via the parameter's transform**: `Log`-typed rates are sampled in log space and exponentiated, so a single LHS pass spans orders of magnitude. `Logit`/`None`-typed parameters are sampled linearly in `[lo, hi]`.                                                                                                   | When you want _stratified_ full-bounds coverage rather than i.i.d. draws — most useful for low-chain-count IF2 basin-finding.                                                                                    |
+| `uniform`                         | Per-chain uniform random within natural-scale bounds. Chain 0 keeps the seeded start.                                                                                                                                                                                                                                                                                   | Legacy mode. Linear in natural space, so it clumps for `Log`-typed parameters at low chain count. Kept for reproducibility of pre-`lhs` results.                                                                 |
+| `{ from_posterior = "<handle>" }` | One row of a stored fit's posterior per chain (or of a draws TSV named directly).                                                                                                                                                                                                                                                                                       | A warm start that keeps R̂ meaningful: the chains begin apart, where the earlier fit found mass.                                                                                                                  |
 
-**Why `uniform_unconstrained` is the default.** Stan initializes by drawing
+A **point** rule puts every chain at one point, and R̂ is then reported as _not
+assessed_ — chains that began together agree by construction:
+
+| `starts`                     | Behaviour                                                                                                                                              | When to use                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `single`                     | Every chain at the seeded `[estimate].start` (or its `Transform`-aware uniform fallback when `start` is omitted). Chains differ only by per-chain RNG. | See "When `single` is the right choice" below.                                                                                                          |
+| `{ from_mle = "<handle>" }`  | Every chain at a stored fit's point estimate.                                                                                                          | Refining an optimizer's estimate with more particles, where the chain-agreement Â is about IF2's own re-spreading of the swarm and the summary says so. |
+| `{ from_params = "<toml>" }` | Every chain at the values in a flat params TOML.                                                                                                       | A hand-picked start.                                                                                                                                    |
+
+A handle is `@label`, a fit-id prefix, a method leaf's `run_id` prefix, the leaf
+directory, or a `fit.toml`. A source whose stored verdict is not converged is
+refused; `fit run --allow-nonconverged-source` records the choice to start from
+it anyway.
+
+**Why `uniform_unconstrained` is the fallback.** Stan initializes by drawing
 `Uniform(-2, 2)` on the unconstrained (transformed) scale and mapping back into
 the constrained space (mc-stan.org Reference Manual, "Initialization"). It's
 **boundary-avoiding** — the sigmoid squash keeps every draw in the interior of
@@ -1531,28 +1539,21 @@ is `O(1)` or `O(1e6)`. camdl keeps the same transform-aware mapping `lhs` uses
 `lhs` past the legacy linear `uniform`, and simply replaces LHS's stratified
 draw with i.i.d. over-dispersed draws — the standard recipe for diagnosing MCMC
 convergence via R-hat. The one thing it gives up versus `lhs` is _guaranteed_
-stratified coverage of each dimension's range; a low-chain-count scout that
-needs that (e.g. the typhoid stratified scout, where 30 LHS chains beat 8
-uniform-random chains by ~80,000 nats) can set `init = "lhs"`.
+stratified coverage of each dimension's range; a low-chain-count fit that needs
+that (e.g. the typhoid stratified scout, where 30 LHS chains beat 8
+uniform-random chains by ~80,000 nats) can set `starts = "lhs"`.
 
-**When `single` is the right choice.** Four legitimate cases:
+**When `single` is the right choice.** Three legitimate cases:
 
-1. **Refine stages with `init_mle = "<prior>"`** — all chains start from the
-   prior stage's MLE anyway; `single` is redundant but harmless.
-2. **Single-chain runs (`chains = 1`)** — there's no per-chain spread to draw,
-   so the three modes collapse to the same draw.
-3. **Reproducibility-critical tests** — `single` gives byte-identical chain
+1. **Single-chain runs (`chains = 1`)** — there's no per-chain spread to draw,
+   so the three bounds-based rules collapse to the same draw.
+2. **Reproducibility-critical tests** — `single` gives byte-identical chain
    starts across runs at the same seed; LHS/uniform draws shift if the RNG order
    changes upstream.
-4. **Deterministic NLopt with no spread desired** — `nl_sbplx` and `nl_bobyqa`
+3. **Deterministic NLopt with no spread desired** — `nl-sbplx` and `nl-bobyqa`
    are deterministic, so `single` + `chains > 1` gives N identical optimisations
-   and the chain-agreement gate is uninformative; only use this when you
-   explicitly want a single optimisation from a known seeded point.
-
-**Per-stage independence.** Scout and refine can use different `init` modes (LHS
-for basin-finding in scout, `single` in refine to converge from scout's MLE).
-The CLI `--init` flag requires `--stage` for the same reason — it's
-stage-scoped.
+   and the chain-agreement gate is uninformative; the run collapses to one chain
+   and says so.
 
 **`camdl profile`** dispatches the same way at each grid cell:
 `--starts N --init lhs` draws N stratified per-cell starts across the non-focal

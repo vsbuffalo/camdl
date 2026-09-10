@@ -6,7 +6,6 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](VERSIONING.md)
 
-
 camdl is a small domain-specific language (DSL), simulation runtime, and
 statistical inference stack for compartmental infectious disease models. The
 goal of camdl is to make writing compartmental models easy --- the mechanics of
@@ -23,22 +22,21 @@ compiler also optimizes the model using tricks like loop-invariant code motion
 and binding caches so that it will run faster during simulations and inference.
 All of this happens under the hood, automatically --- the researcher does not
 need to run these extra steps themselves. As scientific computational workflows
-are increasingly done by coding agents, camdl is explicitly forward-looking:
-the compiler helps ensure the model agents write is sound, and camdl has
-doc-tested documentation integrated into command-line tooling for maximal
-discoverability of never-stale info for agents fitting models with camdl.
+are increasingly done by coding agents, camdl is explicitly forward-looking: the
+compiler helps ensure the model agents write is sound, and camdl has doc-tested
+documentation integrated into command-line tooling for maximal discoverability
+of never-stale info for agents fitting models with camdl.
 
-In a well-posed infectious disease model, the observation process is part of
-the model itself --- in camdl, the link between input data and the model's
-latent process is linked declaratively in an `observations { }` block, which
-supports multiple observation streams (e.g. time-series age-stratified
-incidence, *and* environmental surveillance). The mapping between input data
-and the observation likelihood is declarative --- camdl automatically takes
-care of everything else.
+In a well-posed infectious disease model, the observation process is part of the
+model itself --- in camdl, the link between input data and the model's latent
+process is linked declaratively in an `observations { }` block, which supports
+multiple observation streams (e.g. time-series age-stratified incidence, _and_
+environmental surveillance). The mapping between input data and the observation
+likelihood is declarative --- camdl automatically takes care of everything else.
 
 A central design goal of camdl is to make fitting multiple model variants and
 model comparisons easy and reproducible. Every camdl run is fully provenanced
-and stored in an *input-addressed storage* system, that ensures reproducibility
+and stored in an _input-addressed storage_ system, that ensures reproducibility
 and automatically caches to prevent accidental overwrites of expensive runs.
 
 Developed at the [Institute for Disease Modeling](https://www.idmod.org/) (IDM),
@@ -81,10 +79,10 @@ simulate {
 
 This is all that is needed to simulate an SIR model with camdl; note that camdl
 supports optional [roxygen](https://roxygen2.r-lib.org/)-style comment
-documentation (the lines starting with `#'`) embedded in the model, so parameter 
-descriptions are automatically stored alongside the model and surface in 
-downstream commands like `camdl fit summary` to remind users what's what,
-as well as can be used in automatic plotting, etc.
+documentation (the lines starting with `#'`) embedded in the model, so parameter
+descriptions are automatically stored alongside the model and surface in
+downstream commands like `camdl fit summary` to remind users what's what, as
+well as can be used in automatic plotting, etc.
 
 The dimensions in camdl are real types --- `rate` is `time⁻¹`, `S`, `I` are
 counts --- which ensures models are valid at their core. These parameter types
@@ -108,7 +106,8 @@ error[E300]: transition 'infection' rate has wrong dimension
 
 All of these checks are done automatically though each time a user runs a camdl
 command on a `.camdl` file. More often a user would just rely on this automatic
-checking happening behind the scenes when they run a command like `camdl
+checking happening behind the scenes when they run a command like
+`camdl
 simulate`:
 
 ```console
@@ -154,7 +153,8 @@ observations {
 }
 ```
 
-A `fit.toml` declares the data, what to estimate, and the fitting stages:
+A `fit.toml` declares the data, what to estimate, and the one method to fit
+with:
 
 ```toml
 [model]
@@ -174,7 +174,7 @@ start = 0.1
 rho = 0.5
 k = 10
 
-[stages.fit]
+[method]
 algorithm = "if2" # iterated filtering → MLE
 backend = "chain_binomial"
 chains = 4
@@ -190,9 +190,11 @@ camdl fit run fit.toml --seed 1
 The fit lands in a content-addressed store keyed by its exact inputs (model,
 data, config, seed), so re-running an identical fit is instant and every result
 is traceable back to what produced it. Browse it with `camdl list --kind fit`,
-`camdl fit summary <dir>`, `camdl cat <id>`. Swap the stage to
-`algorithm = "pgas"` for a full Bayesian posterior with NUTS, or chain stages
-(IF2 to find the mode, PGAS to characterise the posterior around it).
+`camdl fit summary <dir>`, `camdl cat <id>`. Swap the method to
+`algorithm = "pgas"` for a full Bayesian posterior with NUTS; a second file with
+the same problem and a different `[method]` shares the fit's identity, and can
+start from the first's result by handle
+(`starts = { from_posterior = "@mle" }`).
 
 ## Why camdl
 
@@ -214,9 +216,9 @@ is traceable back to what produced it. Browse it with `camdl list --kind fit`,
   differences, no runtime autodiff.
 - **Reproducible by construction.** Runs are content-addressed by their inputs;
   paired scenarios share random numbers so a counterfactual differs only where
-  the intervention does. Fits ship convergence gates between stages and a
-  Richardson dt-convergence audit, so "it ran" and "it converged" are different
-  claims.
+  the intervention does. Fits ship chain-agreement and R̂ verdicts, a record of
+  where every chain began, and a Richardson dt-convergence audit, so "it ran"
+  and "it converged" are different claims.
 - **One readable IR, two languages.** An OCaml frontend expands the DSL
   (stratification, contact matrices, Erlang stages, forcing, interventions) into
   a flat JSON intermediate representation; a Rust backend simulates and fits it.
@@ -236,14 +238,14 @@ model.camdl ──→ camdlc ──→ model.ir.json
 
 More, in one table:
 
-| Domain               | What camdl does                                                                                                                                                                        |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Modelling**        | Compartments; stratification (age, space, risk); contact matrices; Erlang staging; forcing functions; scheduled and reactive interventions; events; balance constraints; scenarios     |
-| **Simulation**       | Gillespie SSA, chain-binomial (Euler-multinomial), ODE (RK4 / adaptive RK4(5)). Extra-demographic noise via `overdispersed()`; deterministic flows via `deterministic()`               |
-| **Inference**        | IF2 (MLE), PGAS + NUTS (Bayesian posterior), PMMH, bootstrap particle filter, 1D/2D profile likelihood. Compiler-emitted analytic gradients                                            |
-| **Fitting workflow** | Declarative `fit.toml` (named stages → `camdl fit run`); convergence gates between stages; dt-convergence audit; calendar-dated data; sparse / irregular / missing (`NA`) observations |
-| **Diagnostics**      | Particle-filter health (ESS, τ²), prequential scoring (elpd, CRPS, PIT), paired model comparison via `camdl compare`, posterior-predictive checks via `camdl fit predict`              |
-| **Reproducibility**  | Content-addressed runs with caching; common-random-number scenario coupling; version-locked offline docs (`camdl docs <topic>`)                                                        |
+| Domain               | What camdl does                                                                                                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Modelling**        | Compartments; stratification (age, space, risk); contact matrices; Erlang staging; forcing functions; scheduled and reactive interventions; events; balance constraints; scenarios                           |
+| **Simulation**       | Gillespie SSA, chain-binomial (Euler-multinomial), ODE (RK4 / adaptive RK4(5)). Extra-demographic noise via `overdispersed()`; deterministic flows via `deterministic()`                                     |
+| **Inference**        | IF2 (MLE), PGAS + NUTS (Bayesian posterior), PMMH, bootstrap particle filter, 1D/2D profile likelihood. Compiler-emitted analytic gradients                                                                  |
+| **Fitting workflow** | Declarative `fit.toml` (one problem, one method → `camdl fit run`); warm starts by handle; convergence verdicts; dt-convergence audit; calendar-dated data; sparse / irregular / missing (`NA`) observations |
+| **Diagnostics**      | Particle-filter health (ESS, τ²), prequential scoring (elpd, CRPS, PIT), paired model comparison via `camdl compare`, posterior-predictive checks via `camdl fit predict`                                    |
+| **Reproducibility**  | Content-addressed runs with caching; common-random-number scenario coupling; version-locked offline docs (`camdl docs <topic>`)                                                                              |
 
 ## Install
 

@@ -72,7 +72,7 @@ Surface `survey.html` and let a human confirm before you seed a fit on it.
 ## 4. Write `fit.toml` and run the fit
 
 A `fit.toml` names the model, the data, what to estimate, what to fix, and the
-inference stages. Minimal, complete:
+one method that fits it. Minimal, complete:
 
 ```toml
 [model]
@@ -81,7 +81,7 @@ camdl = "model.camdl"
 [data.observations]
 cases = "data/cases.tsv" # one key per observation stream in the model
 
-[estimate] # bounds always; a posterior stage needs a prior (here, or in the model via ~)
+[estimate] # bounds always; a posterior sampler needs a prior (here, or in the model via ~)
 beta = { bounds = [0.001, 0.5], start = 0.04, prior = { log_normal = { mu = -2.0, sigma = 1.0 } } }
 gamma = { bounds = [0.01, 1.0], start = 0.12, prior = { log_normal = { mu = -1.2, sigma = 0.5 } } }
 
@@ -89,42 +89,52 @@ gamma = { bounds = [0.01, 1.0], start = 0.12, prior = { log_normal = { mu = -1.2
 rho = 0.6
 k = 10.0
 
-[stages.scout] # stages are USER-NAMED; `algorithm` picks the method
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 8
-particles = 2000
-iterations = 150
-cooling = 0.7
-
-[stages.posterior]
+[method] # one per file; `algorithm` picks the method
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 4
 particles = 600
 sweeps = 300
+# starts = "from_prior"   # the default here: every parameter has a prior
 ```
 
-- **Stages are user-named** `[stages.<name>]` blocks; `algorithm` (`if2` |
-  `pgas` | `pmmh` | `pfilter`) picks the method. The conventional pipeline is
-  **scout** (`if2`, find the basin) → optionally **refine** (`if2`, sharpen) →
-  **posterior** (`pgas`, sample) → **validate** (`pfilter`, score).
-- **Priors** for a `pgas`/`pmmh` stage must be explicit — declared here in
-  `[estimate].prior` or in the model (a `~` declaration); it refuses implicit
-  flat. Menu: `log_normal {mu,sigma}` · `normal {mean,sd}` · `beta {alpha,beta}`
-  · `uniform` · `half_normal`.
-- Fits run `chain_binomial` (needed for chain-binomial process noise and
-  `balance`).
-- Full schema — every section, every stage field, transforms, holdout:
-  `camdl docs fit-toml`.
+- **One `[method]` per file.** `algorithm` (`if2` | `pgas` | `pmmh` | `pfilter`
+  | `mh` | `nuts` | `nl-sbplx` | `nl-bobyqa`) picks the method. Everything above
+  it is the problem, which every reader loads (`simulate
+  --draws prior --fit`,
+  `pfilter --fit`, `survey --fit`, `profile --fit`). A second way of fitting the
+  same problem — an `if2` point estimate beside this posterior, say — is a
+  second file with the same problem half:
+  `camdl fit new --from fit.toml fit-if2.toml`, then edit `[method]`.
+- **Chains start apart by default.** `starts` says where the chains begin; when
+  omitted it is `from_prior` (one draw per chain from the priors) whenever every
+  estimated parameter has one, else `uniform_unconstrained`. A warm start from a
+  stored fit is written where it is used —
+  `starts = { from_posterior =
+  "@base" }` keeps R̂ meaningful;
+  `starts = { from_mle = "@mle" }` puts every chain at one point and R̂ is then
+  reported as not assessed.
+- **Priors** for a `pgas`/`pmmh`/`mh`/`nuts` method must be explicit — declared
+  here in `[estimate].prior` or in the model (a `~` declaration); it refuses
+  implicit flat. Menu: `log_normal {mu,sigma}` · `normal {mean,sd}` ·
+  `beta {alpha,beta}` · `uniform` · `half_normal`.
+- The stochastic-process methods run `chain_binomial` (needed for chain-binomial
+  process noise and `balance`); `mh`, `nuts` and the NLopt optimizers run `ode`.
+- Full schema — every section, every method field, `starts`, transforms,
+  holdout: `camdl docs fit-toml`.
 
 ```bash
 camdl fit run fit.toml --label baseline --seed 1
 ```
 
 `--label baseline` names the fit so every downstream verb can refer to it as
-`@baseline` instead of its run directory (see §5). While tuning, run one stage
-at a time: `camdl fit run fit.toml --stage scout`.
+`@baseline` instead of its run directory (see §5). A cheap IF2 pass to locate
+the basin before the posterior is its own file and its own label:
+
+```bash
+camdl fit new --from fit.toml fit-if2.toml     # then set [method] algorithm = "if2"
+camdl fit run fit-if2.toml --label mle --seed 1
+```
 
 ## 5. Read the diagnostics
 
@@ -143,7 +153,7 @@ The summary prints a fixed set of blocks:
 - **best loglik (loglik-eval)** — the MLE _re-scored_ at a high particle count.
   The clean number; IF2's running loglik during optimization is perturbation-
   biased.
-- **The scout-convergence gate — two legs, both must pass:**
+- **The IF2 convergence gate — two legs, both must pass:**
   - **Â (chain-agreement):** `< 1.05` ✓, `1.05–1.10` marginal, `≥ 1.10` ✗. "Did
     the independent optimizer chains climb to the _same place_?"
   - **Δ_dB (decibans spread):** best-vs-worst chain loglik spread, vs a ~30 dB
@@ -213,7 +223,7 @@ reporting mostly about its own truncation point.
 
 ### Diagnostics reference
 
-| Stage            | Diagnostic           | Healthy         | Warning           | Action                                         |
+| Method           | Diagnostic           | Healthy         | Warning           | Action                                         |
 | ---------------- | -------------------- | --------------- | ----------------- | ---------------------------------------------- |
 | Particle filter  | ESS per-obs          | > 50% of N      | 10–50%            | more particles or looser obs model             |
 | Particle filter  | ESS at MLE           | mean > 50%      | mean < 30%        | estimate `σ²` or `k`                           |

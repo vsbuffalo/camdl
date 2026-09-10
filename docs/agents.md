@@ -92,9 +92,10 @@ error costs much more. Default to pausing.
   `CAMDL_SKIP_VERSION_CHECK=1`, `--no-nuts`, `--force` on a fit re-run). Each of
   these bypasses a check that exists for a reason. If a flag is the obvious fix
   to make an error go away, that's the signal to stop.
-- **Loosening a convergence gate** because scout failed it. The gate exists to
-  fail loudly rather than pass a bad fit through. The right move when scout's
-  gate fires is to diagnose _why_ (widen bounds? more chains? more iterations?),
+- **Loosening a convergence gate** because a fit failed it, or starting a
+  posterior from an unconverged fit with `--allow-nonconverged-source`. The gate
+  exists to fail loudly rather than pass a bad fit through. The right move when
+  it fires is to diagnose _why_ (widen bounds? more chains? more iterations?),
   not lower the threshold.
 - **Choosing prior shape for a parameter you don't have domain context for.**
   Picking `Normal(0, 1)` "to make PGAS run" is the worst-case communication
@@ -182,18 +183,18 @@ Compile-time errors (from `camdlc`):
 
 Run-time errors from `camdl simulate` / `pfilter` / `fit`:
 
-| Error                                                               | What it usually means                                                                                           | What to do                                                                                                                                                                                                                       |
-| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IR version mismatch`                                               | Stale `camdlc` binary vs `camdl` binary. The IR envelope's `ir_version` doesn't match what the runtime expects. | `make build && make install`. The runtime checks the on-PATH `camdlc` hash against its own.                                                                                                                                      |
-| `SimError::NumericalCollapse { kind: DivByZero }`                   | A rate expression hit `0/0` or similar (e.g. `beta * I[a] / N_local[a]` when stratum `a` is empty)              | Add a `Cond` guard: `cond(N_local[a] > 0, beta * I[a] / N_local[a], 0)`. **Do not** reach for `--allow-degenerate-rates` unless you've decided the silent-zero is the modeling intent.                                           |
-| `SimError::NumericalCollapse { kind: PowNanInf / SqrtNegative }`    | Negative base raised to fractional power, or sqrt of negative                                                   | Domain bug in the rate expression. Add a guard or fix the formula.                                                                                                                                                               |
-| `SimError::NegativeCount { cause: BinomialOvershoot }`              | Binomial split overshot (rate × dt → 1 for some particle). Common in inference exploration                      | If during `simulate`: reduce `--dt`. If during `fit`: per-particle recovery handles it (the offending particle gets `−Inf` log-likelihood and is killed in resampling). Watch the `eval-stats` summary for how often this fires. |
-| `SimError::NegativeCount { cause: InterventionAddNegative }`        | An `Action::Add` expression resolved to a negative value                                                        | Config bug. There's no inference scenario where `Add` should remove individuals. Fix the expression or use `transfer` instead of `add`.                                                                                          |
-| `requires capabilities: BALANCE` (on gillespie/ode)                 | Model uses `balance { ... }`; only chain-binomial supports it                                                   | Use `--backend chain_binomial`. Don't try to translate `balance` to a manual transition — its semantics are chain-binomial-specific (the residual-compartment fix).                                                              |
-| `--record-prequential requires --stage <pfilter-stage>`             | Flag used with a non-PFilter stage                                                                              | Pass `--stage` with a PFilter stage from your fit.toml. The error message lists available PFilter stages.                                                                                                                        |
-| `pgas refuses to run with implicit improper-uniform priors`         | `[estimate.X]` block exists with no `[estimate.X.prior]`                                                        | Add an explicit prior. For uniform-on-bounds: `prior = { uniform = { lower = ..., upper = ... } }`. **Do not** add a wide normal "to make it shut up" — the prior shows up in the posterior.                                     |
-| `PGAS gradient does not yet include obs-likelihood ... derivatives` | Estimating `rho`, `psi`, `k`, or any param appearing in the obs-likelihood / overdispersion expression          | Move that param to fixed (`[fixed.rho] value = ...`) and either grid-search it, or fit it with IF2 first (gradient-free). Full obs-likelihood gradient threading is on the roadmap (audit C1 follow-up).                         |
-| `IR JSON parse error: missing field 'ir_version'`                   | Loading a bare-Model JSON; runtime requires the envelope wrapper                                                | Re-emit with `camdlc` (it always wraps). For hand-curated JSON: wrap with `jq '{ir_version: "<match ir/VERSION>", validated_by: "manual", model: .}' in.json > out.json` — the version must match your binary's schema.          |
+| Error                                                                                   | What it usually means                                                                                           | What to do                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IR version mismatch`                                                                   | Stale `camdlc` binary vs `camdl` binary. The IR envelope's `ir_version` doesn't match what the runtime expects. | `make build && make install`. The runtime checks the on-PATH `camdlc` hash against its own.                                                                                                                                      |
+| `SimError::NumericalCollapse { kind: DivByZero }`                                       | A rate expression hit `0/0` or similar (e.g. `beta * I[a] / N_local[a]` when stratum `a` is empty)              | Add a `Cond` guard: `cond(N_local[a] > 0, beta * I[a] / N_local[a], 0)`. **Do not** reach for `--allow-degenerate-rates` unless you've decided the silent-zero is the modeling intent.                                           |
+| `SimError::NumericalCollapse { kind: PowNanInf / SqrtNegative }`                        | Negative base raised to fractional power, or sqrt of negative                                                   | Domain bug in the rate expression. Add a guard or fix the formula.                                                                                                                                                               |
+| `SimError::NegativeCount { cause: BinomialOvershoot }`                                  | Binomial split overshot (rate × dt → 1 for some particle). Common in inference exploration                      | If during `simulate`: reduce `--dt`. If during `fit`: per-particle recovery handles it (the offending particle gets `−Inf` log-likelihood and is killed in resampling). Watch the `eval-stats` summary for how often this fires. |
+| `SimError::NegativeCount { cause: InterventionAddNegative }`                            | An `Action::Add` expression resolved to a negative value                                                        | Config bug. There's no inference scenario where `Add` should remove individuals. Fix the expression or use `transfer` instead of `add`.                                                                                          |
+| `requires capabilities: BALANCE` (on gillespie/ode)                                     | Model uses `balance { ... }`; only chain-binomial supports it                                                   | Use `--backend chain_binomial`. Don't try to translate `balance` to a manual transition — its semantics are chain-binomial-specific (the residual-compartment fix).                                                              |
+| `these \`camdl fit run\` flags were removed with the \`[stages]\` → \`[method]\` split` | A `--stage`, `--init`, `--mle`, `--posterior`, `--params` or `--survey-*` flag from the staged era              | Drop `--stage` (a file carries one `[method]`); write `--starts <rule>` or `--starts <rule>=<source>` for the chain starts. The message names each replacement.                                                                  |
+| `pgas refuses to run with implicit improper-uniform priors`                             | `[estimate.X]` block exists with no `[estimate.X.prior]`                                                        | Add an explicit prior. For uniform-on-bounds: `prior = { uniform = { lower = ..., upper = ... } }`. **Do not** add a wide normal "to make it shut up" — the prior shows up in the posterior.                                     |
+| `PGAS gradient does not yet include obs-likelihood ... derivatives`                     | Estimating `rho`, `psi`, `k`, or any param appearing in the obs-likelihood / overdispersion expression          | Move that param to fixed (`[fixed.rho] value = ...`) and either grid-search it, or fit it with IF2 first (gradient-free). Full obs-likelihood gradient threading is on the roadmap (audit C1 follow-up).                         |
+| `IR JSON parse error: missing field 'ir_version'`                                       | Loading a bare-Model JSON; runtime requires the envelope wrapper                                                | Re-emit with `camdlc` (it always wraps). For hand-curated JSON: wrap with `jq '{ir_version: "<match ir/VERSION>", validated_by: "manual", model: .}' in.json > out.json` — the version must match your binary's schema.          |
 
 ---
 
@@ -210,7 +211,7 @@ not all "the fit failed"; they're typed signals.
 | `DivergentTransitions`       | any post-burn-in divergence         | NUTS hit a divergent trajectory (high curvature in posterior geometry)                  | Reparameterise (log/logit transforms), shrink the step size, or check for funnel geometry. Stan-canonical: any post-burn divergence is suspicious. |
 | `MaxTreeDepthHits`           | > 5% of post-burn-in sweeps         | NUTS trees not finishing — step size too small or posterior too elongated               | Increase `max_tree_depth`, or reparameterise.                                                                                                      |
 | `LowSwapRate`                | adjacent-rung pair < 10%            | Tempering ladder too sparse — chains don't mix across rungs                             | Add intermediate β values to the ladder.                                                                                                           |
-| `DegenerateAncestorSampling` | > 10% of post-burn-in CSMC substeps | Reference trajectory too far from particle cloud                                        | More particles, or smaller PGAS proposal SDs (let scout run longer first).                                                                         |
+| `DegenerateAncestorSampling` | > 10% of post-burn-in CSMC substeps | Reference trajectory too far from particle cloud                                        | More particles, or smaller PGAS proposal SDs.                                                                                                      |
 | `LowTrajectoryRenewal`       | mean post-burn renewal < 10%        | PGAS reference trajectory not getting refreshed — possibly stuck                        | More particles. Check that CSMC is actually proposing diverse trajectories (run with `RUST_LOG=camdl_sim::inference::pgas=debug`).                 |
 | `MultimodalLikelihood`       | ll spread > 50 nats with R̂ > 1.5    | Different chains are in different basins                                                | Run `camdl survey` to map the landscape. Likely need more chains or different initialisation.                                                      |
 | `ConvergenceIncomplete`      | max R̂ > 1.1 with finite agreements  | Some parameters haven't converged                                                       | More sweeps; check the per-parameter R̂ table to see which.                                                                                         |
@@ -402,9 +403,10 @@ Gillespie is for forward-simulation sanity checks, not fits (too slow).
 of compute in the pipeline; fitting a model you haven't surveyed is the single
 most common way to spend a week producing a wrong answer.
 
-**One stage at a time when iterating.** `camdl fit run fit.toml --stage scout`
-gives you one stage's output to inspect before committing to refine + validate.
-Run all stages only when the fit.toml is stable.
+**One method at a time when iterating.** A `fit.toml` carries one `[method]`; a
+cheap `if2` file (`camdl fit new --from fit.toml fit-if2.toml`, edit `[method]`)
+gives you a point estimate and Â to inspect before committing to the posterior
+sampler in the main file.
 
 **Explicit priors, always.** PGAS now refuses implicit-Flat priors. A wide
 uniform is fine if that's actually your belief; a wide normal is fine for log
@@ -423,10 +425,10 @@ transformed scale; bounds are enforced by construction.
 **A `fit.toml` `bounds` may only _narrow_ the model, never widen it.** The
 model's `parameters { p : rate in [lo, hi] }` range is the scientific claim
 about where `p` can plausibly live — the source of truth. A `[estimate.p]`
-`bounds` override is for a _tighter_ experiment-specific search (restrict a
-scout to a sub-range, pin a sensitivity sweep), so it must be a **subset** of
-the declared range. camdl enforces this: a fit whose bounds fall outside the
-model's — `p : rate in [0.001, 1.0]` in the model, `bounds = [0.01, 2.0]` in the
+`bounds` override is for a _tighter_ experiment-specific search (restrict a fit
+to a sub-range, pin a sensitivity sweep), so it must be a **subset** of the
+declared range. camdl enforces this: a fit whose bounds fall outside the model's
+— `p : rate in [0.001, 1.0]` in the model, `bounds = [0.01, 2.0]` in the
 fit.toml — is **rejected** at config resolution
 (`estimate.p: fit.toml bounds …
 lie outside model bounds …; a fit can tighten bounds but not loosen them`).
@@ -541,11 +543,12 @@ if the model source has drifted from the one the fit ran on.
 ## fit.toml shape
 
 The full, verified schema — `[model]`, `[data.observations]`, `[estimate]`
-(bounds, prior, transform), `[fixed]`, and user-named `[stages.<name>]` blocks
-with `algorithm = if2|pgas|pmmh|pfilter` — is `camdl docs fit-toml`. Two
-load-bearing rules: every estimated parameter needs an explicit prior for a
-Bayesian stage (in the model's `~` declaration or `[estimate].prior`; PGAS
-refuses _silent_ flat), and fits run the `chain_binomial` backend.
+(bounds, prior, transform), `[fixed]`, and one `[method]` with
+`algorithm = if2|pgas|pmmh|pfilter|mh|nuts|nl-sbplx|nl-bobyqa` and its `starts`
+rule — is `camdl docs fit-toml`. Two load-bearing rules: every estimated
+parameter needs an explicit prior for a Bayesian method (in the model's `~`
+declaration or `[estimate].prior`; PGAS refuses _silent_ flat), and the
+stochastic-process methods run the `chain_binomial` backend.
 
 ---
 
@@ -670,7 +673,7 @@ cannot disagree with the file it describes. Consume the _role_, never the name �
 the iteration column is spelled `sweep`, `step`, `draw` or `iteration` depending
 on the method, and `time` (physical) and `iteration` (a sampler index) are
 deliberately distinct roles. Not every producer declares one: `sim` leaves and
-completed fit stages do; `pfilter`, `survey`, `profile` and the `fit predict`
+completed fit leaves do; `pfilter`, `survey`, `profile` and the `fit predict`
 outputs do not.
 
 ### Workflow tooling — the principle, not a mandated tool

@@ -464,7 +464,7 @@ particle filter — and `camdl fit` samples the posterior on it two ways:
   correlated, ridge-shaped posteriors that stall gradient-free MH.
 
 ```toml
-[stages.posterior]
+[method]
 algorithm = "nuts" # or "mh" for the gradient-free sampler
 backend = "ode"
 chains = 4

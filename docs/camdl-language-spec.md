@@ -5066,7 +5066,7 @@ camdl pfilter MODEL --params P.toml --data cases.tsv \
 #   mu = 0.0
 #   k  = 10
 #
-#   [stages.fit]
+#   [method]
 #   algorithm  = "if2"
 #   backend    = "chain_binomial"
 #   chains     = 4
@@ -5112,15 +5112,16 @@ stage. Cooling is pomp's cf50 convention (halfway-SD fraction); see
 `docs/methods/cooling.md`.
 
 **Regimes (scout / refine / validate)**: the scout → refine → validate ladder is
-a sequence of `[stages.X] algorithm = "if2"` blocks in a `fit.toml`, not a CLI
-preset. A scout is a fast, mildly-cooled stage for basin exploration (e.g.
-`chains = 8`, `particles = 500`, `iterations = 30`, `cooling = 0.70`); a refine
-sharpens onto the scout's mode with more particles and aggressive cooling (e.g.
-`chains = 4`, `particles = 1000`, `iterations = 50`, `cooling = 0.05`,
-`init_mle = "scout"`); a validate stage is a final high-particle polish. Each
-stage sets these knobs explicitly; a later stage warm-starts from an earlier
-one's MLE via `init_mle = "<stage>"`. A scout-convergence gate
-(`docs/methods/cooling.md`) guards the transition.
+a sequence of `fit.toml` files, each with `[method] algorithm = "if2"` and the
+same problem half, not a CLI preset. A scout is a fast, mildly-cooled fit for
+basin exploration (e.g. `chains = 8`, `particles = 500`, `iterations = 30`,
+`cooling = 0.70`); a refine sharpens onto the scout's mode with more particles
+and aggressive cooling (e.g. `chains = 4`, `particles = 1000`,
+`iterations = 50`, `cooling = 0.05`, `starts = { from_mle = "@scout" }`); a
+validate file is a final high-particle polish. Each file sets these knobs
+explicitly; a later file warm-starts from an earlier one's MLE by handle. A
+source whose convergence verdict failed is refused unless
+`--allow-nonconverged-source` records the choice (`docs/methods/cooling.md`).
 
 **Initial value parameters (IVP)**: parameters that set the initial compartment
 state (e.g. `S0`, `I0`) are declared on the model and estimated like any other
@@ -5158,18 +5159,17 @@ The two replacements are:
 ### 21.6 Fit Workflow
 
 ```bash
-camdl fit run     fit.toml [--stage NAME] [--seed N] [--force] [--sweep "PARAM=V1,V2,..."]
+camdl fit run     fit.toml [--starts SPEC] [--seed N] [--force] [--sweep "PARAM=V1,V2,..."]
 camdl fit summary results/fits/<dir>/
 camdl fit table   results/fits/
 ```
 
-Driven by `fit.toml` with `[estimate]`, `[fixed]`, `[data]`, and one or more
-`[stages.NAME]` blocks. Stages are named by the user (by convention `scout`,
-`refine`, `validate`) and chain via the `init = "from_mle"` +
-`init_mle = "<prior-stage>"` pair on each stage. `--stage NAME` runs a single
-stage; `--sweep` takes a Cartesian product over parameter grids and, when a cell
-fails the convergence gate, records the failure in `sweep_failures.tsv` and
-continues rather than halting. See `docs/camdl-inference-spec.md`.
+Driven by `fit.toml` with `[estimate]`, `[fixed]`, `[data]`, and one `[method]`.
+A chain of fits (by convention `scout`, `refine`, `validate`) is a chain of
+files, each naming the previous by handle in its `starts` rule
+(`starts = { from_mle = "@scout" }`); `--starts SPEC` overrides the rule for one
+run. `--sweep` takes a Cartesian product over parameter grids. See
+`docs/camdl-inference-spec.md`.
 
 **Pfilter replicates:**
 

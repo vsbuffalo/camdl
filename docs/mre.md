@@ -92,7 +92,7 @@ relative path changes the id.
   `fit.toml`'s directory for `mre fit`, the current directory for
   `mre simulate`. Absolute or `../`-escaping paths are non-portable and error
   (move the file under the project, or make its path relative).
-- **Self-contained init.** Fits whose chains seed from an upstream artifact
-  (`init = "survey_top_k"` / `"from_mle"` / `"from_posterior"` /
-  `"from_params"`) aren't bundled yet and error with guidance — switch to
-  `init = "lhs"` / `"single"` / `"from_prior"` to make a self-contained MRE.
+- **Self-contained starts.** Fits whose chains start from an upstream artifact
+  (`starts = { from_mle = … }` / `{ from_posterior = … }` /
+  `{ from_params = … }`) aren't bundled yet and error with guidance — switch to
+  `starts = "lhs"` / `"single"` / `"from_prior"` to make a self-contained MRE.

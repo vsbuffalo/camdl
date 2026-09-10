@@ -29,8 +29,8 @@ Users invoke the observation system through these entry points:
   - `camdl pfilter MODEL --data cases.tsv` — bootstrap particle filter with
     `obs.tsv` as observation stream.
   - `camdl fit run fit.toml` — the `[data]` table in `fit.toml` maps stream
-    names to file paths. An MLE-only fit is a `fit.toml` with a single
-    `[stages.X] algorithm = "if2"` stage.
+    names to file paths. An MLE-only fit is a `fit.toml` whose `[method]` is
+    `algorithm = "if2"`.
 
 ## 2. Likelihoods and projections (IR)
 
@@ -136,7 +136,7 @@ calls the per-stream `sample(...)` method seeded from
 `process_seed ^ SEED_MIX_OBS` (defined in `util.rs`) to decorrelate obs RNG from
 process RNG, and writes the resulting value to TSV.
 
-For **pfilter / fit** (including IF2 stages): observed data is loaded from
+For **pfilter / fit** (including IF2 methods): observed data is loaded from
 `--data FILE.tsv` via `load_data_tsv_column`; the filter calls
 `MultiStreamObsModel::log_likelihood(state, obs_idx, params)` at each
 observation time to score particles.

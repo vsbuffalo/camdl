@@ -161,12 +161,12 @@ be alive at the halfway point."_ Scout wants that fraction high
 
 ## 6. Empirical confirmation — instrumented run on he2010
 
-Run parameters mirror `camdl-book/vignettes/he2010/fit_synthetic.toml`
-`[stages.scout]` cooling value (0.9) but shortened to 30 iterations and 100
-particles for runtime of investigation. Effective settings:
-`cooling_fraction = 0.9`, `target_iters = 30` (= n_iterations), `n_obs
-= 1096`
-weekly obs, `per_step_cooling = 0.999993591230`.
+Run parameters mirror `camdl-book/vignettes/he2010/fit_synthetic.toml`'s IF2
+cooling value (0.9) but shortened to 30 iterations and 100 particles for runtime
+of investigation. Effective settings: `cooling_fraction = 0.9`,
+`target_iters = 30` (= n_iterations), `n_obs
+= 1096` weekly obs,
+`per_step_cooling = 0.999993591230`.
 
 ```
 iter   0: SD = 1.0000 × initial
@@ -292,7 +292,7 @@ edit any of the following, please re-verify with an instrumented run (see §6)
 and update this file accordingly:
 
 - `rust/crates/sim/src/inference/if2.rs:250-251` (the formula itself)
-- `rust/crates/cli/src/fit/{scout,refine}.rs` (the stage defaults)
+- `rust/crates/cli/src/fit/{scout,refine}.rs` (the historical stage defaults)
 - `rust/crates/cli/src/fit/runner.rs:254` (target_iters initialization)
 - `rust/crates/cli/src/fit/validate.rs:493` (validate's fixed target_iters)
 
