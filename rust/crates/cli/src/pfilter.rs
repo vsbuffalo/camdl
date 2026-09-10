@@ -892,6 +892,48 @@ pub fn load_data_observations_from_fit_toml(
     Ok(entries)
 }
 
+/// What a column-lookup diagnostic calls the column it could not find.
+///
+/// The shared raw parser takes two columns — a temporal axis and a value — but
+/// not every caller puts the stream's `: time` column in the first slot: a
+/// window boundary goes there, and so does each covariate the likelihood reads
+/// (a binomial denominator, a person-time offset), because those are read by
+/// the same strict by-name path. Reporting a missing covariate as a missing
+/// time column, with the `time : time` rule as the fix, sends the modeller to
+/// look at a time column that is present and fine and away from the
+/// denominator that is not (gh#886) — so the slot says what it holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColumnPurpose {
+    /// The stream's `: time` axis column.
+    Time,
+    /// A per-row window boundary (`window_start` / `window_stop`).
+    WindowBoundary,
+    /// A column the likelihood reads by name, declared in `columns { }` with
+    /// its own type (`tested : count`).
+    Covariate,
+}
+
+impl ColumnPurpose {
+    /// What the diagnostic calls this kind of column.
+    fn what(self) -> &'static str {
+        match self {
+            ColumnPurpose::Time => "time",
+            ColumnPurpose::WindowBoundary => "window boundary",
+            ColumnPurpose::Covariate => "covariate",
+        }
+    }
+
+    /// The declaration the header must match, named as the modeller wrote it.
+    fn declaration(self) -> &'static str {
+        match self {
+            ColumnPurpose::Time => "the declared `time : time` column name",
+            ColumnPurpose::WindowBoundary =>
+                "the declared `window_start` / `window_stop` column name",
+            ColumnPurpose::Covariate => "the declared `columns { }` name",
+        }
+    }
+}
+
 /// Read the rows of two named TSV columns — the time column and one other —
 /// as their raw cells, one pair per data row, with the file line number of
 /// each row. Nothing is converted here: this half of the reader answers only
@@ -905,6 +947,7 @@ fn parse_column_cells_raw<'a>(
     content: &'a str,
     path: &str,
     time_column: &str,
+    purpose: ColumnPurpose,
     column: &str,
 ) -> Result<(Vec<&'a str>, Vec<&'a str>, Vec<usize>), String> {
     // gh#344: skip leading `#` comment lines (a provenance/attribution header is
@@ -924,11 +967,10 @@ fn parse_column_cells_raw<'a>(
     // headers do not match the declared `time` column is a located error.
     let time_idx = cols.iter().position(|&c| c == time_column)
         .ok_or_else(|| format!(
-            "time column '{time_column}' not found in data file '{path}'. \
-             Headers present: [{}]. Fix: rename the data column to \
-             '{time_column}' (it must match the declared `time : time` column \
-             name, case-sensitive).",
-            cols.join(", ")))?;
+            "{} column '{time_column}' not found in data file '{path}'. \
+             Headers present: [{}]. Fix: add the column, or rename the data \
+             column to '{time_column}' (it must match {}, case-sensitive).",
+            purpose.what(), cols.join(", "), purpose.declaration()))?;
 
     // Find the VALUE column index for the requested stream. Binding is
     // strict by name — there is NO positional fallback. A typo'd,
@@ -994,10 +1036,11 @@ fn parse_column_cells<'a>(
     content: &'a str,
     path: &str,
     time_column: &str,
+    purpose: ColumnPurpose,
     column: &str,
 ) -> Result<(Vec<&'a str>, Vec<Option<f64>>, Vec<usize>), String> {
     let (time_cells, value_cells, rows) =
-        parse_column_cells_raw(content, path, time_column, column)?;
+        parse_column_cells_raw(content, path, time_column, purpose, column)?;
 
     let mut cells: Vec<Option<f64>> = Vec::with_capacity(value_cells.len());
     for (i, &cell) in value_cells.iter().enumerate() {
@@ -1081,7 +1124,8 @@ fn read_boundary_column<'a>(
 ) -> Result<(Vec<&'a str>, Vec<usize>), String> {
     // The raw reader wants a time column and a value column; here they are the
     // same column, and only one copy of the cells is wanted.
-    let (cells, _same, rows) = parse_column_cells_raw(content, path, column, column)?;
+    let (cells, _same, rows) =
+        parse_column_cells_raw(content, path, column, ColumnPurpose::WindowBoundary, column)?;
     for (i, &cell) in cells.iter().enumerate() {
         if cell.trim() == "NA" {
             return Err(format!(
@@ -1257,7 +1301,8 @@ pub fn load_data_tsv_column(
 ) -> Result<Vec<Observation>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
-    let (time_cells, cells, rows) = parse_column_cells(&content, path, time_column, column)?;
+    let (time_cells, cells, rows) =
+        parse_column_cells(&content, path, time_column, ColumnPurpose::Time, column)?;
     // Reject holes on the dense path with a located message.
     let mut values: Vec<f64> = Vec::with_capacity(cells.len());
     for (i, c) in cells.iter().enumerate() {
@@ -1287,7 +1332,8 @@ pub fn load_data_tsv_column_cells(
     use sim::inference::ObsCell;
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
-    let (time_cells, cells, rows) = parse_column_cells(&content, path, time_column, column)?;
+    let (time_cells, cells, rows) =
+        parse_column_cells(&content, path, time_column, ColumnPurpose::Time, column)?;
 
     // Convert the time column + run the distinct-substep/off-grid/ordering
     // checks via the same back-half used by the dense path — but on the time
@@ -1392,7 +1438,7 @@ pub fn load_long_form_stream(
 
     let aux_cols = stream_aux_columns(obs_block);
     let aux_idxs: Vec<(String, usize)> = aux_cols.iter()
-        .map(|c| Ok::<_, String>((c.clone(), col_idx(c, "aux")?)))
+        .map(|c| Ok::<_, String>((c.clone(), col_idx(c, "covariate")?)))
         .collect::<Result<_, _>>()?;
 
     // Valid level set per dim = the UNION of all sibling leaves' strata for
@@ -1595,15 +1641,15 @@ pub fn load_stream_aux(
         return Ok((vec![Vec::new(); n_rows_expected], vec![false; n_rows_expected]));
     }
     let content = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
-    // Parse each aux column independently (reusing the strict by-name +
-    // NA-hole parser via a synthetic "time" pin — we only need the value cells,
-    // so pass the aux column itself as the time column to satisfy the parser's
-    // header check, then discard the time side).
+    // Parse each covariate column independently, reusing the strict by-name +
+    // NA-hole parser: the column goes in both of the parser's slots and only
+    // the value cells are kept. The slot is tagged `Covariate` so a missing
+    // header is reported as the covariate it is rather than as a missing time
+    // column (gh#886).
     let mut per_col: Vec<Vec<Option<f64>>> = Vec::with_capacity(aux_cols.len());
     for col in aux_cols {
-        // The parser requires a time column; reuse the aux column as both —
-        // we only consume the value cells.
-        let (_t, cells, _rows) = parse_column_cells(&content, path, col, col)?;
+        let (_t, cells, _rows) =
+            parse_column_cells(&content, path, col, ColumnPurpose::Covariate, col)?;
         if cells.len() != n_rows_expected {
             return Err(format!(
                 "aux column '{}' in '{}' has {} data rows but the scored column has {} \
@@ -1817,6 +1863,41 @@ mod tests {
         let path = std::env::temp_dir().join(format!("camdl_test_{}.tsv", name));
         std::fs::write(&path, content).unwrap();
         path.to_str().unwrap().to_string()
+    }
+
+    // ── gh#886: a column-lookup diagnostic names the role it looked for ──
+
+    /// A column the likelihood reads — a binomial denominator `n = tested`,
+    /// declared `tested : count` — is not the time axis. When the file omits
+    /// it, the message must say so and point at `columns { }`; reporting it as
+    /// a missing `time : time` column sends the modeller to look at a time
+    /// column that is fine, and away from the denominator that is not.
+    #[test]
+    fn a_missing_covariate_column_is_not_reported_as_a_missing_time_column() {
+        let path = write_temp_tsv(
+            "gh886_missing_covariate", "time\tpositives\n0\t3\n1\t5\n");
+        let e = load_stream_aux(&path, &["tested".to_string()], 2).unwrap_err();
+        assert!(e.contains("covariate column 'tested'"),
+            "the message names the column and what kind of column it is: {e}");
+        assert!(e.contains("`columns { }`"),
+            "and the declaration that governs it: {e}");
+        assert!(!e.contains("time column") && !e.contains("`time : time`"),
+            "and says nothing about the time column, which is present and fine: {e}");
+    }
+
+    /// The same, for a per-row window boundary: `window_start` is a temporal
+    /// column but not the `: time` axis, and the fix is to add the boundary
+    /// column, not to rename a time column.
+    #[test]
+    fn a_missing_window_boundary_is_not_reported_as_a_missing_time_column() {
+        let path = write_temp_tsv(
+            "gh886_missing_boundary", "window_stop\tcases\n1\t3\n2\t5\n");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let e = read_boundary_column(&content, &path, "window_start").unwrap_err();
+        assert!(e.contains("window boundary column 'window_start'"),
+            "the message names the boundary column as one: {e}");
+        assert!(!e.contains("`time : time`"),
+            "and does not prescribe the time-column rule: {e}");
     }
 
     fn numeric_opts() -> TimeOpts<'static> {
