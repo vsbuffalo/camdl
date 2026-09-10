@@ -172,7 +172,7 @@ cooling    = 0.5
             // so it runs on the working plain PF. Do NOT raise rho here to "test
             // correlation" — that re-buries the correlated-PF bug behind -inf.
             "--pmmh-rho", "0.0",
-            "--starts", "1",
+            "--n-starts", "1",
             "--rw-sd", "auto",
             "--output", &out_tsv.to_string_lossy(),
             "--seed", "1",

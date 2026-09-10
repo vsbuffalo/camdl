@@ -527,6 +527,29 @@ cooling = 0.7
     assert!(stderr.contains("--starts-from deadbeef: write `--starts from_mle=deadbeef`"),
         "--starts-from must name its replacement, got: {}", stderr);
 
+    // gh#889: `camdl profile` answers the same four flags the same way, and
+    // refuses before it does any work — the earlier surface accepted them and
+    // ran with a start rule the flag was meant to select.
+    let out = Command::new(&bin)
+        .current_dir(tmp.path())
+        .args(["profile", &ir.to_string_lossy(),
+               "--data", &format!("cases={}", data.display()),
+               "--sweep", "beta=lin(0.1,0.5,2)", "--rw-sd", "auto",
+               "--particles", "20",
+               "--init", "from_params", "--params", "truth.toml"])
+        .output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(),
+        "profile's removed flags must fail, not be ignored: {stderr}");
+    assert!(stderr.contains("these `camdl profile` flags were removed"),
+        "expected the removed-flag error naming this verb, got: {stderr}");
+    assert!(stderr.contains("--init from_params: write `--starts from_params=<source>`"),
+        "--init must name `--starts`, got: {stderr}");
+    assert!(stderr.contains("--params truth.toml: write `--starts from_params=truth.toml`"),
+        "--params must name its replacement, got: {stderr}");
+    assert!(!stderr.contains("compiling"),
+        "the refusal must land before any work, got: {stderr}");
+
     // Bad hash with the new spelling: the resolver finds no leaf and no fit.
     let out = Command::new(&bin)
         .current_dir(tmp.path())

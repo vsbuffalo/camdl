@@ -110,7 +110,7 @@ fn run_profile_with(
             "--algorithm", "if2",
             "--particles", "30",
             "--iterations", "5",
-            "--starts", "1",
+            "--n-starts", "1",
             "--rw-sd", rw_sd,
             "--seed", "1",
         ])

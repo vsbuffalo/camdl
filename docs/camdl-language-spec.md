@@ -5078,10 +5078,10 @@ camdl fit run fit.toml --seed 42
 
 # Profile likelihood — parameter identifiability. The swept parameter and its
 # grid are given by `--sweep "PARAM=lin(min,max,n)"` (repeat for 2D+).
-camdl profile MODEL --init from_params --params P.toml --data cases.tsv \
+camdl profile MODEL --starts from_params=P.toml --data cases.tsv \
     --sweep "R0=lin(0.5,5,20)" \
     --rw-sd "sigma=0.01,gamma=0.01" \
-    --particles 500 --iterations 30 --starts 3 --parallel 8
+    --particles 500 --iterations 30 --n-starts 3 --parallel 8
 
 # 2D profile — repeat --sweep
 camdl profile MODEL \

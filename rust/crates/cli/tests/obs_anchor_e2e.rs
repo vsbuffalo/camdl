@@ -770,7 +770,7 @@ fn profile_resolves_an_anchored_model() {
         .args(["--fit", toml.to_str().unwrap()])
         .args(["--sweep", "gamma=lin(0.08,0.12,2)"])
         .args(["--algorithm", "if2", "--particles", "30", "--iterations", "3"])
-        .args(["--starts", "1", "--rw-sd", "auto", "--seed", "1"])
+        .args(["--n-starts", "1", "--rw-sd", "auto", "--seed", "1"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
         .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))

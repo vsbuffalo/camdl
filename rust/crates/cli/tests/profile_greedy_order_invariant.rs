@@ -119,7 +119,7 @@ fn run_profile(bin: &Path, ir: &Path, data: &Path, root: &Path, parallel: u32)
             "--algorithm", "if2",
             "--particles", "30",
             "--iterations", "5",
-            "--starts", "1",
+            "--n-starts", "1",
             "--rw-sd", "auto",
             "--seed", "1",
             "--parallel", &parallel.to_string(),

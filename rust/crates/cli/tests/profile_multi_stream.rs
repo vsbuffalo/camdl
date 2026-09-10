@@ -135,7 +135,7 @@ fn run_profile(
             // 500 is the smallest of those that scores every cell. This gives
             // the fixture enough particles to answer the question; every
             // assertion below is unchanged.
-            "--particles", "500", "--iterations", "1", "--starts", "1",
+            "--particles", "500", "--iterations", "1", "--n-starts", "1",
             "--rw-sd", "auto",
             "--fixed", "sigma=0.125", "--fixed", "gamma=0.2",
             "--fixed", "kappa=0.05", "--fixed", "amplitude=0.3",
@@ -221,7 +221,7 @@ fn profile_multi_stream_model_requires_explicit_obs() {
             "--scenario", "true_params",
             "--data", &data_path.to_string_lossy(),
             "--sweep", "R0=lin(15,25,2)",
-            "--particles", "100", "--iterations", "1", "--starts", "1",
+            "--particles", "100", "--iterations", "1", "--n-starts", "1",
             "--rw-sd", "auto",
             "--fixed", "sigma=0.125", "--fixed", "gamma=0.2",
             "--fixed", "kappa=0.05", "--fixed", "amplitude=0.3",

@@ -1750,6 +1750,56 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let _ = fit_start;
 }
 
+/// The `--init` / `--posterior` / `--mle` / `--params` family, each answered
+/// with the `--starts` rule that replaced it.
+///
+/// Shared by `fit run` and `camdl profile` (gh#889): the same four flags were
+/// removed from both, so one flag has one answer rather than two that drift.
+pub(crate) fn starts_family_removed_lines(
+    init: Option<&str>,
+    posterior: Option<&str>,
+    mle: Option<&str>,
+    params: Option<&str>,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(s) = init {
+        let replacement = match s {
+            "from_posterior" | "from_mle" | "from_params" => format!("--starts {s}=<source>"),
+            other => format!("--starts {other}"),
+        };
+        lines.push(format!("--init {s}: write `{replacement}`."));
+    }
+    if let Some(s) = posterior {
+        lines.push(format!("--posterior {s}: write `--starts from_posterior={s}`."));
+    }
+    if let Some(s) = mle {
+        lines.push(format!("--mle {s}: write `--starts from_mle={s}`."));
+    }
+    if let Some(s) = params {
+        lines.push(format!("--params {s}: write `--starts from_params={s}`."));
+    }
+    lines
+}
+
+/// Wrap the per-flag replacement lines for `command` into the one message a
+/// user sees, or `None` when nothing removed was passed.
+pub(crate) fn removed_flags_message(command: &str, lines: Vec<String>) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let mut msg = format!(
+        "these `camdl {command}` flags were removed with the `[stages]` → `[method]` \
+         split (proposal 2026-09-08-workflow-first-fit-config):",
+    );
+    for l in lines {
+        msg.push_str("\n  ");
+        msg.push_str(&l);
+    }
+    msg.push_str(&format!(
+        "\n  See `camdl {command} --help` and `camdl docs fit-toml`."));
+    Some(msg)
+}
+
 /// The removed `fit run` flags, each answered with its replacement. Every
 /// one the user passed is named in one message, so a habitual
 /// `--stage posterior --init from_prior` is corrected in one round.
@@ -1762,22 +1812,12 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
              second file (`camdl fit new --from fit.toml fit-{s}.toml`)."
         ));
     }
-    if let Some(s) = a._removed_init.as_deref() {
-        let replacement = match s {
-            "from_posterior" | "from_mle" | "from_params" => format!("--starts {s}=<source>"),
-            other => format!("--starts {other}"),
-        };
-        lines.push(format!("--init {s}: write `{replacement}`."));
-    }
-    if let Some(s) = a._removed_posterior.as_deref() {
-        lines.push(format!("--posterior {s}: write `--starts from_posterior={s}`."));
-    }
-    if let Some(s) = a._removed_mle.as_deref() {
-        lines.push(format!("--mle {s}: write `--starts from_mle={s}`."));
-    }
-    if let Some(s) = a._removed_params.as_deref() {
-        lines.push(format!("--params {s}: write `--starts from_params={s}`."));
-    }
+    lines.extend(starts_family_removed_lines(
+        a._removed_init.as_deref(),
+        a._removed_posterior.as_deref(),
+        a._removed_mle.as_deref(),
+        a._removed_params.as_deref(),
+    ));
     if a._removed_survey_path.is_some() || a._removed_survey_top_k.is_some() {
         lines.push(
             "--survey-path / --survey-top-k: the `survey_top_k` start rule was removed (a \
@@ -1800,19 +1840,7 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
     if let Some(raw) = a._removed_init_method.as_deref() {
         lines.push(format!("--init-method {raw}: write `--starts {raw}`."));
     }
-    if lines.is_empty() {
-        return None;
-    }
-    let mut msg = String::from(
-        "these `camdl fit run` flags were removed with the `[stages]` → `[method]` \
-         split (proposal 2026-09-08-workflow-first-fit-config):",
-    );
-    for l in lines {
-        msg.push_str("\n  ");
-        msg.push_str(&l);
-    }
-    msg.push_str("\n  See `camdl fit run --help` and `camdl docs fit-toml`.");
-    Some(msg)
+    removed_flags_message("fit run", lines)
 }
 
 /// After a runner reported success, its `fit_state.toml` is the channel

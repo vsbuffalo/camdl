@@ -162,7 +162,7 @@ fn parse_cell(s: &str) -> f64 {
 }
 
 /// Common harness: run `camdl profile --algorithm <alg>` on the SIR
-/// fixture with `--starts <k>`. Caller picks the algorithm-specific
+/// fixture with `--n-starts <k>`. Caller picks the algorithm-specific
 /// hyperparams via `extra_args`.
 fn run_profile_pmmh(
     bin: &Path, out_root: &Path, ir: &Path, data: &Path,
@@ -184,7 +184,7 @@ fn run_profile_pmmh(
         "--pmmh-rho".into(), "0.99".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
-        "--starts".into(), format!("{}", starts),
+        "--n-starts".into(), format!("{}", starts),
         "--rw-sd".into(), "auto".into(),
         "--fixed".into(), "N0=1000".into(),
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
@@ -213,7 +213,7 @@ fn run_profile_if2(
         "--algorithm".into(), "if2".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
-        "--starts".into(), format!("{}", starts),
+        "--n-starts".into(), format!("{}", starts),
         "--rw-sd".into(), "auto".into(),
         "--fixed".into(), "N0=1000".into(),
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
@@ -289,7 +289,7 @@ fn profile_pmmh_emits_acc_rate_columns() {
             leaf (see profile_leaf_mle_carries_per_start_diagnostics)"]
 fn profile_pmmh_loglik_rhat_nan_at_k_lt_3() {
     // Gelman-Rubin R-hat is undefined / unstable for K < 3 chains.
-    // With --starts 2 the column must hold NaN; the K<3 rule is
+    // With --n-starts 2 the column must hold NaN; the K<3 rule is
     // part of the documented schema.
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
@@ -464,7 +464,7 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
         "--pmmh-rho".into(), "0.0".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
-        "--starts".into(), "3".into(),
+        "--n-starts".into(), "3".into(),
         "--rw-sd".into(), "auto".into(),
         "--fixed".into(), "N0=1000".into(),
         "--output".into(), out_tsv.to_string_lossy().into_owned(),

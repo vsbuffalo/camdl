@@ -242,7 +242,7 @@ fn run_profile(
         "--pmmh-rho".into(), "0.99".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
-        "--starts".into(), "1".into(),
+        "--n-starts".into(), "1".into(),
         "--rw-sd".into(), "auto".into(),
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
         "--seed".into(), "1".into(),
@@ -489,7 +489,7 @@ fn provenance_round_trips_through_reader() {
     let output = run_profile(&bin, &out_root, &ir, &data, &[
         "--fixed", "N0=1000",
         "--suppress-warnings",
-        "--init", "from_prior",
+        "--starts", "from_prior",
         "--label", "round-trip prov",
     ]);
     assert!(output.status.success(),

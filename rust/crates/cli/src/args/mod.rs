@@ -15,171 +15,10 @@ use types::{ForwardBackend, DataSpec, ListDuration, ParamOverride, ParamVecSpec,
 // ─── Shared help-text constants ───────────────────────────────────────────────
 //
 // Per docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md
-// §"Help-text rewrite", the `--init` and `--fixed` flags share a single
-// normative description across every inference subcommand. clap's
-// `long_about` accepts these as constants so a doc edit lands in one
-// place instead of being copied per arg.
-
-/// CLI-side enum for `--init <MODE>` on inference subcommands. Mode
-/// names are snake_case (matches the in-tree `InitMethod` deserializer
-/// per agent-handoff `cb47ee1`). The CLI parses the bare tag here, then
-/// the dispatch site combines it with the companion path flags
-/// (`--posterior`, `--mle`, init-mode `--params`) to build a full
-/// `crate::fit::init::InitMethod` payload-carrying variant.
-///
-/// Why a separate enum: `crate::fit::starts::ChainStarts` has
-/// payload-bearing variants (`FromPosterior { source }`, etc.). clap's
-/// `ValueEnum` can only surface payload-free variants — the post-parse
-/// construction lives at the dispatch site so the arg-struct stays
-/// declarative. `camdl profile` is its one user; `fit run` takes the same
-/// rules as `--starts <spec>` (`name` or `name=source`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum InitModeTag {
-    /// every chain at the seeded base params
-    Single,
-    /// per-chain uniform draw within [estimate] bounds
-    Uniform,
-    /// Latin-hypercube stratified within [estimate] bounds
-    Lhs,
-    /// Stan-style: i.i.d. U(-2,2) on the unconstrained scale, mapped into
-    /// bounds (boundary-avoiding, scale-invariant; the default)
-    #[clap(name = "uniform_unconstrained")]
-    UniformUnconstrained,
-    /// per-chain sample from each parameter's `~ <dist>` declaration
-    #[clap(name = "from_prior")]
-    FromPrior,
-    /// per-chain row from a posterior draws TSV (requires `--posterior`)
-    #[clap(name = "from_posterior")]
-    FromPosterior,
-    /// all chains at the MLE from a prior fit (requires `--mle`)
-    #[clap(name = "from_mle")]
-    FromMle,
-    /// all chains at the point in a hand-written flat params TOML
-    /// (requires the init-mode `--params <toml>` companion)
-    #[clap(name = "from_params")]
-    FromParams,
-}
-
-impl std::fmt::Display for InitModeTag {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            InitModeTag::Single        => "single",
-            InitModeTag::Uniform       => "uniform",
-            InitModeTag::Lhs           => "lhs",
-            InitModeTag::UniformUnconstrained => "uniform_unconstrained",
-            InitModeTag::FromPrior     => "from_prior",
-            InitModeTag::FromPosterior => "from_posterior",
-            InitModeTag::FromMle       => "from_mle",
-            InitModeTag::FromParams    => "from_params",
-        })
-    }
-}
-
-impl InitModeTag {
-    /// Combine the parsed CLI tag with the companion path flags to
-    /// build the full `ChainStarts` rule. Validates that companion
-    /// args match the chosen mode (and rejects payload args for modes
-    /// that don't accept them).
-    ///
-    /// Per the proposal §"`--init` family", payload modes require
-    /// their companion path; payload-free modes reject companions to
-    /// keep "the same flag means the same thing on every subcommand"
-    /// honest.
-    pub fn to_chain_starts(
-        self,
-        posterior: Option<&PathBuf>,
-        mle:       Option<&PathBuf>,
-        init_params: Option<&PathBuf>,
-    ) -> Result<crate::fit::starts::ChainStarts, String> {
-        use crate::fit::starts::{ChainStarts, Handle, Point, Spread};
-        // Reject companion paths on incompatible modes — better an
-        // error at parse time than a silent ignore.
-        match self {
-            InitModeTag::FromPosterior => {}
-            _ => if posterior.is_some() {
-                return Err(format!(
-                    "--posterior is only valid with --init from_posterior \
-                     (got --init {})", self));
-            }
-        }
-        match self {
-            InitModeTag::FromMle => {}
-            _ => if mle.is_some() {
-                return Err(format!(
-                    "--mle is only valid with --init from_mle \
-                     (got --init {})", self));
-            }
-        }
-        match self {
-            InitModeTag::FromParams => {}
-            _ => if init_params.is_some() {
-                return Err(format!(
-                    "--params is only valid with --init from_params \
-                     (got --init {}). For setting parameter values, \
-                     use --fixed NAME=VALUE or --fixed-file <toml>.", self));
-            }
-        }
-        Ok(match self {
-            InitModeTag::Single  => ChainStarts::Point(Point::Declared),
-            InitModeTag::UniformUnconstrained => ChainStarts::Spread(Spread::UniformUnconstrained),
-            InitModeTag::Uniform => ChainStarts::Spread(Spread::Uniform),
-            InitModeTag::Lhs     => ChainStarts::Spread(Spread::Lhs),
-            InitModeTag::FromPrior => ChainStarts::Spread(Spread::FromPrior),
-            InitModeTag::FromPosterior => {
-                let p = posterior.ok_or_else(|| {
-                    "--init from_posterior requires --posterior <path>".to_string()
-                })?;
-                ChainStarts::Spread(Spread::FromPosterior {
-                    source: Handle(p.to_string_lossy().into_owned()),
-                })
-            }
-            InitModeTag::FromMle => {
-                let p = mle.ok_or_else(|| {
-                    "--init from_mle requires --mle <fit handle>".to_string()
-                })?;
-                ChainStarts::Point(Point::FromMle {
-                    source: Handle(p.to_string_lossy().into_owned()),
-                })
-            }
-            InitModeTag::FromParams => {
-                let p = init_params.ok_or_else(|| {
-                    "--init from_params requires --params <toml>".to_string()
-                })?;
-                ChainStarts::Point(Point::FromParams { path: p.clone() })
-            }
-        })
-    }
-}
-
-/// `long_about` for `camdl profile --init <MODE>`. Mode names are
-/// snake_case to match the fit.toml `starts` spellings (`from_prior`, not
-/// `from-prior`). gh#83 / gh#85.
-pub const INIT_LONG_ABOUT: &str = "\
-INIT MODES (where do the per-cell starting points come from?)
-
-  uniform_unconstrained
-                     (default) Stan-style: per-chain i.i.d. U(-2, 2) on the
-                     unconstrained scale, mapped into bounds (boundary-avoiding,
-                     scale-invariant; over-dispersed for MCMC diagnostics)
-  single             every chain starts at the seeded base params
-  uniform            per-chain U(lo, hi) over [estimate] parameter bounds
-  lhs                Latin-hypercube stratified within bounds (scale-aware
-                     via Transform; best full-bounds coverage at low chain counts)
-  from_params        load a single point from a flat params TOML; pass
-                     --params <path>. (Use this where you'd previously
-                     have written --params <path> on profile or if2.)
-  from_prior         sample once per chain from each parameter's `~ <dist>`
-                     declaration in the .camdl source
-  from_posterior     sample chain starts uniformly from a posterior draws TSV
-                     (or a fit-results directory containing draws.tsv); pass
-                     --posterior <path>
-  from_mle           all chains at the point estimate of a stored fit; pass
-                     --mle <fit handle> (@label, a fit-id prefix, or the leaf
-                     directory)
-
-Init applies only to parameters in the inference [estimate] set; parameters
-in [fixed] (or absent from [estimate]) take their model value or --fixed
-override regardless of init mode.";
+// §"Help-text rewrite", the `--fixed` flag shares a single normative
+// description across every inference subcommand. clap's `long_about`
+// accepts it as a constant so a doc edit lands in one place instead of
+// being copied per arg.
 
 /// Shared `long_about` for `--fixed NAME=VALUE` / `--fixed-file <toml>`
 /// on every subcommand. Per the proposal §"`--fixed` semantics,
@@ -1884,13 +1723,13 @@ Examples:
 
   # Warm-start chains from a hand-written params TOML
   camdl profile sir.camdl --data cases.tsv \\
-      --sweep \"R0=lin(0.5,5,20)\" --init from_params --params truth.toml \\
-      --starts 4 --rw-sd auto
+      --sweep \"R0=lin(0.5,5,20)\" --starts from_params=truth.toml \\
+      --n-starts 4 --rw-sd auto
 
   # Warm-start chains from a prior fit's MLE
   camdl profile sir.camdl --data cases.tsv \\
-      --sweep \"R0=lin(0.5,5,20)\" --init from_mle --mle fits/scout/ \\
-      --starts 4 --rw-sd auto
+      --sweep \"R0=lin(0.5,5,20)\" --starts from_mle=fits/scout/ \\
+      --n-starts 4 --rw-sd auto
 
 PRIORS (--algorithm pmmh)
 
@@ -1926,7 +1765,7 @@ OUTPUT
   the algorithm doesn't supply that value):
 
     acc_rate_avg / acc_rate_min   PMMH MH acceptance rate, mean / min
-                                  across the K --starts chains.
+                                  across the K --n-starts chains.
     loglik_spread_starts          max - min of per-start MAP
                                   log-likelihoods. > ~5 nats means
                                   the starts disagree on the basin.
@@ -2005,38 +1844,37 @@ pub struct ProfileArgs {
     #[arg(long, default_value_t = 50)]
     pub iterations: usize,
 
-    /// Independent IF2 starts per grid point
-    #[arg(long, default_value_t = 3)]
-    pub starts: usize,
+    /// Independent IF2 starts per grid point — a count, not a rule.
+    /// `--starts` is the rule the chains are drawn from; this is how
+    /// many are drawn in each cell.
+    #[arg(long = "n-starts", value_name = "N", default_value_t = 3)]
+    pub n_starts: usize,
 
-    /// How the per-cell starting points (for `--starts > 1`) are drawn
-    /// across the non-focal estimated parameters' bounds. See `--help`
-    /// for the full INIT MODES block.
-    #[arg(long, value_name = "MODE", value_enum,
-          default_value_t = InitModeTag::Uniform,
-          long_help = INIT_LONG_ABOUT)]
-    pub init: InitModeTag,
+    /// Where each cell's chains begin — the same rule grammar
+    /// `camdl fit run --starts` takes. A rule name —
+    /// `uniform_unconstrained`, `lhs`, `uniform`, `from_prior`,
+    /// `single` — or a sourced rule with its source:
+    /// `from_posterior=@base` (one posterior row per chain),
+    /// `from_mle=@mle` (every chain at that fit's estimate),
+    /// `from_params=theta.toml`. The chains it draws span the
+    /// non-focal estimated parameters' bounds. Keyed into the run's
+    /// identity. How many chains: `--n-starts`.
+    #[arg(long, value_name = "SPEC", default_value = "uniform")]
+    pub starts: crate::fit::starts::ChainStarts,
 
-    /// Companion path for `--init from_posterior`. Accepts a posterior
-    /// draws TSV directly or a fit-results directory (auto-resolves
-    /// to `<dir>/draws.tsv`).
-    #[arg(long, value_name = "PATH")]
-    pub posterior: Option<PathBuf>,
-
-    /// Companion path for `--init from_mle`. Accepts an MLE TOML file
-    /// directly (`mle.toml` / `final_params.toml`) or a fit-results
-    /// directory (auto-resolves to `<dir>/mle.toml` then
-    /// `<dir>/final_params.toml`).
-    #[arg(long, value_name = "PATH")]
-    pub mle: Option<PathBuf>,
-
-    /// Companion path for `--init from_params`. Hand-written flat
-    /// params TOML; top-level keys are parameter names. This flag is
-    /// the init-mode counterpart to the **removed** value-setter
-    /// `--params` flag; it only fires when `--init from_params` is
-    /// also passed.
-    #[arg(long = "params", value_name = "TOML")]
-    pub init_params: Option<PathBuf>,
+    // The `--init` family the `[stages]` -> `[method]` split removed on
+    // `fit run`, and gh#889 removes here: accepted by clap so the error can
+    // name the replacement, trapped before any work runs. Per CLAUDE.md's
+    // alpha posture these are not back-compat shims — nothing behind them
+    // works — they exist so one message corrects a habitual invocation.
+    #[arg(long = "init", value_name = "MODE", hide = true)]
+    pub _removed_init: Option<String>,
+    #[arg(long = "posterior", value_name = "PATH", hide = true)]
+    pub _removed_posterior: Option<String>,
+    #[arg(long = "mle", value_name = "PATH", hide = true)]
+    pub _removed_mle: Option<String>,
+    #[arg(long = "params", value_name = "TOML", hide = true)]
+    pub _removed_params: Option<String>,
 
     /// Cooling schedule
     #[arg(long, default_value_t = 0.95)]
@@ -2997,89 +2835,87 @@ mod tests {
     //    that the actionable error fires lives in
     //    `tests/cas_integration.rs::starts_from_resolves_short_hash`.
 
-    #[test]
-    fn profile_params_lands_in_init_params_not_trap() {
-        // Regression: post-fix, `profile --params <PATH>` parses into
-        // ProfileArgs::init_params (the legitimate companion to
-        // `--init from_params`), NOT into a trap field. The earlier
-        // version of this test asserted the opposite — the trap then
-        // shadowed the init-mode companion and made
-        // `profile --init from_params --params start.toml`
-        // unreachable. The actionable error for bare `--params` (no
-        // `--init from_params`) now fires from
-        // `InitModeTag::to_init_method` instead of a parse-time trap.
-        let full = ["camdl", "profile", "model.camdl",
-                    "--data", "cases.tsv",
-                    "--sweep", "R0=lin(0.5,5,5)",
-                    "--rw-sd", "auto",
-                    "--particles", "100",
-                    "--params", "truth.toml"];
-        let parsed = Cli::try_parse_from(full)
-            .expect("clap must accept --params on profile (lands in init_params)");
-        match parsed.command {
-            Command::Profile(a) => {
-                assert_eq!(a.init_params.as_deref().map(|p| p.to_string_lossy().into_owned()),
-                    Some("truth.toml".to_string()),
-                    "expected --params to land in init_params");
-                assert_eq!(a.model_overrides.fixed_cli.len(), 0,
-                    "--params must not pollute fixed_cli");
-            }
-            _ => unreachable!(),
+    fn try_parse_profile(args: &[&str]) -> Result<crate::args::ProfileArgs, clap::Error> {
+        let mut full: Vec<&str> = vec![
+            "camdl", "profile", "model.camdl", "--data", "cases.tsv",
+            "--sweep", "R0=lin(0.5,5,5)", "--rw-sd", "auto", "--particles", "100",
+        ];
+        full.extend(args);
+        match Cli::try_parse_from(full)?.command {
+            Command::Profile(a) => Ok(a),
+            _ => unreachable!("expected profile"),
         }
     }
 
-    /// The valid usage: `--init from_params --params <path>` must
-    /// parse AND `to_chain_starts` must build the `from_params` rule.
-    /// Pre-fix, the trap field shadowed init_params and the user got
-    /// a rejection error.
+    /// gh#889: `camdl profile --starts` is the same rule grammar
+    /// `camdl fit run --starts` takes — a name, or a name and a source — and
+    /// the count of independent starts per grid point is `--n-starts`. One
+    /// word meant a rule on one verb and a number on its sibling.
     #[test]
-    fn profile_init_from_params_with_params_companion_parses_and_builds() {
-        let full = ["camdl", "profile", "model.camdl",
-                    "--data", "cases.tsv",
-                    "--sweep", "R0=lin(0.5,5,5)",
-                    "--rw-sd", "auto",
-                    "--particles", "100",
-                    "--init", "from_params",
-                    "--params", "/tmp/start.toml"];
-        let parsed = Cli::try_parse_from(full)
-            .expect("clap must accept --init from_params --params <path>");
-        let Command::Profile(a) = parsed.command else { unreachable!() };
-        assert_eq!(a.init, InitModeTag::FromParams);
-        assert_eq!(a.init_params.as_deref().map(|p| p.to_string_lossy().into_owned()),
-            Some("/tmp/start.toml".to_string()));
-        // Verify to_chain_starts assembles the typed rule.
-        let im = a.init.to_chain_starts(
-            a.posterior.as_ref(), a.mle.as_ref(), a.init_params.as_ref(),
-        ).expect("to_chain_starts must succeed for --init from_params --params <path>");
-        match im {
-            crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromParams { path }) => {
-                assert_eq!(path.to_string_lossy(), "/tmp/start.toml");
-            }
-            other => panic!("expected the from_params rule, got {:?}", other),
+    fn profile_starts_is_a_rule_and_the_count_is_n_starts() {
+        use crate::fit::starts::{ChainStarts, Point, Spread};
+
+        let a = try_parse_profile(&["--starts", "from_params=truth.toml", "--n-starts", "4"])
+            .expect("profile must take the sourced rule grammar");
+        match &a.starts {
+            ChainStarts::Point(Point::FromParams { path }) =>
+                assert_eq!(path.to_string_lossy(), "truth.toml"),
+            other => panic!("expected the from_params rule, got {other:?}"),
         }
+        assert_eq!(a.n_starts, 4, "the count moved to --n-starts");
+
+        let a = try_parse_profile(&["--starts", "lhs"]).expect("a bare rule name");
+        assert_eq!(a.starts, ChainStarts::Spread(Spread::Lhs));
+        assert_eq!(a.n_starts, 3, "the count keeps its default");
+
+        // Unchanged default, so no run identity moves with this rename.
+        let a = try_parse_profile(&[]).expect("no flags");
+        assert_eq!(a.starts, ChainStarts::Spread(Spread::Uniform));
     }
 
-    /// `--params <path>` without `--init from_params` must surface the
-    /// actionable "use --fixed-file or --init from_params" error from
-    /// `to_chain_starts`. This is the migration-friendly version of the
-    /// pre-fix parse-time trap.
+    /// The old `--starts <N>` is now a parse error, and it must name the flag
+    /// that carries the count rather than listing rules at someone who wrote
+    /// a number.
     #[test]
-    fn profile_params_without_init_from_params_errors_from_to_init_method() {
-        let full = ["camdl", "profile", "model.camdl",
-                    "--data", "cases.tsv",
-                    "--sweep", "R0=lin(0.5,5,5)",
-                    "--rw-sd", "auto",
-                    "--particles", "100",
-                    "--params", "truth.toml"];
-        let parsed = Cli::try_parse_from(full).unwrap();
-        let Command::Profile(a) = parsed.command else { unreachable!() };
-        // Default init is Lhs; `--params` without `--init from_params`
-        // must produce a structured error from to_chain_starts.
-        let err = a.init.to_chain_starts(
-            a.posterior.as_ref(), a.mle.as_ref(), a.init_params.as_ref(),
-        ).expect_err("to_chain_starts must reject --params without --init from_params");
-        assert!(err.contains("--params is only valid with --init from_params"),
-            "error must point user at --init from_params: {}", err);
+    fn profile_starts_with_a_count_names_n_starts() {
+        let e = match try_parse_profile(&["--starts", "4"]) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a number is not a start rule"),
+        };
+        assert!(e.contains("--n-starts 4"), "the message names the count flag: {e}");
+        assert!(e.contains("not how many there are"),
+            "and says what `starts` means: {e}");
+    }
+
+    /// The four flags gh#889 removed from `profile` still parse, into their
+    /// hidden traps, so the dispatch site answers with the `--starts`
+    /// replacement instead of clap's "unexpected argument".
+    #[test]
+    fn profile_removed_init_family_is_trapped_at_parse() {
+        let a = try_parse_profile(&[
+            "--init", "from_params", "--params", "truth.toml",
+            "--posterior", "fits/a", "--mle", "fits/b",
+        ]).expect("the hidden traps must accept the removed flags");
+        assert_eq!(a._removed_init.as_deref(), Some("from_params"));
+        assert_eq!(a._removed_params.as_deref(), Some("truth.toml"));
+        assert_eq!(a._removed_posterior.as_deref(), Some("fits/a"));
+        assert_eq!(a._removed_mle.as_deref(), Some("fits/b"));
+        assert_eq!(a.model_overrides.fixed_cli.len(), 0,
+            "--params must not pollute fixed_cli");
+
+        // And each is answered with the replacement `fit run` gives, from the
+        // one builder both verbs use.
+        let msg = crate::fit::removed_flags_message(
+            "profile",
+            crate::fit::starts_family_removed_lines(
+                a._removed_init.as_deref(), a._removed_posterior.as_deref(),
+                a._removed_mle.as_deref(), a._removed_params.as_deref(),
+            ),
+        ).expect("a message for every removed flag passed");
+        assert!(msg.contains("`camdl profile` flags were removed"), "{msg}");
+        assert!(msg.contains("--starts from_params=truth.toml"), "{msg}");
+        assert!(msg.contains("--starts from_posterior=fits/a"), "{msg}");
+        assert!(msg.contains("--starts from_mle=fits/b"), "{msg}");
     }
 
     /// `camdl if2` is removed (gh#147); its arg struct is a catch-all so

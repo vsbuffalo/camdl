@@ -236,7 +236,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.inference.particles;
     let n_iterations = a.iterations;
-    let n_starts = a.starts;
+    let n_starts = a.n_starts;
     let cooling = a.cooling;
     let dt = a.inference.dt;
     let seed_base = a.inference.seed;
@@ -278,6 +278,20 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // M-1 break per docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md
     // §"Migration": fail loudly on removed flags before any work.
     a.model_overrides.check_removed_flags("profile");
+    // gh#889: the `--init` family, answered with the same `--starts`
+    // replacements `fit run` gives, from the same builder.
+    if let Some(msg) = crate::fit::removed_flags_message(
+        "profile",
+        crate::fit::starts_family_removed_lines(
+            a._removed_init.as_deref(),
+            a._removed_posterior.as_deref(),
+            a._removed_mle.as_deref(),
+            a._removed_params.as_deref(),
+        ),
+    ) {
+        eprintln!("error: {msg}");
+        std::process::exit(2);
+    }
     // `--fixed NAME=VALUE` → `fixed_cli`, `--fixed-file <toml>`
     // (repeatable, layered) → `fixed_files`. Both feed into the
     // unified resolver; the fit.toml [fixed] block is still
@@ -288,18 +302,10 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         .map(|p| (p.name.clone(), p.value))
         .collect();
     let _overrides: HashMap<String, f64> = fixed_cli_vec.iter().cloned().collect();
-    // Construct the full starts rule (with payload) from the CLI tag
-    // + companion path flags. This is the post-parse step that turns
-    // `--init from_posterior --posterior <path>` into a typed
-    // `ChainStarts::Spread(Spread::FromPosterior { source })`.
-    let init_method: crate::fit::starts::ChainStarts = a.init.to_chain_starts(
-        a.posterior.as_ref(),
-        a.mle.as_ref(),
-        a.init_params.as_ref(),
-    ).unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
+    // Where each cell's chains begin, as `--starts <spec>` states it — the
+    // same rule grammar and the same typed `ChainStarts` `fit run` takes
+    // (gh#889). How many chains is `--n-starts`, a count.
+    let init_method: crate::fit::starts::ChainStarts = a.starts.clone();
 
     let focal_names: Vec<String> = a.sweep.iter().map(|s| s.name.clone()).collect();
 
@@ -376,8 +382,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         (indexmap::IndexMap::new(), None, indexmap::IndexMap::new())
     };
 
-    // Init-mode → resolver bridge: `--init from_params --params <toml>`
-    // and `--init from_mle --mle <path>` both load a single-point
+    // Starts-rule → resolver bridge: `--starts from_params=<toml>` and
+    // `--starts from_mle=<path>` both load a single-point
     // parameter file. The user's mental model is that the file's
     // values are authoritative for the parameters named in it — both
     // as the resolver's base AND as the chain starting point.
@@ -836,7 +842,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // starts from.
     let resolved_starts = crate::fit::chain_starts::resolve_starts(&init_method, true)
         .unwrap_or_else(|e| {
-            eprintln!("error: profile --init {}: {}", init_method, e);
+            eprintln!("error: profile --starts {}: {}", init_method, e);
             std::process::exit(1);
         });
     let drawn_starts = {
@@ -851,7 +857,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         };
         crate::fit::chain_starts::draw_chain_starts(&ctx, &resolved_starts, n_starts, seed_base)
             .unwrap_or_else(|e| {
-                eprintln!("error: profile --init {}: {}", init_method, e);
+                eprintln!("error: profile --starts {}: {}", init_method, e);
                 std::process::exit(1);
             })
     };
@@ -1346,7 +1352,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let job_seed = seed ^ (grid_idx as u64 * 1000 + start_idx as u64);
         let job_t0 = std::time::Instant::now();
 
-        // gh#42: when --init lhs/uniform, each start uses its own draw
+        // gh#42: when --starts lhs/uniform, each start uses its own draw
         // across the non-focal estimated params; otherwise (Single, or
         // --starts 1) every start shares `if2_params`. The focal params
         // are already pinned in `params` above, so the LHS draw on
@@ -1929,17 +1935,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 /// Render a per-start MLE TOML file. Human-readable; also the format
 /// `rewrite_rollup` reads back to reconstruct the rollup.
 ///
-/// Seed `model.parameters[i].value` from an init-mode companion file
-/// **before** the resolver runs, so single-point init modes
-/// (`--init from_params --params <toml>` and `--init from_mle --mle
-/// <path>`) deliver their values to Phase 2 (resolver) in addition
+/// Seed `model.parameters[i].value` from a single-point start rule's file
+/// **before** the resolver runs, so those rules
+/// (`--starts from_params=<toml>` and `--starts from_mle=<handle>`)
+/// deliver their values to Phase 2 (resolver) in addition
 /// to Phase 3 (chain init). Without this bridge, the resolver fires
 /// `UnsetRequired` for any parameter that has no DSL default + no
 /// `[fixed]` entry, even when the user has explicitly named a file
 /// containing the value.
 ///
 /// **File wins (aggressive)**: if the user typed
-/// `--init from_params --params start.toml` with `beta = 0.5`, and the
+/// `--starts from_params=start.toml` with `beta = 0.5`, and the
 /// model's DSL also declares `beta = 0.3` as a default, beta resolves
 /// to 0.5. The user explicitly named the file as authoritative;
 /// silently preferring the DSL default would be a footgun.
@@ -1966,14 +1972,14 @@ fn seed_params_from_init_method(
         ChainStarts::Point(Point::FromParams { path }) => {
             crate::util::load_params_toml(&path.to_string_lossy())
                 .map_err(|e| format!(
-                    "loading --params for --init from_params: {}", e))?
+                    "loading the --starts from_params file: {}", e))?
         }
         ChainStarts::Point(Point::FromMle { source }) => {
             // The stored fit's point estimate, from the leaf the handle names.
             let leaf = crate::fit::chain_starts::resolve_fit_leaf(&source.0)
-                .map_err(|e| format!("--init from_mle {}: {}", source, e))?;
+                .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
             let state = crate::fit::state::FitState::load(&leaf.to_string_lossy())
-                .map_err(|e| format!("--init from_mle {}: {}", source, e))?;
+                .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
             state.start_values.into_iter().collect()
         }
         _ => return Ok(()),

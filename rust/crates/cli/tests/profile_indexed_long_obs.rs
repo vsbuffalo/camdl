@@ -107,7 +107,7 @@ fn profile_cli_family_binding_slices_per_stratum() {
             "--data", &format!("cases={}", data.to_string_lossy()),
             "--sweep", "beta=lin(0.04,0.06,2)",
             "--fixed", "gamma=0.1", "--fixed", "rho=0.6", "--fixed", "k=5.0",
-            "--particles", "100", "--iterations", "1", "--starts", "1",
+            "--particles", "100", "--iterations", "1", "--n-starts", "1",
             "--rw-sd", "auto", "--seed", "1",
             "--output", &out_tsv.to_string_lossy(),
         ])
@@ -180,7 +180,7 @@ cooling    = 0.5
             "--scenario", "baseline",
             "--fit", &toml.to_string_lossy(),
             "--sweep", "beta=lin(0.04,0.06,2)",
-            "--particles", "100", "--iterations", "1", "--starts", "1",
+            "--particles", "100", "--iterations", "1", "--n-starts", "1",
             "--rw-sd", "auto", "--seed", "1",
             "--output", &out_tsv.to_string_lossy(),
         ])

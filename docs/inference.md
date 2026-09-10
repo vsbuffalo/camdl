@@ -697,10 +697,10 @@ identifiability, confidence intervals, and parameter correlations.
 ### 1D profile
 
 ```bash
-camdl profile model.camdl --init from_params --params p.toml --data cases.tsv \
+camdl profile model.camdl --starts from_params=p.toml --data cases.tsv \
     --sweep "R0=lin(10,80,8)" \
     --rw-sd "sigma=0.01,gamma=0.01" \
-    --particles 500 --iterations 30 --starts 3 --parallel 8
+    --particles 500 --iterations 30 --n-starts 3 --parallel 8
 ```
 
 Output: TSV with R₀, max loglik at each grid point, and the estimated values of
@@ -713,11 +713,11 @@ values).
 ### 2D profile
 
 ```bash
-camdl profile model.camdl --init from_params --params p.toml --data cases.tsv \
+camdl profile model.camdl --starts from_params=p.toml --data cases.tsv \
     --sweep "alpha=0.85,0.90,0.95,0.99" \
     --sweep "gamma=0.06,0.08,0.10,0.12" \
     --rw-sd "R0=2,sigma=0.01" \
-    --particles 500 --starts 2 --parallel 8
+    --particles 500 --n-starts 2 --parallel 8
 ```
 
 Shows ridges and correlations between parameters. An elongated contour along the
@@ -809,7 +809,7 @@ To proceed, do one of:
 camdl profile model.camdl --data cases.tsv \
     --sweep "tau=lin(-35,-1,30)" \
     --algorithm pmmh --pmmh-steps 1500 --pmmh-particles 800 \
-    --rw-sd auto --starts 3 \
+    --rw-sd auto --n-starts 3 \
     --fit fits/profile_tau.toml \
     --output results/profile_tau_posterior.tsv
 
@@ -978,7 +978,7 @@ camdl's TSV NaN convention).
 **The K<3 rule.** `loglik_rhat_starts` is `NaN` when fewer than three of the K
 starts have a usable trace. Gelman–Rubin R̂ is undefined at K=1 and unstable at
 K=2; the rule prevents a spurious diagnostic from a single-chain spike. To get a
-finite R̂ supply `--starts 3` or more, _and_ run the per-cell inner loop long
+finite R̂ supply `--n-starts 3` or more, _and_ run the per-cell inner loop long
 enough to produce post-burn-in samples (`--pmmh-steps` must exceed the
 hard-coded `burn_in = 100` for PMMH).
 
@@ -1492,9 +1492,10 @@ every seed and ignored the parameter's transform.
 
 How chain (or per-cell) starting points are drawn. Set under `[method]` with the
 `starts` key, or overridden on the CLI with `fit run --starts <spec>`;
-`camdl profile --init <mode>` takes the same rules for its per-cell starts.
-Honoured by every method: **IF2**, **PGAS**, **PMMH**, **mh**, **nuts**,
-**NLopt** (`nl-sbplx`, `nl-bobyqa`), and **profile**.
+`camdl profile --starts <spec>` takes the same rules for its per-cell starts,
+and `--n-starts <N>` says how many chains are drawn from them. Honoured by every
+method: **IF2**, **PGAS**, **PMMH**, **mh**, **nuts**, **NLopt** (`nl-sbplx`,
+`nl-bobyqa`), and **profile**.
 
 ```toml
 [method]

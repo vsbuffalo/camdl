@@ -252,6 +252,17 @@ impl ChainStarts {
                  \"@handle\" }`, or use `from_prior`."
                     .to_string(),
             ),
+            // A bare number was `camdl profile --starts <N>` before gh#889
+            // gave that verb this same rule grammar. Say which flag now
+            // carries the count rather than listing rules at someone who
+            // meant a number.
+            other if other.parse::<u32>().is_ok() => Err(format!(
+                "`starts` is the rule the chains begin from, not how many there are, \
+                 and `{other}` is a number. On `camdl profile` the count of \
+                 independent starts per grid point is `--n-starts {other}`; on \
+                 `camdl fit run` the number of chains is `[method] chains`. The rules \
+                 are {BARE_RULES}, or a sourced rule {SOURCED_RULES}."
+            )),
             other => Err(format!(
                 "unknown starts rule `{other}`; expected one of {BARE_RULES}, or a sourced \
                  rule {SOURCED_RULES}"
