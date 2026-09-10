@@ -12900,16 +12900,278 @@ let test_window_columns_on_a_prevalence_stream_are_rejected () =
     prev      ~ poisson(rate = projected)
   }|})
 
-(* gh#875. E341 refuses a projection that divides one incidence by another and
+(* ── Proportion of flows over a window (proposal 2026-09-09) ──────────────────
+   A stream measuring "of this window's events, what fraction were of kind A"
+   is the ratio of two flows accumulated over the same window. It lowers to
+   `FlowRatio`, is interval-valued (so `covers` is required and E348 never
+   fires), and is dimensionless (so it pairs with the proportion families and
+   a count family refuses it). The instant spelling — a ratio of transition
+   rates — is E352 unless written `prevalence(...)`. *)
+
+let sihd_with_obs ?(extra = "") obs_block =
+  Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I, H, Dc, Df }
+    let N = S + I + H
+    %s
+    parameters {
+      beta : rate     in [0.01, 2.0]
+      eta  : rate     in [0.01, 1.0]
+      mu_c : rate     in [0.001, 0.5]
+      mu_f : rate     in [0.001, 0.5]
+      iota : positive in [0.0, 1.0]
+      phi  : positive in [1.0, 1000.0]
+      N0   : count    in [100, 100000]
+      I0   : count    in [1, 1000]
+    }
+    transitions {
+      infection   : S --> I  @ beta * S * I / N
+      hospitalise : I --> H  @ eta * I
+      die_comm    : I --> Dc @ mu_c * I
+      die_fac     : H --> Df @ mu_f * H
+    }
+    observations { %s }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 70 'days }
+  |} extra obs_block
+
+let comm_frac_stream ?(covers = "covers        = closing_at(time, 7 'days)")
+    ?(columns = "columns       { time : time, comm_deaths : count, n_deaths : count }")
+    ?(lik = "comm_deaths   ~ binomial(n = n_deaths, p = projected)")
+    projected =
+  Printf.sprintf {|
+    comm_frac {
+      %s
+      %s
+      projected     = %s
+      emit_schedule = every 7 'days
+      %s
+    }
+  |} columns covers projected lik
+
+(* The column list for a likelihood that reads no denominator column — a
+   declared-but-unread column is its own error (E277), which would mask the
+   dimension check these tests are about. *)
+let no_denominator = "columns       { time : time, comm_deaths : count }"
+
+let window_ratio = "incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))"
+let rate_ratio   = "mu_c * I / (mu_c * I + mu_f * H)"
+
+let expect_flow_ratio ~num ~den src =
+  let m = compile_expect_ok src in
+  match (List.hd m.observations).projection with
+  | Ir.FlowRatio { numerator; denominator } ->
+    Alcotest.(check (list string)) "numerator flows" num numerator;
+    Alcotest.(check (list string)) "denominator flows" den denominator
+  | _ -> Alcotest.fail "expected a FlowRatio projection"
+
+let test_flow_ratio_lowers () =
+  expect_flow_ratio ~num:["die_comm"] ~den:["die_comm"; "die_fac"]
+    (sihd_with_obs (comm_frac_stream window_ratio))
+
+(* Case fatality within a window: a ratio of different transitions, with no
+   subset rule — it may exceed 1 for a particle whose deaths outrun its
+   cases, and the binomial then scores that particle -inf, which is the
+   truthful answer (proposal decision 4). *)
+let test_flow_ratio_of_different_flows_lowers () =
+  expect_flow_ratio ~num:["die_comm"; "die_fac"] ~den:["infection"]
+    (sihd_with_obs (comm_frac_stream
+       "(incidence(die_comm) + incidence(die_fac)) / incidence(infection)"))
+
+(* Each side goes through the walker a projection's `+`/`sum` already does,
+   so a stratified family is pooled and indexed inside a ratio exactly as it
+   is outside one. *)
+let test_flow_ratio_stratified_sides_lower () =
+  let m = compile_expect_ok (stratified_age_seir_with_obs {|
+    observations {
+      child_frac {
+        columns       { time : time, child_cases : count, cases_split : count }
+        covers        = closing_at(time, 7 'days)
+        projected     = incidence(infection[child]) / sum(a in age, incidence(infection[a]))
+        emit_schedule = every 7 'days
+        child_cases   ~ binomial(n = cases_split, p = projected)
+      }
+    }
+  |}) in
+  match (List.hd m.observations).projection with
+  | Ir.FlowRatio { numerator; denominator } ->
+    Alcotest.(check (list string)) "numerator" ["infection_child"] numerator;
+    Alcotest.(check (list string)) "denominator"
+      ["infection_child"; "infection_adult"] denominator
+  | _ -> Alcotest.fail "expected a FlowRatio projection"
+
+(* The ratio is taken over the row's window, so the stream is interval-valued:
+   `covers` is carried into the IR, is required (E350 without it), and E348 —
+   the "a state reading has no window" refusal — never fires on it. *)
+let test_flow_ratio_carries_its_covers () =
+  let m = compile_expect_ok (sihd_with_obs (comm_frac_stream window_ratio)) in
+  match (List.hd m.observations).covers with
+  | Some (Ir.CoversUntil (offset, span)) ->
+    Alcotest.(check (float 1e-12)) "closing_at offset" 0.0 offset;
+    Alcotest.(check (float 1e-12)) "closing_at span" 7.0 span
+  | _ -> Alcotest.fail "a ratio stream carries the window it declared"
+
+let test_flow_ratio_without_covers_is_e350 () =
+  compile_expect_error_code ~code:"E350" ~contains:"what period each row covers"
+    (sihd_with_obs (comm_frac_stream ~covers:"" window_ratio))
+
+let test_flow_ratio_never_meets_e348 () =
+  Diagnostics.json_errors_mode := true;
+  let result = Compiler.compile ~name:"test_err"
+      (sihd_with_obs (comm_frac_stream window_ratio)) in
+  Diagnostics.json_errors_mode := false;
+  match result with
+  | Ok _ -> ()
+  | Error e ->
+    if contains_substring ~needle:"\"code\":\"E348\"" e then
+      Alcotest.failf "E348 fired on a ratio stream, which accumulates: %s" e
+    else Alcotest.failf "a declared ratio stream must compile, got: %s" e
+
+(* Everything else E341 refused stays refused, each by name. *)
+let test_flow_ratio_weighted_side_is_e341 () =
+  compile_expect_error_code ~code:"E341" ~contains:"not a sum of flows"
+    (sihd_with_obs (comm_frac_stream
+       "0.5 * incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))"))
+
+let test_flow_ratio_state_side_is_e341 () =
+  compile_expect_error_code ~code:"E341" ~contains:"not a sum of flows"
+    (sihd_with_obs (comm_frac_stream "incidence(die_comm) / N"))
+
+let test_flow_ratio_constant_numerator_is_e341 () =
+  compile_expect_error_code ~code:"E341" ~contains:"not a sum of flows"
+    (sihd_with_obs (comm_frac_stream "1 / incidence(die_comm)"))
+
+let test_flow_ratio_subtraction_in_a_side_is_e341 () =
+  compile_expect_error_code ~code:"E341" ~contains:"not a sum of flows"
+    (sihd_with_obs (comm_frac_stream
+       "(incidence(die_comm) - incidence(die_fac)) / incidence(die_comm)"))
+
+let test_flow_ratio_second_division_is_e341 () =
+  compile_expect_error_code ~code:"E341" ~contains:"not a sum of flows"
+    (sihd_with_obs (comm_frac_stream
+       "incidence(die_comm) / incidence(die_fac) / incidence(infection)"))
+
+(* The rewritten E341 names the ratio as an admitted shape, so a modeller
+   refused here is shown the route to the window fraction rather than left
+   with the rate spelling as the only form that compiles. *)
+let test_e341_names_the_ratio_form () =
+  compile_expect_error_code ~code:"E341" ~contains:"divide one such sum by another"
+    (sihd_with_obs (comm_frac_stream "incidence(die_comm) / N"))
+
+(* A flow named twice within one side is E342 as in a plain union; the same
+   flow on both sides is the expected shape and is not a collision. *)
+let test_flow_ratio_flow_twice_in_one_side_is_e342 () =
+  compile_expect_error_code ~code:"E342" ~contains:"twice"
+    (sihd_with_obs (comm_frac_stream
+       "incidence(die_comm) / (incidence(die_comm) + incidence(die_comm))"))
+
+(* A `where` that prunes every level of one side would leave `x / 0` — a
+   projection that is NaN on every row. An empty plain sum lowers to a literal
+   zero; an empty side of a ratio is refused by name instead. *)
+let test_flow_ratio_empty_side_is_e351 () =
+  compile_expect_error_code ~code:"E351" ~contains:"denominator"
+    (stratified_age_seir_with_obs {|
+      observations {
+        child_frac {
+          columns       { time : time, child_cases : count, cases_split : count }
+          covers        = closing_at(time, 7 'days)
+          projected     = incidence(infection[child])
+                          / sum(a in age where a == child and a == adult, incidence(infection[a]))
+          emit_schedule = every 7 'days
+          child_cases   ~ binomial(n = cases_split, p = projected)
+        }
+      }
+    |})
+
+(* Making the instant spelling loud. A ratio of transition rates compiles as
+   a state expression read at the row's instant — 7 to 27 percent off the
+   window fraction on the proposal's simulated epidemic, worst at the peak —
+   and used to do so silently. It is E352, naming both spellings. *)
+let test_rate_ratio_is_e352 () =
+  compile_expect_error_code ~code:"E352" ~contains:"read at the row's instant"
+    (sihd_with_obs (comm_frac_stream ~covers:"" rate_ratio))
+
+let test_e352_names_the_window_spelling () =
+  compile_expect_error_code ~code:"E352" ~contains:window_ratio
+    (sihd_with_obs (comm_frac_stream ~covers:"" rate_ratio))
+
+let test_e352_names_the_instant_spelling () =
+  compile_expect_error_code ~code:"E352" ~contains:"prevalence("
+    (sihd_with_obs (comm_frac_stream ~covers:"" rate_ratio))
+
+let test_e352_names_the_transitions () =
+  compile_expect_error_code ~code:"E352" ~contains:"rate of `die_fac`"
+    (sihd_with_obs (comm_frac_stream ~covers:"" rate_ratio))
+
+(* The reporting model's own stream, in shape: an import term with no
+   transition sits beside the rate. The check fires on the terms that are
+   rates, and the hint says what to do with the one that is not. *)
+let test_rate_ratio_with_an_import_term_is_e352 () =
+  compile_expect_error_code ~code:"E352" ~contains:"`iota` match no transition's rate"
+    (sihd_with_obs (comm_frac_stream ~covers:""
+       "(mu_c * I + iota) / ((mu_c * I + iota) + mu_f * H)"))
+
+(* The check reaches a let-bound spelling too: the comparison is on the
+   lowered expression, not on the surface text. *)
+let test_rate_ratio_through_a_let_is_e352 () =
+  compile_expect_error_code ~code:"E352" ~contains:"read at the row's instant"
+    (sihd_with_obs ~extra:(Printf.sprintf "let frac = %s" rate_ratio)
+       (comm_frac_stream ~covers:"" "frac"))
+
+(* `prevalence(<expr>)` is the explicit instant spelling and costs one word. *)
+let test_prevalence_of_a_rate_ratio_is_the_explicit_instant_form () =
+  let m = compile_expect_ok (sihd_with_obs (comm_frac_stream ~covers:""
+    (Printf.sprintf "prevalence(%s)" rate_ratio))) in
+  match (List.hd m.observations).projection with
+  | Ir.DerivedExpr _ -> ()
+  | _ -> Alcotest.fail "prevalence(<expr>) lowers to a derived instant reading"
+
+(* A ratio of two prevalences (`I / N`) mentions no transition rate and is
+   the ordinary proportion projection; E352 has no false positive on it. *)
+let test_prevalence_proportion_is_not_e352 () =
+  ignore (compile_expect_ok (sihd_with_obs (comm_frac_stream ~covers:"" "I / N")))
+
+(* Dimension: a ratio of two accumulated counts is dimensionless, so a count
+   family refuses it with the existing E304 and every proportion family
+   accepts it. This file runs with dimcheck disabled, so these three enable
+   it for their own compile. *)
+let test_flow_ratio_is_refused_by_a_count_family () =
+  with_dim_check_enabled (fun () ->
+    compile_expect_error_code ~code:"E304" ~contains:"count"
+      (sihd_with_obs (comm_frac_stream ~columns:no_denominator
+         ~lik:"comm_deaths ~ poisson(rate = projected)" window_ratio)))
+
+let test_flow_ratio_pairs_with_the_k_of_n_families () =
+  with_dim_check_enabled (fun () ->
+    List.iter (fun lik ->
+      ignore (compile_expect_ok (sihd_with_obs (comm_frac_stream ~lik window_ratio))))
+      [ "comm_deaths ~ binomial(n = n_deaths, p = projected)";
+        "comm_deaths ~ beta_binomial(n = n_deaths, mean = projected, concentration = phi)" ];
+    ignore (compile_expect_ok (sihd_with_obs (comm_frac_stream ~columns:no_denominator
+      ~lik:"comm_deaths ~ bernoulli(p = projected)" window_ratio))))
+
+let test_flow_ratio_pairs_with_beta () =
+  with_dim_check_enabled (fun () ->
+    ignore (compile_expect_ok (sihd_with_obs {|
+      comm_frac {
+        columns       { time : time, comm_frac : probability }
+        covers        = closing_at(time, 7 'days)
+        projected     = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+        emit_schedule = every 7 'days
+        comm_frac     ~ beta(mean = projected, concentration = phi)
+      }
+    |})))
+
+(* gh#875. E341 refuses a projection that mixes a flow with a state read and
    returns a `DerivedExpr (Const 0.0)` placeholder in its place. `lower_covers`
    used to read that placeholder as a state reading at an instant and fire E348
    on the same stream, telling the reader to remove a `covers` line that is not
-   the problem while the projection that IS the problem sits above it.
+   the problem while the projection that is the problem sits above it.
 
-   The projection here is the shape a case-fatality ratio wants — deaths over
-   deaths plus recoveries — which is exactly what E341 refuses today; the test
-   asserts only which diagnostics the modeler sees, so it stays valid whatever
-   E341 later accepts. *)
+   The projection here divides a flow by a population — a shape E341 refuses
+   (a ratio of two flow sums is admitted since proposal 2026-09-09; a state on
+   either side is not) — and the test asserts only which diagnostics the
+   modeler sees. *)
 let divided_incidence_with_covers = {|
 time_unit = 'days
 compartments { S, I, R, D }
@@ -12919,7 +13181,7 @@ observations {
   cfr {
     columns       { time : time, deaths : count }
     covers        = day(time)
-    projected     = incidence(death) / (incidence(death) + incidence(recovery))
+    projected     = incidence(death) / N
     emit_schedule = every 1 'days
     deaths        ~ poisson(rate = projected)
   }
@@ -13729,6 +13991,31 @@ let () =
       Alcotest.test_case "B1a: sum(...) + incidence(...) flattens" `Quick test_incidence_addition_flattens_with_family_sum;
       Alcotest.test_case "B1a: a weighted incidence term is E341, not E100" `Quick test_weighted_incidence_is_named_not_e100;
       Alcotest.test_case "B1a: incidence mixed with state is E341" `Quick test_incidence_mixed_with_state_is_named;
+      Alcotest.test_case "flow ratio: incidence(a) / (incidence(a) + incidence(b)) lowers to FlowRatio" `Quick test_flow_ratio_lowers;
+      Alcotest.test_case "flow ratio: a ratio of different flows lowers (no subset rule)" `Quick test_flow_ratio_of_different_flows_lowers;
+      Alcotest.test_case "flow ratio: stratified sides pool and index as a sum does" `Quick test_flow_ratio_stratified_sides_lower;
+      Alcotest.test_case "flow ratio: carries its covers into the IR" `Quick test_flow_ratio_carries_its_covers;
+      Alcotest.test_case "flow ratio: no covers is E350" `Quick test_flow_ratio_without_covers_is_e350;
+      Alcotest.test_case "flow ratio: E348 never fires on a ratio stream" `Quick test_flow_ratio_never_meets_e348;
+      Alcotest.test_case "flow ratio: a weighted side is still E341" `Quick test_flow_ratio_weighted_side_is_e341;
+      Alcotest.test_case "flow ratio: a state side is still E341" `Quick test_flow_ratio_state_side_is_e341;
+      Alcotest.test_case "flow ratio: a constant numerator is still E341" `Quick test_flow_ratio_constant_numerator_is_e341;
+      Alcotest.test_case "flow ratio: subtraction in a side is still E341" `Quick test_flow_ratio_subtraction_in_a_side_is_e341;
+      Alcotest.test_case "flow ratio: a second division is still E341" `Quick test_flow_ratio_second_division_is_e341;
+      Alcotest.test_case "flow ratio: E341 names the ratio as an admitted shape" `Quick test_e341_names_the_ratio_form;
+      Alcotest.test_case "flow ratio: a flow twice in one side is E342" `Quick test_flow_ratio_flow_twice_in_one_side_is_e342;
+      Alcotest.test_case "flow ratio: an empty side after where is E351" `Quick test_flow_ratio_empty_side_is_e351;
+      Alcotest.test_case "E352: a ratio of transition rates is refused" `Quick test_rate_ratio_is_e352;
+      Alcotest.test_case "E352: names the window spelling" `Quick test_e352_names_the_window_spelling;
+      Alcotest.test_case "E352: names the prevalence spelling" `Quick test_e352_names_the_instant_spelling;
+      Alcotest.test_case "E352: names the transitions whose rates were divided" `Quick test_e352_names_the_transitions;
+      Alcotest.test_case "E352: an import term beside the rates is named in the hint" `Quick test_rate_ratio_with_an_import_term_is_e352;
+      Alcotest.test_case "E352: reaches a let-bound rate ratio" `Quick test_rate_ratio_through_a_let_is_e352;
+      Alcotest.test_case "E352: prevalence(<rate ratio>) is the explicit instant form" `Quick test_prevalence_of_a_rate_ratio_is_the_explicit_instant_form;
+      Alcotest.test_case "E352: a proportion of prevalences is not a rate ratio" `Quick test_prevalence_proportion_is_not_e352;
+      Alcotest.test_case "flow ratio: dimensionless, so a count family refuses it (E304)" `Quick test_flow_ratio_is_refused_by_a_count_family;
+      Alcotest.test_case "flow ratio: pairs with binomial, beta_binomial and bernoulli" `Quick test_flow_ratio_pairs_with_the_k_of_n_families;
+      Alcotest.test_case "flow ratio: pairs with beta" `Quick test_flow_ratio_pairs_with_beta;
       Alcotest.test_case "gh#678: binder collision in a flow union is E342" `Quick test_flow_union_rejects_binder_collision;
       Alcotest.test_case "gh#678: named-index collision is E342" `Quick test_flow_union_rejects_named_index_collision;
       Alcotest.test_case "gh#678: distinct flows in one stratum still compile" `Quick test_flow_union_allows_distinct_flows_same_stratum;

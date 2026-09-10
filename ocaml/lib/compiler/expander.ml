@@ -8154,7 +8154,10 @@ let lower_covers ctx (od : obs_decl) (columns : obs_column list)
         None
     end
 
-let expand_observations ctx =
+(* [transitions] is the lowered transition list, already expanded, so the
+   rate-ratio check (E352) can compare a projection's terms against every
+   transition's lowered rate. *)
+let expand_observations ctx ~(transitions : Ir.transition list) =
   List.concat_map (fun od ->
     let od_loc = diag_loc_of_ast_ctx ctx od.oloc in
     (* m12 in 2026-04-19 review: each of schedule / projection /
@@ -8453,8 +8456,7 @@ let expand_observations ctx =
 
        Returns None for anything that is not an incidence aggregation, which
        falls through to the generic DerivedExpr resolver unchanged. *)
-    let explicit_incidence_sum top =
-      let rec go e local_env =
+    let rec flow_terms e local_env =
         match e with
         | ESum (v, d, guard_opt, body, sum_loc) ->
           (* A2 (gh#488), second site. This walk resolves `sum(...)` itself and
@@ -8497,7 +8499,7 @@ let expand_observations ctx =
             | Some g -> List.filter
                           (fun vv -> eval_guard ctx ((v, vv) :: local_env) g) vals in
           List.fold_right (fun vv acc ->
-            match acc, go body ((v, vv) :: local_env) with
+            match acc, flow_terms body ((v, vv) :: local_env) with
             | Some rest, Some fs -> Some (fs @ rest)
             | _ -> None) vals (Some [])
         (* B1a: `incidence(a) + incidence(b)` — two flows reported as one
@@ -8507,7 +8509,7 @@ let expand_observations ctx =
            term (`rho * incidence(a)`) is a different object — it needs
            `WeightedFlowSum` — and stays refused by [incidence_misuse] below. *)
         | EBinOp (Add, l, r) ->
-          (match go l local_env, go r local_env with
+          (match flow_terms l local_env, flow_terms r local_env with
            | Some ls, Some rs -> Some (ls @ rs)
            | _ -> None)
         | EFuncCall ("incidence", iargs) ->
@@ -8530,9 +8532,19 @@ let expand_observations ctx =
               | Some _          -> None)
            | _ -> None)
         | _ -> None
-      in
+    in
+    let explicit_incidence_sum top =
       match top with
-      | ESum _ | EBinOp (Add, _, _) -> go top env
+      | ESum _ | EBinOp (Add, _, _) -> flow_terms top env
+      | _ -> None
+    in
+    (* One side of a ratio of flows (proposal 2026-09-09): anything the walker
+       above accepts, including a bare `incidence(tr)`, which
+       [explicit_incidence_sum]'s top dispatch leaves to the `EFuncCall` arm
+       because on its own it lowers to `CumulativeFlow` rather than a sum. *)
+    let flow_side e =
+      match e with
+      | ESum _ | EBinOp (Add, _, _) | EFuncCall ("incidence", _) -> flow_terms e env
       | _ -> None
     in
     (* Does this expression mention `incidence` anywhere? Used to tell a
@@ -8565,15 +8577,21 @@ let expand_observations ctx =
     let incidence_misuse e =
       Diagnostics.error ctx.diags ~code:"E341" ~loc:od_loc
         ~message:(Printf.sprintf
-          "observation '%s': `incidence(...)` here is not a sum of flows. A \
-           projection may add incidence terms (`incidence(a) + incidence(b)`) \
-           or sum a family (`sum(p in patch, incidence(tr[p]))`), but it may \
-           not weight them, subtract them, or mix them with a state read"
+          "observation '%s': `incidence(...)` here is not a sum of flows, nor \
+           a ratio of two such sums. A projection may add incidence terms \
+           (`incidence(a) + incidence(b)`), sum a family \
+           (`sum(p in patch, incidence(tr[p]))`), or divide one such sum by \
+           another (`incidence(a) / (incidence(a) + incidence(b))`, the \
+           fraction of the window's events that were of kind `a`); it may not \
+           weight a term, subtract one, mix a flow with a state read, divide \
+           by a constant or a state, or divide twice"
           od.oname)
-        ~hint:"put a per-stream coefficient in the LIKELIHOOD instead \
+        ~hint:"put a per-stream coefficient in the likelihood instead \
                (`cases ~ poisson(rate = rho * projected)`); index a stratified \
-               family (`incidence(tr[p])`) or sum it explicitly; a per-stratum \
-               weight inside the projection is not yet supported"
+               family (`incidence(tr[p])`) or sum it explicitly; for the \
+               fraction of the window's events pair the ratio with `binomial`, \
+               `beta_binomial` or `beta`; a per-stratum weight inside the \
+               projection is not yet supported"
         ();
       ignore e;
       projection_refused := true;
@@ -8622,6 +8640,96 @@ let expand_observations ctx =
                  `die[child]` are one flow on the child row). Drop one term, or \
                  index the second by the stream's binder"
           ()
+    in
+    (* Proposal 2026-09-09, "making the instant spelling loud". A projection
+       that divides transition rates — `mu_c * I / (mu_c * I + mu_f * H)` —
+       compiles as a state expression read at the row's instant, and it is the
+       spelling a modeller reaches for once E341 refuses the flows. It is a
+       different quantity from the window fraction the data measures (7 to 27
+       percent off on the proposal's simulated epidemic, worst at the peak),
+       and nothing at fit time says so. The comparison is structural equality
+       of the lowered expressions: each additive term on either side of the
+       division against every lowered transition's rate, both produced by
+       [resolve_expr] before constant folding and LICM run. A match means the
+       term IS a transition's rate, so there is no false positive; a rate
+       written differently in the two places is not matched, which is the
+       documented residue. `prevalence(<expr>)` is the explicit instant
+       spelling and takes its own arm below, so it never reaches this check. *)
+    let rec additive_terms (e : Ir.expr) : Ir.expr list =
+      match e with
+      | Ir.BinOp { op = Ir.Add; left; right } ->
+        additive_terms left @ additive_terms right
+      | Ir.Reduce terms -> List.concat_map additive_terms terms
+      | e -> [e]
+    in
+    let rate_of_term (t : Ir.expr) : string option =
+      Option.map (fun (tr : Ir.transition) -> tr.Ir.name)
+        (List.find_opt (fun (tr : Ir.transition) -> tr.Ir.rate = t) transitions)
+    in
+    let check_rate_ratio (resolved : Ir.expr) : unit =
+      match resolved with
+      | Ir.BinOp { op = Ir.Div; left; right } ->
+        let classify side =
+          List.map (fun t -> (t, rate_of_term t)) (additive_terms side) in
+        let num = classify left and den = classify right in
+        let matched =
+          List.sort_uniq compare
+            (List.filter_map (fun (t, r) ->
+               Option.map (fun r -> (Pp_expr.to_string t, r)) r) (num @ den)) in
+        if matched <> [] then begin
+          let flows side =
+            let terms =
+              List.map (fun (t, r) -> match r with
+                | Some name -> Printf.sprintf "incidence(%s)" name
+                | None -> Printf.sprintf "<%s>" (Pp_expr.to_string t)) side in
+            match terms with
+            | [one] -> one
+            | many -> "(" ^ String.concat " + " many ^ ")" in
+          let unmatched =
+            List.sort_uniq compare
+              (List.filter_map (fun (t, r) ->
+                 if r = None then Some (Pp_expr.to_string t) else None)
+                 (num @ den)) in
+          let rates =
+            String.concat ", "
+              (List.map (fun (t, name) ->
+                 Printf.sprintf "`%s` is the rate of `%s`" t name) matched) in
+          let unmatched_note = match unmatched with
+            | [] -> ""
+            | us ->
+              Printf.sprintf
+                "\n  the term(s) %s match no transition's rate, so there is no \
+                 flow to accumulate for them: give each a transition of its \
+                 own (an import `bg_deaths : --> Dc @ iota` accumulates as \
+                 `incidence(bg_deaths)`), or drop it if it only guarded \
+                 against a zero denominator — a window with no denominator \
+                 events is scored as `NaN` (an `n = 0` row scores 0, an \
+                 `n > 0` row is refused), not divided by zero"
+                (String.concat ", " (List.map (Printf.sprintf "`%s`") us)) in
+          Diagnostics.error ctx.diags ~code:"E352" ~loc:od_loc
+            ~message:(Printf.sprintf
+              "observation '%s': `projected` divides transition rates — %s — \
+               so it is read at the row's instant, not accumulated over its \
+               window"
+              od.oname rates)
+            ~hint:(Printf.sprintf
+              "if the column is the fraction of the window's events, write \
+               the flows and declare `covers`:\n\
+              \      projected = %s / %s\n\
+              \  if you mean the instantaneous ratio of hazards, say so:\n\
+              \      projected = prevalence(%s)%s"
+              (flows num) (flows den) (Pp_expr.to_string resolved) unmatched_note)
+            ()
+        end
+      | _ -> ()
+    in
+    (* A derived (state) projection: resolve it, then refuse the rate-ratio
+       shape. Used at every site that lowers to [DerivedExpr] from the
+       modeller's own expression, so a let-bound spelling is checked too. *)
+    let derived e =
+      let resolved = resolve_expr ctx env e in
+      check_rate_ratio resolved;
+      Ir.DerivedExpr resolved
     in
     let projection = match proj_v with
       | ProjIncidence (name, idxs) ->
@@ -8791,7 +8899,7 @@ let expand_observations ctx =
            through to `CumulativeFlow "I_total"` — that name is neither a
            transition nor a compartment, so it would E507 (gh#164/#165). *)
         if Hashtbl.mem ctx.let_tbl name then
-          Ir.DerivedExpr (resolve_expr ctx env e)
+          derived e
         else if Hashtbl.mem ctx.expanded_comp_tbl name then
           Ir.CurrentPop name
         else if Hashtbl.mem ctx.comp_tbl name then
@@ -8826,7 +8934,7 @@ let expand_observations ctx =
            only because of this omission — the likelihood family is
            irrelevant here). *)
         if Hashtbl.mem ctx.let_tbl name then
-          Ir.DerivedExpr (resolve_expr ctx env e)
+          derived e
         else if Hashtbl.mem ctx.expanded_comp_tbl concrete then
           Ir.CurrentPop concrete
         else if Hashtbl.mem ctx.comp_tbl name then
@@ -8834,6 +8942,40 @@ let expand_observations ctx =
             ~loc:(diag_loc_of_ast_ctx ctx idx_l) name idx_vals
         else
           Ir.CumulativeFlow concrete
+      | ProjDerived (EBinOp (Div, l, r) as e) when mentions_incidence e ->
+        (* `num / den` where both sides are unit-weighted flow sums: the
+           fraction of the window's events that were of the numerator's kind
+           (proposal 2026-09-09). Each side goes through the same walker a
+           projection's `+`/`sum` already does, so indexing, `where` pruning,
+           the stream binder and E280 behave identically inside a ratio. A flow
+           named twice within a side is E342 as in a plain union; the same flow
+           on both sides is the expected shape (`a / (a + b)`). There is no
+           subset rule: case fatality within a window divides different
+           transitions and may exceed 1 for a particle whose deaths outrun its
+           cases, which a binomial then scores as impossible. *)
+        (match flow_side l, flow_side r with
+         | Some (_ :: _ as num), Some (_ :: _ as den) ->
+           check_flows_disjoint num;
+           check_flows_disjoint den;
+           Ir.FlowRatio { numerator = num; denominator = den }
+         | Some [], Some _ | Some _, Some [] ->
+           (* A `where` that prunes every level of one side leaves `x / 0` or
+              `0 / x` — a projection that is NaN or identically zero on every
+              row. An empty plain sum lowers to a literal zero; an empty side
+              of a ratio is refused by name instead. *)
+           let side =
+             match flow_side l with Some [] -> "numerator" | _ -> "denominator" in
+           Diagnostics.error ctx.diags ~code:"E351" ~loc:od_loc
+             ~message:(Printf.sprintf
+               "observation '%s': the %s of the ratio names no flow after its \
+                `where` guard pruned every level"
+               od.oname side)
+             ~hint:"a side of a ratio must accumulate at least one flow — widen \
+                    or drop the guard, or index the family to a cell that exists"
+             ();
+           projection_refused := true;
+           Ir.DerivedExpr (Ir.Const 0.0)
+         | _ -> incidence_misuse e)
       | ProjDerived e ->
         (match explicit_incidence_sum e with
          (* A `where` that excludes every level sums nothing, matching what
@@ -8842,7 +8984,7 @@ let expand_observations ctx =
          | Some [single] -> Ir.CumulativeFlow single
          | Some many     -> check_flows_disjoint many; Ir.CumulativeFlowSum many
          | None when mentions_incidence e -> incidence_misuse e
-         | None          -> Ir.DerivedExpr (resolve_expr ctx env e))
+         | None          -> derived e)
     in
     (* Likelihood kwarg resolution with strict diagnostics. Unlike the
        silent 0.0 default of old, we emit a real error for:
@@ -11510,7 +11652,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
     Ir.time_functions     = expanded_time_functions;
     Ir.tables             = resolved_tables;
     Ir.interventions      = expand_interventions ctx;
-    Ir.observations       = expand_observations ctx;
+    Ir.observations       = expand_observations ctx ~transitions:expanded_trs;
     Ir.parameters         = expand_parameters ctx;
     Ir.bindings           = [];   (* filled below from ctx.hoisted_rev once all resolution is done *)
     Ir.per_eval_bindings  = [];   (* gh#272 LICM: empty until the LICM pass runs (post-autodiff) *)

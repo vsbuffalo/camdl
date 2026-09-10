@@ -368,6 +368,27 @@ let test_flow_sum_order_insensitive () =
   ]) in
   Alcotest.(check int) "commuted flow sums are one projection" 1 (lint_count "L404" r)
 
+(* Proposal 2026-09-09: a ratio of flows has its own key. A ratio stream and
+   the count stream over its denominator are the joint
+   `p(n | x) · p(k | n, x)` — two pieces of evidence — so they never collide,
+   even under one scored name; two spellings of one ratio still do. *)
+let test_flow_ratio_and_its_denominator_count_are_two_measurements () =
+  let r = Lint.check_model (obs_model [
+    mk_obs "comm_frac" ~scored:"deaths"
+      (FlowRatio { numerator = ["die_comm"]; denominator = ["die_comm"; "die_fac"] });
+    mk_obs "deaths" ~scored:"deaths" (CumulativeFlowSum ["die_comm"; "die_fac"]);
+  ]) in
+  Alcotest.(check int) "a fraction and its denominator's count are distinct"
+    0 (lint_count "L404" r);
+  let r = Lint.check_model (obs_model [
+    mk_obs "frac_a" ~scored:"deaths"
+      (FlowRatio { numerator = ["die_comm"]; denominator = ["die_fac"; "die_comm"] });
+    mk_obs "frac_b" ~scored:"deaths"
+      (FlowRatio { numerator = ["die_comm"]; denominator = ["die_comm"; "die_fac"] });
+  ]) in
+  Alcotest.(check int) "two spellings of one fraction are one measurement"
+    1 (lint_count "L404" r)
+
 (* A one-element sum and the scalar form name the same single flow. *)
 let test_singleton_sum_equals_scalar () =
   let r = Lint.check_model (obs_model [
@@ -519,6 +540,8 @@ let () =
       Alcotest.test_case "three streams, one diagnostic"     `Quick test_three_streams_one_group;
       Alcotest.test_case "flow sum is order-insensitive"     `Quick test_flow_sum_order_insensitive;
       Alcotest.test_case "singleton sum ≡ scalar"            `Quick test_singleton_sum_equals_scalar;
+      Alcotest.test_case "a flow ratio and its denominator's count are two measurements"
+        `Quick test_flow_ratio_and_its_denominator_count_are_two_measurements;
       Alcotest.test_case "stratified stream ignoring binder" `Quick test_stratified_stream_ignoring_its_binder;
       Alcotest.test_case "identical derived exprs"           `Quick test_identical_derived_expr_flagged;
       Alcotest.test_case "cases and deaths off one flow"     `Quick test_cases_and_deaths_off_one_flow_not_shared;
