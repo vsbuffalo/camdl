@@ -3,6 +3,27 @@ name = "sim"
 version = "0.1.0"
 edition = "2021"
 
+# Four clippy lints are allowed crate-wide because each one asks for a change
+# this engine must not make. They are declared here, rather than as per-site
+# `#[allow]`, so the reason lives in one place and the affected lines (many in
+# the high-risk inference files) stay untouched by lint churn.
+[lints.clippy]
+# The numerical kernels (`ode`, `pgas`, `pgas_grad`, `obs_model`, `pmmh`) take
+# 8-12 arguments because that is what a step function's state, parameters,
+# workspace and diagnostics amount to. Bundling them into structs to satisfy
+# the lint churns exactly the surfaces CLAUDE.md marks high-risk, for no
+# correctness gain.
+too_many_arguments = "allow"
+# Same argument, in return position: the tuples-of-vectors these kernels hand
+# back are the derivation's own shape. Naming them adds an indirection the
+# reader must resolve without making any of them simpler.
+type_complexity = "allow"
+# Lockstep indexing across three or more arrays (`pgas`, `pmmh`, `nuts`,
+# `ode`, `resampling`). The shared index mirrors the derivation's subscript;
+# clippy's zip/iterator rewrite reads worse at that arity and makes a silent
+# transposition between two arrays easier to introduce than to spot.
+needless_range_loop = "allow"
+
 [dependencies]
 # Lineage line-list Parquet output (2026-05-19 individual-sampling layer).
 # Pinned; large dependency tree (see proposal report). Behind the default-on
