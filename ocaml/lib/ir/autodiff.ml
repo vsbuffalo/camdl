@@ -838,7 +838,11 @@ let differentiate_projection (proj : projection) (compartments : string list)
     : (string * deriv_entry) list =
   match proj with
   | DerivedExpr e -> differentiate_rate_state e compartments tfs tbls bindings
-  | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ -> []
+  (* A flow ratio depends on θ only through its two accumulated bins, exactly
+     as a flow sum does; the quotient rule is applied over those bins at
+     scoring time, so there is no state gradient to emit here either. *)
+  | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _
+  | FlowRatio _ -> []
 
 
 (* ── Observation / σ² gradient driver (proposal 2026-07-03, P3) ───────────────
@@ -888,7 +892,8 @@ let rec inline_projected (proj : expr) (e : expr) : expr =
 let inline_projection (proj : projection) (arg : expr) : expr =
   match proj with
   | DerivedExpr e -> inline_projected e arg
-  | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ -> arg
+  | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _
+  | FlowRatio _ -> arg
 
 (** Adapt a differentiation outcome for an obs/σ² argument into a
     [deriv_entry option]. [None] means "omit the key" — a genuine zero. *)

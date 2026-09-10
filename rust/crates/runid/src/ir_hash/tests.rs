@@ -974,6 +974,28 @@ fn projection_variant_hashes_are_pinned() {
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
         "df05acb4d865d837590a535138e7be26546f019da197fb68d7d92603c020f09a"
     );
+    // Proposal 2026-09-09 (proportion of flows over a window): appended at 5.
+    // The five pins above are unchanged by the addition — that is the
+    // run-id stability property for every existing model.
+    assert_eq!(
+        hex(Projection::FlowRatio {
+            numerator: vec!["x".into()],
+            denominator: vec!["x".into(), "y".into()],
+        }),
+        "f1e516ab6e3f2a0272a1e0e0a517c437ce6ce3bf59dc7433527b6ab372ff462d"
+    );
+    // The two sides are hashed in order, so swapping them is a different
+    // projection — `a / (a + b)` and `(a + b) / a` must not share a run_id.
+    assert_ne!(
+        hex(Projection::FlowRatio {
+            numerator: vec!["x".into()],
+            denominator: vec!["y".into()],
+        }),
+        hex(Projection::FlowRatio {
+            numerator: vec!["y".into()],
+            denominator: vec!["x".into()],
+        })
+    );
 }
 
 /// gh#750: the model's own `#'` doc block rides the IR **envelope**

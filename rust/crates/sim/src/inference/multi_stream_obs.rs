@@ -297,6 +297,10 @@ impl StreamProjection {
                     obs_name, e))?;
                 Ok(StreamProjection::Expr(resolved))
             }
+            P::FlowRatio { .. } => Err(format!(
+                "observation '{}': the flow-ratio projection (`incidence(a) / (incidence(a) + \
+                 incidence(b))`) is in the IR but this runtime does not score it yet",
+                obs_name)),
         }
     }
 }

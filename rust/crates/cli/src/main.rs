@@ -3656,6 +3656,11 @@ pub(crate) fn project_coverages(
                 )
             }).collect())
         }
+        ir::observation::Projection::FlowRatio { .. } => Err(format!(
+            "observation stream '{}': the flow-ratio projection is in the IR but this \
+             runtime does not project it yet",
+            obs_ir.name,
+        )),
     }
 }
 

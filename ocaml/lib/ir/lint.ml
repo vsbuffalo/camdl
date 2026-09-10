@@ -146,6 +146,7 @@ let referenced_compartments (m : model) : (string, unit) Hashtbl.t =
     (match obs.projection with
      | CumulativeFlow _flow -> ()   (* transition name, not a compartment *)
      | CumulativeFlowSum _flows -> ()  (* transition names, not compartments *)
+     | FlowRatio _ -> ()               (* two flow lists, still not compartments *)
      | CurrentPop name -> add name
      | CurrentPopSum names -> List.iter add names
      | DerivedExpr e -> add_expr e);
@@ -262,9 +263,14 @@ let check_dead_compartments (m : model) : diagnostic list =
    spellings the expander produces and conservative otherwise: it can miss a
    commuted rewrite, never invent a collision. *)
 type projection_key =
-  | KFlow of string list      (* accumulated flows, sorted *)
-  | KPop  of string list      (* compartments read at the instant, sorted *)
-  | KExpr of expr             (* a derived function of the state *)
+  | KFlow  of string list      (* accumulated flows, sorted *)
+  | KPop   of string list      (* compartments read at the instant, sorted *)
+  | KExpr  of expr             (* a derived function of the state *)
+  (* A fraction of accumulated flows, each side sorted. Its own key, so a
+     ratio stream and a count stream over its denominator — the joint
+     `p(n | x) · p(k | n, x)` the proposal recommends — are two measurements,
+     never one. *)
+  | KRatio of string list * string list
 
 let projection_key (p : projection) : projection_key =
   let canon names = List.sort String.compare names in
@@ -274,6 +280,7 @@ let projection_key (p : projection) : projection_key =
   | CurrentPop c         -> KPop [c]
   | CurrentPopSum cs     -> KPop (canon cs)
   | DerivedExpr e        -> KExpr e
+  | FlowRatio { numerator; denominator } -> KRatio (canon numerator, canon denominator)
 
 (* A stream's measurement identity: the latent quantity its projection reads,
    paired with the name of the column its likelihood scores. Both halves are
@@ -293,6 +300,9 @@ let projection_phrase (k : projection_key) : string =
   | KPop  [c]  -> Printf.sprintf "each reads the compartment '%s'" c
   | KPop  cs   -> Printf.sprintf "each reads the same compartments (%s)" (quoted cs)
   | KExpr _    -> "each evaluates the same derived expression over the state"
+  | KRatio (num, den) ->
+    Printf.sprintf "each accumulates the same fraction of flows (%s over %s)"
+      (quoted num) (quoted den)
 
 (* "'a' and 'b'" / "'a', 'b' and 'c'" — the streams of one collision group. *)
 let stream_list (names : string list) : string =

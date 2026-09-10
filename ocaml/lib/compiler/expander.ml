@@ -7983,7 +7983,7 @@ let validate_reactive_streams ctx (model : Ir.model) =
    side; a stream's `covers` must agree with it. *)
 let projection_accumulates (p : Ir.projection) =
   match p with
-  | Ir.CumulativeFlow _ | Ir.CumulativeFlowSum _ -> true
+  | Ir.CumulativeFlow _ | Ir.CumulativeFlowSum _ | Ir.FlowRatio _ -> true
   | Ir.CurrentPop _ | Ir.CurrentPopSum _ | Ir.DerivedExpr _ -> false
 
 (* Lower `covers = <form>(<time column>[, <span>])`, or a `window_start` /

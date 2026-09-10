@@ -416,6 +416,12 @@ type projection =
   (* New variants append last — keeps parity with the Rust run_id hash,
      whose variant indices are positional and permanent. *)
   | CumulativeFlowSum of string list
+  (* The ratio of two unit-weighted flow sums accumulated over the same row
+     window — `Σ numerator / Σ denominator`, read when the window closes.
+     Interval-valued and dimensionless; NaN when the denominator flow is 0.
+     Each side is the object [CumulativeFlowSum] carries, and is never empty
+     (proposal 2026-09-09-proportion-of-flows-over-a-window). *)
+  | FlowRatio         of { numerator : string list; denominator : string list }
 
 (* Each differentiable likelihood argument carries its ∂arg/∂param map (empty ⇒
    not computed; absent key ⇒ genuine zero), the obs analogue of the transition

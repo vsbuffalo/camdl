@@ -128,7 +128,8 @@ let fold_draw_method fe (dm : draw_method) : draw_method =
 let fold_projection fe (p : projection) : projection =
   match p with
   | DerivedExpr e -> DerivedExpr (fe e)
-  | (CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _) as p -> p
+  | (CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _
+    | FlowRatio _) as p -> p
 
 let fold_likelihood fe (lik : likelihood) : likelihood =
   let fd = fold_diffable fe in

@@ -552,6 +552,13 @@ impl ContentAddressed for Projection {
                 h.write_u32(4);
                 v.hash_into(h);
             }
+            // Added by proposal 2026-09-09 (proportion of flows over a
+            // window) — appended at 5; numerator then denominator.
+            Projection::FlowRatio { numerator, denominator } => {
+                h.write_u32(5);
+                numerator.hash_into(h);
+                denominator.hash_into(h);
+            }
         }
     }
 }

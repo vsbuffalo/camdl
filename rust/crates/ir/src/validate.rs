@@ -266,7 +266,31 @@ pub fn validate(model: &Model) -> Result<(), Vec<ValidationError>> {
                     }
                 }
             }
-            _ => {}
+            crate::observation::Projection::FlowRatio { numerator, denominator } => {
+                // Each side is a flow union in its own right: every name must
+                // be a transition and no side may name one twice. The same
+                // flow on both sides is the expected shape (`a / (a + b)`).
+                for side in [numerator, denominator] {
+                    let mut seen = std::collections::HashSet::new();
+                    for tn in side {
+                        if !tr_names.contains(tn.as_str()) {
+                            errors.push(ValidationError::UnknownTransitionInObservation {
+                                obs: obs.name.clone(),
+                                transition: tn.clone(),
+                            });
+                        }
+                        if !seen.insert(tn.as_str()) {
+                            errors.push(ValidationError::DuplicateFlowInObservation {
+                                obs: obs.name.clone(),
+                                transition: tn.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            crate::observation::Projection::CurrentPop(_)
+            | crate::observation::Projection::CurrentPopSum(_)
+            | crate::observation::Projection::DerivedExpr(_) => {}
         }
         // likelihood exprs (projected is allowed)
         check_likelihood_exprs(&obs.likelihood, &ctx, &mut errors);

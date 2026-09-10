@@ -190,6 +190,20 @@ let validate (m : model) : (unit, error list) result =
          if Hashtbl.mem seen tn then
            errors := DuplicateFlowInUnion (tn, here) :: !errors
          else Hashtbl.add seen tn ()) tns
+     | FlowRatio { numerator; denominator } ->
+       (* Each side is a flow union in its own right: every name must be a
+          transition and no side may name one twice. The same flow on both
+          sides is the expected shape (`a / (a + b)`) and is not a collision. *)
+       List.iter (fun tns ->
+         List.iter (fun tn ->
+           if not (SS.mem tn tr_set) then errors := UnknownTransition (tn, here) :: !errors
+         ) tns;
+         let seen = Hashtbl.create 8 in
+         List.iter (fun tn ->
+           if Hashtbl.mem seen tn then
+             errors := DuplicateFlowInUnion (tn, here) :: !errors
+           else Hashtbl.add seen tn ()) tns
+       ) [numerator; denominator]
      | CurrentPop cn ->
        if not (SS.mem cn comp_names) then errors := UnknownCompartment (cn, here) :: !errors
      | CurrentPopSum cns ->

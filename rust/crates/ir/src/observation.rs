@@ -17,6 +17,14 @@ pub enum Projection {
     // variants by position, so declaration order == hash index, and that
     // index is permanent. Inserting earlier would churn stored run_ids.
     CumulativeFlowSum(Vec<String>),
+    /// The ratio of two unit-weighted flow sums accumulated over the same row
+    /// window: `Σ numerator / Σ denominator`, read when the window closes.
+    /// Interval-valued; dimensionless. `NaN` when the denominator flow is 0.
+    /// Each side is the object [`Projection::CumulativeFlowSum`] carries, and
+    /// is never empty (the compiler refuses an empty side, E351; both
+    /// validators refuse it again). Proposal
+    /// 2026-09-09-proportion-of-flows-over-a-window.
+    FlowRatio { numerator: Vec<String>, denominator: Vec<String> },
 }
 
 /// Whether an observation stream measures a quantity accumulated over a
@@ -46,10 +54,11 @@ impl Projection {
     /// variants — the single source of truth for the distinction.
     pub fn temporal_kind(&self) -> TemporalKind {
         match self {
-            // incidence — cumulative flow over the reporting interval
-            Projection::CumulativeFlow(_) | Projection::CumulativeFlowSum(_) => {
-                TemporalKind::Interval
-            }
+            // incidence — cumulative flow over the reporting interval; a ratio
+            // of two such flows is taken over the same interval
+            Projection::CumulativeFlow(_)
+            | Projection::CumulativeFlowSum(_)
+            | Projection::FlowRatio { .. } => TemporalKind::Interval,
             // prevalence — state read at the observation instant
             Projection::CurrentPop(_)
             | Projection::CurrentPopSum(_)
@@ -369,6 +378,15 @@ mod tests {
         assert_eq!(
             Projection::CumulativeFlowSum(vec!["a".into(), "b".into()]).temporal_kind(),
             Interval
+        );
+        assert_eq!(
+            Projection::FlowRatio {
+                numerator: vec!["a".into()],
+                denominator: vec!["a".into(), "b".into()],
+            }
+            .temporal_kind(),
+            Interval,
+            "a ratio of two accumulated flows is taken over the row's window"
         );
         // prevalence — read at the observation instant
         assert_eq!(Projection::CurrentPop("I".into()).temporal_kind(), Instant);

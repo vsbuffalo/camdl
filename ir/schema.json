@@ -734,6 +734,22 @@
             "derived_expr": { "$ref": "#/definitions/expr" }
           },
           "additionalProperties": false
+        },
+        {
+          "comment": "The ratio of two unit-weighted flow sums accumulated over the same row window (numerator / denominator), read when the window closes. Interval-valued and dimensionless; NaN when the denominator flow is zero. Each side is the object cumulative_flow_sum carries, so a side may not be empty.",
+          "required": ["flow_ratio"],
+          "properties": {
+            "flow_ratio": {
+              "type": "object",
+              "required": ["numerator", "denominator"],
+              "properties": {
+                "numerator":   { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                "denominator": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },

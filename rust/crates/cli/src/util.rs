@@ -2355,6 +2355,9 @@ pub fn print_observations_summary(model: &ir::Model) {
                 (format!("incidence({})", name), false),
             ir::observation::Projection::CumulativeFlowSum(names) =>
                 (format!("incidence({})", names.join(" + ")), false),
+            ir::observation::Projection::FlowRatio { numerator, denominator } =>
+                (format!("incidence({}) / incidence({})",
+                         numerator.join(" + "), denominator.join(" + ")), false),
             ir::observation::Projection::CurrentPop(name) =>
                 (format!("prevalence({})", name), true),
             ir::observation::Projection::CurrentPopSum(names) =>

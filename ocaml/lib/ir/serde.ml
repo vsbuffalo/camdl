@@ -876,6 +876,9 @@ let projection_to_json (p : projection) : Yojson.Safe.t =
   | CurrentPop        cn -> obj [("current_pop",         str cn)]
   | CurrentPopSum     cs -> obj [("current_pop_sum",     arr (List.map str cs))]
   | DerivedExpr       e  -> obj [("derived_expr",        expr_to_json e)]
+  | FlowRatio { numerator; denominator } ->
+    obj [("flow_ratio", obj [("numerator",   arr (List.map str numerator));
+                             ("denominator", arr (List.map str denominator))])]
 
 let projection_of_json j =
   match j with
@@ -886,6 +889,9 @@ let projection_of_json j =
     | "current_pop"         -> CurrentPop        (as_string v)
     | "current_pop_sum"     -> CurrentPopSum     (List.map as_string (as_list v))
     | "derived_expr"        -> DerivedExpr       (expr_of_json v)
+    | "flow_ratio"          ->
+      FlowRatio { numerator   = List.map as_string (as_list (member "numerator" v));
+                  denominator = List.map as_string (as_list (member "denominator" v)) }
     | k -> fail "unknown projection '%s'" k
   )
   | _ -> fail "projection must be a single-key object"

@@ -7993,6 +7993,7 @@ let test_projected_bare_sum_emits_derived_expr () =
        | Ir.CurrentPopSum _ -> "CurrentPopSum"
        | Ir.CumulativeFlow _ -> "CumulativeFlow"
        | Ir.CumulativeFlowSum _ -> "CumulativeFlowSum"
+       | Ir.FlowRatio _ -> "FlowRatio"
        | Ir.DerivedExpr _ -> "DerivedExpr")
 
 (** Prevalence-as-proportion — the canonical Garki/surveillance form.

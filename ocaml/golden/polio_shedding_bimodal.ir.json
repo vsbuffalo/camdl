@@ -1,4 +1,4 @@
-{"ir_version":"0.39","validated_by":"ocaml-compiler-v0.39","model":{"name":"polio_shedding_bimodal","version":"0.3","time_unit":"weeks","description":null,"compartments":[
+{"ir_version":"0.40","validated_by":"ocaml-compiler-v0.40","model":{"name":"polio_shedding_bimodal","version":"0.3","time_unit":"weeks","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"R","kind":"integer"},
 {"name":"I__typical__1","kind":"integer"},

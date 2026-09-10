@@ -814,7 +814,9 @@ let obs_projection_dim st (m : model) (stream : string) : dim =
     (match o.projection with
      | DerivedExpr e -> read_dim st e
      | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ ->
-       Known population)
+       Known population
+     (* A ratio of two accumulated counts is a fraction. *)
+     | FlowRatio _ -> Known dimensionless)
   | None -> Unknown (-1)
 
 (* Build the (name, stratum) → resolved-dimension table for all quantities, in
@@ -1084,7 +1086,12 @@ let check_model (m : model) : result =
       st.projected_dim <- Some (match obs.projection with
         | DerivedExpr e -> infer st ~ctx e
         | CumulativeFlow _ | CurrentPop _ | CurrentPopSum _ | CumulativeFlowSum _ ->
-          Known population);
+          Known population
+        (* A ratio of two accumulated counts is dimensionless, which is what
+           lets it feed `binomial`'s `p`, `beta`'s `mean` and the
+           `beta_binomial` sugar, and what makes a count family (`poisson`,
+           `neg_binomial`) refuse it with the existing E304. *)
+        | FlowRatio _ -> Known dimensionless);
       (match obs.likelihood with
        | NegBinomial nb ->
          (* The NegBinomial `mean` is the same object as the Poisson `rate`:
