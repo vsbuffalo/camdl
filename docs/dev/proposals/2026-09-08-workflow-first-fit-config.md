@@ -510,19 +510,26 @@ and positional on `fit run`, two spellings of one argument.
 
 ### 3.4 Chain starts: spread, point, and what the summary says
 
-The default is unchanged: `uniform_unconstrained`, an independent draw per chain
-on the unconstrained scale (Stan's initialization, described at §11.2, p. 195).
-The two spread warm-starts are the ones the workflow text endorses. Starting
-from posterior draws is the book's own recommendation for a hard posterior — run
-an approximate algorithm first and use its draws to initialize ("one way to
-obtain good starting points for HMC is to first run a variational algorithm to
-get near the typical set", §11.2, p. 196; the same move with Pathfinder in
-§12.3, p. 218: run many chains from different initial values to find modes, then
-start fewer chains from the found modes). `from_prior` constrains starts "to be
-within a reasonable region as determined by the prior", which §12.5 (p. 234)
-lists as the legitimate refinement of an initialization scheme once the geometry
-is understood. Both keep one independent draw per chain, so the between-chain
-comparison R̂ makes is still a comparison.
+The default is `from_prior` whenever every estimated parameter declares a prior,
+and `uniform_unconstrained` — an independent draw per chain on the unconstrained
+scale (Stan's initialization, described at §11.2, p. 195) — otherwise. The
+reason is measured (gh#876): a bounds-uniform draw at province scale is
+routinely a start the bootstrap filter cannot score, because a fixed relative
+error in a rate is a standardised residual that grows with the square root of
+the population, and wide bounds carry no scale. A prior does. A chain whose
+start cannot be scored is still refused (gh#887 records the bounded-retry
+follow-up); the default just stops manufacturing the case. The two spread
+warm-starts are the ones the workflow text endorses. Starting from posterior
+draws is the book's own recommendation for a hard posterior — run an approximate
+algorithm first and use its draws to initialize ("one way to obtain good
+starting points for HMC is to first run a variational algorithm to get near the
+typical set", §11.2, p. 196; the same move with Pathfinder in §12.3, p. 218: run
+many chains from different initial values to find modes, then start fewer chains
+from the found modes). `from_prior` constrains starts "to be within a reasonable
+region as determined by the prior", which §12.5 (p. 234) lists as the legitimate
+refinement of an initialization scheme once the geometry is understood. Both
+keep one independent draw per chain, so the between-chain comparison R̂ makes is
+still a comparison.
 
 A point start is kept as an explicit escape hatch — it is the right tool for
 continuing an optimizer, for reproducing a specific run, and for a deterministic
@@ -1085,6 +1092,15 @@ wrong), _leaning_ (a reasonable person could choose the other way), _need-you_
     thing between it and recovery on the real design. Without this, recovery can
     only simulate on the declared schedule, which is the case gh#831 exists to
     end.
+
+20. **`from_prior` is the default `starts` when every estimated parameter has a
+    prior; `uniform_unconstrained` otherwise** (§3.4). _Ruled 2026-09-09._
+21. **An unscoreable start keeps refusing the chain; bounded retry of a spread
+    start is gh#887, landing with the `starts` type** (§3.4). _Ruled
+    2026-09-09._
+22. **The split lands; the ebola agents fold the config edit into their
+    window-format migration** (§5). _Ruled 2026-09-09._ It lands after the
+    proportion-of-flows projection, so the two re-keys ship in one release.
 
 ---
 
