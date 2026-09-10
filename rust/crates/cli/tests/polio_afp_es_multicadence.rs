@@ -12,10 +12,11 @@
 //! What this pins (Phase 2b opens the gate — `bind` merges the per-stream
 //! schedules to the union axis and the per-stream incidence reset scores each
 //! stream over its own cadence):
-//!   1. the model SIMULATES and `--obs-only-dir` emits one TSV per stratum leaf,
-//!      AFP on a 30-day grid and ES on a 14-day grid (two distinct cadences);
-//!   2. each source's long-form file (`time, patch, <scored>`) LOADS through the
-//!      §4.2 long-form router and scores a finite loglik (rows routed by name);
+//!   1. the model SIMULATES and `--obs-only-dir` emits one long-form TSV per
+//!      observation SOURCE (`time, patch, <scored>`), AFP on a 30-day grid and
+//!      ES on a 14-day grid (two distinct cadences);
+//!   2. each source's file LOADS through the §4.2 long-form router and scores a
+//!      finite loglik (rows routed to their leaf by the `patch` column);
 //!   3. binding BOTH sources at once (AFP monthly + ES biweekly) now FITS — the
 //!      heterogeneous-cadence gate is open; the union axis carries both cadences
 //!      and the filter scores a finite loglik over all four stratum leaves;
@@ -73,52 +74,26 @@ fn params() -> PathBuf {
     fixture("polio_afp_es_2patch.params.toml")
 }
 
-/// Read a one-value-per-leaf wide TSV (`time\t<col>`), returning the time column.
-fn read_times(path: &Path) -> Vec<f64> {
+/// The time column of one stratum leaf's rows in a long-form TSV
+/// (`time, patch, <scored>`), selected by the `patch` cell.
+fn read_times(path: &Path, level: &str) -> Vec<f64> {
     let txt = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    txt.lines()
-        .skip(1) // header
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            l.split('\t')
-                .next()
-                .unwrap()
-                .parse::<f64>()
-                .unwrap_or_else(|_| panic!("time parse in {}: {l:?}", path.display()))
+    let mut lines = txt.lines().filter(|l| !l.trim().is_empty());
+    let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    assert_eq!(header[1], "patch",
+        "the family's file carries its `: dim` column: {header:?}");
+    lines
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f[1] == level).then(|| f[0].parse::<f64>()
+                .unwrap_or_else(|_| panic!("time parse in {}: {l:?}", path.display())))
         })
         .collect()
 }
 
-/// Pivot the per-leaf wide TSVs (`{source}_{level}.tsv`, cols `time, {col}`)
-/// into one long-form file (`time, patch, {scored}`) — the shape the §4.2
-/// long-form fit loader consumes. (simulate emits per-leaf wide today; a
-/// stratified `: dim` stream loads long-form. This bridges the two.)
-fn pivot_long_form(obs_dir: &Path, out: &Path, source: &str, scored: &str, levels: &[&str]) {
-    let mut rows: Vec<(f64, String, String)> = Vec::new();
-    for &lvl in levels {
-        let leaf = obs_dir.join(format!("{source}_{lvl}.tsv"));
-        let txt = std::fs::read_to_string(&leaf)
-            .unwrap_or_else(|e| panic!("read leaf {}: {e}", leaf.display()));
-        for line in txt.lines().skip(1).filter(|l| !l.trim().is_empty()) {
-            let mut it = line.split('\t');
-            let t: f64 = it.next().unwrap().parse().unwrap();
-            let v = it.next().unwrap().to_string();
-            rows.push((t, lvl.to_string(), v));
-        }
-    }
-    // Sort by (time, patch) for a stable, chronological long-form file.
-    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
-    let mut body = format!("time\tpatch\t{scored}\n");
-    for (t, p, v) in rows {
-        // Emit integer times without a trailing .0 (matches the simulator).
-        body.push_str(&format!("{}\t{p}\t{v}\n", t as i64));
-    }
-    std::fs::write(out, body).unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
-}
-
-/// Generate the synthetic data into `dir`: simulate at truth, then pivot to
-/// long-form per-source files. Returns (afp_long, es_long) paths.
+/// Generate the synthetic data into `dir`: simulate at truth, which writes one
+/// long-form file per observation source. Returns (afp, es) paths.
 fn generate_data(bin: &Path, ir: &Path, dir: &Path) -> (PathBuf, PathBuf) {
     let obs_dir = dir.join("obs");
     let out = Command::new(bin)
@@ -138,11 +113,14 @@ fn generate_data(bin: &Path, ir: &Path, dir: &Path) -> (PathBuf, PathBuf) {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Property 1: one TSV per stratum leaf, AFP monthly + ES biweekly.
-    let afp_u = read_times(&obs_dir.join("afp_urban.tsv"));
-    let afp_r = read_times(&obs_dir.join("afp_rural.tsv"));
-    let es_u = read_times(&obs_dir.join("es_urban.tsv"));
-    let es_r = read_times(&obs_dir.join("es_rural.tsv"));
+    // Property 1: one long-form TSV per SOURCE, both leaves in it (gh#884),
+    // AFP monthly + ES biweekly.
+    let afp = obs_dir.join("afp.tsv");
+    let es = obs_dir.join("es.tsv");
+    let afp_u = read_times(&afp, "urban");
+    let afp_r = read_times(&afp, "rural");
+    let es_u = read_times(&es, "urban");
+    let es_r = read_times(&es, "rural");
 
     // Both AFP leaves share a 30-day grid; both ES leaves share a 14-day grid.
     assert_eq!(afp_u, afp_r, "AFP leaves must share one cadence");
@@ -159,10 +137,6 @@ fn generate_data(bin: &Path, ir: &Path, dir: &Path) -> (PathBuf, PathBuf) {
     assert!(!es_u.contains(&30.0) || es_u.contains(&28.0),
         "AFP (30d) and ES (14d) grids must differ");
 
-    let afp = dir.join("afp.tsv");
-    let es = dir.join("es.tsv");
-    pivot_long_form(&obs_dir, &afp, "afp", "cases", &["urban", "rural"]);
-    pivot_long_form(&obs_dir, &es, "es", "conc", &["urban", "rural"]);
     (afp, es)
 }
 

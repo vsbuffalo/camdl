@@ -1807,6 +1807,19 @@ time, whose period `[t_start − Δ, t_start)` was never simulated. A windowed
 stream cannot go into the single wide `--obs` file, which has one `time`
 column; the error names `--obs-dir`.
 
+A stratified family (`cases[p in patch]`) is one file, not one per leaf. Its
+leaves share one observation `source`, which the loader binds to a single
+long-format file and routes row by row to the leaf named in the `: dim`
+column — so the family is written that way, named for the source, with the dim
+column filled from each leaf's own stratum (gh#884):
+
+```
+week_ending	province	province_cases
+7	kivu	61
+7	ituri	17
+14	kivu	111
+```
+
 #### `--design-from`: the rows a fit actually scores
 
 `--design-from <fit.toml>` replaces the emit schedule as the source of a

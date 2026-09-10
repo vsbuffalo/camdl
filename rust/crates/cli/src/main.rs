@@ -1867,6 +1867,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         obs_dir: job.obs.dir_path().map(|p| p.to_string_lossy().into_owned()),
         obs_data: Vec::new(),
         obs_stream_names: Vec::new(),
+        obs_files: Vec::new(),
         obs_plans: Vec::new(),
         emit_every: emit_every.clone(),
         total_runs: 1,
@@ -2804,6 +2805,21 @@ struct ObsRow {
     value: f64,
 }
 
+/// Which file one stream's rows belong in under `--obs-dir`, and what those
+/// rows must say to be routed back to it (gh#884).
+///
+/// The loader binds one file per observation `source`. An unstratified stream
+/// is alone under its source and gets a file of its own, named for the stream.
+/// A stratified family's leaves share a source, so they share one long-format
+/// file named for that source, and each row carries the `: dim` cells that say
+/// which leaf it is — the cells the loader routes by.
+struct ObsFileKey {
+    source: String,
+    /// `(column header, level)` per declared `: dim` column; empty for an
+    /// unstratified stream.
+    dims: Vec<(String, String)>,
+}
+
 /// `RunSink` for `camdl simulate`: streams the combined wide-format
 /// trajectory TSV (replicate/scenario/draw columns gated on the grid
 /// shape) and accumulates synthetic observations for a post-loop combined
@@ -2826,6 +2842,9 @@ struct StreamSink {
     obs_dir: Option<String>,
     obs_data: Vec<Vec<ObsRow>>,
     obs_stream_names: Vec<String>,
+    /// Per stream, parallel to `obs_stream_names`: which file it belongs in,
+    /// and what its rows say to get back to it (gh#884).
+    obs_files: Vec<ObsFileKey>,
     /// Per stream, the rows `--obs` writes and the columns they go under —
     /// planned once from the stream's declaration at `run_idx == 0` and shared
     /// by every cell, which all share one obs axis (gh#833).
@@ -2941,6 +2960,10 @@ impl engine::RunSink for StreamSink {
             if run_idx == 0 {
                 for obs_model in &model.observations {
                     self.obs_stream_names.push(obs_model.name.clone());
+                    self.obs_files.push(ObsFileKey {
+                        source: obs_model.source.clone(),
+                        dims: crate::obs_emit::dim_cells(obs_model)?,
+                    });
                     self.obs_data.push(Vec::new());
                     // `model` is the cell's resolved model, so this is the
                     // cell's own horizon under a per-scenario `to` (gh#561),
@@ -3063,16 +3086,24 @@ impl StreamSink {
             eprintln!("observations written to {}", path);
         }
 
-        // --obs-dir / --obs-only-dir: one file per stream, under the columns
-        // the stream declared, so the file re-loads under its own model
-        // (gh#833, gh#830): the value under the SCORED column's name, the
-        // time under the `: time` column's name — or both window boundaries
-        // under their `window_start`/`window_stop` names, each dated when
-        // `--dates` is on.
+        // --obs-dir / --obs-only-dir: one file per observation SOURCE, under
+        // the columns the stream declared, so the file re-loads under its own
+        // model (gh#833, gh#830, gh#884): the value under the SCORED column's
+        // name, the time under the `: time` column's name — or both window
+        // boundaries under their `window_start`/`window_stop` names, each dated
+        // when `--dates` is on. A stratified family's leaves share a source, so
+        // they share one long-format file, each row carrying the `: dim` cells
+        // the loader routes by; every other stream is alone under its source
+        // and keeps a file of its own, named for the stream.
         if let Some(ref dir) = self.obs_dir {
-            for (si, name) in self.obs_stream_names.iter().enumerate() {
-                let plan = &self.obs_plans[si];
-                let path = format!("{}/{}.tsv", dir, name);
+            for group in self.obs_dir_groups() {
+                let first = group[0];
+                let plan = &self.obs_plans[first];
+                let stem = match group.len() {
+                    1 => &self.obs_stream_names[first],
+                    _ => &self.obs_files[first].source,
+                };
+                let path = format!("{}/{}.tsv", dir, stem);
                 let f = std::fs::File::create(&path)
                     .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path, e); std::process::exit(1); });
                 let mut out = std::io::BufWriter::new(f);
@@ -3095,38 +3126,68 @@ impl StreamSink {
                         if date_render.is_some() { write!(out, "\tdate_start\tdate_stop").unwrap(); }
                     }
                 }
+                for (header, _) in &self.obs_files[first].dims {
+                    write!(out, "\t{header}").unwrap();
+                }
                 writeln!(out, "\t{}", plan.scored).unwrap();
 
-                for row in &self.obs_data[si] {
-                    if multi_rep { write!(out, "{}\t", row.replicate).unwrap(); }
-                    if n_scenarios > 1 { write!(out, "{}\t", row.scenario).unwrap(); }
-                    if n_draws > 1 { write!(out, "{}\t", row.draw).unwrap(); }
-                    match (&plan.columns, row.coverage) {
-                        (crate::obs_emit::TemporalColumns::Window { .. },
-                         sim::inference::Coverage::Interval { start, stop }) => {
-                            write!(out, "{start}\t{stop}").unwrap();
-                            if date_render.is_some() {
-                                write!(out, "\t{}\t{}", render_date(start), render_date(stop)).unwrap();
+                // Row-major over the shared obs axis with the leaves
+                // interleaved: one long-format row per (row, leaf), which is
+                // the shape the loader reads a family back from.
+                for ri in 0..self.obs_data[first].len() {
+                    for &si in &group {
+                        let row = &self.obs_data[si][ri];
+                        if multi_rep { write!(out, "{}\t", row.replicate).unwrap(); }
+                        if n_scenarios > 1 { write!(out, "{}\t", row.scenario).unwrap(); }
+                        if n_draws > 1 { write!(out, "{}\t", row.draw).unwrap(); }
+                        match (&plan.columns, row.coverage) {
+                            (crate::obs_emit::TemporalColumns::Window { .. },
+                             sim::inference::Coverage::Interval { start, stop }) => {
+                                write!(out, "{start}\t{stop}").unwrap();
+                                if date_render.is_some() {
+                                    write!(out, "\t{}\t{}", render_date(start), render_date(stop)).unwrap();
+                                }
+                            }
+                            _ => {
+                                write!(out, "{}", row.time).unwrap();
+                                if date_render.is_some() {
+                                    write!(out, "\t{}", render_date(row.time)).unwrap();
+                                }
                             }
                         }
-                        _ => {
-                            write!(out, "{}", row.time).unwrap();
-                            if date_render.is_some() {
-                                write!(out, "\t{}", render_date(row.time)).unwrap();
-                            }
+                        for (_, level) in &self.obs_files[si].dims {
+                            write!(out, "\t{level}").unwrap();
                         }
-                    }
-                    let val = row.value;
-                    if val == val.round() && val.abs() < 1e15 {
-                        writeln!(out, "\t{}", val as i64).unwrap();
-                    } else {
-                        writeln!(out, "\t{:.6}", val).unwrap();
+                        let val = row.value;
+                        if val == val.round() && val.abs() < 1e15 {
+                            writeln!(out, "\t{}", val as i64).unwrap();
+                        } else {
+                            writeln!(out, "\t{:.6}", val).unwrap();
+                        }
                     }
                 }
                 drop(out);
                 eprintln!("observations written to {}", path);
             }
         }
+    }
+
+    /// The stream indices that share each `--obs-dir` file, in declaration
+    /// order: one group per observation `source` (gh#884). A source with one
+    /// stream is a group of one.
+    fn obs_dir_groups(&self) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for (si, key) in self.obs_files.iter().enumerate() {
+            match seen.iter().position(|s| *s == key.source) {
+                Some(g) => groups[g].push(si),
+                None => {
+                    seen.push(&key.source);
+                    groups.push(vec![si]);
+                }
+            }
+        }
+        groups
     }
 }
 

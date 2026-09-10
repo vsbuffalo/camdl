@@ -662,6 +662,32 @@ pub(crate) fn format_obs_value(v: f64) -> String {
     }
 }
 
+/// The `(column header, level)` cells a long-form row carries for one stratum
+/// leaf: each declared `: dim` column, filled from this leaf's own `stratum`
+/// (gh#884). Empty for an unstratified stream.
+///
+/// A stratified family shares one `source` and one long-format file, and the
+/// loader routes each row to its leaf by these values — so a file written
+/// without them cannot be read back at all, whatever else it carries.
+pub(crate) fn dim_cells(obs: &ObservationModel) -> Result<Vec<(String, String)>, String> {
+    obs.columns.iter()
+        .filter_map(|c| match &c.role {
+            ColumnRole::Dim(d) => Some((c.name.clone(), d.clone())),
+            _ => None,
+        })
+        .map(|(header, dim)| {
+            obs.stratum.iter()
+                .find(|k| k.dim == dim)
+                .map(|k| (header, k.level.clone()))
+                .ok_or_else(|| format!(
+                    "observation stream '{}' declares a `: dim` column for dimension \
+                     '{dim}' but its own stratum names no level of it, so no long-form \
+                     row could say which leaf it belongs to.",
+                    obs.name))
+        })
+        .collect()
+}
+
 /// The stream's declared temporal columns: exactly one of a `: time` column or
 /// a window pair (the compiler enforces this; the error here guards a malformed
 /// IR).

@@ -294,12 +294,12 @@ fn the_real_shaped_windowed_and_instant_streams_round_trip() {
         String::from_utf8_lossy(&out.stderr));
 }
 
-/// gh#884. The stratified family is written one file per stratum leaf, each
-/// with no `: dim` column, and the loader routes a family's rows by exactly
-/// that column — so neither file can be read back. The design-preserving
-/// writer refuses this shape by name; this writer does not.
+/// gh#884. A stratified family shares one `source` and one long-format file,
+/// and the loader routes each row to its stratum leaf by the `: dim` column's
+/// value — so the writer emits the family as that one file, dim column
+/// included, rather than as one column-less file per leaf that nothing can
+/// read back.
 #[test]
-#[ignore = "gh#884 — --obs-dir writes a stratified family unloadably"]
 fn the_real_shaped_stratified_family_round_trips() {
     let camdl = camdl_bin();
     let tmp = tempdir("real_shaped_family");
