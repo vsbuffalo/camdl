@@ -22,6 +22,7 @@ use indexmap::IndexMap;
 use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
+use crate::fit::failures::{DeterministicFailure, Site};
 use crate::posterior_draws;
 use crate::fit::method_result::{MaxRhat, PosteriorDiagnostics};
 use crate::run_meta::{FitAlgorithm, ObsSchema};
@@ -1278,12 +1279,42 @@ impl crate::engine::RunSink for PredictiveSink {
 
 // ── The verb ───────────────────────────────────────────────────────────────
 
+/// What one `fit predict` produced: the files it wrote, and what refused while
+/// it did.
+///
+/// The two are independent. A run can write a complete one-step artifact and
+/// still have a non-empty `failures` list, which is the whole point: the exit
+/// status fails closed on the failure while the object that computed is kept
+/// (proposal 2026-09-08 §3.5, §8 item 15).
+struct PredictOutcome {
+    written: Vec<PathBuf>,
+    failures: Vec<DeterministicFailure>,
+}
+
 /// `camdl fit predict` — write the free-forward posterior predictive artifact.
 pub fn cmd_fit_predict(args: &crate::args::FitPredictArgs) {
     match run_predict(args) {
-        Ok(paths) => {
-            for p in paths {
+        Ok(outcome) => {
+            for p in &outcome.written {
                 println!("wrote {}", p.display());
+            }
+            if !outcome.failures.is_empty() {
+                // What failed, then what was written — in that order, because
+                // the first is why the exit status is 1 and the second is what
+                // the reader still has.
+                eprintln!(
+                    "fit predict: {} deterministic failure(s); this predictive is incomplete:",
+                    outcome.failures.len()
+                );
+                for f in &outcome.failures {
+                    eprintln!("  ✗ {}", f.describe());
+                }
+                eprintln!(
+                    "fit predict: wrote {} file(s) anyway — every object that computed is on \
+                     disk, and `report.json` lists what did not. Exit status 1.",
+                    outcome.written.len()
+                );
+                std::process::exit(1);
             }
         }
         Err(e) => {
@@ -1340,7 +1371,7 @@ fn expand_predict_sweep(specs: &[crate::args::types::SweepSpec]) -> Vec<Vec<(Str
     cells
 }
 
-fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, String> {
+fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
     // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
     //    its segment + config.
     let crate::fit::handle::ResolvedFit { segment, config } =
@@ -1494,12 +1525,27 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     //
     // Only a genuine difference from the model horizon is refused: a preset
     // restating the run horizon is a no-op and keeps working.
-    for sref in &scenario_refs {
+    //
+    // WHERE the refusal lands depends on what this run was asked for, because
+    // the scenario overlay is a free-forward thing only — the one-step band
+    // filters the OBSERVED data through the fitted model and carries no overlay
+    // at all. When the tail is being built, this is a deterministic failure of
+    // the tail, recorded below and reported in `report.json`; when it is not
+    // (`--horizon one_step`), the scenario could never have been honoured by
+    // anything this run produces, so it is a plain usage error with no artifact
+    // to salvage.
+    let scenario_horizon_refusal: Option<String> = scenario_refs.iter().find_map(|sref| {
         crate::util::refuse_scenario_horizon(
             &model, Some(sref.name()), "fit predict",
             "the predictive replays every scenario at the model's own horizon, \
              which is one window for the whole run",
-        )?;
+        )
+        .err()
+    });
+    if let Some(reason) = &scenario_horizon_refusal {
+        if !want_free_forward {
+            return Err(reason.clone());
+        }
     }
     // Layer 1 supports param-overlay scenarios cleanly; an intervention-toggling
     // scenario (enable/disable) replays correctly through the engine — the engine
@@ -1681,6 +1727,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     let quantity_obs_anchors: Option<sim::quantity::ObsAnchorTimes> =
         sim::quantity::ObsAnchorTimes::of_times(leaf_times.iter().flatten().copied());
 
+    // What refused. Non-empty ⇒ the artifact this run writes is incomplete, the
+    // failures are named in `report.json`, and the exit status is 1 — but every
+    // object that DID compute is still written (proposal §3.5, §8 item 15).
+    let mut failures: Vec<DeterministicFailure> = Vec::new();
+
     // The rendered quantity sidecars (per logical quantity, all design cells
     // stacked) + the merged manifest, filled after the free-forward pass.
     let mut quantity_outputs: Vec<(String, String)> = Vec::new();
@@ -1719,548 +1770,590 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     // `total_runs` and the same seed, so `process_seed_for` derives identical
     // per-draw seeds — the scenarios' pre-divergence trajectories are coupled.
     if want_free_forward {
-        // A `value_at(..., last_obs)` quantity anchors to the observed-data
-        // axis; if no leaf carries any observation time the anchor is
-        // unresolvable — refuse loudly rather than silently censoring every
-        // draw (proposal 2026-08-17).
-        if let Some(eval) = quant_eval.as_deref() {
-            if eval.references_obs_anchor() && quantity_obs_anchors.is_none() {
-                return Err(format!(
-                    "quantity `{}` reads `value_at` at an observation anchor \
-                     (`last_obs` / `first_obs`, with or without an offset), but \
-                     this fit binds no observation times to anchor to.",
-                    eval.obs_anchor_quantity_names().join("`, `"),
-                ));
-            }
-        }
-        // Observed aux per leaf, in the SAME model.observations order + the same
-        // per-leaf time alignment as `leaf_times` (both cloned from the matched
-        // `LeafObs`), so `leaf_aux[si][ti]` is the survey denominator at
-        // `leaf_times[si][ti]`.
-        let leaf_aux: Vec<Vec<Vec<(String, f64)>>> = model
-            .observations
-            .iter()
-            .map(|o| {
-                leaves
-                    .iter()
-                    .find(|l| leaf_matches(o, l))
-                    .map(|l| l.aux.clone())
-                    .unwrap_or_default()
-            })
-            .collect();
-
-        // ── The free-forward emission grid (gh#696) ────────────────────────
+        // The whole free-forward tail is produced as ONE recoverable unit
+        // (proposal §3.5, §8 item 15). Every refusal inside it — a scenario
+        // window this verb cannot honour, an unresolvable observation anchor, a
+        // replay that errored — is a fact about the tail, and the one-step band
+        // below is a different object: data-conditioned, never reaching the
+        // horizon, and already complete by the time any of this runs. So the
+        // error is caught, recorded against `Site::FreeForward`, and the run
+        // carries on to write what it has; the exit status is still 1.
         //
-        // The trajectory is integrated to the model horizon — `quantities/`
-        // carries rows out there and always has. Only the emission time list
-        // was restricted to the observed times, so a scenario's projected curve
-        // in OBSERVABLE units existed inside this same run and was discarded.
-        // Past the last observation each stream continues on its own reporting
-        // cadence, over the trajectory's own snapshot grid, to the horizon.
-        //
-        // This is the FREE-FORWARD grid only. The one-step band is
-        // `p(y_t | y_{1:t-1})` — data-conditioned by definition, so it has
-        // nothing to say past the data and keeps its own observed-time axis
-        // (`one_step_bands`, untouched below).
-        //
-        // `leaf_times` itself is NOT extended: it is also the observed-data
-        // axis that `value_at(..., last_obs)` anchors to (`quantity_obs_anchors`,
-        // read above) and that the contrast reducer folds through. `last_obs`
-        // means the last OBSERVATION, not the last emitted row.
-        let horizon_output_times: Vec<f64> =
-            sim::output::output_times(&model.output.times, model.simulation.t_end);
-        let mut ff_emit_times: Vec<Vec<f64>> = leaf_times.clone();
-        // One note per logical stream, not per stratum leaf.
-        let mut noted: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (si, obs_ir) in model.observations.iter().enumerate() {
-            let times = &ff_emit_times[si];
-            if times.is_empty() {
-                continue; // stream not bound to data (or filtered out)
+        // The closure exists only to give the `?`s inside a place to land. It
+        // is called immediately, so every mutable capture is released on this
+        // statement and the error branch below can reset them.
+        let outcome = (|| -> Result<(), String> {
+            // gh#561: the scenario horizon this command cannot honour, resolved
+            // above. It blocks the tail and nothing else.
+            if let Some(reason) = &scenario_horizon_refusal {
+                return Err(reason.clone());
             }
-            let last_obs = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            // Negated `>`, not `<=`: an unresolved horizon arrives as NaN and
-            // must fall through to "no forecast window", never to "extend".
-            if !(model.simulation.t_end > last_obs) {
-                continue; // no forecast window — byte-identical to before
-            }
-            // A likelihood whose arguments read an observation data column
-            // (`binomial(n = tested)`, a person-time offset) has NO value for
-            // that column past the data: `compile_obs_sample_pf` resolves an
-            // unavailable aux to 0, so a binomial denominator becomes 0 and
-            // every forecast draw is 0. An identically-zero ribbon presented as
-            // a projection is the worst outcome available here, so the stream is
-            // omitted from the extended grid and the omission is announced —
-            // silence would read as "this model has no horizon".
-            let aux_cols = crate::pfilter::stream_aux_columns(obs_ir);
-            if !aux_cols.is_empty() {
-                if noted.insert(obs_ir.source.clone()) {
-                    eprintln!(
-                        "fit predict: stream '{}' stops at its last observation \
-                         (t = {last_obs}) even though the model horizon is {}: its \
-                         likelihood reads the observed data column(s) [{}], which \
-                         have no value past the data. Projecting it would draw \
-                         against a zero denominator and report an identically-zero \
-                         band as a forecast.\n  \
-                         Fix: to project this stream past the data, express the \
-                         denominator in the model (a parameter or a compartment \
-                         sum) rather than reading it from the data file.",
-                        obs_ir.source,
-                        model.simulation.t_end,
-                        aux_cols.join(", "),
-                    );
+            // A `value_at(..., last_obs)` quantity anchors to the observed-data
+            // axis; if no leaf carries any observation time the anchor is
+            // unresolvable — refuse loudly rather than silently censoring every
+            // draw (proposal 2026-08-17).
+            if let Some(eval) = quant_eval.as_deref() {
+                if eval.references_obs_anchor() && quantity_obs_anchors.is_none() {
+                    return Err(format!(
+                        "quantity `{}` reads `value_at` at an observation anchor \
+                         (`last_obs` / `first_obs`, with or without an offset), but \
+                         this fit binds no observation times to anchor to.",
+                        eval.obs_anchor_quantity_names().join("`, `"),
+                    ));
                 }
-                continue;
             }
-            let extension = forecast_times(times, &horizon_output_times);
-            if extension.is_empty() {
-                if noted.insert(obs_ir.source.clone()) {
-                    eprintln!(
-                        "fit predict: stream '{}' stops at its last observation \
-                         (t = {last_obs}) even though the model horizon is {}: no \
-                         trajectory output time past the data continues this \
-                         stream's observed cadence, so there is no grid to project \
-                         onto.\n  \
-                         Fix: widen `output {{ trajectories {{ ... }} }}` so the \
-                         forecast window carries output times on the stream's \
-                         reporting cadence.",
-                        obs_ir.source,
-                        model.simulation.t_end,
-                    );
-                }
-                continue;
-            }
-            ff_emit_times[si].extend(extension);
-        }
+            // Observed aux per leaf, in the SAME model.observations order + the same
+            // per-leaf time alignment as `leaf_times` (both cloned from the matched
+            // `LeafObs`), so `leaf_aux[si][ti]` is the survey denominator at
+            // `leaf_times[si][ti]`.
+            let leaf_aux: Vec<Vec<Vec<(String, f64)>>> = model
+                .observations
+                .iter()
+                .map(|o| {
+                    leaves
+                        .iter()
+                        .find(|l| leaf_matches(o, l))
+                        .map(|l| l.aux.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
 
-        // What each emitted row covers (gh#833): the observed prefix per the
-        // stream's bound declaration — the very periods the likelihood scored
-        // — and the forecast tail per the same declaration continued.
-        let leaf_coverages: Vec<Vec<(f64, sim::inference::Coverage)>> = model
-            .observations
-            .iter()
-            .enumerate()
-            .map(|(si, o)| {
-                let n_obs = leaf_times[si].len();
-                let observed = leaves.iter().find(|l| leaf_matches(o, l));
-                leaf_row_coverages(
-                    o,
-                    observed.map(|l| &l.stream_times),
-                    &ff_emit_times[si][..n_obs],
-                    &ff_emit_times[si][n_obs..],
-                    model.simulation.t_start,
-                )
-            })
-            .collect();
-
-        // ── The closing boundary of the last forecast row ──────────────────
-        //
-        // A row's value is the difference of the recorded cumulative flow at
-        // its two boundaries, so both must be recorded output times
-        // (`project_coverages`). Every boundary inside the observed record is
-        // one already — the fit scored those rows. The one that can fall off
-        // the grid is the *close* of the last forecast row, because a uniform
-        // `covers` form with a closing offset puts it past the label:
-        // `ending_on(time, 7 'days)` closes the row labelled `t` at `t + 1`,
-        // and the last forecast label sits at the horizon, so the close sits
-        // one day beyond it, where nothing was integrated. Predict integrates
-        // its own trajectories per draw, so it is predict that decides where
-        // they stop: it asks for a snapshot at that close
-        // (`required_output_times` on the job) and reports the declared
-        // horizon everywhere else. Without that snapshot the only fix left to
-        // the modeller is to move `simulate { to }` by one day, which re-keys
-        // the model and orphans the fit
-        // (2026-09-08-workflow-first-fit-config §1.5, §3.5).
-        //
-        // A windowed stream (`window_start`/`window_stop`) takes the contiguous
-        // continuation `[previous stop, label)` in `leaf_row_coverages`, so its
-        // tail closes at its label and this never fires — the list stays empty,
-        // and an empty list changes nothing about the run.
-        let mut required_output_times: Vec<f64> = Vec::new();
-        let mut extended: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for (si, obs_ir) in model.observations.iter().enumerate() {
-            let n_obs = leaf_times[si].len();
-            if ff_emit_times[si].len() <= n_obs {
-                continue; // no forecast tail — nothing past the data to close
-            }
-            // An `Instant` row reads the state at its label, which is an
-            // emitted time and therefore already on the grid.
-            let Some(&(label, sim::inference::Coverage::Interval { start, stop })) =
-                leaf_coverages[si].last()
-            else {
-                continue;
-            };
-            if horizon_output_times.iter().any(|o| (o - stop).abs() <= crate::OBS_SNAP_EPS) {
-                continue; // the schedule already records the close
-            }
-            required_output_times.push(stop);
+            // ── The free-forward emission grid (gh#696) ────────────────────────
+            //
+            // The trajectory is integrated to the model horizon — `quantities/`
+            // carries rows out there and always has. Only the emission time list
+            // was restricted to the observed times, so a scenario's projected curve
+            // in OBSERVABLE units existed inside this same run and was discarded.
+            // Past the last observation each stream continues on its own reporting
+            // cadence, over the trajectory's own snapshot grid, to the horizon.
+            //
+            // This is the FREE-FORWARD grid only. The one-step band is
+            // `p(y_t | y_{1:t-1})` — data-conditioned by definition, so it has
+            // nothing to say past the data and keeps its own observed-time axis
+            // (`one_step_bands`, untouched below).
+            //
+            // `leaf_times` itself is NOT extended: it is also the observed-data
+            // axis that `value_at(..., last_obs)` anchors to (`quantity_obs_anchors`,
+            // read above) and that the contrast reducer folds through. `last_obs`
+            // means the last OBSERVATION, not the last emitted row.
+            let horizon_output_times: Vec<f64> =
+                sim::output::output_times(&model.output.times, model.simulation.t_end);
+            let mut ff_emit_times: Vec<Vec<f64>> = leaf_times.clone();
             // One note per logical stream, not per stratum leaf.
-            if extended.insert(obs_ir.source.clone()) {
-                eprintln!(
-                    "fit predict: stream '{}': the last forecast row (t = {label}) \
-                     covers [{start}, {stop}) under its `covers` declaration, \
-                     which closes past the declared horizon t = {}. Integrating \
-                     to t = {stop} and recording a snapshot there, so the row's \
-                     closing cumulative flow can be read; `simulate {{ to }}` \
-                     keeps its declared value and the fit is unchanged.",
-                    obs_ir.source,
-                    model.simulation.t_end,
-                );
-            }
-        }
-        required_output_times.sort_by(f64::total_cmp);
-        required_output_times.dedup();
-
-        // The free-forward cells (one per sweep-point × scenario, engine canonical
-        // order), plus the stacked quantity files — accumulated across the whole
-        // sweep grid, since one design cell is a (sweep point, scenario) pair and
-        // the sink is rebuilt per sweep point.
-        let mut ff_cells: Vec<FreeForwardCell> = Vec::new();
-        let mut stacked = crate::quantity_output::StackedQuantities::new(
-            crate::quantity_output::Mode::Banded,
-        );
-
-        // ── Honor --n-draws on free-forward: an even, deterministic subsample of
-        // the whole posterior cloud (gh#387). Without it the free-forward path
-        // replays EVERY draw single-threaded, so a long-burn-in ODE fit
-        // (thousands of ~seconds-each solves) never finishes and no artifact is
-        // written. Same knob + default + strided pick the one-step horizon uses,
-        // so both horizons subsample identically. Computed ONCE — the subsample
-        // is scenario/sweep-independent.
-        let ff_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
-        let ff_idx = subsample_indices(posterior.n_draws(), ff_cap);
-        let ff_draws: Vec<&IndexMap<String, f64>> =
-            ff_idx.iter().map(|&i| &posterior.draws()[i]).collect();
-        ff_n_draws = ff_draws.len();
-        // The chain behind each replayed draw, picked by the *same* indices as the
-        // draws themselves — the partition the per-row R̂ reduces over (gh#794).
-        // Every entry is `None` when the cloud's `draws.tsv` has no chain column,
-        // and the per-row columns are then empty rather than invented.
-        let ff_chain_of_point: Vec<Option<usize>> = match posterior.keys() {
-            Some(k) => ff_idx.iter().map(|&i| k.per_draw[i].map(|(c, _)| c)).collect(),
-            None => vec![None; ff_idx.len()],
-        };
-        for c in ff_chain_of_point.iter().flatten() {
-            *ff_draws_per_chain.entry(*c).or_insert(0) += 1;
-        }
-        if ff_chain_of_point.iter().all(Option::is_none) {
-            eprintln!(
-                "fit predict: this fit's draws.tsv carries no chain column, so the \
-                 per-row convergence columns (rhat_mean / ess_mean / rhat_pred / \
-                 ess_pred) are left empty — a between-chain statistic needs to know \
-                 which chain each draw came from."
-            );
-            if args.by_chain {
-                eprintln!(
-                    "fit predict: --by-chain has nothing to split on for the same \
-                     reason, so no `chain` column is written and the file carries \
-                     the pooled band only."
-                );
-            }
-        }
-        if ff_n_draws < posterior.n_draws() {
-            eprintln!(
-                "fit predict: free_forward horizon — subsampling {ff_n_draws} of {} \
-                 posterior draws (raise with --n-draws)",
-                posterior.n_draws()
-            );
-        }
-
-        // ── The conditioned read for in-window quantities (gh#722) ─────────
-        //
-        // A `value_at` anchored at or before `last_obs` is a retrospective
-        // estimand: the observations covering it are what answers it, so it is
-        // folded over the draw's saved smoothing path `p(x | y, θ)` rather than
-        // over a fresh unconditioned replay from `init {}`. Classified per
-        // QUANTITY, once, so a band is never a mixture of two objects.
-        let quant_paths: Vec<sim::quantity::QuantityPath> = quant_eval
-            .as_deref()
-            .map(|e| e.eval_paths(quantity_obs_anchors))
-            .unwrap_or_default();
-        let any_smoothed =
-            quant_paths.iter().any(|p| *p == sim::quantity::QuantityPath::Smoothed);
-        // Named, not silent: an `observations.<stream>` reduction anchored
-        // inside the record has the same defect, and no saved path carries a
-        // y_sim draw to fix it with.
-        if let Some(eval) = quant_eval.as_deref() {
-            let unconditioned = eval.quantity_names_on(
-                sim::quantity::QuantityPath::ReplayUnconditioned,
-                quantity_obs_anchors,
-            );
-            if !unconditioned.is_empty() {
-                eprintln!(
-                    "fit predict: quantity `{}` reduces `observations.<stream>` at an \
-                     anchor inside the observed record, and is reported on the \
-                     free-forward replay. The saved smoothing path carries the \
-                     conditioned projection (`inc_<stream>`, a mean), not a draw from \
-                     it, so there is nothing conditioned to sample the observation \
-                     from (gh#722).\n  \
-                     Fix: express the quantity over latent state \
-                     (`value_at(<state expr>, last_obs)`), which IS read on the \
-                     smoothing path.",
-                    unconditioned.join("`, `"),
-                );
-            }
-        }
-        // The saved subset is resolved only when a quantity needs it — the scan
-        // reads every `chain_*/trajectories.tsv`, and a predict with no
-        // in-window `value_at` must not pay for it.
-        let ff_saved: Option<SavedPaths> = if any_smoothed {
-            posterior.keys().map(|k| {
-                let saved = k.resolve_saved();
-                SavedPaths {
-                    stage_dir: saved.stage_dir,
-                    per_draw: ff_idx.iter().map(|&i| saved.per_draw[i]).collect(),
-                    n_saved: ff_idx.iter().filter(|&&i| saved.per_draw[i].is_some()).count(),
+            let mut noted: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (si, obs_ir) in model.observations.iter().enumerate() {
+                let times = &ff_emit_times[si];
+                if times.is_empty() {
+                    continue; // stream not bound to data (or filtered out)
                 }
-            })
-        } else {
-            None
-        };
-        // The scenario whose cells read conditioned: the no-overlay `fitted`
-        // arm only, and only when no `--enable`/`--disable` rides on it (that
-        // makes it a counterfactual too).
-        let conditioned_scenario: Option<String> =
-            if args.enable.is_empty() && args.disable.is_empty() {
-                Some(crate::args::FITTED.to_string())
+                let last_obs = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                // Negated `>`, not `<=`: an unresolved horizon arrives as NaN and
+                // must fall through to "no forecast window", never to "extend".
+                if !(model.simulation.t_end > last_obs) {
+                    continue; // no forecast window — byte-identical to before
+                }
+                // A likelihood whose arguments read an observation data column
+                // (`binomial(n = tested)`, a person-time offset) has NO value for
+                // that column past the data: `compile_obs_sample_pf` resolves an
+                // unavailable aux to 0, so a binomial denominator becomes 0 and
+                // every forecast draw is 0. An identically-zero ribbon presented as
+                // a projection is the worst outcome available here, so the stream is
+                // omitted from the extended grid and the omission is announced —
+                // silence would read as "this model has no horizon".
+                let aux_cols = crate::pfilter::stream_aux_columns(obs_ir);
+                if !aux_cols.is_empty() {
+                    if noted.insert(obs_ir.source.clone()) {
+                        eprintln!(
+                            "fit predict: stream '{}' stops at its last observation \
+                             (t = {last_obs}) even though the model horizon is {}: its \
+                             likelihood reads the observed data column(s) [{}], which \
+                             have no value past the data. Projecting it would draw \
+                             against a zero denominator and report an identically-zero \
+                             band as a forecast.\n  \
+                             Fix: to project this stream past the data, express the \
+                             denominator in the model (a parameter or a compartment \
+                             sum) rather than reading it from the data file.",
+                            obs_ir.source,
+                            model.simulation.t_end,
+                            aux_cols.join(", "),
+                        );
+                    }
+                    continue;
+                }
+                let extension = forecast_times(times, &horizon_output_times);
+                if extension.is_empty() {
+                    if noted.insert(obs_ir.source.clone()) {
+                        eprintln!(
+                            "fit predict: stream '{}' stops at its last observation \
+                             (t = {last_obs}) even though the model horizon is {}: no \
+                             trajectory output time past the data continues this \
+                             stream's observed cadence, so there is no grid to project \
+                             onto.\n  \
+                             Fix: widen `output {{ trajectories {{ ... }} }}` so the \
+                             forecast window carries output times on the stream's \
+                             reporting cadence.",
+                            obs_ir.source,
+                            model.simulation.t_end,
+                        );
+                    }
+                    continue;
+                }
+                ff_emit_times[si].extend(extension);
+            }
+
+            // What each emitted row covers (gh#833): the observed prefix per the
+            // stream's bound declaration — the very periods the likelihood scored
+            // — and the forecast tail per the same declaration continued.
+            let leaf_coverages: Vec<Vec<(f64, sim::inference::Coverage)>> = model
+                .observations
+                .iter()
+                .enumerate()
+                .map(|(si, o)| {
+                    let n_obs = leaf_times[si].len();
+                    let observed = leaves.iter().find(|l| leaf_matches(o, l));
+                    leaf_row_coverages(
+                        o,
+                        observed.map(|l| &l.stream_times),
+                        &ff_emit_times[si][..n_obs],
+                        &ff_emit_times[si][n_obs..],
+                        model.simulation.t_start,
+                    )
+                })
+                .collect();
+
+            // ── The closing boundary of the last forecast row ──────────────────
+            //
+            // A row's value is the difference of the recorded cumulative flow at
+            // its two boundaries, so both must be recorded output times
+            // (`project_coverages`). Every boundary inside the observed record is
+            // one already — the fit scored those rows. The one that can fall off
+            // the grid is the *close* of the last forecast row, because a uniform
+            // `covers` form with a closing offset puts it past the label:
+            // `ending_on(time, 7 'days)` closes the row labelled `t` at `t + 1`,
+            // and the last forecast label sits at the horizon, so the close sits
+            // one day beyond it, where nothing was integrated. Predict integrates
+            // its own trajectories per draw, so it is predict that decides where
+            // they stop: it asks for a snapshot at that close
+            // (`required_output_times` on the job) and reports the declared
+            // horizon everywhere else. Without that snapshot the only fix left to
+            // the modeller is to move `simulate { to }` by one day, which re-keys
+            // the model and orphans the fit
+            // (2026-09-08-workflow-first-fit-config §1.5, §3.5).
+            //
+            // A windowed stream (`window_start`/`window_stop`) takes the contiguous
+            // continuation `[previous stop, label)` in `leaf_row_coverages`, so its
+            // tail closes at its label and this never fires — the list stays empty,
+            // and an empty list changes nothing about the run.
+            let mut required_output_times: Vec<f64> = Vec::new();
+            let mut extended: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for (si, obs_ir) in model.observations.iter().enumerate() {
+                let n_obs = leaf_times[si].len();
+                if ff_emit_times[si].len() <= n_obs {
+                    continue; // no forecast tail — nothing past the data to close
+                }
+                // An `Instant` row reads the state at its label, which is an
+                // emitted time and therefore already on the grid.
+                let Some(&(label, sim::inference::Coverage::Interval { start, stop })) =
+                    leaf_coverages[si].last()
+                else {
+                    continue;
+                };
+                if horizon_output_times.iter().any(|o| (o - stop).abs() <= crate::OBS_SNAP_EPS) {
+                    continue; // the schedule already records the close
+                }
+                required_output_times.push(stop);
+                // One note per logical stream, not per stratum leaf.
+                if extended.insert(obs_ir.source.clone()) {
+                    eprintln!(
+                        "fit predict: stream '{}': the last forecast row (t = {label}) \
+                         covers [{start}, {stop}) under its `covers` declaration, \
+                         which closes past the declared horizon t = {}. Integrating \
+                         to t = {stop} and recording a snapshot there, so the row's \
+                         closing cumulative flow can be read; `simulate {{ to }}` \
+                         keeps its declared value and the fit is unchanged.",
+                        obs_ir.source,
+                        model.simulation.t_end,
+                    );
+                }
+            }
+            required_output_times.sort_by(f64::total_cmp);
+            required_output_times.dedup();
+
+            // The free-forward cells (one per sweep-point × scenario, engine canonical
+            // order), plus the stacked quantity files — accumulated across the whole
+            // sweep grid, since one design cell is a (sweep point, scenario) pair and
+            // the sink is rebuilt per sweep point.
+            let mut ff_cells: Vec<FreeForwardCell> = Vec::new();
+            let mut stacked = crate::quantity_output::StackedQuantities::new(
+                crate::quantity_output::Mode::Banded,
+            );
+
+            // ── Honor --n-draws on free-forward: an even, deterministic subsample of
+            // the whole posterior cloud (gh#387). Without it the free-forward path
+            // replays EVERY draw single-threaded, so a long-burn-in ODE fit
+            // (thousands of ~seconds-each solves) never finishes and no artifact is
+            // written. Same knob + default + strided pick the one-step horizon uses,
+            // so both horizons subsample identically. Computed ONCE — the subsample
+            // is scenario/sweep-independent.
+            let ff_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
+            let ff_idx = subsample_indices(posterior.n_draws(), ff_cap);
+            let ff_draws: Vec<&IndexMap<String, f64>> =
+                ff_idx.iter().map(|&i| &posterior.draws()[i]).collect();
+            ff_n_draws = ff_draws.len();
+            // The chain behind each replayed draw, picked by the *same* indices as the
+            // draws themselves — the partition the per-row R̂ reduces over (gh#794).
+            // Every entry is `None` when the cloud's `draws.tsv` has no chain column,
+            // and the per-row columns are then empty rather than invented.
+            let ff_chain_of_point: Vec<Option<usize>> = match posterior.keys() {
+                Some(k) => ff_idx.iter().map(|&i| k.per_draw[i].map(|(c, _)| c)).collect(),
+                None => vec![None; ff_idx.len()],
+            };
+            for c in ff_chain_of_point.iter().flatten() {
+                *ff_draws_per_chain.entry(*c).or_insert(0) += 1;
+            }
+            if ff_chain_of_point.iter().all(Option::is_none) {
+                eprintln!(
+                    "fit predict: this fit's draws.tsv carries no chain column, so the \
+                     per-row convergence columns (rhat_mean / ess_mean / rhat_pred / \
+                     ess_pred) are left empty — a between-chain statistic needs to know \
+                     which chain each draw came from."
+                );
+                if args.by_chain {
+                    eprintln!(
+                        "fit predict: --by-chain has nothing to split on for the same \
+                         reason, so no `chain` column is written and the file carries \
+                         the pooled band only."
+                    );
+                }
+            }
+            if ff_n_draws < posterior.n_draws() {
+                eprintln!(
+                    "fit predict: free_forward horizon — subsampling {ff_n_draws} of {} \
+                     posterior draws (raise with --n-draws)",
+                    posterior.n_draws()
+                );
+            }
+
+            // ── The conditioned read for in-window quantities (gh#722) ─────────
+            //
+            // A `value_at` anchored at or before `last_obs` is a retrospective
+            // estimand: the observations covering it are what answers it, so it is
+            // folded over the draw's saved smoothing path `p(x | y, θ)` rather than
+            // over a fresh unconditioned replay from `init {}`. Classified per
+            // QUANTITY, once, so a band is never a mixture of two objects.
+            let quant_paths: Vec<sim::quantity::QuantityPath> = quant_eval
+                .as_deref()
+                .map(|e| e.eval_paths(quantity_obs_anchors))
+                .unwrap_or_default();
+            let any_smoothed =
+                quant_paths.iter().any(|p| *p == sim::quantity::QuantityPath::Smoothed);
+            // Named, not silent: an `observations.<stream>` reduction anchored
+            // inside the record has the same defect, and no saved path carries a
+            // y_sim draw to fix it with.
+            if let Some(eval) = quant_eval.as_deref() {
+                let unconditioned = eval.quantity_names_on(
+                    sim::quantity::QuantityPath::ReplayUnconditioned,
+                    quantity_obs_anchors,
+                );
+                if !unconditioned.is_empty() {
+                    eprintln!(
+                        "fit predict: quantity `{}` reduces `observations.<stream>` at an \
+                         anchor inside the observed record, and is reported on the \
+                         free-forward replay. The saved smoothing path carries the \
+                         conditioned projection (`inc_<stream>`, a mean), not a draw from \
+                         it, so there is nothing conditioned to sample the observation \
+                         from (gh#722).\n  \
+                         Fix: express the quantity over latent state \
+                         (`value_at(<state expr>, last_obs)`), which IS read on the \
+                         smoothing path.",
+                        unconditioned.join("`, `"),
+                    );
+                }
+            }
+            // The saved subset is resolved only when a quantity needs it — the scan
+            // reads every `chain_*/trajectories.tsv`, and a predict with no
+            // in-window `value_at` must not pay for it.
+            let ff_saved: Option<SavedPaths> = if any_smoothed {
+                posterior.keys().map(|k| {
+                    let saved = k.resolve_saved();
+                    SavedPaths {
+                        stage_dir: saved.stage_dir,
+                        per_draw: ff_idx.iter().map(|&i| saved.per_draw[i]).collect(),
+                        n_saved: ff_idx.iter().filter(|&&i| saved.per_draw[i].is_some()).count(),
+                    }
+                })
             } else {
                 None
             };
-        if any_smoothed {
-            let names = quant_eval
-                .as_deref()
-                .map(|e| {
-                    e.quantity_names_on(
-                        sim::quantity::QuantityPath::Smoothed,
-                        quantity_obs_anchors,
-                    )
-                    .join("`, `")
-                })
-                .unwrap_or_default();
-            match (&ff_saved, &conditioned_scenario) {
-                (Some(s), Some(_)) if s.n_saved > 0 => {
-                    eprintln!(
-                        "fit predict: quantity `{names}` is anchored at or before \
-                         last_obs — reported on the conditioned smoothing path \
-                         p(x|y), not on the free-forward replay (gh#722). \
-                         {}/{} replayed draws have a saved path; the other {} are \
-                         censored for these quantities, never substituted from the \
-                         replay.",
-                        s.n_saved,
-                        ff_n_draws,
-                        ff_n_draws - s.n_saved,
-                    );
-                }
-                (_, None) => {
-                    eprintln!(
-                        "fit predict: quantity `{names}` is anchored at or before \
-                         last_obs, but `--enable`/`--disable` makes every arm of this \
-                         run a counterfactual, for which no conditioned path exists. \
-                         They are reported on the free-forward replay, which ignores \
-                         the observations they are anchored inside (gh#722)."
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "fit predict: quantity `{names}` is anchored at or before \
-                         last_obs, but this fit saved no latent path for any replayed \
-                         draw — there is nothing conditioned to read them on. They are \
-                         reported as fully censored rather than taken from the \
-                         free-forward replay, which ignores every observation they are \
-                         anchored inside (gh#722).\n  \
-                         Fix: re-fit with `n_trajectories` set on the posterior stage \
-                         (PGAS/PMMH save the smoothing paths), then re-run \
-                         `fit predict`."
-                    );
-                }
-            }
-        }
-        // A counterfactual arm keeps the replay, and says so once — its rows sit
-        // in the same file as the fitted arm's, under a `scenario` column, so a
-        // reader comparing them must know they are two different objects.
-        if any_smoothed && scenario_refs.iter().any(|s| s.name() != crate::args::FITTED) {
-            eprintln!(
-                "fit predict: the scenario arms report their anchored quantities on \
-                 their OWN free-forward replay — the smoothing path was inferred under \
-                 the fitted model, and the data a counterfactual would have generated \
-                 do not exist. `quantities.json` tags each entry with `evaluated_on`."
-            );
-        }
-        // Fan the (draws × scenarios) replay grid across Rayon. The engine seeds
-        // each cell by its planned `point_idx`/`rep` (`process_seed_for`),
-        // independent of execution order, so parallelism never perturbs a
-        // trajectory (engine.rs) — the bands are byte-identical to a sequential
-        // replay of the same subsample. `fit predict` has no thread-budget flag,
-        // so default to the machine width; `RAYON_NUM_THREADS` still caps the
-        // global pool.
-        let ff_parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-
-        for sweep_pt in &sweep_points {
-            // A FRESH sink per sweep-point keeps the sink scenario-keyed (no sink
-            // rewrite); the sweep axis lives in this loop, not the sink. The
-            // evaluator is shared via the `Arc` clone.
-            //
-            // A sweep point OVERRIDES a parameter, so its cells replay a
-            // different model than the one the smoothing path was inferred
-            // under: only the un-swept design cell reads conditioned (gh#722).
-            let conditioned = match (&ff_saved, &conditioned_scenario) {
-                (Some(saved), Some(scenario))
-                    if conditioned_here(&ff_saved, &conditioned_scenario, sweep_pt, scenario) =>
-                {
-                    Some(ConditionedSource::load(
-                        scenario.clone(),
-                        saved.per_draw.clone(),
-                        &saved.stage_dir,
-                        &model,
-                    )?)
-                }
-                _ => None,
-            };
-            let mut sink = PredictiveSink {
-                compiled: compiled.clone(),
-                quantity_t_end: model.simulation.t_end,
-                leaf_times: ff_emit_times.clone(),
-                leaf_aux: leaf_aux.clone(),
-                leaf_coverages: leaf_coverages.clone(),
-                quant_eval: quant_eval.clone(),
-                obs_anchors: quantity_obs_anchors,
-                conditioned,
-                chain_of_point: ff_chain_of_point.clone(),
-                by_scenario: IndexMap::new(),
-            };
-
-            for sref in &scenario_refs {
-                // Draw rows for this sweep cell: each posterior draw with the swept
-                // parameters OVERWRITTEN to this cell's grid values (the draw
-                // supplies every other parameter). The swept value lands in the
-                // SAME draw/sweep tier as the draw (`point_overrides`), so the
-                // resolver applies the scenario's `set`/`scale`/`enable`/`disable`
-                // ON TOP — exactly once — and a scenario still wins over the sweep.
-                // No per-draw folding of `set`/`scale` (that would double-apply).
-                let rows: Vec<IndexMap<String, f64>> = ff_draws
-                    .iter()
-                    .map(|d| {
-                        let mut r = (*d).clone();
-                        for (name, val) in sweep_pt {
-                            r.insert(name.clone(), *val);
-                        }
-                        r
+            // The scenario whose cells read conditioned: the no-overlay `fitted`
+            // arm only, and only when no `--enable`/`--disable` rides on it (that
+            // makes it a counterfactual too).
+            let conditioned_scenario: Option<String> =
+                if args.enable.is_empty() && args.disable.is_empty() {
+                    Some(crate::args::FITTED.to_string())
+                } else {
+                    None
+                };
+            if any_smoothed {
+                let names = quant_eval
+                    .as_deref()
+                    .map(|e| {
+                        e.quantity_names_on(
+                            sim::quantity::QuantityPath::Smoothed,
+                            quantity_obs_anchors,
+                        )
+                        .join("`, `")
                     })
-                    .collect();
-                let job = crate::sim_job::SimulateJob {
-                    model: compiled_ir.clone(),
-                    params_files: vec![],
-                    // Replay on the SAME forward simulator the fit used
-                    // (chain_binomial / ode), resolved from the stage — never a
-                    // hardcoded default.
-                    backend: posterior.backend,
-                    dt,
-                    integrator: None,
-                    // Generated posterior draws (not a user-authored file), so a
-                    // scenario simply wins over a draw/sweep column — no collision
-                    // error (the scenario×sweep guard above already rejected a
-                    // same-parameter clash).
-                    source: crate::sim_job::ParamSource::Draws {
-                        rows,
-                        replicates: 1,
-                        explicit_file: None,
-                    },
-                    // The original scenario reference drives the engine's scenario
-                    // tier; the scenario NAME is carried for the sink's per-scenario
-                    // partition (`cell.spec.scenario.name()`).
-                    scenarios: vec![sref.clone()],
-                    // gh#626: the predictive window comes from the data.
-                    t_end_override: None,
-                    // The forecast rows' closing boundaries, so the
-                    // projection finds a recorded snapshot at each. Empty
-                    // unless a declared period closes off the recorded grid,
-                    // and an empty list leaves the run untouched.
-                    required_output_times: required_output_times.clone(),
-                    // gh#641: the predictive replays from the model's init {} at
-                    // each posterior draw; a filtered-state restart is a
-                    // `simulate --init-state` surface, not a `fit predict` one.
-                    init_state: None,
-                    // gh#616: the engine re-loads the model from the ARCHIVED IR
-                    // path per cell, which still carries the unresolved anchors —
-                    // so the resolved window has to travel with the job, not just
-                    // live in the copy predict substituted above. Same window,
-                    // so the per-cell model matches the one this command
-                    // validated.
-                    obs_anchors: resolved_obs_anchors,
-                    seeds: crate::sim_job::Seeds::Single(seed),
-                    cli_overrides: vec![],
-                    set_vec_entries: vec![],
-                    table_files: vec![],
-                    obs: crate::sim_job::ObsOutput::None,
-                    parallel: ff_parallel,
-                };
-                crate::engine::run_job(&job, &mut sink)?;
-            }
-
-            // Per (this sweep-point × scenario): band the predictive samples +
-            // (if present) the quantity draws, stacking quantity rows for every
-            // design cell under one header per logical quantity and merging the
-            // manifests. Scenario order = the sink's insertion order (engine
-            // canonical order, scenario outermost).
-            for (scenario_name, accum) in &sink.by_scenario {
-                let coords = crate::quantity_output::DesignCoords {
-                    scenario: Some(scenario_name),
-                    sweep: sweep_pt,
-                };
-                if !model.quantities.is_empty() {
-                    // One design cell = this (sweep point, scenario). The shared
-                    // stacker owns the header-drop and the manifest merge.
-                    // gh#722: a scenario cell folded the replay for EVERY
-                    // quantity, so its manifest entries must say `replay` —
-                    // the routing tag is per design cell, not per model.
-                    let cell_paths: Vec<sim::quantity::QuantityPath> =
-                        if conditioned_here(&ff_saved, &conditioned_scenario, sweep_pt, scenario_name)
-                        {
-                            quant_paths.clone()
-                        } else {
-                            quant_paths
-                                .iter()
-                                .map(|p| match p {
-                                    sim::quantity::QuantityPath::Smoothed => {
-                                        sim::quantity::QuantityPath::Replay
-                                    }
-                                    other => *other,
-                                })
-                                .collect()
-                        };
-                    stacked.push_group(
-                        &model.quantities,
-                        coords,
-                        &accum.quant_draws,
-                        &accum.quant_times,
-                        Some(crate::quantity_output::EvaluatedOn {
-                            paths: &cell_paths,
-                            n_conditioned: accum.n_conditioned,
-                        }),
-                        // The same chain partition the predictive rows reduce
-                        // over, so a `quantities/` row and a `predictive/` row
-                        // from one fit describe the same chains (gh#794).
-                        Some(&accum.draw_chain),
-                        &calendar,
-                    )?;
+                    .unwrap_or_default();
+                match (&ff_saved, &conditioned_scenario) {
+                    (Some(s), Some(_)) if s.n_saved > 0 => {
+                        eprintln!(
+                            "fit predict: quantity `{names}` is anchored at or before \
+                             last_obs — reported on the conditioned smoothing path \
+                             p(x|y), not on the free-forward replay (gh#722). \
+                             {}/{} replayed draws have a saved path; the other {} are \
+                             censored for these quantities, never substituted from the \
+                             replay.",
+                            s.n_saved,
+                            ff_n_draws,
+                            ff_n_draws - s.n_saved,
+                        );
+                    }
+                    (_, None) => {
+                        eprintln!(
+                            "fit predict: quantity `{names}` is anchored at or before \
+                             last_obs, but `--enable`/`--disable` makes every arm of this \
+                             run a counterfactual, for which no conditioned path exists. \
+                             They are reported on the free-forward replay, which ignores \
+                             the observations they are anchored inside (gh#722)."
+                        );
+                    }
+                    _ => {
+                        eprintln!(
+                            "fit predict: quantity `{names}` is anchored at or before \
+                             last_obs, but this fit saved no latent path for any replayed \
+                             draw — there is nothing conditioned to read them on. They are \
+                             reported as fully censored rather than taken from the \
+                             free-forward replay, which ignores every observation they are \
+                             anchored inside (gh#722).\n  \
+                             Fix: re-fit with `n_trajectories` set on the posterior stage \
+                             (PGAS/PMMH save the smoothing paths), then re-run \
+                             `fit predict`."
+                        );
+                    }
                 }
-                ff_cells.push(FreeForwardCell {
-                    sweep: sweep_pt.clone(),
-                    scenario: scenario_name.clone(),
-                    bands: assemble_predictive(
-                        &model, accum, &ff_emit_times, &leaves, schema.as_ref(),
-                        args.by_chain,
-                    )?,
-                });
             }
-        }
+            // A counterfactual arm keeps the replay, and says so once — its rows sit
+            // in the same file as the fitted arm's, under a `scenario` column, so a
+            // reader comparing them must know they are two different objects.
+            if any_smoothed && scenario_refs.iter().any(|s| s.name() != crate::args::FITTED) {
+                eprintln!(
+                    "fit predict: the scenario arms report their anchored quantities on \
+                     their OWN free-forward replay — the smoothing path was inferred under \
+                     the fitted model, and the data a counterfactual would have generated \
+                     do not exist. `quantities.json` tags each entry with `evaluated_on`."
+                );
+            }
+            // Fan the (draws × scenarios) replay grid across Rayon. The engine seeds
+            // each cell by its planned `point_idx`/`rep` (`process_seed_for`),
+            // independent of execution order, so parallelism never perturbs a
+            // trajectory (engine.rs) — the bands are byte-identical to a sequential
+            // replay of the same subsample. `fit predict` has no thread-budget flag,
+            // so default to the machine width; `RAYON_NUM_THREADS` still caps the
+            // global pool.
+            let ff_parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
-        if !stacked.is_empty() {
-            let (outs, manifest) = stacked.finish(&calendar)?;
-            quantity_outputs = outs;
-            quantity_manifest = Some(manifest);
+            for sweep_pt in &sweep_points {
+                // A FRESH sink per sweep-point keeps the sink scenario-keyed (no sink
+                // rewrite); the sweep axis lives in this loop, not the sink. The
+                // evaluator is shared via the `Arc` clone.
+                //
+                // A sweep point OVERRIDES a parameter, so its cells replay a
+                // different model than the one the smoothing path was inferred
+                // under: only the un-swept design cell reads conditioned (gh#722).
+                let conditioned = match (&ff_saved, &conditioned_scenario) {
+                    (Some(saved), Some(scenario))
+                        if conditioned_here(&ff_saved, &conditioned_scenario, sweep_pt, scenario) =>
+                    {
+                        Some(ConditionedSource::load(
+                            scenario.clone(),
+                            saved.per_draw.clone(),
+                            &saved.stage_dir,
+                            &model,
+                        )?)
+                    }
+                    _ => None,
+                };
+                let mut sink = PredictiveSink {
+                    compiled: compiled.clone(),
+                    quantity_t_end: model.simulation.t_end,
+                    leaf_times: ff_emit_times.clone(),
+                    leaf_aux: leaf_aux.clone(),
+                    leaf_coverages: leaf_coverages.clone(),
+                    quant_eval: quant_eval.clone(),
+                    obs_anchors: quantity_obs_anchors,
+                    conditioned,
+                    chain_of_point: ff_chain_of_point.clone(),
+                    by_scenario: IndexMap::new(),
+                };
+
+                for sref in &scenario_refs {
+                    // Draw rows for this sweep cell: each posterior draw with the swept
+                    // parameters OVERWRITTEN to this cell's grid values (the draw
+                    // supplies every other parameter). The swept value lands in the
+                    // SAME draw/sweep tier as the draw (`point_overrides`), so the
+                    // resolver applies the scenario's `set`/`scale`/`enable`/`disable`
+                    // ON TOP — exactly once — and a scenario still wins over the sweep.
+                    // No per-draw folding of `set`/`scale` (that would double-apply).
+                    let rows: Vec<IndexMap<String, f64>> = ff_draws
+                        .iter()
+                        .map(|d| {
+                            let mut r = (*d).clone();
+                            for (name, val) in sweep_pt {
+                                r.insert(name.clone(), *val);
+                            }
+                            r
+                        })
+                        .collect();
+                    let job = crate::sim_job::SimulateJob {
+                        model: compiled_ir.clone(),
+                        params_files: vec![],
+                        // Replay on the SAME forward simulator the fit used
+                        // (chain_binomial / ode), resolved from the stage — never a
+                        // hardcoded default.
+                        backend: posterior.backend,
+                        dt,
+                        integrator: None,
+                        // Generated posterior draws (not a user-authored file), so a
+                        // scenario simply wins over a draw/sweep column — no collision
+                        // error (the scenario×sweep guard above already rejected a
+                        // same-parameter clash).
+                        source: crate::sim_job::ParamSource::Draws {
+                            rows,
+                            replicates: 1,
+                            explicit_file: None,
+                        },
+                        // The original scenario reference drives the engine's scenario
+                        // tier; the scenario NAME is carried for the sink's per-scenario
+                        // partition (`cell.spec.scenario.name()`).
+                        scenarios: vec![sref.clone()],
+                        // gh#626: the predictive window comes from the data.
+                        t_end_override: None,
+                        // The forecast rows' closing boundaries, so the
+                        // projection finds a recorded snapshot at each. Empty
+                        // unless a declared period closes off the recorded grid,
+                        // and an empty list leaves the run untouched.
+                        required_output_times: required_output_times.clone(),
+                        // gh#641: the predictive replays from the model's init {} at
+                        // each posterior draw; a filtered-state restart is a
+                        // `simulate --init-state` surface, not a `fit predict` one.
+                        init_state: None,
+                        // gh#616: the engine re-loads the model from the ARCHIVED IR
+                        // path per cell, which still carries the unresolved anchors —
+                        // so the resolved window has to travel with the job, not just
+                        // live in the copy predict substituted above. Same window,
+                        // so the per-cell model matches the one this command
+                        // validated.
+                        obs_anchors: resolved_obs_anchors,
+                        seeds: crate::sim_job::Seeds::Single(seed),
+                        cli_overrides: vec![],
+                        set_vec_entries: vec![],
+                        table_files: vec![],
+                        obs: crate::sim_job::ObsOutput::None,
+                        parallel: ff_parallel,
+                    };
+                    crate::engine::run_job(&job, &mut sink)?;
+                }
+
+                // Per (this sweep-point × scenario): band the predictive samples +
+                // (if present) the quantity draws, stacking quantity rows for every
+                // design cell under one header per logical quantity and merging the
+                // manifests. Scenario order = the sink's insertion order (engine
+                // canonical order, scenario outermost).
+                for (scenario_name, accum) in &sink.by_scenario {
+                    let coords = crate::quantity_output::DesignCoords {
+                        scenario: Some(scenario_name),
+                        sweep: sweep_pt,
+                    };
+                    if !model.quantities.is_empty() {
+                        // One design cell = this (sweep point, scenario). The shared
+                        // stacker owns the header-drop and the manifest merge.
+                        // gh#722: a scenario cell folded the replay for EVERY
+                        // quantity, so its manifest entries must say `replay` —
+                        // the routing tag is per design cell, not per model.
+                        let cell_paths: Vec<sim::quantity::QuantityPath> =
+                            if conditioned_here(&ff_saved, &conditioned_scenario, sweep_pt, scenario_name)
+                            {
+                                quant_paths.clone()
+                            } else {
+                                quant_paths
+                                    .iter()
+                                    .map(|p| match p {
+                                        sim::quantity::QuantityPath::Smoothed => {
+                                            sim::quantity::QuantityPath::Replay
+                                        }
+                                        other => *other,
+                                    })
+                                    .collect()
+                            };
+                        stacked.push_group(
+                            &model.quantities,
+                            coords,
+                            &accum.quant_draws,
+                            &accum.quant_times,
+                            Some(crate::quantity_output::EvaluatedOn {
+                                paths: &cell_paths,
+                                n_conditioned: accum.n_conditioned,
+                            }),
+                            // The same chain partition the predictive rows reduce
+                            // over, so a `quantities/` row and a `predictive/` row
+                            // from one fit describe the same chains (gh#794).
+                            Some(&accum.draw_chain),
+                            &calendar,
+                        )?;
+                    }
+                    ff_cells.push(FreeForwardCell {
+                        sweep: sweep_pt.clone(),
+                        scenario: scenario_name.clone(),
+                        bands: assemble_predictive(
+                            &model, accum, &ff_emit_times, &leaves, schema.as_ref(),
+                            args.by_chain,
+                        )?,
+                    });
+                }
+            }
+
+            if !stacked.is_empty() {
+                let (outs, manifest) = stacked.finish(&calendar)?;
+                quantity_outputs = outs;
+                quantity_manifest = Some(manifest);
+            }
+            free_forward = Some(ff_cells);
+            Ok(())
+        })();
+        if let Err(reason) = outcome {
+            // Only the fact, here: the reason travels with the failure and is
+            // printed once, at the end, beside the exit status it explains.
+            eprintln!(
+                "fit predict: the free-forward tail refused — continuing with what is \
+                 computable; the reason is below and in report.json."
+            );
+            failures.push(DeterministicFailure::EvaluationFailed {
+                at: Site::FreeForward,
+                reason,
+            });
+            // Half a tail is worse than none: the cells that did complete were
+            // banded against a design the failing cell was part of, and a
+            // quantities table missing one scenario reads as a table over the
+            // scenarios it has. Drop everything this horizon produced, keep
+            // everything the one-step half is about to.
+            free_forward = None;
+            quantity_outputs.clear();
+            quantity_manifest = None;
+            ff_n_draws = 0;
+            ff_draws_per_chain.clear();
         }
-        free_forward = Some(ff_cells);
     }
 
     // ── One-step horizon: per-draw bootstrap filter over the data, pooled. Runs
@@ -2597,6 +2690,16 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         )?;
         written.extend(paths);
     }
+    // `report.json`: what this run computed and what refused, beside the
+    // predictive it describes. Keyed by the chain selection for the same reason
+    // the predictive is (gh#795) — a subset predictive is a different object,
+    // and so is the record of what failed while producing it.
+    written.push(crate::fit::failures::write_report(
+        &segment,
+        &crate::chain_selection::artifact_name("report", selection.as_ref()),
+        &failures,
+    )?);
+
     let method_label = posterior.method.map(|m| m.as_str()).unwrap_or("posterior");
     let mut horizons: Vec<String> = Vec::new();
     if free_forward.is_some() {
@@ -2617,7 +2720,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         method_label,
         posterior.stage,
     );
-    Ok(written)
+    Ok(PredictOutcome { written, failures })
 }
 
 /// Compile `vocabulary` against the fit's model SOURCE and return the quantity

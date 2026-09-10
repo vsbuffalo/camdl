@@ -290,6 +290,8 @@ results/fits/{stem}-{fit_hash8}/
   observed.json
   quantities/<name>.tsv             # `quantities {}` sidecar, when requested
   quantities.json
+  report.json                       # what `fit predict` computed, and what
+                                    #   refused (§2.2.2)
   {method}-{method_hash8}/          # the [method], labelled by its algorithm
     seed_{n}-{seed_hash8}/          # one per fit seed — the leaf
       run.json
@@ -558,17 +560,45 @@ not the same number. The v3 rename is the first time that distinction is visible
 in the column name itself. `observed.json` (`camdl.observed/v1`) is its sibling
 for the observed series.
 
+**`report.json` says what the run computed and what refused.** Schema tag
+`camdl.predict-report/v1`, written on every `fit predict`, with a `failures`
+list that is empty when nothing refused:
+
+```json
+{
+  "schema": "camdl.predict-report/v1",
+  "failures": [
+    {
+      "kind": "evaluation_failed",
+      "at": "free_forward",
+      "reason": "scenario 'longer' declares …"
+    }
+  ]
+}
+```
+
+A _deterministic failure_ is a fact about the model as written that holds for
+whatever produced it regardless of how often it occurs — an unresolvable
+horizon, a scenario window this verb cannot honour. One occurrence is a defect,
+so the run exits **1**. What it does not do is discard a complete object: the
+one-step-ahead band is data-conditioned and never reaches the forecast horizon,
+so a free-forward tail that refuses cannot invalidate it. `fit predict` writes
+the one-step artifact, records the tail's failure here, prints what failed and
+what was written, and exits 1. `--horizon one_step` remains the way to ask for
+that half alone — and because such a run never builds a tail, a scenario it
+could not have honoured is a plain usage error there, refused outright.
+
 **A chain subset is a different address, not a rewrite of the pooled one.**
 `fit predict --exclude-chains 3,5` writes `predictive-excl3,5/<stream>.tsv` +
-`predictive-excl3,5.json`, and likewise `contrasts-excl3,5/` and
-`quantities-excl3,5/`; the full cloud keeps the bare names. The key is the
-excluded **set**, so `3,5` and `5,3` are one address, and it composes with the
-reporting-vocabulary key (`quantities-<key8>-excl3,5/`). Without this a subset
-would silently replace the run's canonical predictive and a second subset would
-replace that, leaving only a stamp inside the file that had already been
-overwritten. `observed/` is not keyed — it is the recorded data, identical under
-any selection. `camdl show <fit>` lists every address a fit holds, and
-`camdl cat <fit> --stream <address>/<stream>.tsv` reads one.
+`predictive-excl3,5.json`, and likewise `contrasts-excl3,5/`,
+`quantities-excl3,5/` and `report-excl3,5.json`; the full cloud keeps the bare
+names. The key is the excluded **set**, so `3,5` and `5,3` are one address, and
+it composes with the reporting-vocabulary key (`quantities-<key8>-excl3,5/`).
+Without this a subset would silently replace the run's canonical predictive and
+a second subset would replace that, leaving only a stamp inside the file that
+had already been overwritten. `observed/` is not keyed — it is the recorded
+data, identical under any selection. `camdl show <fit>` lists every address a
+fit holds, and `camdl cat <fit> --stream <address>/<stream>.tsv` reads one.
 
 **Calendar semantics travel with the artifact.** `predictive.json`,
 `observed.json`, `quantities.json`, and the per-chain `trajectories.json` each
