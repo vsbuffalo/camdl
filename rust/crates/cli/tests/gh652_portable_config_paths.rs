@@ -90,7 +90,7 @@ I0  = 10
 rho = {rho}
 k   = 10.0
 
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2

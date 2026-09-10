@@ -20,9 +20,8 @@ use sim::inference::deterministic::{
     optimize_det, NloptAlgorithm, OptResult, OptStatus,
 };
 
-use crate::fit::config_v2::{DtCheckConfig, FitConfigV2, GateConfig, NloptStageConfig, Stage};
+use crate::fit::config_v2::{Algorithm, DtCheckConfig, GateConfig, Method, NloptStageConfig, Problem};
 use crate::fit::dt_check;
-use crate::fit::init::{build_chain_param_vecs, InitMethod};
 use crate::fit::loglik::LoglikType;
 use crate::fit::methods::check_model_capabilities;
 use crate::fit::runner::{ode_step_dt, FitRunConfig};
@@ -30,23 +29,23 @@ use sim::inference::compute_ode_loglik;
 use crate::fit::state::FitState;
 use crate::fit::provenance;
 
-/// Run a single NLopt-flavoured `Stage` (`Stage::NlSbplx` or
-/// `Stage::NlBobyqa`). Errors with a clear message if `stage` is anything
-/// else — caller's job to dispatch correctly.
+/// Run a single NLopt-flavoured method (`Algorithm::NlSbplx` or
+/// `Algorithm::NlBobyqa`). Errors with a clear message if the algorithm is
+/// anything else — caller's job to dispatch correctly.
 #[allow(clippy::too_many_arguments)]
 pub fn run_stage(
-    fit: &FitConfigV2,
-    stage_name: &str,
-    stage: &Stage,
+    fit: &Problem,
+    method: &Method,
     stage_dir: &Path,
     seed: u64,
-    starts_from: Option<&str>,
+    starts: &super::chain_starts::ResolvedStarts,
     parent_fit_hash: &str,
     model_identity: &str,
     data_hashes: &[(String, String)],
     dt_check_cfg: &DtCheckConfig,
 ) -> Result<(), String> {
-    let (algorithm, knobs) = extract_nlopt_config(stage)?;
+    let stage_name = method.algorithm.method_name();
+    let (algorithm, knobs) = extract_nlopt_config(&method.algorithm)?;
 
     eprintln!(
         "\x1b[33mℹ {} ({}):\x1b[0m deterministic MLE on the ODE-skeleton \
@@ -64,7 +63,6 @@ pub fn run_stage(
         algorithm = algorithm.as_str()
     );
 
-    let prior_state = starts_from.map(FitState::load).transpose()?;
     let n_chains = knobs.chains;
     if n_chains == 0 {
         return Err(format!(
@@ -79,24 +77,15 @@ pub fn run_stage(
     // a fallback only.
     let run_config = FitRunConfig::build(
         fit,
-        prior_state.as_ref(),
+        Some(&method.algorithm),
         n_chains,
         /* n_particles */ 1,
         /* n_iterations */ 1,
         /* cooling */ 1.0,
         /* cooling_target_iters */ 1,
         seed,
-        // gh#506: was `prior_state.is_none()`. The corruption was masked
-        // here, but NOT for the reason that commit gave — it said "this
-        // stage's default `init = \"single\"`", and the default is
-        // `UniformUnconstrained` (`config_v2.rs`'s `#[serde(default)]` on
-        // `InitMethod`, whose `Default` is `init.rs`'s `UniformUnconstrained`).
-        //
-        // The masking is real by a different route: nlopt reads `.initial`
-        // only through `build_chain_param_vecs`, whose `None` fallback is
-        // `base_params`, which carries `[estimate].start` correctly. So only
-        // `init = "uniform"`'s chain 0 was affected — documented to keep the
-        // seeded start, and instead kept the random draw (gh#528).
+        // gh#506 / gh#528: the base point carries `[estimate].start`; the
+        // `starts` rule decides per chain what is drawn around it.
         /* random_starts */ false,
     )?;
 
@@ -122,36 +111,25 @@ pub fn run_stage(
         .map(|p| p.name.clone())
         .collect();
 
-    // Honour the `init` toml key (rust field: `init_method`) as written.
-    // Default for NLopt stages is `single` (every chain starts at the
-    // user's seeded values) so the runs land in a finite-likelihood
-    // region by construction. For models with tight bounds the user can
-    // set `init = "lhs"` to get spread starts; the chain-agreement gate
-    // then becomes informative. With Single + chains > 1, every chain's
-    // outcome is identical (Sbplx/BOBYQA are deterministic), so we run
-    // just one chain and skip the wasted compute.
-    let effective_chains = if knobs.init_method == InitMethod::Single {
-        1
-    } else {
-        n_chains
-    };
+    // Sbplx/BOBYQA are deterministic, so under a point rule every chain's
+    // outcome is identical: run one chain and skip the wasted compute. A
+    // spread rule (`lhs` is the natural one here) gives multi-start basin
+    // exploration, and the chain-agreement gate then becomes informative.
+    let effective_chains = if starts.rule.is_point() { 1 } else { n_chains };
     if effective_chains < n_chains {
         eprintln!(
-            "  init=single with chains={}: collapsing to 1 chain \
+            "  starts = {} with chains={}: collapsing to 1 chain \
              (Sbplx/BOBYQA are deterministic, redundant chains would \
-             produce identical output). Set `init = \"lhs\"` for \
+             produce identical output). Set `starts = \"lhs\"` for \
              multi-start basin exploration.",
-            n_chains
+            starts.rule.spelled(), n_chains
         );
     }
-    let chain_starts: Vec<Vec<f64>> = build_chain_param_vecs(
-        &knobs.init_method,
-        &run_config.estimated_params,
-        &run_config.base_params,
-        effective_chains,
-        seed,
-    )?
-    .unwrap_or_else(|| vec![run_config.base_params.clone(); effective_chains]);
+    let drawn = crate::fit::runner::draw_chain_starts_for(
+        &run_config, &fit.estimate, starts, effective_chains, seed,
+    )?;
+    let chain_starts: Vec<Vec<f64>> =
+        drawn.to_param_vecs(&run_config.estimated_params, &run_config.base_params);
     let n_chains = effective_chains;
 
     std::fs::create_dir_all(stage_dir).map_err(|e| {
@@ -300,11 +278,7 @@ pub fn run_stage(
         chain_eval_ses: Vec::new(),
         resolved_gate: Some(knobs.gate.clone()),
         resolved_loglik_eval: None,
-        // gh#51 v3: NLopt SurveyTopK support is deferred (v2 ships on
-        // IF2 / PMMH / PGAS only). Record the user-set init_method
-        // verbatim; SurveyTopK refuses upstream in
-        // build_chain_param_vecs.
-        chain_init_source: Some(format!("{}", knobs.init_method)),
+        chain_init_source: Some(drawn.rule.tag().to_string()),
         // gh#52, gh#227: deterministic ODE dt-check at θ̂ (above). Skipped →
         // omit the block, mirroring the IF2 path's legacy semantics.
         dt_check: if matches!(dt_check_result.verdict, dt_check::DtCheckVerdict::Skipped) {
@@ -360,11 +334,11 @@ pub fn run_stage(
 }
 
 fn extract_nlopt_config(
-    stage: &Stage,
+    algorithm: &Algorithm,
 ) -> Result<(NloptAlgorithm, &NloptStageConfig), String> {
-    match stage {
-        Stage::NlSbplx(c) => Ok((NloptAlgorithm::Sbplx, c)),
-        Stage::NlBobyqa(c) => Ok((NloptAlgorithm::Bobyqa, c)),
+    match algorithm {
+        Algorithm::NlSbplx(c) => Ok((NloptAlgorithm::Sbplx, c)),
+        Algorithm::NlBobyqa(c) => Ok((NloptAlgorithm::Bobyqa, c)),
         other => Err(format!(
             "nlopt_stage::run_stage: expected nl-sbplx or nl-bobyqa, got {}",
             other.method_name()
@@ -675,10 +649,7 @@ fn print_verdict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::config_v2::{
-        GateConfig, NloptStageConfig, Stage, StartsFrom,
-    };
-    use crate::fit::init::InitMethod;
+    use crate::fit::config_v2::{Algorithm, GateConfig, NloptStageConfig};
     use crate::run_meta::InferenceBackend;
     use sim::inference::deterministic::SuccessState;
 
@@ -688,10 +659,6 @@ mod tests {
             chains: 4,
             tolerance: 1e-6,
             max_evals: 5000,
-            starts_from: StartsFrom::default(),
-            init_method: InitMethod::Single,
-            survey_path: None,
-            survey_top_k_n: None,
             gate: GateConfig::default(),
             dt_check: crate::fit::config_v2::DtCheckConfig::default(),
         }
@@ -709,7 +676,7 @@ mod tests {
 
     #[test]
     fn extract_nlopt_config_sbplx_returns_sbplx_algorithm() {
-        let stage = Stage::NlSbplx(nlopt_config());
+        let stage = Algorithm::NlSbplx(nlopt_config());
         let (algo, cfg) = extract_nlopt_config(&stage).expect("ok");
         assert_eq!(algo, NloptAlgorithm::Sbplx);
         assert_eq!(cfg.chains, 4);
@@ -718,7 +685,7 @@ mod tests {
 
     #[test]
     fn extract_nlopt_config_bobyqa_returns_bobyqa_algorithm() {
-        let stage = Stage::NlBobyqa(nlopt_config());
+        let stage = Algorithm::NlBobyqa(nlopt_config());
         let (algo, cfg) = extract_nlopt_config(&stage).expect("ok");
         assert_eq!(algo, NloptAlgorithm::Bobyqa);
         assert_eq!(cfg.chains, 4);
@@ -727,11 +694,10 @@ mod tests {
     #[test]
     fn extract_nlopt_config_rejects_non_nlopt_stage() {
         // PFilter is the simplest non-nlopt variant to construct.
-        let stage = Stage::PFilter {
+        let stage = Algorithm::PFilter {
             backend: InferenceBackend::ChainBinomial,
             particles: 100,
             replicates: None,
-            starts_from: StartsFrom::default(),
             record_ancestry: false,
             record_prequential: false,
         };

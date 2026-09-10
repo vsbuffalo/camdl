@@ -76,7 +76,7 @@ N0 = 1000
 rho = 0.6
 k = 10.0
 
-[stages.posterior]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2

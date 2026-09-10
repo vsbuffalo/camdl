@@ -229,7 +229,7 @@ mu = { bounds = [0.0005, 0.002], start = 0.001 }
 [fixed]
 N0 = 10000
 
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 2
@@ -396,7 +396,7 @@ rho = 0.5
 psi = 0.3
 k = 20
 
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 2

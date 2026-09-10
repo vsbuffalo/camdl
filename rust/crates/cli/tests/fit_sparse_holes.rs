@@ -144,14 +144,14 @@ beta  = {{ bounds = [0.01, 5.0], start = 0.3, prior = {{ log_normal = {{ mu = -1
 [fixed]
 gamma = 0.1
 N0 = 1000
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 1
 particles = 60
 iterations = 12
 burn_in = 2
-init = "single"
+starts = "single"
 rho = 0.99
 "#,
         out = out_root.display(), ir = ir.display(), data = data.display());
@@ -177,7 +177,7 @@ beta  = {{ bounds = [0.01, 5.0], start = 0.4 }}
 gamma = {{ bounds = [0.01, 1.0], start = 0.15 }}
 [fixed]
 N0 = 1000
-[stages.posterior]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1
@@ -210,7 +210,7 @@ beta  = {{ bounds = [0.01, 5.0], start = 0.3 }}
 gamma = {{ bounds = [0.01, 1.0], start = 0.1 }}
 [fixed]
 N0 = 1000
-[stages.check]
+[method]
 algorithm = "pfilter"
 backend = "chain_binomial"
 particles = 200
@@ -494,14 +494,14 @@ beta  = {{ bounds = [0.01, 5.0], start = 0.3, prior = {{ log_normal = {{ mu = -1
 gamma = 0.1
 N0 = 1000
 I0 = 5
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 1
 particles = 60
 iterations = 12
 burn_in = 2
-init = "single"
+starts = "single"
 rho = 0.99
 "#, out = out_root.display(), ir = ir.display(), data = dense.display());
     let toml = tmp.path().join("fit_cpm_initlaw.toml");

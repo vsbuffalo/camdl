@@ -200,10 +200,10 @@ beta = {{ bounds = [0.05, 5.0], start = {START_BETA} }}
 gamma = 0.3
 N0 = 10000
 
-[stages.mh]
+[method]
 algorithm = "mh"
 backend = "ode"
-init = "single"
+starts = "single"
 chains = 2
 iterations = 1500
 burn_in = {burn_in}

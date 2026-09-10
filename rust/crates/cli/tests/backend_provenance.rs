@@ -404,7 +404,7 @@ N0 = 1000
 rho = 0.6
 k = 10.0
 
-[stages.mle]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -418,7 +418,6 @@ cooling = 0.7
 
     let output = Command::new(&bin)
         .arg("fit").arg("run").arg(&fit_toml)
-        .arg("--allow-nonconverged-scout")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().expect("spawn camdl fit run");
     assert!(output.status.success(),

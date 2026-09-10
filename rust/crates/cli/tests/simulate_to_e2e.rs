@@ -90,7 +90,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.1, prior = {{ log_normal = {{ mu = -2
 beta = 0.3
 rho = 0.6
 k = 5.0
-[stages.dummy]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1

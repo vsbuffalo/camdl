@@ -278,15 +278,16 @@ fn read_mle_param(mle_toml: &str, key: &str) -> Option<f64> {
 /// Recover-known-params end-to-end fit — the Phase 2b proof that the
 /// heterogeneous multi-cadence path FITS, not just loads.
 ///
-/// Runs the IF2 scout (`--stage scout`) of `polio_afp_es/fit.toml` on the
-/// committed multi-cadence data (AFP monthly + ES biweekly long-form files) and
+/// Runs the IF2 method of `polio_afp_es/fit.toml` on the committed
+/// multi-cadence data (AFP monthly + ES biweekly long-form files) and
 /// asserts the fitted point estimate (`mle_params.toml`, the best chain) lands
 /// near the truth for the WELL-IDENTIFIED parameters: the two transmission rates
 /// (R0_urban, R0_rural) and the AFP reporting fraction (rho).
 ///
-/// Scope + tolerance (flagged deliberately): this runs the IF2 SCOUT only (the
-/// PGAS posterior stage is the slow part and is not needed to prove the gate is
-/// open). From a SINGLE synthetic realization (gen_data.sh seed 1) the scout's
+/// Scope + tolerance (flagged deliberately): this runs the IF2 file only (the
+/// PGAS posterior in `pgas.toml` is the slow part and is not needed to prove
+/// the gate is open). From a SINGLE synthetic realization (gen_data.sh seed 1)
+/// the IF2's
 /// likelihood surface is multimodal, so the shedding / spatial-coupling / ES
 /// parameters (delta, kappa, gamma, lambda) are only weakly identified and are
 /// NOT asserted — asserting them would be a flaky test that fails for the wrong
@@ -315,23 +316,19 @@ fn synthetic_fit_recovers_params() {
         // Compile the model with the dune-built camdlc (a stale PATH camdlc
         // predates the stratified-observation header), mirroring compile_model.
         .env("CAMDLC", camdlc_bin())
-        .args([
-            "fit", "run", &fit_toml.to_string_lossy(),
-            "--stage", "scout",
-            "--allow-nonconverged-scout",
-        ])
+        .args(["fit", "run", &fit_toml.to_string_lossy()])
         .output()
         .expect("spawn fit");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "multi-cadence IF2 scout fit failed:\nstderr={stderr}",
+        "multi-cadence IF2 fit failed:\nstderr={stderr}",
     );
     // Proof the heterogeneous union path actually ran: all four leaves bound.
     assert!(
         stderr.contains("4 observation streams")
             && stderr.contains("afp_urban") && stderr.contains("es_urban"),
-        "the scout must have run over all four multi-cadence leaves:\n{stderr}",
+        "the fit must have run over all four multi-cadence leaves:\n{stderr}",
     );
 
     // Locate the stored best-chain point estimate (`mle_params.toml`).

@@ -178,7 +178,7 @@ k   = 10.0
     )
 }
 
-const PGAS: &str = r#"[stages.posterior]
+const PGAS: &str = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -188,7 +188,7 @@ burn_in = 15
 thin = 1
 "#;
 
-const IF2: &str = r#"[stages.mle]
+const IF2: &str = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -533,7 +533,7 @@ simulate { from = 0 'days  to = 60 'days }
 
 const PREVALENCE_DATA: &str = "time\tprevalence\n4\t30\n8\t90\n12\t260\n16\t640\n20\t980\n24\t1100\n28\t900\n32\t620\n36\t400\n40\t250\n44\t150\n48\t90\n52\t55\n56\t33\n60\t20\n";
 
-const ODE_MH: &str = r#"[stages.posterior]
+const ODE_MH: &str = r#"[method]
 algorithm = "mh"
 backend = "ode"
 chains = 2

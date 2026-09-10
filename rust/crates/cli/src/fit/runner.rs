@@ -6,7 +6,6 @@
 
 use crate::fit::loglik_eval;
 use crate::params_resolver::resolved_bounds;
-use crate::fit::state::FitState;
 use rayon::prelude::*;
 use sim::{
     compiled_model::CompiledModel,
@@ -150,16 +149,18 @@ pub struct ChainResults {
 }
 
 impl FitRunConfig {
-    /// Build from a v2 fit.toml, optionally overriding from a prior fit_state.
+    /// Build from a problem. `algorithm` is the method that will run on it,
+    /// for the observation-alignment check (gh#189) — `None` skips that
+    /// check, for callers that build a config with no method in hand.
     ///
-    /// `cooling_target_iters` is IF2-specific — for non-IF2 stages
+    /// `cooling_target_iters` is IF2-specific — for non-IF2 methods
     /// (PGAS / PMMH / PFilter), passing `n_iterations` matches the
     /// pre-2026-04-30 behavior. The IF2 dispatch site reads it from
-    /// `Stage::IF2.cooling_target_iters` (default 50).
+    /// `Algorithm::IF2.cooling_target_iters` (default 50).
     #[allow(clippy::too_many_arguments)]
     pub fn build(
-        fit: &super::config_v2::FitConfigV2,
-        prior_state: Option<&FitState>,
+        fit: &super::config_v2::Problem,
+        algorithm: Option<&super::config_v2::Algorithm>,
         n_chains: usize,
         n_particles: usize,
         n_iterations: usize,
@@ -306,15 +307,10 @@ impl FitRunConfig {
             .map_err(|e| format!("compile error: {:?}", e))?;
         let mut base_params = compiled.default_params.clone();
 
-        // Priority: prior_state > estimate.start > fixed > model default.
-        // `base_params` is the single source of truth for IF2's starting
-        // point: run_if2_with_progress initialises its particle cloud
-        // from `base_params`, not from `EstimatedParam::initial`. If
-        // prior_state is applied before est.start (as was the case
-        // before 2026-04-18), the est.start write silently overwrites
-        // the scout-best values, and `init_mle = "scout"` becomes a
-        // no-op for refine's iter-0 parameters. See
-        // docs/dev/incidents/2026-04-18-starts-from-scout-ignored.md.
+        // Priority: estimate.start > fixed > model default. `base_params` is
+        // the base point every chain-starts rule is drawn around
+        // (`chain_starts::draw_chain_starts`); a sourced rule such as
+        // `from_mle` overwrites the estimated slots per chain, never this.
 
         // 1. Apply estimate start values to base_params (override model defaults).
         for (name, spec) in &fit.estimate {
@@ -330,20 +326,9 @@ impl FitRunConfig {
                 base_params[idx] = v;
             }
         }
-        // 3. Apply prior_state last so it wins over config start/fixed.
-        //    This is what makes `init_mle = "scout"` actually seed
-        //    the IF2 search from scout's best MLE.
-        if let Some(state) = prior_state {
-            for (name, &value) in &state.start_values {
-                if let Some(&idx) = compiled.param_index.get(name.as_str()) {
-                    base_params[idx] = value;
-                }
-            }
-        }
-
         // Build EstimatedParam specs
         let if2_params = build_if2_params(
-            &fit.estimate, prior_state, &model, &compiled, &base_params, random_starts, seed,
+            &fit.estimate, &model, &compiled, &base_params, random_starts, seed,
         )?;
 
         // Load data — one or more observation streams (real-data only;
@@ -431,22 +416,22 @@ impl FitRunConfig {
                 let k = ((o.time - t_start) / dt).round();
                 ((t_start + k * dt) - o.time).abs() < 1e-9
             });
-            for stage in fit.stages.values() {
+            if let Some(algorithm) = algorithm {
                 if matches!(
-                    stage.method_kind(),
+                    algorithm.method_kind(),
                     FitAlgorithm::If2 | FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Pfilter
                 ) {
                     let correlated = matches!(
-                        stage,
-                        crate::fit::config_v2::Stage::PMMH { rho: Some(_), .. }
+                        algorithm,
+                        crate::fit::config_v2::Algorithm::PMMH { rho: Some(_), .. }
                     );
                     crate::fit::methods::resolve_obs_alignment(
-                        stage.method_kind(),
+                        algorithm.method_kind(),
                         correlated,
                         fit.config.obs_alignment,
                         obs_on_grid,
                     )
-                    .map_err(|e| format!("{} stage: {e}", stage.method_name()))?;
+                    .map_err(|e| format!("{} method: {e}", algorithm.method_name()))?;
                 }
             }
         }
@@ -675,12 +660,11 @@ fn resolve_simplex_groups(
     Ok(out)
 }
 
-/// Build EstimatedParam specs from v2 [estimate] + optional prior state overrides.
-/// Uses the shared build_if2_params_from_specs for core logic, then applies
-/// fit-specific overrides (prior state rw_sd, start values, random starts).
+/// Build EstimatedParam specs from v2 [estimate]. Uses the shared
+/// build_if2_params_from_specs for core logic, then applies the fit-specific
+/// start values and random starts.
 fn build_if2_params(
     estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
-    prior_state: Option<&FitState>,
     model: &ir::Model,
     compiled: &CompiledModel,
     base_params: &[f64],
@@ -689,11 +673,8 @@ fn build_if2_params(
 ) -> Result<Vec<EstimatedParam>, String> {
     // Build ParamSpecs from v2 [estimate]
     let specs: Vec<ParamSpec> = estimate.iter().map(|(name, est)| {
-        // rw_sd priority: prior state > fit.toml explicit > None (auto)
-        let rw_sd = prior_state
-            .and_then(|s| s.rw_sd.get(name))
-            .copied()
-            .or(est.rw_sd);
+        // rw_sd: fit.toml explicit, else None (auto).
+        let rw_sd = est.rw_sd;
         ParamSpec {
             name: name.clone(),
             rw_sd,
@@ -725,10 +706,6 @@ fn build_if2_params(
             } else {
                 p.initial *= 1.0 + 0.2 * (rng.uniform() - 0.5);
             }
-        } else if let Some(state) = prior_state {
-            if let Some(&v) = state.start_values.get(&p.name) {
-                p.initial = v;
-            }
         } else if let Some(est) = estimate.get(&p.name) {
             if let Some(start) = est.start {
                 p.initial = start;
@@ -737,6 +714,50 @@ fn build_if2_params(
     }
 
     Ok(params)
+}
+
+/// Draw a method's chain starts for a built config: the one step every
+/// runner takes, so the rule, the prior each parameter is drawn from
+/// (fit-toml over model, through `resolve_prior` — the same precedence the
+/// sampler scores against), and the transform-aware builders are wired once.
+pub fn draw_chain_starts_for(
+    config: &FitRunConfig,
+    estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
+    starts: &super::chain_starts::ResolvedStarts,
+    n_chains: usize,
+    seed: u64,
+) -> Result<super::chain_starts::DrawnStarts, String> {
+    let resolved = super::chain_starts::build_resolved_view_for_init(
+        &config.model, &config.base_params, &config.estimated_params,
+    );
+    let priors: Vec<(String, Prior)> = config
+        .estimated_params
+        .iter()
+        .map(|s| (s.name.clone(), resolve_prior(&s.name, estimate, &config.model).0))
+        .collect();
+    let ctx = super::chain_starts::StartContext {
+        resolved: &resolved,
+        base_specs: &config.estimated_params,
+        priors: &priors,
+    };
+    super::chain_starts::draw_chain_starts(&ctx, starts, n_chains, seed)
+        .map_err(|e| format!("starts = {}: {}", starts.rule.spelled(), e))
+}
+
+/// Write `chain_starts.tsv` for a drawn set — the one sidecar writer every
+/// multi-chain sampler calls. Best-effort: a failure is reported, never
+/// fatal, since the file is an audit artifact and not an input.
+pub fn record_chain_starts(
+    stage_dir: &std::path::Path,
+    config: &FitRunConfig,
+    drawn: &super::chain_starts::DrawnStarts,
+) {
+    let records = drawn.records(&config.estimated_params);
+    if let Err(e) = super::chain_starts::write_chain_starts_tsv(
+        stage_dir, &config.estimated_params, &drawn.rule, &records,
+    ) {
+        eprintln!("warning: could not write chain_starts.tsv: {}", e);
+    }
 }
 
 /// gh#224. Map a raw particle-filter eval `Result` to the inference
@@ -4167,122 +4188,10 @@ mod tests {
     /// was reversing the application order in build. See
     /// docs/dev/incidents/2026-04-18-starts-from-scout-ignored.md.
     ///
-    /// IF2 uses `config.base_params` as its starting point for the
-    /// particle cloud (if2.rs:338, `current_params = base_params`).
-    /// If the priority inversion lets est.start overwrite scout's
-    /// best, refine starts from scratch instead of from scout's MLE.
-    #[test]
-    fn fit_state_overrides_config_start_in_base_params() {
-        use crate::fit::state::FitState;
-        use crate::fit::config_v2::FitConfigV2;
-
-        // Tiny v2 fit.toml referencing the seir golden. We set
-        // beta's `start = 0.1`; prior_state will supply 0.4. The
-        // bug has `start` winning; the fix has `prior_state` winning.
-        // Both values must sit within seir's declared beta bounds
-        // [0.001, 0.5] so the post-resolution validator (gh#31) lets
-        // the build succeed; the precedence test only needs the two
-        // values to be distinguishable.
-        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let ir_path = format!("{}/../../../ocaml/golden/seir_observations.ir.json", manifest);
-        let data_dir = std::env::temp_dir().join(format!(
-            "camdl_starts_from_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&data_dir).unwrap();
-        let data_path = data_dir.join("obs.tsv");
-        std::fs::write(&data_path,
-            "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
-
-        // The v2 fit.toml. We use `start = 0.1` on beta and a [stages.scout]
-        // section so the config validates; build() doesn't actually consume
-        // the stage block (chains/particles come from its own args).
-        let fit_toml_path = data_dir.join("fit.toml");
-        let toml = format!(r#"
-output_dir = "{}"
-
-[model]
-camdl = "{}"
-
-[data.observations]
-weekly_cases = "{}"
-
-[estimate.beta]
-bounds = [0.01, 0.5]
-start  = 0.1
-
-[fixed]
-sigma    = 0.25
-gamma    = 0.3
-rho      = 0.5
-k        = 10.0
-p_detect = 0.5
-N0       = 1000
-I0       = 1
-
-[stages.scout]
-algorithm     = "if2"
-backend     = "chain_binomial"
-chains     = 1
-particles  = 100
-iterations = 1
-cooling    = 0.5
-
-[config]
-dt = 1.0
-"#, data_dir.display(), ir_path, data_path.display());
-        std::fs::write(&fit_toml_path, &toml).unwrap();
-        let fit = FitConfigV2::load(&fit_toml_path.to_string_lossy())
-            .expect("v2 fit.toml parse");
-
-        // Scout produced a very different "best" — a clearly
-        // distinguishable value so a win/loss is unambiguous.
-        // Within [0.001, 0.5] but visibly far from est.start=0.1.
-        let mut start_values = std::collections::BTreeMap::new();
-        start_values.insert("beta".to_string(), 0.4);
-        let prior_state = FitState {
-            stage: "scout".into(), seed: 1,
-            timestamp: "2026-04-18T00:00:00Z".into(),
-            input_hash: None, camdl_version: None,
-            best_loglik: -100.0, initial_loglik: f64::NEG_INFINITY,
-            best_chain: 0, n_chains: 1, n_good_chains: Some(1),
-            start_values,
-            rw_sd: std::collections::BTreeMap::new(),
-            loglik_type: Some(crate::fit::loglik::LoglikType::If2),
-            acceptance_rate: None,
-            tail_chain_agreement: std::collections::BTreeMap::new(),
-            perturb_only_at_t0_params: Vec::new(),
-            chain_logliks: Vec::new(),
-            chain_eval_logliks: Vec::new(),
-            chain_eval_ids: Vec::new(),
-            chain_eval_ses: Vec::new(),
-            resolved_gate: None,
-            resolved_loglik_eval: None,
-            chain_init_source: None,
-            dt_check: None,
-            pf_noise: None,
-        };
-
-        let config = FitRunConfig::build(
-            &fit, Some(&prior_state),
-            1, 100, 1, 0.5, 50, 1, false,
-        ).expect("build must succeed");
-
-        let beta_idx = config.compiled.param_index.get("beta").copied()
-            .expect("beta present");
-        assert!((config.base_params[beta_idx] - 0.4).abs() < 1e-9,
-            "prior_state must win over est.start — got {}, expected 0.4 \
-             (scout's best). 0.1 means est.start overwrote scout — the \
-             pre-fix bug is back.",
-            config.base_params[beta_idx]);
-
-        std::fs::remove_dir_all(&data_dir).ok();
-    }
-
     // ── IC-free inference: config validation ────────────────────────────
 
     fn ic_free_fixture(dir: &std::path::Path, ic_free: bool, perturb_t0: bool)
-        -> super::super::config_v2::FitConfigV2
+        -> super::super::config_v2::Problem
     {
         // Minimal v2 fit.toml against the seir_observations golden IR.
         // Toggles ic_free and whether I0 is perturb_only_at_t0-flagged independently
@@ -4319,7 +4228,7 @@ p_detect = 0.5
 N0       = 1000
 beta     = 0.1
 
-[stages.scout]
+[method]
 algorithm     = "if2"
 backend     = "chain_binomial"
 chains     = 1
@@ -4331,9 +4240,10 @@ cooling    = 0.5
 dt = 1.0
 "#, dir.display(), ic_free, ir_path, data_path.display(), perturb_t0_line);
         std::fs::write(&fit_toml_path, toml_src).unwrap();
-        super::super::config_v2::FitConfigV2::load(
+        super::super::config_v2::FitConfig::load(
             &fit_toml_path.to_string_lossy())
             .expect("v2 fit.toml parse")
+            .problem
     }
 
     fn ic_free_test_dir(tag: &str) -> std::path::PathBuf {
@@ -4666,7 +4576,7 @@ dt = 1.0
     /// failure for forgetful users.
     #[test]
     fn estimate_without_start_falls_back_within_bounds() {
-        use crate::fit::config_v2::FitConfigV2;
+        use crate::fit::config_v2::Problem;
 
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let ir_path = format!("{}/../../../ocaml/golden/seir_observations.ir.json", manifest);
@@ -4706,7 +4616,7 @@ p_detect = 0.5
 N0       = 1000
 I0       = 1
 
-[stages.scout]
+[method]
 algorithm     = "if2"
 backend     = "chain_binomial"
 chains     = 1
@@ -4718,7 +4628,7 @@ cooling    = 0.5
 dt = 1.0
 "#, data_dir.display(), ir_path, data_path.display());
         std::fs::write(&fit_toml_path, &toml).unwrap();
-        let fit = FitConfigV2::load(&fit_toml_path.to_string_lossy())
+        let fit = Problem::load(&fit_toml_path.to_string_lossy())
             .expect("v2 fit.toml parse");
 
         let config = FitRunConfig::build(
@@ -5933,7 +5843,7 @@ dt = 1.0
     /// tail-only validated, and the applied window rides on the run config
     /// for the fit.meta.json proof.
     mod holdout_build {
-        use crate::fit::config_v2::FitConfigV2;
+        use crate::fit::config_v2::Problem;
         use crate::fit::runner::{FitRunConfig, TrainingWindow};
 
         /// Minimal v2 fit.toml against the seir_observations golden IR:
@@ -5944,7 +5854,7 @@ dt = 1.0
             dir: &std::path::Path,
             holdout_after: Option<&str>,
             holdout_tsv: Option<&str>,
-        ) -> FitConfigV2 {
+        ) -> Problem {
             let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
             let ir_path = format!(
                 "{}/../../../ocaml/golden/seir_observations.ir.json", manifest);
@@ -5988,7 +5898,7 @@ p_detect = 0.5
 N0       = 1000
 beta     = 0.1
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1
@@ -6000,7 +5910,7 @@ cooling    = 0.5
 dt = 1.0
 "#, dir.display(), data_path.display());
             std::fs::write(&fit_toml_path, toml_src).unwrap();
-            FitConfigV2::load(&fit_toml_path.to_string_lossy()).expect("fit.toml parse")
+            Problem::load(&fit_toml_path.to_string_lossy()).expect("fit.toml parse")
         }
 
         fn test_dir(tag: &str) -> std::path::PathBuf {
@@ -6012,7 +5922,7 @@ dt = 1.0
             d
         }
 
-        fn build(fit: &FitConfigV2) -> Result<FitRunConfig, String> {
+        fn build(fit: &Problem) -> Result<FitRunConfig, String> {
             FitRunConfig::build(fit, None, 1, 100, 1, 0.5, 50, 1, false)
         }
 

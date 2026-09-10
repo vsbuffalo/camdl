@@ -28,31 +28,17 @@ pub struct NutsStageOpts {
     pub max_tree_depth: usize,
     pub target_accept: f64,
     pub dense_mass: bool,
-    pub init_method: super::init::InitMethod,
-    /// gh#546: populated by `from_stage` and read by NOTHING — survey-based
-    /// initialisation is inert on a `nuts` stage. Kept (rather than deleted)
-    /// so the gap stays visible: the fix is either to wire the landscape into
-    /// the chain starts as `if2`/`pmmh`/`pgas` do, or to refuse
-    /// `init = "survey_top_k"` here with a diagnostic. Silently accepting and
-    /// ignoring is the one option that is not acceptable.
-    ///
-    /// Until gh#540 these were written by the CLI at the dispatch site, which
-    /// masked the dead-code lint and hid the fact that nobody read them.
-    #[allow(dead_code)]
-    pub survey_path: Option<std::path::PathBuf>,
-    #[allow(dead_code)]
-    pub survey_top_k_n: Option<usize>,
     /// Coarse warm-up step (gh#396 follow-on); `None` = off. Validated against the
     /// fit-wide `dt` and the observation streams in `run_stage`.
     pub burnin_dt: Option<f64>,
 }
 
 impl NutsStageOpts {
-    pub fn from_stage(stage: &super::config_v2::Stage) -> Result<Self, String> {
-        match stage {
-            super::config_v2::Stage::Nuts {
+    pub fn from_algorithm(algorithm: &super::config_v2::Algorithm) -> Result<Self, String> {
+        match algorithm {
+            super::config_v2::Algorithm::Nuts {
                 chains, warmup, samples, max_tree_depth, target_accept, dense_mass,
-                init_method, survey_path, survey_top_k_n, burnin_dt, ..
+                burnin_dt, ..
             } => Ok(NutsStageOpts {
                 n_chains: *chains,
                 warmup: *warmup,
@@ -60,13 +46,10 @@ impl NutsStageOpts {
                 max_tree_depth: *max_tree_depth,
                 target_accept: *target_accept,
                 dense_mass: *dense_mass,
-                init_method: init_method.clone(),
-                survey_path: survey_path.clone(),
-                survey_top_k_n: *survey_top_k_n,
                 burnin_dt: *burnin_dt,
             }),
             other => Err(format!(
-                "NutsStageOpts::from_stage: expected Stage::Nuts, got {}",
+                "NutsStageOpts::from_algorithm: expected Algorithm::Nuts, got {}",
                 other.method_name()
             )),
         }
@@ -75,15 +58,16 @@ impl NutsStageOpts {
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_stage(
-    fit: &super::config_v2::FitConfigV2,
-    stage_name: &str,
-    _stage: &super::config_v2::Stage,
+    fit: &super::config_v2::Problem,
+    method: &super::config_v2::Method,
     stage_dir: &Path,
     opts: NutsStageOpts,
     seed: u64,
     force: bool,
     resume: bool,
+    starts: &super::chain_starts::ResolvedStarts,
 ) -> Result<(), String> {
+    let stage_name = method.algorithm.method_name();
     if !force && !resume && stage_dir.join("fit_state.toml").exists() {
         eprintln!(
             "\x1b[33mnuts results already exist in {}. Use --force to re-run.\x1b[0m",
@@ -95,7 +79,7 @@ pub fn run_stage(
         .map_err(|e| format!("cannot create {}: {}", stage_dir.display(), e))?;
 
     let config = super::runner::FitRunConfig::build(
-        fit, None, opts.n_chains, 1, 1, 1.0, 1, seed, false,
+        fit, Some(&method.algorithm), opts.n_chains, 1, 1, 1.0, 1, seed, false,
     )?;
     let dt = config.if2_config.dt;
 
@@ -149,34 +133,19 @@ pub fn run_stage(
         config.model.simulation.t_start,
     )?;
 
-    // Per-chain starting points. Honors the stage's `init` method: a dispersed
-    // method (`uniform_unconstrained` / `lhs`) gives each chain its own
-    // over-dispersed start — Stan's basis for a meaningful between-chain R-hat and
-    // the standard defense against all chains sharing one warm-up pathology (a bad
-    // early metric that builds runaway trees). `single` (default) keeps the shared
-    // start. Reuses the tested init machinery (same as PGAS/PMMH); unsupported
-    // methods (survey / warm-start) error actionably here rather than being
-    // silently ignored.
-    let chain_starts: Vec<Vec<f64>> = super::init::build_chain_param_vecs(
-        &opts.init_method,
-        &config.estimated_params,
-        &config.base_params,
-        opts.n_chains,
-        seed,
+    // Per-chain starting points, through the one seam every runner draws
+    // from (`chain_starts::draw_chain_starts`), under the resolved `starts`
+    // rule: a spread rule gives each chain its own over-dispersed start —
+    // Stan's basis for a meaningful between-chain R̂ and the standard defence
+    // against every chain sharing one warm-up pathology (a bad early metric
+    // that builds runaway trees); a point rule keeps the shared start, and
+    // `fit summary` then reports R̂ as not assessed.
+    let drawn = super::runner::draw_chain_starts_for(
+        &config, estimate, starts, opts.n_chains, seed,
     )
-    .map_err(|e| format!("nuts: {}", e))?
-    .unwrap_or_else(|| {
-        // `Single` (and other non-dispersing methods): every chain starts at the
-        // estimated parameters' declared `initial` values — NOT whatever
-        // `base_params` holds at those indices (which can be a resolved/data
-        // value, not the fit's starting point). `run_ode_nuts` seeds `z` from
-        // these, so getting them wrong starts the chain at the wrong parameter.
-        let mut single = config.base_params.clone();
-        for ep in &config.estimated_params {
-            single[ep.index] = ep.initial;
-        }
-        vec![single; opts.n_chains]
-    });
+    .map_err(|e| format!("nuts: {e}"))?;
+    let chain_starts: Vec<Vec<f64>> =
+        drawn.to_param_vecs(&config.estimated_params, &config.base_params);
 
     // Chains are independent (own seed, own RNG, own trace file) and their outputs
     // reduce order-independently (max-loglik chain + summed divergences), so run
@@ -446,7 +415,7 @@ pub fn run_stage(
         chain_eval_ses: Vec::new(),
         resolved_gate: None,
         resolved_loglik_eval: None,
-        chain_init_source: None,
+        chain_init_source: Some(drawn.rule.tag().to_string()),
         dt_check: None,
         // gh#764: NUTS scores a deterministic ODE likelihood — no filter, no
         // noise, nothing to measure.

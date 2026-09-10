@@ -5,7 +5,7 @@
 //!
 //! 1. A first PGAS run writes `chain_<n>/resume_state.bin` containing
 //!    completed_sweeps == n_sweeps and the stage's identity hash.
-//! 2. A second invocation with `--resume --stage post --sweeps N>n_sweeps`
+//! 2. A second invocation with `--resume --sweeps N>n_sweeps`
 //!    succeeds and continues the chain (does not re-run burn-in).
 //! 3. Changing an *identity* field (e.g. `chains`) between the two
 //!    invocations causes resume to reject with a hash-mismatch error.
@@ -102,7 +102,7 @@ beta  = {{ bounds = [0.01, 5.0],  prior = {{ log_normal = {{ mu = -0.3, sigma = 
 gamma = {{ bounds = [0.01, 1.0],  prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }}, start = 0.3 }}
 [fixed]
 N0 = 1000
-[stages.post]
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = {chains}
@@ -121,7 +121,7 @@ burn_in = 2
     p
 }
 
-/// The `(run_id, dir, run_json)` of a `post` stage leaf under `<out>/fits/`,
+/// The `(run_id, dir, run_json)` of a `pgas` method leaf under `<out>/fits/`,
 /// skipping any run_id in `exclude` (to pick the resumed leaf after a resume).
 fn post_leaf(out: &Path, exclude: &[String]) -> (String, PathBuf, serde_json::Value) {
     let mut stack = vec![out.join("fits")];
@@ -133,10 +133,10 @@ fn post_leaf(out: &Path, exclude: &[String]) -> (String, PathBuf, serde_json::Va
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
                     let stage = v["levels"].as_array().into_iter().flatten()
-                        .find(|l| l["name"].as_str() == Some("stage"))
+                        .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");
                     let rid = v["run_id"].as_str().unwrap_or("").to_string();
-                    if stage.contains("post") && !exclude.contains(&rid) {
+                    if stage.contains("pgas") && !exclude.contains(&rid) {
                         return (rid, d, v);
                     }
                 }
@@ -146,7 +146,7 @@ fn post_leaf(out: &Path, exclude: &[String]) -> (String, PathBuf, serde_json::Va
             for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
         }
     }
-    panic!("no post stage leaf under {} (excluding {:?})", out.join("fits").display(), exclude);
+    panic!("no pgas method leaf under {} (excluding {:?})", out.join("fits").display(), exclude);
 }
 
 /// Recursive `{relpath -> bytes}` snapshot of a leaf, for the base-untouched check.
@@ -192,7 +192,7 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
     let fit16 = write_fit_toml(tmp.path(), &ir, &data, 16, 1);
     let r2 = Command::new(&bin)
         .arg("fit").arg("run").arg(&fit16)
-        .arg("--seed").arg("1").arg("--stage").arg("post").arg("--resume").arg(&base_id)
+        .arg("--seed").arg("1").arg("--resume").arg(&base_id)
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&r2.stderr);
     assert!(r2.status.success(), "resume run must succeed: {}", stderr);
@@ -209,7 +209,7 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
     let fit24 = write_fit_toml(tmp.path(), &ir, &data, 24, 1);
     let r3 = Command::new(&bin)
         .arg("fit").arg("run").arg(&fit24)
-        .arg("--seed").arg("1").arg("--stage").arg("post").arg("--resume").arg(&resumed_id)
+        .arg("--seed").arg("1").arg("--resume").arg(&resumed_id)
         .output().expect("spawn");
     assert!(r3.status.success(), "chained resume must succeed: {}", String::from_utf8_lossy(&r3.stderr));
     let (third_id, _, third_json) = post_leaf(&out, &[base_id.clone(), resumed_id.clone()]);
@@ -348,7 +348,7 @@ fn pgas_resume_rejects_when_identity_field_changes() {
     let fit2 = write_fit_toml(tmp.path(), &ir, &data, 8, 2);
     let r2 = Command::new(&bin)
         .arg("fit").arg("run").arg(&fit2)
-        .arg("--seed").arg("1").arg("--stage").arg("post").arg("--resume").arg(&base_id)
+        .arg("--seed").arg("1").arg("--resume").arg(&base_id)
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&r2.stderr);
     assert!(!r2.status.success(), "resume with changed chains must reject");

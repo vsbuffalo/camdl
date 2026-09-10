@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::args::{MreFitArgs, MreSimulateArgs};
-use crate::fit::config_v2::{DataSpec, FitConfigV2};
+use crate::fit::config_v2::{DataSpec, FitConfig};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -158,7 +158,7 @@ fn default_bundle_path(from: &Path) -> PathBuf {
 // ── fit collector ──────────────────────────────────────────────────────────────
 
 /// Enumerate a fit's input closure → a [`BundlePlan`]. Config-driven: every path
-/// comes from the resolved `FitConfigV2` plus the model's compile-time `read()`
+/// comes from the resolved `FitConfig` plus the model's compile-time `read()`
 /// closure. The fit.toml's directory is the root, so the config's own dest is
 /// its bare name and the reproduce command points at that.
 fn collect_fit(args: &MreFitArgs) -> Result<BundlePlan, String> {
@@ -176,10 +176,11 @@ fn collect_fit(args: &MreFitArgs) -> Result<BundlePlan, String> {
 
     let cfg_text = fs::read_to_string(config)
         .map_err(|e| format!("cannot read {}: {e}", config.display()))?;
-    let cfg: FitConfigV2 = toml::from_str(&cfg_text)
+    let cfg = FitConfig::from_toml_str(&cfg_text)
         .map_err(|e| format!("cannot parse {} as a fit.toml: {e}", config.display()))?;
 
     check_supported(&cfg)?;
+    let cfg = &cfg.problem;
 
     let mut inputs: Vec<InputRef> = Vec::new();
 
@@ -421,37 +422,22 @@ fn read_closure(model_path: &Path) -> Result<Vec<String>, String> {
     Ok(df.reads.into_iter().map(|e| e.resolved).collect())
 }
 
-/// Refuse fits whose init seeds from an upstream artifact mre cannot yet bundle.
-fn check_supported(cfg: &FitConfigV2) -> Result<(), String> {
-    for (name, stage) in &cfg.stages {
-        let v = toml::Value::try_from(stage)
-            .map_err(|e| format!("internal: cannot inspect stage `{name}`: {e}"))?;
-        let Some(t) = v.as_table() else { continue };
-        match t.get("init") {
-            // Unit variant: only `survey_top_k` is an upstream seed.
-            Some(toml::Value::String(s)) if s == "survey_top_k" => {
-                return Err(unsupported_seed(name, "init = \"survey_top_k\" (seeds from a survey landscape)"));
-            }
-            // Struct variants `from_mle` / `from_posterior` / `from_params`
-            // serialize as a single-key table.
-            Some(toml::Value::Table(it)) => {
-                let which = it.keys().next().map(String::as_str).unwrap_or("?");
-                return Err(unsupported_seed(
-                    name,
-                    &format!("init = {{ {which} }} (seeds from an external file or fit dir)"),
-                ));
-            }
-            _ => {}
+/// Refuse fits whose starts read an upstream artifact mre cannot yet bundle.
+fn check_supported(cfg: &FitConfig) -> Result<(), String> {
+    let Some(method) = &cfg.inference.method else { return Ok(()) };
+    if let Some(starts) = &method.starts {
+        if starts.source().is_some() {
+            return Err(unsupported_seed(&starts.spelled()));
         }
     }
     Ok(())
 }
 
-fn unsupported_seed(stage: &str, what: &str) -> String {
+fn unsupported_seed(what: &str) -> String {
     format!(
-        "`camdl mre` does not yet bundle fits whose init seeds from an upstream \
-         artifact: stage `{stage}` uses {what}.\n  \
-         Make the fit self-contained (init = \"lhs\" / \"single\" / \"from_prior\") \
+        "`camdl mre` does not yet bundle fits whose starts read an upstream \
+         artifact: `[method]` has starts = {what}.\n  \
+         Make the fit self-contained (starts = \"lhs\" / \"single\" / \"from_prior\") \
          or wait for a later mre version that bundles seed artifacts."
     )
 }
@@ -575,7 +561,7 @@ camdl = "m.camdl"
 [estimate.beta]
 [fixed]
 gamma = 0.1
-[stages.fit]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -584,8 +570,8 @@ iterations = 5
 cooling = 0.7
 "#;
 
-    fn cfg_from(s: &str) -> FitConfigV2 {
-        toml::from_str(s).expect("parse fit.toml")
+    fn cfg_from(s: &str) -> FitConfig {
+        FitConfig::from_toml_str(s).expect("parse fit.toml")
     }
 
     #[test]
@@ -594,10 +580,10 @@ cooling = 0.7
     }
 
     #[test]
-    fn survey_top_k_seed_is_rejected() {
-        let s = format!("{BASE}init = \"survey_top_k\"\n");
+    fn sourced_starts_is_rejected() {
+        let s = format!("{BASE}starts = {{ from_mle = \"@scout\" }}\n");
         let err = check_supported(&cfg_from(&s)).unwrap_err();
-        assert!(err.contains("survey_top_k"), "expected guidance naming the seed: {err}");
+        assert!(err.contains("from_mle @scout"), "expected guidance naming the source: {err}");
     }
 
     #[test]
@@ -606,7 +592,7 @@ cooling = 0.7
             "{BASE}[data]\nfile = \"cases.tsv\"\n[data.holdout]\ncases = \"holdout.tsv\"\n"
         );
         let cfg = cfg_from(&s);
-        let files = data_files(cfg.data.as_ref().unwrap());
+        let files = data_files(cfg.problem.data.as_ref().unwrap());
         assert_eq!(files, vec!["cases.tsv".to_string(), "holdout.tsv".to_string()]);
     }
 

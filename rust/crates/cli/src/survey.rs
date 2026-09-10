@@ -427,19 +427,14 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 
     // ── LHS sampling ────────────────────────────────────────────────
     //
-    // gh#42's `build_chain_starts` is the scale-aware sampler. LHS
-    // requires n >= 2; reject n_points = 1 upstream so the call here
+    // gh#42's `build_lhs_chain_starts` is the scale-aware sampler. LHS
+    // requires n >= 2; n_points = 1 is rejected upstream so the call here
     // doesn't degenerate to "just use base_params".
-    let lhs_starts = crate::fit::init::build_chain_starts(
-        crate::fit::init::InitMethod::Lhs,
+    let lhs_starts = crate::fit::init::build_lhs_chain_starts(
         &resolved.estimated,
         n_points,
         a.seed,
-    ).unwrap_or_else(|| {
-        // n_points < 2 returns None from build_chain_starts.
-        eprintln!("internal error: LHS sampler returned None at n_points={}", n_points);
-        std::process::exit(1);
-    });
+    );
 
     // ── Parallel evaluation loop ────────────────────────────────────
     // gh#53: the process must be built at the same dt as the filter so its
@@ -611,12 +606,10 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     // ── Finalize the CAS leaf ───────────────────────────────────────
     let elapsed = t0.elapsed().as_secs_f64();
     let best_loglik = sorted.iter().map(|r| r.loglik).find(|l| l.is_finite());
-    // Cross-check provenance for `init = survey_top_k` (gh#51): the
+    // Provenance a reader can cross-check the landscape against: the
     // `runid` model identity + per-stream data digests + the resolved
-    // `[fixed]` block. `build_chain_starts_from_survey` validates these
-    // against the fit before seeding chains. Recorded-not-hashed (the
-    // identity is the `levels`); these are the human/consumer-readable
-    // mirror the cross-check reads back.
+    // `[fixed]` block. Recorded-not-hashed (the identity is the `levels`);
+    // these are the human/consumer-readable mirror.
     let model_identity = crate::resolve::model_identity_from_ir(&resolved.model_ir_json);
     let inputs_json = serde_json::json!({
         "eval_method":     eval_method.as_str(),
@@ -643,7 +636,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
 fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
     -> Result<ResolvedSurveyInputs, String>
 {
-    use crate::fit::config_v2::FitConfigV2;
+    use crate::fit::config_v2::Problem;
     use crate::fit::runner::{build_if2_params_from_specs, ParamSpec};
 
     let model_path = a.model.to_string_lossy().into_owned();
@@ -652,7 +645,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         // Fit-aware mode: load fit.toml; pull bounds from [estimate],
         // data from [data], fixed from [fixed], scenario from top.
         let fit_path_str = fit_path.to_string_lossy().into_owned();
-        let config = FitConfigV2::load(&fit_path_str)?;
+        let config = Problem::load(&fit_path_str)?;
         // Make scenario+enable+disable mutual exclusion explicit
         // (matches fit::runner::FitRunConfig::build).
         if config.scenario.is_some() && (!config.enable.is_empty() || !config.disable.is_empty()) {
@@ -662,7 +655,7 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
         }
 
         // Load model from fit.toml's `model.camdl` (already path-
-        // resolved by FitConfigV2::load). `mut` because the gh#92
+        // resolved by Problem::load). `mut` because the gh#92
         // [estimate].start fall-back below seeds values into
         // `model_pre.parameters[i].value` before the resolver call.
         let (mut model_pre, model_ir_json) = crate::util::load_model(&config.model.camdl)?;

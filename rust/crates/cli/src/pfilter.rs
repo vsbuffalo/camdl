@@ -875,7 +875,7 @@ pub fn load_data_observations_from_fit_toml(
     model_obs_names: &[String],
 ) -> Result<Vec<(String, std::path::PathBuf)>, String> {
     let path_str = fit_path.to_string_lossy().into_owned();
-    let fit_cfg = crate::fit::config_v2::FitConfigV2::load(&path_str)
+    let fit_cfg = crate::fit::config_v2::Problem::load(&path_str)
         .map_err(|e| format!("failed to load --fit toml '{}': {}", path_str, e))?;
     let data_spec = fit_cfg.data_spec()?;
     let effective = data_spec.effective_observations(model_obs_names)?;

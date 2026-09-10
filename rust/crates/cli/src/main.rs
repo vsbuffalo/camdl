@@ -375,7 +375,7 @@ Examples:
 
 See `camdl fit <subcommand> --help` for full options."))]
 pub(crate) enum FitCmd {
-    /// Run inference stages defined in a fit.toml
+    /// Run the `[method]` a fit.toml declares on its problem
     Run(args::FitRunArgs),
     /// Interpret one fit: the convergence verdict, the estimates, and the
     /// per-parameter and per-chain diagnostics behind them
@@ -3225,12 +3225,13 @@ fn resolve_simulate_obs_anchors(
     // is consulted. Run dirs / @labels / hashes resolve through the store.
     let config = match crate::fit::handle::FitRef::classify(&fit_ref.to_string_lossy()) {
         crate::fit::handle::FitRef::Config(path) => {
-            crate::fit::config_v2::FitConfigV2::load(&path.to_string_lossy())
+            crate::fit::config_v2::Problem::load(&path.to_string_lossy())
                 .map_err(|e| format!("failed to load fit toml '{}': {e}", path.display()))?
         }
         _ => crate::fit::handle::resolve_fit(&fit_ref.to_string_lossy())
             .map_err(|e| e.to_string())?
-            .config,
+            .config
+            .problem,
     };
     obs_anchors_from_config(model, &config, dt)
 }
@@ -3241,7 +3242,7 @@ fn resolve_simulate_obs_anchors(
 /// second one that could disagree about which rows count as observation times.
 pub(crate) fn obs_anchors_from_config(
     model: &ir::Model,
-    config: &crate::fit::config_v2::FitConfigV2,
+    config: &crate::fit::config_v2::Problem,
     dt: f64,
 ) -> Result<(f64, f64), String> {
     let data = config.data_spec().map_err(|e| format!(
@@ -3795,7 +3796,7 @@ fn generate_uniform_draws(
 ///
 /// `model` is the simulate-flow's already-loaded IR. Threading it through
 /// is what enables the IR-tier fallback — without it, this function would
-/// be dependent on `FitConfigV2`'s `[model] camdl = …` path and have to
+/// be dependent on the config's `[model] camdl = …` path and have to
 /// re-load. The caller passes the same model used for simulation, so the
 /// priors we sample from match the model that runs.
 ///
@@ -3809,13 +3810,24 @@ fn generate_uniform_draws(
 /// the RNG-byte trajectory changes. Verified by the
 /// `sample_from_prior_raw_matches_expected_moments` test, which asserts
 /// the moment-matching at N=50k.
-/// gh#158: `simulate --fit <toml>` (via `--draws prior`) loads a full
-/// `FitConfigV2`, so a minimal or wrong file fails with a raw serde
-/// message (e.g. `expected struct ModelRef`) that does not tell the
-/// user what shape the file must have. Append a hint naming the
-/// expected `[model]` table and pointing at the docs. The original
-/// error is preserved so the underlying cause is still visible.
+/// gh#158: `simulate --fit <toml>` (via `--draws prior`) loads the fit
+/// config's problem half, so a bare params file — one with no `[model]`
+/// table — fails with a raw serde message (`missing field \`model\``) that
+/// does not tell the user what shape the file must have. Append a hint
+/// naming the expected `[model]` table and pointing at the docs. The
+/// original error is preserved so the underlying cause is still visible.
+///
+/// Scoped to that one error: any other load failure (a missing data field,
+/// a legacy `[stages]` table, a typo'd key) carries its own diagnosis, and
+/// the `[model]` hint on top of it points at the one table that is present.
 fn wrap_fit_load_error(fit_path: &str, err: String) -> String {
+    // Both spellings of "this is not a fit config at the top level": no
+    // `[model]` table, or a bare key where the top-level tables go.
+    let top_level_shape =
+        err.contains("missing field `model`") || err.contains("expected one of `model`");
+    if !top_level_shape {
+        return err;
+    }
     format!(
         "{}\n  \
          hint: `simulate --fit` expects a fit-config TOML, not a bare \
@@ -3834,12 +3846,12 @@ fn generate_prior_draws(
     seed: u64,
     model: &ir::Model,
 ) -> Result<Vec<HashMap<String, f64>>, String> {
-    use fit::config_v2::{FitConfigV2, EstimatePriorSpec};
+    use fit::config_v2::{EstimatePriorSpec, Problem};
     use crate::fit::priors_precedence::{
         resolve_priors_with_precedence, PriorSource,
     };
 
-    let config = FitConfigV2::load(fit_path).map_err(|e| wrap_fit_load_error(fit_path, e))?;
+    let config = Problem::load(fit_path).map_err(|e| wrap_fit_load_error(fit_path, e))?;
     let fixed = config.fixed.resolve()?;
 
     // Three-tier resolution: fit_toml > model_ir > flat. Walks every
@@ -5081,11 +5093,9 @@ mod tests {
     /// Write a minimal fit.toml that exercises `generate_prior_draws`.
     ///
     /// Only the surface that the function actually reads is filled in
-    /// (model, estimate, fixed). `FitConfigV2::load` parses the toml
-    /// without running validate(), but the parse step still enforces
-    /// the Stage enum's required fields — so we emit a syntactically
-    /// minimal IF2 stage. None of those values are read by the
-    /// prior-draws code path.
+    /// (model, estimate, fixed). `Problem::load` parses the toml without
+    /// running validate(); a file with no `[method]` at all is a complete
+    /// problem for this reader.
     fn write_fit_toml_for_prior_draws(
         dir: &std::path::Path,
         model_ir_path: &str,
@@ -5102,7 +5112,7 @@ camdl = "{model}"
 [fixed]
 {fixed}
 
-[stages.draw]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1
@@ -5163,7 +5173,7 @@ I0    = { bounds = [1, 1000] }
 
     // ─── gh#158: `simulate --fit` config-load error carries a hint ───────
 
-    /// A `--fit` file with no `[model]` table fails the `FitConfigV2`
+    /// A `--fit` file with no `[model]` table fails the config
     /// deserialize. The raw serde message is opaque ("missing field
     /// `model`"); the wrapped error must add the `[model]` shape hint so
     /// the user knows what kind of file `simulate --fit` wants.

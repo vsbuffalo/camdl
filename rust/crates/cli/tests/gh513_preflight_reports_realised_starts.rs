@@ -16,7 +16,7 @@
 //! asserted ABSENT separately, so a table that silently fell back to the config
 //! cannot pass by coincidence.
 //!
-//! `init = "lhs"` is the mode that separates the two: it stratifies over
+//! `starts = "lhs"` is the mode that separates the two: it stratifies over
 //! `bounds` and uses the base point for no chain, so chain 1's start differs
 //! from `[estimate].start`. Under `single`, or `uniform`'s chain 1, the two
 //! coincide and the test would prove nothing.
@@ -132,14 +132,14 @@ p_detect = 0.5
 N0       = 1000
 I0       = 1
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 2
 particles  = 20
 iterations = 1
 cooling    = 0.5
-init       = "lhs"
+starts       = "lhs"
 
 [config]
 dt = 1.0
@@ -150,7 +150,7 @@ dt = 1.0
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--seed", "1", "--allow-nonconverged-scout"])
+               "--seed", "1",])
         .output()
         .expect("spawn fit run");
     let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
@@ -170,7 +170,7 @@ dt = 1.0
     // where LHS happened to land near it.
     assert!((shown - 0.123).abs() > 1e-6,
         "the transforms table printed the declared [estimate].start (0.123) under \
-         init = \"lhs\", which uses the base point for no chain — this is exactly \
+         starts = \"lhs\", which uses the base point for no chain — this is exactly \
          gh#513.\nstderr:\n{stderr}");
 
     // The header has to say the chains diverge, or a reader takes chain 1's

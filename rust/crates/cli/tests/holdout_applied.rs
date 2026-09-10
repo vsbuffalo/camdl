@@ -85,7 +85,7 @@ p_detect = 0.5
 N0       = 1000
 beta     = {beta}
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1
@@ -290,7 +290,7 @@ p_detect = 0.5
 N0       = 1000
 beta     = 0.1
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1

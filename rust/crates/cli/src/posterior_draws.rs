@@ -21,8 +21,8 @@ use crate::fit::fit_view::FitView;
 use crate::run_meta::{FitAlgorithm, InferenceBackend};
 use crate::KeyedDraw;
 
-/// The terminal (or `--stage`-selected) Bayesian stage that produced a
-/// posterior draws cloud, located within a resolved fit directory.
+/// The method leaf that produced a posterior draws cloud, located within a
+/// resolved fit directory.
 #[derive(Debug, Clone)]
 pub struct PosteriorDrawsRef {
     /// Bare stage name (`scout`, `refine`, `pgas`) the draws came from.
@@ -51,10 +51,11 @@ const DRAWS_FILE: &str = "draws.tsv";
 /// Resolve a fit reference to its canonical posterior draws.
 ///
 /// `fit_ref` is a path to a fit results directory — either the segment
-/// (`results/fits/<stem>-<hash>/`) or a single stage directory. The terminal
-/// stage that wrote a `draws.tsv` is chosen; `stage` overrides that choice by
-/// bare name. Errors (never guesses) when the directory holds no posterior
-/// draws or the named stage has none.
+/// (`results/fits/<stem>-<hash>/`) or a single leaf directory. The last leaf
+/// (in label order) that wrote a `draws.tsv` is chosen; `stage` names one
+/// leaf by its label instead — an internal selector, used by the readers that
+/// render one leaf's stanza. Errors (never guesses) when the directory holds
+/// no posterior draws or the named leaf has none.
 pub fn resolve_posterior_draws(
     fit_ref: &str,
     stage: Option<&str>,
@@ -68,8 +69,8 @@ pub fn resolve_posterior_draws(
         ));
     }
 
-    // Segment case: the fit-level view enumerates stage leaves in execution
-    // order (the `NN-` ordinal prefix sorts topologically).
+    // Segment case: the fit-level view enumerates the method leaves in label
+    // order.
     if let Some(view) = FitView::read(dir) {
         // Stages that actually wrote a posterior cloud — the artifact gate.
         let with_draws: Vec<&crate::fit::fit_view::FitStageView> = view
@@ -99,7 +100,7 @@ pub fn resolve_posterior_draws(
             });
         }
 
-        // No --stage: the terminal stage that wrote a posterior cloud.
+        // No selector: the last leaf that wrote a posterior cloud.
         let chosen = with_draws.last().ok_or_else(|| no_posterior_error(fit_ref, &view))?;
         let draws_path = chosen.stage_dir.join(DRAWS_FILE);
         return Ok(PosteriorDrawsRef {
@@ -111,14 +112,15 @@ pub fn resolve_posterior_draws(
         });
     }
 
-    // Stage-dir-passed-directly case: no fit-level view, but the directory
-    // itself may be a stage holding draws.tsv.
+    // Leaf-dir-passed-directly case: no fit-level view, but the directory
+    // itself may be a leaf holding draws.tsv. Its label comes from its own
+    // `run.json` when it has one.
     let draws_path = dir.join(DRAWS_FILE);
     if draws_path.is_file() {
-        let stage = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(bare_stage_from_dir)
+        let stage = std::fs::read(dir.join("run.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
+            .and_then(|r| r.inputs.get("stage").and_then(|s| s.as_str()).map(String::from))
             .unwrap_or_default();
         return Ok(PosteriorDrawsRef {
             stage,
@@ -244,14 +246,6 @@ fn fit_algorithm_label(m: FitAlgorithm) -> &'static str {
     }
 }
 
-/// `"01-pgas"` → `"pgas"`; a name without an ordinal prefix is returned as-is.
-fn bare_stage_from_dir(label: &str) -> String {
-    label
-        .split_once('-')
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_else(|| label.to_string())
-}
-
 /// Resolve a fit's `[fixed]` block, for #273 backfill: fill any parameter
 /// *absent* from a raw draws TSV with the value the fit held it fixed at.
 ///
@@ -270,7 +264,7 @@ pub fn resolve_fixed_for_backfill(fit_ref: &str) -> Result<Vec<(String, f64)>, S
         out.sort_by(|a, b| a.0.cmp(&b.0));
         return Ok(out);
     }
-    let cfg = crate::fit::config_v2::FitConfigV2::load(fit_ref)
+    let cfg = crate::fit::config_v2::Problem::load(fit_ref)
         .map_err(|e| format!("failed to load --fit config '{fit_ref}': {e}"))?;
     let fixed = cfg
         .fixed
@@ -306,7 +300,7 @@ mod tests {
     use std::fs;
 
     /// Write one realistic `FitStage` leaf into a segment, mirroring the on-disk
-    /// shape the runner writes: `<seg>/<NN-stage>-<h8>/seed_1-<h8>/run.json`.
+    /// shape the runner writes: `<seg>/<label>-<h8>/seed_1-<h8>/run.json`.
     /// Returns the leaf dir (where `draws.tsv` would live). `method` is the
     /// inference algorithm tag; `draws` writes a `draws.tsv` iff `Some`.
     fn write_stage_leaf(
@@ -320,12 +314,12 @@ mod tests {
         fs::create_dir_all(&leaf).unwrap();
         let fit_hash = "abc12345".to_string() + &"0".repeat(56);
         // run_id must be valid 64-char hex (ContentHash rejects non-hex), and
-        // unique per stage — derive it from the label's hex ordinal prefix.
-        let ord_hex: String = stage_label.chars().take_while(|c| c.is_ascii_digit()).collect();
+        // unique per leaf — derive it from the label's bytes.
+        let ord_hex: String = stage_label.bytes().map(|b| format!("{b:02x}")).collect();
         let run_id = format!("{:0<64}", format!("{ord_hex}abcdef"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"toy","hash":"{fit_hash}","schema_version":1}},{{"name":"stage","label":"{stage_label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{bare}","method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":-12.3,"best_chain":1}},"provenance":{{"created_at":"2026-06-22T00:00:0{ord}Z","argv":["camdl","fit","run"]}}}}"#,
-            ord = stage_label.chars().next().unwrap_or('1'),
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"toy","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{stage_label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{bare}","method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":-12.3,"best_chain":1}},"provenance":{{"created_at":"2026-06-22T00:00:0{ord}Z","argv":["camdl","fit","run"]}}}}"#,
+            ord = stage_label.len() % 10,
         );
         fs::write(leaf.join("run.json"), rec).unwrap();
         if let Some(content) = draws {
@@ -361,11 +355,11 @@ mod tests {
     #[test]
     fn resolves_terminal_stage_draws() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_ok");
-        // A scout (IF2, no draws) followed by a posterior stage (PGAS, draws):
-        // the terminal stage with a cloud wins, not the last stage overall.
+        // An IF2 leaf (no draws) beside a PGAS leaf (draws) — two methods of
+        // one problem: the leaf with a cloud wins.
         let seg = fixture_segment(&tmp, &[
-            ("01-scout", "scout", "if2", None),
-            ("02-pgas",  "pgas",  "pgas", Some(TWO_DRAWS)),
+            ("if2",  "if2",  "if2", None),
+            ("pgas", "pgas", "pgas", Some(TWO_DRAWS)),
         ]);
         let r = resolve_posterior_draws(seg.to_str().unwrap(), None).expect("resolves");
         assert_eq!(r.stage, "pgas");
@@ -378,10 +372,10 @@ mod tests {
     #[test]
     fn errors_when_no_stage_has_draws() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_none");
-        // An IF2-only fit: an optimizer, no posterior cloud anywhere.
+        // An optimizer-only fit: no posterior cloud anywhere.
         let seg = fixture_segment(&tmp, &[
-            ("01-scout",  "scout",  "if2", None),
-            ("02-refine", "refine", "if2", None),
+            ("if2",      "if2",      "if2", None),
+            ("nl-sbplx", "nl-sbplx", "nl-sbplx", None),
         ]);
         let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
         assert!(err.contains("no stage"), "actionable error, got: {err}");
@@ -393,12 +387,12 @@ mod tests {
     fn stage_override_selects_named_stage() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_stagepick");
         let seg = fixture_segment(&tmp, &[
-            ("01-pgas",  "pgas",  "pgas", Some("beta\n0.1\n")),
-            ("02-pmmh",  "pmmh",  "pmmh", Some(TWO_DRAWS)),
+            ("pgas",  "pgas",  "pgas", Some("beta\n0.1\n")),
+            ("pmmh",  "pmmh",  "pmmh", Some(TWO_DRAWS)),
         ]);
-        // Without --stage, the terminal (pmmh) wins...
+        // Without a selector, the last leaf in label order (pmmh) wins...
         assert_eq!(resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap().stage, "pmmh");
-        // ...with --stage pgas, the earlier stage is chosen.
+        // ...with the selector naming pgas, that leaf is chosen.
         let r = resolve_posterior_draws(seg.to_str().unwrap(), Some("pgas")).unwrap();
         assert_eq!(r.stage, "pgas");
         assert_eq!(r.method, Some(FitAlgorithm::Pgas));
@@ -409,10 +403,10 @@ mod tests {
     fn errors_when_named_stage_has_no_draws() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_namednone");
         let seg = fixture_segment(&tmp, &[
-            ("01-scout", "scout", "if2",  None),
-            ("02-pgas",  "pgas",  "pgas", Some(TWO_DRAWS)),
+            ("if2",  "if2",  "if2",  None),
+            ("pgas", "pgas", "pgas", Some(TWO_DRAWS)),
         ]);
-        let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("scout")).unwrap_err();
+        let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("if2")).unwrap_err();
         assert!(err.contains("no posterior draws") || err.contains("optimizer"), "got: {err}");
         fs::remove_dir_all(&tmp).ok();
     }
@@ -423,13 +417,13 @@ mod tests {
         // — incomplete or still running — must NOT be framed as an optimizer fit,
         // on either the default (terminal-stage) or the --stage-named path.
         let tmp = crate::test_support::unique_temp_dir("pdraws_pgas_nodraws");
-        let seg = fixture_segment(&tmp, &[("01-posterior", "posterior", "pgas", None)]);
+        let seg = fixture_segment(&tmp, &[("pgas", "pgas", "pgas", None)]);
 
         let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
         assert!(!err.contains("optimizer"), "a pgas stage is not an optimizer: {err}");
         assert!(err.contains(DRAWS_FILE), "names the missing posterior draws: {err}");
 
-        let err2 = resolve_posterior_draws(seg.to_str().unwrap(), Some("posterior")).unwrap_err();
+        let err2 = resolve_posterior_draws(seg.to_str().unwrap(), Some("pgas")).unwrap_err();
         assert!(!err2.contains("optimizer"), "named pgas stage is not an optimizer: {err2}");
         assert!(err2.contains(DRAWS_FILE), "named stage names the missing draws: {err2}");
         fs::remove_dir_all(&tmp).ok();
@@ -438,7 +432,7 @@ mod tests {
     #[test]
     fn errors_on_unknown_stage_name() {
         let tmp = crate::test_support::unique_temp_dir("pdraws_badstage");
-        let seg = fixture_segment(&tmp, &[("01-pgas", "pgas", "pgas", Some(TWO_DRAWS))]);
+        let seg = fixture_segment(&tmp, &[("pgas", "pgas", "pgas", Some(TWO_DRAWS))]);
         let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("nope")).unwrap_err();
         assert!(err.contains("no stage named 'nope'"), "got: {err}");
         fs::remove_dir_all(&tmp).ok();

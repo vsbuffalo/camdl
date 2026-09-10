@@ -109,7 +109,7 @@ gamma = { bounds = [0.01, 1.0], start = 0.3 }
 [fixed]
 N0 = 1000
 
-[stages.mle]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -128,9 +128,9 @@ fn run_fit(bin: &Path, fit_toml: &Path) {
     assert!(status.success(), "fit run failed for {}", fit_toml.display());
 }
 
-/// gh#147 (M3.2): the CAS stage leaf for `stage_substr` under `fit_dir` —
-/// `<fit_dir>/<NN>-<stage>-<h8>/seed_<N>-<h8>/` (the dir holding a `fit_stage`
-/// run.json whose `stage` level contains `stage_substr`). Replaces the pre-M3.2
+/// gh#147 (M3.2): the CAS method leaf for `stage_substr` under `fit_dir` —
+/// `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/` (the dir holding a `fit_stage`
+/// run.json whose `method` level contains `stage_substr`). Replaces the pre-M3.2
 /// `real/fit_<seed>/<stage>` / `synthetic/ds_NN/fit_<seed>/<stage>` probe.
 fn cas_stage_leaf(fit_dir: &Path, stage_substr: &str) -> PathBuf {
     let mut stack = vec![fit_dir.to_path_buf()];
@@ -145,7 +145,7 @@ fn cas_stage_leaf(fit_dir: &Path, stage_substr: &str) -> PathBuf {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .find(|l| l["name"].as_str() == Some("stage"))
+                        .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str())
                         .unwrap_or("");
                     if stage.contains(stage_substr) {
@@ -177,7 +177,7 @@ fn all_stage_leaves(root: &Path, stage_substr: &str) -> Vec<PathBuf> {
         ) {
             if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
                 let stage = v["levels"].as_array().into_iter().flatten()
-                    .find(|l| l["name"].as_str() == Some("stage"))
+                    .find(|l| l["name"].as_str() == Some("method"))
                     .and_then(|l| l["label"].as_str()).unwrap_or("");
                 if stage.contains(stage_substr) { out.push(d.clone()); }
             }
@@ -208,7 +208,7 @@ fn cell_fit_bases(out: &Path) -> Vec<PathBuf> {
     let fits = out.join("fits");
     let mut bases: Vec<PathBuf> = std::fs::read_dir(&fits).unwrap()
         .flatten().map(|e| e.path())
-        .filter(|p| p.is_dir() && !all_stage_leaves(p, "mle").is_empty())
+        .filter(|p| p.is_dir() && !all_stage_leaves(p, "if2").is_empty())
         .collect();
     bases.sort();
     bases
@@ -252,7 +252,7 @@ cases = "{}"
     // `<fit_dir>/<NN>-mle-<h8>/seed_<N>-<h8>/`, not the legacy
     // `real/fit_1/mle/` wrapper.
     let fit_dir = find_fit_dir(&out, "fit");
-    let leaf = cas_stage_leaf(&fit_dir, "mle");
+    let leaf = cas_stage_leaf(&fit_dir, "if2");
     assert!(leaf.join("run.json").is_file(),
         "the mle stage leaf {} must hold a run.json", leaf.display());
     // The retired per-seed wrapper must NOT exist.
@@ -289,7 +289,7 @@ cases = "{}"
     // `mle` stage leaf per fit-seed. The legacy `real/fit_<seed>/` wrapper is
     // retired; the cross-seed summary.tsv is the deferred M4 view (gh#150).
     let fit_dir = find_fit_dir(&out, "fit");
-    let leaves = all_stage_leaves(&fit_dir, "mle");
+    let leaves = all_stage_leaves(&fit_dir, "if2");
     let seeds: std::collections::HashSet<u64> = leaves.iter().map(|l| seed_of(l)).collect();
     assert_eq!(seeds, [11u64, 22, 33].into_iter().collect(),
         "expected one mle stage leaf per fit-seed {{11,22,33}}; got {:?} from {:?}",
@@ -339,7 +339,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.3 }}
 [fixed]
 N0 = 1000
 
-[stages.mle]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 6
@@ -371,7 +371,7 @@ cooling = 0.7
 
     // Acceptance 3: the surviving chains still produced the fit output —
     // the `mle` stage leaf (gh#147 M3.2 CAS layout).
-    let leaf = cas_stage_leaf(&find_fit_dir(&out, "fit"), "mle");
+    let leaf = cas_stage_leaf(&find_fit_dir(&out, "fit"), "if2");
     assert!(leaf.join("run.json").is_file(),
         "surviving chains must still write the mle stage leaf at {}", leaf.display());
 }
@@ -421,7 +421,7 @@ sim_seeds = [1, 2, 3]
     assert_eq!(bases.len(), 3,
         "3 datasets → 3 distinct content-addressed cell fits; got {:?}", bases);
     for b in &bases {
-        assert!(!all_stage_leaves(b, "mle").is_empty(),
+        assert!(!all_stage_leaves(b, "if2").is_empty(),
             "each cell fit must have an mle stage leaf: {}", b.display());
     }
 }
@@ -457,7 +457,7 @@ sim_seeds = [10, 20]
     assert_eq!(bases.len(), 2, "2 datasets → 2 cell fit-bases; got {:?}", bases);
     for b in &bases {
         let seeds: std::collections::HashSet<u64> =
-            all_stage_leaves(b, "mle").iter().map(|l| seed_of(l)).collect();
+            all_stage_leaves(b, "if2").iter().map(|l| seed_of(l)).collect();
         assert_eq!(seeds, [1u64, 2].into_iter().collect(),
             "cell fit {} must have a leaf per fit-seed {{1,2}}; got {:?}",
             b.display(), seeds);
@@ -496,7 +496,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.3 }}
 [fixed]
 N0 = 1000
 
-[stages.mle]
+[method]
 algorithm     = "if2"
 backend     = "chain_binomial"
 chains     = 8
@@ -510,7 +510,7 @@ cooling    = 0.9
     // not the legacy `synthetic/ds_01/fit_1/mle/` wrapper. A synthetic fit
     // writes two segments (the generated dataset + the fit), so search the
     // `fits/` root for the stage leaf rather than assuming one segment.
-    let stage = cas_stage_leaf(&out.join("fits"), "mle");
+    let stage = cas_stage_leaf(&out.join("fits"), "if2");
     let starts_text = std::fs::read_to_string(stage.join("chain_starts.tsv"))
         .expect("chain_starts.tsv must exist");
     let mut body = starts_text.lines()
@@ -656,9 +656,9 @@ sim_seeds = [10]
         String::from_utf8_lossy(&syn_bytes));
 }
 
-// ── mode 5: [data] + [synthetic] errors cleanly ───────────────────────
+// ── mode 5: [data] + [synthetic] fits the real data ────────────────────
 #[test]
-fn data_and_synthetic_errors_cleanly() {
+fn data_beside_synthetic_fits_the_real_data() {
     let bin = camdl_sim();
     if camdlc().is_none() { return; }
     let tmp = tempdir("mutex");
@@ -684,9 +684,13 @@ sim_seeds = [1]
 
     let output = Command::new(&bin).arg("fit").arg("run")
         .arg(&fit_toml).output().unwrap();
-    assert!(!output.status.success(),
-        "[data]+[synthetic] must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("[data]") && stderr.contains("[synthetic]"),
-        "error must name both blocks: {}", stderr);
+    assert!(output.status.success(),
+        "[data] beside [synthetic] is a real-data fit with a recorded truth (proposal \
+         2026-09-08 §8, item 19); it must run: {stderr}");
+    // The real data were fitted: one leaf, no synthetic dataset generated.
+    assert_eq!(all_stage_leaves(&out, "if2").len(), 1, "one real-data leaf\n{stderr}");
+    assert!(!out.join("fits").join("synthetic").exists()
+            && !stderr.contains("ds_01"),
+        "no synthetic dataset may be generated when [data] is present:\n{stderr}");
 }

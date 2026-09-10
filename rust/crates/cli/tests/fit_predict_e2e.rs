@@ -149,7 +149,7 @@ fn fit_predict_writes_posterior_predictive_and_observed_artifacts() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let pgas = r#"[stages.posterior]
+    let pgas = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -456,7 +456,7 @@ fn fit_predict_two_scenarios_stack_into_one_file_each_tagged() {
     std::fs::write(tmp.join("model.camdl"), MODEL_WITH_SCENARIOS).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let pgas = r#"[stages.posterior]
+    let pgas = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -671,7 +671,7 @@ fn fit_predict_scale_scenario_applied_exactly_once_not_squared() {
     std::fs::write(tmp.join("model.camdl"), MODEL_WITH_SCALE_SCENARIO).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let pgas = r#"[stages.posterior]
+    let pgas = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -794,7 +794,7 @@ fn fit_predict_is_self_contained_after_loose_camdl_removed() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let pgas = r#"[stages.posterior]
+    let pgas = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -865,7 +865,7 @@ fn fit_predict_resolves_at_label_and_hash_prefix() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let pgas = r#"[stages.posterior]
+    let pgas = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -934,7 +934,7 @@ fn fit_summary_ambiguous_label_lists_candidates() {
     // Two fits that differ in config (→ distinct fit-level hashes → two
     // segments) but carry the SAME label. Cheap IF2 fits: resolution ambiguity
     // fires before any posterior is touched, so `fit summary` is enough.
-    let if2_a = r#"[stages.scout]
+    let if2_a = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -942,7 +942,7 @@ particles = 150
 iterations = 20
 cooling = 0.7
 "#;
-    let if2_b = r#"[stages.scout]
+    let if2_b = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -1001,7 +1001,7 @@ fn fit_predict_free_forward_honors_n_draws() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let pgas = r#"[stages.posterior]
+    let pgas = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -1063,7 +1063,7 @@ fn fit_predict_refuses_an_optimizer_fit() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let if2 = r#"[stages.scout]
+    let if2 = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2

@@ -156,7 +156,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.3 }}
 [fixed]
 N0 = 1000
 
-[stages.scout]
+[method]
 algorithm     = "if2"
 backend     = "chain_binomial"
 chains     = 2
@@ -269,8 +269,8 @@ fn sidecar_label(fit_dir: &Path) -> Option<String> {
     v.get("label").and_then(|l| l.as_str()).map(String::from)
 }
 
-/// gh#147 (M3.2): a stage leaf for `stage_substr` exists under `fit_dir` at the
-/// CAS shape `<fit_dir>/<NN-stage>-<h8>/seed_<N>-<h8>/run.json` (kind
+/// gh#147 (M3.2): a method leaf for `stage_substr` exists under `fit_dir` at the
+/// CAS shape `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/run.json` (kind
 /// `fit_stage`). Returns the leaf dir. Replaces the pre-M3.2 hard-coded
 /// `<fit_dir>/real/fit_<seed>/<stage>` probe.
 fn cas_stage_leaf(fit_dir: &Path, stage_substr: &str) -> Option<PathBuf> {
@@ -286,7 +286,7 @@ fn cas_stage_leaf(fit_dir: &Path, stage_substr: &str) -> Option<PathBuf> {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .find(|l| l["name"].as_str() == Some("stage"))
+                        .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str())
                         .unwrap_or("");
                     if stage.contains(stage_substr) {
@@ -342,14 +342,14 @@ fn fit_summary_walks_real_fit_run_v2_output() {
         fit_dir.display()
     );
 
-    // Spot-check: the canonical CAS stage leaf is on disk where the runner
-    // promises — `<fit_dir>/<NN-stage>-<h8>/seed_<N>-<h8>/run.json` (gh#147
+    // Spot-check: the canonical CAS method leaf is on disk where the runner
+    // promises — `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/run.json` (gh#147
     // M3.2). Hashes aren't predictable, so assert the *shape*: a `fit_stage`
-    // leaf whose `stage` level contains "scout". Locks the CAS layout into the
-    // test surface so a future runner change can't silently break the walker.
-    let leaf = cas_stage_leaf(&fit_dir, "scout").unwrap_or_else(|| {
+    // leaf whose `method` level is "if2". Locks the CAS layout into the test
+    // surface so a future runner change can't silently break the walker.
+    let leaf = cas_stage_leaf(&fit_dir, "if2").unwrap_or_else(|| {
         panic!(
-            "expected a CAS `scout` stage leaf under {} but none is present",
+            "expected a CAS `if2` method leaf under {} but none is present",
             fit_dir.display()
         )
     });
@@ -949,7 +949,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.3 }}
 [fixed]
 N0 = 1000
 
-[stages.scout]
+[method]
 algorithm     = "if2"
 backend     = "chain_binomial"
 chains     = 2

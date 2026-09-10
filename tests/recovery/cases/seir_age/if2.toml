@@ -18,7 +18,7 @@ gamma = { bounds = [0.01, 1.0], start = 0.12 }
 rho = 0.6
 k = 10.0
 
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 4

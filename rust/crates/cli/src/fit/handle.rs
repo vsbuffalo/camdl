@@ -17,7 +17,7 @@
 //! Phase 1b of
 //! `docs/dev/proposals/2026-06-27-sealed-fit-packets-handles-and-override-algebra.md`.
 
-use crate::fit::config_v2::FitConfigV2;
+use crate::fit::config_v2::FitConfig;
 use std::path::{Path, PathBuf};
 
 /// A parsed fit reference, before resolution. Classification is syntactic and
@@ -89,7 +89,7 @@ impl std::fmt::Display for ResolveError {
 /// `resolve_segment` returned, so that is what resolution yields.
 pub struct ResolvedFit {
     pub segment: PathBuf,
-    pub config: FitConfigV2,
+    pub config: FitConfig,
 }
 
 /// Resolve a raw fit handle to its segment directory only (no config load).
@@ -117,7 +117,7 @@ pub fn resolve_fit(s: &str) -> Result<ResolvedFit, ResolveError> {
 /// already-loaded live config (so the data paths it resolved against the user's
 /// directory are preserved); the other branches return `None` and let
 /// [`resolve_fit`] recover the config from the segment.
-fn resolve_inner(s: &str) -> Result<(PathBuf, Option<FitConfigV2>), ResolveError> {
+fn resolve_inner(s: &str) -> Result<(PathBuf, Option<FitConfig>), ResolveError> {
     match FitRef::classify(s) {
         FitRef::RunDir(dir) => {
             if dir.is_dir() {
@@ -166,12 +166,12 @@ fn resolve_inner(s: &str) -> Result<(PathBuf, Option<FitConfigV2>), ResolveError
 /// `results/fits/data/streams/x.tsv` and broke `compare` for every project whose
 /// configs use relative paths (gh#652). The sidecar records `fit_toml_path`, so
 /// that directory is known even when the file itself is gone or changed, and
-/// [`FitConfigV2::load_anchored_at`] resolves against it.
+/// [`FitConfig::load_anchored_at`] resolves against it.
 ///
 /// A fit run entirely from the CLI has no `fit.toml` at all: `write_fit_sidecar`
 /// records an empty `fit_toml_path` and archives nothing. That is a real gap, not
 /// a lookup miss, so it gets its own named error rather than a wrong path.
-fn load_config_for_segment(segment: &Path) -> Result<FitConfigV2, String> {
+fn load_config_for_segment(segment: &Path) -> Result<FitConfig, String> {
     let side = crate::run_meta::read_fit_sidecar(segment).ok_or_else(|| {
         format!(
             "{} is not a complete fit directory: no fit.meta.json",
@@ -188,7 +188,7 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfigV2, String> {
         ));
     }
     let archived = segment.join("fit.toml.original");
-    FitConfigV2::load_anchored_at(&archived, Path::new(&side.fit_toml_path)).map_err(|e| {
+    FitConfig::load_anchored_at(&archived, Path::new(&side.fit_toml_path)).map_err(|e| {
         format!(
             "{} is a fit directory but its archived config could not be read: {e}\n  \
              (expected {})",
@@ -202,7 +202,7 @@ fn load_config_for_segment(segment: &Path) -> Result<FitConfigV2, String> {
 /// comments, whitespace, and float spelling discarded (gh#653). Parsed with the
 /// production parser, so a config this cannot parse cannot match a fit either.
 fn config_identity(text: &str) -> Result<String, String> {
-    let config = FitConfigV2::from_toml_str(text)?;
+    let config = FitConfig::from_toml_str(text)?;
     crate::fit::cas::config_identity_hash(&config)
 }
 
@@ -226,14 +226,14 @@ fn config_identity(text: &str) -> Result<String, String> {
 /// A segment whose archive is missing or unparseable therefore cannot be
 /// matched — so those segments are named in the not-found message rather than
 /// silently passed over.
-fn resolve_config(path: &Path) -> Result<(PathBuf, FitConfigV2), ResolveError> {
+fn resolve_config(path: &Path) -> Result<(PathBuf, FitConfig), ResolveError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| ResolveError::NotFound(format!("cannot read fit config {}: {e}", path.display())))?;
     let wanted = config_identity(&text)
         .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
-    let config = FitConfigV2::load(&path.to_string_lossy())
+    let config = FitConfig::load(&path.to_string_lossy())
         .map_err(|e| ResolveError::NotFound(format!("cannot load fit config {}: {e}", path.display())))?;
-    let cas_root = crate::run_paths::output_root(None, config.output_dir.as_deref());
+    let cas_root = crate::run_paths::output_root(None, config.problem.output_dir.as_deref());
     let fits_dir = cas_root.join("fits");
     let mut matches: Vec<PathBuf> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
@@ -356,7 +356,7 @@ beta = { bounds = [0.01, 2.0] }
 [fixed]
 gamma = 0.2
 
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1
@@ -403,7 +403,7 @@ cooling = 0.7
         let cfg = resolve_fit(&seg.to_string_lossy())
             .unwrap_or_else(|e| panic!("resolve_fit on the segment: {e}"))
             .config;
-        let data = Path::new(&cfg.data.as_ref().unwrap().observations["cases"]);
+        let data = Path::new(&cfg.problem.data.as_ref().unwrap().observations["cases"]);
         assert!(
             data.is_file(),
             "the archived config's data path must resolve to the real file; got {}",
@@ -415,7 +415,7 @@ cooling = 0.7
         );
         // The model path anchors the same way.
         assert_eq!(
-            Path::new(&cfg.model.camdl),
+            Path::new(&cfg.problem.model.camdl),
             tmp.join("fits/../models/sir.camdl"),
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -482,7 +482,7 @@ beta = { bounds = [0.01, 2.0] }
 [fixed]
 gamma = 0.2
 
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1
@@ -513,7 +513,7 @@ cases = "../data/streams/cases.tsv"
 [model]
 camdl   = "../models/sir.camdl"
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1
@@ -553,39 +553,6 @@ cooling    = 0.70
         assert_ne!(changed, ARCHIVED);
         let (got, _seg, tmp) = resolve_live_against_archive("datapath", ARCHIVED, &changed);
         let err = got.err().expect("a changed data path is a different fit").to_string();
-        assert!(err.contains("no completed fit found"), "got: {err}");
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn a_reordered_stage_block_does_not_resolve() {
-        // NEGATIVE CONTROL for the canonicalisation's one deliberate asymmetry:
-        // key order inside `[stages]` is NOT sorted away, because stages execute
-        // in declaration order — scout→posterior and posterior→scout are two
-        // different pipelines and must not share an identity.
-        let two_stages = format!(
-            "{ARCHIVED}\n[stages.posterior]\nalgorithm = \"pgas\"\n\
-             backend = \"chain_binomial\"\nchains = 1\nparticles = 10\n\
-             sweeps = 4\nburn_in = 1\nthin = 1\n"
-        );
-        let swapped = {
-            let (head, _) = two_stages.split_once("[stages.scout]").unwrap();
-            let scout = two_stages
-                .split_once("[stages.scout]")
-                .unwrap()
-                .1
-                .split_once("[stages.posterior]")
-                .unwrap()
-                .0
-                .to_string();
-            let posterior = two_stages.split_once("[stages.posterior]").unwrap().1.to_string();
-            format!("{head}[stages.posterior]{posterior}\n[stages.scout]{scout}")
-        };
-        let (got, _seg, tmp) = resolve_live_against_archive("stageorder", &two_stages, &swapped);
-        let err = got
-            .err()
-            .expect("stage order is meaning, not formatting")
-            .to_string();
         assert!(err.contains("no completed fit found"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }

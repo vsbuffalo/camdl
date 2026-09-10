@@ -111,7 +111,7 @@ beta  = {{ bounds = [0.001, 5.0], prior = {{ log_normal = {{ mu = -0.3, sigma = 
 gamma = {{ bounds = [0.01, 1.0],  prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }}, start = 0.1 }}
 [fixed]
 N0 = 1000
-[stages.post]
+[method]
 algorithm  = "pmmh"
 backend    = "chain_binomial"
 chains     = 1
@@ -119,7 +119,7 @@ particles  = 2000
 iterations = 40
 burn_in    = 10
 thin       = 1
-init       = "single"
+starts       = "single"
 {rho}
 "#,
         out  = dir.join("results").display(),

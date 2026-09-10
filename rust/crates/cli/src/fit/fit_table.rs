@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::args::{FitTableArgs, FitTableFormat};
 use crate::fit::config_diff::ConfigDiff;
-use crate::fit::config_v2::FitConfigV2;
+use crate::fit::config_v2::FitConfig;
 use crate::fit::fit_tree::{self, FitDirEntry};
 use crate::fit::fit_view::FitView;
 use crate::fit::table_row::{self, TableRow};
@@ -210,7 +210,7 @@ pub(crate) fn emit_unlabelled_warning(unlabelled_count: usize) {
 /// posture the reader errors with an actionable message rather than
 /// silently falling back to `FitView.fit_toml_path` (which can
 /// move/change).
-fn load_archived_fit_toml(fit_dir: &std::path::Path) -> Result<FitConfigV2, String> {
+fn load_archived_fit_toml(fit_dir: &std::path::Path) -> Result<FitConfig, String> {
     let archive = fit_dir.join("fit.toml.original");
     if !archive.exists() {
         return Err(format!(
@@ -221,7 +221,7 @@ fn load_archived_fit_toml(fit_dir: &std::path::Path) -> Result<FitConfigV2, Stri
              remove the directory.",
             archive.display()));
     }
-    FitConfigV2::load(&archive.to_string_lossy())
+    FitConfig::load(&archive.to_string_lossy())
 }
 
 fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs, now_unix: i64) -> bool {
@@ -229,11 +229,6 @@ fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs, now_unix: i64
 
     if let Some(model) = &args.model {
         if !view.model_identity.starts_with(model.as_str()) {
-            return false;
-        }
-    }
-    if let Some(stage) = &args.with_stage {
-        if !view.stages_declared.iter().any(|s| s == stage) {
             return false;
         }
     }
@@ -770,12 +765,12 @@ mod tests {
     /// `mle_params.toml`/`fit_state.toml`, so the row's MethodResult won't load
     /// (the property under test); the fit entry itself is still discovered.
     fn write_cas_fit_seg(seg: &Path, fit_h8: &str) {
-        let leaf = seg.join("01-mle-1fb03eee").join("seed_1-06cbd6b3");
+        let leaf = seg.join("if2-1fb03eee").join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
         let run_id = format!("{:0<64}", format!("{fit_h8}01"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"stage","label":"01-mle","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"mle","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"mle","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(

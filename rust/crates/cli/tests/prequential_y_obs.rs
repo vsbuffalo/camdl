@@ -298,7 +298,7 @@ I0  = 10
 rho = 0.5
 k   = 10.0
 
-[stages.score]
+[method]
 algorithm = "pfilter"
 backend = "chain_binomial"
 particles = 300

@@ -31,21 +31,24 @@
 //!   `prevalence(I) > 0` at every observation time and the Poisson term is
 //!   finite whatever the counts.
 //!
-//! Per-chain starts come from a forged `survey_top_k` landscape, which assigns
-//! rank-1 → chain 1 and rank-2 → chain 2 deterministically — the same lever
-//! `pmmh_bad_init_skip.rs` uses to plant one pathological start.
+//! Per-chain starts come from a two-row draws file named by
+//! `starts = { from_posterior = … }`: each chain draws one row, so which chain
+//! gets the pathological row is a property of the seeded draw. The test reads
+//! `chain_starts.tsv` — the artifact that records exactly this — rather than
+//! assuming an assignment, and asserts the premise that the two chains drew
+//! different rows. The same lever `pmmh_bad_init_skip.rs` uses.
 //!
 //! ## Acceptance
 //!
 //! 1. `one_bad_chain_is_skipped_and_survivors_finish` — exit 0; exactly one
-//!    `bad_init` diagnostic, carrying chain 1's index and the `iota = 0` start
-//!    it actually ran from; `fit_state.toml` records `n_good_chains = 1` beside
-//!    `n_chains = 2`; and `draws.tsv` holds draws for chain 1 (0-based) ONLY —
-//!    the skipped chain enters no pooled number.
-//! 2. `all_chains_refused_is_an_error` — both ranks at `iota = 0` ⇒ non-zero
+//!    `bad_init` diagnostic, carrying the refused chain's index and the
+//!    `iota = 0` start it actually ran from; `fit_state.toml` records
+//!    `n_good_chains = 1` beside `n_chains = 2`; and `draws.tsv` holds draws
+//!    for the surviving chain ONLY — the skipped chain enters no pooled number.
+//! 2. `all_chains_refused_is_an_error` — both rows at `iota = 0` ⇒ non-zero
 //!    exit and an `initial_loglik_infinite` diagnostic, rather than a
 //!    degenerate posterior written at exit 0.
-//! 3. `healthy_fit_keeps_every_chain` — the negative control. Both ranks
+//! 3. `healthy_fit_keeps_every_chain` — the negative control. Both rows
 //!    healthy ⇒ NO `bad_init`, both chains present in `draws.tsv`, and
 //!    `fit_state.toml` carries no `n_good_chains` key, so a healthy fit's
 //!    output is unchanged by the guard.
@@ -56,7 +59,6 @@
 //! Skipped when the release binary or camdlc isn't present, mirroring
 //! `pmmh_bad_init_skip.rs`.
 
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -82,22 +84,6 @@ fn tempdir(tag: &str) -> Tmp {
         "camdl_pgas_bad_init_{}_{}_{}", tag, std::process::id(), ns));
     std::fs::create_dir_all(&base).unwrap();
     Tmp(base)
-}
-
-/// `crate::resolve::model_identity_from_ir` for the integration test — calls
-/// the SAME `runid::inputs::model_ir_hash` the production helper does (gh#442),
-/// so the forged survey `run.json` carries an identity the fit accepts by
-/// construction.
-fn model_identity_for_test(ir_json: &str) -> String {
-    let model: ir::Model = ir::from_str(ir_json).expect("model_identity_for_test: invalid IR");
-    runid::inputs::model_ir_hash(&model).to_hex()
-}
-
-fn sha256_hex_of_file(path: &Path) -> String {
-    let bytes = std::fs::read(path).unwrap();
-    let mut h = Sha256::new();
-    h.update(&bytes);
-    hex::encode(h.finalize())
 }
 
 /// SIR whose only route into `I` is the importation term `iota * S`, so
@@ -144,61 +130,20 @@ simulate { from = 0 'days  to = 6 'days }
     (ir_path, data_path)
 }
 
-/// Forge a 2-row survey landscape. `iotas.0` becomes rank-1 (chain 1) and
-/// `iotas.1` rank-2 (chain 2) — ranking is by the `loglik` column, which the
-/// fit re-evaluates itself and uses here only to order the rows.
-fn write_survey_artifact(
-    survey_dir: &Path,
-    model_identity: &str,
-    data_hash_cases: &str,
-    iotas: (f64, f64),
-) -> String {
-    std::fs::create_dir_all(survey_dir).unwrap();
-
-    let survey_hash = "abad1de0abad1de0abad1de0abad1de0abad1de0abad1de0abad1de0abad1de0";
-
-    let record = runid::RunRecord {
-        format_version: runid::FORMAT_VERSION,
-        kind: runid::ArtifactKind::Survey,
-        run_id: runid::ContentHash::from_hex(survey_hash).unwrap(),
-        hash_version: runid::HASH_VERSION,
-        ir_version: "0.7".into(),
-        engine_version: "test-fixture".into(),
-        levels: Vec::new(),
-        deps: Vec::new(),
-        status: runid::RunStatus::Completed,
-        artifacts: Default::default(),
-        output_schema: Default::default(),
-        children: Default::default(),
-        inputs: serde_json::json!({
-            "model_identity": model_identity,
-            "data_hashes": { "cases": data_hash_cases },
-            "fixed": { "N0": 1000.0 },
-            "estimated": ["beta", "gamma", "iota"],
-            "eval_method": "pfilter",
-            "eval_particles": 100,
-            "eval_replicates": 1,
-            "n_points": 2,
-        }),
-        provenance: Default::default(),
-    };
-    std::fs::write(
-        survey_dir.join("run.json"),
-        serde_json::to_string_pretty(&record).unwrap(),
-    ).unwrap();
-
-    let landscape = format!(
+/// A two-row draws file: each chain draws one row as its start.
+fn write_draws(dir: &Path, iotas: (f64, f64)) -> PathBuf {
+    let draws = format!(
         "# gh#607 PGAS chain-start refusal test fixture\n\
-         beta\tgamma\tiota\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
-         0.30\t0.10\t{}\t-50.0\t1.0\t0.8\t1\t0\n\
-         0.30\t0.10\t{}\t-55.0\t1.0\t0.8\t1\t1\n",
+         beta\tgamma\tiota\n\
+         0.30\t0.10\t{}\n\
+         0.30\t0.10\t{}\n",
         iotas.0, iotas.1);
-    std::fs::write(survey_dir.join("landscape.tsv"), landscape).unwrap();
-
-    survey_hash.to_string()
+    let p = dir.join("starts.tsv");
+    std::fs::write(&p, draws).unwrap();
+    p
 }
 
-fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, survey_dir: &Path) -> (PathBuf, PathBuf) {
+fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, draws: &Path) -> (PathBuf, PathBuf) {
     let out_root = dir.join("results");
     // `iota`'s prior is uniform over its whole bound range, so `iota = 0` is
     // INSIDE the prior's support: the refusal below must come from the
@@ -217,7 +162,7 @@ gamma = {{ bounds = [0.01, 1.0], prior = {{ log_normal = {{ mu = -1.2, sigma = 0
 iota  = {{ bounds = [0.0, 1.0],  prior = {{ uniform = {{ lower = 0.0, upper = 1.0 }} }}, start = 0.2 }}
 [fixed]
 N0 = 1000
-[stages.post]
+[method]
 algorithm      = "pgas"
 backend        = "chain_binomial"
 chains         = 2
@@ -225,13 +170,12 @@ particles      = 20
 sweeps         = 10
 burn_in        = 2
 thin           = 1
-init           = "survey_top_k"
-survey_path    = "{survey}"
+starts         = {{ from_posterior = "{draws}" }}
 "#,
         out    = out_root.display(),
         ir     = ir.display(),
         data   = data.display(),
-        survey = survey_dir.display(),
+        draws  = draws.display(),
     );
     let p = dir.join("fit.toml");
     std::fs::write(&p, toml).unwrap();
@@ -248,7 +192,7 @@ fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> Option<PathBuf> {
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
                     let stage = v["levels"].as_array().into_iter().flatten()
-                        .find(|l| l["name"].as_str() == Some("stage"))
+                        .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");
                     if stage.contains(stage_substr) { return Some(d); }
                 }
@@ -311,6 +255,37 @@ fn diagnostics_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Each chain's `iota` start, read from the leaf's `chain_starts.tsv` —
+/// `(chain_id, iota)` in file order.
+fn chain_iotas(leaf: &Path) -> Vec<(usize, f64)> {
+    let path = leaf.join("chain_starts.tsv");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let mut body = raw.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let cols: Vec<&str> = body.next().expect("chain_starts.tsv header").split('\t').collect();
+    let id_idx = cols.iter().position(|c| *c == "chain_id").expect("chain_id column");
+    let iota_idx = cols.iter().position(|c| *c == "iota").expect("iota column");
+    body.map(|l| {
+        let cells: Vec<&str> = l.split('\t').collect();
+        (cells[id_idx].parse().unwrap(), cells[iota_idx].parse().unwrap())
+    }).collect()
+}
+
+/// The chains that drew the `iota = 0` row and the ones that did not, from the
+/// leaf's own record of its starts. Asserts the premise every skip test
+/// stands on: the two chains drew different rows.
+fn split_chains_by_start(leaf: &Path) -> (Vec<usize>, Vec<usize>) {
+    let starts = chain_iotas(leaf);
+    assert_eq!(starts.len(), 2, "two chains, two recorded starts: {starts:?}");
+    let bad: Vec<usize> = starts.iter().filter(|(_, i)| *i == 0.0).map(|(c, _)| *c).collect();
+    let good: Vec<usize> = starts.iter().filter(|(_, i)| *i != 0.0).map(|(c, _)| *c).collect();
+    assert!(!bad.is_empty() && !good.is_empty(),
+        "the seeded from_posterior draw must hand the two chains different rows for \
+         this fixture to test a skip; chain_starts.tsv says {starts:?}. If the draw \
+         changed, pick a seed under which the rows differ.");
+    (bad, good)
+}
+
 /// The 0-based `chain` column of every row in `draws.tsv`.
 fn draws_chain_ids(draws: &Path) -> Vec<usize> {
     let raw = std::fs::read_to_string(draws)
@@ -342,14 +317,8 @@ fn run_fit(tag: &str, iotas: (f64, f64)) -> Option<Run> {
     let tmp = tempdir(tag);
     let (ir, data) = write_fixture(tmp.path(), &camdlc);
 
-    let ir_json = std::fs::read_to_string(&ir).unwrap();
-    let mh = model_identity_for_test(&ir_json);
-    let dh = sha256_hex_of_file(&data);
-
-    let survey_dir = tmp.path().join("survey_dir");
-    let _ = write_survey_artifact(&survey_dir, &mh, &dh, iotas);
-
-    let (fit_toml, out_root) = write_fit_toml(tmp.path(), &ir, &data, &survey_dir);
+    let draws = write_draws(tmp.path(), iotas);
+    let (fit_toml, out_root) = write_fit_toml(tmp.path(), &ir, &data, &draws);
     let out = Command::new(&bin)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(),
@@ -376,24 +345,29 @@ fn one_bad_chain_is_skipped_and_survivors_finish() {
         "the fit must succeed when ONE chain's start is refused.\n\
          stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
 
-    // Exactly one BadInit, naming chain 0 and the start it actually ran from.
+    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+        .expect("committed `pgas` method leaf");
+    let (bad_chains, good_chains) = split_chains_by_start(&stage_dir);
+
+    // Exactly one BadInit, naming the refused chain and the start it actually
+    // ran from.
     let bad = bad_init_entries(&run.out_root);
     assert_eq!(bad.len(), 1,
         "expected exactly 1 bad_init diagnostic, got {}: {:#?}\nstderr:\n{}",
         bad.len(), bad, run.stderr);
     let chain_id = bad[0].get("chain_id").and_then(|c| c.as_u64())
-        .expect("bad_init must carry a chain_id");
-    assert_eq!(chain_id, 0,
-        "rank-1 goes to chain 1 (0-based id 0); got {chain_id}. \
+        .expect("bad_init must carry a chain_id") as usize;
+    assert_eq!(vec![chain_id], bad_chains,
+        "the refused chain must be the one that drew the iota = 0 row; \
          bad_init:\n{:#?}", bad[0]);
 
     // gh#513: the diagnostic quotes the start THIS chain ran from, which is
-    // the survey rank-1 row — not the `[estimate].start` value of 0.2.
+    // the drawn row — not the `[estimate].start` value of 0.2.
     let params = bad[0].get("params").expect("bad_init must carry params");
     let iota = params.get("iota").and_then(|v| v.as_f64())
         .expect("bad_init.params must include iota");
     assert_eq!(iota, 0.0,
-        "bad_init must name the survey rank-1 start (iota=0), not the \
+        "bad_init must name the drawn start (iota=0), not the \
          configured `start` (0.2); got {iota}. bad_init:\n{:#?}", bad[0]);
 
     // The reason must identify WHICH term was non-finite — `observation` is a
@@ -406,9 +380,6 @@ fn one_bad_chain_is_skipped_and_survivors_finish() {
         "the reason must record that the X|θ,y rescue was attempted and failed; \
          got: {reason}");
 
-    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "post")
-        .expect("committed `post` stage leaf");
-
     // `fit_state.toml`: 1 of 2 chains usable.
     let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();
@@ -420,8 +391,8 @@ fn one_bad_chain_is_skipped_and_survivors_finish() {
     // THE load-bearing assertion: the skipped chain contributes no draw.
     let chains = draws_chain_ids(&stage_dir.join("draws.tsv"));
     assert!(!chains.is_empty(), "the surviving chain must have written draws");
-    assert!(chains.iter().all(|&c| c == 1),
-        "draws.tsv must hold ONLY the surviving chain (0-based id 1); \
+    assert!(chains.iter().all(|c| good_chains.contains(c)),
+        "draws.tsv must hold ONLY the surviving chain {good_chains:?}; \
          saw chain ids {:?}", {
             let mut u = chains.clone(); u.sort_unstable(); u.dedup(); u
         });
@@ -460,8 +431,8 @@ fn all_chains_refused_is_an_error() {
 /// the 6-day window is 0.6: the *reference* draw is all-zero (hence `-inf`)
 /// with probability ≈ e^(-0.6) ≈ 0.55, while at least one of the 40 conditional
 /// SMC particles imports with probability ≈ 1 − e^(-24) — so a trajectory that
-/// explains the data exists at this very `θ₀` and CSMC finds it. Both survey
-/// ranks use it, so both chains must survive.
+/// explains the data exists at this very `θ₀` and CSMC finds it. Both rows use
+/// it, so both chains must survive.
 #[test]
 fn a_start_the_trajectory_move_can_rescue_is_not_refused() {
     let Some(run) = run_fit("rescued", (1e-4, 1e-4)) else { return };
@@ -478,8 +449,8 @@ fn a_start_the_trajectory_move_can_rescue_is_not_refused() {
         "the fixture must actually START at -inf and recover, or this test is \
          vacuous.\nstderr:\n{}", run.stderr);
 
-    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "post")
-        .expect("committed `post` stage leaf");
+    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+        .expect("committed `pgas` method leaf");
     let mut chains = draws_chain_ids(&stage_dir.join("draws.tsv"));
     chains.sort_unstable();
     chains.dedup();
@@ -503,8 +474,8 @@ fn healthy_fit_keeps_every_chain() {
     assert!(!run.stderr.contains("skipped via BadInit"),
         "a healthy fit must not report a skip.\nstderr:\n{}", run.stderr);
 
-    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "post")
-        .expect("committed `post` stage leaf");
+    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+        .expect("committed `pgas` method leaf");
 
     let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();

@@ -134,7 +134,7 @@ gamma = {{ bounds = [0.01, 1.0], prior = {{ log_normal = {{ mu = -1.2, sigma = 0
 [fixed]
 N0 = 1000
 I0 = 10
-[stages.post]
+[method]
 algorithm = "{algorithm}"
 backend = "chain_binomial"
 chains = {chains}

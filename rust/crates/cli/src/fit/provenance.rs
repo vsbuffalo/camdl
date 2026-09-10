@@ -305,8 +305,7 @@ pub fn fit_stage_hash(
     estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
     fixed_resolved: &indexmap::IndexMap<String, f64>,
     simplex_groups: &[super::config_v2::SimplexGroup],
-    stage_name: &str,
-    stage: &super::config_v2::Stage,
+    method: &super::config_v2::Method,
     seed: u64,
 ) -> Result<String, String> {
     let mut h = Sha256::new();
@@ -359,13 +358,13 @@ pub fn fit_stage_hash(
         h.update(b"\x00");
     }
 
-    // Stage config — uses Stage::identity_payload(), which omits the
+    // Method config — uses Method::identity_payload(), which omits the
     // extension dimension (PGAS sweeps, PMMH iterations) so resume
     // can extend a chain without invalidating its stored state.
     h.update(b"\x00stage\x00");
-    h.update(stage_name.as_bytes());
+    h.update(method.algorithm.method_name().as_bytes());
     h.update(b"\x00");
-    h.update(serde_json::to_vec(&stage.identity_payload()).unwrap_or_default());
+    h.update(serde_json::to_vec(&method.identity_payload()).unwrap_or_default());
 
     // Seed
     h.update(b"\x00seed\x00");
@@ -381,6 +380,23 @@ pub fn fit_stage_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An IF2 `[method]` with `starts` resolved, as `fit run` hands it to the
+    /// runners.
+    fn if2_method(chains: usize) -> super::super::config_v2::Method {
+        super::super::config_v2::Method {
+            algorithm: super::super::config_v2::Algorithm::IF2 {
+                backend: crate::run_meta::InferenceBackend::ChainBinomial,
+                chains, particles: 1000, iterations: 50,
+                cooling: 0.7,
+                cooling_target_iters: 50,
+                loglik_eval: Default::default(),
+                gate: Default::default(),
+                dt_check: Default::default(),
+            },
+            starts: Some(super::super::config_v2::ChainStarts::uniform_unconstrained()),
+        }
+    }
 
     #[test]
     fn content_hash_stable() {
@@ -411,21 +427,9 @@ mod tests {
         let obs: IndexMap<String, String> = IndexMap::new();
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
-        let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::InferenceBackend::ChainBinomial,
-            chains: 4, particles: 1000, iterations: 50,
-            cooling: 0.7,
-            cooling_target_iters: 50,
-            starts_from: super::super::config_v2::StartsFrom::Random,
-            loglik_eval: Default::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
-            gate: Default::default(),
-            dt_check: Default::default(),
-        };
-        let h1 = fit_stage_hash("model", &obs, &est, &fixed, &[], "mle", &stage, 1).unwrap();
-        let h2 = fit_stage_hash("model", &obs, &est, &fixed, &[], "mle", &stage, 1).unwrap();
+        let stage = if2_method(4);
+        let h1 = fit_stage_hash("model", &obs, &est, &fixed, &[], &stage, 1).unwrap();
+        let h2 = fit_stage_hash("model", &obs, &est, &fixed, &[], &stage, 1).unwrap();
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64, "config hash is 64 hex chars");
     }
@@ -436,21 +440,9 @@ mod tests {
         let obs: IndexMap<String, String> = IndexMap::new();
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
-        let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::InferenceBackend::ChainBinomial,
-            chains: 4, particles: 1000, iterations: 50,
-            cooling: 0.7,
-            cooling_target_iters: 50,
-            starts_from: super::super::config_v2::StartsFrom::Random,
-            loglik_eval: Default::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
-            gate: Default::default(),
-            dt_check: Default::default(),
-        };
-        let h1 = fit_stage_hash("model_a", &obs, &est, &fixed, &[], "mle", &stage, 1).unwrap();
-        let h2 = fit_stage_hash("model_b", &obs, &est, &fixed, &[], "mle", &stage, 1).unwrap();
+        let stage = if2_method(4);
+        let h1 = fit_stage_hash("model_a", &obs, &est, &fixed, &[], &stage, 1).unwrap();
+        let h2 = fit_stage_hash("model_b", &obs, &est, &fixed, &[], &stage, 1).unwrap();
         assert_ne!(h1, h2, "different model must produce different hash");
     }
 
@@ -460,21 +452,9 @@ mod tests {
         let obs: IndexMap<String, String> = IndexMap::new();
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
-        let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::InferenceBackend::ChainBinomial,
-            chains: 4, particles: 1000, iterations: 50,
-            cooling: 0.7,
-            cooling_target_iters: 50,
-            starts_from: super::super::config_v2::StartsFrom::Random,
-            loglik_eval: Default::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
-            gate: Default::default(),
-            dt_check: Default::default(),
-        };
-        let h1 = fit_stage_hash("model", &obs, &est, &fixed, &[], "mle", &stage, 1).unwrap();
-        let h2 = fit_stage_hash("model", &obs, &est, &fixed, &[], "mle", &stage, 2).unwrap();
+        let stage = if2_method(4);
+        let h1 = fit_stage_hash("model", &obs, &est, &fixed, &[], &stage, 1).unwrap();
+        let h2 = fit_stage_hash("model", &obs, &est, &fixed, &[], &stage, 2).unwrap();
         assert_ne!(h1, h2, "different seed must produce different hash");
     }
 
@@ -484,34 +464,10 @@ mod tests {
         let obs: IndexMap<String, String> = IndexMap::new();
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
-        let stage1 = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::InferenceBackend::ChainBinomial,
-            chains: 4, particles: 1000, iterations: 50,
-            cooling: 0.7,
-            cooling_target_iters: 50,
-            starts_from: super::super::config_v2::StartsFrom::Random,
-            loglik_eval: Default::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
-            gate: Default::default(),
-            dt_check: Default::default(),
-        };
-        let stage2 = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::InferenceBackend::ChainBinomial,
-            chains: 8, particles: 1000, iterations: 50,
-            cooling: 0.7,
-            cooling_target_iters: 50,
-            starts_from: super::super::config_v2::StartsFrom::Random,
-            loglik_eval: Default::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
-            gate: Default::default(),
-            dt_check: Default::default(),
-        };
-        let h1 = fit_stage_hash("model", &obs, &est, &fixed, &[], "mle", &stage1, 1).unwrap();
-        let h2 = fit_stage_hash("model", &obs, &est, &fixed, &[], "mle", &stage2, 1).unwrap();
+        let stage1 = if2_method(4);
+        let stage2 = if2_method(8);
+        let h1 = fit_stage_hash("model", &obs, &est, &fixed, &[], &stage1, 1).unwrap();
+        let h2 = fit_stage_hash("model", &obs, &est, &fixed, &[], &stage2, 1).unwrap();
         assert_ne!(h1, h2, "different stage settings must produce different hash");
     }
 
@@ -526,27 +482,15 @@ mod tests {
         let obs: IndexMap<String, String> = IndexMap::new();
         let est: IndexMap<String, super::super::config_v2::EstimateSpecV2> = IndexMap::new();
         let fixed: IndexMap<String, f64> = IndexMap::new();
-        let stage = super::super::config_v2::Stage::IF2 {
-            backend: crate::run_meta::InferenceBackend::ChainBinomial,
-            chains: 4, particles: 1000, iterations: 50,
-            cooling: 0.7,
-            cooling_target_iters: 50,
-            starts_from: super::super::config_v2::StartsFrom::Random,
-            loglik_eval: Default::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
-            gate: Default::default(),
-            dt_check: Default::default(),
-        };
+        let stage = if2_method(4);
         let no_groups: Vec<super::super::config_v2::SimplexGroup> = vec![];
         let with_group = vec![super::super::config_v2::SimplexGroup {
             params: vec!["S0_y".into(), "S0_a".into(), "S0_e".into()],
         }];
         let h1 = fit_stage_hash("model", &obs, &est, &fixed,
-            &no_groups, "mle", &stage, 1).unwrap();
+            &no_groups, &stage, 1).unwrap();
         let h2 = fit_stage_hash("model", &obs, &est, &fixed,
-            &with_group, "mle", &stage, 1).unwrap();
+            &with_group, &stage, 1).unwrap();
         assert_ne!(h1, h2,
             "adding a simplex_group must invalidate the stage hash");
 
@@ -557,7 +501,7 @@ mod tests {
             params: vec!["S0_e".into(), "S0_a".into(), "S0_y".into()],
         }];
         let h3 = fit_stage_hash("model", &obs, &est, &fixed,
-            &with_group_reordered, "mle", &stage, 1).unwrap();
+            &with_group_reordered, &stage, 1).unwrap();
         assert_ne!(h2, h3,
             "reordering simplex members must invalidate the stage hash");
     }

@@ -120,14 +120,14 @@ I0 = 10
 rho = 0.6
 k = 10.0
 
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 1
 particles = 60
 iterations = 12
 burn_in = 2
-init = "single"
+starts = "single"
 "#
     )
 }

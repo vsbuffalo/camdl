@@ -117,7 +117,7 @@ beta  = { bounds = [0.05, 1.5], start = 0.35 }
 gamma = 0.2
 N0    = 10000
 I0    = 1
-[stages.posterior]
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -181,7 +181,7 @@ gamma = { bounds = [0.01, 1.0], start = 0.2, prior = { uniform = {} } }
 [fixed]
 rho = 0.6
 k = 10.0
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 2

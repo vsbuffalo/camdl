@@ -127,13 +127,13 @@ beta = {{ bounds = [0.02, 2.0], start = 0.1, prior = {{ log_normal = {{ mu = -1.
 sigma = 0.2
 gamma = 0.1
 N0 = 10000
-[stages.posterior]
+[method]
 algorithm = "nuts"
 backend = "ode"
 chains = 2
 warmup = 100
 samples = 150
-init = "single"
+starts = "single"
 {burnin_line}
 "#, out = out_dir.display(), ir = ir.display(), data = data.display())
 }
@@ -263,13 +263,13 @@ beta = {{ bounds = [0.02, 2.0], start = 0.1, prior = {{ log_normal = {{ mu = -1.
 sigma = 0.2
 gamma = 0.1
 N0 = 10000
-[stages.posterior]
+[method]
 algorithm = "mh"
 backend = "ode"
 chains = 2
 iterations = 800
 burn_in = 300
-init = "single"
+starts = "single"
 {burnin_line}
 "#, out = out_dir.display(), ir = ir.display(), data = data.display())
 }

@@ -121,7 +121,7 @@ fn fit_envelope_show_and_cat_by_label() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let pgas = r#"[stages.posterior]
+    let pgas = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2

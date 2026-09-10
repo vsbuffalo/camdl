@@ -111,7 +111,7 @@ pub fn walk_fits_root(root: &Path) -> io::Result<Vec<FitDirEntry>> {
         return Ok(out);
     }
     // gh#147: a CAS fit is a segment dir `fits/{stem}-{h8}/` holding its
-    // stage-leaf subdirs (`{NN-stage}-{h8}/seed_N-{h8}/run.json`, kind
+    // method-leaf subdirs (`{method}-{h8}/seed_N-{h8}/run.json`, kind
     // FitStage) plus the fit-level sidecar. `FitView::read` derives ONE
     // fit-level view per segment from those leaves — the same projection
     // `table_row::build_row` consumes, so the table row and its source entry
@@ -258,22 +258,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let run_id = format!("{:0<64}", format!("ae{ord:06x}"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"stage","label":"{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{stage}","method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":0}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{stage}","method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":0}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(dir.join("run.json"), rec).unwrap();
     }
 
     /// gh#147: write a CAS fit segment at `seg` — one FitStage leaf
-    /// (`01-mle-<h8>/seed_1-<h8>/run.json`) plus the fit-level sidecar — the
+    /// (`if2-<h8>/seed_1-<h8>/run.json`) plus the fit-level sidecar — the
     /// shape `walk_fits_root` reads. `fit_h8` (8 hex) seeds the shared
     /// `fit`-level hash so each segment gets a distinct fit hash.
     fn write_cas_fit_seg(seg: &Path, fit_h8: &str) {
-        let leaf = seg.join("01-mle-1fb03eee").join("seed_1-06cbd6b3");
+        let leaf = seg.join("if2-1fb03eee").join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
         let run_id = format!("{:0<64}", format!("{fit_h8}01"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"stage","label":"01-mle","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"mle","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"mle","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
@@ -432,7 +432,7 @@ mod tests {
         // comes from the leaves' stage levels. gh#147: `estimated`/`fixed`/priors
         // are config detail not carried on the leaves, so they default empty —
         // config-diff reads the archived `fit.toml.original` for those.
-        assert_eq!(entries[0].view.stages_declared, vec!["mle"]);
+        assert_eq!(entries[0].view.stages_declared, vec!["if2"]);
         assert!(!entries[0].view.fit_hash.is_empty());
         assert_eq!(entries[0].view.stages.len(), 1);
     }

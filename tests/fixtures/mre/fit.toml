@@ -21,11 +21,11 @@ rho = 0.6
 k   = 20
 I0  = 5
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 2
 particles  = 1000
 iterations = 8
 cooling    = 0.7
-init       = "single"
+starts       = "single"

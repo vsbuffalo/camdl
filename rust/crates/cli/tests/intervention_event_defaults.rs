@@ -244,7 +244,6 @@ observations = {}
 
 [estimate]
 [fixed]
-[stages]
 "#).unwrap();
 
     // `fit run` will fail on the missing model but only AFTER TOML parse.
@@ -282,7 +281,14 @@ observations = {{ cases = "/nowhere.tsv" }}
 
 [estimate]
 [fixed]
-[stages]
+
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 10
+iterations = 1
+cooling = 0.7
 "#, model = model_path.display(), out = tmp.path().display())).unwrap();
 
     let out = Command::new(&bin)

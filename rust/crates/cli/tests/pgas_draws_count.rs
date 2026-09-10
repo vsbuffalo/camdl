@@ -126,7 +126,7 @@ N0  = 10000
 I0  = 10
 rho = 0.6
 k   = 10.0
-[stages.posterior]
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = {n_chains}

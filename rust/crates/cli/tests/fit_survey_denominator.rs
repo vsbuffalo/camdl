@@ -164,7 +164,7 @@ beta  = {{ bounds = [0.01, 5.0], start = 0.4 }}
 gamma = {{ bounds = [0.01, 1.0], start = 0.15 }}
 [fixed]
 N0 = 1000
-[stages.posterior]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1

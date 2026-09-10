@@ -113,14 +113,14 @@ p_detect = 0.5
 N0       = 1000
 I0       = 1
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1
 particles  = 20
 iterations = 1
 cooling    = 0.5
-init       = "single"
+starts       = "single"
 
 [config]
 dt = 1.0
@@ -131,7 +131,7 @@ dt = 1.0
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--seed", "1", "--allow-nonconverged-scout"])
+               "--seed", "1",])
         .output()
         .expect("spawn fit run");
     let stderr = String::from_utf8_lossy(&out.stderr);

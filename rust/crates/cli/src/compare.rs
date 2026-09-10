@@ -959,7 +959,7 @@ struct SealedHoldout {
 }
 
 fn detect_sealed_holdout(resolved: &ResolvedFit) -> Result<Option<SealedHoldout>, String> {
-    let data = resolved.config.data.as_ref();
+    let data = resolved.config.problem.data.as_ref();
     let declares = data
         .map(|d| d.holdout_after.is_some() || d.holdout.is_some())
         .unwrap_or(false);
@@ -1058,14 +1058,14 @@ fn derive_prequential(
     selection: Option<&ChainSelection>,
 ) -> Result<(PrequentialTrace, Option<f64>), String> {
     let segment = &resolved.segment;
-    let config = &resolved.config;
+    let config = &resolved.config.problem;
 
     // gh#729: the filter this shells out to is chain-binomial. The θ̂ below
-    // comes from the TERMINAL stage (both `resolve_posterior_draws` and
-    // `winner_params_toml` pick it), so that stage's backend is the one the
+    // comes from the fit's method leaf (both `resolve_posterior_draws` and
+    // `winner_params_toml` pick it), so that method's backend is the one the
     // derived score must match.
-    if let Some(terminal) = config.stages.values().last() {
-        check_derivable_backend(terminal.backend(), segment)?;
+    if let Some(method) = &resolved.config.inference.method {
+        check_derivable_backend(method.algorithm.backend(), segment)?;
     }
 
     // (a) θ — what the prequential is scored at. With `--draws M ≥ 2` and a
@@ -1654,7 +1654,7 @@ fn point_estimate_params_toml(
     match crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), None) {
         Ok(pdraws) => posterior_mean_params_toml(&pdraws.with_selection(selection.cloned())),
         // No posterior cloud → an optimizer fit; its θ̂ is the single winner.
-        Err(_) => crate::fit::fit_summary::winner_params_toml(segment, None),
+        Err(_) => crate::fit::fit_summary::winner_params_toml(segment),
     }
 }
 

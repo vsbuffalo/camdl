@@ -282,7 +282,6 @@ dt = 1.0
 
 [fixed]
 
-[stages]
 
 [data.observations]
 cases_p1 = "/nonexistent/should_not_be_read.tsv"
@@ -341,7 +340,6 @@ dt = 1.0
 
 [fixed]
 
-[stages]
 
 [data.observations]
 cases_p1 = "{p}"

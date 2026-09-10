@@ -198,7 +198,7 @@ mu = {{ bounds = [0.00005, 0.0002], start = 0.0001 }}
 [fixed]
 N0 = 1000000
 
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 2
@@ -230,7 +230,7 @@ mu = {{ bounds = [0.00005, 0.0002], start = 0.0001 }}
 [fixed]
 N0 = 1000000
 
-[stages.posterior]
+[method]
 algorithm = "mh"
 backend = "ode"
 chains = 2

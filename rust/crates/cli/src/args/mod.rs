@@ -27,11 +27,12 @@ use types::{ForwardBackend, DataSpec, ListDuration, ParamOverride, ParamVecSpec,
 /// (`--posterior`, `--mle`, init-mode `--params`) to build a full
 /// `crate::fit::init::InitMethod` payload-carrying variant.
 ///
-/// Why a separate enum: `crate::fit::init::InitMethod` has
-/// payload-bearing variants (`FromPosterior { source: PosteriorSource }`,
-/// etc.). clap's `ValueEnum` can only surface payload-free variants —
-/// the post-parse construction lives at the dispatch site so the
-/// arg-struct stays declarative.
+/// Why a separate enum: `crate::fit::starts::ChainStarts` has
+/// payload-bearing variants (`FromPosterior { source }`, etc.). clap's
+/// `ValueEnum` can only surface payload-free variants — the post-parse
+/// construction lives at the dispatch site so the arg-struct stays
+/// declarative. `camdl profile` is its one user; `fit run` takes the same
+/// rules as `--starts <spec>` (`name` or `name=source`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum InitModeTag {
     /// every chain at the seeded base params
@@ -57,9 +58,6 @@ pub enum InitModeTag {
     /// (requires the init-mode `--params <toml>` companion)
     #[clap(name = "from_params")]
     FromParams,
-    /// top-K rows from a `camdl survey` landscape (requires `--survey-path`)
-    #[clap(name = "survey_top_k")]
-    SurveyTopK,
 }
 
 impl std::fmt::Display for InitModeTag {
@@ -73,14 +71,13 @@ impl std::fmt::Display for InitModeTag {
             InitModeTag::FromPosterior => "from_posterior",
             InitModeTag::FromMle       => "from_mle",
             InitModeTag::FromParams    => "from_params",
-            InitModeTag::SurveyTopK    => "survey_top_k",
         })
     }
 }
 
 impl InitModeTag {
     /// Combine the parsed CLI tag with the companion path flags to
-    /// build the full `InitMethod` variant. Validates that companion
+    /// build the full `ChainStarts` rule. Validates that companion
     /// args match the chosen mode (and rejects payload args for modes
     /// that don't accept them).
     ///
@@ -88,13 +85,13 @@ impl InitModeTag {
     /// their companion path; payload-free modes reject companions to
     /// keep "the same flag means the same thing on every subcommand"
     /// honest.
-    pub fn to_init_method(
+    pub fn to_chain_starts(
         self,
         posterior: Option<&PathBuf>,
         mle:       Option<&PathBuf>,
         init_params: Option<&PathBuf>,
-    ) -> Result<crate::fit::init::InitMethod, String> {
-        use crate::fit::init::{InitMethod, MleSource, PosteriorSource};
+    ) -> Result<crate::fit::starts::ChainStarts, String> {
+        use crate::fit::starts::{ChainStarts, Handle, Point, Spread};
         // Reject companion paths on incompatible modes — better an
         // error at parse time than a silent ignore.
         match self {
@@ -123,52 +120,42 @@ impl InitModeTag {
             }
         }
         Ok(match self {
-            InitModeTag::Single  => InitMethod::Single,
-            InitModeTag::UniformUnconstrained => InitMethod::UniformUnconstrained,
-            InitModeTag::Uniform => InitMethod::Uniform,
-            InitModeTag::Lhs     => InitMethod::Lhs,
-            InitModeTag::FromPrior => InitMethod::FromPrior,
-            InitModeTag::SurveyTopK => InitMethod::SurveyTopK,
+            InitModeTag::Single  => ChainStarts::Point(Point::Declared),
+            InitModeTag::UniformUnconstrained => ChainStarts::Spread(Spread::UniformUnconstrained),
+            InitModeTag::Uniform => ChainStarts::Spread(Spread::Uniform),
+            InitModeTag::Lhs     => ChainStarts::Spread(Spread::Lhs),
+            InitModeTag::FromPrior => ChainStarts::Spread(Spread::FromPrior),
             InitModeTag::FromPosterior => {
                 let p = posterior.ok_or_else(|| {
                     "--init from_posterior requires --posterior <path>".to_string()
                 })?;
-                // Distinguish a file from a directory at construction
-                // time so the loader can give a precise error message.
-                let source = if p.is_dir() {
-                    PosteriorSource::FitDir(p.clone())
-                } else {
-                    PosteriorSource::DrawsTsv(p.clone())
-                };
-                InitMethod::FromPosterior { source }
+                ChainStarts::Spread(Spread::FromPosterior {
+                    source: Handle(p.to_string_lossy().into_owned()),
+                })
             }
             InitModeTag::FromMle => {
                 let p = mle.ok_or_else(|| {
-                    "--init from_mle requires --mle <path>".to_string()
+                    "--init from_mle requires --mle <fit handle>".to_string()
                 })?;
-                let source = if p.is_dir() {
-                    MleSource::FitDir(p.clone())
-                } else {
-                    MleSource::File(p.clone())
-                };
-                InitMethod::FromMle { source }
+                ChainStarts::Point(Point::FromMle {
+                    source: Handle(p.to_string_lossy().into_owned()),
+                })
             }
             InitModeTag::FromParams => {
                 let p = init_params.ok_or_else(|| {
                     "--init from_params requires --params <toml>".to_string()
                 })?;
-                InitMethod::FromParams { path: p.clone() }
+                ChainStarts::Point(Point::FromParams { path: p.clone() })
             }
         })
     }
 }
 
-/// Shared `long_about` for `--init <MODE>` on inference subcommands
-/// (`if2`, `profile`, `fit run`). Mode names are snake_case to match
-/// the in-tree `InitMethod` deserializer (`from_prior`, not
+/// `long_about` for `camdl profile --init <MODE>`. Mode names are
+/// snake_case to match the fit.toml `starts` spellings (`from_prior`, not
 /// `from-prior`). gh#83 / gh#85.
 pub const INIT_LONG_ABOUT: &str = "\
-INIT MODES (where do chain starting points come from?)
+INIT MODES (where do the per-cell starting points come from?)
 
   uniform_unconstrained
                      (default) Stan-style: per-chain i.i.d. U(-2, 2) on the
@@ -186,10 +173,9 @@ INIT MODES (where do chain starting points come from?)
   from_posterior     sample chain starts uniformly from a posterior draws TSV
                      (or a fit-results directory containing draws.tsv); pass
                      --posterior <path>
-  from_mle           all chains at the MLE point from a prior fit; pass
-                     --mle <path>
-  survey_top_k       initialise from the top-K best landscape points of a
-                     prior survey; pass --survey-path <dir>
+  from_mle           all chains at the point estimate of a stored fit; pass
+                     --mle <fit handle> (@label, a fit-id prefix, or the leaf
+                     directory)
 
 Init applies only to parameters in the inference [estimate] set; parameters
 in [fixed] (or absent from [estimate]) take their model value or --fixed
@@ -874,9 +860,22 @@ pub struct FitRunArgs {
     /// Fit configuration file (v2 TOML)
     pub config: PathBuf,
 
-    /// Run only this stage by name
+    /// Where the method's chains begin, overriding the file's `starts`. A
+    /// rule name — `uniform_unconstrained`, `lhs`, `uniform`, `from_prior`,
+    /// `single` — or a sourced rule with its source: `from_posterior=@base`
+    /// (one posterior row per chain), `from_mle=@mle` (every chain at that
+    /// fit's estimate), `from_params=theta.toml`. Default when neither the
+    /// file nor this flag says: `from_prior` if every estimated parameter
+    /// declares a prior, `uniform_unconstrained` otherwise. Keyed into the
+    /// run's identity, like the file's own `starts`.
+    #[arg(long, value_name = "SPEC")]
+    pub starts: Option<crate::fit::starts::ChainStarts>,
+
+    /// Start from a `from_mle` / `from_posterior` source whose stored verdict
+    /// is not converged. Without this the source is refused, since starting
+    /// from an unconverged fit launders its multi-modality into this one.
     #[arg(long)]
-    pub stage: Option<String>,
+    pub allow_nonconverged_source: bool,
 
     /// Max worker threads for the Rayon pool that runs the chains and, within
     /// each chain, the particle filter. `0` (the default) uses all logical
@@ -894,14 +893,14 @@ pub struct FitRunArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Resume a previously-completed PGAS or PMMH stage from a base run
+    /// Resume a previously-completed PGAS or PMMH run from a base run
     /// addressed by `<run_id prefix>` or a leaf path. gh#147 (M3.2): the
     /// base leaf is read **read-only**; the resumed run is written to a new
     /// content-addressed leaf keyed on the new extension dimension (PGAS
     /// `sweeps` / PMMH `iterations`) with a dep on the base — a distinct
     /// deterministic artifact, not bit-identical to an uninterrupted fit of
-    /// the same length. Requires --stage. Conflicts with --force.
-    #[arg(long, value_name = "BASE_REF", requires = "stage", conflicts_with = "force")]
+    /// the same length. Conflicts with --force.
+    #[arg(long, value_name = "BASE_REF", conflicts_with = "force")]
     pub resume: Option<String>,
 
     /// Cartesian sweep over a fixed parameter (may repeat).
@@ -921,67 +920,38 @@ pub struct FitRunArgs {
     #[arg(long = "emit-every", value_name = "N | NAME=N")]
     pub emit_every: Vec<String>,
 
-    /// Proceed even if prior scout stage failed convergence gate
-    #[arg(long)]
-    pub allow_nonconverged_scout: bool,
-
-    /// Override [stages.<stage>.gate] decibans_thresh (the inter-chain
-    /// log-likelihood-spread floor, in decibans). Requires --stage.
-    #[arg(long, value_name = "DB", requires = "stage")]
+    /// Override [method.gate] decibans_thresh (the inter-chain
+    /// log-likelihood-spread floor, in decibans).
+    #[arg(long, value_name = "DB")]
     pub decibans_thresh: Option<f64>,
 
-    /// Override [stages.<stage>.init] for chain starts (gh#42, gh#83).
-    /// See `--help` for the INIT MODES block. Requires --stage so
-    /// scout and refine can be set independently. Has no effect when
-    /// the stage uses `init_mle = "<prior_stage>"` — those chains
-    /// start from the prior MLE regardless. Renamed from
-    /// `--init-method` per 2026-05-25 CLI UX rev 2.
-    #[arg(long, value_name = "MODE", value_enum, requires = "stage",
-          long_help = INIT_LONG_ABOUT)]
-    pub init: Option<InitModeTag>,
-
-    /// Companion path for `--init from_posterior`. Accepts a posterior
-    /// draws TSV directly or a fit-results directory.
-    #[arg(long, value_name = "PATH", requires = "stage")]
-    pub posterior: Option<PathBuf>,
-
-    /// Companion path for `--init from_mle`. Accepts an MLE TOML
-    /// directly or a fit-results directory (auto-resolves
-    /// `<dir>/mle.toml`, then `<dir>/final_params.toml`). Replaces
-    /// the removed `--starts-from <dir>` flag.
-    #[arg(long, value_name = "PATH", requires = "stage")]
-    pub mle: Option<PathBuf>,
-
-    /// Companion path for `--init from_params`. Hand-written flat
-    /// params TOML; top-level keys are parameter names.
-    #[arg(long = "params", value_name = "TOML", requires = "stage")]
-    pub init_params: Option<PathBuf>,
-
-    // ── Removed-flag traps (M-1 break per 2026-05-25 proposal) ────────
+    // ── Removed-flag traps ───────────────────────────────────────────
     //
-    // These flags were renamed/removed; the dispatch site emits an
-    // actionable error citing the replacement. Per CLAUDE.md alpha
-    // posture, no back-compat shims — these exist purely so the error
-    // message points the user to the right replacement.
+    // Each of these was renamed or removed with the `[stages]` → `[method]`
+    // split (proposal 2026-09-08); the dispatch site answers every one it
+    // sees with its replacement in one message. Per CLAUDE.md alpha posture,
+    // no back-compat shims — they exist purely so the error names the right
+    // replacement.
+    #[arg(long = "stage", value_name = "STAGE", hide = true)]
+    pub _removed_stage: Option<String>,
+    #[arg(long = "init", value_name = "MODE", hide = true)]
+    pub _removed_init: Option<String>,
+    #[arg(long = "posterior", value_name = "PATH", hide = true)]
+    pub _removed_posterior: Option<String>,
+    #[arg(long = "mle", value_name = "PATH", hide = true)]
+    pub _removed_mle: Option<String>,
+    #[arg(long = "params", value_name = "TOML", hide = true)]
+    pub _removed_params: Option<String>,
+    #[arg(long = "survey-path", value_name = "DIR", hide = true)]
+    pub _removed_survey_path: Option<String>,
+    #[arg(long = "survey-top-k", value_name = "N", hide = true)]
+    pub _removed_survey_top_k: Option<String>,
+    #[arg(long = "allow-nonconverged-scout", hide = true)]
+    pub _removed_allow_nonconverged_scout: bool,
     #[arg(long = "init-method", value_name = "MODE", hide = true)]
     pub _removed_init_method: Option<String>,
     #[arg(long = "starts-from", value_name = "DIR_OR_HASH", hide = true)]
     pub _removed_starts_from: Option<String>,
-
-    /// Survey CAS directory consumed when `--init survey_top_k` is in
-    /// effect (gh#51). Must contain `run.json` (kind = survey) and
-    /// `landscape.tsv`. Overrides any `survey_path` set on the stage
-    /// in fit.toml. Requires --stage; ignored unless the effective
-    /// init mode is `survey_top_k`.
-    #[arg(long, value_name = "DIR", requires = "stage")]
-    pub survey_path: Option<std::path::PathBuf>,
-
-    /// Top-K count for `--init survey_top_k` (gh#51). Defaults to the
-    /// stage's `chains` when omitted; in v1 must equal `chains`
-    /// (strict K=chains; K > chains stratified sub-sampling deferred
-    /// to v2). Requires --stage.
-    #[arg(long, value_name = "N", requires = "stage")]
-    pub survey_top_k: Option<usize>,
 
     /// User-supplied display label for this fit (1–64 chars after
     /// trim; allowed: letters, digits, spaces, commas, dot,
@@ -999,10 +969,10 @@ pub struct FitRunArgs {
     /// every ODE inference stage — nl-sbplx, nl-bobyqa, and mh
     /// (deterministic likelihood). Use this for CI smoke fits or
     /// known-converged-dt rerenders where the audit cost is unwelcome.
-    /// Requires --stage: the dt-check result is stored in the leaf, so
+    ///: the dt-check result is stored in the leaf, so
     /// the override is keyed into that stage's identity (gh#540 seam;
     /// gh#726 for the mh/nl-* dt_check field).
-    #[arg(long, requires = "stage")]
+    #[arg(long)]
     pub no_dt_check: bool,
 
     /// Drop the dt-check warning threshold to the strict default
@@ -1010,11 +980,11 @@ pub struct FitRunArgs {
     /// research-quality fits where sub-nat differences matter for
     /// paper-grade conclusions; the routine default (2.0 / 0.5)
     /// allows more give before flagging.
-    /// Requires --stage: the threshold it selects is stored in the leaf
+    ///: the threshold it selects is stored in the leaf
     /// (fit_state.toml.dt_check), so it is resolved into that stage's
     /// dt_check.threshold_nats and keyed into its identity (gh#730). A stage
     /// that declares its own threshold_nats is unaffected.
-    #[arg(long, requires = "stage")]
+    #[arg(long)]
     pub dt_check_strict: bool,
 
     /// Binomial sampler for a PGAS stage's chain-binomial draws: `btpe`
@@ -1028,107 +998,107 @@ pub struct FitRunArgs {
     /// another's leaf. It is a flag rather than an environment variable for
     /// exactly that reason (gh#241 removed the last env-var input rather than
     /// hash it).
-    #[arg(long, requires = "stage", value_name = "SAMPLER",
+    #[arg(long, value_name = "SAMPLER",
           value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
     pub binomial: Option<sim::rng::BinomialAlgorithm>,
 
     /// Override `n_halvings` on the dt-check (gh#52). Default 2
     /// (evaluates at dt_fit, dt_fit/2, dt_fit/4 — 7× the
     /// loglik-eval cost). Use 3 for ambiguous cases at 15×.
-    /// Requires --stage: the ladder result is stored in the leaf, so
+    ///: the ladder result is stored in the leaf, so
     /// the override is keyed into that stage's identity (gh#540 seam;
     /// gh#726 for the mh/nl-* dt_check field).
-    #[arg(long, value_name = "N", requires = "stage")]
+    #[arg(long, value_name = "N")]
     pub dt_check_halvings: Option<usize>,
 
-    // ── IF2-specific algorithm overrides (require --stage) ───────────
+    // ── IF2-specific algorithm overrides ────────────────────────────
 
-    /// Override [stages.<stage>.cooling_target_iters]. Iterations
+    /// Override [method.cooling_target_iters]. Iterations
     /// over which the cooling fraction is reached (pomp's
-    /// cooling.fraction.50 default). Requires --stage.
-    #[arg(long, value_name = "N", requires = "stage")]
+    /// cooling.fraction.50 default).
+    #[arg(long, value_name = "N")]
     pub cooling_target_iters: Option<usize>,
 
-    // ── PGAS-specific algorithm overrides (require --stage) ──────────
+    // ── PGAS-specific algorithm overrides  ──────────
 
-    /// Override [stages.<stage>.tempering]. Comma-separated β values
+    /// Override [method.tempering]. Comma-separated β values
     /// for parallel tempering ladder. First value MUST be 1.0.
-    /// Example: `--tempering "1.0,0.7,0.4,0.15"`. Requires --stage.
-    #[arg(long, value_name = "B1,B2,...", requires = "stage",
+    /// Example: `--tempering "1.0,0.7,0.4,0.15"`.
+    #[arg(long, value_name = "B1,B2,...",
           value_parser = parse_f64_list)]
     pub tempering: Option<Vec<f64>>,
 
-    /// Override [stages.<stage>.max_tree_depth] (NUTS depth ceiling).
-    /// Requires --stage.
-    #[arg(long, value_name = "N", requires = "stage")]
+    /// Override [method.max_tree_depth] (NUTS depth ceiling).
+    ///
+    #[arg(long, value_name = "N")]
     pub max_tree_depth: Option<usize>,
 
-    /// Override [stages.<stage>.trajectory_warmup] (CSMC-only sweeps
-    /// before parameter updates begin). Requires --stage.
-    #[arg(long, value_name = "N", requires = "stage")]
+    /// Override [method.trajectory_warmup] (CSMC-only sweeps
+    /// before parameter updates begin).
+    #[arg(long, value_name = "N")]
     pub trajectory_warmup: Option<usize>,
 
-    /// Override [stages.<stage>.csmc_sweeps_per_nuts] (CSMC trajectory
-    /// updates per parameter update). Requires --stage.
-    #[arg(long, value_name = "N", requires = "stage")]
+    /// Override [method.csmc_sweeps_per_nuts] (CSMC trajectory
+    /// updates per parameter update).
+    #[arg(long, value_name = "N")]
     pub csmc_sweeps_per_nuts: Option<usize>,
 
-    /// Override [stages.<stage>.n_trajectories] (posterior trajectories
-    /// saved). Requires --stage.
-    #[arg(long, value_name = "N", requires = "stage")]
+    /// Override [method.n_trajectories] (posterior trajectories
+    /// saved).
+    #[arg(long, value_name = "N")]
     pub n_trajectories: Option<usize>,
 
-    /// Override [stages.<stage>.dense_mass] to false (use diagonal NUTS
-    /// mass matrix). One-way: edit TOML to flip back. Requires --stage.
-    #[arg(long, requires = "stage")]
+    /// Override [method.dense_mass] to false (use diagonal NUTS
+    /// mass matrix). One-way: edit TOML to flip back.
+    #[arg(long)]
     pub diagonal_mass: bool,
 
-    /// Override [stages.<stage>.use_nuts] to false (fall back to
+    /// Override [method.use_nuts] to false (fall back to
     /// MH-within-Gibbs for the θ|X update). One-way: edit TOML to
-    /// flip back. Requires --stage.
-    #[arg(long, requires = "stage")]
+    /// flip back.
+    #[arg(long)]
     pub no_nuts: bool,
 
-    /// Override [stages.<stage>.ancestor_sampling] to false: run the CSMC
+    /// Override [method.ancestor_sampling] to false: run the CSMC
     /// sweep as plain particle Gibbs, without the ancestor-sampling move.
     /// A diagnostic control (what does AS contribute, and what does its
     /// density pass cost?); changes the sampled draws, so the run stores
     /// under its own address. One-way: edit TOML to flip back. Requires
     /// --stage.
-    #[arg(long, requires = "stage")]
+    #[arg(long)]
     pub no_ancestor_sampling: bool,
 
-    // ── PMMH-specific algorithm overrides (require --stage) ──────────
+    // ── PMMH-specific algorithm overrides  ──────────
 
-    /// Override [stages.<stage>.adapt] to false (lock proposal SDs;
+    /// Override [method.adapt] to false (lock proposal SDs;
     /// disables Haario-style adaptation). One-way: edit TOML to flip
-    /// back. Requires --stage.
-    #[arg(long, requires = "stage")]
+    /// back.
+    #[arg(long)]
     pub no_adapt: bool,
 
-    /// Override [stages.<stage>.adapt_start] (MCMC step at which
-    /// proposal-SD adaptation begins). Requires --stage.
-    #[arg(long, value_name = "N", requires = "stage")]
+    /// Override [method.adapt_start] (MCMC step at which
+    /// proposal-SD adaptation begins).
+    #[arg(long, value_name = "N")]
     pub adapt_start: Option<usize>,
 
-    /// Override [stages.<stage>.rho] (Crank-Nicolson correlation for
+    /// Override [method.rho] (Crank-Nicolson correlation for
     /// correlated pseudo-marginal MCMC). Set to a value in [0, 1).
-    /// Requires --stage.
-    #[arg(long, value_name = "F", requires = "stage")]
+    ///
+    #[arg(long, value_name = "F")]
     pub rho: Option<f64>,
 
-    // ── PFilter-specific algorithm overrides (require --stage) ───────
+    // ── PFilter-specific algorithm overrides  ───────
 
-    /// Override [stages.<stage>.record_ancestry] to true (record
+    /// Override [method.record_ancestry] to true (record
     /// ancestor indices for smoothing-path reconstruction). Requires
     /// --stage.
-    #[arg(long, requires = "stage")]
+    #[arg(long)]
     pub record_ancestry: bool,
 
-    /// Override [stages.<stage>.record_prequential] to true (record
+    /// Override [method.record_prequential] to true (record
     /// per-step predictive samples for `camdl compare`). Requires
     /// --stage.
-    #[arg(long, requires = "stage")]
+    #[arg(long)]
     pub record_prequential: bool,
 }
 
@@ -1162,9 +1132,6 @@ Examples:
   # Render summary for a completed fit
   camdl fit summary fit/he2010
 
-  # Just one stage
-  camdl fit summary fit/he2010 --stage scout
-
   # Machine-readable JSON for the book pipeline
   camdl fit summary fit/he2010 --format json > summary.json
 
@@ -1173,7 +1140,7 @@ Examples:
 
   # Just the winner θ̂ as a flat params TOML, pipeable into
   # `camdl pfilter --params`:
-  camdl fit summary fit/he2010 --params-only --stage validate \\
+  camdl fit summary fit/he2010 --params-only \\
     | camdl pfilter --params /dev/stdin model.camdl --data cases.tsv
 
   # Disable colour (useful for redirecting to a file)
@@ -1205,10 +1172,6 @@ pub struct FitSummaryArgs {
     /// directory (e.g. `results/fits/he2010-…`), or a `fit.toml` config.
     pub fit: String,
 
-    /// Render only one stage's stanza
-    #[arg(long, value_name = "STAGE")]
-    pub stage: Option<String>,
-
     /// Output format. `text` (default) emits the terminal block;
     /// `json` emits a versioned `schema.version: 1` document; `md`
     /// emits GitHub-flavoured Markdown; `latex` emits `\begin{tabular}`
@@ -1219,10 +1182,7 @@ pub struct FitSummaryArgs {
 
     /// Print only the winner θ̂ as a flat params TOML (no metadata,
     /// no provenance, no headings — pipeable into `camdl pfilter
-    /// --params <(camdl fit summary --params-only ...)`). Combine
-    /// with `--stage <stage>` to pick which stage's winner to emit;
-    /// without `--stage`, prints the terminal stage in the pipeline
-    /// order (validate → refine → scout, whichever is present).
+    /// --params <(camdl fit summary --params-only ...)`).
     #[arg(long, conflicts_with = "format")]
     pub params_only: bool,
 
@@ -1375,10 +1335,6 @@ pub struct FitPredictArgs {
     /// expanded leaf name (`onset_Bo`), which maps up to its logical stream.
     #[arg(long, value_name = "STREAM")]
     pub stream: Option<String>,
-
-    /// Use this stage's posterior cloud instead of the terminal one.
-    #[arg(long, value_name = "STAGE")]
-    pub stage: Option<String>,
 
     /// Prospective scenario overlay (repeatable; conflicts with --enable/--disable).
     /// Each `--scenario NAME` selects a model `scenarios {}` preset; the free-forward
@@ -1644,11 +1600,7 @@ pub struct FitTableArgs {
     #[arg(long)]
     pub gate_failed: bool,
 
-    /// Filter to fits whose declared stages include the named stage.
-    #[arg(long, value_name = "STAGE")]
-    pub with_stage: Option<String>,
-
-    /// Filter to fits whose terminal-stage method matches.
+    /// Filter to fits whose method matches.
     #[arg(long, value_name = "METHOD",
           value_parser = clap::builder::PossibleValuesParser::new(["if2", "pgas", "pmmh"]))]
     pub with_method: Option<String>,
@@ -3082,7 +3034,7 @@ mod tests {
     }
 
     /// The valid usage: `--init from_params --params <path>` must
-    /// parse AND `to_init_method` must build `InitMethod::FromParams`.
+    /// parse AND `to_chain_starts` must build the `from_params` rule.
     /// Pre-fix, the trap field shadowed init_params and the user got
     /// a rejection error.
     #[test]
@@ -3100,21 +3052,21 @@ mod tests {
         assert_eq!(a.init, InitModeTag::FromParams);
         assert_eq!(a.init_params.as_deref().map(|p| p.to_string_lossy().into_owned()),
             Some("/tmp/start.toml".to_string()));
-        // Verify to_init_method assembles the typed InitMethod.
-        let im = a.init.to_init_method(
+        // Verify to_chain_starts assembles the typed rule.
+        let im = a.init.to_chain_starts(
             a.posterior.as_ref(), a.mle.as_ref(), a.init_params.as_ref(),
-        ).expect("to_init_method must succeed for --init from_params --params <path>");
+        ).expect("to_chain_starts must succeed for --init from_params --params <path>");
         match im {
-            crate::fit::init::InitMethod::FromParams { path } => {
+            crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromParams { path }) => {
                 assert_eq!(path.to_string_lossy(), "/tmp/start.toml");
             }
-            other => panic!("expected InitMethod::FromParams, got {:?}", other),
+            other => panic!("expected the from_params rule, got {:?}", other),
         }
     }
 
     /// `--params <path>` without `--init from_params` must surface the
     /// actionable "use --fixed-file or --init from_params" error from
-    /// `to_init_method`. This is the migration-friendly version of the
+    /// `to_chain_starts`. This is the migration-friendly version of the
     /// pre-fix parse-time trap.
     #[test]
     fn profile_params_without_init_from_params_errors_from_to_init_method() {
@@ -3127,10 +3079,10 @@ mod tests {
         let parsed = Cli::try_parse_from(full).unwrap();
         let Command::Profile(a) = parsed.command else { unreachable!() };
         // Default init is Lhs; `--params` without `--init from_params`
-        // must produce a structured error from to_init_method.
-        let err = a.init.to_init_method(
+        // must produce a structured error from to_chain_starts.
+        let err = a.init.to_chain_starts(
             a.posterior.as_ref(), a.mle.as_ref(), a.init_params.as_ref(),
-        ).expect_err("to_init_method must reject --params without --init from_params");
+        ).expect_err("to_chain_starts must reject --params without --init from_params");
         assert!(err.contains("--params is only valid with --init from_params"),
             "error must point user at --init from_params: {}", err);
     }
@@ -3158,79 +3110,80 @@ mod tests {
         }
     }
 
+    /// Every flag the `[stages]` → `[method]` split removed from `fit run`
+    /// still parses, into its hidden trap, so the dispatch site can answer
+    /// with the replacement instead of clap's "unexpected argument".
     #[test]
-    fn fit_run_starts_from_flag_is_trapped_at_parse() {
-        // Mirrors profile_params_flag_is_trapped_at_parse for the
-        // `--starts-from` removal on `camdl fit run`.
+    fn fit_run_removed_flags_are_trapped_at_parse() {
         let a = try_parse_fit_run(&[
-            "fit.toml", "--stage", "refine",
-            "--starts-from", "fits/scout/",
-        ]).expect("hidden trap must accept --starts-from");
+            "fit.toml", "--stage", "posterior", "--init", "from_prior",
+        ]).expect("hidden traps must accept --stage and --init");
+        assert_eq!(a._removed_stage.as_deref(), Some("posterior"));
+        assert_eq!(a._removed_init.as_deref(), Some("from_prior"));
+        assert!(a.starts.is_none(), "a trapped --init must not populate --starts");
+
+        let a = try_parse_fit_run(&[
+            "fit.toml", "--posterior", "fits/a", "--mle", "fits/b",
+            "--params", "theta.toml", "--survey-path", "surveys/x",
+            "--survey-top-k", "4", "--allow-nonconverged-scout",
+            "--init-method", "lhs", "--starts-from", "fits/scout/",
+        ]).expect("every removed flag must parse into its trap");
+        assert_eq!(a._removed_posterior.as_deref(), Some("fits/a"));
+        assert_eq!(a._removed_mle.as_deref(), Some("fits/b"));
+        assert_eq!(a._removed_params.as_deref(), Some("theta.toml"));
+        assert_eq!(a._removed_survey_path.as_deref(), Some("surveys/x"));
+        assert_eq!(a._removed_survey_top_k.as_deref(), Some("4"));
+        assert!(a._removed_allow_nonconverged_scout);
+        assert_eq!(a._removed_init_method.as_deref(), Some("lhs"));
         assert_eq!(a._removed_starts_from.as_deref(), Some("fits/scout/"));
     }
 
+    /// `--starts <spec>` parses every rule: the bare names and the sourced
+    /// `name=source` form.
     #[test]
-    fn fit_run_init_method_alias_is_trapped_at_parse() {
-        // `--init-method` was renamed to `--init`. The trap collects
-        // the old spelling so the dispatch site can emit the
-        // actionable rename error.
-        let a = try_parse_fit_run(&[
-            "fit.toml", "--stage", "scout",
-            "--init-method", "lhs",
-        ]).expect("hidden trap must accept --init-method");
-        assert_eq!(a._removed_init_method.as_deref(), Some("lhs"));
-        assert!(a.init.is_none(),
-            "trapped --init-method must not populate the new --init field");
-    }
-
-    #[test]
-    fn fit_run_init_flag_parses_modes() {
-        // The renamed `--init` flag accepts every payload-free
-        // `InitModeTag` variant via clap's value_enum.
-        for mode in ["single", "uniform", "lhs", "from_prior",
-                     "from_posterior", "from_mle", "from_params",
-                     "survey_top_k"] {
-            let a = try_parse_fit_run(&[
-                "fit.toml", "--stage", "scout",
-                "--init", mode,
-            ]).unwrap_or_else(|e|
-                panic!("--init {} must parse: {}", mode, e));
-            assert!(a.init.is_some(),
-                "--init {} must populate the field", mode);
+    fn fit_run_starts_flag_parses_every_rule() {
+        use crate::fit::starts::{ChainStarts, Point, Spread};
+        let cases: &[(&str, ChainStarts)] = &[
+            ("uniform_unconstrained", ChainStarts::Spread(Spread::UniformUnconstrained)),
+            ("lhs", ChainStarts::Spread(Spread::Lhs)),
+            ("uniform", ChainStarts::Spread(Spread::Uniform)),
+            ("from_prior", ChainStarts::Spread(Spread::FromPrior)),
+            ("single", ChainStarts::Point(Point::Declared)),
+            ("from_posterior=@base", ChainStarts::Spread(Spread::FromPosterior {
+                source: crate::fit::starts::Handle("@base".into()),
+            })),
+            ("from_mle=@mle", ChainStarts::Point(Point::FromMle {
+                source: crate::fit::starts::Handle("@mle".into()),
+            })),
+            ("from_params=theta.toml", ChainStarts::Point(Point::FromParams {
+                path: "theta.toml".into(),
+            })),
+        ];
+        for (spec, want) in cases {
+            let a = try_parse_fit_run(&["fit.toml", "--starts", spec])
+                .unwrap_or_else(|e| panic!("--starts {spec} must parse: {e}"));
+            assert_eq!(a.starts.as_ref(), Some(want), "--starts {spec}");
         }
-    }
-
-    #[test]
-    fn fit_run_init_method_alias_does_not_resolve() {
-        // The trap is wired specifically — `--init-method` lives on
-        // `_removed_init_method`, not the new `init` field, so the
-        // dispatch's check_removed-flag style emit fires correctly.
-        let a = try_parse_fit_run(&[
-            "fit.toml", "--stage", "scout",
-            "--init-method", "from_prior",
-        ]).expect("hidden trap must accept --init-method <mode>");
-        assert!(a.init.is_none());
-        assert_eq!(a._removed_init_method.as_deref(), Some("from_prior"));
+        // A sourced rule without its source, and an unknown name, are refused
+        // at parse time with the rule named.
+        let err = try_parse_fit_run(&["fit.toml", "--starts", "from_mle"])
+            .err().expect("from_mle needs a source");
+        assert!(err.to_string().contains("from_mle"), "{err}");
+        let err = try_parse_fit_run(&["fit.toml", "--starts", "survey_top_k"])
+            .err().expect("survey_top_k is not a rule");
+        assert!(err.to_string().contains("survey_top_k"), "{err}");
     }
 
     // gh#189: --loglik-eval-particles/-reps removed — loglik_eval is part of the
-    // fit identity (set only in the stage TOML), not a CLI override that bypasses
-    // the run_id. The convergence-gate override (--decibans-thresh) stays.
+    // fit identity (set only in the method table), not a CLI override that
+    // bypasses the run_id. The convergence-gate override (--decibans-thresh)
+    // stays, and no longer needs a stage to attach to.
     #[test]
-    fn fit_run_gate_override_parses_with_stage() {
+    fn fit_run_gate_override_parses() {
         let a = try_parse_fit_run(&[
-            "fit.toml", "--stage", "scout", "--decibans-thresh", "60.0",
-        ]).expect("should parse with --stage");
-        assert_eq!(a.decibans_thresh, Some(60.0));
-        assert_eq!(a.stage.as_deref(), Some("scout"));
-    }
-
-    #[test]
-    fn fit_run_decibans_thresh_requires_stage() {
-        let err = try_parse_fit_run(&[
             "fit.toml", "--decibans-thresh", "60.0",
-        ]).err().expect("should reject without --stage");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        ]).expect("should parse");
+        assert_eq!(a.decibans_thresh, Some(60.0));
     }
 
     #[test]

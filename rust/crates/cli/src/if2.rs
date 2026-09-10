@@ -2,9 +2,9 @@
 //!
 //! The standalone `if2` subcommand had its own non-content-addressed
 //! fit runner. Every fit, however invoked, is now a content-addressed
-//! fit with ≥1 ordered stages, so a one-method IF2 fit is just a fit
-//! with a single `algorithm = "if2"` stage run through `camdl fit run`.
-//! There is no separate "one-off" shape to maintain.
+//! fit of one `[method]`, so an IF2 fit is a fit whose method is
+//! `algorithm = "if2"`, run through `camdl fit run`. There is no separate
+//! "one-off" shape to maintain.
 //!
 //! This file is a deprecation stub: it accepts (and ignores) any
 //! arguments and prints an actionable migration message. Per CLAUDE.md
@@ -20,7 +20,7 @@ pub fn cmd_if2(_a: &crate::args::If2Args) {
 
 const DEPRECATION: &str = r#"error: `camdl if2` has been removed.
 
-Run IF2 as a one-stage fit through the content-addressed fit runner.
+Run IF2 as a fit through the content-addressed fit runner.
 Write a fit.toml:
 
   [model]
@@ -32,7 +32,7 @@ Write a fit.toml:
   [estimate]
   beta = { bounds = [0.1, 2.0], start = 0.6 }
 
-  [stages.fit]
+  [method]
   algorithm  = "if2"
   backend    = "chain_binomial"
   chains     = 4
@@ -45,5 +45,5 @@ then run it:
   camdl fit run fit.toml --seed 1
 
 The fit lands in the content-addressed store
-(fits/<stem>-<h8>/01-fit-<h8>/); browse it with `camdl list --kind fit`,
+(fits/<stem>-<h8>/if2-<h8>/); browse it with `camdl list --kind fit`,
 `camdl show <hash>`, `camdl cat <hash>`."#;

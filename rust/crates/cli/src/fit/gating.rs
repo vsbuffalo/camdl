@@ -1,21 +1,23 @@
-//! Refine-stage convergence gates.
+//! The convergence check at the one seam where a stored fit is consumed as a
+//! warm start — `starts = { from_mle = "@handle" }` or
+//! `{ from_posterior = "@handle" }` — and the compound chain-agreement gate
+//! an IF2 run is judged by at its end.
 //!
-//! Two gates protect against the "refine launders an unconverged
-//! scout" failure mode documented in
-//! `docs/dev/proposals/2026-04-19-refine-gates-scout-convergence.md`:
+//! [`check_source_converged`] refuses a source whose stored verdict is not
+//! converged unless `--allow-nonconverged-source` is passed: that is the
+//! purpose the old pre-refine gate served, kept where the upstream is
+//! consumed rather than inside a stage pipeline (proposal
+//! 2026-09-08-workflow-first-fit-config, §8 item 11). The post-refine
+//! regression gate it used to pair with guarded an in-process handoff that no
+//! longer exists; across invocations a regression is visible in `fit table`.
 //!
-//! - Gate 1 (pre-refine): scout's tail chain-agreement (Â) on every
-//!   structural estimated parameter (every one not declared
-//!   `perturb_only_at_t0`) must be below `gate.a_thresh`. If it isn't,
-//!   refine refuses to start. Overridable via `--allow-nonconverged-scout`.
-//!
-//! - Gate 2 (post-refine): refine's best loglik must not regress
-//!   below scout's by more than a tolerance ε. If it does, refine's
-//!   output is rejected — this is a near-certain bug in the run
-//!   itself, not a statistical choice, so there's no override.
-//!
-//! Both gates produce actionable error messages that name the failing
-//! values AND suggest fixes.
+//! [`check_scout_convergence`] is the compound gate itself — the tail
+//! chain-agreement Â on every structural parameter (every one not declared
+//! `perturb_only_at_t0`) below `gate.a_thresh`, and the inter-chain clean-eval
+//! spread below its decibans floor — which `fit summary` renders for every
+//! IF2 run and the source check applies to an IF2 source.
+
+use std::path::Path;
 
 use super::config_v2::GateConfig;
 use super::state::FitState;
@@ -97,16 +99,15 @@ impl GateConfig {
     }
 }
 
-/// Minimum ε for Gate 2. Scout's noise floor on a typical PF-based
-/// loglik estimator at reasonable particle counts. `epsilon` takes the
-/// max of this and `2 * σ_scout_chains` so multi-modal scout runs (high
-/// between-chain σ) get a proportionally wider tolerance.
+/// The noise floor of a PF-based log-likelihood estimator at reasonable
+/// particle counts, in nats. A between-chain spread past three of these is
+/// read as multi-modality in [`format_hard_verdict`].
 pub const LOGLIK_EPSILON_MIN: f64 = 3.0;
 
-/// Verdict from the pre-refine convergence check. `SoftWarn` callers
+/// Verdict from the compound convergence check. `SoftWarn` callers
 /// should print the named parameters prominently. `Hard` and
 /// `DecibansSpread` callers should error unless the user passed
-/// `--allow-nonconverged-scout`, in which case downgrade to a warning.
+/// `--allow-nonconverged-source`, in which case downgrade to a warning.
 #[derive(Debug)]
 pub enum ScoutGateVerdict {
     Ok,
@@ -244,54 +245,6 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
     ScoutGateVerdict::Ok
 }
 
-/// Compute the ε tolerance for Gate 2: `max(LOGLIK_EPSILON_MIN,
-/// 2 · σ(scout.chain_logliks))`. A wider scout spread (more evidence
-/// of multi-modality) gives refine proportionally more room.
-pub fn loglik_regression_epsilon(scout_chain_logliks: &[f64]) -> f64 {
-    if scout_chain_logliks.len() < 2 {
-        return LOGLIK_EPSILON_MIN;
-    }
-    let n = scout_chain_logliks.len() as f64;
-    let mean = scout_chain_logliks.iter().sum::<f64>() / n;
-    let var = scout_chain_logliks.iter()
-        .map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    let two_sigma = 2.0 * var.sqrt();
-    LOGLIK_EPSILON_MIN.max(two_sigma)
-}
-
-/// Check Gate 2: refine's best loglik must not be worse than scout's
-/// by more than ε. Returns `Ok(())` on pass, `Err(msg)` with a
-/// human-readable diagnosis naming both logliks, the delta, and ε.
-pub fn check_loglik_regression(
-    scout_best: f64,
-    refine_best: f64,
-    scout_chain_logliks: &[f64],
-) -> Result<(), String> {
-    let epsilon = loglik_regression_epsilon(scout_chain_logliks);
-    let delta = refine_best - scout_best;
-    if delta >= -epsilon {
-        Ok(())
-    } else {
-        Err(format!(
-            "refine regressed below scout.\n\n  \
-             scout  best_loglik = {:.1}\n  \
-             refine best_loglik = {:.1}   delta = {:+.1}, threshold ε = {:.1}\n\n  \
-             Refine landed in a worse basin than scout found. This is a\n  \
-             pipeline failure, not a user-facing knob — refine is supposed\n  \
-             to polish scout's best, not regress from it. Possible causes:\n\n    \
-             - scout was multi-modal and refine's starts_from filter picked\n      \
-             top-K chains from the wrong basin (re-run with tighter bounds\n      \
-             around scout's best chain)\n    \
-             - refine cooling too aggressive given rw_sd; collapsed on the\n      \
-             first accessible local maximum\n    \
-             - the model or data changed between stages (hash mismatch —\n      \
-             check run.json)\n\n  \
-             scout/fit_state.toml is authoritative for \"what scout's best\n  \
-             looked like.\" Investigate before re-running.",
-            scout_best, refine_best, delta, epsilon))
-    }
-}
-
 /// Render the DecibansSpread verdict as a human error message.
 /// Names the spread, the threshold (and which limb of `max(...)` it
 /// came from), and the per-chain logliks in nats and decibans so the
@@ -310,7 +263,7 @@ pub fn format_decibans_spread_verdict(
         format!("user-configured floor decibans_thresh = {:.1} dB", threshold_db)
     };
     let mut msg = format!(
-        "scout chains landed in different basins.\n\n  \
+        "its chains landed in different basins.\n\n  \
          clean-eval log-likelihood spread:\n    \
          Δℓ = {:.2} dB > threshold = {:.2} dB ({})\n\n  \
          Per-chain clean logliks (nats / dB from worst):\n",
@@ -351,14 +304,14 @@ pub fn format_decibans_spread_verdict(
                     label dominated each chain — divergent labels are a\n      \
                     multimodality signal\n    \
                   - if the spread is genuinely Monte-Carlo noise, raise\n      \
-                    [stages.scout.clean_eval] n_particles or n_replicates\n    \
-                  - relax the gate via [stages.scout.gate].decibans_thresh\n      \
+                    [method.loglik_eval] n_particles or n_replicates\n    \
+                  - relax the gate via [method.gate].decibans_thresh\n      \
                     or pass --decibans-thresh on the next run\n\n  \
-                  To proceed anyway:  camdl fit run fit.toml --allow-nonconverged-scout");
+                  To start from it anyway:  camdl fit run fit.toml --allow-nonconverged-source");
     msg
 }
 
-/// Render the Gate 1 Hard verdict as a human error message.
+/// Render the Hard verdict as a human error message.
 ///
 /// `gate` is the one this verdict came from, so every glyph in the table is
 /// the same comparison the verdict is — not a literal that agrees only while
@@ -373,8 +326,8 @@ pub fn format_hard_verdict(
     scout_best_chain_values: Option<&[(String, f64)]>,
 ) -> String {
     let mut msg = format!(
-        "refine stage requires scout convergence.\n\n  \
-         Scout tail Â (IF2 chain agreement over the last half of iterations), \
+        "it did not converge.\n\n  \
+         Tail Â (IF2 chain agreement over the last half of iterations), \
          threshold {:.2}:\n",
         gate.a_thresh);
     for (name, agreement) in all_structural {
@@ -394,7 +347,7 @@ pub fn format_hard_verdict(
             name, agreement));
     }
     if loglik_spread > 0.0 {
-        msg.push_str(&format!("\n  Scout loglik spread: {:.1} (best chain loglik {:.1})\n",
+        msg.push_str(&format!("\n  Loglik spread: {:.1} (best chain loglik {:.1})\n",
             loglik_spread, scout_best_loglik));
     }
     if loglik_spread > LOGLIK_EPSILON_MIN * 3.0 {
@@ -404,8 +357,8 @@ pub fn format_hard_verdict(
         failing.iter().map(|(n, r)| format!("{} (Â={:.2})", n, r))
             .collect::<Vec<_>>().join(", ")));
     msg.push_str("\n  Pick one:\n    \
-                  - re-run scout with more chains or iterations\n    \
-                  - narrow bounds to the basin scout's best chain found");
+                  - re-run it with more chains or iterations\n    \
+                  - narrow bounds to the basin its best chain found");
     if let Some(vals) = scout_best_chain_values {
         msg.push_str(":\n");
         for (name, value) in vals {
@@ -418,9 +371,97 @@ pub fn format_hard_verdict(
     msg.push_str("- mark weakly-identified initial-state params as \
                   `perturb_only_at_t0 = true`\n      \
                   (reported but not gated)\n\n  \
-                  To run refine anyway (results may launder multi-modality):\n    \
-                  camdl fit run fit.toml --allow-nonconverged-scout");
+                  To start from it anyway (the starts may launder multi-modality):\n    \
+                  camdl fit run fit.toml --allow-nonconverged-source");
     msg
+}
+
+/// Refuse a warm-start source whose stored verdict is not converged, unless
+/// `allow` (`--allow-nonconverged-source`), in which case say so and proceed.
+///
+/// An IF2 (or NLopt) leaf carries `tail_chain_agreement`, so it is judged by
+/// the compound gate it was run under (`resolved_gate`, else the default). A
+/// sampler leaf is judged by its stored R̂ through the same classification
+/// `fit summary` renders: `max R̂` at or above the certification threshold,
+/// or an unassessable R̂ (a sampler pathology), is not converged; a leaf whose
+/// R̂ was never applicable (one chain) is not refused — there is no verdict to
+/// contradict. `handle` names the source in the message.
+pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<(), String> {
+    let dir = leaf.to_string_lossy().into_owned();
+    let verdict: Option<String> = match FitState::load(&dir) {
+        Ok(state) if !state.tail_chain_agreement.is_empty() => {
+            let gate = state.resolved_gate.clone().unwrap_or_default();
+            match check_scout_convergence(&state, &gate) {
+                ScoutGateVerdict::Ok => None,
+                ScoutGateVerdict::SoftWarn { param_agreement } => {
+                    // Between the soft and hard bands: usable, but say which
+                    // parameters the source's chains only nearly agreed on.
+                    let named: Vec<String> = param_agreement
+                        .iter()
+                        .map(|(n, a)| format!("{n} (Â = {a:.3})"))
+                        .collect();
+                    eprintln!(
+                        "\x1b[33mwarning:\x1b[0m starts source {handle}: chain agreement is \
+                         below the certification band on {}",
+                        named.join(", ")
+                    );
+                    None
+                }
+                ScoutGateVerdict::Hard {
+                    failing, all_structural, perturb_only_at_t0, loglik_spread,
+                } => Some(format_hard_verdict(
+                    &gate, &failing, &all_structural, &perturb_only_at_t0,
+                    loglik_spread, state.best_loglik, None,
+                )),
+                ScoutGateVerdict::DecibansSpread {
+                    delta_db, threshold_db, sigma_max, chain_logliks,
+                } => Some(format_decibans_spread_verdict(
+                    delta_db, threshold_db, sigma_max, &chain_logliks,
+                )),
+            }
+        }
+        _ => sampler_source_verdict(leaf),
+    };
+    match verdict {
+        None => Ok(()),
+        Some(msg) if allow => {
+            eprintln!(
+                "\x1b[33mwarning:\x1b[0m starts source {handle}: {msg}\n  \
+                 --allow-nonconverged-source: starting from it anyway."
+            );
+            Ok(())
+        }
+        Some(msg) => Err(format!("starts source {handle}: {msg}")),
+    }
+}
+
+/// A sampler leaf's stored verdict, through the same classification
+/// `fit summary` renders. `None` when converged, or when there is no verdict
+/// to read (not a sampler leaf, R̂ never applicable).
+fn sampler_source_verdict(leaf: &Path) -> Option<String> {
+    use super::method_result::{MaxRhat, MethodResult, RHAT_CONVERGED_THRESHOLD};
+    let rec = std::fs::read(leaf.join("run.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())?;
+    let method = rec.inputs.get("method")?.as_str()?.to_string();
+    let typed = MethodResult::load_from(leaf, &method).ok()?;
+    let diag = match &typed {
+        MethodResult::Pgas(r) => &r.diagnostics,
+        MethodResult::Pmmh(r) => &r.diagnostics,
+        MethodResult::Nuts(r) => &r.diagnostics,
+        _ => return None,
+    };
+    match diag.max_rhat_status() {
+        MaxRhat::Reported(v) if v < RHAT_CONVERGED_THRESHOLD => None,
+        MaxRhat::Reported(v) => Some(format!(
+            "its posterior did not converge: max R̂ = {v:.3}, threshold {RHAT_CONVERGED_THRESHOLD}"
+        )),
+        MaxRhat::Unassessable { params } => Some(format!(
+            "its R̂ could not be computed for {} — a sampler failure, not a missing number",
+            params.join(", ")
+        )),
+        MaxRhat::NotApplicable { .. } | MaxRhat::NoParams => None,
+    }
 }
 
 #[cfg(test)]
@@ -642,37 +683,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn loglik_regression_fires_when_refine_below_scout() {
-        // Scout best = -60.2; refine best = -76.3. Regression of 16.1.
-        // Scout chain spread is wide (-60.2 to -68.7, σ ≈ 3), so
-        // ε = max(3, 2·3) ≈ 6. Delta of -16.1 >> ε → error.
-        let scout_lls = vec![-60.2, -62.5, -63.3, -64.5, -66.2, -68.7];
-        let err = check_loglik_regression(-60.2, -76.3, &scout_lls)
-            .expect_err("refine regressed far below scout");
-        assert!(err.contains("-60.2") && err.contains("-76.3"),
-            "error must name both logliks: {}", err);
-        assert!(err.contains("regressed"),
-            "error must use the word 'regressed': {}", err);
-    }
-
-    #[test]
-    fn loglik_regression_tolerates_small_delta() {
-        // Scout best = -60.2; refine best = -62.0. Delta 1.8 < ε (3).
-        // Should pass — within the noise floor of the PF loglik.
-        let scout_lls = vec![-60.2, -60.3, -60.1, -60.4];  // tight
-        check_loglik_regression(-60.2, -62.0, &scout_lls)
-            .expect("small regression within ε should pass");
-    }
-
-    #[test]
-    fn loglik_regression_passes_when_refine_better() {
-        // Refine improved on scout's best — always passes.
-        let scout_lls = vec![-60.2, -62.5, -63.3];
-        check_loglik_regression(-60.2, -58.0, &scout_lls)
-            .expect("refine improvement must pass");
-    }
-
     /// gh#406: the DecibansSpread message must NAME the outlier chain, not just
     /// report the aggregate spread. A single clear low outlier among six chains
     /// clears the modified-z threshold, so the "Outlier chains" line names it.
@@ -726,18 +736,5 @@ mod tests {
             "fallback must name the worst chain (-110 → chain 6):\n{msg}"
         );
         assert!(!msg.contains("Outlier chains"), "no robust outlier line on a smooth spread:\n{msg}");
-    }
-
-    #[test]
-    fn epsilon_widens_with_scout_loglik_spread() {
-        let tight = vec![-60.0, -60.1, -60.0, -59.9];
-        let wide  = vec![-60.0, -70.0, -80.0, -55.0];
-        let eps_tight = loglik_regression_epsilon(&tight);
-        let eps_wide  = loglik_regression_epsilon(&wide);
-        assert!(eps_wide > eps_tight * 2.0,
-            "wider scout spread should give proportionally larger ε: \
-             tight={:.2}, wide={:.2}", eps_tight, eps_wide);
-        assert!(eps_tight >= LOGLIK_EPSILON_MIN,
-            "ε must never drop below the floor: {}", eps_tight);
     }
 }

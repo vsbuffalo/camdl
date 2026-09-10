@@ -18,7 +18,7 @@ gamma = { bounds = [0.01, 1.0], start = 0.12 }
 rho = 0.6
 k = 10.0
 
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 4
@@ -27,4 +27,4 @@ iterations = 1200
 
 # single-start (the estimate `start` point) — cold LHS draws from the wide
 # bounds can land in explosive / PF-degenerate regions; "single" avoids that.
-init = "single"
+starts = "single"

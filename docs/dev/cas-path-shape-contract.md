@@ -56,7 +56,7 @@ results/<kind_dir>/<seg>/<seg>/…/run.json
 | kind            | `kind_dir`  | levels (in order)                         |
 | --------------- | ----------- | ----------------------------------------- |
 | `sim`           | `sims`      | model · config · params · scenario · seed |
-| `fit_stage`     | `fits`      | fit · stage · seed                        |
+| `fit_stage`     | `fits`      | fit · method · seed                       |
 | `pfilter`       | `pfilters`  | model · config · params · seed            |
 | `survey`        | `surveys`   | model · config · box · seed               |
 | `profile_point` | `profiles`  | profile · point · stage · seed · start    |
@@ -65,8 +65,11 @@ results/<kind_dir>/<seg>/<seg>/…/run.json
 A **fit** is the `fits/<stem>-<hash8>/` segment: it has no `run.json` of its own
 — it carries a `fit.meta.json` sidecar (fit-wide provenance: label, model/data
 hashes, estimated/fixed, resolved priors) and one `fit_stage` leaf per (cell ×
-stage) underneath. Read the fit-level view by combining the sidecar with its
-stage-leaf `run.json`s.
+seed) underneath, labelled by the method that ran (`if2-<h8>`, `pgas-<h8>`). The
+fit level hashes the problem alone, so two `fit.toml` files that share a problem
+half and differ in `[method]` share the hash; they sit in sibling segments named
+by their stems. Read the fit-level view by combining the sidecar with its
+method-leaf `run.json`s.
 
 A **multi-cell `simulate`** (`--replicates` / `--seeds` / multiple `--scenario`
 / `--draws`) writes N per-cell `sim` leaves under `sims/` **plus** one
@@ -91,14 +94,19 @@ the store today).
   (e.g. the model hash now covers the whole IR, including
   output/origin/time-unit). There is no migration: clear `results/` and re-run.
   Old paths/records are not readable by the new tools.
-- **Fit stage segments gained an `NN-` ordinal prefix** (`01-scout-<h8>`, not
-  `scout-<h8>`) so execution order sorts topologically.
+- **The `stage` level is `method`, labelled by the algorithm** (`pgas-<h8>`, not
+  `02-posterior-<h8>`): a `fit.toml` carries one `[method]`, so there is no
+  execution order to sort and no user-chosen stage name (proposal
+  2026-09-08-workflow-first-fit-config). Every method leaf re-keys — its payload
+  dropped the four chain-start keys for the one `starts` rule — and the fit
+  level re-keys once, having dropped the `fit_starts` leaf it hashed as `null`;
+  `LEVEL_SCHEMA_VERSION` is unchanged. Old fit leaves are cache-misses and their
+  paths are not produced by the new tools.
 - **`pfilter` moved to its own `pfilters/` kind** (was nested elsewhere).
-- **`camdl if2` is removed.** A single-method IF2 run is now a one-stage fit:
-  `fits/<stem>-<h8>/01-fit-<h8>/…`, run via `camdl fit run` with a
-  `[stages.X] algorithm = "if2"` block.
+- **`camdl if2` is removed.** An IF2 run is a fit whose `[method]` is
+  `algorithm = "if2"`: `fits/<stem>-<h8>/if2-<h8>/…`, run via `camdl fit run`.
 - **No fit-wide `run.json`** at the `fits/<stem>-<h8>/` level — read the
-  `fit.meta.json` sidecar + the stage leaves (see above).
+  `fit.meta.json` sidecar + the method leaves (see above).
 
 ## Derived index (`results/index.json`)
 

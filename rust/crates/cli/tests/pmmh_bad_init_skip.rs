@@ -2,13 +2,15 @@
 //!
 //! End-to-end test for the init-eval guard wired into
 //! `pmmh::run_stage`. We construct a two-chain PMMH fit whose
-//! `survey_top_k` init feeds:
+//! `starts = { from_posterior = … }` draws file holds two rows:
 //!
-//!   - rank-1: pathological β=4.8, γ=0.05 → R0 ≈ 96 against a
-//!             flat-low data series. PF reweights kill all but ~1
-//!             particle within a handful of obs windows → ESS
-//!             collapse → `Err(SimError::PFDegenerate)`.
-//!   - rank-2: sane β=0.30, γ=0.10 → R0 = 3, fits the data.
+//!   - pathological β=4.8, γ=0.05 → R0 ≈ 96 against a flat-low data
+//!     series. PF reweights kill all but ~1 particle within a handful
+//!     of obs windows → ESS collapse → `Err(SimError::PFDegenerate)`.
+//!   - sane β=0.30, γ=0.10 → R0 = 3, fits the data.
+//!
+//! Each chain draws one row; which chain gets which is a property of the
+//! seeded draw, read back from `chain_starts.tsv` rather than assumed.
 //!
 //! Acceptance:
 //!   1. `camdl fit run` exits 0 (the run does NOT fail when one
@@ -19,14 +21,11 @@
 //!      rename declared on `DiagnosticKind`.
 //!   3. `fit_state.toml` reports `n_good_chains = 1` (the good
 //!      chain's MAP), distinct from `n_chains = 2`.
-//!   4. The good chain (chain 2 in 1-indexed terms) wrote
-//!      `chain_2/trace.tsv` and the bad chain (chain 1) did NOT
-//!      produce a final trace beyond burn-in.
+//!   4. The good chain wrote its `chain_<n>/trace.tsv` with post-burn-in
+//!      rows.
 //!
-//! Skipped when the release binary or camdlc isn't present, mirroring
-//! the gate in `survey_top_k_pmmh.rs`.
+//! Skipped when the release binary or camdlc isn't present.
 
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,22 +57,6 @@ fn tempdir(tag: &str) -> Tmp {
         "camdl_pmmh_bad_init_{}_{}_{}", tag, std::process::id(), ns));
     std::fs::create_dir_all(&base).unwrap();
     Tmp(base)
-}
-
-/// `crate::resolve::model_identity_from_ir` for the integration test — same as
-/// `survey_top_k_pmmh.rs::model_identity_for_test`. Calls the shared
-/// `runid::inputs::model_ir_hash` (gh#442) rather than re-implementing the
-/// presentation strip.
-fn model_identity_for_test(ir_json: &str) -> String {
-    let model: ir::Model = ir::from_str(ir_json).expect("model_identity_for_test: invalid IR");
-    runid::inputs::model_ir_hash(&model).to_hex()
-}
-
-fn sha256_hex_of_file(path: &Path) -> String {
-    let bytes = std::fs::read(path).unwrap();
-    let mut h = Sha256::new();
-    h.update(&bytes);
-    hex::encode(h.finalize())
 }
 
 /// SIR fixture with wide enough bounds that β=4.8 (pathological) is
@@ -131,73 +114,27 @@ simulate { from = 0 'days  to = 30 'days }
     (ir_path, data_path)
 }
 
-/// Write a 2-row survey landscape: rank-1 is the pathological seed,
-/// rank-2 is the sane one. The fit's `survey_top_k` resolver will
-/// hand rank-1 to chain 1 and rank-2 to chain 2.
-fn write_survey_artifact(
-    survey_dir: &Path,
-    model_identity: &str,
-    data_hash_cases: &str,
-) -> String {
-    std::fs::create_dir_all(survey_dir).unwrap();
-
-    let survey_hash = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-
-    // New-format survey leaf (`runid::RunRecord`). The cross-check provenance
-    // (model_identity / data_hashes / fixed / estimated) lives in `inputs`;
-    // identity is `run_id`.
-    let record = runid::RunRecord {
-        format_version: runid::FORMAT_VERSION,
-        kind: runid::ArtifactKind::Survey,
-        run_id: runid::ContentHash::from_hex(survey_hash).unwrap(),
-        hash_version: runid::HASH_VERSION,
-        ir_version: "0.7".into(),
-        engine_version: "test-fixture".into(),
-        levels: Vec::new(),
-        deps: Vec::new(),
-        status: runid::RunStatus::Completed,
-        artifacts: Default::default(),
-        output_schema: Default::default(),
-        children: Default::default(),
-        inputs: serde_json::json!({
-            "model_identity": model_identity,
-            "data_hashes": { "cases": data_hash_cases },
-            "fixed": { "N0": 1000.0 },
-            "estimated": ["beta", "gamma"],
-            "eval_method": "pfilter",
-            "eval_particles": 100,
-            "eval_replicates": 1,
-            "n_points": 2,
-        }),
-        provenance: Default::default(),
-    };
-    std::fs::write(
-        survey_dir.join("run.json"),
-        serde_json::to_string_pretty(&record).unwrap(),
-    ).unwrap();
-
-    // Row 1 (rank-1, BEST by loglik): pathological β=4.8, γ=0.05.
-    //   R0 = β/γ ≈ 96 with N=1000 → epidemic peaks within ~3 days,
-    //   incompatible with the flat case series → ESS collapse.
-    // Row 2 (rank-2): sane β=0.30, γ=0.10 → R0 = 3.
-    //
-    // The synthetic loglik values are diagnostic-only — the fit
-    // re-evaluates the loglik with its own particle filter.
-    let landscape = "\
+/// A two-row draws file: the pathological start and the sane one.
+///
+/// Row 1: β=4.8, γ=0.05. R0 = β/γ ≈ 96 with N=1000 → epidemic peaks within
+/// ~3 days, incompatible with the flat case series → ESS collapse.
+/// Row 2: β=0.30, γ=0.10 → R0 = 3.
+fn write_draws(dir: &Path) -> PathBuf {
+    let draws = "\
 # gh#110 PMMH BadInit skip-and-continue test fixture\n\
-beta\tgamma\tloglik\tloglik_se\tmean_ess\tn_replicates\tpoint_id\n\
-4.80\t0.05\t-50.0\t1.0\t0.8\t1\t0\n\
-0.30\t0.10\t-55.0\t1.0\t0.8\t1\t1\n";
-    std::fs::write(survey_dir.join("landscape.tsv"), landscape).unwrap();
-
-    survey_hash.to_string()
+beta\tgamma\n\
+4.80\t0.05\n\
+0.30\t0.10\n";
+    let p = dir.join("starts.tsv");
+    std::fs::write(&p, draws).unwrap();
+    p
 }
 
 fn write_fit_toml(
     dir: &Path,
     ir: &Path,
     data: &Path,
-    survey_dir: &Path,
+    draws: &Path,
 ) -> PathBuf {
     let toml = format!(r#"
 output_dir = "{out}"
@@ -212,7 +149,7 @@ beta  = {{ bounds = [0.001, 5.0], prior = {{ log_normal = {{ mu = -0.3, sigma = 
 gamma = {{ bounds = [0.01, 1.0],  prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }}, start = 0.1 }}
 [fixed]
 N0 = 1000
-[stages.post]
+[method]
 algorithm      = "pmmh"
 backend        = "chain_binomial"
 chains         = 2
@@ -220,21 +157,20 @@ particles      = 30
 iterations     = 40
 burn_in        = 5
 thin           = 1
-init           = "survey_top_k"
-survey_path    = "{survey}"
+starts         = {{ from_posterior = "{draws}" }}
 "#,
         out    = dir.join("results").display(),
         ir     = ir.display(),
         data   = data.display(),
-        survey = survey_dir.display(),
+        draws  = draws.display(),
     );
     let p = dir.join("fit.toml");
     std::fs::write(&p, toml).unwrap();
     p
 }
 
-/// The CAS stage leaf for `stage_substr` under `fits_root` —
-/// `<fit>/<NN>-<stage>-<h8>/seed_<N>-<h8>/` holding a `fit_stage` run.json.
+/// The CAS method leaf for `stage_substr` under `fits_root` —
+/// `<fit>/<method>-<h8>/seed_<N>-<h8>/` holding a `fit_stage` run.json.
 fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> PathBuf {
     let mut stack = vec![fits_root.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -244,7 +180,7 @@ fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> PathBuf {
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
                     let stage = v["levels"].as_array().into_iter().flatten()
-                        .find(|l| l["name"].as_str() == Some("stage"))
+                        .find(|l| l["name"].as_str() == Some("method"))
                         .and_then(|l| l["label"].as_str()).unwrap_or("");
                     if stage.contains(stage_substr) { return d; }
                 }
@@ -254,27 +190,36 @@ fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> PathBuf {
             for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
         }
     }
-    panic!("no CAS '{}' stage leaf under {}", stage_substr, fits_root.display());
+    panic!("no CAS '{}' method leaf under {}", stage_substr, fits_root.display());
 }
 
-/// gh#110 acceptance: pathological survey-rank-1 init must not hang
-/// the run — the chain is skipped with a `BadInit` diagnostic and
-/// the sane rank-2 chain completes.
+/// Each chain's `beta` start, read from the leaf's `chain_starts.tsv` —
+/// `(chain_id, beta)` in file order.
+fn chain_betas(leaf: &Path) -> Vec<(usize, f64)> {
+    let path = leaf.join("chain_starts.tsv");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let mut body = raw.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let cols: Vec<&str> = body.next().expect("chain_starts.tsv header").split('\t').collect();
+    let id_idx = cols.iter().position(|c| *c == "chain_id").expect("chain_id column");
+    let beta_idx = cols.iter().position(|c| *c == "beta").expect("beta column");
+    body.map(|l| {
+        let cells: Vec<&str> = l.split('\t').collect();
+        (cells[id_idx].parse().unwrap(), cells[beta_idx].parse().unwrap())
+    }).collect()
+}
+
+/// gh#110 acceptance: a pathological drawn start must not hang the run — the
+/// chain is skipped with a `BadInit` diagnostic and the sane chain completes.
 #[test]
-fn pmmh_skips_pathological_survey_init_and_continues() {
+fn pmmh_skips_pathological_drawn_start_and_continues() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("skip");
     let (ir, data) = write_fixture(tmp.path());
 
-    let ir_json = std::fs::read_to_string(&ir).unwrap();
-    let mh = model_identity_for_test(&ir_json);
-    let dh = sha256_hex_of_file(&data);
-
-    let survey_dir = tmp.path().join("survey_dir");
-    let _survey_hash = write_survey_artifact(&survey_dir, &mh, &dh);
-
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &survey_dir);
+    let draws = write_draws(tmp.path());
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &draws);
     let t0 = std::time::Instant::now();
     let out = Command::new(&bin)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -301,9 +246,18 @@ fn pmmh_skips_pathological_survey_init_and_continues() {
 
     // Acceptance 2: diagnostics.json contains a `bad_init` entry.
     let fits_dir = tmp.path().join("results/fits");
-    let stage_dir = cas_stage_leaf(&fits_dir, "post");
+    let stage_dir = cas_stage_leaf(&fits_dir, "pmmh");
     assert!(stage_dir.join("run.json").is_file(),
-        "post stage leaf missing run.json: {}\nstderr:\n{}", stage_dir.display(), stderr);
+        "pmmh method leaf missing run.json: {}\nstderr:\n{}", stage_dir.display(), stderr);
+
+    // The premise: the seeded draw handed the two chains different rows.
+    let starts = chain_betas(&stage_dir);
+    let bad_chain = starts.iter().find(|(_, b)| (b - 4.8).abs() < 1e-9).map(|(c, _)| *c)
+        .unwrap_or_else(|| panic!("no chain drew the pathological row: {starts:?}"));
+    let good_chain = starts.iter().find(|(_, b)| (b - 0.3).abs() < 1e-9).map(|(c, _)| *c)
+        .unwrap_or_else(|| panic!(
+            "no chain drew the sane row: {starts:?}. If the from_posterior draw \
+             changed, pick a seed under which the two chains draw different rows."));
 
     let diag_path = stage_dir.join("diagnostics.json");
     assert!(diag_path.exists(),
@@ -321,26 +275,24 @@ fn pmmh_skips_pathological_survey_init_and_continues() {
         "expected exactly 1 BadInit diagnostic; full diagnostics.json:\n{}\n\
          stderr:\n{}", diag_raw, stderr);
 
-    // The BadInit entry must carry the pathological chain's index
-    // (0 = chain 1, 1-indexed in the user-facing message) and its
-    // β / γ pair. We only verify chain_id since the params keys are
-    // BTreeMap-ordered (alphabetical) in the JSON.
+    // The BadInit entry must carry the pathological chain's index and its
+    // β / γ pair.
     let bad = arr.iter().find(|d|
         d.get("kind").and_then(|k| k.get("type"))
             .and_then(|t| t.as_str()) == Some("bad_init"))
         .unwrap();
     let bad_kind = bad.get("kind").unwrap();
     let chain_id = bad_kind.get("chain_id").and_then(|c| c.as_u64())
-        .expect("BadInit must carry a chain_id");
-    assert_eq!(chain_id, 0,
-        "rank-1 (β=4.8) goes to chain 0; expected chain_id=0, got {}.\n\
+        .expect("BadInit must carry a chain_id") as usize;
+    assert_eq!(chain_id, bad_chain,
+        "the refused chain must be the one that drew β=4.8; got chain_id={}.\n\
          BadInit:\n{}", chain_id, serde_json::to_string_pretty(bad).unwrap());
 
     let params = bad_kind.get("params").expect("BadInit must carry params");
     let beta = params.get("beta").and_then(|v| v.as_f64())
         .expect("BadInit.params must include beta");
     assert!((beta - 4.8).abs() < 1e-9,
-        "BadInit.params.beta should = 4.8 (rank-1 pathological); got {}", beta);
+        "BadInit.params.beta should = 4.8 (the pathological row); got {}", beta);
 
     // Acceptance 3: fit_state.toml reports n_good_chains = 1.
     let state_path = stage_dir.join("fit_state.toml");
@@ -352,7 +304,7 @@ fn pmmh_skips_pathological_survey_init_and_continues() {
         .expect("fit_state.toml must record n_good_chains when a chain \
                  was skipped (gh#110)");
     assert_eq!(n_good, 1,
-        "n_good_chains should be 1 (rank-2 chain only). \
+        "n_good_chains should be 1 (the sane chain only). \
          fit_state.toml:\n{}", state_raw);
     let n_chains = state.get("n_chains").and_then(|v| v.as_integer())
         .expect("n_chains field");
@@ -360,21 +312,20 @@ fn pmmh_skips_pathological_survey_init_and_continues() {
         "n_chains should remain 2 (the requested chain count). \
          fit_state.toml:\n{}", state_raw);
 
-    // Acceptance 4: the good chain (chain_2) produced a trace with
-    // posterior draws. Chain 1 (the skipped one) may have a
-    // trace.tsv header but should not have post-burn-in rows
-    // (its loop never ran).
-    let good_trace = stage_dir.join("chain_2/trace.tsv");
+    // Acceptance 4: the good chain produced a trace with posterior draws.
+    // The skipped chain may have a trace.tsv header but should not have
+    // post-burn-in rows (its loop never ran).
+    let good_trace = stage_dir.join(format!("chain_{}/trace.tsv", good_chain + 1));
     assert!(good_trace.exists(),
-        "chain_2/trace.tsv must exist for the surviving chain");
+        "{} must exist for the surviving chain", good_trace.display());
     let good_lines = std::fs::read_to_string(&good_trace).unwrap()
         .lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .count();
     // Header + at least one post-burn-in draw. iterations=40, burn_in=5,
     // thin=1 → ~35 draws expected.
     assert!(good_lines >= 5,
-        "chain_2/trace.tsv should have header + post-burn-in draws; \
-         got {} non-comment lines", good_lines);
+        "{} should have header + post-burn-in draws; got {} non-comment lines",
+        good_trace.display(), good_lines);
 
     // Stderr should surface the user-facing "ran 1 of 2 chains" line.
     assert!(stderr.contains("ran 1 of 2 chains"),

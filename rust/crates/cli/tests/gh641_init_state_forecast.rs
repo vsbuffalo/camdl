@@ -370,7 +370,7 @@ fn composes_with_an_observation_anchored_horizon() {
     std::fs::write(
         &fit,
         format!(
-            "[model]\ncamdl = \"{}\"\n\n[data.observations]\ndaily_cases = \"{}\"\n\n[estimate]\nbeta = {{ bounds = [0.05, 1.0], start = 0.4 }}\n\n[fixed]\ngamma = 0.15\n\n[stages.posterior]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 50\niterations = 2\ncooling = 0.7\n",
+            "[model]\ncamdl = \"{}\"\n\n[data.observations]\ndaily_cases = \"{}\"\n\n[estimate]\nbeta = {{ bounds = [0.05, 1.0], start = 0.4 }}\n\n[fixed]\ngamma = 0.15\n\n[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 50\niterations = 2\ncooling = 0.7\n",
             s(&f.model_long), s(&f.data)
         ),
     )

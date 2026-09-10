@@ -128,7 +128,7 @@ beta = {{ bounds = [0.05, 5.0], start = {START_BETA} }}
 gamma = 0.3
 N0 = 10000
 
-[stages.nuts]
+[method]
 algorithm = "nuts"
 backend = "ode"
 chains = 2
@@ -137,7 +137,7 @@ samples = 250
 # Controlled recovery from the declared start (like mh_ode_recovery): the default
 # init is UniformUnconstrained (dispersed), which is right for a real fit but adds
 # variance a short-warmup recovery check shouldn't depend on.
-init = "single"
+starts = "single"
 "#, out = out_dir.display(), ir = ir.display(), data = data.display())).unwrap();
 
     let status = Command::new(&bin)

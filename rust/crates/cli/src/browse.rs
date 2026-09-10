@@ -433,7 +433,7 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     println!("{}", "path".bright_black()); println!("  {}", rel_path.cyan());
     println!("{}", "kind".bright_black()); println!("  fit_stage");
     println!("{}", "fit".bright_black()); println!("  {}", leaf.level_label("fit"));
-    println!("{}", "stage".bright_black()); println!("  {}", leaf.level_label("stage"));
+    println!("{}", "method".bright_black()); println!("  {}", leaf.level_label("method"));
     println!("{}", "seed".bright_black()); println!("  {}", leaf.level_label("seed"));
     println!("{}", "run_id".bright_black()); println!("  {}", rec.run_id.to_hex().dimmed());
     println!("{}", "levels".bright_black());
@@ -1430,45 +1430,6 @@ fn leaf_created(leaf: &cas_read::Leaf) -> SystemTime {
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         })
 }
-
-/// Find the fit-stage directory whose `run.json` `run_id` starts with
-/// `hash_prefix`. Walks every `<root>/fits/**/run.json` `FitStage` leaf,
-/// matched on its `run_id` hex prefix.
-///
-/// Returns `Ok(path)` for exactly one match, `Err` on zero or
-/// multiple matches (with the candidates enumerated in the
-/// multiple-match error). Used by `--starts-from <hash>` to let
-/// users reference a stage by git-style short hash without
-/// knowing the directory layout.
-pub fn resolve_stage_by_hash(root: &str, hash_prefix: &str)
-    -> Result<std::path::PathBuf, String>
-{
-    let fits = std::path::Path::new(root).join("fits");
-    if !fits.exists() {
-        return Err(format!("no fits/ tree under {}", root));
-    }
-    // FitStage leaves under fits/, matched on the leaf `run_id` hex prefix.
-    let matches: Vec<std::path::PathBuf> = cas_read::resolve_fit_prefix(Path::new(root), hash_prefix)
-        .into_iter()
-        .map(|leaf| leaf.dir)
-        .collect();
-    match matches.len() {
-        0 => Err(format!("no fit stage matching hash prefix '{}' under {}",
-            hash_prefix, root)),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        n => {
-            let mut msg = format!(
-                "hash prefix '{}' is ambiguous, matches {} stages:\n",
-                hash_prefix, n);
-            for p in &matches {
-                msg.push_str(&format!("  {}\n", p.display()));
-            }
-            msg.push_str("refine by passing a longer hash prefix");
-            Err(msg)
-        }
-    }
-}
-
 
 // ── Output formatting ────────────────────────────────────────────────────────
 

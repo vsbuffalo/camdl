@@ -99,7 +99,7 @@ I0  = 10
 rho = 0.6
 k   = 10.0
 
-[stages.posterior]
+[method]
 algorithm = "mh"
 backend = "ode"
 chains = 2

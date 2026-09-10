@@ -65,9 +65,9 @@ $(SYNTH): $(CASE)/$(MODEL) $(CASE)/truth.toml | ocaml
 	@touch $(SYNTH)
 synth: $(SYNTH) ## simulate at truth.toml → obs streams
 
-if2:  $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run if2.toml  --allow-nonconverged-scout ## IF2 fit
-pgas: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pgas.toml --allow-nonconverged-scout ## PGAS fit
-pmmh: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pmmh.toml --allow-nonconverged-scout ## PMMH fit
+if2:  $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run if2.toml  ## IF2 fit
+pgas: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pgas.toml ## PGAS fit
+pmmh: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pmmh.toml ## PMMH fit
 
 ensemble: | ocaml ## 30-replicate forward sim (cells bar)
 	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial $(TRUTH) \

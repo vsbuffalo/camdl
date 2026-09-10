@@ -216,7 +216,7 @@ I0  = 10
 rho = 0.6
 k   = 10.0
 
-[stages.posterior]
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -472,7 +472,7 @@ gamma = { bounds = [0.01, 0.5], start = 0.15 }
 [fixed]
 N0 = 1000
 
-[stages.posterior]
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2

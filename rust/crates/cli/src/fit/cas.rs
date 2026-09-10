@@ -1,27 +1,35 @@
-//! The fit-stage CAS identity: map a resolved fit stage into the `runid`
-//! factored levels (`fit` / `NN-stage` / `seed`) and its leaf `run_id`.
+//! The fit-method CAS identity: map a resolved (problem, method, seed) into
+//! the `runid` factored levels (`fit` / `method` / `seed`) and its leaf
+//! `run_id`.
 //!
-//! Factoring (`FitDigest` excludes `[stages.*]` so editing the posterior's
-//! block doesn't re-key the scout; cross-stage invalidation rides the
-//! deps-DAG):
+//! Factoring — the fit level hashes the *problem* alone, so two files that
+//! differ only in `[method]` land under one fit-level digest and a warm start
+//! from one to the other rides the method level's `deps`:
 //!
 //! - **fit level** = [`FitDigest`] = whole-IR model digest + per-stream
 //!   training data digests + per-stream `[data.holdout]` content digests
-//!   (gh#190) + the canonicalized fit-wide config (with `stages` / `fit_seeds`
-//!   / `output_dir` normalized out) + engine version.
-//! - **stage level** = [`StageLevel`] = [`StageConfig`] (the stage's
-//!   `identity_payload` + `n_trajectories` + obs/flow + `target_length` + the
-//!   resolved `obs_alignment`, gh#189) folded with its `deps` (so
-//!   `02-posterior`'s hash folds in `01-scout`'s identity).
+//!   (gh#190) + the canonicalized problem half of the config (`output_dir`
+//!   normalized out) + engine version.
+//! - **method level** = [`StageLevel`] = [`StageConfig`] (the method's
+//!   `identity_payload` — its algorithm's fields plus `starts` — +
+//!   `n_trajectories` + obs/flow + `target_length` + the resolved
+//!   `obs_alignment`, gh#189) folded with its `deps` (the content of a
+//!   `from_mle` / `from_posterior` / `from_params` source, so a regenerated
+//!   source re-keys the run). Its path label is the algorithm's name.
 //! - **seed level** = [`Seed`] = the resolved fit RNG seed.
 //!
 //! `n_trajectories` (the count of posterior trajectories PGAS writes to
-//! `chain_N/trajectories.tsv` under the leaf) is folded into the stage identity
-//! ([`Stage::cas_n_trajectories`]). It is an output-shaping knob that
-//! `identity_payload` otherwise omits, but it must be in the key: a count that
-//! changes stored output has to change the `run_id`, else a stage `run_id`
-//! could serve a different trajectory count's output. So each value yields a
-//! distinct leaf (count-in-the-key), at the cost of re-fitting when it changes.
+//! `chain_N/trajectories.tsv` under the leaf) is folded into the method
+//! identity ([`Algorithm::cas_n_trajectories`]). It is an output-shaping knob
+//! that `identity_payload` otherwise omits, but it must be in the key: a count
+//! that changes stored output has to change the `run_id`, else a method
+//! `run_id` could serve a different trajectory count's output. So each value
+//! yields a distinct leaf (count-in-the-key), at the cost of re-fitting when it
+//! changes.
+//!
+//! The `runid` input types keep their `Stage*` names: they are the crate's
+//! vocabulary for "the level below the fit", and renaming them would re-key
+//! nothing and touch a crate this change otherwise leaves alone.
 
 use indexmap::IndexMap;
 
@@ -33,9 +41,9 @@ use runid::inputs::{
 };
 use runid::{run_id, ArtifactKind, ContentAddressed, ContentHash, LevelId, RunRecord};
 
-use super::config_v2::{FitConfigV2, Stage};
+use super::config_v2::{Algorithm, FitConfig, Method, Problem};
 
-/// A fully-resolved fit-stage leaf: the factored identity levels (in path
+/// A fully-resolved fit-method leaf: the factored identity levels (in path
 /// order) and the leaf `run_id` composed from their hashes.
 pub struct ResolvedFitStage {
     pub levels: Vec<LevelId>,
@@ -43,27 +51,26 @@ pub struct ResolvedFitStage {
 }
 
 /// Inputs to [`resolve_fit_stage`], all already resolved by the caller
-/// (sweep overrides applied to `config`, data paths resolved). Labels are
-/// provenance; identity rides in the hashes.
+/// (sweep overrides applied to `problem`, CLI overrides and the `starts`
+/// default applied to `method`, data paths resolved). Labels are provenance;
+/// identity rides in the hashes.
 pub struct FitStageCtx<'a> {
     pub model: &'a ir::Model,
     pub fit_stem: &'a str,
     pub ir_version: &'a str,
     pub engine_version: &'a str,
-    /// The resolved (sweep-applied) fit config. Hashed whole, less the
-    /// lower-level/provenance slices (see [`fit_config_blob_hash`]).
-    pub config: &'a FitConfigV2,
+    /// The resolved (sweep-applied) problem half. Hashed whole, less
+    /// `output_dir` (see [`fit_config_blob_hash`]).
+    pub problem: &'a Problem,
     /// Resolved training observation streams (name → path); their *content*
     /// is digested into `FitDigest.data`.
     pub data_paths: &'a IndexMap<String, String>,
-    pub stage_name: &'a str,
-    pub stage: &'a Stage,
-    /// Zero-padded topological position → the provenance label `NN-stage`.
-    pub ordinal: usize,
+    /// The method, with `starts` resolved.
+    pub method: &'a Method,
     /// The resolved fit RNG seed.
     pub seed: u64,
-    /// Upstream artifacts consumed (`StartsFrom` → `fit_state.toml`), folded
-    /// into the stage level so a regenerated upstream re-keys this stage.
+    /// Upstream artifacts consumed (a `starts` source's file), folded into
+    /// the method level so a regenerated source re-keys this run.
     pub deps: Vec<ArtifactRef>,
 }
 
@@ -402,28 +409,24 @@ pub(crate) fn build_data_digests(paths: &IndexMap<String, String>) -> Result<Vec
 /// no explicit holdout is configured (temporal `holdout_after` is a numeric
 /// threshold already in the blob, not a file). Reuses [`build_data_digests`],
 /// the same content-addressing the training streams use.
-fn build_holdout_digests(config: &FitConfigV2) -> Result<Vec<DataDigest>, String> {
-    match config.data.as_ref().and_then(|d| d.holdout.as_ref()) {
+fn build_holdout_digests(problem: &Problem) -> Result<Vec<DataDigest>, String> {
+    match problem.data.as_ref().and_then(|d| d.holdout.as_ref()) {
         Some(holdout) => build_data_digests(holdout),
         None => Ok(Vec::new()),
     }
 }
 
-/// The fit-wide config blob hash: the whole resolved config (include-by-
-/// default — so `ic_free`/`holdout`/`[config]`/priors can't be silently
-/// dropped) with the slices owned by a lower level or by provenance
-/// normalized out:
-///   - `stages` — each stage owns its block at the stage level (excluding it
-///     is what lets editing the posterior leave the scout leaf untouched);
-///   - `fit_seeds` — the seed level owns the seed;
+/// The fit-wide config blob hash: the whole problem half (include-by-default
+/// — so `ic_free`/`holdout`/`[config]`/priors can't be silently dropped) with
+/// the one provenance slice normalized out:
 ///   - `output_dir` — pure write-location provenance.
-/// model/data *paths* stay (a rename is a harmless over-invalidate; their
-/// *content* rides in `FitDigest.model`/`.data`).
-fn fit_config_blob_hash(config: &FitConfigV2) -> Result<ContentHash, String> {
-    // The subtractive helper, with this level's three named omissions. It
-    // gates finiteness, serializes whole, subtracts, and digests — exactly
-    // what this function used to spell out, so the hash is unchanged.
-    Ok(canonical_config_hash(config, &["stages", "fit_seeds", "output_dir"])?.into_inner())
+/// `[method]` and `fit_seeds` are not in the problem at all — the method
+/// level owns the first and the seed level the second — so a second method on
+/// the same problem, or another seed, shares this digest. model/data *paths*
+/// stay (a rename is a harmless over-invalidate; their *content* rides in
+/// `FitDigest.model`/`.data`).
+fn fit_config_blob_hash(problem: &Problem) -> Result<ContentHash, String> {
+    Ok(canonical_config_hash(problem, &["output_dir"])?.into_inner())
 }
 
 /// The config-MEANING hash: what a `fit.toml` handle is looked up by (gh#653).
@@ -439,49 +442,45 @@ fn fit_config_blob_hash(config: &FitConfigV2) -> Result<ContentHash, String> {
 /// bytes kept all three, so reflowing a comment orphaned a completed multi-hour
 /// fit — the run store held it, and `compare` reported "no completed fit found".
 ///
-/// One thing the canonical form would discard that must not be: `digest_value`
-/// sorts object keys, and `[stages.*]` is an ordered map — stages execute in
-/// declaration order, so a scout→posterior pipeline and a posterior→scout one
-/// are different fits that the sorted tree cannot tell apart. The stage names
-/// are therefore folded in a second time, as an ordered array. The other ordered
-/// maps (`[estimate]`, `[data.observations]`) get no such treatment on purpose:
-/// [`fit_config_blob_hash`] sorts them too, so two configs differing only in
-/// their order resolve to the same stored fit *because it is the same stored
-/// fit*. Lookup insensitivity is kept aligned with store insensitivity.
+/// The ordered maps (`[estimate]`, `[data.observations]`) are sorted on
+/// purpose: [`fit_config_blob_hash`] sorts them too, so two configs differing
+/// only in their order resolve to the same stored fit *because it is the same
+/// stored fit*. Lookup insensitivity is kept aligned with store insensitivity.
 ///
-/// Every field is included, including the `[stages.*]` blocks
-/// [`fit_config_blob_hash`] strips for the fit level: a lookup asks about the
-/// whole config, so a changed particle count must not resolve to the old run.
-pub fn config_identity_hash(config: &FitConfigV2) -> Result<String, String> {
+/// Every field is included, including the `[method]` table
+/// [`fit_config_blob_hash`] never sees: a lookup asks about the whole config,
+/// so a changed particle count must not resolve to the old run.
+pub fn config_identity_hash(config: &FitConfig) -> Result<String, String> {
     ensure_finite(config)?;
     let v = serde_json::to_value(config)
         .map_err(|e| format!("cannot serialize fit config for hashing: {}", e))?;
-    let stage_order: Vec<&str> = config.stages.keys().map(|s| s.as_str()).collect();
-    Ok(digest_value(&serde_json::json!({
-        "config": v,
-        "stage_order": stage_order,
-    }))
-    .to_hex())
+    Ok(digest_value(&serde_json::json!({ "config": v })).to_hex())
 }
 
-/// The stage-level config hash: the stage's `identity_payload` (which omits
-/// the extension dim + `n_trajectories`) re-augmented with `n_trajectories`,
-/// which is count-in-the-key (see the module note and
-/// [`Stage::cas_n_trajectories`]).
-fn stage_config_hash(stage: &Stage) -> Result<ContentHash, String> {
-    // Gate the Stage struct itself: `identity_payload()` already built its
+/// The method-level config hash: the method's `identity_payload` (which
+/// omits the extension dim + `n_trajectories`) re-augmented with
+/// `n_trajectories`, which is count-in-the-key (see the module note and
+/// [`Algorithm::cas_n_trajectories`]).
+///
+/// Refuses a method whose `starts` was never resolved: the default rule is a
+/// function of the problem, and hashing an absent key would let a file that
+/// spells the default and one that omits it key differently — or, worse, let
+/// the run draw from a rule its address never saw.
+fn stage_config_hash(method: &Method) -> Result<ContentHash, String> {
+    method.starts()?;
+    // Gate the Method struct itself: `identity_payload()` already built its
     // Value via `json!`, which would have nulled any non-finite cooling /
     // rho / tempering — so check the source struct before trusting it.
-    ensure_finite(stage)?;
+    ensure_finite(method)?;
     let v = serde_json::json!({
-        "identity": stage.identity_payload(),
-        "n_trajectories": stage.cas_n_trajectories(),
+        "identity": method.identity_payload(),
+        "n_trajectories": method.algorithm.cas_n_trajectories(),
     });
     Ok(digest_value(&v))
 }
 
-/// Build the `fit`-level [`FitDigest`] — the seed-independent, stage-
-/// independent identity shared by every stage leaf of a fit. This is the
+/// Build the `fit`-level [`FitDigest`] — the seed-independent, method-
+/// independent identity shared by every method leaf of a fit. This is the
 /// single source of truth for the `fit` level: [`resolve_fit_stage`] folds it
 /// into the leaf, and [`fit_segment_dir`] hashes it into the `fits/{stem}-{h8}/`
 /// directory name, so the announced fit directory and the directory the leaves
@@ -490,7 +489,7 @@ pub fn fit_level_digest(
     model: &ir::Model,
     ir_version: &str,
     engine_version: &str,
-    config: &FitConfigV2,
+    problem: &Problem,
     data_paths: &IndexMap<String, String>,
 ) -> Result<FitDigest, String> {
     Ok(FitDigest {
@@ -502,8 +501,8 @@ pub fn fit_level_digest(
             EngineVersion(engine_version.to_string()),
         ),
         data: build_data_digests(data_paths)?,
-        holdout_data: build_holdout_digests(config)?,
-        fit_toml: fit_config_blob_hash(config)?,
+        holdout_data: build_holdout_digests(problem)?,
+        fit_toml: fit_config_blob_hash(problem)?,
         engine: EngineVersion(engine_version.to_string()),
     })
 }
@@ -515,16 +514,16 @@ pub fn fit_level_hash(
     model: &ir::Model,
     ir_version: &str,
     engine_version: &str,
-    config: &FitConfigV2,
+    problem: &Problem,
     data_paths: &IndexMap<String, String>,
 ) -> Result<ContentHash, String> {
-    Ok(fit_level_digest(model, ir_version, engine_version, config, data_paths)?.content_hash())
+    Ok(fit_level_digest(model, ir_version, engine_version, problem, data_paths)?.content_hash())
 }
 
 /// The fit segment directory for a known fit-level hash:
 /// `<root>/fits/{path_label(stem)}-{short8}/`. This is the grandparent of
-/// every stage leaf (`store_path` factors the leaf as
-/// `fits/{fit}/{NN-stage}/{seed}/`), so the directory this returns is exactly
+/// every method leaf (`store_path` factors the leaf as
+/// `fits/{fit}/{method}/{seed}/`), so the directory this returns is exactly
 /// where `resolve_fit_stage`'s leaves land — `fit run` can announce it and be
 /// right. Pass the hash from [`fit_level_hash`] (the `fit`-level
 /// `ContentHash`).
@@ -533,31 +532,31 @@ pub fn fit_segment_dir(root: &Path, stem: &str, fit_hash: &ContentHash) -> std::
         .join(format!("{}-{}", runid::path_label(stem), fit_hash.short8()))
 }
 
-/// The resolved observation-time alignment a stage will actually run under,
-/// for the stage CAS identity (gh#189). Resolution is the single
-/// `crate::fit::methods::resolve_obs_alignment` gate, fed the stage algorithm,
+/// The resolved observation-time alignment a method will actually run under,
+/// for the method CAS identity (gh#189). Resolution is the single
+/// `crate::fit::methods::resolve_obs_alignment` gate, fed the algorithm,
 /// whether it is correlated PMMH, and the fit-wide requested
 /// `[config] obs_alignment`. The resolved `Ok` value is independent of whether
 /// observations sit on the `dt` grid (that flag only governs whether a combo
 /// is rejected — never which alignment is returned), so a fixed `true` yields
 /// the alignment without needing the observed-data times here; the runner
 /// still validates on-grid-ness and errors loudly for an unsupported combo.
-/// A non-inference stage (or an unsupported combo, which aborts the run before
-/// any output is stored) is keyed as `Snap` — the historical uniform-grid
-/// default — so it never silently aliases an `Exact` run.
-fn resolved_obs_alignment(stage: &Stage, config: &FitConfigV2) -> ResolvedObsAlignment {
+/// A non-inference method (or an unsupported combo, which aborts the run
+/// before any output is stored) is keyed as `Snap` — the historical
+/// uniform-grid default — so it never silently aliases an `Exact` run.
+fn resolved_obs_alignment(algorithm: &Algorithm, problem: &Problem) -> ResolvedObsAlignment {
     use crate::run_meta::FitAlgorithm;
     if !matches!(
-        stage.method_kind(),
+        algorithm.method_kind(),
         FitAlgorithm::If2 | FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Pfilter
     ) {
         return ResolvedObsAlignment::Snap;
     }
-    let correlated = matches!(stage, Stage::PMMH { rho: Some(_), .. });
+    let correlated = matches!(algorithm, Algorithm::PMMH { rho: Some(_), .. });
     match crate::fit::methods::resolve_obs_alignment(
-        stage.method_kind(),
+        algorithm.method_kind(),
         correlated,
-        config.config.obs_alignment,
+        problem.config.obs_alignment,
         /* obs_on_grid = */ true,
     ) {
         Ok(crate::fit::methods::ObsAlignment::Exact) => ResolvedObsAlignment::Exact,
@@ -565,26 +564,28 @@ fn resolved_obs_alignment(stage: &Stage, config: &FitConfigV2) -> ResolvedObsAli
     }
 }
 
-/// Resolve a fit-stage leaf's identity: the three factored levels (fit /
-/// `NN-stage` / seed) and the `run_id` derived from their hashes.
+/// Resolve a fit-method leaf's identity: the three factored levels (fit /
+/// method / seed) and the `run_id` derived from their hashes. The method
+/// level's label is the algorithm's name — there is no order among methods
+/// and nothing for an ordinal to encode.
 pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> {
     let fit = fit_level_digest(
         ctx.model,
         ctx.ir_version,
         ctx.engine_version,
-        ctx.config,
+        ctx.problem,
         ctx.data_paths,
     )?;
 
     let stage_config = StageConfig {
-        config: stage_config_hash(ctx.stage)?,
+        config: stage_config_hash(ctx.method)?,
         // Fits select observation streams via `[data]` (captured in
         // `FitDigest.data`); there is no fit-level `--obs`/`--flow`.
         obs_block: String::new(),
         flow_indices: Vec::new(),
-        target_length: ctx.stage.cas_target_length(),
-        // gh#189: the resolved (not requested) obs alignment, keyed per stage.
-        obs_alignment: resolved_obs_alignment(ctx.stage, ctx.config),
+        target_length: ctx.method.algorithm.cas_target_length(),
+        // gh#189: the resolved (not requested) obs alignment, keyed per method.
+        obs_alignment: resolved_obs_alignment(&ctx.method.algorithm, ctx.problem),
     };
     let stage_level = StageLevel { config: stage_config, deps: Deps(ctx.deps.clone()) };
 
@@ -594,11 +595,7 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
 
     let levels = vec![
         level("fit", ctx.fit_stem, structural_level_hash(&fit)),
-        level(
-            "stage",
-            &format!("{:02}-{}", ctx.ordinal, ctx.stage_name),
-            structural_level_hash(&stage_level),
-        ),
+        level("method", ctx.method.algorithm.method_name(), structural_level_hash(&stage_level)),
         level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
@@ -607,27 +604,23 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
     Ok(ResolvedFitStage { levels, run_id: rid })
 }
 
-/// The lineage dep for consuming an upstream stage's `fit_state.toml`: the
-/// upstream's `run_id` (its identity) + the consumed file's content digest,
-/// so a regenerated upstream (different θ̂) re-keys this stage. `None` if the
-/// upstream has no `fit_state.toml` (e.g. a PFilter-only upstream).
-pub fn cas_dep_ref(run_id: ContentHash, dir: &Path) -> Option<ArtifactRef> {
-    let bytes = std::fs::read(dir.join("fit_state.toml")).ok()?;
-    Some(ArtifactRef {
-        run_id,
-        kind: ArtifactKind::FitStage,
-        artifact: "fit_state.toml".to_string(),
-        digest: ContentHash::digest_bytes(&bytes),
-    })
+/// The lineage dep for a `from_mle` source: the leaf's `fit_state.toml` —
+/// prefer the leaf's CAS `run_id` (from its `run.json`); if it isn't a CAS
+/// leaf, use the consumed file's digest as a stand-in identity (content still
+/// re-keys).
+pub fn cas_dep_from_dir(dir: &Path) -> Option<ArtifactRef> {
+    cas_leaf_file_dep(dir, "fit_state.toml")
 }
 
-/// The lineage dep for an external `StartsFrom::Directory`: prefer the
-/// upstream's CAS `run_id` (from its `run.json`); if it isn't a CAS leaf, use
-/// the consumed file's digest as a stand-in identity (content still re-keys).
-pub fn cas_dep_from_dir(dir: &Path) -> Option<ArtifactRef> {
-    let bytes = std::fs::read(dir.join("fit_state.toml")).ok()?;
+/// The lineage dep for a named artifact under a method leaf — `draws.tsv`
+/// for a `from_posterior` source, `fit_state.toml` for `from_mle`: the
+/// leaf's `run_id` (its identity, from `run.json`; the file's digest when the
+/// directory is not a CAS leaf) plus the consumed file's content digest, so a
+/// regenerated leaf re-keys the run that starts from it.
+pub fn cas_leaf_file_dep(leaf: &Path, artifact: &str) -> Option<ArtifactRef> {
+    let bytes = std::fs::read(leaf.join(artifact)).ok()?;
     let digest = ContentHash::digest_bytes(&bytes);
-    let run_id = std::fs::read(dir.join("run.json"))
+    let run_id = std::fs::read(leaf.join("run.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<RunRecord>(&b).ok())
         .map(|r| r.run_id)
@@ -635,32 +628,18 @@ pub fn cas_dep_from_dir(dir: &Path) -> Option<ArtifactRef> {
     Some(ArtifactRef {
         run_id,
         kind: ArtifactKind::FitStage,
-        artifact: "fit_state.toml".to_string(),
+        artifact: artifact.to_string(),
         digest,
     })
 }
 
-/// Build the `deps` entry for a survey consumed by `init = "survey_top_k"`.
-/// The survey is a content-addressed `Survey` leaf; folding its `run_id`
-/// (content identity) + `landscape.tsv` digest into the fit stage's deps means
-/// a regenerated survey — even one written back to the same path — re-keys the
-/// fit. Returns `None` if the survey dir is unreadable (the fit will fail in
-/// init anyway, producing no stored output to mis-key). The `landscape.tsv`
-/// digest is the bytes the top-K rows are actually read from; `run_id` falls
-/// back to it if `run.json` is missing.
-/// Content dependency on a chain-start SOURCE FILE — `--posterior`'s
-/// `draws.tsv` or `--params`' TOML (gh#541).
+/// Content dependency on a chain-start source file named directly — a
+/// `from_posterior` draws TSV or a `from_params` TOML (gh#541).
 ///
-/// Same argument `cas_survey_dep` makes one function below, and the codebase
-/// already states it there: "the path string in `identity_payload` only
-/// distinguishes a *different* directory, not the same path rewritten". A path
-/// answers WHICH FILE; the starting values are WHAT IS IN IT. Rewrite
-/// `draws.tsv` in place with different draws, re-run, and a path-keyed identity
-/// serves the previous file's fit.
-///
-/// `--survey-path` (`cas_survey_dep`) and `--mle` (which folds the upstream
-/// leaf's `fit_state.toml` digest via `cas_dep_from_dir`) already got this
-/// right; these two were the gap.
+/// A path answers WHICH FILE; the starting values are WHAT IS IN IT. Rewrite
+/// `draws.tsv` in place with different draws, re-run, and a path-keyed
+/// identity serves the previous file's fit. `from_mle` folds the leaf's
+/// `fit_state.toml` digest through `cas_dep_from_dir` for the same reason.
 ///
 /// Missing or unreadable file → `None`, and the run proceeds unkeyed on it. The
 /// loader downstream fails with a real message naming the path; refusing here
@@ -676,28 +655,19 @@ pub fn cas_file_dep(path: &Path, artifact: &str) -> Option<ArtifactRef> {
     })
 }
 
-pub fn cas_survey_dep(dir: &Path) -> Option<ArtifactRef> {
-    let landscape = std::fs::read(dir.join("landscape.tsv")).ok()?;
-    let digest = ContentHash::digest_bytes(&landscape);
-    let run_id = std::fs::read(dir.join("run.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<RunRecord>(&b).ok())
-        .map(|r| r.run_id)
-        .unwrap_or(digest);
-    Some(ArtifactRef {
-        run_id,
-        kind: ArtifactKind::Survey,
-        artifact: "landscape.tsv".to_string(),
-        digest,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn pgas_stage(n_trajectories: usize) -> Stage {
-        toml::from_str(&format!(
+    /// A `[method]` table with `starts` spelled, so the identity is takeable
+    /// without a model to resolve the default against.
+    fn method(toml: &str) -> Method {
+        toml::from_str(&format!("{toml}\nstarts = \"lhs\"\n"))
+            .expect("minimal method toml must parse")
+    }
+
+    fn pgas_stage(n_trajectories: usize) -> Method {
+        method(&format!(
             "algorithm = \"pgas\"\n\
              backend = \"chain_binomial\"\n\
              chains = 2\n\
@@ -705,7 +675,42 @@ mod tests {
              sweeps = 10\n\
              n_trajectories = {n_trajectories}"
         ))
-        .expect("minimal PGAS stage toml must parse")
+    }
+
+    /// An unresolved `starts` cannot be hashed: the default depends on the
+    /// problem, and a run must never draw from a rule its address never saw.
+    #[test]
+    fn an_unresolved_starts_refuses_the_identity() {
+        let m: Method = toml::from_str(
+            "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+             chains = 2\nparticles = 100\nsweeps = 10\n",
+        )
+        .unwrap();
+        assert!(m.starts.is_none());
+        let err = stage_config_hash(&m).unwrap_err();
+        assert!(err.contains("unresolved"), "{err}");
+    }
+
+    /// `starts` is in the method identity: two methods differing only in it
+    /// get distinct hashes, and a spelled default equals the resolved one.
+    #[test]
+    fn starts_is_in_the_method_identity() {
+        let base = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+                    chains = 2\nparticles = 100\nsweeps = 10\n";
+        let lhs: Method = toml::from_str(&format!("{base}starts = \"lhs\"\n")).unwrap();
+        let prior: Method = toml::from_str(&format!("{base}starts = \"from_prior\"\n")).unwrap();
+        let mle: Method =
+            toml::from_str(&format!("{base}starts = {{ from_mle = \"@a\" }}\n")).unwrap();
+        let mle_b: Method =
+            toml::from_str(&format!("{base}starts = {{ from_mle = \"@b\" }}\n")).unwrap();
+        let h = |m: &Method| stage_config_hash(m).unwrap();
+        assert_ne!(h(&lhs), h(&prior));
+        assert_ne!(h(&prior), h(&mle));
+        assert_ne!(h(&mle), h(&mle_b), "the handle as written is part of the key");
+        // A resolved default and the same rule spelled out key identically.
+        let mut resolved: Method = toml::from_str(base).unwrap();
+        resolved.starts = Some(super::super::starts::ChainStarts::from_prior());
+        assert_eq!(h(&resolved), h(&prior));
     }
 
     /// Guardrail-1 (gh#147 M3.2, deviation-A). `n_trajectories` is folded into
@@ -728,12 +733,12 @@ mod tests {
         assert_eq!(h200, stage_config_hash(&pgas_stage(200)).unwrap());
     }
 
-    fn nuts_stage(burnin_dt: Option<f64>) -> Stage {
+    fn nuts_stage(burnin_dt: Option<f64>) -> Method {
         let burnin_line = match burnin_dt {
             Some(b) => format!("burnin_dt = {b}\n"),
             None => String::new(),
         };
-        toml::from_str(&format!(
+        method(&format!(
             "algorithm = \"nuts\"\n\
              backend = \"ode\"\n\
              chains = 4\n\
@@ -741,7 +746,6 @@ mod tests {
              samples = 300\n\
              {burnin_line}"
         ))
-        .expect("minimal NUTS stage toml must parse")
     }
 
     /// `burnin_dt` (coarse warm-up step) changes the coarsely-integrated transient
@@ -770,26 +774,26 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    fn minimal_config(extra: &str) -> FitConfigV2 {
-        toml::from_str(&format!(
+    fn minimal_config(extra: &str) -> Problem {
+        FitConfig::from_toml_str(&format!(
             "[model]\ncamdl = \"models/sir.camdl\"\n\
              [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
              [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n\
              [fixed]\nN0 = 1000000\n\
              {extra}\
-             [stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
              chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n"
         ))
         .expect("minimal fit config must parse")
+        .problem
     }
 
-    fn if2_stage(loglik_particles: usize) -> Stage {
-        toml::from_str(&format!(
+    fn if2_stage(loglik_particles: usize) -> Method {
+        method(&format!(
             "algorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
              chains = 2\nparticles = 100\niterations = 10\ncooling = 0.7\n\
              loglik_eval = {{ n_particles = {loglik_particles}, n_replicates = 8 }}"
         ))
-        .expect("minimal IF2 stage toml must parse")
     }
 
     /// gh#189: `loglik_eval` determines the reported θ̂/loglik, so it's part of
@@ -838,14 +842,15 @@ mod tests {
         // PRESENTATION: `output_dir` is normalized OUT of the fit identity (pure
         // write-location provenance), so two configs differing only in it hash equal.
         let cfg = |out: &str| {
-            toml::from_str::<FitConfigV2>(&format!(
+            FitConfig::from_toml_str(&format!(
                 "output_dir = \"{out}\"\n[model]\ncamdl = \"models/sir.camdl\"\n\
                  [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
                  [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n[fixed]\nN0 = 1000000\n\
-                 [stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                 [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
                  chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n"
             ))
             .expect("config must parse")
+            .problem
         };
         assert_eq!(
             fit_config_blob_hash(&cfg("results/run_a")).unwrap(),
@@ -863,24 +868,24 @@ mod tests {
     ///   - a semantic `[synthetic]` change (different ground truth / sim seeds →
     ///     different generated data) re-keys the dir;
     ///   - a seed-only `fit_seeds` change does NOT (the fit RNG seed is a lower
-    ///     CAS level under the segment, not part of the segment name).
-    /// The legacy `fit_content_hash` hashed the whole fit.toml bytes, so it
-    /// over-keyed on `fit_seeds`/`output_dir`/stage edits; routing synthetic
-    /// through the runid blob fixes that, matching real fits.
+    ///     CAS level under the segment, not part of the segment name — and
+    ///     not part of the problem at all);
+    ///   - a `[method]` change does NOT (the method level owns it).
     #[test]
     fn synthetic_fit_dir_is_seed_stable_and_semantic_sensitive() {
         // A complete synthetic fit config; `top` is spliced at the very top so a
         // top-level key (`fit_seeds`) isn't absorbed into a `[table]` above it.
-        let syn = |top: &str, sim_seeds: &str| -> FitConfigV2 {
-            toml::from_str(&format!(
+        let syn = |top: &str, sim_seeds: &str| -> Problem {
+            FitConfig::from_toml_str(&format!(
                 "{top}\
                  [model]\ncamdl = \"models/sir.camdl\"\n\
                  [synthetic]\ntrue_params = \"truth.toml\"\nsim_seeds = \"{sim_seeds}\"\n\
                  [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n[fixed]\nN0 = 1000000\n\
-                 [stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+                 [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
                  chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n"
             ))
             .expect("synthetic fit config must parse")
+            .problem
         };
 
         let base = fit_config_blob_hash(&syn("", "1:5")).unwrap();
@@ -891,6 +896,22 @@ mod tests {
         assert_eq!(
             base, seed_only,
             "a seed-only fit_seeds change must NOT re-key the synthetic fit dir (gh#241)"
+        );
+
+        // A different method on the same problem shares the fit-level digest.
+        let other_method = FitConfig::from_toml_str(
+            "[model]\ncamdl = \"models/sir.camdl\"\n\
+             [synthetic]\ntrue_params = \"truth.toml\"\nsim_seeds = \"1:5\"\n\
+             [estimate]\nbeta = { bounds = [0.01, 2.0] }\n[fixed]\nN0 = 1000000\n\
+             [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+             chains = 4\nparticles = 600\nsweeps = 300\n",
+        )
+        .unwrap()
+        .problem;
+        assert_eq!(
+            base,
+            fit_config_blob_hash(&other_method).unwrap(),
+            "the fit level hashes the problem alone; a second method shares it"
         );
 
         // Semantic: different `[synthetic].sim_seeds` → different generated data
@@ -964,9 +985,9 @@ mod tests {
         assert!(build_holdout_digests(&no_holdout).unwrap().is_empty());
     }
 
-    /// gh#189: the *resolved* obs alignment is folded into the stage identity,
-    /// and resolution is per-algorithm. A PGAS stage resolves to `Snap`; an
-    /// IF2 stage resolves to `Exact`. The two must therefore produce distinct
+    /// gh#189: the *resolved* obs alignment is folded into the method identity,
+    /// and resolution is per-algorithm. A PGAS method resolves to `Snap`; an
+    /// IF2 method resolves to `Exact`. The two must therefore produce distinct
     /// `StageConfig`s (so a snap and an exact fit never collide in the store).
     #[test]
     fn resolved_obs_alignment_is_keyed_per_stage() {
@@ -974,12 +995,12 @@ mod tests {
         let pgas = pgas_stage(200);
         let cfg = minimal_config(""); // obs_alignment unset → per-algorithm default
         assert_eq!(
-            resolved_obs_alignment(&if2, &cfg),
+            resolved_obs_alignment(&if2.algorithm, &cfg),
             ResolvedObsAlignment::Exact,
             "if2 resolves to exact (steps exactly to obs times)"
         );
         assert_eq!(
-            resolved_obs_alignment(&pgas, &cfg),
+            resolved_obs_alignment(&pgas.algorithm, &cfg),
             ResolvedObsAlignment::Snap,
             "pgas resolves to snap (uniform grid)"
         );
@@ -1004,33 +1025,10 @@ mod tests {
         );
     }
 
-    /// A survey consumed by `init = "survey_top_k"` is folded into the fit
-    /// stage's `deps` by its CONTENT, so two surveys with different landscapes
-    /// (even written to the same path, one after the other) produce different
-    /// deps → the fit re-keys. Missing landscape → `None` (the fit fails in
-    /// init, producing no stored output to mis-key).
-    #[test]
-    fn cas_survey_dep_is_content_sensitive() {
-        let d1 = tempfile::tempdir().unwrap();
-        let d2 = tempfile::tempdir().unwrap();
-        std::fs::write(d1.path().join("landscape.tsv"), b"theta\tll\n0.10\t-5.0\n").unwrap();
-        std::fs::write(d2.path().join("landscape.tsv"), b"theta\tll\n0.10\t-9.9\n").unwrap();
-        let r1 = cas_survey_dep(d1.path()).expect("dep from a readable survey dir");
-        let r2 = cas_survey_dep(d2.path()).expect("dep from a readable survey dir");
-        assert_ne!(r1.digest, r2.digest,
-            "different survey landscape content must yield a different dep digest \
-             (regenerating a survey at the same path re-keys the fit)");
-        assert_eq!(r1.kind, runid::ArtifactKind::Survey);
-        assert_eq!(r1.artifact, "landscape.tsv");
-
-        // No landscape.tsv → no dep (unreadable survey; fit will fail in init).
-        let d3 = tempfile::tempdir().unwrap();
-        assert!(cas_survey_dep(d3.path()).is_none());
-    }
-
-    /// gh#541: the same property for `--posterior` / `--params`. These were
-    /// folded by PATH only, so rewriting the file in place left the run_id
-    /// unchanged and the fit came back from cache with the OLD starting values.
+    /// gh#541: a `from_posterior` / `from_params` source file is keyed by its
+    /// CONTENT. These were folded by PATH only, so rewriting the file in place
+    /// left the run_id unchanged and the fit came back from cache with the OLD
+    /// starting values.
     #[test]
     fn cas_file_dep_is_content_sensitive_not_path_sensitive() {
         let d = tempfile::tempdir().unwrap();

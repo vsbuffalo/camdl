@@ -115,7 +115,7 @@ gamma = { bounds = [0.01, 1.0], start = 0.3 }
 [fixed]
 N0 = 1000
 
-[stages.mle]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 2
@@ -314,7 +314,7 @@ rho   = 0.5
 psi   = 0.3
 k     = 20
 
-[stages.mle]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 2
@@ -696,7 +696,7 @@ beta = 0.5
 eta  = 0.15
 mu_f = 0.1
 
-[stages.mle]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 2

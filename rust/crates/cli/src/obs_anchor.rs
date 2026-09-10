@@ -97,7 +97,7 @@ pub fn resolve_from_bindings(
 /// resolved anchor means or on what an unresolvable one says.
 pub fn resolve_from_config(
     model: &mut ir::Model,
-    config: &crate::fit::config_v2::FitConfigV2,
+    config: &crate::fit::config_v2::Problem,
     dt: f64,
 ) -> Result<bool, String> {
     resolve_with(model, |m| crate::obs_anchors_from_config(m, config, dt))

@@ -157,7 +157,7 @@ struct ProfileMethodLevel<'a> {
     /// `--rw-sd auto` derives magnitudes from the model rather than the flag,
     /// so it is its own discriminator rather than a value.
     rw_sd_auto: bool,
-    init: &'a crate::fit::init::InitMethod,
+    init: &'a crate::fit::starts::ChainStarts,
     pf_max_substeps: Option<u64>,
 }
 
@@ -288,11 +288,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         .map(|p| (p.name.clone(), p.value))
         .collect();
     let _overrides: HashMap<String, f64> = fixed_cli_vec.iter().cloned().collect();
-    // Construct the full InitMethod (with payload) from the CLI tag
+    // Construct the full starts rule (with payload) from the CLI tag
     // + companion path flags. This is the post-parse step that turns
     // `--init from_posterior --posterior <path>` into a typed
-    // `InitMethod::FromPosterior { source: ... }`.
-    let init_method: crate::fit::init::InitMethod = a.init.to_init_method(
+    // `ChainStarts::Spread(Spread::FromPosterior { source })`.
+    let init_method: crate::fit::starts::ChainStarts = a.init.to_chain_starts(
         a.posterior.as_ref(),
         a.mle.as_ref(),
         a.init_params.as_ref(),
@@ -341,7 +341,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
          Option<String>,
          indexmap::IndexMap<String, f64>) = if let Some(fit_path) = a.fit.as_ref() {
         let fit_path_str = fit_path.to_string_lossy().into_owned();
-        let fit_cfg = crate::fit::config_v2::FitConfigV2::load(&fit_path_str)
+        let fit_cfg = crate::fit::config_v2::Problem::load(&fit_path_str)
             .unwrap_or_else(|e| {
                 eprintln!("error: failed to load --fit toml '{}': {}",
                     fit_path_str, e);
@@ -829,35 +829,34 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // same draw across cells (lets the per-start TSV rows be compared
     // cell-to-cell). `None` → every start uses `if2_params` directly
     // (Single mode; or `--starts 1`).
-    if init_method == crate::fit::init::InitMethod::SurveyTopK {
-        eprintln!("error: --init survey_top_k is not yet supported on \
-            `camdl profile`; v2 supports it on IF2 / PMMH / PGAS \
-            `camdl fit` stages, profile (and NLopt) are deferred to v3 \
-            (see gh#51 §\"Stage scope\"). Workaround: use --init lhs.");
-        std::process::exit(1);
-    }
-    // Step 7 warm-start variants: dispatch through the new
-    // `chain_starts::draw_chain_starts` entry point. The CLI break
-    // wires `--posterior` / `--mle` / `--params` companion flags via
-    // `InitModeTag::to_init_method` (step 7).
-    let per_start_params: Option<Arc<Vec<Vec<sim::inference::if2::EstimatedParam>>>> =
-        match &init_method {
-            crate::fit::init::InitMethod::FromPrior
-            | crate::fit::init::InitMethod::FromPosterior { .. }
-            | crate::fit::init::InitMethod::FromMle       { .. }
-            | crate::fit::init::InitMethod::FromParams    { .. } => {
-                let starts = crate::fit::chain_starts::draw_chain_starts(
-                    &resolved, &init_method, n_starts, seed_base,
-                ).unwrap_or_else(|e| {
-                    eprintln!("error: profile --init {}: {}", init_method, e);
-                    std::process::exit(1);
-                });
-                Some(Arc::new(starts.to_estimated_params(&if2_params)))
-            }
-            _ => crate::fit::init::build_chain_starts(
-                    init_method.clone(), &if2_params, n_starts, seed_base,
-                ).map(Arc::new),
+    // Every rule draws through the one seam the fit runners use
+    // (`chain_starts::draw_chain_starts`), with a sourced rule's handle
+    // resolved once. A source that did not converge is a warning here, not a
+    // refusal: a profile is exploratory and makes no claim about the fit it
+    // starts from.
+    let resolved_starts = crate::fit::chain_starts::resolve_starts(&init_method, true)
+        .unwrap_or_else(|e| {
+            eprintln!("error: profile --init {}: {}", init_method, e);
+            std::process::exit(1);
+        });
+    let drawn_starts = {
+        let priors: Vec<(String, sim::inference::pmmh::Prior)> = if2_params
+            .iter()
+            .map(|s| (s.name.clone(), crate::fit::runner::resolve_prior(&s.name, &fit_estimate, &resolved.model).0))
+            .collect();
+        let ctx = crate::fit::chain_starts::StartContext {
+            resolved: &resolved,
+            base_specs: &if2_params,
+            priors: &priors,
         };
+        crate::fit::chain_starts::draw_chain_starts(&ctx, &resolved_starts, n_starts, seed_base)
+            .unwrap_or_else(|e| {
+                eprintln!("error: profile --init {}: {}", init_method, e);
+                std::process::exit(1);
+            })
+    };
+    let per_start_params: Option<Arc<Vec<Vec<sim::inference::if2::EstimatedParam>>>> =
+        Some(Arc::new(drawn_starts.to_estimated_params(&if2_params)));
 
     let process = Arc::new(ChainBinomialProcess::new(compiled.clone()));
     // Build the multi-stream observation model from the loaded `ObsStream`s via
@@ -1034,71 +1033,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             .map(|rp| (rp.name.clone(),
                  crate::run_meta::ParameterProvenance::from_resolved(rp)))
             .collect();
-    // Per-start init provenance: ChainStarts uses the `--init` mode
-    // as its method tag. For legacy modes we still emit one entry so
-    // `init_provenance.method` is never absent on a profile run.
+    // Per-start init provenance, straight from the drawn starts.
     let init_provenance: Option<crate::run_meta::InitProvenance> =
-        per_start_params.as_ref().map(|psp| {
-            // Build a ChainStarts-shaped view from the existing
-            // `EstimatedParam` per-start vectors, using the
-            // best-available InitSource tag for each chain.
-            let starts: Vec<crate::fit::chain_starts::ChainStart> =
-                psp.iter().enumerate().map(|(chain_id, per_start)| {
-                    let values: std::collections::HashMap<String, f64> =
-                        per_start.iter()
-                            .map(|spec| (spec.name.clone(), spec.initial))
-                            .collect();
-                    let source = match &init_method {
-                        crate::fit::init::InitMethod::FromPrior =>
-                            crate::fit::chain_starts::InitSource::PriorDraw {
-                                seed: crate::util::derive_chain_seed(
-                                    seeds[0], chain_id),
-                            },
-                        crate::fit::init::InitMethod::FromPosterior {
-                            source: crate::fit::init::PosteriorSource::DrawsTsv(p),
-                        } | crate::fit::init::InitMethod::FromPosterior {
-                            source: crate::fit::init::PosteriorSource::FitDir(p),
-                        } => crate::fit::chain_starts::InitSource::PosteriorRow {
-                            row: chain_id, path: p.clone(),
-                        },
-                        crate::fit::init::InitMethod::FromMle {
-                            source: crate::fit::init::MleSource::File(p),
-                        } | crate::fit::init::InitMethod::FromMle {
-                            source: crate::fit::init::MleSource::FitDir(p),
-                        } => crate::fit::chain_starts::InitSource::MlePoint {
-                            path: p.clone(),
-                        },
-                        crate::fit::init::InitMethod::FromParams { path } =>
-                            crate::fit::chain_starts::InitSource::ParamsPoint {
-                                path: path.clone(),
-                            },
-                        crate::fit::init::InitMethod::Lhs =>
-                            crate::fit::chain_starts::InitSource::LhsCell {
-                                row: chain_id,
-                            },
-                        crate::fit::init::InitMethod::Uniform =>
-                            crate::fit::chain_starts::InitSource::UniformDraw {
-                                seed: crate::util::derive_chain_seed(
-                                    seeds[0], chain_id),
-                            },
-                        crate::fit::init::InitMethod::UniformUnconstrained =>
-                            crate::fit::chain_starts::InitSource::UnconstrainedDraw {
-                                seed: crate::util::derive_chain_seed(
-                                    seeds[0], chain_id),
-                            },
-                        crate::fit::init::InitMethod::Single |
-                        crate::fit::init::InitMethod::SurveyTopK =>
-                            crate::fit::chain_starts::InitSource::SeededBase,
-                    };
-                    crate::fit::chain_starts::ChainStart {
-                        chain_id, values, source,
-                    }
-                }).collect();
-            let cs = crate::fit::chain_starts::ChainStarts {
-                starts, method: init_method.clone(),
-            };
-            crate::run_meta::InitProvenance::from_chain_starts(&cs)
-        });
+        Some(crate::run_meta::InitProvenance::from_chain_starts(&drawn_starts));
 
     // Run-level provenance recorded into every profile-point leaf's
     // `RunRecord.inputs` — display payload, NOT identity-bearing, so it
@@ -1188,15 +1125,15 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // a dep (guardrail 3-base). `camdl profile` does not currently
     // thread a base-fit lineage, so the dep list is empty; when it
     // does, push the resolved `FitStage` ArtifactRef here.
-    // 2026-08-23 audit: fold the chain-start file's CONTENT into the identity,
+    // 2026-08-23 audit: fold the chain-start file's content into the identity,
     // the same treatment `fit run` got in gh#541. The resolved `init` in the
-    // method blob names WHICH file; this digests WHAT IS IN IT, so rewriting
-    // a draws.tsv or params.toml in place re-keys instead of serving the
-    // previous file's landscape. (`from_mle` is deliberately absent — it
-    // folds the upstream leaf's fit_state.toml digest already.)
-    let profile_deps: Vec<runid::inputs::ArtifactRef> = init_method
-        .source_file()
-        .and_then(|(path, artifact)| crate::fit::cas::cas_file_dep(&path, artifact))
+    // method blob names which source; the dep digests what is in it, so
+    // rewriting a draws.tsv or params.toml in place, or re-running the fit a
+    // `from_mle` names, re-keys instead of serving the previous landscape.
+    let profile_deps: Vec<runid::inputs::ArtifactRef> = resolved_starts
+        .source
+        .as_ref()
+        .map(|src| src.dep.clone())
         .into_iter()
         .collect();
     let store = runid::FsCasStore::new(&root);
@@ -2014,7 +1951,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 /// behaviour, not a hidden constraint.
 ///
 /// Returns `Ok(())` for init modes that don't seed (single, uniform,
-/// lhs, from_prior, from_posterior, survey_top_k) — the caller can
+/// lhs, from_prior, from_posterior) — the caller can
 /// blindly call this and let the resolver handle errors downstream.
 ///
 /// Takes `&mut Vec<Parameter>` rather than `&mut Model` because the
@@ -2022,36 +1959,22 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 /// surface = simpler tests + less coupling to the rest of the IR.
 fn seed_params_from_init_method(
     params: &mut Vec<ir::parameter::Parameter>,
-    init_method: &crate::fit::init::InitMethod,
+    init_method: &crate::fit::starts::ChainStarts,
 ) -> Result<(), String> {
-    use crate::fit::init::{InitMethod, MleSource};
+    use crate::fit::starts::{ChainStarts, Point};
     let file_values: HashMap<String, f64> = match init_method {
-        InitMethod::FromParams { path } => {
+        ChainStarts::Point(Point::FromParams { path }) => {
             crate::util::load_params_toml(&path.to_string_lossy())
                 .map_err(|e| format!(
                     "loading --params for --init from_params: {}", e))?
         }
-        InitMethod::FromMle { source } => {
-            let path = match source {
-                MleSource::File(p) => p.clone(),
-                MleSource::FitDir(dir) => {
-                    let mle = dir.join("mle.toml");
-                    if mle.is_file() { mle }
-                    else {
-                        let final_p = dir.join("final_params.toml");
-                        if final_p.is_file() { final_p }
-                        else {
-                            return Err(format!(
-                                "--init from_mle: neither {}/mle.toml nor \
-                                 {}/final_params.toml exists",
-                                dir.display(), dir.display()));
-                        }
-                    }
-                }
-            };
-            crate::fit::chain_starts::load_mle_toml(&path)
-                .map_err(|e| format!(
-                    "loading --mle for --init from_mle: {:?}", e))?
+        ChainStarts::Point(Point::FromMle { source }) => {
+            // The stored fit's point estimate, from the leaf the handle names.
+            let leaf = crate::fit::chain_starts::resolve_fit_leaf(&source.0)
+                .map_err(|e| format!("--init from_mle {}: {}", source, e))?;
+            let state = crate::fit::state::FitState::load(&leaf.to_string_lossy())
+                .map_err(|e| format!("--init from_mle {}: {}", source, e))?;
+            state.start_values.into_iter().collect()
         }
         _ => return Ok(()),
     };
@@ -2188,7 +2111,7 @@ mod tests {
              stored profile leaf re-keys a second time");
 
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("N0", Some(5.0))];
-        let init = crate::fit::init::InitMethod::Lhs;
+        let init = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
         let method_struct = serde_json::to_value(ProfileMethodLevel {
             algorithm: "if2",
             if2: ProfileIf2Knobs {
@@ -2387,7 +2310,7 @@ mod tests {
             ("beta",  None),  // no DSL default
             ("gamma", None),
         ]);
-        let init = crate::fit::init::InitMethod::FromParams { path: toml_path };
+        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromParams { path: toml_path });
         seed_params_from_init_method(&mut params, &init).unwrap();
         let beta_val  = params.iter()
             .find(|p| p.name == "beta").unwrap().value.resolved_value();
@@ -2408,7 +2331,7 @@ mod tests {
         let mut params = build_params(&[
             ("beta", Some(0.3)),  // DSL default that the file should override
         ]);
-        let init = crate::fit::init::InitMethod::FromParams { path: toml_path };
+        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromParams { path: toml_path });
         seed_params_from_init_method(&mut params, &init).unwrap();
         let beta_val = params.iter()
             .find(|p| p.name == "beta").unwrap().value.resolved_value();
@@ -2417,20 +2340,23 @@ mod tests {
     }
 
     #[test]
-    fn seed_from_mle_resolves_fitdir_to_mle_toml() {
-        // --init from_mle --mle <fit-dir>: helper auto-resolves to
-        // <dir>/mle.toml. Verifies the [mle] section is parsed
-        // (mle.toml shape, distinct from flat params.toml).
+    fn seed_from_mle_reads_the_leaf_point_estimate() {
+        // --init from_mle --mle <leaf dir>: the helper reads the stored fit's
+        // `fit_state.toml` `start_values` — the same file `fit run`'s
+        // `from_mle` reads.
         let tmp = tempfile::tempdir().unwrap();
-        let mle_dir = tmp.path().join("fit_results");
-        std::fs::create_dir_all(&mle_dir).unwrap();
-        write_toml(&mle_dir, "mle.toml",
-            "final_loglik = -311.13\n\n[focal]\nR0 = 25\n\n[mle]\nbeta = 0.5\n");
+        let leaf = tmp.path().join("if2-abcdef12").join("seed_1-01234567");
+        std::fs::create_dir_all(&leaf).unwrap();
+        write_toml(&leaf, "fit_state.toml",
+            "stage = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+             best_loglik = -311.13\ninitial_loglik = -400.0\nbest_chain = 0\nn_chains = 2\n\n\
+             [start_values]\nbeta = 0.5\n\n[rw_sd]\n");
         let mut params = build_params(&[
             ("beta", None),
         ]);
-        let source = crate::fit::init::MleSource::FitDir(mle_dir);
-        let init = crate::fit::init::InitMethod::FromMle { source };
+        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromMle {
+            source: crate::fit::starts::Handle(leaf.to_string_lossy().into_owned()),
+        });
         seed_params_from_init_method(&mut params, &init).unwrap();
         let beta_val = params.iter()
             .find(|p| p.name == "beta").unwrap().value.resolved_value();
@@ -2448,13 +2374,13 @@ mod tests {
         ]);
         let original_beta = params.iter()
             .find(|p| p.name == "beta").unwrap().value.resolved_value();
-        let init_prior = crate::fit::init::InitMethod::FromPrior;
+        let init_prior = crate::fit::starts::ChainStarts::from_prior();
         seed_params_from_init_method(&mut params, &init_prior).unwrap();
         assert_eq!(params.iter()
             .find(|p| p.name == "beta").unwrap().value.resolved_value(), original_beta,
             "from_prior must NOT seed model_pre — values are per-chain");
 
-        let init_lhs = crate::fit::init::InitMethod::Lhs;
+        let init_lhs = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
         seed_params_from_init_method(&mut params, &init_lhs).unwrap();
         assert_eq!(params.iter()
             .find(|p| p.name == "beta").unwrap().value.resolved_value(), original_beta,

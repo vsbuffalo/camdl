@@ -1,6 +1,6 @@
 //! Structured fit-config diff engine.
 //!
-//! Computes a typed diff between two `FitConfigV2` instances —
+//! Computes a typed diff between two `FitConfig` instances —
 //! ([estimate], [fixed], bounds, priors, data hashes, stages) — for
 //! the `table_row.config_diff_from_baseline` field. JSON consumers
 //! need a structured shape (free-form text loses information); the
@@ -10,7 +10,7 @@
 //! See `docs/dev/proposals/2026-04-28-fit-experiment-management.md` §4.
 //!
 //! **Parser reuse.** This module never re-implements fit.toml parsing;
-//! it always loads via [`config_v2::FitConfigV2::load`]. Two parsers
+//! it always loads via [`config_v2::FitConfig::load`]. Two parsers
 //! diverging silently on edge cases (transform aliases, prior syntax,
 //! default filling) is exactly the drift class this proposal exists to
 //! prevent.
@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::fit::config_v2::{FitConfigV2, PriorDist, Stage};
+use crate::fit::config_v2::{FitConfig, Method, PriorDist};
 use crate::fit::fit_view::FitView;
 
 /// Structured diff of one fit's config relative to a baseline. Map
@@ -54,9 +54,9 @@ pub struct ConfigDiff {
     pub priors_changed: Vec<PriorChange>,
     /// Per-stream data file hash differences.
     pub data_hashes: DataHashesDiff,
-    /// Stage-level diff (added / removed names plus per-stage settings
-    /// changes).
-    pub stages_changed: StagesChanged,
+    /// Method-level diff: one `[method]` per file, so a change is either the
+    /// table appearing / disappearing or a per-key settings change.
+    pub method_changed: MethodChanged,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -91,19 +91,20 @@ pub struct DataHashesDiff {
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
-pub struct StagesChanged {
-    pub added: Vec<String>,
-    pub removed: Vec<String>,
-    /// Per-stage settings changes — one entry per (stage, key) tuple
-    /// whose value changed. The shape is intentionally flat (a list of
-    /// settings deltas) rather than nested maps; renderers project
+pub struct MethodChanged {
+    /// This fit declares a `[method]` and the baseline does not.
+    pub added: bool,
+    /// The baseline declares a `[method]` and this fit does not.
+    pub removed: bool,
+    /// Per-key settings changes — one entry per key whose value changed,
+    /// `algorithm` and `starts` included. The shape is intentionally flat (a
+    /// list of settings deltas) rather than nested maps; renderers project
     /// however they want.
-    pub settings_changed: Vec<StageSettingsChange>,
+    pub settings_changed: Vec<MethodSettingChange>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct StageSettingsChange {
-    pub stage: String,
+pub struct MethodSettingChange {
     pub key: String,
     /// Pre-image as a JSON value (numbers stay numeric, strings stay
     /// stringy). Stored as `serde_json::Value` so consumers can
@@ -129,32 +130,32 @@ impl ConfigDiff {
             bounds_changed: Vec::new(),
             priors_changed: Vec::new(),
             data_hashes: DataHashesDiff::default(),
-            stages_changed: StagesChanged::default(),
+            method_changed: MethodChanged::default(),
         }
     }
 
     /// Compare `this` against `baseline`. Both arguments are already
-    /// parsed via [`FitConfigV2::load`] — callers that have only paths
+    /// parsed via [`FitConfig::load`] — callers that have only paths
     /// should call [`compare_paths`] instead, which loads then
     /// dispatches here.
     ///
     /// `model_changed` requires the caller to supply each fit's
-    /// `model_identity` from its [`FitView`] (the `FitConfigV2` itself only
+    /// `model_identity` from its [`FitView`] (the `FitConfig` itself only
     /// references the model file; the canonical hash lives on the fit-level
     /// view / sidecar).
     pub fn compare(
-        this: &FitConfigV2,
-        baseline: &FitConfigV2,
+        this: &FitConfig,
+        baseline: &FitConfig,
         this_meta: &FitView,
         baseline_meta: &FitView,
     ) -> Self {
         let this_est: BTreeSet<&str> =
-            this.estimate.keys().map(|s| s.as_str()).collect();
+            this.problem.estimate.keys().map(|s| s.as_str()).collect();
         let base_est: BTreeSet<&str> =
-            baseline.estimate.keys().map(|s| s.as_str()).collect();
+            baseline.problem.estimate.keys().map(|s| s.as_str()).collect();
 
-        let this_fix = this.fixed.resolve().unwrap_or_default();
-        let base_fix = baseline.fixed.resolve().unwrap_or_default();
+        let this_fix = this.problem.fixed.resolve().unwrap_or_default();
+        let base_fix = baseline.problem.fixed.resolve().unwrap_or_default();
         let this_fix_keys: BTreeSet<&str> =
             this_fix.keys().map(|s| s.as_str()).collect();
         let base_fix_keys: BTreeSet<&str> =
@@ -179,8 +180,8 @@ impl ConfigDiff {
 
         let mut bounds_changed = Vec::new();
         for name in this_est.intersection(&base_est) {
-            let tb = this.estimate[*name].bounds;
-            let bb = baseline.estimate[*name].bounds;
+            let tb = this.problem.estimate[*name].bounds;
+            let bb = baseline.problem.estimate[*name].bounds;
             // Bounds Option-equality: omit↔omit unchanged; explicit↔omit
             // is a change; explicit↔explicit compares exact tuple.
             let differ = match (tb, bb) {
@@ -201,8 +202,8 @@ impl ConfigDiff {
         let estimate_union: BTreeSet<&str> =
             this_est.union(&base_est).copied().collect();
         for name in &estimate_union {
-            let tp = this.estimate.get(*name).and_then(|e| e.prior.as_ref());
-            let bp = baseline.estimate.get(*name).and_then(|e| e.prior.as_ref());
+            let tp = this.problem.estimate.get(*name).and_then(|e| e.prior.as_ref());
+            let bp = baseline.problem.estimate.get(*name).and_then(|e| e.prior.as_ref());
             let tp_str = tp.map(format_prior);
             let bp_str = bp.map(format_prior);
             if tp_str != bp_str {
@@ -216,7 +217,10 @@ impl ConfigDiff {
 
         let data_hashes =
             diff_data_hashes(&this_meta.data_hashes, &baseline_meta.data_hashes);
-        let stages_changed = diff_stages(&this.stages, &baseline.stages);
+        let method_changed = diff_methods(
+            this.inference.method.as_ref(),
+            baseline.inference.method.as_ref(),
+        );
 
         ConfigDiff {
             baseline_hash: Some(baseline_meta_hash(baseline_meta)),
@@ -228,7 +232,7 @@ impl ConfigDiff {
             bounds_changed,
             priors_changed,
             data_hashes,
-            stages_changed,
+            method_changed,
         }
     }
 }
@@ -318,63 +322,50 @@ fn diff_data_hashes(
     }
 }
 
-fn diff_stages(
-    this: &indexmap::IndexMap<String, Stage>,
-    baseline: &indexmap::IndexMap<String, Stage>,
-) -> StagesChanged {
-    let this_keys: BTreeSet<&str> = this.keys().map(|s| s.as_str()).collect();
-    let base_keys: BTreeSet<&str> = baseline.keys().map(|s| s.as_str()).collect();
-
-    let added: Vec<String> = this_keys
-        .difference(&base_keys)
-        .map(|s| s.to_string())
-        .collect();
-    let removed: Vec<String> = base_keys
-        .difference(&this_keys)
-        .map(|s| s.to_string())
-        .collect();
-
-    let mut settings_changed = Vec::new();
-    for name in this_keys.intersection(&base_keys) {
-        let ts = stage_settings_map(&this[*name]);
-        let bs = stage_settings_map(&baseline[*name]);
-        let key_union: BTreeSet<&str> =
-            ts.keys().chain(bs.keys()).map(|s| s.as_str()).collect();
-        for key in key_union {
-            let from_v = bs.get(key).cloned().unwrap_or(serde_json::Value::Null);
-            let to_v = ts.get(key).cloned().unwrap_or(serde_json::Value::Null);
-            if from_v != to_v {
-                settings_changed.push(StageSettingsChange {
-                    stage: (*name).to_string(),
-                    key: key.to_string(),
-                    from: from_v,
-                    to: to_v,
-                });
-            }
-        }
-    }
-    StagesChanged {
-        added,
-        removed,
-        settings_changed,
+fn diff_methods(this: Option<&Method>, baseline: Option<&Method>) -> MethodChanged {
+    match (this, baseline) {
+        (None, None) => MethodChanged::default(),
+        (Some(_), None) => MethodChanged { added: true, ..Default::default() },
+        (None, Some(_)) => MethodChanged { removed: true, ..Default::default() },
+        (Some(t), Some(b)) => MethodChanged {
+            added: false,
+            removed: false,
+            settings_changed: method_setting_changes(t, b),
+        },
     }
 }
 
-/// Project a `Stage` into a flat key→value settings map, derived from the
-/// stage's own serialization (dotted paths for nested tables) — the same
-/// move `validate_stage_keys` makes to get its allowed-key set. The
+/// The per-key settings deltas between two methods, in key order.
+pub fn method_setting_changes(this: &Method, baseline: &Method) -> Vec<MethodSettingChange> {
+    let ts = stage_settings_map(this);
+    let bs = stage_settings_map(baseline);
+    let key_union: BTreeSet<&str> = ts.keys().chain(bs.keys()).map(|s| s.as_str()).collect();
+    let mut out = Vec::new();
+    for key in key_union {
+        let from_v = bs.get(key).cloned().unwrap_or(serde_json::Value::Null);
+        let to_v = ts.get(key).cloned().unwrap_or(serde_json::Value::Null);
+        if from_v != to_v {
+            out.push(MethodSettingChange { key: key.to_string(), from: from_v, to: to_v });
+        }
+    }
+    out
+}
+
+/// Project a `Method` into a flat key→value settings map, derived from the
+/// method's own serialization (dotted paths for nested tables) — the same
+/// move `validate_method_keys` makes to get its allowed-key set. The
 /// previous hand-maintained per-variant projection listed a SUBSET of each
 /// variant's fields, so `fit diff` reported "no settings changed" for two
 /// configs differing in anything swept into its `..` (tempering, use_nuts,
-/// dt_check, every init selector, …) — a silent wrong answer from a
-/// provenance surface. Deriving from serialization means the key set can
-/// never drift from the enum; keys carry the TOML-side spellings
-/// (`init_mle`, `init`), which is what the user wrote and diffs against.
-fn stage_settings_map(stage: &Stage) -> BTreeMap<String, serde_json::Value> {
+/// dt_check, the starts rule, …) — a silent wrong answer from a provenance
+/// surface. Deriving from serialization means the key set can never drift
+/// from the enum; keys carry the TOML-side spellings (`starts`), which is
+/// what the user wrote and diffs against.
+fn stage_settings_map(method: &Method) -> BTreeMap<String, serde_json::Value> {
     let mut m = BTreeMap::new();
     // The serde tag puts `algorithm` in the map alongside every field;
     // `backend` is an ordinary field on all variants.
-    let v = serde_json::to_value(stage).unwrap_or(serde_json::Value::Null);
+    let v = serde_json::to_value(method).unwrap_or(serde_json::Value::Null);
     flatten_settings("", &v, &mut m);
     m
 }
@@ -408,7 +399,7 @@ fn flatten_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::config_v2::FitConfigV2;
+    use crate::fit::config_v2::FitConfig;
     use std::collections::HashMap;
 
     fn fitmeta(model_identity: &str) -> FitView {
@@ -432,8 +423,8 @@ mod tests {
         }
     }
 
-    fn parse(s: &str) -> FitConfigV2 {
-        toml::from_str(s).expect("toml parse")
+    fn parse(s: &str) -> FitConfig {
+        FitConfig::from_toml_str(s).expect("toml parse")
     }
 
     const BASELINE_TOML: &str = r#"
@@ -453,15 +444,7 @@ mod tests {
         [fixed]
         N0 = 1000.0
 
-        [stages.scout]
-        algorithm = "if2"
-        backend = "chain_binomial"
-        chains = 4
-        particles = 500
-        iterations = 50
-        cooling = 0.7
-
-        [stages.refine]
+        [method]
         algorithm = "if2"
         backend = "chain_binomial"
         chains = 4
@@ -545,11 +528,11 @@ mod tests {
     }
 
     #[test]
-    fn detects_stage_added_and_settings_changed() {
+    fn detects_method_settings_changed() {
         let baseline = parse(BASELINE_TOML);
         let variant_str = BASELINE_TOML.replace(
-            "[stages.refine]\n        algorithm = \"if2\"\n        backend = \"chain_binomial\"\n        chains = 4\n        particles = 1000\n        iterations = 100\n        cooling = 0.5",
-            "[stages.refine]\n        algorithm = \"if2\"\n        backend = \"chain_binomial\"\n        chains = 8\n        particles = 1000\n        iterations = 100\n        cooling = 0.5\n\n        [stages.validate]\n        algorithm = \"if2\"\n        backend = \"chain_binomial\"\n        chains = 4\n        particles = 5000\n        iterations = 20\n        cooling = 0.9",
+            "chains = 4\n        particles = 1000",
+            "chains = 8\n        particles = 1000\n        starts = \"lhs\"",
         );
         let variant = parse(&variant_str);
         let diff = ConfigDiff::compare(
@@ -558,28 +541,48 @@ mod tests {
             &fitmeta("modelA"),
             &fitmeta("modelA"),
         );
-        assert_eq!(diff.stages_changed.added, vec!["validate".to_string()]);
-        assert!(diff.stages_changed.removed.is_empty());
-        // refine.chains: 4 → 8
+        assert!(!diff.method_changed.added);
+        assert!(!diff.method_changed.removed);
+        // chains: 4 → 8
         let chains_chg = diff
-            .stages_changed
+            .method_changed
             .settings_changed
             .iter()
-            .find(|s| s.stage == "refine" && s.key == "chains")
-            .expect("refine.chains delta missing");
+            .find(|s| s.key == "chains")
+            .expect("chains delta missing");
         assert_eq!(chains_chg.from, serde_json::json!(4));
         assert_eq!(chains_chg.to, serde_json::json!(8));
+        // starts: absent → "lhs"
+        let starts_chg = diff
+            .method_changed
+            .settings_changed
+            .iter()
+            .find(|s| s.key == "starts")
+            .expect("starts delta missing");
+        assert_eq!(starts_chg.from, serde_json::Value::Null);
+        assert_eq!(starts_chg.to, serde_json::json!("lhs"));
     }
 
-    /// The settings map must cover EVERY stage field, not a hand-picked
+    #[test]
+    fn detects_method_added_and_removed() {
+        let with = parse(BASELINE_TOML);
+        let (head, _) = BASELINE_TOML.split_once("[method]").unwrap();
+        let without = parse(head);
+        let added = ConfigDiff::compare(&with, &without, &fitmeta("m"), &fitmeta("m"));
+        assert!(added.method_changed.added);
+        let removed = ConfigDiff::compare(&without, &with, &fitmeta("m"), &fitmeta("m"));
+        assert!(removed.method_changed.removed);
+    }
+
+    /// The settings map must cover EVERY method field, not a hand-picked
     /// subset: the old per-variant projection swallowed `tempering`,
-    /// `use_nuts`, the init selectors and more with `..`, so a diff over
-    /// any of them reported "no settings changed". Derived-from-
-    /// serialization can't drift from the enum; this pins the fields the
-    /// old code demonstrably missed.
+    /// `use_nuts`, the starts rule and more with `..`, so a diff over any of
+    /// them reported "no settings changed". Derived-from-serialization can't
+    /// drift from the enum; this pins the fields the old code demonstrably
+    /// missed.
     #[test]
     fn settings_map_covers_fields_the_old_projection_swallowed() {
-        let cfg: FitConfigV2 = toml::from_str(r#"
+        let cfg = FitConfig::from_toml_str(r#"
         [model]
         camdl = "m.camdl"
 
@@ -589,24 +592,28 @@ mod tests {
         [fixed]
         N0 = 1000000
 
-        [stages.posterior]
+        [method]
         algorithm  = "pgas"
         backend    = "chain_binomial"
         chains     = 2
         particles  = 100
         sweeps     = 10
         tempering  = [1.0, 0.5]
+        starts     = "from_prior"
         "#).expect("toml parse");
-        let m = stage_settings_map(&cfg.stages["posterior"]);
-        for key in ["algorithm", "backend", "chains", "tempering", "use_nuts", "init", "init_mle"] {
+        let method = cfg.inference.method.as_ref().unwrap();
+        let m = stage_settings_map(method);
+        for key in ["algorithm", "backend", "chains", "tempering", "use_nuts", "starts"] {
             assert!(m.contains_key(key),
                 "settings map must carry '{key}' — a fit diff over it \
                  previously reported no change; keys present: {:?}",
                 m.keys().collect::<Vec<_>>());
         }
         // And a diff over one of the previously-swallowed fields yields a row.
-        let mut hot = cfg.stages["posterior"].clone();
-        if let Stage::PGAS { tempering, .. } = &mut hot { *tempering = vec![1.0, 0.7, 0.4]; }
+        let mut hot = method.clone();
+        if let crate::fit::config_v2::Algorithm::PGAS { tempering, .. } = &mut hot.algorithm {
+            *tempering = vec![1.0, 0.7, 0.4];
+        }
         let hot_map = stage_settings_map(&hot);
         assert_ne!(m.get("tempering"), hot_map.get("tempering"),
             "a tempering change must be visible to fit diff");
@@ -658,6 +665,6 @@ mod tests {
         assert_eq!(json["model_changed"], false);
         assert_eq!(json["estimate_added"], serde_json::json!([]));
         assert_eq!(json["data_hashes"]["modified"], serde_json::json!([]));
-        assert_eq!(json["stages_changed"]["settings_changed"], serde_json::json!([]));
+        assert_eq!(json["method_changed"]["settings_changed"], serde_json::json!([]));
     }
 }

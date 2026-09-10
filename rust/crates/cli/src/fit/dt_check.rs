@@ -50,7 +50,7 @@ pub enum DtCheckVerdict {
     /// At least one leg exceeds `τ`. Hard warning; user should re-fit
     /// at finer dt before interpreting θ̂.
     Fail,
-    /// Check disabled (via `[stages.X.dt_check]` `enabled = false`,
+    /// Check disabled (via `[method.dt_check]` `enabled = false`,
     /// or `--no-dt-check` on the CLI). No ladder is run.
     Skipped,
 }

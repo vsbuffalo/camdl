@@ -159,9 +159,8 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
 
     let strict = args.strict || ci_env_set();
 
-    // The full set of completed stages, walker-discovered, in fit.toml
-    // declaration order (see `discover_stages`). Validate `--stage`
-    // against this set rather than a hard-coded constant.
+    // The full set of completed method leaves, walker-discovered, in label
+    // order (see `discover_stages`).
     let discovered = discover_stages(Path::new(&dir));
 
     // gh#103 (H17): warn (once, to stderr) when the fit has instant-kind
@@ -173,7 +172,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     }
 
     if args.params_only {
-        match dump_params_only(&dir, args.stage.as_deref(), &discovered) {
+        match dump_params_only(&dir, &discovered) {
             Ok(s) => {
                 print!("{}", s);
                 return;
@@ -185,21 +184,7 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
         }
     }
 
-    let selected: Vec<ResolvedStage> = match &args.stage {
-        Some(name) => {
-            let valid: Vec<&str> = discovered.iter().map(|r| r.stage.as_str()).collect();
-            if !valid.contains(&name.as_str()) {
-                eprintln!(
-                    "error: unknown stage `{}`. Available: {}",
-                    name,
-                    if valid.is_empty() { "(none)".to_string() } else { valid.join(", ") }
-                );
-                std::process::exit(1);
-            }
-            discovered.iter().filter(|r| r.stage == *name).cloned().collect()
-        }
-        None => discovered.clone(),
-    };
+    let selected: Vec<ResolvedStage> = discovered.clone();
 
     // Parse `--exclude-chains` at the boundary into a typed selection. A
     // selection is meaningless without a Bayesian stage to subset — refuse it
@@ -368,12 +353,12 @@ struct ResolvedStage {
     stage_dir: PathBuf,
 }
 
-/// Walk the fit_dir and return one `ResolvedStage` per completed
-/// stage. Order matches `FitView.stages_declared` (the execution order recovered
-/// from the leaves' ordinal-prefixed stage labels); stages that didn't complete are
-/// dropped; stages that completed but aren't in `stages_declared`
-/// (shouldn't happen in v2 layouts, but the walker is permissive)
-/// are appended at the end in walker order so they're still visible.
+/// Walk the fit_dir and return one `ResolvedStage` per completed method
+/// leaf. Order matches `FitView.stages_declared` (label order); leaves that
+/// didn't complete are dropped; leaves that completed but aren't in
+/// `stages_declared` (shouldn't happen in v2 layouts, but the walker is
+/// permissive) are appended at the end in walker order so they're still
+/// visible.
 ///
 /// When the same stage name appears in multiple cells (synthetic
 /// replicates, sweep cells), prefers Real over Synthetic, lowest
@@ -3363,14 +3348,11 @@ fn escape_latex(s: &str) -> String {
 /// payload `fit summary --params-only` prints. A `pub(crate)` seam over
 /// [`discover_stages`] + [`dump_params_only`] so `compare` can derive a
 /// prequential at θ̂ from a sealed fit without touching the private
-/// `ResolvedStage` type. `stage` selects a stage; `None` = the terminal stage.
-pub(crate) fn winner_params_toml(
-    segment: &Path,
-    stage: Option<&str>,
-) -> Result<String, String> {
+/// `ResolvedStage` type. The last completed method leaf's winner.
+pub(crate) fn winner_params_toml(segment: &Path) -> Result<String, String> {
     let dir = segment.to_string_lossy();
     let discovered = discover_stages(segment);
-    dump_params_only(&dir, stage, &discovered)
+    dump_params_only(&dir, &discovered)
 }
 
 /// Dump the chosen stage's winner params as a flat TOML, pipeable
@@ -3383,33 +3365,13 @@ pub(crate) fn winner_params_toml(
 /// declaration order (`FitView.stages_declared` walked in reverse).
 fn dump_params_only(
     dir: &str,
-    stage_filter: Option<&str>,
     discovered: &[ResolvedStage],
 ) -> Result<String, String> {
-    let target = match stage_filter {
-        Some(name) => discovered
-            .iter()
-            .find(|r| r.stage == name)
-            .cloned()
-            .ok_or_else(|| {
-                let avail: Vec<&str> = discovered.iter().map(|r| r.stage.as_str()).collect();
-                format!(
-                    "no completed `{}` stage found under {}. Available: {}",
-                    name,
-                    dir,
-                    if avail.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        avail.join(", ")
-                    }
-                )
-            })?,
-        None => discovered
-            .iter()
-            .next_back()
-            .cloned()
-            .ok_or_else(|| format!("no completed fit-stage runs found in {}", dir))?,
-    };
+    let target = discovered
+        .iter()
+        .next_back()
+        .cloned()
+        .ok_or_else(|| format!("no completed fit-stage runs found in {}", dir))?;
     let target_stage = target.stage.clone();
     let stage_path = target.stage_dir.clone();
     let path = format!("{}/final_params.toml", stage_path.to_string_lossy());
@@ -3418,7 +3380,7 @@ fn dump_params_only(
     let mut keys: Vec<&String> = params.keys().collect();
     keys.sort();
     let mut out = String::new();
-    out.push_str(&format!("# camdl fit summary --params-only --stage {}\n", target_stage));
+    out.push_str(&format!("# camdl fit summary --params-only ({})\n", target_stage));
     out.push_str(&format!("# source: {}\n", path));
     out.push_str(&format!("# camdl: {}\n\n", version::VERSION_SHORT));
     for k in keys {
@@ -5105,20 +5067,12 @@ mod tests {
 
     /// Write a `FitStage` `runid::RunRecord` leaf for `stage` under `stage_dir`.
     /// `parent_hash` seeds the shared `fit`-level hash; the `inputs` carry the
-    /// per-stage numbers (`method`, `n_chains`, `best_loglik`, …) the views
-    /// project. The `stage` LEVEL label gets an ordinal prefix (`01-scout`,
-    /// `02-refine`, …) so `FitView::read` recovers execution order; `inputs.stage`
-    /// keeps the bare name consumers read.
+    /// per-leaf numbers (`method`, `n_chains`, `best_loglik`, …) the views
+    /// project. The `method` LEVEL label is the leaf's name; `inputs.stage`
+    /// carries the same name for the consumers that read it.
     fn write_stage_run(stage_dir: &std::path::Path, parent_hash: &str, stage: &str, method: crate::run_meta::FitAlgorithm) {
         std::fs::create_dir_all(stage_dir).unwrap();
-        // Fixed pipeline order for the test stage names → `NN-` ordinal.
-        let ord = match stage {
-            "scout" | "mle" => 1,
-            "refine"        => 2,
-            "validate"      => 3,
-            _               => 9,
-        };
-        let stage_label = format!("{ord:02}-{stage}");
+        let stage_label = stage.to_string();
         let fit_hash: String = parent_hash.chars().cycle().take(64).collect();
         let run_id: String = format!("{}-{}", parent_hash, stage)
             .chars()
@@ -5140,7 +5094,7 @@ mod tests {
             "engine_version": "0.1.0+test",
             "levels": [
                 {"name": "fit",   "label": "fit",  "hash": fit_hash, "schema_version": 1},
-                {"name": "stage", "label": stage_label, "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
+                {"name": "method", "label": stage_label, "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
                 {"name": "seed",  "label": "seed_1","hash": "06cbd6b300000000000000000000000000000000000000000000000000000000", "schema_version": 1}
             ],
             "status": "completed",
@@ -5244,7 +5198,7 @@ mod tests {
         let dir = make_fit_dir("scout", &state, &params);
 
         let stages = discover_stages(&dir);
-        let s = dump_params_only(&dir.to_string_lossy(), Some("scout"), &stages).unwrap();
+        let s = dump_params_only(&dir.to_string_lossy(), &stages).unwrap();
         // No metadata leaks at top level (the existing loader skips
         // `[provenance]`, but --params-only doesn't even emit it).
         assert!(!s.contains("[provenance]"),
@@ -5261,41 +5215,11 @@ mod tests {
     }
 
     #[test]
-    fn params_only_picks_terminal_stage_in_pipeline_order() {
-        // Build a fit dir with both scout and refine at the v2
-        // layout; --params-only without --stage should pick refine
-        // (most refined).
-        let state = synthetic_fit_state();
-        let scout_params = [("R0", 56.0_f64)];
-        let refine_params = [("R0", 56.5_f64)];
-        let dir = make_fit_dir("scout", &state, &scout_params);
-        // Add a refine stage at the v2 path real/fit_1/refine/.
-        let parent_hash: String = "deadbeef".repeat(8);
-        let refine_dir = dir.join("real").join("fit_1").join("refine");
-        std::fs::create_dir_all(&refine_dir).unwrap();
-        state.save(&refine_dir.to_string_lossy()).unwrap();
-        write_stage_run(&refine_dir, &parent_hash, "refine", crate::run_meta::FitAlgorithm::If2);
-        let mut body = String::new();
-        for (k, v) in refine_params { body.push_str(&format!("{} = {}\n", k, v)); }
-        std::fs::write(refine_dir.join("final_params.toml"), &body).unwrap();
-        std::fs::write(refine_dir.join("mle_params.toml"), &body).unwrap();
-
-        let stages = discover_stages(&dir);
-        let s = dump_params_only(&dir.to_string_lossy(), None, &stages).unwrap();
-        assert!(s.contains("--stage refine"),
-            "no --stage filter must pick refine over scout: {}", s);
-        assert!(s.contains("R0 = 56.5"),
-            "must dump refine's params, not scout's: {}", s);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn params_only_errors_when_no_completed_stage() {
         let dir = crate::test_support::unique_temp_dir("summary_empty");
         std::fs::create_dir_all(&dir).unwrap();
         let stages = discover_stages(&dir);
-        let err = dump_params_only(&dir.to_string_lossy(), None, &stages).unwrap_err();
+        let err = dump_params_only(&dir.to_string_lossy(), &stages).unwrap_err();
         assert!(err.contains("no completed fit-stage runs"));
         std::fs::remove_dir_all(&dir).ok();
     }

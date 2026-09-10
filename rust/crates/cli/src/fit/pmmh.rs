@@ -33,31 +33,19 @@ pub struct PmmhStageOpts {
     pub adapt: bool,
     pub adapt_start: usize,
     pub rho: Option<f64>,
-    pub init_method: super::init::InitMethod,
-    /// Survey CAS directory consumed when
-    /// `init_method = InitMethod::SurveyTopK` (gh#51 v2). `None`
-    /// for other init methods. The dispatcher fills this from the
-    /// stage TOML (`survey_path = "..."` on `[stages.X]`) or the CLI
-    /// override (`--survey-path`).
-    pub survey_path: Option<std::path::PathBuf>,
-    /// Top-K count for `init_method = SurveyTopK`. `None` → defaults
-    /// to `chains`. v2 enforces `top_k == chains` (strict K=chains;
-    /// K > chains with stratified sub-sampling is v3).
-    pub survey_top_k_n: Option<usize>,
 }
 
 pub(crate) const DEFAULT_BURN_IN: usize = 5000;
 const DEFAULT_THIN: usize = 10;
 
 impl PmmhStageOpts {
-    /// Build from a `Stage::PMMH { ... }` variant. Errors if `stage` is
-    /// not the PMMH variant — caller's responsibility to dispatch.
-    pub fn from_stage(stage: &super::config_v2::Stage) -> Result<Self, String> {
-        match stage {
-            super::config_v2::Stage::PMMH {
+    /// Build from an `Algorithm::PMMH { ... }` or `Algorithm::Mh { ... }`
+    /// variant. Errors otherwise — caller's responsibility to dispatch.
+    pub fn from_algorithm(algorithm: &super::config_v2::Algorithm) -> Result<Self, String> {
+        match algorithm {
+            super::config_v2::Algorithm::PMMH {
                 chains, particles, iterations, burn_in, thin,
-                adapt, adapt_start, rho, init_method,
-                survey_path, survey_top_k_n,
+                adapt, adapt_start, rho,
                 ..
             } => {
                 if let Some(r) = rho {
@@ -76,19 +64,15 @@ impl PmmhStageOpts {
                     adapt: *adapt,
                     adapt_start: *adapt_start,
                     rho: *rho,
-                    init_method: init_method.clone(),
-                    survey_path: survey_path.clone(),
-                    survey_top_k_n: *survey_top_k_n,
                 })
             }
             // Deterministic-ODE MH reuses the PMMH machinery via `run_stage`'s
             // `is_ode_mh` seam. It carries neither `particles` (no PF) nor
             // `rho` (no correlated pseudo-marginal noise), so `n_particles` is
             // 0 (unused on the deterministic path) and `rho` is None.
-            super::config_v2::Stage::Mh {
+            super::config_v2::Algorithm::Mh {
                 chains, iterations, burn_in, thin,
-                adapt, adapt_start, init_method,
-                survey_path, survey_top_k_n,
+                adapt, adapt_start,
                 ..
             } => {
                 Ok(PmmhStageOpts {
@@ -100,13 +84,10 @@ impl PmmhStageOpts {
                     adapt: *adapt,
                     adapt_start: *adapt_start,
                     rho: None,
-                    init_method: init_method.clone(),
-                    survey_path: survey_path.clone(),
-                    survey_top_k_n: *survey_top_k_n,
                 })
             }
             other => Err(format!(
-                "PmmhStageOpts::from_stage: expected Stage::PMMH or Stage::Mh, got {}",
+                "PmmhStageOpts::from_algorithm: expected Algorithm::PMMH or Algorithm::Mh, got {}",
                 other.method_name())),
         }
     }
@@ -115,15 +96,14 @@ impl PmmhStageOpts {
 // See pgas::run_stage for the comment on this allow.
 #[allow(clippy::too_many_arguments)]
 pub fn run_stage(
-    fit: &super::config_v2::FitConfigV2,
-    stage_name: &str,
-    stage: &super::config_v2::Stage,
+    fit: &super::config_v2::Problem,
+    method: &super::config_v2::Method,
     stage_dir: &Path,
     pmmh_opts: PmmhStageOpts,
     seed: u64,
     force: bool,
     resume: bool,
-    starts_from: Option<&str>,
+    starts: &super::chain_starts::ResolvedStarts,
     // Post-fit deterministic ODE dt-check config (gh#52, gh#227). `Some` only on
     // the `mh` (ODE) dispatch; PMMH passes `None` (its dt-check is PF-based and
     // wired on the IF2 path). `--dt-check-strict` is resolved into the config's
@@ -134,6 +114,7 @@ pub fn run_stage(
     // dispatch chokepoint (`methods::emit_status_banner`), driven by the
     // registry `status_note` so it can't drift from `camdl fit methods`.
     let collector = DiagnosticCollector::new("pmmh");
+    let stage_name = method.algorithm.method_name();
     let estimate = &fit.estimate;
 
     let n_chains = pmmh_opts.n_chains;
@@ -151,30 +132,14 @@ pub fn run_stage(
     // filter. With no PF there is no correlated pseudo-marginal noise, so `rho`
     // is forced to None (skips the CPM obs-grid preflight and the correlated
     // evaluator) and the PF-variance preflight is skipped entirely.
-    let is_ode_mh = matches!(stage, super::config_v2::Stage::Mh { .. });
+    let is_ode_mh = matches!(method.algorithm, super::config_v2::Algorithm::Mh { .. });
     let rho: Option<f64> = if is_ode_mh { None } else { pmmh_opts.rho };
-
-    // Load prior state if --starts-from provided
-    let prior_state = starts_from.map(FitState::load).transpose()?;
-
-    // gh#871. Under `init_mle = "<stage>"` / `--starts-from` every chain takes
-    // the upstream stage's point estimate and the declared `init` never runs,
-    // so the declared `init` is not what supplied the values. Provenance
-    // records the mode that did — otherwise `chain_starts.tsv` reports N
-    // independent per-chain draws beside N identical values, and that file is
-    // what an auditor reads to check whether the chains were started apart.
-    let recorded_init = match starts_from {
-        Some(dir) => super::init::InitMethod::FromMle {
-            source: super::init::MleSource::FitDir(std::path::PathBuf::from(dir)),
-        },
-        None => pmmh_opts.init_method.clone(),
-    };
 
     // Build FitRunConfig (reuse existing builder). iterations,
     // cooling, cooling_target_iters are IF2-specific and never read
     // by PMMH — pass harmless values.
     let config = FitRunConfig::build(
-        fit, prior_state.as_ref(),
+        fit, Some(&method.algorithm),
         n_chains, n_particles, 1,
         1.0, 1,
         seed, false,
@@ -204,8 +169,8 @@ pub fn run_stage(
     // fails before any chain runs; the per-substep `events`/`balance` refusal is
     // enforced downstream in `run_ode`. `None` ⇒ `ode_dt` (off).
     let ode_burnin_dt: f64 = if is_ode_mh {
-        let burnin_opt = match stage {
-            super::config_v2::Stage::Mh { burnin_dt, .. } => *burnin_dt,
+        let burnin_opt = match &method.algorithm {
+            super::config_v2::Algorithm::Mh { burnin_dt, .. } => *burnin_dt,
             _ => None,
         };
         let n_interval = ode_obs_model.as_ref().map_or(0, |m| m.n_interval_streams());
@@ -236,7 +201,7 @@ pub fn run_stage(
     }
 
     // Build proposal SDs
-    let proposal_sd = build_proposal_sd(&config, starts_from)?;
+    let proposal_sd = build_proposal_sd(&config);
 
     // Preflight: likelihood-noise check (skipped for ODE-MH — deterministic,
     // no PF). Measures the spread that governs acceptance and reports it
@@ -247,104 +212,14 @@ pub fn run_stage(
         eprintln!("\npfilter noise check ({} particles, {} evaluation pairs)...",
             n_particles, pf_noise::NOISE_PAIRS);
     }
-    let base = prior_state.as_ref().map(|s| {
-        let mut p = config.base_params.clone();
-        for spec in &config.estimated_params {
-            if let Some(&v) = s.start_values.get(&spec.name) {
-                p[spec.index] = v;
-            }
-        }
-        p
-    }).unwrap_or_else(|| config.base_params.clone());
+    let base = config.base_params.clone();
 
-    // Per-chain starting parameters (gh#42, gh#51 v2).
-    // Precedence:
-    // 1. `--starts-from` — every chain at the prior MLE (`base`).
-    //    Mutually exclusive with `init = "survey_top_k"`: `init_mle`
-    //    already commits every chain to the same point (the scout MLE),
-    //    so any sibling survey_top_k seed would be silently overwritten.
-    //    Refuse early instead.
-    // 2. `init = "survey_top_k"` (gh#51 v2) — resolved here via the
-    //    shared helper. Requires `survey_path = "..."` set on the
-    //    stage or via CLI override.
-    // 3. `init` dispatch on Lhs / Uniform / Single. Default `lhs` gives
-    //    stratified posterior coverage at low chain counts. `Single`
-    //    and `Uniform`-with-n_chains=1 return None; we then materialise
-    //    N copies of `base`.
-    let mut survey_top_k_result: Option<super::init::SurveyTopKResult> = None;
-    let chain_starts: Vec<Vec<f64>> = if prior_state.is_some() {
-        if pmmh_opts.init_method == super::init::InitMethod::SurveyTopK {
-            return Err(format!(
-                "pmmh stage `{}`: --starts-from / `init_mle = \"...\"` and \
-                 `init = \"survey_top_k\"` are mutually exclusive — \
-                 the former commits every chain to the prior MLE, so any \
-                 survey-seeded start would be silently overwritten. Pick one: \
-                 drop `init_mle`, or use a non-survey `init`.",
-                stage_name));
-        }
-        vec![base.clone(); n_chains]
-    } else if pmmh_opts.init_method == super::init::InitMethod::SurveyTopK {
-        // Compute the fit-level cross-check context. Mirrors what the
-        // IF2 dispatch site does; see gh#51 §"Validation".
-        let model_identity_str = crate::resolve::model_identity_from_ir(&config.model_ir_json);
-        let data_spec = fit.data_spec()?;
-        let model_obs_names: Vec<String> = config.model.observations.iter()
-            .map(|o| o.name.clone()).collect();
-        let effective_obs = data_spec.effective_observations(&model_obs_names)?;
-        let data_hashes = super::init::compute_data_hashes(&effective_obs)?;
-        let estimate_names: Vec<String> = fit.estimate.keys().cloned().collect();
-        let fixed_for_ctx = fit.fixed.resolve()?;
-        let fixed_hashmap: std::collections::HashMap<String, f64> =
-            fixed_for_ctx.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        let ctx = super::init::SurveyFitContext {
-            model_identity: &model_identity_str,
-            data_hashes: &data_hashes,
-            fixed: &fixed_hashmap,
-            estimate_names: &estimate_names,
-        };
-        let (chains_opt, result) =
-            super::init::resolve_per_chain_starts_from_method(
-                &pmmh_opts.init_method,
-                pmmh_opts.survey_path.as_deref(),
-                pmmh_opts.survey_top_k_n,
-                stage_name,
-                &config.estimated_params,
-                n_chains,
-                seed,
-                &ctx,
-                None,
-            ).map_err(|e| format!("pmmh: {}", e))?;
-        let chains_specs = chains_opt
-            .expect("SurveyTopK must yield per-chain starts");
-        survey_top_k_result = result;
-        super::init::chain_starts_to_param_vecs(&chains_specs, &base)
-    } else if matches!(pmmh_opts.init_method,
-        super::init::InitMethod::FromPrior
-        | super::init::InitMethod::FromPosterior { .. }
-        | super::init::InitMethod::FromMle    { .. }
-        | super::init::InitMethod::FromParams { .. })
-    {
-        // Step 7 warm-start dispatch (gh#83/gh#85). See pgas.rs for
-        // the mirror path; same shape, different stage type.
-        let resolved_view = super::init::build_resolved_view_for_init(
-            &config.model, &base, &config.estimated_params,
-        );
-        let starts = crate::fit::chain_starts::draw_chain_starts(
-            &resolved_view, &pmmh_opts.init_method, n_chains, seed,
-        ).map_err(|e| format!("pmmh: --init {}: {}",
-            pmmh_opts.init_method, e))?;
-        let chains_specs = starts.to_estimated_params(&config.estimated_params);
-        super::init::chain_starts_to_param_vecs(&chains_specs, &base)
-    } else {
-        super::init::build_chain_param_vecs(
-            &pmmh_opts.init_method,
-            &config.estimated_params,
-            &base,
-            n_chains,
-            seed,
-        ).map_err(|e| format!("pmmh: {}", e))?
-        .unwrap_or_else(|| vec![base.clone(); n_chains])
-    };
+    // Per-chain starting parameters, through the one seam every runner
+    // draws from (`chain_starts::draw_chain_starts`), under the resolved
+    // `starts` rule.
+    let drawn = super::runner::draw_chain_starts_for(&config, estimate, starts, n_chains, seed)
+        .map_err(|e| format!("pmmh: {e}"))?;
+    let chain_starts: Vec<Vec<f64>> = drawn.to_param_vecs(&config.estimated_params, &base);
 
     let ll_mean: f64;
     // gh#764: the measured spread, carried to the stage artifact instead of
@@ -429,30 +304,8 @@ pub fn run_stage(
     std::fs::create_dir_all(stage_dir)
         .map_err(|e| format!("cannot create {}: {}", stage_dir.display(), e))?;
 
-    // Write chain_starts.tsv sidecar for audit (gh#51 v2). Best-effort;
-    // failure logs but does not abort the fit. The `chain_starts`
-    // vector built above is `Vec<Vec<f64>>` (per-chain full param
-    // vectors); the writer accepts the IF2-shaped per-chain
-    // EstimatedParam slice instead, so we rebuild the spec view here.
-    // For non-survey modes, `survey_top_k_result` is `None` and the
-    // writer uses the `<method>:chain-<id>` source convention.
-    let per_chain_specs_for_audit: Vec<Vec<EstimatedParam>> = chain_starts.iter()
-        .map(|params| config.estimated_params.iter()
-            .map(|spec| EstimatedParam {
-                initial: params[spec.index], ..spec.clone()
-            })
-            .collect())
-        .collect();
-    if let Err(e) = super::init::write_chain_starts_tsv(
-        stage_dir,
-        &config.estimated_params,
-        Some(&per_chain_specs_for_audit),
-        n_chains,
-        &recorded_init,
-        survey_top_k_result.as_ref(),
-    ) {
-        eprintln!("warning: could not write chain_starts.tsv: {}", e);
-    }
+    // The audit sidecar, captured before any step runs.
+    super::runner::record_chain_starts(stage_dir, &config, &drawn);
 
     // Resolve priors: fit.toml override → model IR → Flat
     let priors: Vec<Prior> = config.estimated_params.iter()
@@ -465,17 +318,15 @@ pub fn run_stage(
 
     let dt = config.if2_config.dt;
 
-    // Compute config hash — identifies the statistical problem.
-    // Uses the same provenance::fit_stage_hash that the v2 dispatch
-    // site uses for cache-hit checks; resume only succeeds when the
-    // (model + observations + estimate + fixed + stage_name + Stage
-    // variant + seed) tuple is unchanged.
+    // Compute config hash — identifies the statistical problem; resume only
+    // succeeds when the (model + observations + estimate + fixed + method +
+    // seed) tuple is unchanged.
     let fixed_resolved = fit.fixed.resolve()?;
     let data_spec = fit.data_spec()?;
     let config_hash = super::provenance::fit_stage_hash(
         &config.model_ir_json, &data_spec.observations,
         &fit.estimate, &fixed_resolved, &fit.simplex_groups,
-        stage_name, stage, seed,
+        method, seed,
     )?;
 
     // Load resume states if --resume
@@ -933,8 +784,8 @@ pub fn run_stage(
              weight, and that standardised distance grows with the square \
              root of the population — so a relative error that is harmless at \
              ten thousand people is fatal at a million. Start every chain at \
-             the declared values (`init = \"single\"`), draw the starts from \
-             the priors (`init = \"from_prior\"`), or raise `particles`. Note \
+             the declared values (`starts = \"single\"`), draw the starts from \
+             the priors (`starts = \"from_prior\"`), or raise `particles`. Note \
              that widening the parameter bounds widens the range the starts \
              are drawn from, so it makes this refusal more likely, not less.",
             stage_name, n_chains));
@@ -1057,17 +908,9 @@ pub fn run_stage(
         // Bayesian path — compound gate doesn't apply to PMMH.
         resolved_gate: None,
         resolved_loglik_eval: None,
-        // gh#51 v2: chain init provenance. When SurveyTopK was used,
-        // emit the full survey hash + top-K via the shared formatter;
-        // otherwise render the in-process sampler name verbatim.
-        // SurveyTopK is dispatched via the shared
-        // `resolve_per_chain_starts_from_method` helper above.
-        // `recorded_init` rather than the declared `init` for the same reason
-        // `chain_starts.tsv` uses it (gh#871): the two must agree, and under
-        // `init_mle` neither of them ran the declared mode.
-        chain_init_source: Some(super::init::format_chain_init_source(
-            &recorded_init, survey_top_k_result.as_ref(),
-        )),
+        // The rule that supplied the starts — the same tag `chain_starts.tsv`
+        // rows carry, so the two cannot disagree (gh#871, gh#873).
+        chain_init_source: Some(drawn.rule.tag().to_string()),
         // gh#52, gh#227: deterministic ODE dt-check at the MAP (above); `None`
         // on the PMMH path (PF dt-check is wired on the IF2 path).
         dt_check: dt_check_result,
@@ -1178,79 +1021,14 @@ pub fn run_stage(
     Ok(())
 }
 
-/// Build proposal SDs on the transformed scale.
-///
-/// v1's [pmmh] section let users point at a separate `proposal_from`
-/// directory (independent from `starts_from`); v2's Stage::PMMH carries
-/// only `starts_from` (toml key `init_mle`). So we use it for both — if
-/// the user wants empirical covariance from scout, they wire that via
-/// `init_mle = "scout"` on the PMMH stage.
-fn build_proposal_sd(
-    config: &FitRunConfig,
-    starts_from: Option<&str>,
-) -> Result<Vec<f64>, String> {
-    if let Some(dir) = starts_from {
-        if let Ok(sds) = load_scout_proposal_sd(dir, &config.estimated_params) {
-            eprintln!("  proposal_sd seeded from chain spread in {}/", dir);
-            return Ok(sds);
-        }
-    }
-
-    // Fallback: use rw_sd from [estimate], scaled up for MH jumps
-    // IF2 rw_sd is per-perturbation-step; PMMH needs per-proposal (larger)
-    Ok(config.estimated_params.iter().map(|p| {
+/// Build proposal SDs on the transformed scale from `[estimate]`'s
+/// `rw_sd`, scaled up for MH jumps: IF2's `rw_sd` is per-perturbation-step,
+/// PMMH needs per-proposal (larger). The adaptive scheme (`adapt = true`)
+/// takes over from here.
+fn build_proposal_sd(config: &FitRunConfig) -> Vec<f64> {
+    config.estimated_params.iter().map(|p| {
         p.transformed_sd(p.rw_sd, p.initial) * 5.0
-    }).collect())
-}
-
-/// Load chain endpoint parameters from a prior stage and compute
-/// empirical SD on the transformed scale. Scale by 2.38/√d (optimal RWM).
-fn load_scout_proposal_sd(dir: &str, if2_params: &[EstimatedParam]) -> Result<Vec<f64>, String> {
-    // Find chain directories
-    let mut chain_dirs: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {}", dir, e))? {
-        let entry = entry.map_err(|e| format!("{}", e))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("chain_") && entry.path().is_dir() {
-            chain_dirs.push(entry.path().to_string_lossy().to_string());
-        }
-    }
-    if chain_dirs.len() < 2 {
-        return Err("need at least 2 chains for empirical covariance".into());
-    }
-
-    // Read final params from each chain
-    let d = if2_params.len();
-    let mut transformed_endpoints: Vec<Vec<f64>> = Vec::new();
-
-    for chain_dir in &chain_dirs {
-        let toml_path = format!("{}/final_params.toml", chain_dir);
-        let contents = std::fs::read_to_string(&toml_path)
-            .map_err(|e| format!("{}: {}", toml_path, e))?;
-        let parsed: HashMap<String, toml::Value> = toml::from_str(&contents)
-            .map_err(|e| format!("{}: {}", toml_path, e))?;
-
-        let mut z = Vec::with_capacity(d);
-        for spec in if2_params {
-            let v = parsed.get(&spec.name)
-                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
-                .ok_or_else(|| format!("missing {} in {}", spec.name, toml_path))?;
-            z.push(spec.to_transformed(v));
-        }
-        transformed_endpoints.push(z);
-    }
-
-    // Compute per-parameter SD on transformed scale
-    let n = transformed_endpoints.len() as f64;
-    let scale = 2.38 / (d as f64).sqrt();
-
-    let sds: Vec<f64> = (0..d).map(|i| {
-        let mean = transformed_endpoints.iter().map(|z| z[i]).sum::<f64>() / n;
-        let var = transformed_endpoints.iter().map(|z| (z[i] - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        (var.sqrt() * scale).max(0.01) // floor to prevent zero proposal
-    }).collect();
-
-    Ok(sds)
+    }).collect()
 }
 
 fn compute_diagnostics(

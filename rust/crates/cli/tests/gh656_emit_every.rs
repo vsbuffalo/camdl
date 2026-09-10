@@ -521,7 +521,7 @@ beta = { bounds = [0.01, 2.0], start = 0.5 }
 [fixed]
 gamma = 0.1
 
-[stages.mle]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2

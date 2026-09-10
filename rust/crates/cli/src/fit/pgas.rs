@@ -210,16 +210,6 @@ pub struct PgasStageOpts {
     /// `--no-ancestor-sampling` disables it — plain particle Gibbs, a
     /// diagnostic control). Identity-bearing; see the field on `Stage::PGAS`.
     pub ancestor_sampling: bool,
-    pub init_method: super::init::InitMethod,
-    /// Survey CAS directory consumed when
-    /// `init_method = InitMethod::SurveyTopK` (gh#51 v2). `None`
-    /// for other init methods. The dispatcher fills this from the
-    /// stage TOML (`survey_path = "..."` on `[stages.X]`) or the CLI
-    /// override (`--survey-path`).
-    pub survey_path: Option<std::path::PathBuf>,
-    /// Top-K count for `init_method = SurveyTopK`. `None` → defaults
-    /// to `chains`. v2 enforces `top_k == chains`.
-    pub survey_top_k_n: Option<usize>,
     /// gh#747: the binomial sampler this stage's draws use. Hashed into the
     /// stage identity by being a `Stage::PGAS` field.
     pub binomial: sim::rng::BinomialAlgorithm,
@@ -229,16 +219,16 @@ pub(crate) const DEFAULT_BURN_IN: usize = 2000;
 const DEFAULT_THIN: usize = 5;
 
 impl PgasStageOpts {
-    /// Build from a `Stage::PGAS { ... }` variant. Errors if `stage` is
-    /// not the PGAS variant — caller's responsibility to dispatch.
-    pub fn from_stage(stage: &super::config_v2::Stage) -> Result<Self, String> {
-        match stage {
-            super::config_v2::Stage::PGAS {
+    /// Build from an `Algorithm::PGAS { ... }` variant. Errors if
+    /// `algorithm` is not the PGAS variant — caller's responsibility to
+    /// dispatch.
+    pub fn from_algorithm(algorithm: &super::config_v2::Algorithm) -> Result<Self, String> {
+        match algorithm {
+            super::config_v2::Algorithm::PGAS {
                 chains, particles, sweeps, burn_in, thin,
                 tempering, max_tree_depth, trajectory_warmup,
                 csmc_sweeps_per_nuts, n_trajectories,
-                dense_mass, use_nuts, ancestor_sampling, init_method,
-                survey_path, survey_top_k_n, binomial,
+                dense_mass, use_nuts, ancestor_sampling, binomial,
                 ..
             } => {
                 if tempering.is_empty() || (tempering[0] - 1.0).abs() > 1e-9 {
@@ -275,36 +265,33 @@ impl PgasStageOpts {
                     dense_mass: *dense_mass,
                     use_nuts: *use_nuts,
                     ancestor_sampling: *ancestor_sampling,
-                    init_method: init_method.clone(),
-                    survey_path: survey_path.clone(),
-                    survey_top_k_n: *survey_top_k_n,
                     binomial: *binomial,
                 })
             }
             other => Err(format!(
-                "PgasStageOpts::from_stage: expected Stage::PGAS, got {}",
+                "PgasStageOpts::from_algorithm: expected Algorithm::PGAS, got {}",
                 other.method_name())),
         }
     }
 }
 
-// Per-stage entry point for PGAS — wide because every flag is
+// Per-method entry point for PGAS — wide because every flag is
 // independent at the dispatch site (stage_dir, opts struct, RNG seed,
-// --resume / --starts-from). Same pattern as
+// --resume, the resolved starts). Same pattern as
 // `batch::run_one_scenario` and `main::run_simulate`, both of which
 // also carry this allow.
 #[allow(clippy::too_many_arguments)]
 pub fn run_stage(
-    fit: &super::config_v2::FitConfigV2,
-    stage_name: &str,
-    stage: &super::config_v2::Stage,
+    fit: &super::config_v2::Problem,
+    method: &super::config_v2::Method,
     stage_dir: &Path,
     pgas_opts: PgasStageOpts,
     seed: u64,
     force: bool,
     resume: bool,
-    starts_from: Option<&str>,
+    starts: &super::chain_starts::ResolvedStarts,
 ) -> Result<(), String> {
+    let stage_name = method.algorithm.method_name();
     let estimate = &fit.estimate;
     let n_chains = pgas_opts.n_chains;
     let n_sweeps = pgas_opts.n_sweeps;
@@ -329,14 +316,10 @@ pub fn run_stage(
 
     let collector = DiagnosticCollector::new("pgas");
 
-    // Load prior state if --starts-from provided
-    let starts_from = starts_from.map(String::from);
-    let prior_state = starts_from.as_deref().map(FitState::load).transpose()?;
-
     // Build FitRunConfig (reuse existing builder). cooling_target_iters
     // is IF2-specific and never read by PGAS — pass 1 as a harmless value.
     let config = FitRunConfig::build(
-        fit, prior_state.as_ref(),
+        fit, Some(&method.algorithm),
         n_chains, n_particles, 1,
         1.0, 1, seed, false,
     )?;
@@ -458,15 +441,14 @@ pub fn run_stage(
 
     // Compute config hash — identifies the statistical problem.
     // Changes to model/data/priors/bounds/particles/dt invalidate resume state.
-    // Uses provenance::fit_stage_hash, the same hash the v2 dispatch
-    // site uses for cache-hit / staleness checks (model + observations
-    // + estimate + fixed + stage_name + Stage variant + seed).
+    // Uses provenance::fit_stage_hash (model + observations + estimate +
+    // fixed + method + seed).
     let fixed_resolved = fit.fixed.resolve()?;
     let data_spec = fit.data_spec()?;
     let config_hash = super::provenance::fit_stage_hash(
         &config.model_ir_json, &data_spec.observations,
         &fit.estimate, &fixed_resolved, &fit.simplex_groups,
-        stage_name, stage, seed,
+        method, seed,
     )?;
 
     // Load resume states if --resume
@@ -519,123 +501,23 @@ pub fn run_stage(
         vec![None; n_chains]
     };
 
-    // Generate per-chain starting parameters (gh#42, gh#51 v2).
-    // Precedence:
-    // 1. `--starts-from` — every chain at the prior MLE; mutually
-    //    exclusive with `init = "survey_top_k"` (the former pins every
-    //    chain to one point, so any survey-seeded start would be
-    //    silently overwritten).
-    // 2. `init = "survey_top_k"` — resolved here via the shared helper.
-    //    Bayesian seeds are valid because the chain's stationary
-    //    distribution is set by the prior, not the start.
-    // 3. `init` dispatch on Lhs / Uniform / Single. Default `lhs` gives
-    //    stratified posterior coverage.
-    let has_starts = prior_state.is_some();
-    // gh#871. Under `init_mle = "<stage>"` / `--starts-from` every chain takes
-    // the upstream stage's point estimate and the declared `init` never runs,
-    // so the declared `init` is not what supplied the values. Provenance
-    // records the mode that did — otherwise `chain_starts.tsv` reports N
-    // independent per-chain draws beside N identical values, and that file is
-    // what an auditor reads to check whether the chains were started apart.
-    let recorded_init = match starts_from.as_deref() {
-        Some(dir) => super::init::InitMethod::FromMle {
-            source: super::init::MleSource::FitDir(std::path::PathBuf::from(dir)),
-        },
-        None => pgas_opts.init_method.clone(),
-    };
-    let mut survey_top_k_result: Option<super::init::SurveyTopKResult> = None;
-    let chain_starts: Vec<Vec<f64>> = if has_starts {
-        if pgas_opts.init_method == super::init::InitMethod::SurveyTopK {
-            return Err(format!(
-                "pgas stage `{}`: --starts-from / `init_mle = \"...\"` and \
-                 `init = \"survey_top_k\"` are mutually exclusive — \
-                 the former commits every chain to the prior MLE, so any \
-                 survey-seeded start would be silently overwritten. Pick one: \
-                 drop `init_mle`, or use a non-survey `init`.",
-                stage_name));
-        }
-        vec![config.base_params.clone(); n_chains]
-    } else if pgas_opts.init_method == super::init::InitMethod::SurveyTopK {
-        // Cross-check context. Same construction as IF2 / PMMH.
-        let model_identity_str = crate::resolve::model_identity_from_ir(&config.model_ir_json);
-        let model_obs_names: Vec<String> = config.model.observations.iter()
-            .map(|o| o.name.clone()).collect();
-        let effective_obs = data_spec.effective_observations(&model_obs_names)?;
-        let data_hashes = super::init::compute_data_hashes(&effective_obs)?;
-        let estimate_names: Vec<String> = fit.estimate.keys().cloned().collect();
-        let fixed_hashmap: std::collections::HashMap<String, f64> =
-            fixed_resolved.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        let ctx = super::init::SurveyFitContext {
-            model_identity: &model_identity_str,
-            data_hashes: &data_hashes,
-            fixed: &fixed_hashmap,
-            estimate_names: &estimate_names,
-        };
-        let (chains_opt, result) =
-            super::init::resolve_per_chain_starts_from_method(
-                &pgas_opts.init_method,
-                pgas_opts.survey_path.as_deref(),
-                pgas_opts.survey_top_k_n,
-                stage_name,
-                &config.estimated_params,
-                n_chains,
-                seed,
-                &ctx,
-                // SurveyTopK doesn't need ResolvedParameters; that
-                // branch fires above. The warm-start variants take a
-                // separate dispatch path below (post-step-7).
-                None,
-            ).map_err(|e| format!("pgas: {}", e))?;
-        let chains_specs = chains_opt
-            .expect("SurveyTopK must yield per-chain starts");
-        survey_top_k_result = result;
-        super::init::chain_starts_to_param_vecs(&chains_specs, &config.base_params)
-    } else if matches!(pgas_opts.init_method,
-        super::init::InitMethod::FromPrior
-        | super::init::InitMethod::FromPosterior { .. }
-        | super::init::InitMethod::FromMle    { .. }
-        | super::init::InitMethod::FromParams { .. })
-    {
-        // Step 7 warm-start dispatch (gh#83/gh#85). Build a minimal
-        // `ResolvedParameters` view from the fit runner config and
-        // route through `chain_starts::draw_chain_starts`. Provenance
-        // for the resolved value side is already recorded upstream
-        // (params_resolver runs in fit/runner.rs:188); this branch
-        // owns only chain-start provenance, which step 9 already
-        // serializes into `init_provenance.chains[i]`.
-        let resolved_view = super::init::build_resolved_view_for_init(
-            &config.model, &config.base_params, &config.estimated_params,
-        );
-        let starts = crate::fit::chain_starts::draw_chain_starts(
-            &resolved_view, &pgas_opts.init_method, n_chains, seed,
-        ).map_err(|e| format!("pgas: --init {}: {}",
-            pgas_opts.init_method, e))?;
-        let chains_specs = starts.to_estimated_params(&config.estimated_params);
-        super::init::chain_starts_to_param_vecs(&chains_specs, &config.base_params)
-    } else {
-        super::init::build_chain_param_vecs(
-            &pgas_opts.init_method,
-            &config.estimated_params,
-            &config.base_params,
-            n_chains,
-            seed,
-        ).map_err(|e| format!("pgas: {}", e))?
-        .unwrap_or_else(|| vec![config.base_params.clone(); n_chains])
-    };
+    // Per-chain starting parameters, through the one seam every runner
+    // draws from (`chain_starts::draw_chain_starts`), under the resolved
+    // `starts` rule.
+    let drawn = super::runner::draw_chain_starts_for(&config, estimate, starts, n_chains, seed)
+        .map_err(|e| format!("pgas: {e}"))?;
+    let chain_starts: Vec<Vec<f64>> =
+        drawn.to_param_vecs(&config.estimated_params, &config.base_params);
 
     eprintln!("\npgas: {} chains × {} sweeps × {} particles, burn_in={}, thin={}",
         n_chains, n_sweeps, n_particles, burn_in, thin);
-    if has_starts {
-        eprintln!("  starting all chains from prior stage (--starts-from)");
-    } else {
-        eprintln!("  chain starts: init = {} (per-parameter ranges below)",
-            pgas_opts.init_method);
-        for spec in &config.estimated_params {
-            let vals: Vec<f64> = chain_starts.iter().map(|p| p[spec.index]).collect();
-            eprintln!("    {:12} [{:.4} .. {:.4}]", spec.name,
-                vals.iter().cloned().fold(f64::INFINITY, f64::min),
-                vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
-        }
+    eprintln!("  chain starts: starts = {} (per-parameter ranges below)",
+        starts.rule.spelled());
+    for spec in &config.estimated_params {
+        let vals: Vec<f64> = chain_starts.iter().map(|p| p[spec.index]).collect();
+        eprintln!("    {:12} [{:.4} .. {:.4}]", spec.name,
+            vals.iter().cloned().fold(f64::INFINITY, f64::min),
+            vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
     }
     eprintln!("  estimated output: {} posterior samples per chain",
         (n_sweeps.saturating_sub(burn_in)) / thin);
@@ -658,29 +540,8 @@ pub fn run_stage(
             .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
     }
 
-    // Write chain_starts.tsv sidecar for audit (gh#51 v2). Best-effort;
-    // failure logs but does not abort the fit. Rebuild the per-chain
-    // EstimatedParam view from the f64 vectors so the writer (which
-    // expects the IF2 shape) can label each row with the right
-    // `source` (survey:<hash>:rank-N for SurveyTopK, otherwise
-    // <method>:chain-<id>).
-    let per_chain_specs_for_audit: Vec<Vec<EstimatedParam>> = chain_starts.iter()
-        .map(|params| config.estimated_params.iter()
-            .map(|spec| EstimatedParam {
-                initial: params[spec.index], ..spec.clone()
-            })
-            .collect())
-        .collect();
-    if let Err(e) = super::init::write_chain_starts_tsv(
-        stage_dir,
-        &config.estimated_params,
-        Some(&per_chain_specs_for_audit),
-        n_chains,
-        &recorded_init,
-        survey_top_k_result.as_ref(),
-    ) {
-        eprintln!("warning: could not write chain_starts.tsv: {}", e);
-    }
+    // The audit sidecar, captured before any sweep runs.
+    super::runner::record_chain_starts(stage_dir, &config, &drawn);
 
     let t0 = std::time::Instant::now();
     let _is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
@@ -1368,7 +1229,7 @@ pub fn run_stage(
              no chain could move. See `diagnostics.json` for the per-chain \
              `bad_init` entries and `chain_starts.tsv` for the starts they \
              name. Most often the starting values sit in an impossible region \
-             (try `--init lhs` or a different start); less often the data are \
+             (try `--starts from_prior` or a different start); less often the data are \
              impossible under this model — also check the observation model \
              and parameter bounds.",
             stage_name, n_chains));
@@ -1727,17 +1588,9 @@ pub fn run_stage(
         // Bayesian path — compound gate doesn't apply to PGAS.
         resolved_gate: None,
         resolved_loglik_eval: None,
-        // gh#51 v2: chain init provenance. When SurveyTopK was used,
-        // emit the full survey hash + top-K via the shared formatter;
-        // otherwise render the in-process sampler name verbatim.
-        // SurveyTopK is dispatched via the shared
-        // `resolve_per_chain_starts_from_method` helper above.
-        // `recorded_init` rather than the declared `init` for the same reason
-        // `chain_starts.tsv` uses it (gh#871): the two must agree, and under
-        // `init_mle` neither of them ran the declared mode.
-        chain_init_source: Some(super::init::format_chain_init_source(
-            &recorded_init, survey_top_k_result.as_ref(),
-        )),
+        // The rule that supplied the starts — the same tag `chain_starts.tsv`
+        // rows carry, so the two cannot disagree (gh#871, gh#873).
+        chain_init_source: Some(drawn.rule.tag().to_string()),
         // gh#52: Richardson dt-check is wired only on IF2 stages in
         // v1 (the inference math is shared but the dispatch site
         // refactor across PGAS/PMMH/NLopt is out of scope here).
@@ -2099,16 +1952,12 @@ fn write_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::config_v2::{Stage, StartsFrom};
+    use super::super::config_v2::Algorithm;
 
-    fn pgas_stage_with_tempering(tempering: Vec<f64>) -> Stage {
-        Stage::PGAS {
+    fn pgas_stage_with_tempering(tempering: Vec<f64>) -> Algorithm {
+        Algorithm::PGAS {
             backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 1, particles: 10, sweeps: 10,
-            starts_from: StartsFrom::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
             burn_in: Some(2), thin: Some(1),
             tempering,
             max_tree_depth: 10,
@@ -2126,7 +1975,7 @@ mod tests {
     fn tempering_rejects_first_entry_not_one() {
         // First entry MUST be 1.0 (cold chain).
         let stage = pgas_stage_with_tempering(vec![0.7, 0.4]);
-        let err = PgasStageOpts::from_stage(&stage).unwrap_err();
+        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
         assert!(err.contains("must start with β=1.0"), "got: {}", err);
     }
 
@@ -2134,7 +1983,7 @@ mod tests {
     fn tempering_rejects_beta_above_one() {
         // β > 1 concentrates likelihood — physically nonsensical.
         let stage = pgas_stage_with_tempering(vec![1.0, 1.5, 0.4]);
-        let err = PgasStageOpts::from_stage(&stage).unwrap_err();
+        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
         assert!(err.contains("out of range"), "got: {}", err);
         assert!(err.contains("1.5"), "got: {}", err);
     }
@@ -2143,7 +1992,7 @@ mod tests {
     fn tempering_rejects_negative_beta() {
         // β < 0 inverts the likelihood (anti-annealing).
         let stage = pgas_stage_with_tempering(vec![1.0, -0.2]);
-        let err = PgasStageOpts::from_stage(&stage).unwrap_err();
+        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
         assert!(err.contains("out of range"), "got: {}", err);
     }
 
@@ -2152,7 +2001,7 @@ mod tests {
         // β = 0 would scale all log-likelihoods to 0 (uniform), not
         // a valid replica-exchange rung.
         let stage = pgas_stage_with_tempering(vec![1.0, 0.5, 0.0]);
-        let err = PgasStageOpts::from_stage(&stage).unwrap_err();
+        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
         assert!(err.contains("out of range"), "got: {}", err);
     }
 
@@ -2160,7 +2009,7 @@ mod tests {
     fn tempering_accepts_well_formed_ladder() {
         // [1.0, 0.7, 0.4, 0.15] — typical 4-rung exchange ladder.
         let stage = pgas_stage_with_tempering(vec![1.0, 0.7, 0.4, 0.15]);
-        let opts = PgasStageOpts::from_stage(&stage)
+        let opts = PgasStageOpts::from_algorithm(&stage)
             .expect("well-formed ladder must validate");
         assert_eq!(opts.tempering, vec![1.0, 0.7, 0.4, 0.15]);
     }
@@ -2169,7 +2018,7 @@ mod tests {
     fn tempering_default_single_rung() {
         // Default `[1.0]` (no tempering) must validate.
         let stage = pgas_stage_with_tempering(vec![1.0]);
-        let opts = PgasStageOpts::from_stage(&stage)
+        let opts = PgasStageOpts::from_algorithm(&stage)
             .expect("single-rung [1.0] must validate");
         assert_eq!(opts.tempering, vec![1.0]);
     }

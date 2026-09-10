@@ -108,9 +108,8 @@ fn profile_pmmh_log_posterior_includes_focal_and_nuisance_uniform_priors() {
     // sum.
     let fit_toml = tmp.path().join("fit.toml");
     let model_path = seir_observations_ir().to_string_lossy().to_string();
-    // fit.toml schema requires `[model]`, `[estimate]`, `[fixed]`, and
-    // `[stages.*]` even though profile only consults `[estimate]` and
-    // `[fixed]`. Dummy stage satisfies the loader.
+    // profile reads the problem half — `[model]`, `[estimate]`, `[fixed]` —
+    // and ignores the `[method]`; a file with none would load too.
     // Asymmetric widths: focal width = 0.20, nuisance width = 0.25.
     // The two contributions to the prior sum are then distinct
     // (-ln(0.20) ≈ 1.6094 vs -ln(0.25) ≈ 1.3863) so a bug that
@@ -133,7 +132,7 @@ k         = 5.0
 p_detect  = 0.8
 N0        = 100000.0
 I0        = 10.0
-[stages.dummy]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1

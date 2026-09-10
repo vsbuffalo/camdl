@@ -85,7 +85,7 @@ I0  = 10
 rho = 0.5
 k   = 10.0
 
-[stages.scout]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
@@ -118,7 +118,7 @@ weekly_cases = "weekly_cases.tsv"
 [model]
 camdl = "model.camdl"
 
-[stages.scout]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 2

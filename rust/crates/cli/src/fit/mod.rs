@@ -1,9 +1,10 @@
 //! `camdl fit` — structured inference workflow.
 //!
-//! Single entry point: `camdl fit run FIT.toml [--seed N] [--stage NAME]
-//! [--label "..."] [--force]`. The fit.toml v2 schema declares stages
-//! inline; the runner walks them in order. See
-//! `docs/dev/proposals/2026-04-15-fit-run-spec-v0.4.md`.
+//! `camdl fit run FIT.toml [--seed N] [--starts SPEC] [--label "..."]
+//! [--force]` runs the file's one `[method]` on its problem and stores the
+//! result as a content-addressed leaf; `fit summary`, `fit predict`, `fit
+//! table`, `fit diff` and `fit new` read and derive from those. See
+//! `docs/dev/proposals/2026-09-08-workflow-first-fit-config.md`.
 
 /// gh#616: resolve a model's observation anchors against this fit's `[data]`
 /// and re-emit the compiled IR with them substituted, returning the path every
@@ -17,7 +18,7 @@
 /// back off this path.
 fn resolve_anchors_into_temp_ir(
     ir_path: &str,
-    config: &config_v2::FitConfigV2,
+    config: &config_v2::Problem,
 ) -> Result<String, String> {
     let src = std::fs::read_to_string(ir_path)
         .map_err(|e| format!("cannot read compiled IR {ir_path}: {e}"))?;
@@ -87,6 +88,7 @@ pub mod filter_ess;         // gh#685: the conditional filter's ESS at every obs
 pub mod row_convergence;    // gh#794: R̂/ESS of the value in one predictive/quantity row
 pub mod dt_check;
 pub mod init;
+pub mod starts;         // the `starts` rule: where a method's chains begin
 pub mod chain_starts;
 pub mod loglik_eval;
 pub mod methods;
@@ -105,20 +107,19 @@ pub fn cmd_fit_methods() {
 
 // ─── New `camdl fit run` entry point (config_v2) ────────────────────────────
 
-/// gh#191: the model-capability gate must run on the fit-run path, PER STAGE.
-/// Each stage carries its own simulation backend (a config can mix e.g. an
-/// `ode` nl-sbplx scout with a `chain_binomial` pgas refine), so gating once
-/// against a single backend would be wrong; we check every stage's declared
-/// backend against the compiled model. Returns the first offending stage's
-/// message (prefixed with the stage name) so the user knows where to look.
-fn gate_run_stages_against_model(
-    stages: &[(&str, &config_v2::Stage)],
+/// gh#191: the model-capability gate must run on the fit-run path, against
+/// the method's declared simulation backend. Returns the offending message
+/// prefixed with the method's name so the user knows where to look.
+fn gate_run_method_against_model(
+    algorithm: &config_v2::Algorithm,
     compiled: &sim::CompiledModel,
     dt: f64,
 ) -> Result<(), String> {
-    for (stage_name, stage) in stages {
+    let stage_name = algorithm.method_name();
+    {
+        let stage = algorithm;
         if let Err(msg) = methods::check_model_capabilities(stage.backend(), compiled) {
-            return Err(format!("stage '{}': {}", stage_name, msg));
+            return Err(format!("method '{}': {}", stage_name, msg));
         }
         // gh#449: the recurring-fire collision guard (gh#447) lived only at the
         // three forward backends' entry points; the inference path calls
@@ -133,28 +134,28 @@ fn gate_run_stages_against_model(
         // postdates gh#447, which is why the original guard never considered
         // it.
         let burnin_dt = match stage {
-            config_v2::Stage::Mh { burnin_dt, .. }
-            | config_v2::Stage::Nuts { burnin_dt, .. } => *burnin_dt,
+            config_v2::Algorithm::Mh { burnin_dt, .. }
+            | config_v2::Algorithm::Nuts { burnin_dt, .. } => *burnin_dt,
             _ => None,
         };
         for (label, step) in [("dt", Some(dt)), ("burnin_dt", burnin_dt)] {
             let Some(step) = step else { continue };
             if let Err(e) = compiled.validate_recurring_dt_collisions(step) {
-                return Err(format!("stage '{}' ({} = {}): {}", stage_name, label, step, e));
+                return Err(format!("method '{}' ({} = {}): {}", stage_name, label, step, e));
             }
         }
     }
-    // gh#166 B2: warn (once) if any ODE-backed stage will fit a `dt`-in-rate model
+    // gh#166 B2: warn if an ODE-backed method will fit a `dt`-in-rate model
     // with first-order Euler incidence (the high-order augmented flow is undefined
     // when a rate depends on the step size).
-    if stages.iter().any(|(_, s)| s.backend() == crate::run_meta::InferenceBackend::Ode) {
+    if algorithm.backend() == crate::run_meta::InferenceBackend::Ode {
         methods::warn_if_ode_euler_flow(compiled);
     }
     Ok(())
 }
 
 pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
-    use config_v2::{FitConfigV2, Stage, StartsFrom};
+    use config_v2::{Algorithm, FitConfig};
 
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     // allow_degenerate_rates is set from the loaded `[config]` below (it's a
@@ -171,73 +172,21 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .num_threads(a.parallel)
             .build_global();
     }
-    // M-1 break per docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md
-    // §"Migration": fail loudly on removed flags before any work.
-    if let Some(raw) = a._removed_starts_from.as_deref() {
-        eprintln!(
-            "error: --starts-from is no longer accepted on `camdl fit run`. \
-             Replacement:\n  \
-             --init from_mle --mle <fit-dir>       \
-                 (warm-start every chain from a prior fit's MLE)\n  \
-             --init from_params --params <toml>    \
-                 (warm-start from a hand-written params TOML)\n\
-             Saw --starts-from {}.\n\
-             See `camdl fit run --help` (INIT MODES section).",
-            raw);
-        std::process::exit(1);
-    }
-    if let Some(raw) = a._removed_init_method.as_deref() {
-        eprintln!(
-            "error: --init-method is no longer accepted on `camdl fit run`. \
-             It was renamed to --init for parity with `camdl profile`.\n\
-             Saw --init-method {}.\n\
-             See `camdl fit run --help` (INIT MODES section).",
-            raw);
+    // Removed flags fail loudly before any work, each naming its replacement
+    // (alpha posture: a redirect, not a shim). Every one present is reported,
+    // so `--stage posterior --init from_prior` is answered in one message.
+    if let Some(msg) = removed_flag_message(a) {
+        eprintln!("error: {}", msg);
         std::process::exit(1);
     }
     let fit_path              = a.config.to_string_lossy().into_owned();
     let base_seed             = a.seed.unwrap_or(1);
     let force                 = a.force;
-    let stage_filter          = a.stage.clone();
-    // `--init from_mle --mle <dir>` is the new spelling for the
-    // pre-rev-2 `--starts-from <dir>` flag. The mle-fitdir path
-    // becomes the "all chains at prior-fit MLE" warm start that the
-    // dispatcher's `starts_from_override` already implements.
-    let starts_from_override: Option<String> = a.mle.as_ref()
-        .filter(|_| matches!(a.init,
-            Some(crate::args::InitModeTag::FromMle)))
-        .map(|p| {
-            let s = p.to_string_lossy().to_string();
-            resolve_starts_from_arg(&s)
-        });
-    let allow_nonconverged_scout = a.allow_nonconverged_scout;
-    // Construct the full InitMethod payload from the CLI tag +
-    // companion paths. When `--init from_mle` is used the path-bearing
-    // variant is consumed by `starts_from_override` above (the legacy
-    // dispatcher's `--starts-from` semantic). For the other warm-start
-    // variants (from_prior / from_posterior / from_params) the typed
-    // InitMethod flows into `cli_init_method`, which reaches every
-    // stage through `CliStageOverrides::init` -> `apply_cli_overrides`
-    // (gh#514) — the stage's own `init_method` field carries it from
-    // there.
-    let cli_init_method: Option<crate::fit::init::InitMethod> = match a.init {
-        Some(tag) if !matches!(tag, crate::args::InitModeTag::FromMle) => {
-            Some(tag.to_init_method(
-                a.posterior.as_ref(),
-                a.mle.as_ref(),
-                a.init_params.as_ref(),
-            ).unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }))
-        }
-        _ => None,
-    };
 
-    // gh#540: every CLI flag that changes what a stage computes or stores,
-    // collected once so the stage identity can see all of them. Applied to the
-    // in-memory stage below, before the CAS claim — the dispatch sites no
-    // longer override anything, so there is no route around the key.
+    // gh#540: every CLI flag that changes what the method computes or stores,
+    // collected once so the method identity can see all of them. Applied to
+    // the in-memory method below, before the CAS claim — the dispatch sites
+    // no longer override anything, so there is no route around the key.
     //
     // `--tempering` is validated HERE rather than at dispatch: it now feeds the
     // identity, and a malformed value should fail before a run_id is computed
@@ -256,9 +205,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
     let cli_overrides = crate::fit::config_v2::CliStageOverrides {
-        init:                 cli_init_method.clone(),
-        survey_path:          a.survey_path.clone(),
-        survey_top_k:         a.survey_top_k,
         tempering:            a.tempering.clone(),
         max_tree_depth:       a.max_tree_depth,
         trajectory_warmup:    a.trajectory_warmup,
@@ -283,15 +229,21 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         .map(|s| (s.name.clone(), s.grid.expand()))
         .collect();
 
-    // Load v2 config
-    let mut config = FitConfigV2::load(&fit_path).unwrap_or_else(|e| {
+    // Load the file: the problem half and the one `[method]`.
+    let mut config = FitConfig::load(&fit_path).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
+    // `fit run` runs the file's one method and refuses a file that has none,
+    // naming the table. Every other reader takes the problem alone.
+    if let Err(e) = config.method() {
+        eprintln!("error: {}: {}", fit_path, e);
+        std::process::exit(1);
+    }
     // gh#audit-C6 / gh#189: degenerate-rate handling is a keyed `[config]` field
     // (folds into the fit-identity hash via the config blob), set before any rate
     // evaluation. Was a CLI flag, which silently bypassed the run_id.
-    sim::eval_stats::set_allow_degenerate_rates(config.config.allow_degenerate_rates);
+    sim::eval_stats::set_allow_degenerate_rates(config.problem.config.allow_degenerate_rates);
 
     // gh#656: `--emit-every` reaches exactly one thing on this command — the
     // `[synthetic]` generator, which is the only fit path where the emission
@@ -310,78 +262,87 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: {}", e);
             std::process::exit(1);
         });
-    if emit_every.is_some() && config.synthetic.is_none() {
+    if emit_every.is_some() && !config.problem.is_synthetic_fit() {
         eprintln!(
             "error: --emit-every sets the cadence at which SYNTHETIC \
-             observations are generated, and {} declares no `[synthetic]` \
-             block.\n  \
+             observations are generated, and {} {}.\n  \
              A fit against real data scores each stream at its own data file's \
              times — `emit_schedule` never enters the likelihood — so this flag \
              would change nothing.\n  \
              Drop the flag, or add a `[synthetic]` block to generate data.",
-            fit_path
+            fit_path,
+            if config.problem.synthetic.is_some() {
+                "declares `[data]` beside `[synthetic]`, so it fits the real data"
+            } else {
+                "declares no `[synthetic]` block"
+            }
         );
         std::process::exit(1);
     }
 
-    // gh#514: the same treatment for the chain-start overrides. `--init`,
-    // `--posterior`, `--mle`, `--params`, `--survey-path` and `--survey-top-k`
-    // all change where the chains begin, and therefore the stored output — but
-    // they used to be applied at the DISPATCH site, well after the CAS claim,
-    // while the stage's `identity_payload` carried only the toml's values. Two
-    // runs differing solely in `--init` shared a run_id, and the second was
-    // served the first's result with a "cache hit" line and no warning.
-    // `--force` did not rescue it either: that path errors with "artifact
-    // already completed".
-    //
-    // Clap requires `--stage` alongside each of these, so exactly one stage is
-    // targeted. Writing them here — before `cas::fit_level_hash` and before the
-    // per-stage claim — makes a different override a different artifact.
-    // Leaving them unset leaves the toml's values in place, so a run with no
-    // overrides keys exactly as it did before and no cached fit is invalidated.
-    if let Some(stage_name) = a.stage.as_deref() {
+    // gh#514 / gh#540: the CLI overrides — `--starts` and the sampler knobs —
+    // all change where the chains begin or what the method computes, and
+    // therefore the stored output. They are written INTO the method here,
+    // before `cas::fit_level_hash` and before the claim, so a different
+    // override is a different artifact. Leaving them unset leaves the toml's
+    // values in place.
+    {
+        let method = config.inference.method.as_mut().expect("checked above");
         if !cli_overrides.is_empty() {
-            match config.stages.get_mut(stage_name) {
-                Some(stage) => stage.apply_cli_overrides(&cli_overrides),
-                None => {
-                    eprintln!("error: --stage '{}' is not a stage in {} \
-                               (stages: {})",
-                        stage_name, fit_path,
-                        config.stages.keys().cloned().collect::<Vec<_>>().join(", "));
-                    std::process::exit(1);
-                }
-            }
+            method.algorithm.apply_cli_overrides(&cli_overrides);
+        }
+        if let Some(starts) = &a.starts {
+            method.starts = Some(starts.clone());
         }
     }
 
+    // A sourced `starts` rule reads a stored fit or a file: resolve the handle
+    // now, before the model is compiled, so a bad handle is refused at once
+    // and the dep folded into every leaf is one resolution. The source's
+    // convergence verdict is checked here (`--allow-nonconverged-source`
+    // lifts the refusal) — the one seam an upstream fit is consumed. A bare
+    // rule has nothing to resolve until the default is known, below.
+    let early_resolved_starts: Option<chain_starts::ResolvedStarts> = {
+        let method = config.inference.method.as_ref().expect("checked above");
+        match &method.starts {
+            Some(rule) if rule.source().is_some() => Some(
+                chain_starts::resolve_starts(rule, a.allow_nonconverged_source).unwrap_or_else(|e| {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }),
+            ),
+            _ => None,
+        }
+    };
+
     // Compile `model.camdl` → IR EXACTLY ONCE for the whole fit. Every
-    // per-(cell × sweep point × stage) `FitRunConfig::build` then loads this
-    // pre-compiled IR instead of re-invoking camdlc per unit (a multi-stage
-    // swept fit otherwise recompiled the model dozens of times). The resolved
-    // path is recorded on `config.compiled_ir`; `config.model.camdl` is left
+    // per-(cell × sweep point) `FitRunConfig::build` then loads this
+    // pre-compiled IR instead of re-invoking camdlc per unit (a swept fit
+    // otherwise recompiled the model dozens of times). The resolved path is
+    // recorded on `config.problem.compiled_ir`; `model.camdl` is left
     // untouched so the fit's content hash still hashes the original `.camdl`
     // source bytes (identity is unchanged by the hoist). The temp IR persists
     // for the process — `resolve_ir_path`'s returned path is not a drop guard.
     //
     // gh#439 A2: only `nuts` on the `ode` backend reads the WrtPop state-Jacobian
     // (`rate_state_grad` / `projection_state_grad`, via the ODE forward-sensitivity
-    // gradient in `ode_grad::det_grad`). If no stage is nuts+ode, compile lean
+    // gradient in `ode_grad::det_grad`). Otherwise compile lean
     // (`--no-state-grad`), which omits the dense ~O(G^3) Jacobian that dominates
     // coupled-model IR. The bit is folded into the IR-cache key, so a lean entry is
     // never reused for a nuts+ode fit (and run identity is gradient-independent, so
     // lean vs full share the same model digest).
     let needs_state_grad = config.needs_state_grad();
-    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.model.camdl, needs_state_grad)
+    let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.problem.model.camdl, needs_state_grad)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);
         });
-    config.compiled_ir = Some(compiled_ir.clone());
+    config.problem.compiled_ir = Some(compiled_ir.clone());
 
     // gh#616: if the model declares observation anchors, resolve them ONCE here
     // — from this fit's own `[data]` — and re-emit the compiled IR with the
     // anchors substituted, so every downstream loader (the runner, each sweep
-    // point, each stage, the archived copy) reads the SAME resolved model.
+    // point, the archived copy) reads the SAME resolved model.
     //
     // The alternative, substituting in memory at each of those loads, would put
     // the resolution in half a dozen places that must agree; this puts it in
@@ -393,12 +354,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // `.camdl` source plus the data digests, so two data vintages against one
     // anchored model key differently through the data, exactly as two vintages
     // of any fit do.
-    let compiled_ir = resolve_anchors_into_temp_ir(&compiled_ir, &config)
+    let compiled_ir = resolve_anchors_into_temp_ir(&compiled_ir, &config.problem)
         .unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);
         });
-    config.compiled_ir = Some(compiled_ir.clone());
+    config.problem.compiled_ir = Some(compiled_ir.clone());
 
     // Load model and validate completeness (from the pre-compiled IR).
     let (model, _) = crate::util::load_model(&compiled_ir).unwrap_or_else(|e| {
@@ -409,7 +370,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // values map by looking up the named scenario in the model. Must
     // happen after model load but before validate, so the every-param-
     // resolved check sees the expanded values.
-    config.expand_fixed_from_scenario(&model).unwrap_or_else(|e| {
+    config.problem.expand_fixed_from_scenario(&model).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
@@ -428,7 +389,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         std::process::exit(1);
     });
     // gh#75: prior-presence check honoring the IR fallback. Has to run
-    // after partition/dag validation but with the model IR in scope.
+    // after partition validation but with the model IR in scope.
     let ir_prior_params: std::collections::BTreeSet<&str> = model.parameters.iter()
         .filter(|p| p.prior_dist().is_some() || p.hierarchical().is_some())
         .map(|p| p.name.as_str())
@@ -437,25 +398,32 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
-    if let Some(msg) = config.dangling_priors_warning() {
-        // Warning, not error: a staged Bayesian workflow (scout → pgas)
-        // legitimately declares priors that the IF2 stage ignores — so
-        // we can't refuse here. But silent would hide the copy-paste /
-        // mental-model-mismatch class of bug that's the actual risk.
-        eprintln!("\x1b[33mwarning:\x1b[0m {}", msg);
-    }
-    if let Some(msg) = config.single_init_multichain_warning() {
-        // gh#71: single-init multi-chain posterior runs produce an
-        // uninformative R̂. Warning, not error — the sample is still
-        // valid; only the convergence diagnostic is weakened.
-        eprintln!("\x1b[33mwarning:\x1b[0m {}", msg);
+
+    // The chain-starts rule, resolved against the problem before the identity
+    // is taken (proposal §3.4): `from_prior` when every estimated parameter
+    // declares a prior, `uniform_unconstrained` otherwise, unless the file or
+    // `--starts` spelled one. Said at startup either way, so the rule a run
+    // used is never a thing to infer.
+    let starts_resolution = {
+        let method = config.inference.method.as_mut().expect("checked above");
+        method.resolve_starts(&config.problem, &model)
+    };
+    // From here the method is read-only: the identity below sees exactly what
+    // the runners consume.
+    let method: config_v2::Method = config.inference.method.clone().expect("checked above");
+    let allow_nonconverged_source = a.allow_nonconverged_source;
+    if let Some(msg) = config.point_start_multichain_note() {
+        // gh#71: a point-started multi-chain sampler's R̂ is uninformative;
+        // the summary will report it as not assessed. A note, not an error —
+        // the sample is still valid.
+        eprintln!("\x1b[33mnote:\x1b[0m {}", msg);
     }
 
     // ── Validate sweeps ───────────────────────────────────────────────────
     // Validate: swept params must be in [fixed], not [estimate]
-    let fixed_resolved = config.fixed.resolve().unwrap_or_default();
+    let fixed_resolved = config.problem.fixed.resolve().unwrap_or_default();
     for (name, _) in &sweep_specs {
-        if config.estimate.contains_key(name) {
+        if config.problem.estimate.contains_key(name) {
             eprintln!("error: cannot sweep '{}' — it is in [estimate].\n  \
                        Sweeps override [fixed] parameters. Move '{}' to [fixed] first.",
                 name, name);
@@ -492,55 +460,34 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("sweep: {} points", sweep_points.len());
     }
 
-
-    // Validate --resume requires a PGAS or PMMH stage. Other methods
+    // Validate --resume requires a PGAS or PMMH method. Other methods
     // have no extension dimension (IF2's cooling depends on total
     // iterations, PFilter is single-pass), so resuming would be
     // statistically incoherent.
-    if a.resume.is_some() {
-        if let Some(ref name) = stage_filter {
-            match config.stages.get(name.as_str()) {
-                Some(s) if matches!(s, Stage::PGAS { .. } | Stage::PMMH { .. }) => {}
-                Some(s) => {
-                    eprintln!("error: --resume is only supported for PGAS and PMMH stages; \
-                               '{}' is method '{}'.", name, s.method_name());
-                    std::process::exit(1);
-                }
-                None => {} // The stage_filter check below will report this.
-            }
-        }
+    if a.resume.is_some()
+        && !matches!(method.algorithm, Algorithm::PGAS { .. } | Algorithm::PMMH { .. })
+    {
+        eprintln!("error: --resume is only supported for PGAS and PMMH methods; \
+                   this fit's method is '{}'.", method.algorithm.method_name());
+        std::process::exit(1);
     }
 
-    // Determine which stages to run
-    let stages_to_run: Vec<(&str, &Stage)> = if let Some(ref name) = stage_filter {
-        match config.stages.get(name.as_str()) {
-            Some(stage) => vec![(name.as_str(), stage)],
-            None => {
-                let available: Vec<&str> = config.stages.keys().map(|s| s.as_str()).collect();
-                eprintln!("error: stage '{}' not found. Available: {}", name, available.join(", "));
-                std::process::exit(1);
-            }
-        }
-    } else {
-        config.stages.iter().map(|(k, v)| (k.as_str(), v)).collect()
-    };
-
-    // gh#191: gate the model's required capabilities against EACH stage's
+    // gh#191: gate the model's required capabilities against the method's
     // declared backend, before any fitting work. `profile` already runs this
     // check, but `fit run` never did — so a real-compartment (ODE-coupled)
-    // model on a chain_binomial inference stage was silently mis-fit (the
-    // filter loops freeze the real reservoir at its init value). Fail fast
-    // with the actionable per-stage message instead.
+    // model on a chain_binomial method was silently mis-fit (the filter loops
+    // freeze the real reservoir at its init value). Fail fast with the
+    // actionable message instead.
     {
         // `required_capabilities()` is STRUCTURAL (transitions / compartments /
         // balance) — the parameter VALUES are irrelevant to it. But
         // `CompiledModel::new` requires every parameter to carry a value, and
         // estimated parameters carry `value = None` in the IR (their start is
-        // resolved per-stage from `[estimate].start` later). So fill any
-        // value-less parameter with a harmless placeholder purely for this
-        // capability scan — without it the gate errored "parameter '<estimated>'
-        // has no value" on every `init = survey_top_k` / estimate-only fit
-        // (gh#191: the gate must not demand resolved params it doesn't use).
+        // resolved from `[estimate].start` later). So fill any value-less
+        // parameter with a harmless placeholder purely for this capability
+        // scan — without it the gate errored "parameter '<estimated>' has no
+        // value" on every estimate-only fit (gh#191: the gate must not demand
+        // resolved params it doesn't use).
         let mut cap_model = model.clone();
         for p in &mut cap_model.parameters {
             if p.value.resolved_value().is_none() {
@@ -555,38 +502,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: {:?}", e);
             std::process::exit(1);
         });
-        if let Err(msg) = gate_run_stages_against_model(&stages_to_run, &compiled, config.config.dt) {
+        if let Err(msg) = gate_run_method_against_model(&method.algorithm, &compiled, config.problem.config.dt) {
             eprintln!("error: {}", msg);
             std::process::exit(1);
         }
     }
 
     // gh#audit-H12: --record-prequential and --record-ancestry only have
-    // effect inside the Stage::PFilter arm of the stage match. clap
-    // enforces `requires = "stage"`, but doesn't validate that the named
-    // stage *resolves* to a PFilter — so before this check, passing the
-    // flags with `--stage scout` (or any non-PFilter stage) silently
-    // dropped them. List the available PFilter stages on error so the
-    // user knows what they should have passed.
-    if a.record_prequential || a.record_ancestry {
-        let on_pfilter = stages_to_run.iter()
-            .all(|(_, s)| matches!(s, Stage::PFilter { .. }));
-        if !on_pfilter {
-            let pf_stages: Vec<&str> = config.stages.iter()
-                .filter(|(_, s)| matches!(s, Stage::PFilter { .. }))
-                .map(|(k, _)| k.as_str())
-                .collect();
-            let flag = if a.record_prequential { "--record-prequential" } else { "--record-ancestry" };
-            if pf_stages.is_empty() {
-                eprintln!("error: {} requires --stage <pfilter-stage>, \
-                    but this fit config has no PFilter stages.", flag);
-            } else {
-                eprintln!("error: {} requires --stage <pfilter-stage>. \
-                    Available PFilter stages in this config: {}",
-                    flag, pf_stages.join(", "));
-            }
-            std::process::exit(1);
-        }
+    // effect on a PFilter method. Refuse them on any other, so they are never
+    // silently dropped.
+    if (a.record_prequential || a.record_ancestry)
+        && !matches!(method.algorithm, Algorithm::PFilter { .. })
+    {
+        let flag = if a.record_prequential { "--record-prequential" } else { "--record-ancestry" };
+        eprintln!("error: {} applies to a `pfilter` method, and this fit's method is \
+                   `{}`.", flag, method.algorithm.method_name());
+        std::process::exit(1);
     }
 
     // gh#604: every key the user typed under `[data.observations]` /
@@ -597,7 +528,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // real fault is a binding that names no stream. The motivating case is a
     // top-level key such as `ic_free` written below the `[data.observations]`
     // header, which TOML scopes into the table.
-    if let Ok(ds) = config.data_spec() {
+    if let Ok(ds) = config.problem.data_spec() {
         for (origin, table) in [
             ("[data.observations]", Some(&ds.observations)),
             ("[data.holdout]", ds.holdout.as_ref()),
@@ -612,12 +543,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
     // ── Compute the fit-wide identity + sidecar (no fit-root run.json) ──
     //
-    // Per-stage run.json records live inside each stage dir; the fit as a
-    // whole is the `fits/{stem}-{h8}/` path segment, not a separate record
-    // (see the note below where `build_fit_run` is called). The
-    // seed-independent parent fit hash computed here is reused by every
-    // stage as its `fit`-level hash — computing it once avoids the
-    // O(stages × full-I/O rehash) pattern.
+    // The method leaf's run.json lives inside the leaf; the fit as a whole is
+    // the `fits/{stem}-{h8}/` path segment, not a separate record. The
+    // seed-independent parent fit hash computed here is reused by every leaf
+    // as its `fit`-level hash — computing it once avoids the O(cells × full-I/O
+    // rehash) pattern.
     let fit_start = std::time::Instant::now();
     // Validate --label early so we fail before any I/O. The same
     // validator is reused by `cmd_label` (post-hoc relabel).
@@ -634,28 +564,28 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // gh#147 (M3.2): the fit identity is a CAS *path segment*
     // (`fits/{fit}-{h8}/`), not a separate fit-wide `run.json` — so there is no
     // fit-wide record; the segment is the fit-level home. Fit-level outputs
-    // (grid summary, sweep_failures, synthetic data) live directly under it.
+    // (synthetic data) live directly under it.
     // The fit-level identity (the `fit` CAS level) and the directory its
-    // stage leaves actually land in. `parent_fit_hash` is the fit-level
+    // method leaves actually land in. `parent_fit_hash` is the fit-level
     // `ContentHash` (the same hash `resolve_fit_stage` puts on the `fit`
     // level, and the same one `FitView.fit_hash` reads back from `run.json`),
     // and `announced_fit_dir` is `fits/{stem}-{h8}/` built from it — so the
-    // path `fit run` announces is exactly where the `NN-stage-{h8}` leaves
+    // path `fit run` announces is exactly where the `{method}-{h8}` leaves
     // are written.
     //
     // Real and synthetic share this one `runid` fit-level digest. A real fit
     // folds its base `[data]` stream digests; a synthetic fit has no input
     // data (it generates data per-cell from the model + `[synthetic]`, both
     // already in the digest), so it hashes with an EMPTY data map. Either way
-    // the container is keyed on model + config + engine, and the per-cell
-    // stage leaves resolve their own segment (folding the generated data).
-    let announce_cas_root = crate::run_paths::output_root(None, config.output_dir.as_deref());
+    // the container is keyed on the problem + engine, and the per-cell method
+    // leaves resolve their own segment (folding the generated data).
+    let announce_cas_root = crate::run_paths::output_root(None, config.problem.output_dir.as_deref());
     let announce_stem = crate::hashing::path_stem_slug(&fit_path)
         .unwrap_or_else(|| "fit".to_string());
     let announce_ir_version = ir::IR_VERSION.trim().to_string();
     // Real fits resolve their base `[data]` streams; synthetic fits have none
     // (empty map → no data digests folded).
-    let fit_data_paths: indexmap::IndexMap<String, String> = config.data_spec().ok()
+    let fit_data_paths: indexmap::IndexMap<String, String> = config.problem.data_spec().ok()
         .and_then(|ds| {
             let model_obs_names: Vec<String> =
                 model.observations.iter().map(|o| o.name.clone()).collect();
@@ -666,7 +596,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         &model,
         &announce_ir_version,
         crate::version::VERSION_SHORT,
-        &config,
+        &config.problem,
         &fit_data_paths,
     )
     .unwrap_or_else(|e| {
@@ -676,24 +606,21 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let announced_fit_dir = cas::fit_segment_dir(
         &announce_cas_root, &announce_stem, &parent_fit_hash_ch);
     let parent_fit_hash = parent_fit_hash_ch.to_hex();
-    // Synthetic-data generation + fit-level outputs (grid summary,
-    // sweep_failures) write under the same content-addressed segment.
+    // Synthetic-data generation writes under the same content-addressed
+    // segment.
     let fit_dir = announced_fit_dir.clone();
 
     let fit_sidecar = build_fit_sidecar(&config, &fit_path, validated_label, Some(&model));
 
-    eprintln!("fit: {} ({} stage{})",
-        fit_path,
-        stages_to_run.len(),
-        if stages_to_run.len() == 1 { "" } else { "s" },
-    );
-    eprintln!("  model:    {}", config.model.camdl);
-    eprintln!("  estimate: {}", config.estimate.keys()
+    eprintln!("fit: {} (method={})", fit_path, method.algorithm.method_name());
+    eprintln!("  model:    {}", config.problem.model.camdl);
+    eprintln!("  estimate: {}", config.problem.estimate.keys()
         .map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
     eprintln!("  fixed:    {}", {
-        let resolved = config.fixed.resolve().unwrap_or_default();
+        let resolved = config.problem.fixed.resolve().unwrap_or_default();
         resolved.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
     });
+    eprintln!("  starts:   {}", starts_resolution.describe());
     // gh#507: absolute, not as-written. A relative string here is consistent
     // with either base (the CWD or the fit.toml's directory), so it cannot
     // tell you which one you got — which is exactly how a run tree ended up
@@ -706,8 +633,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // computing log L_c (conditional on y₁) rather than log L. Silent
     // when ic_free is false or absent. See
     // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
-    if config.ic_free.unwrap_or(false) {
-        let perturb_only_at_t0_params: Vec<&str> = config.estimate.iter()
+    if config.problem.ic_free.unwrap_or(false) {
+        let perturb_only_at_t0_params: Vec<&str> = config.problem.estimate.iter()
             .filter(|(_, spec)| spec.perturb_only_at_t0)
             .map(|(n, _)| n.as_str())
             .collect();
@@ -727,7 +654,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             sources.push(format!("`init {{ }}` laws on [{}]", drawn.join(", ")));
         }
         if !perturb_only_at_t0_params.is_empty() {
-            sources.push(format!("perturb_only_at_t0 params [{}] (if2 stages only)",
+            sources.push(format!("perturb_only_at_t0 params [{}] (if2 only)",
                 perturb_only_at_t0_params.join(", ")));
         }
         eprintln!("    - initial state spread from: {}", sources.join("; "));
@@ -737,8 +664,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // ── Build the replicate grid: (dataset_idx, fit_seed) cells ──────────
     //
     // Four canonical modes, all routed through the same grid. Each cell is a
-    // content-addressed fit (its own FitDigest base); the legacy literal cell
-    // dirs (`real/fit_<seed>/`, `synthetic/ds_NN/fit_<seed>/`) are retired.
+    // content-addressed fit (its own FitDigest base).
     //   Mode                           synthetic?  fit_seeds     Cells
     //   Single fit                     no          None/scalar   1
     //   Start-sensitivity              no          list of M     M  (seed levels, one base)
@@ -747,48 +673,51 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     //
     // For synthetic modes the datasets are generated once up front and the
     // per-cell DataSpec is materialised from their on-disk paths. See
-    // docs/dev/proposals/2026-04-17-synthetic-fit-replicates.md.
+    // docs/dev/proposals/2026-04-17-synthetic-fit-replicates.md. A file that
+    // declares `[data]` beside `[synthetic]` is a real-data fit here: the
+    // truth is `fit recovery`'s to read (proposal §8, item 19).
     //
     // Multi-seed fits produce sibling CAS cells under one `fit`-level base
     // (the seed is a factored `runid` level), with no cross-cell aggregator.
-    // A cross-seed roll-up view (per-stage chain-R̂ across fit_seeds) is a
+    // A cross-seed roll-up view (per-method chain-R̂ across fit_seeds) is a
     // derived index, deferred to M4 (gh#154) — the same home as the profile
     // and grid roll-ups. The same applies to `dataset_idx` for synthetic fits.
-    let fit_seeds: Vec<u64> = match &config.fit_seeds {
+    let fit_seeds: Vec<u64> = match &config.inference.fit_seeds {
         Some(list) => list.clone(),
         None       => vec![base_seed],
     };
 
-    let synthetic_datasets: Vec<synthetic::SyntheticDataset> = if let Some(spec) = &config.synthetic {
-        let datasets = synthetic::generate_synthetic_datasets(
-            spec,
-            // Pre-compiled IR (compiled once above) so per-dataset generation
-            // doesn't re-invoke camdlc; falls back to the source path.
-            config.compiled_ir.as_deref().unwrap_or(&config.model.camdl),
-            &fit_dir,
-            config.config.dt,
-            emit_every.as_ref(),
-        ).unwrap_or_else(|e| {
-            eprintln!("error: synthetic-data generation failed: {}", e);
-            std::process::exit(1);
-        });
-        eprintln!("synthetic: generated {} dataset{} under {}/synthetic/data/",
-            datasets.len(),
-            if datasets.len() == 1 { "" } else { "s" },
-            fit_dir.display());
-        datasets
-    } else {
-        Vec::new()
+    let synthetic_datasets: Vec<synthetic::SyntheticDataset> = match &config.problem.synthetic {
+        Some(spec) if config.problem.is_synthetic_fit() => {
+            let datasets = synthetic::generate_synthetic_datasets(
+                spec,
+                // Pre-compiled IR (compiled once above) so per-dataset generation
+                // doesn't re-invoke camdlc; falls back to the source path.
+                config.problem.compiled_ir.as_deref().unwrap_or(&config.problem.model.camdl),
+                &fit_dir,
+                config.problem.config.dt,
+                emit_every.as_ref(),
+            ).unwrap_or_else(|e| {
+                eprintln!("error: synthetic-data generation failed: {}", e);
+                std::process::exit(1);
+            });
+            eprintln!("synthetic: generated {} dataset{} under {}/synthetic/data/",
+                datasets.len(),
+                if datasets.len() == 1 { "" } else { "s" },
+                fit_dir.display());
+            datasets
+        }
+        _ => Vec::new(),
     };
 
     // A cell is one (data_source, fit_seed) pair. Real-data cells carry
-    // `dataset_idx = None` and leave the existing `config.data` in place;
-    // synthetic cells carry `Some(idx)` and replace `config.data` with a
+    // `dataset_idx = None` and leave the existing `[data]` in place;
+    // synthetic cells carry `Some(idx)` and replace `[data]` with a
     // DataSpec pointing at the generated TSV.
     struct Cell {
         dataset_idx: Option<usize>,
         fit_seed: u64,
-        // None → keep config.data; Some → overwrite with synthetic path.
+        // None → keep the problem's data; Some → overwrite with synthetic path.
         data_override: Option<config_v2::DataSpec>,
     }
     let cells: Vec<Cell> = if synthetic_datasets.is_empty() {
@@ -830,21 +759,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             if total_cells == 1 { "" } else { "s" });
     }
 
-    // Fix 2026-04-19 (surfaced when testing camdl-book profiles): collect per-sweep-point
-    // gate failures instead of exit(1). A sweep is explicitly a
-    // grid of cells where edge values are expected to fail
-    // convergence — treating the first failure as fatal destroys
-    // the profile-likelihood use case. Collect (cell_i, pt_idx,
-    // stage_name, reason) tuples; when all cells finish, print a
-    // summary of passed/failed cells.
-    let mut sweep_failures: Vec<(usize, usize, String, String)> = Vec::new();
-
     // ── gh#147 (M3.2): content-addressed store root + fit-level label ──
-    // Fits write to `<output_root>/fits/{fit}-{h8}/{NN-stage}-{h8}/seed_N-{h8}/`
-    // (symmetric to sims under `<output_root>/sims/`), NOT the legacy
-    // per-fit `fit_dir`. The fit level is a path segment, so there is no
-    // separate fit-wide record.
-    let cas_root = crate::run_paths::output_root(None, config.output_dir.as_deref());
+    // Fits write to `<output_root>/fits/{fit}-{h8}/{method}-{h8}/seed_N-{h8}/`
+    // (symmetric to sims under `<output_root>/sims/`). The fit level is a
+    // path segment, so there is no separate fit-wide record.
+    let cas_root = crate::run_paths::output_root(None, config.problem.output_dir.as_deref());
     let fit_stem = crate::hashing::path_stem_slug(&fit_path)
         .unwrap_or_else(|| "fit".to_string());
     let ir_version_str = ir::IR_VERSION.trim().to_string();
@@ -856,16 +775,37 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     let mut written_fit_segments: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
 
-    // ── Execute grid: cell × sweep_point × stage ──
+    // The rule every cell draws from and folds into its identity: the sourced
+    // resolution taken above, or the bare rule (declared or defaulted) now.
+    let starts_rule = method.starts().cloned().unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+    let resolved_starts = early_resolved_starts.unwrap_or_else(|| {
+        chain_starts::resolve_starts(&starts_rule, allow_nonconverged_source).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        })
+    });
+    if let Some(src) = &resolved_starts.source {
+        match &src.leaf_dir {
+            Some(leaf) => eprintln!(
+                "  starts source: {} ({})",
+                leaf.display(),
+                src.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            ),
+            None => eprintln!("  starts source: {}", src.file.display()),
+        }
+    }
+
+    // ── Execute grid: cell × sweep_point ──
     for (cell_i, cell) in cells.iter().enumerate() {
-        let mut cell_config = config.clone();
+        let mut cell_problem = config.problem.clone();
         if let Some(spec) = &cell.data_override {
-            // Materialise the synthetic cell's data path. Keep
-            // `synthetic` set so `per_fit_prefix` picks the
-            // `synthetic/ds_NN/fit_<seed>/` branch; `data_spec()`
-            // returns `data` when both are present, which is the
-            // per-cell behaviour we want.
-            cell_config.data = Some(spec.clone());
+            // Materialise the synthetic cell's data path. `[synthetic]`
+            // stays set — `data_spec()` returns `data` when both are
+            // present, which is the per-cell behaviour we want.
+            cell_problem.data = Some(spec.clone());
         }
         let seed = cell.fit_seed;
         if total_cells > 1 {
@@ -877,10 +817,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
 
-    // Execute stages: sweep_point × stage
+    // Execute: sweep_point
     for (pt_idx, sweep_point) in sweep_points.iter().enumerate() {
-        // Build a config with swept values applied to [fixed]
-        let mut sweep_config = cell_config.clone();
+        // The problem with the swept values applied to [fixed]. The method is
+        // unchanged by a sweep.
+        let mut sweep_config = cell_problem.clone();
         for (name, val) in sweep_point {
             sweep_config.fixed.values.insert(name.clone(), *val);
         }
@@ -899,12 +840,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             std::process::exit(1);
         }
 
-        // Per-cell output directory:
-        //   real-data:  <fit_dir>/real/fit_<seed>/<stage>/
-        //   synthetic:  <fit_dir>/synthetic/ds_NN/fit_<seed>/<stage>/
-        // Sweep slug (when present) is nested under the per-fit prefix.
-        let per_fit_prefix = sweep_config.per_fit_prefix(seed, cell.dataset_idx);
-        let sweep_fit_dir = if has_sweep {
+        if has_sweep {
             let slug: String = sweep_point.iter()
                 .map(|(k, v)| format!("{}_{:.3}", k, v))
                 .collect::<Vec<_>>()
@@ -913,38 +849,20 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 eprintln!();
             }
             eprintln!("═══ sweep point {}/{}: {} ═══", pt_idx + 1, sweep_points.len(), slug);
-            fit_dir.join(&per_fit_prefix).join(slug)
-        } else {
-            fit_dir.join(&per_fit_prefix)
-        };
+        }
 
-    // gh#147 (M3.2): memoize each completed stage's CAS identity so a
-    // downstream `StartsFrom` resolves to the upstream leaf and folds an
-    // `ArtifactRef` dep into its stage hash (the deps-DAG). Scoped per
-    // (cell, sweep_point) — the pipeline that ran together.
-    let mut stage_identities: std::collections::HashMap<String, (runid::ContentHash, std::path::PathBuf)> =
-        std::collections::HashMap::new();
-    let _ = &sweep_fit_dir; // legacy layout retired; CAS root is output_root
-    for (stage_name, stage) in &stages_to_run {
-        eprintln!("\n── stage: {} (method={}) ──", stage_name, stage.method_name());
+        let stage_name = method.algorithm.method_name();
+        eprintln!("\n── method: {} ──", stage_name);
 
         // Resolve data the runners load from (also feeds the data digests).
-        let fixed_resolved = sweep_config.fixed.resolve().unwrap_or_default();
         let data_spec = sweep_config.data_spec().unwrap_or_else(|e| {
             eprintln!("error: {}", e);
             std::process::exit(1);
         });
         // Expand the [data] shorthand (`file = "..."`) into the canonical
         // per-stream map before hashing, so the shorthand and the
-        // verbose `[data.observations]` form produce identical stage
+        // verbose `[data.observations]` form produce identical method
         // hashes when they reference the same data.
-        // The model's declared observation stream names, used to expand the
-        // `[data] file = "..."` single-file shorthand. The prior code navigated
-        // `model_json["observations"]` — the IR *envelope*'s top level — but the
-        // streams live under `model.observations`, so this always saw zero
-        // streams and the single-file form errored with "model declares no
-        // observation streams". Use the typed model (already loaded above), as
-        // the sibling sites at lines 414 / 547 do.
         let model_obs_names: Vec<String> =
             model.observations.iter().map(|o| o.name.clone()).collect();
         let effective_obs = data_spec.effective_observations(&model_obs_names)
@@ -952,40 +870,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             });
-        // ── gh#147 (M3.2): resolve StartsFrom → upstream CAS leaf + dep ──
-        // CLI --starts-from wins (single-stage only); else the stage's
-        // init_mle. `effective_starts` is the dir the runner loads the prior
-        // θ̂ from (now an upstream CAS leaf); `deps` folds the upstream's
-        // identity + consumed `fit_state.toml` digest into this stage's hash.
-        // `starts_from_override` derives from `--mle`, which clap marks
-        // `requires = "stage"` — so when it is Some, stages_to_run is
-        // exactly the one selected stage. (A `.filter(len == 1)` here was
-        // vestigial belt-and-braces re-checking what clap enforces.)
-        let cli_starts = starts_from_override.clone();
-        let (effective_starts, mut deps): (Option<String>, Vec<runid::inputs::ArtifactRef>) =
-            if let Some(dir) = cli_starts {
-                let dep = cas::cas_dep_from_dir(std::path::Path::new(&dir));
-                (Some(dir), dep.into_iter().collect())
-            } else {
-                match stage.starts_from() {
-                    StartsFrom::Random => (None, Vec::new()),
-                    StartsFrom::Stage(ref dep_name) => match stage_identities.get(dep_name) {
-                        Some((up_run_id, up_dir)) => {
-                            let dep = cas::cas_dep_ref(*up_run_id, up_dir);
-                            (Some(up_dir.to_string_lossy().to_string()), dep.into_iter().collect())
-                        }
-                        None => {
-                            eprintln!("error: stage '{}' starts_from '{}', which has not run \
-                                       in this pipeline", stage_name, dep_name);
-                            std::process::exit(1);
-                        }
-                    },
-                    StartsFrom::Directory(ref path) => {
-                        let dep = cas::cas_dep_from_dir(path);
-                        (Some(path.to_string_lossy().to_string()), dep.into_iter().collect())
-                    }
-                }
-            };
+        // The method level's `deps`: the content of a sourced `starts` rule's
+        // file, so a regenerated source re-keys this run (gh#541), plus the
+        // `--resume` base.
+        let mut deps: Vec<runid::inputs::ArtifactRef> =
+            resolved_starts.source.iter().map(|s| s.dep.clone()).collect();
 
         // gh#147 (M3.2): --resume <base ref> reads a prior leaf read-only; the
         // resumed run writes a distinct leaf keyed on the new target_length
@@ -1002,50 +891,21 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             base
         });
 
-        // gh#147: when this stage seeds chains from a survey
-        // (`init = "survey_top_k"`), fold the survey's CONTENT (run_id +
-        // landscape.tsv digest) into `deps` so a regenerated survey re-keys
-        // the fit — the path string in `identity_payload` only distinguishes a
-        // *different* directory, not the same path rewritten. Folded for every
-        // stage kind via the `survey_init_path` accessor.
-        if let Some(survey_dir) = stage.survey_init_path() {
-            if let Some(dep) = cas::cas_survey_dep(survey_dir) {
-                deps.push(dep);
-            }
-        }
-
-        // gh#541: same treatment for the other two file-backed chain-start
-        // sources. `--posterior`'s draws.tsv and `--params`' TOML were folded
-        // by PATH only (gh#514), so rewriting either in place left the run_id
-        // unchanged and the fit was served from cache — the previous file's
-        // starting values, silently. `--survey-path` above and `--mle` (via
-        // `cas_dep_from_dir` on the upstream leaf) already keyed on content.
-        if let Some((src, artifact)) = stage.init_source_file() {
-            if let Some(dep) = cas::cas_file_dep(&src, artifact) {
-                deps.push(dep);
-            }
-        }
-
         // ── CAS identity + claim ──
-        // sweep_config is the authoritative document inside the sweep loop;
-        // reading `config` here was correct only because a sweep never adds
-        // or removes stages.
-        let ordinal = sweep_config.stages.get_index_of(*stage_name).map(|i| i + 1).unwrap_or(0);
+        // sweep_config is the authoritative problem inside the sweep loop.
         let ctx = cas::FitStageCtx {
             model: &model,
             fit_stem: &fit_stem,
             ir_version: &ir_version_str,
             engine_version: crate::version::VERSION_SHORT,
-            config: &sweep_config,
+            problem: &sweep_config,
             data_paths: &effective_obs,
-            stage_name: *stage_name,
-            stage,
-            ordinal,
+            method: &method,
             seed,
             deps: deps.clone(),
         };
         let resolved = cas::resolve_fit_stage(&ctx).unwrap_or_else(|e| {
-            eprintln!("error: fit-stage identity: {}", e);
+            eprintln!("error: fit-method identity: {}", e);
             std::process::exit(1);
         });
         let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitStage, &resolved.levels);
@@ -1076,7 +936,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // `batch.rs`'s sibling `model.ir.json`). The base model IR is
                 // structurally identical across sweep cells (a sweep overrides
                 // parameter *values* at resolve time), so one archive per segment.
-                if let Some(ir_src) = config.compiled_ir.as_deref() {
+                if let Some(ir_src) = config.problem.compiled_ir.as_deref() {
                     let dest = seg.join("model.ir.json");
                     match std::fs::read(ir_src) {
                         Ok(bytes) => {
@@ -1104,13 +964,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // that the fit path was safe because `config.model.camdl` "is
                 // source by construction"; it is not. One guard over both
                 // blocks, since they share the precondition.
-                if !crate::util::model_is_camdl_source(&config.model.camdl) {
+                if !crate::util::model_is_camdl_source(&config.problem.model.camdl) {
                     eprintln!(
                         "note: model given as compiled IR; skipping model.render.json / \
                          model.graph.json (pass the .camdl source to archive the display render)"
                     );
                 } else {
-                match crate::util::render_model_json(std::path::Path::new(&config.model.camdl)) {
+                match crate::util::render_model_json(std::path::Path::new(&config.problem.model.camdl)) {
                     Ok(json) => {
                         let dest = seg.join("model.render.json");
                         if let Err(e) = std::fs::write(&dest, &json) {
@@ -1123,7 +983,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // Archive the structured flow graph (`model.graph.json`) beside
                 // the display render so a viewer can draw the compartmental flow
                 // diagram. Same best-effort, identity-neutral treatment.
-                match crate::util::render_model_graph_json(std::path::Path::new(&config.model.camdl)) {
+                match crate::util::render_model_graph_json(std::path::Path::new(&config.problem.model.camdl)) {
                     Ok(json) => {
                         let dest = seg.join("model.graph.json");
                         if let Err(e) = std::fs::write(&dest, &json) {
@@ -1138,9 +998,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
         let store = runid::FsCasStore::new(&cas_root);
         // Streaming write through the one resolved-writer seam (gh#241 PR D).
-        // The running record carries Null inputs (the stage's loglik summary is
-        // a post-run result); the final inputs are supplied to `finalize`. The
-        // upstream lineage deps ride in `RecordMeta`.
+        // The running record carries Null inputs (the method's loglik summary
+        // is a post-run result); the final inputs are supplied to `finalize`.
+        // The upstream lineage deps ride in `RecordMeta`.
         let resolved_artifact = crate::resolve::ResolvedArtifact {
             kind: runid::ArtifactKind::FitStage,
             levels: resolved.levels.clone(),
@@ -1152,11 +1012,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             .with_deps(deps.clone());
         // Reuse decision through the one policy seam. `--resume` deliberately
         // does NOT reuse: it extends a base run into a NEW leaf keyed on the
-        // longer chain, so this stage must run even when its own identity is
+        // longer chain, so this method must run even when its own identity is
         // already stored. `--force` displaces the incumbent (quarantined) —
         // previously it skipped the lookup only to die at the claim with
         // "artifact already completed", which is why the flag never worked
-        // on a completed stage.
+        // on a completed leaf.
         let policy = if force {
             crate::resolve::WritePolicy::Force
         } else {
@@ -1167,12 +1027,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
                     eprintln!("  \x1b[33mcache hit — reusing {}\x1b[0m",
                         dir.strip_prefix(&cas_root).unwrap_or(&dir).display());
-                    stage_identities.insert(stage_name.to_string(), (resolved.run_id, dir));
                     continue;
                 }
                 Ok(crate::resolve::ReuseVerdict::MustRun) => {}
                 Err(e) => {
-                    eprintln!("error: fit stage cache check {}: {}", cas_path.display(), e);
+                    eprintln!("error: fit method cache check {}: {}", cas_path.display(), e);
                     std::process::exit(1);
                 }
             }
@@ -1186,7 +1045,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 unreachable!("Streaming write mode never returns a committed path")
             }
             Err(e) => {
-                eprintln!("error: claim fit stage {}: {}", cas_path.display(), e);
+                eprintln!("error: claim fit method {}: {}", cas_path.display(), e);
                 std::process::exit(1);
             }
         };
@@ -1204,7 +1063,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
 
         let stage_t0 = std::time::Instant::now();
-        // Uninitialized on purpose: every dispatch arm must assign a stage
+        // Uninitialized on purpose: every dispatch arm must assign a
         // loglik (or exit) — the compiler enforces that no arm can fall
         // through to the finalize below with a silent None.
         let stage_best_loglik: Option<f64>;
@@ -1213,146 +1072,51 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let mut stage_best_chain: Option<usize> = None;
 
         // Surface the registry caveat for Beta/Experimental methods, once per
-        // executing stage (after the cache-hit skip above, so reused stages
+        // executing method (after the cache-hit skip above, so reused leaves
         // stay silent). Registry-driven so it can't drift from `fit methods`.
-        methods::emit_status_banner(stage.method_kind(), stage.backend());
+        methods::emit_status_banner(method.algorithm.method_kind(), method.algorithm.backend());
 
-        // gh#506 follow-up, gh#881: a declared `start` that the chosen init
-        // mode discards is a silent no-op. Not an error — the spreading modes
+        // gh#506 follow-up, gh#881: a declared `start` that the chosen starts
+        // rule discards is a silent no-op. Not an error — the spread rules
         // ignore it on purpose — but the user who wrote the value should hear
         // that it had no effect, rather than inferring a start that never
-        // happened. Every stage kind draws its chain starts the same way, so
-        // this runs once here, before the dispatch. Inside the IF2 arm it
-        // reached only IF2 fits: PMMH, PGAS, MH, NUTS and the NLopt stages
-        // discarded `[estimate].start` without a word, which is how the
-        // gh#876 modeller came to declare the true value and then fit from
-        // starts 33-41% away from it.
-        if effective_starts.is_none()
-            && init::ignores_base_point(&stage.init_method(), stage.chains())
-        {
+        // happened. Every method kind draws its chain starts the same way, so
+        // this runs once here, before the dispatch.
+        if starts_rule.ignores_base_point(method.algorithm.chains()) {
             let declared: Vec<&str> = sweep_config.estimate.iter()
                 .filter(|(_, spec)| spec.start.is_some())
                 .map(|(n, _)| n.as_str())
                 .collect();
             if !declared.is_empty() {
                 eprintln!(
-                    "  \x1b[33mnote:\x1b[0m `init = \"{}\"` draws every chain's \
+                    "  \x1b[33mnote:\x1b[0m `starts = \"{}\"` draws every chain's \
                      start, so `[estimate].start` is unused here for: {}. \
-                     Use `init = \"single\"` to start every chain at the \
+                     Use `starts = \"single\"` to start every chain at the \
                      declared values, or drop the `start` entries.",
-                    stage.init_method(), declared.join(", "));
+                    starts_rule.tag(), declared.join(", "));
             }
         }
 
-        match stage {
-            Stage::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, init_method, survey_path, survey_top_k_n, loglik_eval, gate, dt_check, .. } => {
-                // clean_eval comes straight from the stage TOML — it is part of
-                // the fit's identity (folded into the IF2 stage's whole-serialize
-                // identity_payload), so it has no CLI override (gh#189: a CLI
-                // override bypassed the run_id and silently re-scored under the
-                // same key). The gate's `--decibans-thresh` override is applied
-                // through `apply_cli_overrides` BEFORE the identity is taken,
-                // so `gate` here already carries it (gh#540 seam).
+        match &method.algorithm {
+            Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
+                // clean_eval comes straight from the method TOML — it is part
+                // of the fit's identity (folded into the IF2 method's
+                // whole-serialize identity_payload), so it has no CLI override
+                // (gh#189: a CLI override bypassed the run_id and silently
+                // re-scored under the same key). The gate's `--decibans-thresh`
+                // override is applied through `apply_cli_overrides` BEFORE the
+                // identity is taken, so `gate` here already carries it (gh#540
+                // seam).
                 let effective_loglik_eval = loglik_eval.clone();
                 let effective_gate = gate.clone();
-                let prior_state = effective_starts.as_ref().and_then(|dir| {
-                    state::FitState::load(dir).ok()
-                });
-
-                // Gate 1 — pre-stage: if this stage consumes a prior
-                // stage (starts_from), refuse to run when the prior
-                // stage's tail Â failed convergence on any structural
-                // (non-`perturb_only_at_t0`) param. Skipped when starts_from is absent
-                // (this stage is itself the scout). Overridable via
-                // --allow-nonconverged-scout. See proposal
-                // docs/dev/proposals/2026-04-19-refine-gates-scout-convergence.md.
-                let (scout_best_for_gate2, scout_chain_logliks_for_gate2):
-                    (Option<f64>, Vec<f64>) = match prior_state.as_ref() {
-                    Some(ps) => {
-                        use gating::ScoutGateVerdict;
-                        // Compound gate (Â + decibans-spread). Reads
-                        // the GateConfig from the *consuming* stage —
-                        // i.e. refine's [stages.refine.gate] governs
-                        // how strictly we judge the scout it consumes.
-                        // CLI overrides already merged into
-                        // `effective_gate` above (Step 4).
-                        match gating::check_scout_convergence(ps, &effective_gate) {
-                            ScoutGateVerdict::Ok => {}
-                            ScoutGateVerdict::SoftWarn { param_agreement } => {
-                                eprintln!("\x1b[33m  warning:\x1b[0m prior stage tail Â in \
-                                           SoftWarn band ([{:.2}, {:.2})) for: {}",
-                                    gating::A_SOFT, effective_gate.a_thresh,
-                                    param_agreement.iter()
-                                        .map(|(n, r)| format!("{} (Â={:.2})", n, r))
-                                        .collect::<Vec<_>>().join(", "));
-                            }
-                            ScoutGateVerdict::Hard {
-                                failing, all_structural, perturb_only_at_t0, loglik_spread
-                            } => {
-                                let msg = gating::format_hard_verdict(
-                                    &effective_gate,
-                                    &failing, &all_structural, &perturb_only_at_t0,
-                                    loglik_spread, ps.best_loglik, None);
-                                if allow_nonconverged_scout {
-                                    eprintln!("\x1b[33m  warning:\x1b[0m {}", msg);
-                                    eprintln!("\n  --allow-nonconverged-scout: proceeding anyway.");
-                                } else if has_sweep {
-                                    // Sweep-gate fix 2026-04-19 (testing camdl-book): don't
-                                    // kill the whole sweep on one cell's gate
-                                    // failure. Record, skip remaining stages for
-                                    // this sweep point, continue to next point.
-                                    eprintln!("\x1b[33m  sweep-skip:\x1b[0m {}", msg);
-                                    sweep_failures.push((
-                                        cell_i, pt_idx,
-                                        stage_name.to_string(),
-                                        "scout_tail_agreement_gate".to_string(),
-                                    ));
-                                    break; // exit stages loop for this sweep point
-                                } else {
-                                    eprintln!("error: {}", msg);
-                                    std::process::exit(1);
-                                }
-                            }
-                            ScoutGateVerdict::DecibansSpread {
-                                delta_db, threshold_db, sigma_max, chain_logliks,
-                            } => {
-                                let msg = gating::format_decibans_spread_verdict(
-                                    delta_db, threshold_db, sigma_max, &chain_logliks);
-                                if allow_nonconverged_scout {
-                                    eprintln!("\x1b[33m  warning:\x1b[0m {}", msg);
-                                    eprintln!("\n  --allow-nonconverged-scout: proceeding anyway.");
-                                } else if has_sweep {
-                                    eprintln!("\x1b[33m  sweep-skip:\x1b[0m {}", msg);
-                                    sweep_failures.push((
-                                        cell_i, pt_idx,
-                                        stage_name.to_string(),
-                                        "scout_decibans_spread_gate".to_string(),
-                                    ));
-                                    break;
-                                } else {
-                                    eprintln!("error: {}", msg);
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                        (Some(ps.best_loglik), ps.chain_logliks.clone())
-                    }
-                    None => (None, Vec::new()),
-                };
 
                 let mut run_config = runner::FitRunConfig::build(
                     &sweep_config,
-                    prior_state.as_ref(),
+                    Some(&method.algorithm),
                     *chains, *particles, *iterations,
                     *cooling, *cooling_target_iters,
-                    // gh#506: NOT `effective_starts.is_none()`. That asked
-                    // `build` to overwrite every `EstimatedParam::initial`
-                    // with a uniform draw whenever the stage had no upstream
-                    // `starts_from` — i.e. on every scout stage — which threw
-                    // away `[estimate].start` and made `init = "single"` mean
-                    // "single random point". Per-chain dispersion is `init`'s
-                    // job (`uniform` / `lhs` / `uniform_unconstrained`), and
-                    // this predated that machinery.
+                    // gh#506: per-chain dispersion is the starts rule's job;
+                    // the base point carries `[estimate].start`.
                     seed, false,
                 ).unwrap_or_else(|e| {
                     eprintln!("error building run config: {}", e);
@@ -1376,138 +1140,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
                 let collector = sim::inference::diagnostic::DiagnosticCollector::new(stage_name);
                 let t0 = std::time::Instant::now();
-                // Per-chain starting points. When this stage consumes
-                // a prior stage (`starts_from`), every chain starts from
-                // that stage's MLE (intent of the handoff) regardless
-                // of init_method — that's what makes refine-after-scout
-                // meaningful. Otherwise dispatch on `init_method`
-                // (gh#42): Single = all chains at the seeded start
-                // (legacy refine semantics, useful when bounds are
-                // tight); Uniform = per-chain uniform random within
-                // bounds (v1 default — keeps existing fit.toml files
-                // unchanged); Lhs = Latin-hypercube stratified, scale-
-                // aware via Transform.
-                //
-                // CLI `--init` / `--survey-path` / `--survey-top-k` were
-                // already written INTO the stage by `apply_cli_overrides`
-                // (gh#514, applied before the identity was taken; the flags
-                // require --stage, and --stage filters `stages_to_run` to
-                // exactly the overridden stage). Re-merging the CLI values
-                // here was a second merge site that could only agree with
-                // the first or drift from it — read the stage fields.
-                let effective_init: crate::fit::init::InitMethod = init_method.clone();
-                let effective_survey_path: Option<std::path::PathBuf> = survey_path.clone();
-                let effective_survey_top_k_n: Option<usize> = *survey_top_k_n;
-                // gh#871. When this stage consumes a prior one, every chain
-                // takes that stage's point estimate and `effective_init` never
-                // runs, so it is not what supplied the values. Provenance
-                // records the mode that did; the declared `init` stays in the
-                // stage config, which is where it belongs.
-                let recorded_init: crate::fit::init::InitMethod =
-                    match effective_starts.as_deref() {
-                        Some(dir) => crate::fit::init::InitMethod::FromMle {
-                            source: crate::fit::init::MleSource::FitDir(
-                                std::path::PathBuf::from(dir)),
-                        },
-                        None => effective_init.clone(),
-                    };
-                // For survey_top_k we need to keep the SurveyTopKResult
-                // around (not just the per-chain `chains`) so the
-                // chain_init_source / chain_starts.tsv writers can pull
-                // the survey's full hash out of it. Plain Lhs / Uniform
-                // / Single produce no such result.
-                let (per_chain_params, survey_top_k_result) =
-                    if effective_starts.is_some() {
-                        (None, None)
-                    } else {
-                        let model_identity_str =
-                            crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
-                        let data_hashes = init::compute_data_hashes(&effective_obs)
-                            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                        let estimate_names: Vec<String> =
-                            sweep_config.estimate.keys().cloned().collect();
-                        let fixed_hashmap: std::collections::HashMap<String, f64> =
-                            fixed_resolved.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                        let ctx = init::SurveyFitContext {
-                            model_identity: &model_identity_str,
-                            data_hashes: &data_hashes,
-                            fixed: &fixed_hashmap,
-                            estimate_names: &estimate_names,
-                        };
-                        // Build a `ResolvedParameters` view so the
-                        // step-7 warm-start variants can dispatch
-                        // through `chain_starts::draw_chain_starts`.
-                        // For legacy modes the view is unused; for
-                        // FromPrior/FromPosterior/FromMle/FromParams
-                        // it's the seam that lets us read the model
-                        // priors / bounds / estimate set.
-                        let resolved_view = init::build_resolved_view_for_init(
-                            &run_config.model,
-                            &run_config.base_params,
-                            &run_config.estimated_params,
-                        );
-                        init::resolve_per_chain_starts_from_method(
-                            &effective_init,
-                            effective_survey_path.as_deref(),
-                            effective_survey_top_k_n,
-                            stage_name,
-                            &run_config.estimated_params,
-                            *chains,
-                            seed,
-                            &ctx,
-                            Some(&resolved_view),
-                        ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
-                    };
-
-                // Write chain_starts.tsv sidecar for audit (gh#51).
-                // Best-effort; failure logs but doesn't abort the fit.
-                if let Err(e) = init::write_chain_starts_tsv(
-                    &stage_dir,
-                    &run_config.estimated_params,
-                    per_chain_params.as_deref(),
-                    *chains,
-                    &recorded_init,
-                    survey_top_k_result.as_ref(),
-                ) {
-                    eprintln!("warning: could not write chain_starts.tsv: {}", e);
-                }
-                let chain_init_source = init::format_chain_init_source(
-                    &recorded_init, survey_top_k_result.as_ref(),
-                );
+                // Per-chain starting points, through the one seam every runner
+                // draws from, under the resolved `starts` rule.
+                let drawn = runner::draw_chain_starts_for(
+                    &run_config, &sweep_config.estimate, &resolved_starts, *chains, seed,
+                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
+                    drawn.to_estimated_params(&run_config.estimated_params);
+                // The audit sidecar, captured before the first filter pass.
+                runner::record_chain_starts(&stage_dir, &run_config, &drawn);
+                let chain_init_source = drawn.rule.tag().to_string();
                 let stage_dir_str = stage_dir.to_string_lossy();
                 let chain_results = runner::run_chains_with_per_chain_params(
-                    &run_config, per_chain_params.as_deref(), &collector,
+                    &run_config, Some(&per_chain_params), &collector,
                     Some(stage_dir_str.as_ref()))
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
                 let elapsed = t0.elapsed();
-
-                // Gate 2 — post-stage: refine must not regress below
-                // scout's best. Not overridable — a regression is a
-                // pipeline failure regardless of user preference.
-                // Fires only when a prior stage was consumed (scout→
-                // refine handoff). Fails before writing any
-                // "stage completed" artefacts so the filesystem tells
-                // the truth.
-                if let Some(scout_best) = scout_best_for_gate2 {
-                    if let Err(msg) = gating::check_loglik_regression(
-                        scout_best, chain_results.best_loglik,
-                        &scout_chain_logliks_for_gate2,
-                    ) {
-                        if has_sweep {
-                            // Sweep-gate fix 2026-04-19 (testing camdl-book): same
-                            // non-halting treatment as the scout gate.
-                            eprintln!("\x1b[33m  sweep-skip:\x1b[0m {}", msg);
-                            sweep_failures.push((
-                                cell_i, pt_idx,
-                                stage_name.to_string(),
-                                "regression_gate".to_string(),
-                            ));
-                            break;
-                        }
-                        eprintln!("error: {}", msg);
-                        std::process::exit(1);
-                    }
-                }
 
                 // Write outputs
                 let param_names: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
@@ -1529,10 +1177,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 runner::write_diagnostics(&stage_dir.to_string_lossy(), &chain_results.results)
                     .unwrap_or_else(|e| eprintln!("warning: {}", e));
 
-                // Write fit_state.toml for downstream stages.
+                // Write fit_state.toml — the leaf's result record.
                 // Source params from the clean-eval winner θ̂ (GH #16) so
-                // mle_params.toml and final_params.toml agree, and so
-                // refine starts in the basin clean-eval actually picked.
+                // mle_params.toml and final_params.toml agree, and so a
+                // `from_mle` start from this leaf lands in the basin clean-eval
+                // actually picked.
                 let winner_theta = chain_results.winner_theta();
                 let start_values = runner::collect_all_params(
                     winner_theta, &run_config.estimated_params, &run_config.model,
@@ -1557,10 +1206,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // `apply_cli_overrides` BEFORE the identity is taken, so
                 // `dt_check` here already carries them (gh#540 seam — the
                 // result is stored in fit_state.toml, so the knobs are
-                // identity-defining). --dt-check-strict is still a plain
-                // runtime arg — but NOT byte-neutral: when the TOML leaves
-                // threshold_nats unset it selects the stored threshold, an
-                // identity gap tracked in gh#730.
+                // identity-defining). --dt-check-strict is resolved into the
+                // stored threshold the same way (gh#730).
                 let effective_dt_check = dt_check.clone();
                 let dt_check_seed = seed.wrapping_add(0xd7c4ec_5eed); // "dtchec seed"
                 let dt_check_result = dt_check::run_richardson_ladder(
@@ -1604,7 +1251,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // Persist the gate / clean-eval config that was
                     // *actually in force* — `effective_gate` and
                     // `effective_loglik_eval` above already collapsed the
-                    // priority chain (CLI flag > stage TOML > defaults).
+                    // priority chain (CLI flag > method TOML > defaults).
                     // `summary` reads these so its verdict line reports
                     // against the threshold the run was judged by, not
                     // whatever `fit.toml` says at summary-time.
@@ -1660,11 +1307,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     seed,
                     stage: stage_name.to_string(),
                     best_chain: chain_results.best_chain,
-                    // Record the backend the STAGE actually fit on (gh#241): the
-                    // `simulate --params` guardrail replays θ̂ with this, so it
-                    // must be the stage's backend. `InferenceBackend` is a valid
-                    // `ForwardBackend` (total `From`).
-                    backend: stage.backend().into(),
+                    // Record the backend the method actually fit on (gh#241):
+                    // the `simulate --params` guardrail replays θ̂ with this,
+                    // so it must be the method's backend. `InferenceBackend`
+                    // is a valid `ForwardBackend` (total `From`).
+                    backend: method.algorithm.backend().into(),
                     dt: sweep_config.config.dt,
                     loglik: chain_results.best_loglik,
                     loglik_sd: 0.0,
@@ -1687,26 +1334,22 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 crate::status::hint(format!("best ll={:.1} (chain {}) in {:.1}s",
                     chain_results.best_loglik, chain_results.best_chain + 1, elapsed.as_secs_f64()));
             }
-            Stage::PGAS { .. } => {
-                let pgas_opts = pgas::PgasStageOpts::from_stage(stage)
+            Algorithm::PGAS { .. } => {
+                let pgas_opts = pgas::PgasStageOpts::from_algorithm(&method.algorithm)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
                 // gh#540: no CLI overrides here. Every flag that reaches this
-                // stage was written into `stage` before its content address was
-                // taken, so `from_stage` above already carries them. Applying
-                // one here again would be the bug this fixed: a value the run
-                // uses that its `run_id` never saw.
-
+                // method was written into it before its content address was
+                // taken, so `from_algorithm` above already carries them.
                 pgas::run_stage(
                     &sweep_config,
-                    stage_name,
-                    stage,
+                    &method,
                     &stage_dir,
                     pgas_opts,
                     seed, force,
                     a.resume.is_some(),
-                    effective_starts.as_deref(),
+                    &resolved_starts,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running pgas stage '{}': {}", stage_name, e);
+                    eprintln!("error running pgas: {}", e);
                     std::process::exit(1);
                 });
                 // Bubble loglik from fit_state.toml written by PGAS runner
@@ -1714,102 +1357,90 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Stage::PMMH { .. } => {
-                let pmmh_opts = pmmh::PmmhStageOpts::from_stage(stage)
+            Algorithm::PMMH { .. } => {
+                let pmmh_opts = pmmh::PmmhStageOpts::from_algorithm(&method.algorithm)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                // gh#540: overrides are applied to `stage` before its
-                // content address is taken; `from_stage` carries them.
-
                 pmmh::run_stage(
                     &sweep_config,
-                    stage_name,
-                    stage,
+                    &method,
                     &stage_dir,
                     pmmh_opts,
                     seed, force,
                     a.resume.is_some(),
-                    effective_starts.as_deref(),
+                    &resolved_starts,
                     // PMMH's dt-check is the PF-based one wired on the IF2 path.
                     /* dt_check_opt */ None,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running pmmh stage '{}': {}", stage_name, e);
+                    eprintln!("error running pmmh: {}", e);
                     std::process::exit(1);
                 });
                 let fs = load_stage_result_or_exit(stage_name, &stage_dir);
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Stage::Mh { dt_check, .. } => {
+            Algorithm::Mh { dt_check, .. } => {
                 // Deterministic-ODE Metropolis-Hastings. Routes through the
                 // shared PMMH machinery (chains, adaptive proposal, priors,
                 // MAP, R̂/ESS, trace output); `pmmh::run_stage` swaps the PF
-                // likelihood for `compute_ode_loglik` when the stage is the Mh
-                // variant. `PmmhStageOpts::from_stage` parses the Mh fields
-                // with `n_particles = 0` / `rho = None` (the deterministic path
-                // uses neither).
-                let pmmh_opts = pmmh::PmmhStageOpts::from_stage(stage)
+                // likelihood for `compute_ode_loglik` when the algorithm is the
+                // Mh variant. `PmmhStageOpts::from_algorithm` parses the Mh
+                // fields with `n_particles = 0` / `rho = None` (the
+                // deterministic path uses neither).
+                let pmmh_opts = pmmh::PmmhStageOpts::from_algorithm(&method.algorithm)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                // gh#540: overrides are applied to `stage` before its
-                // content address is taken; `from_stage` carries them.
-
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
                 // default; honours the same CLI flags as the IF2 path
                 // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
-                // gh#726: the stage's dt_check field — CLI overrides were
+                // gh#726: the method's dt_check field — CLI overrides were
                 // applied through `apply_cli_overrides` BEFORE the identity
                 // was taken, and the field is in Mh's identity_payload (the
                 // result is stored in fit_state.toml.dt_check).
                 let mh_dt_check = dt_check.clone();
-
                 pmmh::run_stage(
                     &sweep_config,
-                    stage_name,
-                    stage,
+                    &method,
                     &stage_dir,
                     pmmh_opts,
                     seed, force,
                     a.resume.is_some(),
-                    effective_starts.as_deref(),
+                    &resolved_starts,
                     Some(mh_dt_check),
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running mh stage '{}': {}", stage_name, e);
+                    eprintln!("error running mh: {}", e);
                     std::process::exit(1);
                 });
                 let fs = load_stage_result_or_exit(stage_name, &stage_dir);
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Stage::Nuts { .. } => {
+            Algorithm::Nuts { .. } => {
                 // Gradient-based Bayesian sampling of the deterministic ODE
                 // marginal likelihood (gh#275 Phase 2) via `det_grad` + NUTS.
-                let nuts_opts = nuts::NutsStageOpts::from_stage(stage)
+                let nuts_opts = nuts::NutsStageOpts::from_algorithm(&method.algorithm)
                     .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
-                // gh#540: overrides are applied to `stage` before its
-                // content address is taken; `from_stage` carries them.
-
                 nuts::run_stage(
                     &sweep_config,
-                    stage_name,
-                    stage,
+                    &method,
                     &stage_dir,
                     nuts_opts,
                     seed, force,
                     a.resume.is_some(),
+                    &resolved_starts,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running nuts stage '{}': {}", stage_name, e);
+                    eprintln!("error running nuts: {}", e);
                     std::process::exit(1);
                 });
                 let fs = load_stage_result_or_exit(stage_name, &stage_dir);
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Stage::NlSbplx(nl_cfg) | Stage::NlBobyqa(nl_cfg) => {
+            Algorithm::NlSbplx(nl_cfg) | Algorithm::NlBobyqa(nl_cfg) => {
                 #[cfg(feature = "ode")]
                 {
                     // Model identity + data digests for the mle_params.toml
-                    // provenance block (same shape as the IF2 path uses below).
+                    // provenance block (same shape as the IF2 path uses).
                     // Load the canonical IR JSON from the pre-compiled IR so this
-                    // provenance read doesn't re-invoke camdlc per PFilter stage.
+                    // provenance read doesn't re-invoke camdlc.
                     let model_src = sweep_config.compiled_ir.as_deref()
                         .unwrap_or(&sweep_config.model.camdl);
                     let model_ir_json = crate::util::load_model(model_src)
@@ -1833,7 +1464,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                             .collect())
                         .unwrap_or_default();
                     // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
-                    // default. gh#726: the stage's dt_check field — CLI
+                    // default. gh#726: the method's dt_check field — CLI
                     // overrides were applied through `apply_cli_overrides`
                     // BEFORE the identity was taken, and NloptStageConfig
                     // full-serializes into its identity (the result is
@@ -1842,17 +1473,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
                     nlopt_stage::run_stage(
                         &sweep_config,
-                        stage_name,
-                        stage,
+                        &method,
                         &stage_dir,
                         seed,
-                        effective_starts.as_deref(),
+                        &resolved_starts,
                         &parent_fit_hash,
                         &model_identity_for_prov,
                         &data_hashes_for_prov,
                         &nl_dt_check,
                     ).unwrap_or_else(|e| {
-                        eprintln!("error running nlopt stage '{}': {}", stage_name, e);
+                        eprintln!("error running {}: {}", stage_name, e);
                         std::process::exit(1);
                     });
                     let fs = load_stage_result_or_exit(stage_name, &stage_dir);
@@ -1861,40 +1491,34 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
                 #[cfg(not(feature = "ode"))]
                 {
-                    let _ = (stage_name, &sweep_config, &stage_dir, seed, effective_starts.as_deref(), nl_cfg);
+                    let _ = (stage_name, &sweep_config, &stage_dir, seed, nl_cfg, &resolved_starts);
                     eprintln!(
                         "error: this binary was built without --features ode, \
                          which is required for algorithm = \"{}\". Rebuild \
                          with `cargo build --features ode` (default).",
-                        stage.method_name()
+                        method.algorithm.method_name()
                     );
                     std::process::exit(1);
                 }
             }
-            Stage::PFilter { particles, replicates, record_ancestry, record_prequential, .. } => {
+            Algorithm::PFilter { particles, replicates, record_ancestry, record_prequential, .. } => {
                 let n_reps = replicates.unwrap_or(1);
                 // record_ancestry: CLI flag is a one-way override to true
                 // (TOML default false); no flag means use TOML.
                 // record_prequential: TOML default true (per the
                 // 2026-04-20 prequential proposal); explicit
-                // `record_prequential = false` in [stages.X] opts out,
+                // `record_prequential = false` in [method] opts out,
                 // and the CLI flag can re-enable it on a per-invocation
                 // basis without editing the TOML.
                 let record_ancestry = *record_ancestry;
                 let want_prequential = *record_prequential;
-                let prior_state = effective_starts.as_ref().and_then(|dir| {
-                    state::FitState::load(dir).ok()
-                });
-                if prior_state.is_none() && !effective_starts.as_ref().is_none_or(|s| s.is_empty()) {
-                    eprintln!("warning: could not load fit_state from starts_from");
-                }
 
                 // Build run config (reuse IF2 builder with 1 chain, N particles).
                 // cooling_target_iters=1 here is harmless: PFilter doesn't
                 // cool, so the IF2-shaped config field is never read.
                 let run_config = runner::FitRunConfig::build(
                     &sweep_config,
-                    prior_state.as_ref(),
+                    Some(&method.algorithm),
                     1, *particles, 1, 1.0, 1, seed, false,
                 ).unwrap_or_else(|e| {
                     eprintln!("error building pfilter config: {}", e);
@@ -1902,7 +1526,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 });
 
                 // gh#585: same §3.7.3(b) proof recording as the IF2/Bayesian
-                // stages — a fit may run a PFilter stage first (or alone).
+                // paths — a fit may run a PFilter method alone.
                 if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
                     crate::run_meta::record_training_window(
                         seg, run_config.applied_training_window);
@@ -1913,8 +1537,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     std::process::exit(1);
                 });
 
-                // Run PF at MLE params
-                let mle_params = run_config.base_params.clone();
+                // The point the filter scores: the base point, or the point a
+                // sourced `starts` rule names (`from_mle = "@fit"` scores at
+                // that fit's estimate). A pfilter runs replicates of one point,
+                // so one draw of the rule is the point.
+                let drawn = runner::draw_chain_starts_for(
+                    &run_config, &sweep_config.estimate, &resolved_starts, 1, seed,
+                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                let mle_params: Vec<f64> = drawn
+                    .to_param_vecs(&run_config.estimated_params, &run_config.base_params)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| run_config.base_params.clone());
                 let t0 = std::time::Instant::now();
 
                 let mut logliks = Vec::new();
@@ -1927,8 +1561,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let process = run_config.build_process();
                     let obs_model = run_config.build_obs_model();
                     // Prequential / ancestry recording: gated by the
-                    // user-facing flags from Stage::PFilter. Prequential
-                    // is per-stage scoring (point-estimate property),
+                    // user-facing flags from Algorithm::PFilter. Prequential
+                    // is per-method scoring (point-estimate property),
                     // so we only record it on the first replicate;
                     // subsequent reps just build the loglik SD.
                     let record_preq = want_prequential && r == 0;
@@ -1997,7 +1631,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 
                 // Write prequential trace (plug-in predictive at MLE).
                 // Scoring is a point-estimate property — rep 0 only.
-                // Routed through the shared writer so the fit-stage TSV
+                // Routed through the shared writer so the fit-method TSV
                 // carries the same tidy/long schema as `camdl pfilter
                 // --save-prequential` (gh#650).
                 if let Some(ref trace) = preq_trace {
@@ -2015,41 +1649,44 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
 
-        // ── finalize the CAS fit-stage leaf ──
+        // ── finalize the CAS fit-method leaf ──
         // The runners streamed every output (chains, fit_state.toml,
         // draws.tsv, trajectories/, …) into `stage_dir = claim.dir()`;
         // `finalize` builds the recursive exact-set manifest over them and
         // commits Running→Completed. The display fields ride in `run.json`
         // `inputs` (recorded, never hashed) for show/status.
         let stage_elapsed = stage_t0.elapsed();
-        let algo_tag = stage.method_name();
-        let backend_tag = stage.backend().as_str();
-        let algo_json = match stage {
-            Stage::IF2 { chains, particles, iterations, cooling, .. } =>
+        let algo_tag = method.algorithm.method_name();
+        let backend_tag = method.algorithm.backend().as_str();
+        let algo_json = match &method.algorithm {
+            Algorithm::IF2 { chains, particles, iterations, cooling, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations, "cooling": cooling }),
-            Stage::PGAS { chains, particles, sweeps, .. } =>
+            Algorithm::PGAS { chains, particles, sweeps, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "sweeps": sweeps }),
-            Stage::PMMH { chains, particles, iterations, .. } =>
+            Algorithm::PMMH { chains, particles, iterations, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations }),
-            Stage::Mh { chains, iterations, .. } =>
+            Algorithm::Mh { chains, iterations, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "iterations": iterations }),
-            Stage::Nuts { chains, warmup, samples, .. } =>
+            Algorithm::Nuts { chains, warmup, samples, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "warmup": warmup, "samples": samples }),
-            Stage::PFilter { particles, replicates, .. } =>
+            Algorithm::PFilter { particles, replicates, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
-            Stage::NlSbplx(c) | Stage::NlBobyqa(c) =>
+            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
         };
+        // `stage` keeps its key for the readers that project a leaf
+        // (`FitStageView`); its value is the method's name, the leaf's label.
         let inputs_json = serde_json::json!({
             "stage": stage_name,
             "method": algo_tag,
             "backend": backend_tag,
             "seed": seed,
-            "n_chains": stage.chains(),
+            "n_chains": method.algorithm.chains(),
             "best_loglik": stage_best_loglik,
             "best_chain": stage_best_chain,
             "algorithm": algo_json,
-            "starts_from": effective_starts,
+            "starts": starts_rule.spelled(),
+            "chain_starts_kind": starts_rule.kind().as_str(),
             "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
             "wall_time_seconds": stage_elapsed.as_secs_f64(),
         });
@@ -2073,57 +1710,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         let dest = match write.finalize(inputs_json) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("error: could not finalize fit stage {}: {}", cas_path.display(), e);
+                eprintln!("error: could not finalize fit method leaf {}: {}", cas_path.display(), e);
                 std::process::exit(1);
             }
         };
         crate::status::done("stored",
             format!("{} \u{b7} {} \u{b7} {:.1}s", stage_name, dest.display(), stage_elapsed.as_secs_f64()));
-        stage_identities.insert(stage_name.to_string(), (resolved.run_id, dest));
 
-    } // end stages
     } // end sweep_points
     } // end cells
-
-    // Sweep-gate fix 2026-04-19 (testing camdl-book): emit a sweep summary when
-    // any cells were skipped due to gate failures. Also write a
-    // machine-readable record to <fit_dir>/sweep_failures.tsv so
-    // downstream tooling (profile-likelihood plots, etc.) can
-    // distinguish "cell didn't converge" from "cell wasn't run."
-    if has_sweep && !sweep_failures.is_empty() {
-        let total_runs = cells.len() * sweep_points.len();
-        let n_failed = sweep_failures.len();
-        eprintln!("\n━━━ sweep summary ━━━");
-        eprintln!("  {} / {} cells skipped gate", n_failed, total_runs);
-        for (cell_i, pt_idx, stage, reason) in &sweep_failures {
-            let slug: String = sweep_points[*pt_idx].iter()
-                .map(|(k, v)| format!("{}={:.3}", k, v))
-                .collect::<Vec<_>>()
-                .join(", ");
-            eprintln!("    cell {:>2} / pt {:>2} ({}) stage={} reason={}",
-                cell_i + 1, pt_idx + 1, slug, stage, reason);
-        }
-        // Land beside the leaves: the fit segment dir `fit run` announced
-        // (the FitDigest `fits/{stem}-{h8}/`), not the divergent legacy
-        // `fit_dir`. Create it first — a sweep keys each cell's own segment,
-        // so the base segment may not yet exist on disk.
-        let _ = std::fs::create_dir_all(&announced_fit_dir);
-        let path = announced_fit_dir.join("sweep_failures.tsv");
-        let mut tsv = String::from("cell\tsweep_point\tsweep_values\tstage\treason\n");
-        for (cell_i, pt_idx, stage, reason) in &sweep_failures {
-            let slug: String = sweep_points[*pt_idx].iter()
-                .map(|(k, v)| format!("{}={:.6}", k, v))
-                .collect::<Vec<_>>()
-                .join(";");
-            tsv.push_str(&format!("{}\t{}\t{}\t{}\t{}\n",
-                cell_i, pt_idx, slug, stage, reason));
-        }
-        if let Err(e) = std::fs::write(&path, tsv) {
-            eprintln!("warning: could not write {}: {}", path.display(), e);
-        } else {
-            eprintln!("  details: {}", path.display());
-        }
-    }
 
     // ── Grid roll-ups (summary.tsv / coverage.tsv): deferred to M4 ──
     //
@@ -2131,25 +1726,88 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // keyed by that cell's dataset digest × fit-seed — readable individually
     // via `camdl list`/`show`/`cat`. The cross-cell summary and the synthetic
     // parameter-recovery coverage table are derived views with no home in the
-    // per-cell tree; the M4 reindex rebuilds them from the CAS leaves (gh#150 /
-    // gh#154), where coverage gains a truth-within-interval correctness check.
-    if cells.len() > 1 || config.synthetic.is_some() {
+    // per-cell tree; `fit recovery` (proposal increment 3) owes the roll-up
+    // (gh#150 / gh#154), where coverage gains a truth-within-interval
+    // correctness check.
+    if cells.len() > 1 || config.problem.is_synthetic_fit() {
         eprintln!("note: grid summary / coverage are derived views — \
-                   rebuilt by the reindex in M4 (gh#150 / gh#154)");
+                   owed by `fit recovery` (gh#150 / gh#154)");
     }
 
     // gh#147 (M3.2): no fit-wide `run.json` rewrite — the fit identity is a
-    // CAS path segment, and each stage leaf records its own wall time in
-    // `run.json` `inputs` at `finalize`. `fit_start` paces the run; per-stage
+    // CAS path segment, and each method leaf records its own wall time in
+    // `run.json` `inputs` at `finalize`. `fit_start` paces the run; per-leaf
     // timing is the honest unit now.
     let _ = fit_start;
 }
 
-/// Resolve a `--resume <base ref>` to a base stage-leaf dir: an existing path,
-/// else a `run_id` hex prefix matched under `<cas_root>/fits/`. `None` when no
-/// unique match (caller errors).
-/// After a stage runner reported success, its `fit_state.toml` is the channel
-/// carrying the stage result back to this orchestrator (`best_loglik` /
+/// The removed `fit run` flags, each answered with its replacement. Every
+/// one the user passed is named in one message, so a habitual
+/// `--stage posterior --init from_prior` is corrected in one round.
+fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(s) = a._removed_stage.as_deref() {
+        lines.push(format!(
+            "--stage {s}: a fit.toml carries one `[method]`, so there is nothing to \
+             select; drop the flag. A second way of fitting the same problem is a \
+             second file (`camdl fit new --from fit.toml fit-{s}.toml`)."
+        ));
+    }
+    if let Some(s) = a._removed_init.as_deref() {
+        let replacement = match s {
+            "from_posterior" | "from_mle" | "from_params" => format!("--starts {s}=<source>"),
+            other => format!("--starts {other}"),
+        };
+        lines.push(format!("--init {s}: write `{replacement}`."));
+    }
+    if let Some(s) = a._removed_posterior.as_deref() {
+        lines.push(format!("--posterior {s}: write `--starts from_posterior={s}`."));
+    }
+    if let Some(s) = a._removed_mle.as_deref() {
+        lines.push(format!("--mle {s}: write `--starts from_mle={s}`."));
+    }
+    if let Some(s) = a._removed_params.as_deref() {
+        lines.push(format!("--params {s}: write `--starts from_params={s}`."));
+    }
+    if a._removed_survey_path.is_some() || a._removed_survey_top_k.is_some() {
+        lines.push(
+            "--survey-path / --survey-top-k: the `survey_top_k` start rule was removed (a \
+             survey landscape is not a posterior). Use `--starts from_prior`, or run a short \
+             fit and `--starts from_posterior=@handle`."
+                .to_string(),
+        );
+    }
+    if a._removed_allow_nonconverged_scout {
+        lines.push(
+            "--allow-nonconverged-scout: the in-file scout/refine gate is gone with in-file \
+             chaining; a warm start's source is checked where it is consumed, and \
+             `--allow-nonconverged-source` lifts that refusal."
+                .to_string(),
+        );
+    }
+    if let Some(raw) = a._removed_starts_from.as_deref() {
+        lines.push(format!("--starts-from {raw}: write `--starts from_mle={raw}`."));
+    }
+    if let Some(raw) = a._removed_init_method.as_deref() {
+        lines.push(format!("--init-method {raw}: write `--starts {raw}`."));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut msg = String::from(
+        "these `camdl fit run` flags were removed with the `[stages]` → `[method]` \
+         split (proposal 2026-09-08-workflow-first-fit-config):",
+    );
+    for l in lines {
+        msg.push_str("\n  ");
+        msg.push_str(&l);
+    }
+    msg.push_str("\n  See `camdl fit run --help` and `camdl docs fit-toml`.");
+    Some(msg)
+}
+
+/// After a runner reported success, its `fit_state.toml` is the channel
+/// carrying the result back to this orchestrator (`best_loglik` /
 /// `best_chain` end up in the finalized run.json inputs). A missing or
 /// corrupt file at that point is a runner bug or a torn write; the previous
 /// `if let Ok` swallow left a silent `null` in run.json where the result
@@ -2157,13 +1815,16 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
 fn load_stage_result_or_exit(stage_name: &str, stage_dir: &std::path::Path) -> state::FitState {
     state::FitState::load(&stage_dir.to_string_lossy()).unwrap_or_else(|e| {
         eprintln!(
-            "error: stage '{}' reported success but its fit_state.toml \
+            "error: method '{}' reported success but its fit_state.toml \
              cannot be read back from {}: {}",
             stage_name, stage_dir.display(), e);
         std::process::exit(1);
     })
 }
 
+/// Resolve a `--resume <base ref>` to a base method-leaf dir: an existing
+/// path, else a `run_id` hex prefix matched under `<cas_root>/fits/`. `None`
+/// when no unique match (caller errors).
 fn resolve_base_ref(reference: &str, cas_root: &std::path::Path) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(reference);
     if p.is_dir() {
@@ -2217,15 +1878,16 @@ fn copy_resume_carryover(base: &std::path::Path, new_leaf: &std::path::Path) -> 
 /// scope (`fit where` doesn't load the IR for a path-only resolution), in which
 /// case `resolved_priors` is empty and `schema` is `None`.
 fn build_fit_sidecar(
-    config: &config_v2::FitConfigV2,
+    config: &config_v2::FitConfig,
     fit_path: &str,
     label: Option<String>,
     model: Option<&ir::Model>,
 ) -> crate::run_meta::FitSidecar {
+    let problem = &config.problem;
     // Prefer the pre-compiled IR (set by `cmd_fit_run_v2`); `load_model`
     // re-invokes camdlc when handed a raw `.camdl`. The resolved model identity
     // is byte-identical either way; empty string if the IR can't be loaded.
-    let model_src = config.compiled_ir.as_deref().unwrap_or(&config.model.camdl);
+    let model_src = problem.compiled_ir.as_deref().unwrap_or(&problem.model.camdl);
     let model_identity = crate::util::load_model(model_src)
         .ok()
         .map(|(_, ir_json)| crate::resolve::model_identity_from_ir(&ir_json))
@@ -2244,7 +1906,7 @@ fn build_fit_sidecar(
     let model_obs_names: Vec<String> = model
         .map(|m| m.observations.iter().map(|o| o.name.clone()).collect())
         .unwrap_or_default();
-    let data_hashes: std::collections::HashMap<String, String> = config
+    let data_hashes: std::collections::HashMap<String, String> = problem
         .data.as_ref()
         .and_then(|d| d.effective_observations(&model_obs_names).ok())
         .map(|obs| obs.into_iter()
@@ -2253,24 +1915,25 @@ fn build_fit_sidecar(
             })
             .collect())
         .unwrap_or_default();
-    let estimated: Vec<String> = config.estimate.keys().cloned().collect();
-    let fixed: std::collections::HashMap<String, f64> = config.fixed
+    let estimated: Vec<String> = problem.estimate.keys().cloned().collect();
+    let fixed: std::collections::HashMap<String, f64> = problem.fixed
         .resolve().unwrap_or_default().into_iter().collect();
-    let stages_declared: Vec<String> = config.stages.keys().cloned().collect();
     // gh#75: resolve per-parameter prior provenance. We only emit
-    // entries when the fit has at least one Bayesian stage (IF2-only
-    // fits don't consume priors, and surfacing `model_ir` for a
-    // bunch of params the fit will never read from is misleading
-    // noise — both `camdl fit where` and an IF2-only run can leave
-    // this empty). `validate_priors_present` has already rejected
-    // any silent flat-fallback by the time we get here, so any
-    // entry we emit is one of {fit_toml, model_ir, flat_explicit}.
-    let any_bayesian = config.stages.values().any(config_v2::Stage::requires_priors);
+    // entries when the method is Bayesian (an IF2 fit doesn't consume
+    // priors, and surfacing `model_ir` for a bunch of params the fit will
+    // never read from is misleading noise). `validate_priors_present` has
+    // already rejected any silent flat-fallback by the time we get here, so
+    // any entry we emit is one of {fit_toml, model_ir, flat_explicit}.
+    let any_bayesian = config
+        .inference
+        .method
+        .as_ref()
+        .is_some_and(|m| m.algorithm.requires_priors());
     let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> = match model {
         Some(model) if any_bayesian => {
-            let names: Vec<String> = config.estimate.keys().cloned().collect();
+            let names: Vec<String> = problem.estimate.keys().cloned().collect();
             crate::fit::priors_precedence::resolve_priors_with_precedence(
-                &names, &config.estimate, model,
+                &names, &problem.estimate, model,
             )
             .into_iter()
             .map(|r| {
@@ -2292,10 +1955,9 @@ fn build_fit_sidecar(
         }
         _ => Vec::new(),
     };
-    let _ = stages_declared; // stages come from the leaves; sidecar omits them.
     crate::run_meta::FitSidecar {
         label,
-        model_path: config.model.camdl.clone(),
+        model_path: problem.model.camdl.clone(),
         model_identity,
         fit_toml_path: fit_path.to_string(),
         fit_toml_hash,
@@ -2333,18 +1995,20 @@ fn format_prior(p: &Option<config_v2::EstimatePriorSpec>) -> String {
 /// `camdl fit where FIT.toml [--seed N]`
 ///
 pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
-    use config_v2::FitConfigV2;
+    use config_v2::FitConfig;
 
     let a_path = args.a.to_string_lossy().into_owned();
     let b_path = args.b.to_string_lossy().into_owned();
-    let a = FitConfigV2::load(&a_path).unwrap_or_else(|e| {
-        eprintln!("error loading {}: {}", a_path, e);
-        std::process::exit(1);
-    });
-    let b = FitConfigV2::load(&b_path).unwrap_or_else(|e| {
-        eprintln!("error loading {}: {}", b_path, e);
-        std::process::exit(1);
-    });
+    let (a, a_method) = FitConfig::load(&a_path).map(|c| (c.problem, c.inference.method))
+        .unwrap_or_else(|e| {
+            eprintln!("error loading {}: {}", a_path, e);
+            std::process::exit(1);
+        });
+    let (b, b_method) = FitConfig::load(&b_path).map(|c| (c.problem, c.inference.method))
+        .unwrap_or_else(|e| {
+            eprintln!("error loading {}: {}", b_path, e);
+            std::process::exit(1);
+        });
 
     println!("diff: {} → {}", a_path, b_path);
     println!();
@@ -2416,45 +2080,23 @@ pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
         println!("  (no parameter changes)");
     }
 
-    // Stage changes
+    // Method changes
     println!();
-    println!("Stages:");
-    let a_stages: std::collections::BTreeSet<&str> = a.stages.keys().map(|s| s.as_str()).collect();
-    let b_stages: std::collections::BTreeSet<&str> = b.stages.keys().map(|s| s.as_str()).collect();
-    let mut stage_changes = false;
-    for name in b_stages.difference(&a_stages) {
-        let s = &b.stages[*name];
-        println!("  stage '{}': (new) {}", name, s.method_name());
-        stage_changes = true;
-    }
-    for name in a_stages.difference(&b_stages) {
-        println!("  stage '{}': (removed)", name);
-        stage_changes = true;
-    }
-    for name in a_stages.intersection(&b_stages) {
-        let sa = &a.stages[*name];
-        let sb = &b.stages[*name];
-        let sa_json = serde_json::to_string(sa).unwrap_or_default();
-        let sb_json = serde_json::to_string(sb).unwrap_or_default();
-        if sa_json != sb_json {
-            // Show detailed changes
-            let mut details = Vec::new();
-            if sa.method_name() != sb.method_name() {
-                details.push(format!("method {}→{}", sa.method_name(), sb.method_name()));
+    println!("Method:");
+    match (&a_method, &b_method) {
+        (None, None) => println!("  (neither file declares a [method])"),
+        (None, Some(m)) => println!("  [method]: (new) {}", m.algorithm.method_name()),
+        (Some(_), None) => println!("  [method]: (removed)"),
+        (Some(ma), Some(mb)) => {
+            let changes = config_diff::method_setting_changes(ma, mb);
+            if changes.is_empty() {
+                println!("  (no method changes)");
+            } else {
+                for c in changes {
+                    println!("  {}: {} → {}", c.key, c.from, c.to);
+                }
             }
-            if sa.chains() != sb.chains() {
-                details.push(format!("chains {}→{}", sa.chains(), sb.chains()));
-            }
-            // Compare serialized for catch-all
-            if details.is_empty() {
-                details.push("settings changed".to_string());
-            }
-            println!("  stage '{}': {}", name, details.join(", "));
-            stage_changes = true;
         }
-    }
-    if !stage_changes {
-        println!("  (no stage changes)");
     }
 }
 
@@ -2494,12 +2136,11 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
         eprintln!("note: {} already has [provenance]. Update derived_from manually.", to);
     }
 
-    // Best-effort: point the user at the source fit's content-addressed
-    // segment so they can set `starts_from` on the derived fit's first stage.
-    // The exact stage-leaf path (`{NN-stage}-{h8}/seed_N-{h8}`) needs the
-    // stage + seed hashes, so we name the segment and defer the leaf to
-    // `camdl list`.
-    if let Some(cfg) = config_v2::FitConfigV2::load(&from).ok() {
+    // Best-effort: name the source fit's content-addressed segment, so the
+    // derived file can warm-start from it by handle. The exact leaf path
+    // (`{method}-{h8}/seed_N-{h8}`) needs the method + seed hashes, so we name
+    // the segment and defer the leaf to `camdl list`.
+    if let Ok(cfg) = config_v2::Problem::load(&from) {
         let seg = crate::util::load_model(&cfg.model.camdl).ok().and_then(|(m, _)| {
             let ir_version = ir::IR_VERSION.trim().to_string();
             let data_paths = cfg.data_spec().ok()
@@ -2520,9 +2161,12 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
         });
         if let Some(seg) = seg {
             eprintln!("  [provenance] derived_from = \"{}\"", from);
-            eprintln!("  hint: set starts_from on your first stage to the last stage \
-                       leaf under {}", seg.display());
-            eprintln!("        (run `camdl list` to find the exact stage-leaf path)");
+            eprintln!("  hint: to warm-start the derived fit from {}, write under its \
+                       [method]", seg.display());
+            eprintln!("        starts = {{ from_posterior = \"@<label>\" }}   # one draw per chain");
+            eprintln!("        starts = {{ from_mle = \"@<label>\" }}         # every chain at its estimate");
+            eprintln!("        (a handle is @label, a fit-id prefix, or the leaf directory; \
+                       `camdl list` shows them)");
         }
     }
 
@@ -2534,12 +2178,6 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs) {
     eprintln!("created {}", to);
 }
 
-/// Accept either a directory path or a git-style short hash for
-/// `--starts-from`. The heuristic: contains `/` or `\\` → path;
-/// else → resolve as a leaf `run_id` prefix via
-/// `browse::resolve_stage_by_hash` against the default output
-/// root. Errors on zero or multiple matches.
-///
 // ─── Labels (proposal §5) ─────────────────────────────────────────────
 
 /// Validate a user-supplied label string against the proposal's
@@ -2727,51 +2365,22 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     std::process::exit(1);
 }
 
-/// Resolve a `--init from_mle --mle <hash-or-path>` argument to a
-/// concrete stage directory path. If the argument looks like a path,
-/// pass it through; otherwise treat as a short content-hash prefix and
-/// resolve against the default output root. Hardening proposal
-/// ship-now #9 (originally for the removed `--starts-from` flag,
-/// now reachable via `--init from_mle --mle <hash>`).
-fn resolve_starts_from_arg(raw: &str) -> String {
-    if raw.contains('/') || raw.contains('\\') || raw == "." || raw == ".." {
-        return raw.to_string();
-    }
-    // Treat as a short hash prefix. Resolve against the default
-    // output root; if the user has a non-default output location
-    // they can still pass the full path.
-    let root = format!("./{}", crate::run_paths::DEFAULT_OUTPUT_ROOT);
-    match crate::browse::resolve_stage_by_hash(&root, raw) {
-        Ok(path) => path.to_string_lossy().to_string(),
-        Err(e) => {
-            eprintln!("error: --init from_mle --mle '{}': {}", raw, e);
-            eprintln!("  Tip: pass a full path (e.g. results/fits/FOO/real/fit_1/scout)");
-            eprintln!("  or a longer hash prefix.");
-            std::process::exit(1);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // ── gh#191: per-stage capability gate on `fit run` ─────────────
 
-    /// A chain_binomial IF2 stage — the inference path that carries no
+    /// A chain_binomial IF2 method — the inference path that carries no
     /// real reservoir state (gh#191).
-    fn chain_binomial_if2_stage() -> config_v2::Stage {
-        config_v2::Stage::IF2 {
+    fn chain_binomial_if2_stage() -> config_v2::Algorithm {
+        config_v2::Algorithm::IF2 {
             backend: crate::run_meta::InferenceBackend::ChainBinomial,
             chains: 1,
             particles: 10,
             iterations: 1,
             cooling: 0.7,
             cooling_target_iters: 1,
-            starts_from: config_v2::StartsFrom::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
             loglik_eval: config_v2::LoglikEvalConfig::default(),
             gate: config_v2::GateConfig::default(),
             dt_check: config_v2::DtCheckConfig::default(),
@@ -2780,15 +2389,11 @@ mod tests {
 
     /// An `mh`-on-ODE stage carrying `burnin_dt`, for the gh#449 warm-up-step
     /// checks. Only `backend` and `burnin_dt` matter to the gate.
-    fn mh_stage_with_burnin_dt(burnin_dt: Option<f64>) -> config_v2::Stage {
-        config_v2::Stage::Mh {
+    fn mh_stage_with_burnin_dt(burnin_dt: Option<f64>) -> config_v2::Algorithm {
+        config_v2::Algorithm::Mh {
             backend: crate::run_meta::InferenceBackend::Ode,
             chains: 1,
             iterations: 1,
-            starts_from: config_v2::StartsFrom::default(),
-            init_method: Default::default(),
-            survey_path: None,
-            survey_top_k_n: None,
             burn_in: None,
             thin: None,
             adapt: true,
@@ -2833,15 +2438,14 @@ mod tests {
             "fixture must actually require REAL_COMPARTMENTS"
         );
         let stage = chain_binomial_if2_stage();
-        let stages = vec![("scout", &stage)];
-        let err = gate_run_stages_against_model(&stages, &compiled, 1.0)
+        let err = gate_run_method_against_model(&stage, &compiled, 1.0)
             .expect_err("real-coupled model on a chain_binomial fit stage must be rejected");
         assert!(err.contains("gh#191"), "should cite the tracking issue: {err}");
         assert!(
             err.contains("frozen"),
             "should explain the frozen-reservoir reason: {err}"
         );
-        assert!(err.contains("scout"), "should name the offending stage: {err}");
+        assert!(err.contains("if2"), "should name the offending method: {err}");
     }
 
     #[test]
@@ -2878,8 +2482,7 @@ mod tests {
             "fixture must actually require BALANCE"
         );
         let stage = chain_binomial_if2_stage();
-        let stages = vec![("scout", &stage)];
-        gate_run_stages_against_model(&stages, &compiled, 1.0).unwrap_or_else(|e| {
+        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
             panic!("fit run must ACCEPT a balance{{}} model on a chain_binomial stage: {e}")
         });
     }
@@ -2918,10 +2521,9 @@ mod tests {
         );
 
         let stage = chain_binomial_if2_stage();
-        let stages = vec![("scout", &stage)];
-        let err = gate_run_stages_against_model(&stages, &compiled, 400.0)
+        let err = gate_run_method_against_model(&stage, &compiled, 400.0)
             .expect_err("a fit dt that drops recurring fires must be rejected, not silently merged");
-        assert!(err.contains("scout"), "should name the offending stage: {err}");
+        assert!(err.contains("if2"), "should name the offending method: {err}");
         assert!(
             err.contains("silently dropped"),
             "should carry the collision diagnostic: {err}"
@@ -2934,8 +2536,7 @@ mod tests {
     fn fit_run_accepts_dt_finer_than_the_recurrence_period() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
         let stage = chain_binomial_if2_stage();
-        let stages = vec![("scout", &stage)];
-        gate_run_stages_against_model(&stages, &compiled, 1.0).unwrap_or_else(|e| {
+        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
             panic!("dt=1 is far finer than the 365.25-day period and must be accepted: {e}")
         });
     }
@@ -2949,13 +2550,12 @@ mod tests {
     fn fit_run_rejects_coarse_burnin_dt_even_when_dt_is_fine() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
         let stage = mh_stage_with_burnin_dt(Some(400.0));
-        let stages = vec![("refine", &stage)];
         // dt = 1.0 is fine on its own — proven by the negative control above —
         // so any rejection here can only come from `burnin_dt`.
-        let err = gate_run_stages_against_model(&stages, &compiled, 1.0).expect_err(
+        let err = gate_run_method_against_model(&stage, &compiled, 1.0).expect_err(
             "a coarse burnin_dt that drops recurring fires must be rejected even when dt is fine",
         );
-        assert!(err.contains("refine"), "should name the offending stage: {err}");
+        assert!(err.contains("mh"), "should name the offending method: {err}");
         assert!(
             err.contains("burnin_dt"),
             "should name burnin_dt as the offending step, not dt: {err}"
@@ -2973,8 +2573,7 @@ mod tests {
     fn fit_run_accepts_an_mh_stage_without_burnin_dt() {
         let compiled = compiled_golden("ocaml/golden/seir_seasonal_importation.ir.json");
         let stage = mh_stage_with_burnin_dt(None);
-        let stages = vec![("refine", &stage)];
-        gate_run_stages_against_model(&stages, &compiled, 1.0).unwrap_or_else(|e| {
+        gate_run_method_against_model(&stage, &compiled, 1.0).unwrap_or_else(|e| {
             panic!("an mh stage with no burnin_dt must be accepted at dt=1: {e}")
         });
     }
@@ -3091,7 +2690,7 @@ beta = {{ bounds = [0.01, 2.0] }}
 [fixed]
 N0 = 1000
 
-[stages.mle]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1
@@ -3102,7 +2701,7 @@ cooling = 0.7
             data_path.display()
         );
         std::fs::write(&fit_path, &toml_src).expect("write fit.toml");
-        let config = config_v2::FitConfigV2::from_toml_str(&toml_src)
+        let config = config_v2::FitConfig::from_toml_str(&toml_src)
             .expect("fixture fit.toml should parse");
 
         let model = golden_model("ocaml/golden/seir_observations.ir.json");

@@ -442,12 +442,11 @@ fn list_shows_cached_runs() {
     assert!(stdout.contains("baseline"), "list should show scenario name");
 }
 
-/// `--starts-from` was removed in the 2026-05-25 CLI UX rev 2 M-1
-/// break. Users get an actionable error pointing at the replacement
-/// (`--init from_mle --mle <fit-dir>`), and `--init from_mle --mle
-/// <hash>` resolves a short-hash prefix to the matching fit-stage
-/// directory (preserving Hardening #9's resolver behaviour under the
-/// new spelling).
+/// `--starts-from` (2026-05-25 CLI UX rev 2) and `--init from_mle --mle`
+/// (the `[stages]` → `[method]` split) are both gone. Users get an actionable
+/// error naming the replacement, and `--starts from_mle=<hash>` resolves a
+/// short prefix of a method leaf's `run_id` to that leaf (Hardening #9's
+/// resolver behaviour under the new spelling).
 #[test]
 fn starts_from_resolves_short_hash() {
     let bin = skip_if_missing_binary();
@@ -457,7 +456,7 @@ fn starts_from_resolves_short_hash() {
     // walks results/fits/**, so we need to place the run.json
     // under that structure.
     let stage = results.join("fits").join("demo-abc12345")
-        .join("real").join("fit_1").join("scout");
+        .join("if2-1fb03eee").join("seed_1-06cbd6b3");
     std::fs::create_dir_all(&stage).unwrap();
     // gh#147: the resolver matches a `FitStage` `runid::RunRecord` leaf on its
     // `run_id` hex prefix. Plant a leaf whose `run_id` starts `deadbeef`.
@@ -467,20 +466,20 @@ fn starts_from_resolves_short_hash() {
         "ir_version":"0.7","engine_version":"0.1.0+test",
         "levels":[
             {{"name":"fit","label":"demo","hash":"abc1234500000000000000000000000000000000000000000000000000000000","schema_version":1}},
-            {{"name":"stage","label":"01-scout","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
+            {{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
             {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
         ],
         "status":"completed","artifacts":{{}},
-        "inputs":{{"stage":"scout","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
+        "inputs":{{"stage":"if2","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
         "provenance":{{"created_at":"2026-04-19T12:00:00Z","argv":[]}}
     }}"#, target_hash);
     std::fs::write(stage.join("run.json"), run_json).unwrap();
 
-    // Exercise the short-hash stage resolver through `fit run`: the removed
-    // `--starts-from` flag must error with the actionable replacement
-    // message, and the new `--init from_mle --mle <hash>` spelling resolves
-    // the same planted stage. Run from `tmp` so the default `./results`
-    // resolver finds the leaf planted above.
+    // Exercise the short-hash leaf resolver through `fit run`: the removed
+    // flags must error with the actionable replacement message, and the
+    // `--starts from_mle=<hash>` spelling resolves the same planted leaf. Run
+    // from `tmp` so the default `./results` resolver finds the leaf planted
+    // above.
     std::env::set_current_dir(tmp.path()).unwrap();
 
     // Bad hash: should error with our message.
@@ -499,64 +498,62 @@ cases = "{}"
 beta = {{ bounds = [0.01, 2.0] }}
 [fixed]
 N0 = 1000
-[stages.refine]
+[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2
 particles = 50
 iterations = 3
 cooling = 0.7
-init_mle = "{{use CLI}}"
 "#, ir.display(), data.display())).unwrap();
 
-    // Removed flag: `--starts-from` produces the actionable error
-    // from the M-1 break (proposal §"Migration"), regardless of value.
+    // Removed flags, every one named with its replacement in one message
+    // (the ebola agents' habitual `--stage posterior --init from_prior`).
     let out = Command::new(&bin)
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--stage", "refine",
+               "--stage", "posterior", "--init", "from_prior",
                "--starts-from", "deadbeef"])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(),
-        "--starts-from must fail with the removed-flag error");
-    assert!(stderr.contains("--starts-from is no longer accepted"),
-        "expected actionable removed-flag error, got: {}", stderr);
-    assert!(stderr.contains("--init from_mle --mle"),
-        "removed-flag error must spell out the replacement, got: {}",
-        stderr);
+        "removed flags must fail with the removed-flag error");
+    assert!(stderr.contains("these `camdl fit run` flags were removed"),
+        "expected the removed-flag error, got: {}", stderr);
+    assert!(stderr.contains("--stage posterior:") && stderr.contains("drop the flag"),
+        "--stage must be named as gone, got: {}", stderr);
+    assert!(stderr.contains("--init from_prior: write `--starts from_prior`"),
+        "--init must name `--starts`, got: {}", stderr);
+    assert!(stderr.contains("--starts-from deadbeef: write `--starts from_mle=deadbeef`"),
+        "--starts-from must name its replacement, got: {}", stderr);
 
-    // Bad hash with the new spelling: same short-hash resolver, same
-    // actionable error.
+    // Bad hash with the new spelling: the resolver finds no leaf and no fit.
     let out = Command::new(&bin)
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--stage", "refine",
-               "--init", "from_mle",
-               "--mle", "zzzznonexistent"])
+               "--starts", "from_mle=zzzznonexistent"])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "bad hash must fail");
-    assert!(stderr.contains("no fit stage matching hash prefix"),
-        "expected 'no fit stage matching hash prefix', got: {}", stderr);
+    assert!(stderr.contains("starts = from_mle zzzznonexistent")
+            && stderr.contains("no fit found for zzzznonexistent"),
+        "expected the handle named and 'no fit found' — a bad handle is refused before \
+         the model is loaded, got: {}", stderr);
 
-    // Good hash: resolves to the fake stage we planted via the new
-    // `--init from_mle --mle <hash>` spelling. Resolution happens
-    // before the fit actually does anything expensive, so verifying
-    // the success path means checking that we get past arg parsing —
-    // the fit itself may still fail downstream (the model IR is
-    // empty), but the warm-start lookup succeeded.
+    // Good hash: resolves to the leaf we planted. Resolution happens before
+    // the fit does anything expensive, so the success path is that the
+    // failure comes AFTER the lookup — the planted leaf holds no
+    // `fit_state.toml`, and the error says so about that leaf.
     let out = Command::new(&bin)
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--stage", "refine",
-               "--init", "from_mle",
-               "--mle", "deadbeef"])
+               "--starts", "from_mle=deadbeef"])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("no fit stage matching hash prefix"),
-        "short-hash 'deadbeef' should resolve to the planted stage, \
-         got: {}", stderr);
+    assert!(!stderr.contains("no fit found for"),
+        "short-hash 'deadbeef' should resolve to the planted leaf, got: {}", stderr);
+    assert!(stderr.contains("seed_1-06cbd6b3") && stderr.contains("fit_state.toml"),
+        "the planted leaf must be the one read next, got: {}", stderr);
 }
 
 /// `camdl list --kind fit` should hide sim rows entirely; `--kind sim`
@@ -575,7 +572,7 @@ fn list_kind_filter_isolates_sections() {
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
     // Synthesise a CAS fit (single `mle` stage leaf + sidecar).
-    write_cas_fit(&output, "demo", "abc12345", &["mle"], "m");
+    write_cas_fit(&output, "demo", "abc12345", &["if2"], "m");
 
     let fit_only = Command::new(&bin)
         .args(["list", "--kind", "fit", &output.to_string_lossy()])
@@ -602,10 +599,10 @@ fn list_shows_fit_entries() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
-    // gh#147 (M3.2): a CAS fit segment with two stage leaves + the fit-level
+    // gh#147 (M3.2): a CAS fit segment with two method leaves + the fit-level
     // sidecar. `read_fit_segment` derives one fit entry whose `stages_declared`
-    // comes from the leaves (`scout`, `refine`).
-    write_cas_fit(&output, "demo", "abc12345", &["scout", "refine"], "m000");
+    // comes from the leaves (`if2`, `pgas`).
+    write_cas_fit(&output, "demo", "abc12345", &["if2", "pgas"], "m000");
 
     let out = Command::new(&bin)
         .args(["list", &output.to_string_lossy()])
@@ -618,8 +615,8 @@ fn list_shows_fit_entries() {
     assert!(all.contains("fits"), "list output must include a 'fits' section: {}", all);
     assert!(stdout.contains("demo"),
         "fit stem should appear in table: {}", stdout);
-    assert!(stdout.contains("scout,refine"),
-        "fit STAGES column should show declared stages: {}", stdout);
+    assert!(stdout.contains("if2,pgas"),
+        "fit METHODS column should show the methods that ran: {}", stdout);
 }
 
 /// Tamper-with-artifact regression: a corrupted `traj.tsv` whose bytes no
@@ -682,7 +679,7 @@ fn show_resolves_fit_by_hash_prefix() {
         String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("fit_stage"), "should render a fit-stage: {stdout}");
-    assert!(stdout.contains("scout"), "stage label missing: {stdout}");
+    assert!(stdout.contains("if2"), "method label missing: {stdout}");
 }
 
 
@@ -915,11 +912,11 @@ fn show_prints_metadata() {
 /// renders the FitStage payload. Pre-show-coverage-collapse, this
 /// returned "unrecognised kind".
 /// A content-addressed fit-stage leaf (`runid::RunRecord`, M3.2) at
-/// `fits/{fit}/{NN-stage}/{seed}/run.json`, addressable by `run_id` prefix.
+/// `fits/{fit}/{method}/{seed}/run.json`, addressable by `run_id` prefix.
 fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf {
     let leaf = output.join("fits")
         .join(format!("{fit_label}-5ca1ab1e"))
-        .join("01-scout-1fb03eee")
+        .join("if2-1fb03eee")
         .join("seed_42-06cbd6b3");
     std::fs::create_dir_all(&leaf).unwrap();
     let rec = format!(r#"{{
@@ -931,12 +928,12 @@ fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf 
         "engine_version": "0.1.0+test",
         "levels": [
             {{"name":"fit","label":"{fit_label}","hash":"5ca1ab1e00000000000000000000000000000000000000000000000000000000","schema_version":1}},
-            {{"name":"stage","label":"01-scout","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
+            {{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
             {{"name":"seed","label":"seed_42","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
         ],
         "status": "completed",
         "artifacts": {{}},
-        "inputs": {{"stage":"scout","method":"if2","backend":"chain_binomial","seed":42,"n_chains":4,"best_loglik":-123.45,"best_chain":1}},
+        "inputs": {{"stage":"if2","method":"if2","backend":"chain_binomial","seed":42,"n_chains":4,"best_loglik":-123.45,"best_chain":1}},
         "provenance": {{"created_at":"2026-04-30T12:00:00Z","argv":["camdl","fit","run"]}}
     }}"#);
     std::fs::write(leaf.join("run.json"), rec).unwrap();
@@ -944,7 +941,7 @@ fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf 
 }
 
 /// Write a content-addressed fit segment `fits/<label>-<fit_h8>/` with one
-/// `FitStage` leaf per stage (`<NN>-<stage>-<h8>/seed_1-<h8>/run.json`) plus the
+/// `FitStage` leaf per method (`<method>-<h8>/seed_1-<h8>/run.json`) plus the
 /// fit-level sidecar (`fit.meta.json` — the label + model-identity home). This is
 /// the shape `read_fit_segment` derives a single fit-level entry from, so
 /// `list` / `fit table` see one fit with `stages_declared` taken from the
@@ -956,7 +953,7 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], mode
     for (i, stage) in stages.iter().enumerate() {
         let nn = i + 1;
         let leaf = seg
-            .join(format!("{nn:02}-{stage}-1fb03eee"))
+            .join(format!("{stage}-1fb03eee"))
             .join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
         // Any distinct 64-hex run_id per leaf; `read_fit_segment` reads the
@@ -971,12 +968,12 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], mode
             "engine_version": "0.1.0+test",
             "levels": [
                 {{"name":"fit","label":"{label}","hash":"{fit_hash}","schema_version":1}},
-                {{"name":"stage","label":"{nn:02}-{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
+                {{"name":"method","label":"{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
                 {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
             ],
             "status": "completed",
             "artifacts": {{}},
-            "inputs": {{"stage":"{stage}","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
+            "inputs": {{"stage":"{stage}","method":"{stage}","backend":"chain_binomial","seed":1,"n_chains":2}},
             "provenance": {{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}
         }}"#);
         std::fs::write(leaf.join("run.json"), rec).unwrap();
@@ -1007,7 +1004,7 @@ fn show_renders_fit_stage_metadata() {
         String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("fit_stage"), "kind label missing: {}", s);
-    assert!(s.contains("scout"),     "stage name missing: {}", s);
+    assert!(s.contains("if2"),       "method name missing: {}", s);
     assert!(s.contains("if2"),       "method missing: {}", s);
     assert!(s.contains("-123.45"),   "best_loglik missing: {}", s);
 
@@ -1018,7 +1015,7 @@ fn show_renders_fit_stage_metadata() {
     assert!(out.status.success(), "show by run_id prefix failed: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("scout"));
+    assert!(s.contains("if2"));
 }
 
 

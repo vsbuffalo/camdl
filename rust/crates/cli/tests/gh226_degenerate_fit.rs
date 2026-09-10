@@ -112,11 +112,11 @@ fn write_impossible_data(dir: &Path) -> PathBuf {
 }
 
 /// The per-method stage block. Every method starts from the same fixed `start`
-/// values (`init = "single"`), tiny particle/iteration counts (the assertion is
+/// values (`starts = "single"`), tiny particle/iteration counts (the assertion is
 /// "backstop fires", not convergence).
 fn stage_block(method: &str) -> String {
     match method {
-        "pmmh" => r#"[stages.post]
+        "pmmh" => r#"[method]
 algorithm = "pmmh"
 backend   = "chain_binomial"
 chains    = 1
@@ -124,18 +124,18 @@ particles = 20
 iterations = 10
 burn_in   = 2
 thin      = 1
-init      = "single"
+starts      = "single"
 "#.to_string(),
-        "if2" => r#"[stages.post]
+        "if2" => r#"[method]
 algorithm = "if2"
 backend   = "chain_binomial"
 chains    = 1
 particles = 20
 iterations = 1
 cooling   = 0.9
-init      = "single"
+starts      = "single"
 "#.to_string(),
-        "pgas" => r#"[stages.post]
+        "pgas" => r#"[method]
 algorithm = "pgas"
 backend   = "chain_binomial"
 chains    = 1
@@ -143,7 +143,7 @@ particles = 20
 sweeps    = 5
 burn_in   = 1
 thin      = 1
-init      = "single"
+starts      = "single"
 "#.to_string(),
         other => panic!("unknown method {other}"),
     }

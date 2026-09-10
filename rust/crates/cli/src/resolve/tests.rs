@@ -454,7 +454,7 @@ fn differential_presentation_inputs_are_inert() {
 //      makes, and so the sim/fit keys (which this refactor must NOT touch) stay
 //      pinned to their pre-gh#442 values.
 
-use crate::fit::config_v2::FitConfigV2;
+use crate::fit::config_v2::FitConfig;
 use crate::pfilter_cas::{resolve_pfilter, PfilterCtx};
 use crate::profile_cas::{resolve_profile_point, ProfilePointCtx};
 use crate::sim_ensemble_cas::{resolve_sim_ensemble, EnsembleCell, EnsembleCtx};
@@ -464,14 +464,17 @@ const IRV: &str = "0.7";
 const ENGV: &str = "0.3.0+test";
 
 /// A minimal fit config with no `[data]` streams, so `fit_level_digest` needs
-/// no files on disk and the model is its only model-bearing input.
-fn fit_config() -> FitConfigV2 {
-    toml::from_str(
+/// no files on disk and the model is its only model-bearing input. `starts`
+/// is spelled so the method identity is takeable without a model to resolve
+/// the default against.
+fn fit_config() -> FitConfig {
+    FitConfig::from_toml_str(
         "[model]\ncamdl = \"models/sir.camdl\"\n\
          [estimate]\nbeta = { bounds = [0.01, 2.0] }\n\
          [fixed]\nN0 = 1000000\n\
-         [stages.mle]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
-         chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n",
+         [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+         chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n\
+         starts = \"uniform_unconstrained\"\n",
     )
     .expect("fixture fit config must parse")
 }
@@ -491,17 +494,15 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     // fit — `resolve_fit_stage`; levels[0] is the `fit` level (folds the model
     // digest alongside the data/config digests).
     let cfg = fit_config();
-    let stage = cfg.stages.get("mle").expect("fixture stage").clone();
+    let method = cfg.inference.method.clone().expect("fixture method");
     let fit = crate::fit::cas::resolve_fit_stage(&crate::fit::cas::FitStageCtx {
         model,
         fit_stem: "sir",
         ir_version: IRV,
         engine_version: ENGV,
-        config: &cfg,
+        problem: &cfg.problem,
         data_paths: &indexmap::IndexMap::new(),
-        stage_name: "mle",
-        stage: &stage,
-        ordinal: 1,
+        method: &method,
         seed: 7,
         deps: vec![],
     })
@@ -682,8 +683,20 @@ fn cas_identity_pins() {
         // key must not name bytes a recompute no longer reproduces. The other
         // five kinds hold no trajectory table under a `SimConfig` key, so
         // they stay — that scope is the claim this pin checks.
+        //
+        // The `[stages]` → `[method]` split (proposal 2026-09-08, §8 item 22)
+        // then moved `fit` ALONE, twice over: the fit level's canonical config
+        // JSON lost the `fit_starts` leaf it had serialized as `null` since the
+        // key was introduced, and the method level's payload — the algorithm
+        // serialized whole, minus its extension dimension — dropped the four
+        // chain-start fields (`init`, `init_mle`, `survey_path`,
+        // `survey_top_k_n`) for the one `starts` rule, so every method leaf
+        // re-keys. `pfilter`, `survey` and `profile` read the same problem
+        // half through `Problem::load` and hash nothing that changed; `sim`
+        // and `sim_ensemble` hash no fit config at all. That the other five
+        // stay is the claim this pin checks.
         ("sim", "3db7bf9105cb8bb4c8b6efc44fdcb289fea7ad0d628bd139a0475aee334a5f84"),
-        ("fit", "4013b1617bb9152e85ab715b2acded4923e3d23f8df68246b4447db943610fa5"),
+        ("fit", "80339677a112da2a743896246da06ee9a80002d0bf0b481fbb88e6afe089966c"),
         ("pfilter", "487a1ac8fafaa7548b078657be2fc7d1b5ec17ccfb177ff10b992b8a03e161b3"),
         ("survey", "ef89bb787175271fbec810a494a3a7b7cde2ef909cff60633d638b66ea1b0ab0"),
         ("sim_ensemble", "b597c66aa6dac403d222637af80ddf09b715e1b38a23848459b562101aee12c9"),

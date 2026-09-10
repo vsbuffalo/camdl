@@ -154,7 +154,7 @@ fn tsv_fitted_q50(tsv: &Path) -> f64 {
     panic!("no fitted row in {}", tsv.display());
 }
 
-const PGAS: &str = r#"[stages.posterior]
+const PGAS: &str = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 2
@@ -167,7 +167,7 @@ thin = 1
 // `mh` is the deterministic Metropolis-Hastings — an ODE Bayesian sampler (no
 // particle filter, hence no `particles` key). It writes a posterior `draws.tsv`
 // just like PGAS/PMMH, so the artifact gate must accept it.
-const MH: &str = r#"[stages.posterior]
+const MH: &str = r#"[method]
 algorithm = "mh"
 backend = "ode"
 chains = 2
@@ -309,7 +309,7 @@ fn quantity_if2_renders_dash_and_default_omits_column() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    let if2 = r#"[stages.scout]
+    let if2 = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 2

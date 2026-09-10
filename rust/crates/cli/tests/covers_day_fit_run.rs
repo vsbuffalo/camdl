@@ -164,7 +164,7 @@ beta  = {{ bounds = [0.01, 5.0], prior = {{ log_normal = {{ mu = -0.3, sigma = 0
 gamma = {{ bounds = [0.01, 1.0], prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }}, start = 0.3 }}
 [fixed]
 N0 = 1000
-[stages.post]
+[method]
 algorithm = "pgas"
 backend = "chain_binomial"
 chains = 1
@@ -172,6 +172,7 @@ particles = 30
 sweeps = 6
 burn_in = 2
 thin = 1
+starts = "uniform_unconstrained"
 "#,
         out = out.display(), ir = ir.display(), data = data.display(),
     );

@@ -62,8 +62,7 @@ fn tempdir(tag: &str) -> Tmp {
 /// Build a tiny SIR-with-Poisson-cases fixture. Two estimated params
 /// (`beta`, `gamma`); `N0` is fixed via the toml or CLI as needed.
 /// No `~` priors in the model file so the resolver's flat-fallback
-/// case fires when `--fit` is absent. Matches the `survey_top_k_pmmh`
-/// fixture shape so the fit toml schema is well-trodden.
+/// case fires when `--fit` is absent.
 fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     let camdlc = camdlc_bin().expect("camdlc.exe present");
     // Defaults supplied via a `baseline` preset block so the
@@ -120,12 +119,10 @@ simulate { from = 0 'days  to = 6 'days }
 }
 
 /// Write a fit toml with [estimate] containing log_normal priors for
-/// every estimated param. The `[stages.dummy]` block satisfies
-/// `FitConfigV2::load`'s schema check — profile never *runs* the
-/// stages, it only reads `[estimate]` and `[fixed]` for prior /
-/// bounds resolution (the v2 schema requires at least one stage to
-/// be declared; we treat that as a fixable schema burden rather than
-/// an excuse to fork the loader).
+/// every estimated param. Profile reads the problem half through
+/// `Problem::load` — `[estimate]` and `[fixed]` for prior / bounds
+/// resolution — and never runs the `[method]`, which is kept here so the
+/// same file also serves `fit run`.
 fn write_fit_toml_with_priors(dir: &Path, ir: &Path, data: &Path, name: &str) -> PathBuf {
     let toml = format!(r#"
 output_dir = "{out}"
@@ -140,7 +137,7 @@ beta  = {{ bounds = [0.01, 5.0], prior = {{ log_normal = {{ mu = -0.3, sigma = 0
 gamma = {{ bounds = [0.01, 1.0], prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }}, start = 0.1 }}
 [fixed]
 N0 = 1000
-[stages.dummy]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1
@@ -175,7 +172,7 @@ beta  = {{ bounds = [0.01, 5.0], prior = {{ log_normal = {{ mu = -1.0, sigma = 0
 gamma = {{ bounds = [0.01, 1.0], prior = {{ log_normal = {{ mu = -1.5, sigma = 0.3 }} }}, start = 0.1 }}
 [fixed]
 N0 = 1000
-[stages.dummy]
+[method]
 algorithm  = "if2"
 backend    = "chain_binomial"
 chains     = 1

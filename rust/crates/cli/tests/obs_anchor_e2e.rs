@@ -157,7 +157,7 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.1, prior = {{ uniform = {{}} }} }}
 [fixed]
 beta = 0.12
 rho = 0.6
-[stages.posterior]
+[method]
 algorithm  = "pmmh"
 backend    = "chain_binomial"
 chains     = 1

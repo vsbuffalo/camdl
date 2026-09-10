@@ -1,9 +1,7 @@
 //! gh#147 (M3.3) — end-to-end round-trip for the content-addressed
 //! `camdl survey` writer and its `list` / `show` / `cat` readers.
 //!
-//! The `survey_top_k_*` tests feed a *hand-written* survey fixture into
-//! a fit; none of them exercise the real `camdl survey` writer. This
-//! test runs the actual command and asserts the leaf it produces is
+//! This test runs the actual command and asserts the leaf it produces is
 //! discoverable and readable through every browse path:
 //!
 //!   1. `camdl survey … --eval simulate` writes a `surveys/…` leaf with
@@ -15,8 +13,7 @@
 //!   4. `camdl cat <run_id[:8]>` emits the `landscape.tsv` body.
 //!
 //! `--eval simulate` keeps the run deterministic and sub-second (no PF).
-//! Skipped when the release binary or camdlc isn't present, mirroring
-//! the gate in `survey_top_k_pmmh.rs`.
+//! Skipped when the release binary or camdlc isn't present.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,8 +48,7 @@ fn tempdir(tag: &str) -> Tmp {
     Tmp(base)
 }
 
-/// A tiny deterministic SIR model + dataset (mirrors the fixture in
-/// `survey_top_k_pmmh.rs`, minus the PF-specific bits).
+/// A tiny deterministic SIR model + dataset.
 fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     let camdlc = camdlc_bin().expect("camdlc.exe present");
     let src = r#"
@@ -147,7 +143,7 @@ fn survey_write_then_list_show_cat_roundtrip() {
     assert!(leaf.join("run.json").is_file(), "run.json missing");
 
     // The run.json is a parseable RunRecord of kind Survey, and carries
-    // the cross-check provenance the survey_top_k consumer reads back.
+    // the cross-check provenance a reader can verify the landscape against.
     let rec_bytes = std::fs::read(leaf.join("run.json")).unwrap();
     let record: runid::RunRecord = serde_json::from_slice(&rec_bytes)
         .expect("run.json must deserialize as a RunRecord");

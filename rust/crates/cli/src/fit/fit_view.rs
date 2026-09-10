@@ -78,30 +78,30 @@ pub struct FitView {
     pub parameters_provenance: HashMap<String, ParameterProvenance>,
 
     // ── from the leaves ──
-    /// Bare stage names in execution order (the `NN-` ordinal prefix sorts
-    /// topologically), deduplicated.
+    /// The method labels found among the leaves, in label order,
+    /// deduplicated. One per method that ran on this problem.
     pub stages_declared: Vec<String>,
-    /// One view per discovered stage leaf, sorted by stage label.
+    /// One view per discovered method leaf, sorted by method label then seed.
     pub stages: Vec<FitStageView>,
 }
 
-/// The `stage` level's readable label (`"01-scout"`); `""` when absent.
+/// The `method` level's readable label (the algorithm's name); `""` when
+/// absent.
 fn stage_label(r: &RunRecord) -> String {
     r.levels
         .iter()
-        .find(|l| l.name == "stage")
+        .find(|l| l.name == "method")
         .map(|l| l.label.clone())
         .unwrap_or_default()
 }
 
-/// The bare stage name from a `NN-stage` provenance label (`"01-scout"` →
-/// `"scout"`); a label without an ordinal prefix is returned unchanged. Splits
-/// on the first `-` only, so stage names containing `-` survive.
-fn bare_stage_name(stage_label: &str) -> String {
-    stage_label
-        .split_once('-')
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_else(|| stage_label.to_string())
+/// The `seed` level's label, for a stable order among one method's leaves.
+fn seed_label(r: &RunRecord) -> String {
+    r.levels
+        .iter()
+        .find(|l| l.name == "seed")
+        .map(|l| l.label.clone())
+        .unwrap_or_default()
 }
 
 /// Build a [`FitStageView`] from a fit-stage leaf record + its directory.
@@ -141,8 +141,8 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Option<Fit
 
 impl FitView {
     /// Project a CAS fit segment (`fits/{stem}-{h8}/`) into a fit-level view.
-    /// Collects its `FitStage` leaves, sorts by stage label (`NN-` ordinal →
-    /// execution order), reads the fit-level sidecar, and folds them.
+    /// Collects its `FitStage` leaves, sorts by method label then seed, reads
+    /// the fit-level sidecar, and folds them.
     ///
     /// Provenance integrity (gh#147): a segment with stage leaves but no
     /// sidecar is malformed — skipped with a loud error rather than surfaced
@@ -157,8 +157,10 @@ impl FitView {
         if leaves.is_empty() {
             return None;
         }
-        // Execution order: the `NN-stage` ordinal prefix sorts topologically.
-        leaves.sort_by(|a, b| stage_label(&a.1).cmp(&stage_label(&b.1)));
+        // Label order, then seed: there is no execution order among methods.
+        leaves.sort_by(|a, b| {
+            (stage_label(&a.1), seed_label(&a.1)).cmp(&(stage_label(&b.1), seed_label(&b.1)))
+        });
 
         let fit_hash = leaves
             .iter()
@@ -182,12 +184,12 @@ impl FitView {
             .first()
             .map(|(_, r)| r.provenance.argv.clone())
             .unwrap_or_default();
-        // Bare stage names in execution order, dedup preserving order.
+        // Method labels in label order, dedup preserving order.
         let mut stages_declared: Vec<String> = Vec::new();
         for (_, r) in &leaves {
-            let bare = bare_stage_name(&stage_label(r));
-            if !stages_declared.contains(&bare) {
-                stages_declared.push(bare);
+            let label = stage_label(r);
+            if !stages_declared.contains(&label) {
+                stages_declared.push(label);
             }
         }
 
@@ -253,16 +255,17 @@ mod tests {
     use super::*;
     use crate::run_meta::{write_fit_sidecar, FitSidecar};
 
-    /// Write a realistic two-stage CAS fit segment under `seg`:
-    /// `{01-scout,02-refine}-<h8>/seed_1-<h8>/run.json` `FitStage` leaves plus
-    /// the fit-level `fit.meta.json` sidecar. Mirrors the on-disk shape the
+    /// Write a realistic two-method CAS fit segment under `seg` — the shape
+    /// two files with one problem half produce:
+    /// `{if2,pgas}-<h8>/seed_1-<h8>/run.json` `FitStage` leaves plus the
+    /// fit-level `fit.meta.json` sidecar. Mirrors the on-disk shape the
     /// runner writes. `fit_h8` seeds the shared `fit`-level hash.
     fn write_two_stage_fit(seg: &Path, fit_h8: &str) {
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
         let stages = [
-            // (ordinal, stage label, bare stage, method, best_loglik, best_chain, created_at)
-            (1_u8, "01-scout", "scout", "if2", -120.5_f64, 2_u64, "2026-04-27T00:00:01Z"),
-            (2_u8, "02-refine", "refine", "if2", -56.7_f64, 1_u64, "2026-04-27T00:00:02Z"),
+            // (ordinal, method label, inputs.stage, method, best_loglik, best_chain, created_at)
+            (1_u8, "if2", "if2", "if2", -120.5_f64, 2_u64, "2026-04-27T00:00:01Z"),
+            (2_u8, "pgas", "pgas", "pgas", -56.7_f64, 1_u64, "2026-04-27T00:00:02Z"),
         ];
         for (ord, label, stage, method, best_ll, best_chain, created_at) in stages {
             let leaf = seg.join(format!("{label}-1fb03eee")).join("seed_1-06cbd6b3");
@@ -270,7 +273,7 @@ mod tests {
             // run_id must be valid 64-char hex (ContentHash rejects non-hex).
             let run_id = format!("{:0<64}", format!("{fit_h8}0{ord}"));
             let rec = format!(
-                r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"stage","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{stage}","method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
+                r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{stage}","method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
             );
             std::fs::write(leaf.join("run.json"), rec).unwrap();
         }
@@ -283,7 +286,10 @@ mod tests {
             data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "d4ta".repeat(2))]),
             estimated: vec!["beta".into(), "gamma".into()],
             fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0)]),
-            resolved_priors: vec![],
+            resolved_priors: vec![crate::run_meta::ResolvedPriorEntry {
+                param: "beta".into(),
+                source: "model_ir".into(),
+            }],
             parameters_provenance: std::collections::BTreeMap::new(),
             schema: None,
             docs: Default::default(),
@@ -293,12 +299,12 @@ mod tests {
         write_fit_sidecar(seg, Path::new("nonexistent.toml"), &sidecar).unwrap();
     }
 
-    /// Pins the N→1 aggregation `FitView` performs over a realistic two-stage
-    /// fixture: the fit-level fold (fit_hash, latest created_at, engine/argv,
-    /// sidecar provenance, execution-order `stages_declared`) and the per-stage
-    /// fold (stage / method / backend / seed / n_chains / best_loglik /
-    /// best_chain). Asserts real values — not `None == None` — so a degenerate
-    /// projection (all-empty / all-None) fails.
+    /// Pins the N→1 aggregation `FitView` performs over a realistic
+    /// two-method fixture: the fit-level fold (fit_hash, latest created_at,
+    /// engine/argv, sidecar provenance, label-order `stages_declared`) and the
+    /// per-leaf fold (label / method / backend / seed / n_chains /
+    /// best_loglik / best_chain). Asserts real values — not `None == None` —
+    /// so a degenerate projection (all-empty / all-None) fails.
     #[test]
     fn fit_view_folds_segment_field_for_field() {
         let tmp = crate::test_support::unique_temp_dir("fit_view_equiv");
@@ -325,21 +331,22 @@ mod tests {
         assert_eq!(view.estimated, vec!["beta", "gamma"], "estimated");
         assert_eq!(view.fixed.get("N0"), Some(&1000.0), "fixed");
 
-        // stages_declared: execution order, deduped.
-        assert_eq!(view.stages_declared, vec!["scout", "refine"], "execution order");
+        // stages_declared: label order, deduped.
+        assert_eq!(view.stages_declared, vec!["if2", "pgas"], "label order");
 
-        // Per-stage fold, leaf-for-leaf.
-        assert_eq!(view.stages.len(), 2, "two stage leaves");
-        let scout = view.stages.iter().find(|s| s.stage == "scout").unwrap();
-        assert_eq!(scout.method, FitAlgorithm::If2, "scout method");
-        assert_eq!(scout.backend, InferenceBackend::ChainBinomial, "scout backend");
-        assert_eq!(scout.seed, 1, "scout seed");
-        assert_eq!(scout.n_chains, 4, "scout n_chains");
-        assert_eq!(scout.best_loglik, Some(-120.5), "scout best_loglik");
-        assert_eq!(scout.best_chain, Some(2), "scout best_chain");
-        let refine = view.stages.iter().find(|s| s.stage == "refine").unwrap();
-        assert_eq!(refine.best_loglik, Some(-56.7), "refine best_loglik");
-        assert_eq!(refine.best_chain, Some(1), "refine best_chain");
+        // Per-leaf fold, leaf-for-leaf.
+        assert_eq!(view.stages.len(), 2, "two method leaves");
+        let scout = view.stages.iter().find(|s| s.stage == "if2").unwrap();
+        assert_eq!(scout.method, FitAlgorithm::If2, "if2 method");
+        assert_eq!(scout.backend, InferenceBackend::ChainBinomial, "if2 backend");
+        assert_eq!(scout.seed, 1, "if2 seed");
+        assert_eq!(scout.n_chains, 4, "if2 n_chains");
+        assert_eq!(scout.best_loglik, Some(-120.5), "if2 best_loglik");
+        assert_eq!(scout.best_chain, Some(2), "if2 best_chain");
+        let refine = view.stages.iter().find(|s| s.stage == "pgas").unwrap();
+        assert_eq!(refine.method, FitAlgorithm::Pgas, "pgas method");
+        assert_eq!(refine.best_loglik, Some(-56.7), "pgas best_loglik");
+        assert_eq!(refine.best_chain, Some(1), "pgas best_chain");
 
         std::fs::remove_dir_all(&tmp).ok();
     }

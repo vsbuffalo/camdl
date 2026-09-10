@@ -701,11 +701,10 @@ impl FitResult {
     /// the returned [`PosteriorDraws`].
     pub fn resolve(
         segment: &Path,
-        stage: Option<&str>,
         selection: Option<ChainSelection>,
     ) -> Result<FitResult, String> {
         let seg_str = segment.to_str().ok_or("fit path is not valid UTF-8")?;
-        match posterior_draws::resolve_posterior_draws(seg_str, stage) {
+        match posterior_draws::resolve_posterior_draws(seg_str, None) {
             Ok(pref) => {
                 let pref = pref.with_selection(selection);
                 // Keyed, not param-only: the `(chain, draw)` key locates the
@@ -756,16 +755,11 @@ impl FitResult {
                     .with_keys(DrawKeys { stage_dir, per_draw: keys })?,
                 ))
             }
-            // No cloud: classify as a point-estimate fit. Report the stage the
-            // user asked for (`--stage`), not the terminal one, so the refusal
-            // names the right stage.
+            // No cloud: classify as a point-estimate fit, naming the method
+            // the refusal is about.
             Err(e) => {
                 if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
-                    let chosen = match stage {
-                        Some(want) => view.stages.iter().find(|s| s.stage == want),
-                        None => view.stages.last(),
-                    };
-                    if let Some(s) = chosen {
+                    if let Some(s) = view.stages.last() {
                         return Ok(FitResult::PointEstimate {
                             method: Some(s.method),
                             stage: s.stage.clone(),
@@ -1339,6 +1333,8 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     //    its segment + config.
     let crate::fit::handle::ResolvedFit { segment, config } =
         crate::fit::handle::resolve_fit(args.fit()?).map_err(|e| e.to_string())?;
+    // The problem half is all a replay reads: model, data, fixed, estimate.
+    let config = config.problem;
 
     // 2. Resolve the posterior — by artifact. A point-estimate fit is refused.
     //    `--exclude-chains` is parsed at the boundary into a typed selection and
@@ -1348,7 +1344,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
         .as_deref()
         .map(ChainSelection::parse_exclude)
         .transpose()?;
-    let fit_result = FitResult::resolve(&segment, args.stage.as_deref(), selection.clone())?;
+    let fit_result = FitResult::resolve(&segment, selection.clone())?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
     // unwrap the cloud (v1 only ever reaches `posterior` here, but the label is
@@ -2580,7 +2576,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<Vec<PathBuf>, Strin
     if !model.contrasts.is_empty() {
         let paths = crate::fit::contrasts::emit_contrasts(
             &segment,
-            args.stage.as_deref(),
+            None,
             selection.as_ref(),
             &model,
             posterior.backend,
@@ -2678,7 +2674,7 @@ fn leaf_matches(o: &ir::observation::ObservationModel, l: &LeafObs) -> bool {
 fn load_leaf_obs(
     model: &ir::Model,
     compiled: &sim::CompiledModel,
-    config: &crate::fit::config_v2::FitConfigV2,
+    config: &crate::fit::config_v2::Problem,
     dt: f64,
     stream_filter: Option<&str>,
 ) -> Result<Vec<LeafObs>, String> {
@@ -3314,7 +3310,7 @@ fn pool_one_step_draws(
 fn one_step_bands(
     compiled: std::sync::Arc<sim::CompiledModel>,
     model: &ir::Model,
-    config: &crate::fit::config_v2::FitConfigV2,
+    config: &crate::fit::config_v2::Problem,
     dt: f64,
     stream_filter: Option<&str>,
     fit: &FilterableFit,

@@ -241,15 +241,14 @@ pub struct ScenarioOverrideRecord {
 }
 
 /// Per-chain init provenance. The `method` field echoes the
-/// [`crate::fit::init::InitMethod`] tag; each entry of `chains` is a
+/// [`crate::fit::starts::ChainStarts`] tag; each entry of `chains` is a
 /// map from estimated-parameter name to its per-chain start value +
 /// source. Restricted to the estimate set by construction (see
 /// `ChainStart.values`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitProvenance {
-    /// [`crate::fit::init::InitMethod`] `Display` tag — matches the
-    /// `Display` impl so a `match` over the impl's possible outputs
-    /// is exhaustive.
+    /// The starts rule's tag ([`crate::fit::starts::ChainStarts::tag`]) — one
+    /// spelling per rule across every artifact.
     pub method: String,
     /// One map per chain; key = estimated-parameter name; value =
     /// the value + per-chain source tag.
@@ -307,7 +306,7 @@ impl InitProvenance {
     /// `chains[i]` corresponds to chain i regardless of storage
     /// order — important for downstream consumers that index by
     /// chain id rather than draw order.
-    pub fn from_chain_starts(cs: &crate::fit::chain_starts::ChainStarts) -> Self {
+    pub fn from_chain_starts(cs: &crate::fit::chain_starts::DrawnStarts) -> Self {
         // Allocate `chains` sized to (max chain_id + 1) so an
         // out-of-order Vec<ChainStart> still produces a well-formed
         // index-by-chain_id output. Empty starts yield an empty Vec.
@@ -327,7 +326,7 @@ impl InitProvenance {
             chains[chain.chain_id] = entry;
         }
         InitProvenance {
-            method: cs.method.to_string(),
+            method: cs.rule.tag().to_string(),
             chains,
         }
     }
@@ -1031,44 +1030,39 @@ mod tests {
         assert!(beta.kicked_from_estimate.is_none());
     }
 
-    /// Audit checklist item 5: every `InitMethod` variant has at
-    /// least one round-trip producing a `run.json` whose
-    /// `init_provenance.method` equals that variant's tag.
+    /// Audit checklist item 5: every starts rule has at least one
+    /// round-trip producing a `run.json` whose `init_provenance.method`
+    /// equals that rule's tag.
     #[test]
     fn init_provenance_method_tag_matches_for_every_variant() {
-        use crate::fit::chain_starts::{
-            ChainStart, ChainStarts, InitSource,
-        };
-        use crate::fit::init::{
-            InitMethod, MleSource, PosteriorSource,
-        };
-        // One ChainStarts per (variant, expected tag) pair.
-        let cases: Vec<(InitMethod, &str)> = vec![
-            (InitMethod::Single,        "single"),
-            (InitMethod::Uniform,       "uniform"),
-            (InitMethod::Lhs,           "lhs"),
-            (InitMethod::UniformUnconstrained, "uniform_unconstrained"),
-            (InitMethod::SurveyTopK,    "survey_top_k"),
-            (InitMethod::FromPrior,     "from_prior"),
-            (InitMethod::FromPosterior {
-                source: PosteriorSource::DrawsTsv("/tmp/draws.tsv".into()),
-            }, "from_posterior"),
-            (InitMethod::FromMle {
-                source: MleSource::File("/tmp/mle.toml".into()),
-            }, "from_mle"),
-            (InitMethod::FromParams {
-                path: "/tmp/params.toml".into(),
-            }, "from_params"),
+        use crate::fit::chain_starts::{ChainStart, DrawnStarts, InitSource};
+        use crate::fit::starts::{ChainStarts, Handle, Point, Spread};
+        // One DrawnStarts per (rule, expected tag) pair.
+        let cases: Vec<(ChainStarts, &str)> = vec![
+            (ChainStarts::Point(Point::Declared), "single"),
+            (ChainStarts::Spread(Spread::Uniform), "uniform"),
+            (ChainStarts::Spread(Spread::Lhs), "lhs"),
+            (ChainStarts::Spread(Spread::UniformUnconstrained), "uniform_unconstrained"),
+            (ChainStarts::Spread(Spread::FromPrior), "from_prior"),
+            (ChainStarts::Spread(Spread::FromPosterior {
+                source: Handle("draws.tsv".into()),
+            }), "from_posterior"),
+            (ChainStarts::Point(Point::FromMle {
+                source: Handle("@mle".into()),
+            }), "from_mle"),
+            (ChainStarts::Point(Point::FromParams {
+                path: "params.toml".into(),
+            }), "from_params"),
         ];
         for (method, expected_tag) in &cases {
-            // Single-chain ChainStarts → InitProvenance → JSON.
-            let cs = ChainStarts {
+            // Single-chain DrawnStarts → InitProvenance → JSON.
+            let cs = DrawnStarts {
                 starts: vec![ChainStart {
                     chain_id: 0,
                     values: HashMap::from([("beta".into(), 0.5_f64)]),
                     source: InitSource::SeededBase,
                 }],
-                method: method.clone(),
+                rule: method.clone(),
             };
             let prov = InitProvenance::from_chain_starts(&cs);
             assert_eq!(prov.method, *expected_tag,
@@ -1087,10 +1081,8 @@ mod tests {
     /// test to cover audit item 5 at the per-chain level.
     #[test]
     fn init_source_per_chain_tags_round_trip() {
-        use crate::fit::chain_starts::{
-            ChainStart, ChainStarts, InitSource,
-        };
-        use crate::fit::init::InitMethod;
+        use crate::fit::chain_starts::{ChainStart, DrawnStarts, InitSource};
+        use crate::fit::starts::ChainStarts;
         let starts = vec![
             ChainStart {
                 chain_id: 0,
@@ -1117,7 +1109,7 @@ mod tests {
                 },
             },
         ];
-        let cs = ChainStarts { starts, method: InitMethod::FromPrior };
+        let cs = DrawnStarts { starts, rule: ChainStarts::from_prior() };
         let prov = InitProvenance::from_chain_starts(&cs);
         // Each chain's per-parameter source matches the InitSource tag.
         assert_eq!(prov.chains[0]["beta"].source, "prior_draw");
@@ -1142,13 +1134,13 @@ mod tests {
         use crate::fit::fit_view::FitView;
         let tmp = crate::test_support::unique_temp_dir("sidecar_priors");
         let seg = tmp.join("fits").join("demo-abc12345");
-        let leaf = seg.join("01-posterior-1fb03eee").join("seed_1-06cbd6b3");
+        let leaf = seg.join("pgas-1fb03eee").join("seed_1-06cbd6b3");
         std::fs::create_dir_all(&leaf).unwrap();
         // A Bayesian (pgas) stage leaf — `FitView::read` requires its
         // sidecar to carry resolved_priors.
         std::fs::write(
             leaf.join("run.json"),
-            r#"{"format_version":1,"kind":"fit_stage","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"stage","label":"01-posterior","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"stage":"posterior","method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
+            r#"{"format_version":1,"kind":"fit_stage","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"stage":"pgas","method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
         )
         .unwrap();
 

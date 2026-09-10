@@ -1,87 +1,72 @@
-//! Phase-3 chain-start dispatcher for the CLI UX rev 2 init family.
+//! The one seam every runner draws its chain starts through.
 //!
-//! Sister surface to [`crate::fit::init::build_chain_starts`]. The
-//! legacy entry point covers the per-stage init methods that ship in
-//! fit.toml today (`single` / `uniform` / `lhs` / `survey_top_k`); this
-//! module covers the four new warm-start variants introduced by the
-//! 2026-05-25 CLI UX rev 2 proposal:
+//! [`draw_chain_starts`] dispatches on a [`ChainStarts`] rule: the bare
+//! spread rules go to the transform-aware builders in [`crate::fit::init`],
+//! the sourced rules read their file, and every rule returns the same
+//! [`DrawnStarts`] shape — one [`ChainStart`] per chain, each carrying an
+//! [`InitSource`] tag saying which draw produced it. A sourced rule's handle
+//! is resolved once, before the run's identity is taken, by
+//! [`resolve_starts`], which also folds the source's *content* into the
+//! run's lineage so rewriting a file in place re-keys the run (gh#541).
 //!
-//!   - [`InitMethod::FromPrior`] — per-chain draw from each parameter's
-//!     `~ <dist>` declaration; fall back to bounds-uniform with a
-//!     startup warning for parameters with no prior (Decision A).
-//!   - [`InitMethod::FromPosterior`] — per-chain draw from a posterior
-//!     draws TSV (uniformly with replacement; gh#83's default). An
-//!     explicit source that can't bind every estimated parameter — a
-//!     missing column or an unparseable cell — is a hard error, never a
-//!     silent bounds-uniform fallback (gh#274).
-//!   - [`InitMethod::FromMle`] — all chains at the MLE point from a
-//!     prior fit; knows the fit-output TOML schema.
-//!   - [`InitMethod::FromParams`] — all chains at a hand-written flat
-//!     params TOML.
+//! The seam between parameter resolution and chain initialization is the
+//! [`ChainStart::values`] map: it only contains parameters in
+//! `resolved.estimate_set`. Every loader builds the map by iterating that
+//! set — there is no way to ask "what's the starting value for `gamma`?"
+//! when `gamma` is fixed. This is what guarantees a fixed value always wins
+//! over the starts rule.
 //!
-//! The seam between Phase 2 (parameter resolution) and Phase 3 (chain
-//! initialization) is the [`ChainStart::values`] map: it only contains
-//! parameters in `resolved.estimate_set`. Every loader builds the map
-//! by iterating that set — there is no public way to ask "what's the
-//! starting value for `gamma`?" when `gamma` is in `Fixed`. This is
-//! what guarantees `--fixed` always wins over `--init`.
-//!
-//! Provenance: every [`ChainStart`] carries an [`InitSource`] tag that
-//! step 9 serializes into `run.json`'s `init_provenance.chains[i]`.
-//!
-//! See [`docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md`]
-//! §"Init phase types" for the design rationale (verb-per-source
-//! contract, fall-back behaviour, etc.).
+//! The starts themselves are recorded by [`write_chain_starts_tsv`], the one
+//! writer of `chain_starts.tsv`; every multi-chain sampler calls it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use sim::inference::prior::{Prior, Density};
+use sim::inference::prior::{Density, Prior};
+use sim::inference::types::EstimatedParam;
 use sim::rng::StatefulRng;
 
 use crate::params_resolver::ResolvedParameters;
 use crate::util::derive_chain_seed;
 
-use super::init::{InitMethod, MleSource, PosteriorSource};
+use super::starts::{ChainStarts, Point, Spread};
 
 /// Per-chain provenance tag. Stored on each [`ChainStart`] and rendered
-/// into `run.json`'s `init_provenance.chains[i][param].source` by
-/// step 9.
+/// into `run.json`'s `init_provenance.chains[i][param].source` by the
+/// profile runner.
 ///
 /// Each variant carries enough information to identify the specific
 /// draw: the seed for stochastic samplers, the row index + path for
-/// file-based draws, the rank for survey ranking.
+/// file-based draws.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InitSource {
-    /// All chains at the seeded base param values (`InitMethod::Single`,
-    /// or the no-op fallback for `n_chains < 2`).
+    /// All chains at the seeded base param values (`starts = "single"`, or
+    /// a spread rule degraded to the base point at one chain).
     SeededBase,
-    /// Per-chain uniform random draw within parameter bounds (legacy
-    /// `Uniform` mode).
+    /// Per-chain uniform random draw within parameter bounds
+    /// (`starts = "uniform"`).
     UniformDraw { seed: u64 },
     /// Per-chain Stan-style draw: i.i.d. `Uniform(-2, 2)` on the
     /// unconstrained scale, squashed and mapped into bounds
-    /// (`InitMethod::UniformUnconstrained`).
+    /// (`starts = "uniform_unconstrained"`).
     UnconstrainedDraw { seed: u64 },
     /// One stratum of an LHS layout.
     LhsCell { row: usize },
-    /// Per-chain draw from a parameter's `~` prior declaration (or
-    /// bounds-uniform fall-back when no prior).
+    /// Per-chain draw from a parameter's prior (or bounds-uniform fall-back
+    /// when it has none).
     PriorDraw { seed: u64 },
     /// One row of a posterior draws TSV.
     PosteriorRow { row: usize, path: PathBuf },
-    /// All chains at an MLE point loaded from a fit-output TOML.
+    /// All chains at the point estimate a stored fit's `fit_state.toml`
+    /// records.
     MlePoint { path: PathBuf },
     /// All chains at a hand-written flat params TOML.
     ParamsPoint { path: PathBuf },
-    /// Top-K rank from a survey landscape (1-indexed).
-    SurveyRank { rank: usize, path: PathBuf },
 }
 
 impl InitSource {
-    /// Stable string tag for one-line / column-oriented provenance
-    /// (e.g. `chain_starts.tsv`'s `source` column header).
+    /// Stable string tag for one-line / column-oriented provenance.
     pub fn tag(&self) -> &'static str {
         match self {
             InitSource::SeededBase      => "seeded_base",
@@ -92,7 +77,6 @@ impl InitSource {
             InitSource::PosteriorRow{..}=> "posterior_row",
             InitSource::MlePoint{..}    => "mle_point",
             InitSource::ParamsPoint{..} => "params_point",
-            InitSource::SurveyRank{..}  => "survey_rank",
         }
     }
 }
@@ -110,41 +94,39 @@ pub struct ChainStart {
 
 /// The full set of chain starts produced by [`draw_chain_starts`].
 #[derive(Debug, Clone)]
-pub struct ChainStarts {
+pub struct DrawnStarts {
     /// Length = `n_chains` requested.
     pub starts: Vec<ChainStart>,
-    /// The method that produced these starts. Echoed into
-    /// `run.json`'s `init_provenance.method`.
-    pub method: InitMethod,
+    /// The rule that produced these starts.
+    pub rule: ChainStarts,
 }
 
-impl ChainStarts {
+impl DrawnStarts {
     /// Adapt to the IF2-shaped `Vec<Vec<EstimatedParam>>` view that
-    /// `runner::run_chains_with_per_chain_params` /
-    /// `profile`'s per-cell init / `nlopt_stage::build_chain_param_vecs`
-    /// already consume. Each chain's `EstimatedParam`s start from
-    /// `base_specs` and have `.initial` overwritten from
-    /// `ChainStart.values` for any name present in the HashMap.
+    /// `runner::run_chains_with_per_chain_params` and the PMMH / PGAS /
+    /// NUTS / NLopt dispatch sites consume. Each chain's `EstimatedParam`s
+    /// start from `base_specs` and have `.initial` overwritten from
+    /// `ChainStart.values` for any name present in the map.
     ///
-    /// Names in `estimate_set` that the HashMap doesn't carry (e.g.
-    /// when a loader fell back to bounds-uniform for a missing
-    /// column) take `base_specs[i].initial`; the loader already
-    /// emitted a startup warning so the silent fall-through is
-    /// auditable.
-    pub fn to_estimated_params(
-        &self,
-        base_specs: &[sim::inference::types::EstimatedParam],
-    ) -> Vec<Vec<sim::inference::types::EstimatedParam>> {
+    /// Names in `estimate_set` that the map doesn't carry (e.g. when a
+    /// loader fell back to bounds-uniform for a missing column) take
+    /// `base_specs[i].initial`; the loader already emitted a startup
+    /// warning so the silent fall-through is auditable.
+    pub fn to_estimated_params(&self, base_specs: &[EstimatedParam]) -> Vec<Vec<EstimatedParam>> {
         self.starts.iter().map(|cs| {
             base_specs.iter().map(|spec| {
                 let initial = cs.values.get(&spec.name)
                     .copied()
                     .unwrap_or(spec.initial);
-                sim::inference::types::EstimatedParam {
-                    initial, ..spec.clone()
-                }
+                EstimatedParam { initial, ..spec.clone() }
             }).collect()
         }).collect()
+    }
+
+    /// Per-chain full parameter vectors: `base_params` with each estimated
+    /// slot overwritten by that chain's start.
+    pub fn to_param_vecs(&self, base_specs: &[EstimatedParam], base_params: &[f64]) -> Vec<Vec<f64>> {
+        super::init::chain_starts_to_param_vecs(&self.to_estimated_params(base_specs), base_params)
     }
 }
 
@@ -153,11 +135,10 @@ impl ChainStarts {
 ///
 /// Missing parameters in a `from_mle` / `from_params` / `from_prior`
 /// source are handled by those loaders via bounds-uniform fall-back +
-/// a stderr warning (per proposal §"Init family"), not by a distinct
-/// error variant. `from_posterior` is the exception: an explicit draws
-/// source that can't bind an estimated parameter (missing column or
-/// unparseable cell) is a hard [`InitError::SchemaMismatch`], not a
-/// silent fall-back (gh#274).
+/// a stderr warning, not by a distinct error variant. `from_posterior`
+/// is the exception: an explicit draws source that can't bind an
+/// estimated parameter (missing column or unparseable cell) is a hard
+/// [`InitError::SchemaMismatch`], not a silent fall-back (gh#274).
 #[derive(Debug)]
 pub enum InitError {
     /// A path argument doesn't point at a readable file or directory.
@@ -171,12 +152,13 @@ pub enum InitError {
         expected: &'static str,
         msg:      String,
     },
-    /// `FromPrior` was requested but at least one parameter had no
-    /// `~` declared and no bounds for the uniform fall-back. Lists
-    /// the offending parameter names. The fall-back-to-bounds-uniform
-    /// path of Decision A is the normal case; this variant fires
-    /// only when neither prior nor bounds exist.
+    /// `from_prior` was requested but at least one parameter had no
+    /// sampleable prior and no bounds for the uniform fall-back. Lists
+    /// the offending parameter names.
     NoPriorAndNoBounds { params: Vec<String> },
+    /// A sourced rule reached the draw without its source resolved — a
+    /// wiring bug ([`resolve_starts`] must run first), never user input.
+    Unresolved { rule: String },
     /// I/O error reading a source file.
     Io { path: PathBuf, msg: String },
 }
@@ -185,16 +167,18 @@ impl std::fmt::Display for InitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InitError::UnknownSource { path } => write!(
-                f, "init source `{}` does not exist", path.display()),
+                f, "starts source `{}` does not exist", path.display()),
             InitError::SchemaMismatch { path, expected, msg } => write!(
-                f, "init source `{}` does not look like a {}: {}",
+                f, "starts source `{}` does not look like a {}: {}",
                 path.display(), expected, msg),
             InitError::NoPriorAndNoBounds { params } => write!(
                 f,
-                "--init from_prior requires either a `~ <dist>` \
-                 declaration or finite bounds on every estimated \
-                 parameter; the following have neither: {}",
+                "starts = \"from_prior\" requires either a prior or finite bounds on \
+                 every estimated parameter; the following have neither: {}",
                 params.join(", ")),
+            InitError::Unresolved { rule } => write!(
+                f, "internal: starts rule `{rule}` reached the draw with its source \
+                    unresolved (resolve_starts must run first)"),
             InitError::Io { path, msg } => write!(
                 f, "cannot read `{}`: {}", path.display(), msg),
         }
@@ -203,83 +187,317 @@ impl std::fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// ─── Source resolution ───────────────────────────────────────────────────────
 
-/// Build [`ChainStarts`] for the four step-6 warm-start init variants.
-///
-/// Loaders dispatch on `method`'s variant, then assemble per-chain
-/// starts by iterating `resolved.estimate_set` and reading the
-/// corresponding column / row / draw. Parameters absent from the
-/// source file but present in `estimate_set` fall back to a uniform
-/// draw within `model.parameters[*].bounds` with a stderr warning.
-///
-/// For the legacy `Single` / `Uniform` / `Lhs` / `SurveyTopK` variants
-/// this function delegates to the existing
-/// [`crate::fit::init::build_chain_starts`] path indirectly: it builds
-/// `ChainStart` entries with [`InitSource::SeededBase`] /
-/// [`InitSource::UniformDraw`] / [`InitSource::LhsCell`] /
-/// [`InitSource::SurveyRank`] tags and the resolved-base values.
-/// Step-7 wires this into the inference subcommands; for step 6 the
-/// function is exercised primarily through unit tests.
-pub fn draw_chain_starts(
-    resolved: &ResolvedParameters,
-    method:   &InitMethod,
-    n_chains: usize,
-    seed:     u64,
-) -> Result<ChainStarts, InitError> {
-    if n_chains == 0 {
-        return Ok(ChainStarts { starts: Vec::new(), method: method.clone() });
-    }
-    let starts = match method {
-        InitMethod::Single =>
-            draw_single(resolved, n_chains),
-        InitMethod::Uniform =>
-            draw_uniform(resolved, n_chains, seed),
-        InitMethod::Lhs =>
-            draw_lhs(resolved, n_chains, seed),
-        InitMethod::UniformUnconstrained =>
-            draw_uniform_unconstrained(resolved, n_chains, seed),
-        InitMethod::SurveyTopK => {
-            // SurveyTopK requires a SurveyFitContext that's only built
-            // at the stage callsite; the canonical entry point for
-            // this variant remains `init::resolve_per_chain_starts_from_method`.
-            // Reaching this branch via `draw_chain_starts` is a
-            // mis-dispatch — surface it as a schema-mismatch error so
-            // step-7 wiring catches the bug at test time.
-            return Err(InitError::SchemaMismatch {
-                path: PathBuf::from("<survey>"),
-                expected: "draw_chain_starts(SurveyTopK) — use \
-                    init::resolve_per_chain_starts_from_method instead",
-                msg: "SurveyTopK needs a SurveyFitContext \
-                    (model_identity, data_hashes, [fixed], estimate_names) \
-                    that draw_chain_starts has no access to".into(),
-            });
-        }
-        InitMethod::FromPrior =>
-            draw_from_prior(resolved, n_chains, seed)?,
-        InitMethod::FromPosterior { source } =>
-            draw_from_posterior(resolved, source, n_chains, seed)?,
-        InitMethod::FromMle { source } =>
-            draw_from_mle(resolved, source, n_chains)?,
-        InitMethod::FromParams { path } =>
-            draw_from_params(resolved, path, n_chains)?,
-    };
-    Ok(ChainStarts { starts, method: method.clone() })
+/// A sourced rule's handle, resolved to the file it reads and the lineage
+/// dep that keys the run on that file's content.
+#[derive(Debug, Clone)]
+pub struct ResolvedSource {
+    /// The file the draw reads: `fit_state.toml` (`from_mle`), `draws.tsv`
+    /// (`from_posterior`), or the params TOML (`from_params`).
+    pub file: PathBuf,
+    /// The stored fit leaf the file came from, when the handle named one.
+    pub leaf_dir: Option<PathBuf>,
+    /// Folded into the method level's `deps`, so a regenerated source
+    /// re-keys the run even at the same path.
+    pub dep: runid::inputs::ArtifactRef,
 }
 
-// ─── Legacy-mode adapters (Single / Uniform / Lhs) ──────────────────────────
-//
-// These exist to give the new entry point uniform output shape — every
-// caller gets `Vec<ChainStart>` regardless of method, so step-9
-// run.json provenance has one consistent serializer.
+/// A starts rule with its source, if any, resolved.
+#[derive(Debug, Clone)]
+pub struct ResolvedStarts {
+    pub rule: ChainStarts,
+    pub source: Option<ResolvedSource>,
+}
 
-fn draw_single(
-    resolved: &ResolvedParameters,
+impl ResolvedStarts {
+    /// A bare rule, which has nothing to resolve.
+    pub fn bare(rule: ChainStarts) -> Self {
+        ResolvedStarts { rule, source: None }
+    }
+
+    /// A sourced rule bound directly to a file — the test seam, and the
+    /// shape [`resolve_starts`] produces for a file-shaped handle.
+    pub fn from_file(rule: ChainStarts, file: PathBuf) -> Result<Self, String> {
+        let artifact = source_artifact_name(&rule);
+        let dep = super::cas::cas_file_dep(&file, artifact)
+            .ok_or_else(|| format!("starts = {}: cannot read `{}`", rule.spelled(), file.display()))?;
+        Ok(ResolvedStarts { rule, source: Some(ResolvedSource { file, leaf_dir: None, dep }) })
+    }
+}
+
+/// The artifact name a sourced rule's dep records.
+fn source_artifact_name(rule: &ChainStarts) -> &'static str {
+    match rule {
+        ChainStarts::Spread(Spread::FromPosterior { .. }) => "draws.tsv",
+        ChainStarts::Point(Point::FromMle { .. }) => "fit_state.toml",
+        ChainStarts::Point(Point::FromParams { .. }) => "params.toml",
+        _ => "",
+    }
+}
+
+/// Resolve a rule's handle (proposal §3.1): `from_params` names a flat
+/// params TOML directly; `from_posterior` names a draws TSV directly or a
+/// fit handle whose leaf wrote one; `from_mle` names a fit handle and reads
+/// the point estimate its `fit_state.toml` records. A fit handle goes
+/// through [`crate::fit::handle::FitRef::classify`] (`@label`, hash prefix,
+/// run directory, `fit.toml`); a segment with one method leaf resolves to
+/// it, and one with several is refused with the leaves listed.
+///
+/// A fit source whose stored verdict is not converged is refused unless
+/// `allow_nonconverged` — the purpose of the old pre-refine gate, kept at the
+/// one seam where an upstream fit is consumed (proposal §8, item 11).
+pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<ResolvedStarts, String> {
+    let handle = match rule {
+        ChainStarts::Point(Point::FromParams { path }) => {
+            return ResolvedStarts::from_file(rule.clone(), path.clone());
+        }
+        ChainStarts::Spread(Spread::FromPosterior { source })
+        | ChainStarts::Point(Point::FromMle { source }) => source.0.clone(),
+        _ => return Ok(ResolvedStarts::bare(rule.clone())),
+    };
+    // A draws TSV named directly.
+    if matches!(rule, ChainStarts::Spread(Spread::FromPosterior { .. }))
+        && handle.ends_with(".tsv")
+    {
+        return ResolvedStarts::from_file(rule.clone(), PathBuf::from(&handle));
+    }
+    let leaf = resolve_fit_leaf(&handle)
+        .map_err(|e| format!("starts = {}: {}", rule.spelled(), e))?;
+    super::gating::check_source_converged(&leaf, &handle, allow_nonconverged)?;
+    let (file, artifact) = match rule {
+        ChainStarts::Spread(Spread::FromPosterior { .. }) => (leaf.join("draws.tsv"), "draws.tsv"),
+        _ => (leaf.join("fit_state.toml"), "fit_state.toml"),
+    };
+    if !file.is_file() {
+        return Err(format!(
+            "starts = {}: {} holds no {} — an optimizer-only method writes no \
+             posterior cloud; use `from_mle` for its point estimate",
+            rule.spelled(),
+            leaf.display(),
+            artifact
+        ));
+    }
+    let dep = super::cas::cas_leaf_file_dep(&leaf, artifact)
+        .ok_or_else(|| format!("starts = {}: cannot read {}", rule.spelled(), file.display()))?;
+    Ok(ResolvedStarts {
+        rule: rule.clone(),
+        source: Some(ResolvedSource { file, leaf_dir: Some(leaf), dep }),
+    })
+}
+
+/// A fit handle → the one method leaf it names.
+///
+/// A leaf is named exactly by its directory or by a prefix of its own
+/// `run_id` (what `camdl show` resolves); a segment handle — `@label`, a
+/// fit-id prefix, a `fit.toml`, the segment directory — names a leaf only
+/// while the segment holds one, since the label lives on the segment and two
+/// method files with one problem share it.
+pub fn resolve_fit_leaf(handle: &str) -> Result<PathBuf, String> {
+    use super::handle::FitRef;
+    match FitRef::classify(handle) {
+        // A leaf directory named directly.
+        FitRef::RunDir(dir) if dir.join("fit_state.toml").is_file() => return Ok(dir),
+        // A leaf `run_id` prefix, before the fit-id prefixes a segment answers to.
+        FitRef::HashPrefix(prefix) => {
+            let root = crate::run_paths::output_root(None, None);
+            let mut leaves = crate::cas_read::resolve_fit_prefix(&root, &prefix);
+            match leaves.len() {
+                0 => {}
+                1 => return Ok(leaves.remove(0).dir),
+                n => {
+                    let listed: Vec<String> =
+                        leaves.iter().map(|l| format!("    {}", l.dir.display())).collect();
+                    return Err(format!(
+                        "{handle} is a prefix of {n} method leaves' run_ids; give more \
+                         characters or the leaf directory:\n{}",
+                        listed.join("\n")
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    let segment = super::handle::resolve_fit_segment(handle).map_err(|e| e.to_string())?;
+    let view = super::fit_view::FitView::read(&segment).ok_or_else(|| {
+        format!("{} is not a completed fit (no method leaf with a run.json)", segment.display())
+    })?;
+    match view.stages.len() {
+        0 => Err(format!("{} holds no completed method leaf", segment.display())),
+        1 => Ok(view.stages[0].stage_dir.clone()),
+        n => {
+            let listed: Vec<String> =
+                view.stages.iter().map(|s| format!("    {}", s.stage_dir.display())).collect();
+            Err(format!(
+                "{handle} resolves to {n} method leaves (several seeds or cells); pass the \
+                 leaf directory to name one:\n{}",
+                listed.join("\n")
+            ))
+        }
+    }
+}
+
+// ─── Context and entry point ─────────────────────────────────────────────────
+
+/// What the draw needs beyond the rule: the resolved parameters (names,
+/// bounds, base values, the model), the `EstimatedParam` specs the
+/// transform-aware builders read, and the prior each estimated parameter
+/// resolved to — fit-toml over model, through the same precedence the
+/// sampler scores against — which is the distribution `from_prior` draws.
+pub struct StartContext<'a> {
+    pub resolved: &'a ResolvedParameters,
+    pub base_specs: &'a [EstimatedParam],
+    pub priors: &'a [(String, Prior)],
+}
+
+/// Build a minimal `ResolvedParameters` view from a fit-runner-style
+/// triple of (model, base_params, estimated_specs). Used by the runners to
+/// thread the sourced rules through [`draw_chain_starts`] without forcing a
+/// full `ParameterInputs` reconstruction. Provenance from the original
+/// resolve is not preserved here (the fit runner already recorded it into
+/// run.json upstream); only the fields the draw reads — `model`,
+/// `estimate_set`, and per-name `params[i].value` — are populated.
+pub fn build_resolved_view_for_init(
+    model: &ir::Model,
+    base_params: &[f64],
+    estimated_specs: &[EstimatedParam],
+) -> ResolvedParameters {
+    use crate::params_resolver::{
+        FixReason, ParameterRole, ResolvedParameter, ValueSource,
+    };
+    use indexmap::IndexSet;
+    let estimate_set: IndexSet<String> = estimated_specs.iter()
+        .map(|s| s.name.clone()).collect();
+    let mut params: Vec<ResolvedParameter> = Vec::with_capacity(model.parameters.len());
+    for p in &model.parameters {
+        // `base_params` is indexed by compiled-model param index; look
+        // up by name to find the value. Missing names fall back to
+        // p.value (the model default) — should not happen by
+        // construction, but kept defensive.
+        let value = estimated_specs.iter()
+            .find(|s| s.name == p.name)
+            .map(|s| base_params[s.index])
+            .or_else(|| {
+                model.parameters.iter().position(|q| q.name == p.name)
+                    .and_then(|idx| base_params.get(idx).copied())
+            })
+            .or(p.value.resolved_value())
+            .unwrap_or(f64::NAN);
+        let role = if estimate_set.contains(&p.name) {
+            ParameterRole::Estimated
+        } else {
+            ParameterRole::Fixed { reason: FixReason::NotInEstimate }
+        };
+        params.push(ResolvedParameter {
+            name: p.name.clone(),
+            value,
+            source: ValueSource::ModelDefault,
+            role,
+            overrode_scenario: None,
+        });
+    }
+    ResolvedParameters {
+        params,
+        estimate_set,
+        model: model.clone(),
+        warnings: Vec::new(),
+    }
+}
+
+/// Draw `n_chains` starts under `starts`.
+///
+/// The bare spread rules fall back to the base point at one chain (there is
+/// nothing to spread); the sourced rules read every chain from their source
+/// at any chain count. Every rule yields the same shape, so one writer
+/// records the result and one provenance serializer reads it.
+pub fn draw_chain_starts(
+    ctx: &StartContext<'_>,
+    starts: &ResolvedStarts,
     n_chains: usize,
+    seed: u64,
+) -> Result<DrawnStarts, InitError> {
+    let rule = starts.rule.clone();
+    if n_chains == 0 {
+        return Ok(DrawnStarts { starts: Vec::new(), rule });
+    }
+    let source_file = || -> Result<&Path, InitError> {
+        starts
+            .source
+            .as_ref()
+            .map(|s| s.file.as_path())
+            .ok_or_else(|| InitError::Unresolved { rule: rule.spelled() })
+    };
+    let drawn = match &rule {
+        ChainStarts::Point(Point::Declared) => draw_single(ctx.resolved, n_chains),
+        ChainStarts::Spread(Spread::Uniform) => {
+            if n_chains < 2 {
+                draw_single(ctx.resolved, n_chains)
+            } else {
+                from_specs(
+                    super::init::build_uniform_chain_starts(ctx.base_specs, n_chains, seed),
+                    |chain_id| InitSource::UniformDraw { seed: derive_chain_seed(seed, chain_id) },
+                )
+            }
+        }
+        ChainStarts::Spread(Spread::Lhs) => {
+            if n_chains < 2 {
+                draw_single(ctx.resolved, n_chains)
+            } else {
+                from_specs(
+                    super::init::build_lhs_chain_starts(ctx.base_specs, n_chains, seed),
+                    |chain_id| InitSource::LhsCell { row: chain_id },
+                )
+            }
+        }
+        ChainStarts::Spread(Spread::UniformUnconstrained) => {
+            if n_chains < 2 {
+                draw_single(ctx.resolved, n_chains)
+            } else {
+                from_specs(
+                    super::init::build_uniform_unconstrained_chain_starts(
+                        ctx.base_specs, n_chains, seed,
+                    ),
+                    |chain_id| InitSource::UnconstrainedDraw {
+                        seed: derive_chain_seed(seed, chain_id),
+                    },
+                )
+            }
+        }
+        ChainStarts::Spread(Spread::FromPrior) => {
+            draw_from_prior(ctx.resolved, ctx.priors, n_chains, seed)?
+        }
+        ChainStarts::Spread(Spread::FromPosterior { .. }) => {
+            draw_from_posterior(ctx.resolved, source_file()?, n_chains, seed)?
+        }
+        ChainStarts::Point(Point::FromMle { .. }) => {
+            draw_from_mle(ctx.resolved, source_file()?, n_chains)?
+        }
+        ChainStarts::Point(Point::FromParams { .. }) => {
+            draw_from_params(ctx.resolved, source_file()?, n_chains)?
+        }
+    };
+    Ok(DrawnStarts { starts: drawn, rule })
+}
+
+/// Lift the builders' `Vec<Vec<EstimatedParam>>` into `ChainStart`s.
+fn from_specs(
+    per_chain: Vec<Vec<EstimatedParam>>,
+    source: impl Fn(usize) -> InitSource,
 ) -> Vec<ChainStart> {
+    per_chain
+        .into_iter()
+        .enumerate()
+        .map(|(chain_id, specs)| ChainStart {
+            chain_id,
+            values: specs.iter().map(|s| (s.name.clone(), s.initial)).collect(),
+            source: source(chain_id),
+        })
+        .collect()
+}
+
+fn draw_single(resolved: &ResolvedParameters, n_chains: usize) -> Vec<ChainStart> {
     // Every chain starts at the resolved base values. The values map
-    // is restricted to `estimate_set` per the Phase 2 → Phase 3
-    // invariant.
+    // is restricted to `estimate_set`.
     let base = estimate_values_from_resolved(resolved);
     (0..n_chains).map(|chain_id| ChainStart {
         chain_id,
@@ -288,173 +506,44 @@ fn draw_single(
     }).collect()
 }
 
-fn draw_uniform(
-    resolved: &ResolvedParameters,
-    n_chains: usize,
-    seed: u64,
-) -> Vec<ChainStart> {
-    // Chain 0 keeps the seeded base (reproducibility); chains 1..N
-    // draw fresh uniform within bounds. Mirrors the legacy
-    // `build_uniform_chain_starts` behaviour but on the
-    // estimate_set-restricted value map.
-    let bounds_map = bounds_map_for_estimate(resolved);
-    let base = estimate_values_from_resolved(resolved);
-    (0..n_chains).map(|chain_id| {
-        let chain_seed = derive_chain_seed(seed, chain_id);
-        let mut values = HashMap::with_capacity(resolved.estimate_set.len());
-        if chain_id == 0 {
-            values = base.clone();
-        } else {
-            let mut rng = StatefulRng::new(chain_seed);
-            for name in &resolved.estimate_set {
-                let val = match bounds_map.get(name) {
-                    Some((lo, hi)) if lo.is_finite() && hi.is_finite() =>
-                        lo + rng.uniform() * (hi - lo),
-                    _ => base.get(name).copied().unwrap_or(0.0)
-                        * (0.5 + rng.uniform()),
-                };
-                values.insert(name.clone(), val);
-            }
-        }
-        ChainStart {
-            chain_id,
-            values,
-            source: InitSource::UniformDraw { seed: chain_seed },
-        }
-    }).collect()
-}
+// ─── Sourced rules ───────────────────────────────────────────────────────────
 
-fn draw_lhs(
-    resolved: &ResolvedParameters,
-    n_chains: usize,
-    seed: u64,
-) -> Vec<ChainStart> {
-    // LHS in [0, 1] across each estimate-set dim, then mapped linearly
-    // to `[lo, hi]`. This is a simplified rendering — the full
-    // Transform-aware mapping lives in `init::build_lhs_chain_starts`
-    // (which operates on `EstimatedParam`, including `Transform`); for
-    // `draw_chain_starts` the linear mapping is correct on `Identity`
-    // and `Logit` transforms and is the floor for unwarranted-log
-    // params. Step 7's wiring into IF2 / PGAS / PMMH will route
-    // legacy LHS through the original surface; this version is here
-    // primarily so `draw_chain_starts(Lhs)` returns sane values for
-    // tests and for step-9 provenance round-trip.
-    let n_params = resolved.estimate_set.len();
-    if n_params == 0 || n_chains < 2 {
-        // No estimate-set or only one chain: degenerate to Single.
-        return draw_single(resolved, n_chains);
-    }
-    let bounds_map = bounds_map_for_estimate(resolved);
-    let names: Vec<String> = resolved.estimate_set.iter().cloned().collect();
-    let mut rng = StatefulRng::new(seed ^ 0x1f5_beef_u64);
-    // u[chain_id][param_id] is the [0,1] LHS coord.
-    let mut u: Vec<Vec<f64>> = vec![vec![0.0; n_params]; n_chains];
-    for d in 0..n_params {
-        let mut perm: Vec<usize> = (0..n_chains).collect();
-        for i in (1..n_chains).rev() {
-            let j = (rng.uniform() * (i as f64 + 1.0)).floor() as usize;
-            perm.swap(i, j.min(i));
-        }
-        for k in 0..n_chains {
-            let jitter = rng.uniform();
-            u[k][d] = (perm[k] as f64 + jitter) / n_chains as f64;
-        }
-    }
-    let base = estimate_values_from_resolved(resolved);
-    (0..n_chains).map(|chain_id| {
-        let mut values = HashMap::with_capacity(n_params);
-        for (d, name) in names.iter().enumerate() {
-            let val = match bounds_map.get(name) {
-                Some((lo, hi)) if lo.is_finite() && hi.is_finite() =>
-                    lo + u[chain_id][d] * (hi - lo),
-                _ => base.get(name).copied().unwrap_or(0.0)
-                    * (0.5 + u[chain_id][d]),
-            };
-            values.insert(name.clone(), val);
-        }
-        ChainStart {
-            chain_id,
-            values,
-            source: InitSource::LhsCell { row: chain_id },
-        }
-    }).collect()
-}
-
-fn draw_uniform_unconstrained(
-    resolved: &ResolvedParameters,
-    n_chains: usize,
-    seed: u64,
-) -> Vec<ChainStart> {
-    // Stan-style: i.i.d. `z ~ U(-R, R)` per (chain, param) on the
-    // unconstrained scale, squashed to `u = σ(z)` (a fixed interior band)
-    // then mapped into `[lo, hi]`. Boundary-avoiding and scale-invariant.
-    // Like `draw_lhs`, this surface uses the linear `[lo, hi]` mapping (it
-    // has bounds, not the full `Transform`); the Transform-aware
-    // production path for legacy modes lives in
-    // `init::build_uniform_unconstrained_chain_starts`.
-    let n_params = resolved.estimate_set.len();
-    if n_params == 0 || n_chains < 2 {
-        return draw_single(resolved, n_chains);
-    }
-    let radius = crate::fit::init::STAN_INIT_RADIUS;
-    let bounds_map = bounds_map_for_estimate(resolved);
-    let base = estimate_values_from_resolved(resolved);
-    (0..n_chains).map(|chain_id| {
-        let chain_seed = derive_chain_seed(seed, chain_id);
-        let mut rng = StatefulRng::new(chain_seed);
-        let mut values = HashMap::with_capacity(n_params);
-        for name in &resolved.estimate_set {
-            let z = (rng.uniform() * 2.0 - 1.0) * radius;
-            let u = 1.0 / (1.0 + (-z).exp());
-            let val = match bounds_map.get(name) {
-                Some((lo, hi)) if lo.is_finite() && hi.is_finite() =>
-                    lo + u * (hi - lo),
-                _ => base.get(name).copied().unwrap_or(0.0) * (0.5 + u),
-            };
-            values.insert(name.clone(), val);
-        }
-        ChainStart {
-            chain_id,
-            values,
-            source: InitSource::UnconstrainedDraw { seed: chain_seed },
-        }
-    }).collect()
-}
-
-// ─── Step 6 loaders ─────────────────────────────────────────────────────────
-
-/// `--init from_prior`: per-chain draw from each parameter's `~`
-/// declaration. Parameters with no prior fall back to a bounds-uniform
-/// draw with a startup warning (Decision A).
+/// `from_prior`: per-chain draw from each parameter's resolved prior.
+/// Parameters whose prior cannot be drawn from — flat, or hierarchical
+/// (its hyperparameters have no values at chain-init time) — fall back to a
+/// bounds-uniform draw with a startup warning, and are refused when they
+/// have no finite bounds either.
 fn draw_from_prior(
     resolved: &ResolvedParameters,
+    priors: &[(String, Prior)],
     n_chains: usize,
     seed: u64,
 ) -> Result<Vec<ChainStart>, InitError> {
-    // Walk model.parameters once to classify each name as either
-    // "has prior" or "fall-back bounds-uniform"; refuse if any name
-    // has neither.
+    let bounds_map = bounds_map_for_estimate(resolved);
     let mut no_prior_names: Vec<String> = Vec::new();
     let mut no_prior_no_bounds: Vec<String> = Vec::new();
-    let bounds_map = bounds_map_for_estimate(resolved);
-    let priors_by_name: HashMap<String, Prior> = resolved.model.parameters.iter()
-        .filter_map(|p| {
-            if !resolved.estimate_set.contains(&p.name) { return None; }
-            match p.prior_dist() {
-                Some(pd) => Some((p.name.clone(), Prior::from_ir(pd))),
-                None => {
-                    no_prior_names.push(p.name.clone());
-                    if bounds_map.get(&p.name)
-                        .map(|(lo, hi)| !lo.is_finite() || !hi.is_finite())
-                        .unwrap_or(true)
-                    {
-                        no_prior_no_bounds.push(p.name.clone());
-                    }
-                    None
+    let mut priors_by_name: HashMap<String, Prior> = HashMap::new();
+    for name in &resolved.estimate_set {
+        let sampleable = priors
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, p)| p)
+            .filter(|p| !matches!(p, Prior::Fixed(Density::Flat)) && !p.is_hierarchical());
+        match sampleable {
+            Some(p) => {
+                priors_by_name.insert(name.clone(), p.clone());
+            }
+            None => {
+                no_prior_names.push(name.clone());
+                if bounds_map.get(name)
+                    .map(|(lo, hi)| !lo.is_finite() || !hi.is_finite())
+                    .unwrap_or(true)
+                {
+                    no_prior_no_bounds.push(name.clone());
                 }
             }
-        })
-        .collect();
+        }
+    }
     if !no_prior_no_bounds.is_empty() {
         return Err(InitError::NoPriorAndNoBounds {
             params: no_prior_no_bounds,
@@ -462,13 +551,11 @@ fn draw_from_prior(
     }
     if !no_prior_names.is_empty() {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m --init from_prior: no `~` \
-             declared for {}; falling back to bounds-uniform for \
-             those parameter(s). Add a `~ <dist>` clause in the \
-             model or pass `--fixed {}=<value>` to silence this \
-             warning.",
+            "\x1b[33mwarning:\x1b[0m starts = \"from_prior\": no sampleable prior for \
+             {}; drawing those parameter(s) uniformly within their bounds instead. \
+             Declare a `~ <dist>` prior in the model or a `prior = {{ ... }}` in \
+             [estimate] to draw them from one.",
             no_prior_names.join(", "),
-            no_prior_names.first().map(String::as_str).unwrap_or("<name>"),
         );
     }
     let base = estimate_values_from_resolved(resolved);
@@ -506,7 +593,6 @@ fn draw_from_prior(
 /// non-positive numbers — should not happen by construction, but
 /// kept defensive).
 fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>) -> f64 {
-    use std::f64::consts::PI;
     match prior {
         Prior::Fixed(Density::Flat) => base.unwrap_or(0.0),
         Prior::Fixed(Density::Uniform { lower, upper }) => {
@@ -526,11 +612,6 @@ fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>)
         }
         Prior::Fixed(Density::Beta { alpha, beta }) => {
             // Beta(α, β) = X / (X + Y), X ~ Gamma(α, 1), Y ~ Gamma(β, 1).
-            // StatefulRng.gamma_multiplier returns a Gamma(α, 1) factor
-            // when called with (σ² = 1/α, dt = 1) — it's tuned for the
-            // chain-binomial multiplier use case; here we need a plain
-            // Gamma draw, so fall through to a simple Marsaglia &
-            // Tsang trial via two Normal + one Uniform per accept.
             let x = sample_gamma_shape_rate(rng, *alpha, 1.0);
             let y = sample_gamma_shape_rate(rng, *beta,  1.0);
             x / (x + y)
@@ -555,19 +636,9 @@ fn sample_prior_natural(prior: &Prior, rng: &mut StatefulRng, base: Option<f64>)
             let q = a + rng.uniform() * (b - a);
             (mean + sd * normal_quantile(q)).clamp(*lower, *upper)
         }
-        Prior::Hierarchical(_) => {
-            // Hierarchical priors are evaluated against a ParamEnv that
-            // we don't have here. Fall back to the base value with a
-            // warning so the user notices.
-            eprintln!("\x1b[33mwarning:\x1b[0m --init from_prior: \
-                hierarchical prior cannot be sampled at chain-init \
-                time (needs ParamEnv); using resolved base value.");
-            base.unwrap_or({
-                // sentinel — picks something visible if base is None.
-                let _ = PI;
-                1.0
-            })
-        }
+        // `draw_from_prior` routes hierarchical priors to the bounds
+        // fall-back before reaching here.
+        Prior::Hierarchical(_) => base.unwrap_or(1.0),
     }
 }
 
@@ -578,60 +649,41 @@ fn sample_gamma_shape_rate(rng: &mut StatefulRng, shape: f64, rate: f64) -> f64 
     if shape < 1.0 {
         // Recursive boost: Gamma(α, r) = U^(1/α) · Gamma(α+1, r).
         let u: f64 = {
-            let mut x = rng.uniform();
-            while x <= 0.0 { x = rng.uniform(); }
-            x
+            let x = rng.uniform();
+            if x <= 0.0 { f64::MIN_POSITIVE } else { x }
         };
         return u.powf(1.0 / shape) * sample_gamma_shape_rate(rng, shape + 1.0, rate);
     }
     let d = shape - 1.0 / 3.0;
     let c = 1.0 / (9.0 * d).sqrt();
     loop {
-        let z = rng.normal();
-        let v_inner = 1.0 + c * z;
-        if v_inner <= 0.0 { continue; }
-        let v = v_inner * v_inner * v_inner;
-        let u: f64 = {
-            let mut x = rng.uniform();
-            while x <= 0.0 { x = rng.uniform(); }
-            x
-        };
-        // Squeeze test (cheap reject path).
-        if u < 1.0 - 0.0331 * z * z * z * z {
-            return d * v / rate;
-        }
-        // Full check.
-        if u.ln() < 0.5 * z * z + d * (1.0 - v + v.ln()) {
-            return d * v / rate;
+        let x = rng.normal();
+        let v = 1.0 + c * x;
+        if v <= 0.0 { continue; }
+        let v3 = v * v * v;
+        let u = rng.uniform();
+        if u < 1.0 - 0.0331 * x.powi(4)
+            || u.ln() < 0.5 * x * x + d * (1.0 - v3 + v3.ln())
+        {
+            return d * v3 / rate;
         }
     }
 }
 
-/// `--init from_posterior`: per-chain row draw (uniform with
-/// replacement) from a posterior draws TSV.
-///
-/// The source is explicitly requested, so it must bind every estimated
-/// parameter: a missing column, or a cell that won't parse as a number,
-/// is a hard [`InitError::SchemaMismatch`] — not a silent bounds-uniform
-/// or base-value substitution (gh#274). Cells are parsed up front so a
-/// bad value is caught deterministically, independent of which rows the
-/// per-chain sampler happens to draw.
+/// `from_posterior`: one row per chain, drawn uniformly with replacement
+/// from a draws TSV. An explicit source that cannot bind every estimated
+/// parameter — a missing column or an unparseable cell — is a hard error,
+/// never a silent bounds-uniform fallback (gh#274).
 fn draw_from_posterior(
     resolved: &ResolvedParameters,
-    source: &PosteriorSource,
+    path: &Path,
     n_chains: usize,
     seed: u64,
 ) -> Result<Vec<ChainStart>, InitError> {
-    let path = match source {
-        PosteriorSource::DrawsTsv(p) => p.clone(),
-        PosteriorSource::FitDir(dir) => {
-            let candidate = dir.join("draws.tsv");
-            if !candidate.is_file() {
-                return Err(InitError::UnknownSource { path: candidate });
-            }
-            candidate
-        }
-    };
+    let path = path.to_path_buf();
+    if !path.is_file() {
+        return Err(InitError::UnknownSource { path });
+    }
     let (header, rows) = read_tsv(&path)?;
     if rows.is_empty() {
         return Err(InitError::SchemaMismatch {
@@ -709,39 +761,33 @@ fn draw_from_posterior(
     Ok(starts)
 }
 
-/// `--init from_mle`: all chains at the MLE point from a fit-output
-/// TOML. Knows the fit-output schema — skips `[provenance]` /
-/// `[focal]` / scalar metadata and reads values from either an `[mle]`
-/// section or top-level scalars.
+/// `from_mle`: every chain at the point estimate a stored fit's
+/// `fit_state.toml` records in `start_values` — the clean-eval winner for
+/// IF2, the MAP for a sampler, the best chain for an optimizer. The same
+/// file the old in-file chaining read, so the two agree exactly.
 fn draw_from_mle(
     resolved: &ResolvedParameters,
-    source: &MleSource,
+    path: &Path,
     n_chains: usize,
 ) -> Result<Vec<ChainStart>, InitError> {
-    let path = match source {
-        MleSource::File(p) => p.clone(),
-        MleSource::FitDir(dir) => {
-            let mle_path = dir.join("mle.toml");
-            if mle_path.is_file() {
-                mle_path
-            } else {
-                let final_path = dir.join("final_params.toml");
-                if final_path.is_file() {
-                    final_path
-                } else {
-                    return Err(InitError::UnknownSource {
-                        path: dir.join("mle.toml-or-final_params.toml"),
-                    });
-                }
-            }
+    let path_buf: PathBuf = path.to_path_buf();
+    if !path_buf.is_file() {
+        return Err(InitError::UnknownSource { path: path_buf });
+    }
+    let dir = path_buf.parent().map(Path::to_path_buf).unwrap_or_default();
+    let state = super::state::FitState::load(&dir.to_string_lossy()).map_err(|e| {
+        InitError::SchemaMismatch {
+            path: path_buf.clone(),
+            expected: "fit_state.toml of a completed method leaf",
+            msg: e,
         }
-    };
-    let values_in_file = load_mle_toml(&path)?;
-    apply_point_to_all_chains(resolved, &path, &values_in_file, n_chains,
+    })?;
+    let values_in_file: HashMap<String, f64> = state.start_values.into_iter().collect();
+    apply_point_to_all_chains(resolved, &path_buf, &values_in_file, n_chains,
         |path| InitSource::MlePoint { path })
 }
 
-/// `--init from_params`: all chains at a hand-written flat params TOML.
+/// `from_params`: all chains at a hand-written flat params TOML.
 fn draw_from_params(
     resolved: &ResolvedParameters,
     path: &Path,
@@ -749,7 +795,7 @@ fn draw_from_params(
 ) -> Result<Vec<ChainStart>, InitError> {
     // Reject files that look like fit-output (have `[focal]` or
     // `[mle]` sections, or a `final_loglik` scalar) — the actionable
-    // hint redirects the user to `--init from_mle`.
+    // hint redirects the user to `from_mle`.
     let path_buf: PathBuf = path.to_path_buf();
     let raw = std::fs::read_to_string(path).map_err(|e| InitError::Io {
         path: path_buf.clone(), msg: e.to_string(),
@@ -761,35 +807,36 @@ fn draw_from_params(
             msg: e.to_string(),
         }
     })?;
-    let has_focal = table.contains_key("focal");
-    let has_mle_section = table.get("mle")
-        .map(|v| matches!(v, toml::Value::Table(_))).unwrap_or(false);
-    let has_final_loglik = table.contains_key("final_loglik");
-    if has_focal || has_mle_section || has_final_loglik {
+    if table.contains_key("focal") || table.contains_key("mle")
+        || table.contains_key("final_loglik")
+    {
         return Err(InitError::SchemaMismatch {
             path: path_buf.clone(),
             expected: "flat params TOML (top-level keys = parameter names)",
-            msg: "this file has `[focal]` / `[mle]` / `final_loglik` \
-                  scalars — it looks like an mle.toml. Use \
-                  `--init from_mle --mle <path>` for fit-output \
-                  TOMLs.".into(),
+            msg: "the file looks like mle.toml / fit output (it has a `[focal]` / \
+                  `[mle]` section or a `final_loglik` scalar). To start every chain \
+                  at a stored fit's estimate write `starts = { from_mle = \"@handle\" }`."
+                .into(),
         });
     }
-    let values_in_file = crate::util::load_params_toml(
-        &path_buf.to_string_lossy())
-        .map_err(|msg| InitError::SchemaMismatch {
-            path: path_buf.clone(),
-            expected: "flat params TOML",
-            msg,
-        })?;
+    let mut values_in_file: HashMap<String, f64> = HashMap::new();
+    for (key, val) in &table {
+        match val {
+            toml::Value::Float(f)   => { values_in_file.insert(key.clone(), *f); }
+            toml::Value::Integer(i) => { values_in_file.insert(key.clone(), *i as f64); }
+            other => {
+                return Err(InitError::SchemaMismatch {
+                    path: path_buf.clone(),
+                    expected: "flat params TOML (top-level keys = parameter names)",
+                    msg: format!("key `{}` has non-numeric value {:?}", key, other),
+                });
+            }
+        }
+    }
     apply_point_to_all_chains(resolved, &path_buf, &values_in_file, n_chains,
         |path| InitSource::ParamsPoint { path })
 }
 
-/// Shared logic for `FromMle` and `FromParams`: a single point loaded
-/// from a TOML, replicated across all chains. Missing parameters
-/// (i.e. names in `estimate_set` not present in the file) fall back
-/// to bounds-uniform with a startup warning naming them.
 fn apply_point_to_all_chains<F>(
     resolved: &ResolvedParameters,
     path: &Path,
@@ -809,7 +856,7 @@ where F: Fn(PathBuf) -> InitSource,
         .collect();
     if !missing.is_empty() {
         eprintln!(
-            "\x1b[33mwarning:\x1b[0m --init source `{}` is missing \
+            "\x1b[33mwarning:\x1b[0m starts source `{}` is missing \
              parameter(s): {}. Falling back to bounds-uniform for \
              those parameter(s).",
             path.display(), missing.join(", "));
@@ -840,54 +887,6 @@ where F: Fn(PathBuf) -> InitSource,
         }
     }).collect();
     Ok(starts)
-}
-
-/// Load an `mle.toml` / `final_params.toml`-shape file. Skips
-/// `[provenance]` / `[focal]` sections, reads parameter values from
-/// either top-level scalars or an `[mle]` section. Mirrors what the
-/// `from_mle` documentation promises and what current fit-output
-/// emits.
-pub fn load_mle_toml(path: &Path) -> Result<HashMap<String, f64>, InitError> {
-    let path_buf: PathBuf = path.to_path_buf();
-    let raw = std::fs::read_to_string(path).map_err(|e| InitError::Io {
-        path: path_buf.clone(), msg: e.to_string(),
-    })?;
-    let table: toml::Table = raw.parse().map_err(|e: toml::de::Error| {
-        InitError::SchemaMismatch {
-            path: path_buf.clone(),
-            expected: "fit-output TOML (mle.toml / final_params.toml)",
-            msg: e.to_string(),
-        }
-    })?;
-    let mut out: HashMap<String, f64> = HashMap::new();
-    // First: top-level scalar entries (final_params.toml uses this
-    // shape; `[provenance]`, `[focal]` are sections that get skipped).
-    for (key, val) in &table {
-        // Skip section names (handled below) + metadata scalars like
-        // `final_loglik` that share the top-level namespace but
-        // aren't parameters.
-        if key == "provenance" || key == "focal" || key == "mle"
-            || key == "final_loglik" { continue; }
-        match val {
-            toml::Value::Float(f)   => { out.insert(key.clone(), *f); }
-            toml::Value::Integer(i) => { out.insert(key.clone(), *i as f64); }
-            // skip non-scalar metadata silently (`final_loglik`, etc.
-            // are floats — they'll be captured above; any unexpected
-            // section is ignored).
-            _ => {}
-        }
-    }
-    // Second: `[mle]` section overrides top-level (`mle.toml` shape).
-    if let Some(toml::Value::Table(mle_section)) = table.get("mle") {
-        for (key, val) in mle_section {
-            match val {
-                toml::Value::Float(f)   => { out.insert(key.clone(), *f); }
-                toml::Value::Integer(i) => { out.insert(key.clone(), *i as f64); }
-                _ => {}
-            }
-        }
-    }
-    Ok(out)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -939,12 +938,112 @@ fn read_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
     Ok((header, rows))
 }
 
+// ─── The record ─────────────────────────────────────────────────────────────
+
+/// One row of `chain_starts.tsv`.
+#[derive(Debug, Clone)]
+pub struct ChainStartRecord {
+    pub chain_id: usize,
+    /// The `source` column: the rule's tag, with `:chain-<id>` appended only
+    /// when that chain got a point of its own (gh#871).
+    pub source: String,
+    /// Values in `base_specs` order.
+    pub values: Vec<f64>,
+}
+
+impl DrawnStarts {
+    /// The rows the writer records, in `base_specs` order.
+    pub fn records(&self, base_specs: &[EstimatedParam]) -> Vec<ChainStartRecord> {
+        let per_chain = self.to_estimated_params(base_specs);
+        per_chain
+            .iter()
+            .enumerate()
+            .map(|(chain_id, specs)| ChainStartRecord {
+                chain_id,
+                source: source_label(&self.rule, chain_id),
+                values: specs.iter().map(|s| s.initial).collect(),
+            })
+            .collect()
+    }
+}
+
+/// The `source` column for one chain: a rule that drew each chain its own
+/// point earns `:chain-<id>`; a rule that put every chain at one point does
+/// not, because that suffix reads as independent draws that happen to
+/// coincide (gh#871).
+pub fn source_label(rule: &ChainStarts, chain_id: usize) -> String {
+    if rule.is_point() {
+        rule.tag().to_string()
+    } else {
+        format!("{}:chain-{}", rule.tag(), chain_id)
+    }
+}
+
+/// Write `chain_starts.tsv` — the sidecar recording every chain's starting
+/// parameter vector and its provenance. Lives at the method leaf's root.
+/// The one writer, called by every multi-chain sampler (IF2, PGAS, PMMH,
+/// MH, NUTS); the optimizer-only methods write none.
+///
+/// The values are captured before the sampler runs, which is what makes the
+/// file worth having: it answers "did the starts span the declared bounds?"
+/// and "did the chains collapse into one basin immediately?", and the
+/// per-chain trace cannot. An IF2 run perturbs its parameter swarm before
+/// the first filter pass (`sim::inference::if2`, the `t=0` perturbation), so
+/// iteration 0 of `chain_<chain_id + 1>/parameter_traces.tsv` already shows
+/// moved values. The file header says so, because a reader who has only the
+/// TSV would otherwise pair the two row-by-row.
+pub fn write_chain_starts_tsv(
+    dir: &Path,
+    base: &[EstimatedParam],
+    rule: &ChainStarts,
+    records: &[ChainStartRecord],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let path = dir.join("chain_starts.tsv");
+    let tmp = path.with_extension("tsv.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        // Comment header — stable, machine-parseable.
+        writeln!(f, "# camdl chain_starts; starts={}; chains={}; kind={}",
+            rule.spelled(), records.len(), rule.kind().as_str())?;
+        // What the numbers are, for a reader holding only this file.
+        writeln!(f, "# each chain's starting point, captured before the \
+            sampler ran; an IF2 run")?;
+        writeln!(f, "# perturbs its swarm before the first filter pass, so \
+            a per-chain trace opens on")?;
+        writeln!(f, "# values that have already moved.")?;
+        writeln!(f, "# chain_id is 0-based; that chain's outputs are under \
+            chain_<chain_id + 1>/.")?;
+        // Header row.
+        let mut cols = vec!["chain_id".to_string(), "source".to_string()];
+        for spec in base { cols.push(spec.name.clone()); }
+        writeln!(f, "{}", cols.join("\t"))?;
+        for rec in records {
+            let mut fields = vec![rec.chain_id.to_string(), rec.source.clone()];
+            for v in &rec.values {
+                fields.push(format_float_for_tsv(*v));
+            }
+            writeln!(f, "{}", fields.join("\t"))?;
+        }
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+fn format_float_for_tsv(v: f64) -> String {
+    if v.is_nan() { "NaN".into() }
+    else if v == f64::INFINITY  { "Inf".into() }
+    else if v == f64::NEG_INFINITY { "-Inf".into() }
+    else { format!("{}", v) }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::params_resolver::{ParameterRole, ResolvedParameter, ValueSource};
+    use sim::inference::types::Transform;
 
     use indexmap::IndexSet;
 
@@ -1035,6 +1134,76 @@ mod tests {
         }
     }
 
+    /// `EstimatedParam` specs for the resolved view's estimate set, with the
+    /// bounds the model declares and an identity transform.
+    fn specs_for(resolved: &ResolvedParameters) -> Vec<EstimatedParam> {
+        resolved.estimate_set.iter().enumerate().map(|(i, name)| {
+            let p = resolved.model.parameters.iter().find(|p| &p.name == name).unwrap();
+            let (lower, upper) = crate::params_resolver::resolved_bounds(p)
+                .unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
+            EstimatedParam {
+                name: name.clone(),
+                index: i,
+                initial: p.value.resolved_value().unwrap(),
+                rw_sd: 0.1,
+                transform: Transform::None,
+                lower,
+                upper,
+                rw_sd_auto: false,
+                perturb_only_at_t0: false,
+            }
+        }).collect()
+    }
+
+    /// The priors the model declares, resolved the way the runner does.
+    fn priors_for(resolved: &ResolvedParameters) -> Vec<(String, Prior)> {
+        resolved.estimate_set.iter().map(|name| {
+            let p = resolved.model.parameters.iter().find(|p| &p.name == name).unwrap();
+            let prior = match p.prior_dist() {
+                Some(pd) => Prior::from_ir(pd),
+                None => Prior::Fixed(Density::Flat),
+            };
+            (name.clone(), prior)
+        }).collect()
+    }
+
+    fn draw(
+        resolved: &ResolvedParameters,
+        starts: &ResolvedStarts,
+        n_chains: usize,
+        seed: u64,
+    ) -> Result<DrawnStarts, InitError> {
+        let base_specs = specs_for(resolved);
+        let priors = priors_for(resolved);
+        let ctx = StartContext { resolved, base_specs: &base_specs, priors: &priors };
+        draw_chain_starts(&ctx, starts, n_chains, seed)
+    }
+
+    fn from_params(path: &Path) -> ResolvedStarts {
+        ResolvedStarts::from_file(
+            ChainStarts::Point(Point::FromParams { path: path.to_path_buf() }),
+            path.to_path_buf(),
+        ).unwrap()
+    }
+
+    fn from_posterior(path: &Path) -> ResolvedStarts {
+        ResolvedStarts::from_file(
+            ChainStarts::Spread(Spread::FromPosterior {
+                source: super::super::starts::Handle(path.display().to_string()),
+            }),
+            path.to_path_buf(),
+        ).unwrap()
+    }
+
+    fn from_mle(fit_state: &Path) -> ResolvedStarts {
+        ResolvedStarts::from_file(
+            ChainStarts::Point(Point::FromMle {
+                source: super::super::starts::Handle(fit_state.display().to_string()),
+            }),
+            fit_state.to_path_buf(),
+        ).unwrap()
+    }
+
     fn write_tmp(name: &str, contents: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!(
             "camdl_init_{}_{}_{}",
@@ -1063,11 +1232,7 @@ mod tests {
         );
         let path = write_tmp("from_params_flat",
             "beta = 0.42\ngamma = 0.12\nN0 = 999\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromParams { path: path.clone() },
-            3, 42,
-        ).unwrap();
+        let starts = draw(&resolved, &from_params(&path), 3, 42).unwrap();
         assert_eq!(starts.starts.len(), 3);
         for cs in &starts.starts {
             // domain restricted to estimate_set.
@@ -1089,21 +1254,17 @@ mod tests {
     #[test]
     fn from_params_errors_on_mle_toml_shape_with_actionable_hint() {
         // A file with `[focal]` or `[mle]` section is mle.toml-shaped
-        // — `from_params` must refuse and point at `--init from_mle`.
+        // — `from_params` must refuse and point at `from_mle`.
         let resolved = mk_resolved(
             vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
             &["beta"],
         );
         let path = write_tmp("from_params_mle_shape",
             "[focal]\nname = \"beta\"\n\n[mle]\nbeta = 0.42\n");
-        let err = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromParams { path: path.clone() },
-            1, 42,
-        ).unwrap_err();
+        let err = draw(&resolved, &from_params(&path), 1, 42).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("from_mle"),
-            "error must hint at --init from_mle: {}", msg);
+            "error must hint at from_mle: {}", msg);
         assert!(msg.contains("mle.toml"),
             "error must explain the file looks like mle.toml: {}", msg);
         std::fs::remove_file(&path).ok();
@@ -1111,8 +1272,25 @@ mod tests {
 
     // ─── `from_mle` ───────────────────────────────────────────────────
 
+    /// A `fit_state.toml` the way a completed method leaf writes it, with
+    /// only the fields `from_mle` reads populated.
+    fn write_fit_state(dir: &Path, values: &[(&str, f64)]) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut body = String::from(
+            "stage = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = 2\n\n\
+             [start_values]\n");
+        for (k, v) in values {
+            body.push_str(&format!("{k} = {v}\n"));
+        }
+        body.push_str("\n[rw_sd]\n");
+        let path = dir.join("fit_state.toml");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
     #[test]
-    fn from_mle_resolves_fitdir_to_mle_toml_first_then_final_params() {
+    fn from_mle_reads_the_stored_point_estimate() {
         let resolved = mk_resolved(
             vec![
                 mk_param("beta",  0.3, None, Some((0.0, 1.0))),
@@ -1121,61 +1299,21 @@ mod tests {
             &["beta", "gamma"],
         );
         let dir = std::env::temp_dir().join(format!(
-            "camdl_from_mle_fitdir_{}_{}",
+            "camdl_from_mle_leaf_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // mle.toml + final_params.toml both present — mle.toml wins.
-        std::fs::write(dir.join("mle.toml"),
-            "[mle]\nbeta = 0.55\ngamma = 0.22\n").unwrap();
-        std::fs::write(dir.join("final_params.toml"),
-            "beta = 9.99\ngamma = 9.99\n").unwrap();
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromMle { source: MleSource::FitDir(dir.clone()) },
-            2, 0,
-        ).unwrap();
+        let state = write_fit_state(&dir, &[("beta", 0.55), ("gamma", 0.22)]);
+        let starts = draw(&resolved, &from_mle(&state), 2, 0).unwrap();
         for cs in &starts.starts {
-            assert!((cs.values["beta"]  - 0.55).abs() < 1e-12,
-                "expected mle.toml to win, got {}", cs.values["beta"]);
+            assert!((cs.values["beta"]  - 0.55).abs() < 1e-12);
             assert!((cs.values["gamma"] - 0.22).abs() < 1e-12);
             match &cs.source {
-                InitSource::MlePoint { path } =>
-                    assert_eq!(path, &dir.join("mle.toml")),
+                InitSource::MlePoint { path } => assert_eq!(path, &state),
                 other => panic!("unexpected: {:?}", other),
             }
         }
-        // Remove mle.toml: final_params.toml is the fallback.
-        std::fs::remove_file(dir.join("mle.toml")).unwrap();
-        let starts2 = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromMle { source: MleSource::FitDir(dir.clone()) },
-            1, 0,
-        ).unwrap();
-        assert!((starts2.starts[0].values["beta"] - 9.99).abs() < 1e-12);
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn from_mle_handles_explicit_mle_toml_file() {
-        // File path → File variant. Skips [provenance].
-        let resolved = mk_resolved(
-            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
-            &["beta"],
-        );
-        let path = write_tmp("from_mle_explicit",
-            "[provenance]\nbackend = \"chain_binomial\"\n\n\
-             [mle]\nbeta = 0.77\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromMle { source: MleSource::File(path.clone()) },
-            2, 0,
-        ).unwrap();
-        for cs in &starts.starts {
-            assert!((cs.values["beta"] - 0.77).abs() < 1e-12);
-        }
-        std::fs::remove_file(&path).ok();
     }
 
     // ─── `from_posterior` ──────────────────────────────────────────────
@@ -1190,13 +1328,7 @@ mod tests {
         );
         let path = write_tmp("from_post_sampling",
             "beta\n0.10\n0.20\n0.30\n0.40\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromPosterior {
-                source: PosteriorSource::DrawsTsv(path.clone()),
-            },
-            50, 42,
-        ).unwrap();
+        let starts = draw(&resolved, &from_posterior(&path), 50, 42).unwrap();
         // All values should be from {0.10, 0.20, 0.30, 0.40}.
         let allowed: [f64; 4] = [0.10, 0.20, 0.30, 0.40];
         let used: HashSet<i64> = starts.starts.iter()
@@ -1206,47 +1338,10 @@ mod tests {
             assert!(allowed.iter().any(|a| ((*a * 100.0).round() as i64) == *u),
                 "value {} not in allowed {:?}", u, allowed);
         }
-        // 50 draws from 4 rows uniformly → very likely all 4 hit at
-        // least once. Bound at ≥ 3 to avoid flakiness, but in
-        // practice the test seed makes all 4 used.
         assert!(used.len() >= 3,
             "expected ≥ 3 distinct rows used in 50 draws, got {}: {:?}",
             used.len(), used);
         std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn from_posterior_resolves_fitdir_to_draws_tsv() {
-        let resolved = mk_resolved(
-            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
-            &["beta"],
-        );
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_from_post_fitdir_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("draws.tsv"), "beta\n0.55\n0.66\n").unwrap();
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromPosterior {
-                source: PosteriorSource::FitDir(dir.clone()),
-            },
-            10, 1,
-        ).unwrap();
-        assert_eq!(starts.starts.len(), 10);
-        for cs in &starts.starts {
-            let v = cs.values["beta"];
-            assert!((v - 0.55).abs() < 1e-9 || (v - 0.66).abs() < 1e-9,
-                "value {} not in {{0.55, 0.66}}", v);
-            match &cs.source {
-                InitSource::PosteriorRow { path, .. } =>
-                    assert_eq!(path, &dir.join("draws.tsv")),
-                other => panic!("unexpected: {:?}", other),
-            }
-        }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1266,13 +1361,7 @@ mod tests {
         );
         let path = write_tmp("from_post_missing_col",
             "beta\n0.10\n0.20\n0.30\n");
-        let err = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromPosterior {
-                source: PosteriorSource::DrawsTsv(path.clone()),
-            },
-            4, 42,
-        ).unwrap_err();
+        let err = draw(&resolved, &from_posterior(&path), 4, 42).unwrap_err();
         let msg = err.to_string();
         // names the file, the missing column, and hints the fix.
         assert!(msg.contains(&path.display().to_string()),
@@ -1296,13 +1385,7 @@ mod tests {
         );
         let path = write_tmp("from_post_bad_cell",
             "beta\n0.10\nnotanumber\n0.30\n");
-        let err = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromPosterior {
-                source: PosteriorSource::DrawsTsv(path.clone()),
-            },
-            4, 42,
-        ).unwrap_err();
+        let err = draw(&resolved, &from_posterior(&path), 4, 42).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains(&path.display().to_string()),
             "error must name the file: {}", msg);
@@ -1316,10 +1399,9 @@ mod tests {
     // ─── `from_prior` ──────────────────────────────────────────────────
 
     #[test]
-    fn from_prior_falls_back_to_bounds_uniform_with_warning_for_no_tilde_params() {
+    fn from_prior_falls_back_to_bounds_uniform_with_warning_for_no_prior_params() {
         // beta has a prior, gamma does not. Both are bounded — the
         // fallback uniform-on-bounds path must engage for gamma.
-        // Decision A: warn, don't error.
         let resolved = mk_resolved(
             vec![
                 mk_param("beta", 0.3,
@@ -1330,19 +1412,15 @@ mod tests {
             ],
             &["beta", "gamma"],
         );
-        let starts = draw_chain_starts(
-            &resolved, &InitMethod::FromPrior, 4, 42,
-        ).unwrap();
+        let starts = draw(&resolved, &ResolvedStarts::bare(ChainStarts::from_prior()), 4, 42)
+            .unwrap();
         for cs in &starts.starts {
-            // Both names present (estimate_set restriction).
             assert!(cs.values.contains_key("beta"));
             assert!(cs.values.contains_key("gamma"));
-            // Both within their bounds.
             let b = cs.values["beta"];
             let g = cs.values["gamma"];
             assert!(b >= 0.0 && b <= 1.0);
             assert!(g >= 0.0 && g <= 1.0);
-            // Source = PriorDraw with a chain-specific seed.
             match &cs.source {
                 InitSource::PriorDraw { .. } => {}
                 other => panic!("unexpected source: {:?}", other),
@@ -1351,35 +1429,47 @@ mod tests {
     }
 
     #[test]
-    fn from_prior_uses_declared_dist_when_tilde_present() {
-        // beta has Uniform(0.4, 0.5) — narrow box. Many draws must
-        // all land inside.
+    fn from_prior_uses_the_resolved_prior_not_just_the_model_declaration() {
+        // The model declares nothing; the resolved prior (as a fit.toml
+        // `prior = { uniform = ... }` would supply through the precedence
+        // resolver) is Uniform(0.4, 0.5). Every draw must land in it: the
+        // draw reads the prior the sampler scores against, not the model
+        // alone.
         let resolved = mk_resolved(
-            vec![
-                mk_param("beta", 0.42,
-                    Some(ir::parameter::PriorDist::Uniform(
-                        ir::parameter::UniformPrior { lower: 0.4, upper: 0.5 })),
-                    Some((0.0, 1.0))),
-            ],
+            vec![mk_param("beta", 0.42, None, Some((0.0, 1.0)))],
             &["beta"],
         );
+        let base_specs = specs_for(&resolved);
+        let priors = vec![(
+            "beta".to_string(),
+            Prior::Fixed(Density::Uniform { lower: 0.4, upper: 0.5 }),
+        )];
+        let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
         let starts = draw_chain_starts(
-            &resolved, &InitMethod::FromPrior, 32, 7,
+            &ctx, &ResolvedStarts::bare(ChainStarts::from_prior()), 32, 7,
         ).unwrap();
         for cs in &starts.starts {
             let v = cs.values["beta"];
             assert!(v >= 0.4 - 1e-9 && v <= 0.5 + 1e-9,
-                "draw {} outside declared prior [0.4, 0.5]", v);
+                "draw {} outside the resolved prior [0.4, 0.5]", v);
         }
+    }
+
+    #[test]
+    fn from_prior_refuses_a_flat_prior_with_no_bounds() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, None)],
+            &["beta"],
+        );
+        let err = draw(&resolved, &ResolvedStarts::bare(ChainStarts::from_prior()), 2, 1)
+            .unwrap_err();
+        assert!(matches!(err, InitError::NoPriorAndNoBounds { .. }), "{err}");
     }
 
     // ─── Estimate-set domain invariant (per-variant) ──────────────────
 
     #[test]
     fn from_params_chainstart_values_restricted_to_estimate_set() {
-        // Already validated above. Repeat here for the audit-required
-        // per-variant coverage. The TOML carries an extra `extra_param`
-        // not in estimate_set — must be ignored silently.
         let resolved = mk_resolved(
             vec![
                 mk_param("beta",  0.3, None, Some((0.0, 1.0))),
@@ -1390,11 +1480,7 @@ mod tests {
         );
         let path = write_tmp("from_params_extra",
             "beta = 0.42\ngamma = 0.12\nN0 = 999\nextra_param = 1.0\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromParams { path: path.clone() },
-            1, 0,
-        ).unwrap();
+        let starts = draw(&resolved, &from_params(&path), 1, 0).unwrap();
         let keys: HashSet<&str> = starts.starts[0].values.keys()
             .map(String::as_str).collect();
         assert_eq!(keys, HashSet::from(["beta"]));
@@ -1410,17 +1496,17 @@ mod tests {
             ],
             &["beta"],
         );
-        let path = write_tmp("from_mle_restricted",
-            "[mle]\nbeta = 0.66\nrho = 0.05\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromMle { source: MleSource::File(path.clone()) },
-            1, 0,
-        ).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_from_mle_restricted_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let state = write_fit_state(&dir, &[("beta", 0.66), ("rho", 0.05)]);
+        let starts = draw(&resolved, &from_mle(&state), 1, 0).unwrap();
         let keys: HashSet<&str> = starts.starts[0].values.keys()
             .map(String::as_str).collect();
         assert_eq!(keys, HashSet::from(["beta"]));
-        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1434,13 +1520,7 @@ mod tests {
         );
         let path = write_tmp("from_post_restricted",
             "beta\trho\n0.42\t0.05\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromPosterior {
-                source: PosteriorSource::DrawsTsv(path.clone()),
-            },
-            1, 0,
-        ).unwrap();
+        let starts = draw(&resolved, &from_posterior(&path), 1, 0).unwrap();
         let keys: HashSet<&str> = starts.starts[0].values.keys()
             .map(String::as_str).collect();
         assert_eq!(keys, HashSet::from(["beta"]));
@@ -1459,9 +1539,8 @@ mod tests {
             ],
             &["beta"],
         );
-        let starts = draw_chain_starts(
-            &resolved, &InitMethod::FromPrior, 1, 0,
-        ).unwrap();
+        let starts = draw(&resolved, &ResolvedStarts::bare(ChainStarts::from_prior()), 1, 0)
+            .unwrap();
         let keys: HashSet<&str> = starts.starts[0].values.keys()
             .map(String::as_str).collect();
         assert_eq!(keys, HashSet::from(["beta"]));
@@ -1470,94 +1549,143 @@ mod tests {
     // ─── Per-variant provenance tag check ─────────────────────────────
 
     #[test]
-    fn from_params_chainstart_source_records_provenance_with_correct_tag() {
+    fn every_rule_records_its_provenance_tag() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3,
+                Some(ir::parameter::PriorDist::Uniform(
+                    ir::parameter::UniformPrior { lower: 0.0, upper: 1.0 })),
+                Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let params = write_tmp("tag_params", "beta = 0.42\n");
+        let post = write_tmp("tag_post", "beta\n0.42\n");
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_tag_mle_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let state = write_fit_state(&dir, &[("beta", 0.42)]);
+        let cases: Vec<(ResolvedStarts, &str)> = vec![
+            (from_params(&params), "params_point"),
+            (from_mle(&state), "mle_point"),
+            (from_posterior(&post), "posterior_row"),
+            (ResolvedStarts::bare(ChainStarts::from_prior()), "prior_draw"),
+            (ResolvedStarts::bare(ChainStarts::Point(Point::Declared)), "seeded_base"),
+            (ResolvedStarts::bare(ChainStarts::Spread(Spread::Lhs)), "lhs_cell"),
+            (ResolvedStarts::bare(ChainStarts::Spread(Spread::Uniform)), "uniform_draw"),
+            (ResolvedStarts::bare(ChainStarts::uniform_unconstrained()), "unconstrained_draw"),
+        ];
+        for (starts, tag) in cases {
+            let drawn = draw(&resolved, &starts, 2, 42).unwrap();
+            assert_eq!(drawn.starts[1].source.tag(), tag, "{}", starts.rule.spelled());
+        }
+        std::fs::remove_file(&params).ok();
+        std::fs::remove_file(&post).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn single_puts_every_chain_at_the_seeded_base() {
         let resolved = mk_resolved(
             vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
             &["beta"],
         );
-        let path = write_tmp("from_params_tag", "beta = 0.42\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromParams { path: path.clone() },
-            1, 0,
-        ).unwrap();
-        assert_eq!(starts.starts[0].source.tag(), "params_point");
-        assert!(matches!(starts.starts[0].source,
-            InitSource::ParamsPoint { .. }));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn from_mle_chainstart_source_records_provenance_with_correct_tag() {
-        let resolved = mk_resolved(
-            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
-            &["beta"],
-        );
-        let path = write_tmp("from_mle_tag", "[mle]\nbeta = 0.42\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromMle { source: MleSource::File(path.clone()) },
-            1, 0,
-        ).unwrap();
-        assert_eq!(starts.starts[0].source.tag(), "mle_point");
-        assert!(matches!(starts.starts[0].source,
-            InitSource::MlePoint { .. }));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn from_posterior_chainstart_source_records_provenance_with_correct_tag() {
-        let resolved = mk_resolved(
-            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
-            &["beta"],
-        );
-        let path = write_tmp("from_post_tag", "beta\n0.42\n");
-        let starts = draw_chain_starts(
-            &resolved,
-            &InitMethod::FromPosterior {
-                source: PosteriorSource::DrawsTsv(path.clone()),
-            },
-            1, 0,
-        ).unwrap();
-        assert_eq!(starts.starts[0].source.tag(), "posterior_row");
-        assert!(matches!(starts.starts[0].source,
-            InitSource::PosteriorRow { .. }));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn from_prior_chainstart_source_records_provenance_with_correct_tag() {
-        let resolved = mk_resolved(
-            vec![
-                mk_param("beta", 0.3,
-                    Some(ir::parameter::PriorDist::Uniform(
-                        ir::parameter::UniformPrior { lower: 0.0, upper: 1.0 })),
-                    Some((0.0, 1.0))),
-            ],
-            &["beta"],
-        );
-        let starts = draw_chain_starts(
-            &resolved, &InitMethod::FromPrior, 1, 42,
-        ).unwrap();
-        assert_eq!(starts.starts[0].source.tag(), "prior_draw");
-        assert!(matches!(starts.starts[0].source,
-            InitSource::PriorDraw { .. }));
-    }
-
-    // ─── Legacy variant dispatch through draw_chain_starts ─────────────
-
-    #[test]
-    fn legacy_single_returns_seeded_base() {
-        let resolved = mk_resolved(
-            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
-            &["beta"],
-        );
-        let starts = draw_chain_starts(
-            &resolved, &InitMethod::Single, 3, 0,
+        let starts = draw(
+            &resolved, &ResolvedStarts::bare(ChainStarts::Point(Point::Declared)), 3, 0,
         ).unwrap();
         for cs in &starts.starts {
             assert!((cs.values["beta"] - 0.3).abs() < 1e-12);
             assert!(matches!(cs.source, InitSource::SeededBase));
         }
+    }
+
+    #[test]
+    fn spread_rules_degrade_to_the_base_point_at_one_chain() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        for rule in [
+            ChainStarts::Spread(Spread::Lhs),
+            ChainStarts::Spread(Spread::Uniform),
+            ChainStarts::uniform_unconstrained(),
+        ] {
+            let starts = draw(&resolved, &ResolvedStarts::bare(rule.clone()), 1, 7).unwrap();
+            assert_eq!(starts.starts.len(), 1);
+            assert!((starts.starts[0].values["beta"] - 0.3).abs() < 1e-12, "{}", rule.tag());
+            assert!(matches!(starts.starts[0].source, InitSource::SeededBase));
+        }
+    }
+
+    #[test]
+    fn a_sourced_rule_without_its_source_is_a_wiring_error() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let starts = ResolvedStarts::bare(ChainStarts::Point(Point::FromMle {
+            source: super::super::starts::Handle("@x".into()),
+        }));
+        let err = draw(&resolved, &starts, 2, 0).unwrap_err();
+        assert!(matches!(err, InitError::Unresolved { .. }), "{err}");
+    }
+
+    // ─── chain_starts.tsv source labels (gh#871) ─────────────────────
+
+    /// A rule that drew each chain its own point earns `:chain-<id>`; a rule
+    /// that put every chain at one point does not, because that suffix reads
+    /// as independent draws that happen to coincide. gh#871.
+    #[test]
+    fn chain_starts_source_marks_per_chain_draws_only() {
+        for rule in [
+            ChainStarts::Spread(Spread::Uniform),
+            ChainStarts::Spread(Spread::Lhs),
+            ChainStarts::uniform_unconstrained(),
+            ChainStarts::from_prior(),
+        ] {
+            let got: Vec<String> = (0..3).map(|i| source_label(&rule, i)).collect();
+            assert_eq!(got, vec![format!("{rule}:chain-0"),
+                                 format!("{rule}:chain-1"),
+                                 format!("{rule}:chain-2")],
+                "{rule} draws each chain its own point, so each row names its chain");
+        }
+        for rule in [
+            ChainStarts::Point(Point::Declared),
+            ChainStarts::Point(Point::FromMle { source: super::super::starts::Handle("@up".into()) }),
+            ChainStarts::Point(Point::FromParams { path: "p.toml".into() }),
+        ] {
+            let got: Vec<String> = (0..3).map(|i| source_label(&rule, i)).collect();
+            assert_eq!(got, vec![rule.to_string(); 3],
+                "{rule} puts every chain at one point, so no row may claim \
+                 a draw of its own");
+        }
+    }
+
+    #[test]
+    fn the_writer_records_one_row_per_chain_in_spec_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = vec![
+            EstimatedParam {
+                name: "beta".into(), index: 0, initial: 0.3, rw_sd: 0.1,
+                transform: Transform::None, lower: 0.0, upper: 1.0,
+                rw_sd_auto: false, perturb_only_at_t0: false,
+            },
+        ];
+        let rule = ChainStarts::Point(Point::FromMle {
+            source: super::super::starts::Handle("@up".into()),
+        });
+        let records = vec![
+            ChainStartRecord { chain_id: 0, source: source_label(&rule, 0), values: vec![0.25] },
+            ChainStartRecord { chain_id: 1, source: source_label(&rule, 1), values: vec![0.25] },
+        ];
+        write_chain_starts_tsv(dir.path(), &base, &rule, &records).unwrap();
+        let txt = std::fs::read_to_string(dir.path().join("chain_starts.tsv")).unwrap();
+        let header = txt.lines().next().unwrap();
+        assert!(header.contains("starts=from_mle @up"), "{header}");
+        assert!(header.contains("kind=point"), "{header}");
+        let body: Vec<&str> = txt.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(body[0], "chain_id\tsource\tbeta");
+        assert_eq!(body[1], "0\tfrom_mle\t0.25");
+        assert_eq!(body[2], "1\tfrom_mle\t0.25");
     }
 }

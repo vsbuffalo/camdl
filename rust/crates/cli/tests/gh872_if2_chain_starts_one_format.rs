@@ -43,10 +43,10 @@ fn golden_ir() -> PathBuf {
     Path::new(&manifest).join("../../../ocaml/golden/seir_observations.ir.json")
 }
 
-/// The `chain_starts.tsv` written by the stage whose CAS leaf sits under a
-/// `NN-<stage_name>-<h8>` directory.
-fn chain_starts_for_stage(root: &Path, stage_name: &str) -> PathBuf {
-    let marker = format!("-{stage_name}-");
+/// The `chain_starts.tsv` written by the method whose CAS leaf sits under a
+/// `<method>-<h8>` directory.
+fn chain_starts_for_stage(root: &Path, method: &str) -> PathBuf {
+    let marker = format!("{method}-");
     let mut found: Vec<PathBuf> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -57,7 +57,7 @@ fn chain_starts_for_stage(root: &Path, stage_name: &str) -> PathBuf {
                 stack.push(p);
             } else if p.file_name().is_some_and(|n| n == "chain_starts.tsv")
                 && p.components().any(|c| {
-                    c.as_os_str().to_string_lossy().contains(&marker)
+                    c.as_os_str().to_string_lossy().starts_with(&marker)
                 })
             {
                 found.push(p);
@@ -65,7 +65,7 @@ fn chain_starts_for_stage(root: &Path, stage_name: &str) -> PathBuf {
         }
     }
     assert_eq!(found.len(), 1,
-        "expected exactly one chain_starts.tsv under a `{stage_name}` stage \
+        "expected exactly one chain_starts.tsv under a `{method}` method \
          leaf below {}, found {found:?}", root.display());
     found.pop().unwrap()
 }
@@ -110,12 +110,12 @@ fn if2_chain_starts_matches_the_format_every_other_stage_writes() {
     std::fs::write(&data,
         "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
 
-    // Both stages draw their own starts with the same init mode, so the two
-    // files are directly comparable: neither is chained off the other, and a
+    // Both methods draw their own starts with the same rule, so the two files
+    // are directly comparable: neither is chained off the other, and a
     // difference between them can only come from the writers. PGAS needs a
-    // proper prior on every estimated parameter, hence the log-normal.
-    let fit_toml = dir.join("fit.toml");
-    std::fs::write(&fit_toml, format!(r#"
+    // proper prior on every estimated parameter, hence the log-normal. One
+    // problem half, two `[method]` files.
+    let problem = format!(r#"
 [model]
 camdl = "{ir}"
 
@@ -135,44 +135,49 @@ p_detect = 0.5
 N0       = 1000
 I0       = 1
 
-[stages.optimum]
-algorithm  = "if2"
-backend    = "chain_binomial"
+[config]
+dt = 1.0
+"#, ir = golden_ir().display(), data = data.display());
+    let if2_toml = dir.join("optimum.toml");
+    std::fs::write(&if2_toml, format!("{problem}
+[method]
+algorithm  = \"if2\"
+backend    = \"chain_binomial\"
 chains     = 2
 particles  = 20
 iterations = 1
 cooling    = 0.5
-init       = "uniform_unconstrained"
-
-[stages.posterior]
-algorithm = "pgas"
-backend   = "chain_binomial"
+starts     = \"uniform_unconstrained\"
+")).unwrap();
+    let pgas_toml = dir.join("posterior.toml");
+    std::fs::write(&pgas_toml, format!("{problem}
+[method]
+algorithm = \"pgas\"
+backend   = \"chain_binomial\"
 chains    = 2
 particles = 20
 sweeps    = 4
 burn_in   = 1
-init      = "uniform_unconstrained"
+starts    = \"uniform_unconstrained\"
+")).unwrap();
 
-[config]
-dt = 1.0
-"#, ir = golden_ir().display(), data = data.display())).unwrap();
-
-    let out = Command::new(&bin)
-        .env("CAMDL_OUTPUT_DIR", dir.join("results"))
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDLC", &camdlc)
-        .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--seed", "1", "--allow-nonconverged-scout", "--no-progress"])
-        .output()
-        .expect("spawn fit run");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "fit run failed:\nstderr={stderr}");
+    for toml in [&if2_toml, &pgas_toml] {
+        let out = Command::new(&bin)
+            .env("CAMDL_OUTPUT_DIR", dir.join("results"))
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDLC", &camdlc)
+            .args(["fit", "run", &toml.to_string_lossy(), "--seed", "1", "--no-progress"])
+            .output()
+            .expect("spawn fit run");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "fit run {} failed:\nstderr={stderr}", toml.display());
+    }
 
     let results = dir.join("results");
     let (if2_comments, if2_cols, if2_rows) =
-        parse(&chain_starts_for_stage(&results, "optimum"));
+        parse(&chain_starts_for_stage(&results, "if2"));
     let (_, pgas_cols, pgas_rows) =
-        parse(&chain_starts_for_stage(&results, "posterior"));
+        parse(&chain_starts_for_stage(&results, "pgas"));
 
     // The audit question: can a reader tell from this file alone whether the
     // chains were started apart?
@@ -206,7 +211,7 @@ dt = 1.0
     assert_eq!(if2_sources,
         ["uniform_unconstrained:chain-0", "uniform_unconstrained:chain-1"],
         "the IF2 stage's per-chain sources are {if2_sources:?}; the stage drew \
-         each chain its own point under `init = \"uniform_unconstrained\"`, and \
+         each chain its own point under `starts = \"uniform_unconstrained\"`, and \
          the file has to say so.");
 
     let betas: Vec<f64> = column(&if2_cols, &if2_rows, "beta").iter()
@@ -223,7 +228,7 @@ dt = 1.0
             "no `# camdl chain_starts` header in the IF2 stage's file: \
              {if2_comments:?}. The header names the init method, so a reader \
              who skims it gets the same answer as the rows."));
-    assert!(header.contains("method=uniform_unconstrained"),
-        "the IF2 stage's header is {header:?} and does not name the init that \
-         supplied the starts.");
+    assert!(header.contains("starts=uniform_unconstrained") && header.contains("kind=spread"),
+        "the IF2 stage's header is {header:?} and does not name the rule that \
+         supplied the starts, or its kind.");
 }

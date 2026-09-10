@@ -155,7 +155,7 @@ enum TildeMode {
     Variant,
 }
 
-/// Variants on the fit TOML's `[estimate]` block. Same `[stages.posterior]`
+/// Variants on the fit TOML's `[estimate]` block. Same `[method]`
 /// (PMMH, chain_binomial, tiny particle count) across all of them.
 #[derive(Copy, Clone)]
 enum FitTomlMode {
@@ -208,7 +208,7 @@ beta  = {beta_field}
 gamma = {gamma_field}
 [fixed]
 N0 = 1000
-[stages.posterior]
+[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 1
@@ -596,7 +596,7 @@ k = 10.0
     p
 }
 
-const PMMH_STAGE: &str = r#"[stages.posterior]
+const PMMH_STAGE: &str = r#"[method]
 algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 1
@@ -604,7 +604,7 @@ particles = 20
 iterations = 20
 burn_in = 2"#;
 
-const IF2_STAGE: &str = r#"[stages.point]
+const IF2_STAGE: &str = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
 chains = 1
