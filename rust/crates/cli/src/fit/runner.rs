@@ -1627,6 +1627,12 @@ pub(crate) fn resolve_and_load_obs_streams(
                 &stream_name,
                 compiled.model.simulation.t_start,
                 &obs_times,
+                // gh#842: only asked on the refusal path — reading the column
+                // back to see how it spelled its times is not worth spending on
+                // every successful load.
+                || crate::pfilter::stream_cells_were_dated(&obs_model, data_path, time_opts)
+                    .unwrap_or(false),
+                time_opts,
             )?;
             // A row AT the origin is judged by `stream_times_for` from what it
             // covers: an incidence row there has a period opening before the

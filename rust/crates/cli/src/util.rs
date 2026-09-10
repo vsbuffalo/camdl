@@ -1525,19 +1525,48 @@ pub fn format_unbound_streams_warning(
 /// "Strictly before" is judged with the same 1e-9 tolerance the loaders use
 /// for obs-time comparisons, so a time a float-ULP below the origin is treated
 /// as on-origin, not as an error.
+///
+/// The times are quoted the way the file states them (gh#842): on a file whose
+/// time column is ISO dates, a bare `-3` is a conversion the reader has to do
+/// by hand on a model where every other time is a calendar date. `dated` is a
+/// closure because answering it costs a re-read of the column
+/// ([`crate::pfilter::stream_cells_were_dated`]) and only the error path needs
+/// the answer — the same shape `pfilter::stream_times_for`'s two refusals use.
 pub fn check_obs_before_origin(
     stream_name: &str,
     t_start: f64,
     obs_times: &[f64],
+    dated: impl FnOnce() -> bool,
+    opts: &crate::caltime_load::TimeOpts<'_>,
 ) -> Result<(), String> {
     if let Some(&t) = obs_times.iter().find(|&&t| t < t_start - 1e-9) {
+        // Why it cannot be scored — the same clause either way, since the
+        // mechanism does not depend on how the file spells its times.
+        const WHY: &str = "so an earlier observation can never be propagated to \
+             — its likelihood term would be scored against a particle that \
+             never advanced (a silent wrong answer).";
+        if dated() {
+            // The dated form quotes the row and the run's start as dates, and
+            // prescribes the two anchors that actually move the start.
+            // "set `simulate.from` ≤ <date>" is not offered, because
+            // `simulate { from = <date> }` is not a form the compiler accepts
+            // (gh#844) — moving the model's `origin`, or lowering
+            // `simulate.from` on the internal scale, are both real actions.
+            let q = |t: f64| crate::caltime_load::quote_time(t, true, opts);
+            return Err(format!(
+                "observation stream '{stream_name}': the observation dated {} \
+                 precedes the start of the run, {}. The simulation begins there, \
+                 {WHY} Fix the alignment: drop the pre-origin observation(s), or \
+                 make the run start at {} or earlier — move the model's `origin` \
+                 back, or lower `simulate.from`.",
+                q(t), q(t_start), q(t)
+            ));
+        }
         return Err(format!(
             "observation stream '{stream_name}': observation at t = {t} precedes \
              the model origin t_start = {t_start}. The simulation begins at \
-             t_start, so an earlier observation can never be propagated to — its \
-             likelihood term would be scored against a particle that never \
-             advanced (a silent wrong answer). Fix the alignment: remove the \
-             pre-origin observation(s), or move the model origin earlier (set \
+             t_start, {WHY} Fix the alignment: remove the pre-origin \
+             observation(s), or move the model origin earlier (set \
              `simulate.from` ≤ {t}) so every observation falls within the run \
              window."
         ));
@@ -1613,11 +1642,30 @@ mod modal_value_tests {
 #[cfg(test)]
 mod obs_before_origin_tests {
     use super::check_obs_before_origin;
+    use crate::caltime_load::{TimeFormat, TimeOpts};
+
+    /// A numeric-file context: no origin to render through, so a quoted time
+    /// is the bare number whatever the column looked like.
+    fn numeric_opts() -> TimeOpts<'static> {
+        TimeOpts {
+            origin: None, time_unit: "days", dt: 1.0, t_start: 0.0,
+            format: TimeFormat::Auto,
+        }
+    }
+
+    /// A dated-file context: the model carries an `origin`, so an internal
+    /// time renders as the date the file wrote.
+    fn dated_opts() -> TimeOpts<'static> {
+        TimeOpts {
+            origin: Some("2026-07-01"), time_unit: "days", dt: 1.0, t_start: 0.0,
+            format: TimeFormat::Auto,
+        }
+    }
 
     #[test]
     fn obs_strictly_before_origin_errors_and_locates_it() {
         // Model origin t_start = 21, obs at 0/7/14 all precede it (F4).
-        let e = check_obs_before_origin("cases", 21.0, &[0.0, 7.0, 14.0])
+        let e = check_obs_before_origin("cases", 21.0, &[0.0, 7.0, 14.0], || false, &numeric_opts())
             .unwrap_err();
         assert!(e.contains("cases"), "error must name the stream: {e}");
         // Locates the offending time and the origin.
@@ -1633,18 +1681,76 @@ mod obs_before_origin_tests {
         // An observation exactly at the origin is fine here — whether an
         // incidence row there can be scored is judged from what it covers, in
         // `stream_times_for`, not by this check.
-        assert!(check_obs_before_origin("cases", 21.0, &[21.0, 28.0]).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[21.0, 28.0], || false, &numeric_opts()).is_ok());
     }
 
     #[test]
     fn obs_after_origin_is_allowed() {
-        assert!(check_obs_before_origin("cases", 21.0, &[28.0, 35.0]).is_ok());
-        assert!(check_obs_before_origin("cases", 0.0, &[0.0, 7.0, 14.0]).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[28.0, 35.0], || false, &numeric_opts()).is_ok());
+        assert!(check_obs_before_origin("cases", 0.0, &[0.0, 7.0, 14.0], || false, &numeric_opts()).is_ok());
     }
 
     #[test]
     fn empty_obs_times_is_ok() {
-        assert!(check_obs_before_origin("cases", 21.0, &[]).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[], || false, &numeric_opts()).is_ok());
+    }
+
+    /// gh#842: on a file whose time column is ISO dates, the refusal quotes
+    /// the row's date and the run's start date.
+    ///
+    /// The reported evidence was `observation at t = -3 precedes the model
+    /// origin t_start = 0` for a row written `2026-06-28`, on a model whose
+    /// `simulate.from` is a date. Finding the offending row meant converting
+    /// `-3` back to a calendar date by hand, in the message whose whole job is
+    /// to locate it.
+    #[test]
+    fn a_pre_origin_observation_on_a_dated_file_is_reported_in_dates() {
+        // Origin 2026-07-01, run starts there; the row is three days earlier.
+        let e = check_obs_before_origin("cases", 0.0, &[-3.0], || true, &dated_opts())
+            .unwrap_err();
+        assert!(e.contains("2026-06-28"),
+            "the offending row must be named by the date the file wrote: {e}");
+        assert!(e.contains("2026-07-01"),
+            "and the start of the run by its date: {e}");
+        assert!(!e.contains("t = -3") && !e.contains("t_start = 0"),
+            "no bare model time survives on a dated file: {e}");
+        // The prescription is one a modeller can carry out: `simulate { from =
+        // <date> }` does not compile (gh#844), so the fix names the origin and
+        // `simulate.from` rather than prescribing a date for the latter.
+        assert!(e.contains("`origin`") && e.contains("`simulate.from`"),
+            "the fix must name the two anchors that move the run's start: {e}");
+        assert!(!e.contains("simulate.from` ≤"),
+            "and must not prescribe a form the compiler rejects: {e}");
+    }
+
+    /// The other half of the same rule: a numeric file's message is unchanged,
+    /// down to `t = `, `t_start = ` and the `≤` prescription. A modeller whose
+    /// times are numbers should see no churn from the dated form existing.
+    #[test]
+    fn a_numeric_file_keeps_the_message_it_had() {
+        let e = check_obs_before_origin("cases", 0.0, &[-3.0], || false, &numeric_opts())
+            .unwrap_err();
+        assert_eq!(
+            e,
+            "observation stream 'cases': observation at t = -3 precedes the \
+             model origin t_start = 0. The simulation begins at t_start, so an \
+             earlier observation can never be propagated to — its likelihood \
+             term would be scored against a particle that never advanced (a \
+             silent wrong answer). Fix the alignment: remove the pre-origin \
+             observation(s), or move the model origin earlier (set \
+             `simulate.from` ≤ -3) so every observation falls within the run \
+             window."
+        );
+    }
+
+    /// A dated column on a model with no `origin` has nothing to render
+    /// through, so the message falls back to the number rather than swallowing
+    /// the diagnostic — the same fallback `quote_time` makes everywhere.
+    #[test]
+    fn a_dated_column_without_an_origin_falls_back_to_the_number() {
+        let e = check_obs_before_origin("cases", 0.0, &[-3.0], || true, &numeric_opts())
+            .unwrap_err();
+        assert!(e.contains("-3"), "{e}");
     }
 
     #[test]
@@ -1652,9 +1758,9 @@ mod obs_before_origin_tests {
         // A time a hair below the origin (within float tolerance) is NOT an
         // error — it's treated as on-origin. Strictly-before means by more
         // than the obs-time comparison tolerance used elsewhere.
-        assert!(check_obs_before_origin("cases", 21.0, &[21.0 - 1e-12, 28.0]).is_ok());
+        assert!(check_obs_before_origin("cases", 21.0, &[21.0 - 1e-12, 28.0], || false, &numeric_opts()).is_ok());
         // ...but a clearly-earlier time is rejected.
-        assert!(check_obs_before_origin("cases", 21.0, &[20.0, 28.0]).is_err());
+        assert!(check_obs_before_origin("cases", 21.0, &[20.0, 28.0], || false, &numeric_opts()).is_err());
     }
 }
 
