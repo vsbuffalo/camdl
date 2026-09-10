@@ -2183,12 +2183,19 @@ pub fn run_chains_with_per_chain_params(
     // inference to report. Fail with an actionable message rather than
     // letting a later stage trip over an empty result set.
     if results.is_empty() {
+        // gh#885: the reason and the remedies come from the one string the
+        // other two all-chains-refused errors also carry (pgas's start
+        // refusal, pmmh's init-eval refusal). The advice here used to end
+        // "tighten parameter bounds" with no reason attached, which reads as
+        // though the bounds were the lever; they are, but only in the
+        // direction the shared sentence names, and the cause is the start the
+        // filter cannot score.
         eprintln!(
             "error: all {} IF2 chain(s) bailed via the PF degeneracy watchdog — no usable \
-             chain. This is sustained ESS collapse (R0 at its bound, σ too large, or too few \
-             particles): raise --particles or tighten parameter bounds (see the per-chain \
-             errors above).",
-            config.n_chains);
+             chain. This is sustained ESS collapse: the swarm lost support and did not \
+             recover (see the per-chain errors above). {}",
+            config.n_chains,
+            crate::fit::chain_starts::UNSCOREABLE_START_ADVICE);
         std::process::exit(1);
     }
 

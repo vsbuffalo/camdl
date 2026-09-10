@@ -454,6 +454,15 @@ fn all_chains_refused_is_an_error() {
         "the all-refused path must also carry `initial_loglik_infinite` — the \
          signal the gh#226 backstop taught consumers to look for.\nstderr:\n{}",
         run.stderr);
+    // gh#885: and it says WHY an unscoreable start happens and what to do,
+    // from the one string all three all-chains-refused errors carry — before
+    // this, PGAS's message named neither, and pointed at the observation model
+    // and the bounds with no reason attached.
+    assert!(run.stderr.contains("standardised distance grows with the square root")
+            && run.stderr.contains("`starts = \"from_prior\"`")
+            && run.stderr.contains("widening the parameter bounds"),
+        "the refusal must carry the shared reason and remedies.\nstderr:\n{}",
+        run.stderr);
     assert!(run.stderr.contains("refused at their starting point"),
         "the error must say what happened.\nstderr:\n{}", run.stderr);
 }

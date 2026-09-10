@@ -98,6 +98,35 @@ pub struct ChainStart {
 /// rule has nothing to redraw and gets one.
 pub const MAX_START_ATTEMPTS: usize = 10;
 
+/// What to say when no chain could be started — the reason and the remedies,
+/// written once (gh#880, gh#885).
+///
+/// Three aggregate errors describe this one failure: PGAS's "all N chains were
+/// refused at their starting point", PMMH's "all N chains failed init-eval
+/// with PFDegenerate", and IF2's "all N chains bailed via the PF degeneracy
+/// watchdog". Each used to carry its own advice, and two of them carried none
+/// of the reason; one of those two recommended tightening bounds, which is the
+/// half of the story that reads as if widening them would help.
+///
+/// The measurement behind the sentence is gh#876: a start whose projected mean
+/// sits several standard deviations from the observed counts leaves no
+/// particle with appreciable weight, and that standardised distance grows with
+/// the square root of the population — a relative error that is harmless at
+/// ten thousand people is fatal at a million. The remedies follow from it:
+/// start somewhere the filter can score, or give the filter more particles.
+/// Widening the bounds is named as the thing that does NOT help, because the
+/// drawing rules map their draws through the bounds, so a wider range makes an
+/// unscoreable start more likely, not less.
+pub const UNSCOREABLE_START_ADVICE: &str =
+    "A start whose projected mean sits several standard deviations from the \
+     observed counts leaves no particle with appreciable weight, and that \
+     standardised distance grows with the square root of the population — so a \
+     relative error that is harmless at ten thousand people is fatal at a \
+     million. Start every chain at the declared values (`starts = \"single\"`), \
+     draw the starts from the priors (`starts = \"from_prior\"`), or raise \
+     `particles`. Note that widening the parameter bounds widens the range the \
+     starts are drawn from, so it makes this refusal more likely, not less.";
+
 /// A start the filter could not score, kept so `chain_starts.tsv` says how
 /// many starts were tried and why each was dropped (gh#887).
 #[derive(Debug, Clone)]
@@ -1832,6 +1861,28 @@ mod tests {
         let keys: HashSet<&str> = starts.starts[0].values.keys()
             .map(String::as_str).collect();
         assert_eq!(keys, HashSet::from(["beta"]));
+    }
+
+    /// gh#885: the one explanation the three all-chains-refused errors share
+    /// says both halves — why an unscoreable start happens, and what to do.
+    ///
+    /// The halves are asserted separately because each was missing somewhere
+    /// before: `runner.rs`'s IF2 bail and `pgas.rs`'s start refusal gave
+    /// advice without the reason, and the IF2 one recommended tightening the
+    /// bounds without saying which direction helps or why.
+    #[test]
+    fn the_shared_refusal_advice_carries_the_reason_and_the_remedies() {
+        let a = UNSCOREABLE_START_ADVICE;
+        // The reason (gh#876): the standardised distance, and that it scales.
+        assert!(a.contains("standard deviations"), "{a}");
+        assert!(a.contains("square root of the population"), "{a}");
+        // The remedies, all three.
+        assert!(a.contains("`starts = \"single\"`"), "{a}");
+        assert!(a.contains("`starts = \"from_prior\"`"), "{a}");
+        assert!(a.contains("`particles`"), "{a}");
+        // And the anti-remedy, which two of the three messages used to imply.
+        assert!(a.contains("widening the parameter bounds"), "{a}");
+        assert!(a.contains("more likely, not less"), "{a}");
     }
 
     // ─── Per-variant provenance tag check ─────────────────────────────

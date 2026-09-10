@@ -1310,17 +1310,21 @@ pub fn run_stage(
         collector.render_to_stderr(HintContext { chains_completed: Some(n_good_chains) });
         let diag_path = stage_dir.join("diagnostics.json");
         let _ = collector.write_json(&diag_path.to_string_lossy());
+        // gh#885: the reason and the remedies come from the one string the
+        // other two all-chains-refused errors also carry (pmmh's init-eval
+        // refusal, IF2's watchdog bail), so they cannot drift apart again.
+        // This message keeps its own first sentence, because what was refused
+        // here is specific: a complete-data log-posterior that stayed
+        // non-finite through the trajectory update, not a filter degeneracy.
         return Err(format!(
             "pgas stage `{}`: all {} chain(s) were refused at their starting \
              point — the complete-data log-posterior is non-finite for every \
              one and stayed non-finite through its first trajectory update, so \
              no chain could move. See `diagnostics.json` for the per-chain \
              `bad_init` entries and `chain_starts.tsv` for the starts they \
-             name. Most often the starting values sit in an impossible region \
-             (try `--starts from_prior` or a different start); less often the data are \
-             impossible under this model — also check the observation model \
-             and parameter bounds.",
-            stage_name, n_chains));
+             name. {}",
+            stage_name, n_chains,
+            super::chain_starts::UNSCOREABLE_START_ADVICE));
     }
 
     let elapsed = t0.elapsed();
