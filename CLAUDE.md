@@ -87,7 +87,7 @@ Do **not**, to "fix" a mismatch red:
 
 Runbook: `docs/dev/testing.md` ("Gotcha: camdlc version check"). The deeper fix
 — key the guard on IR schema version, not git hash, so no skip is needed — is in
-`docs/dev/proposals/2026-06-04-camdlc-version-guard.md`.
+`docs/dev/proposals/2026-09-10-camdlc-version-guard.md`.
 
 ## Goldens and `ir/VERSION` are a human-loop change, never collateral
 
