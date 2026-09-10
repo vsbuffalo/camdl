@@ -3656,11 +3656,23 @@ pub(crate) fn project_coverages(
                 )
             }).collect())
         }
-        ir::observation::Projection::FlowRatio { .. } => Err(format!(
-            "observation stream '{}': the flow-ratio projection is in the IR but this \
-             runtime does not project it yet",
-            obs_ir.name,
-        )),
+        ir::observation::Projection::FlowRatio { numerator, denominator } => {
+            // The two flow sums over the row's window — each the incidence
+            // quantity above — divided (proposal 2026-09-09). Emission and
+            // scoring agree by construction: the runtime reads the same two
+            // bins at the row's close and takes the same quotient, NaN when
+            // the denominator flow is zero.
+            use sim::inference::multi_stream_obs::flow_ratio;
+            let indices = |names: &[String]| -> Vec<usize> {
+                names.iter()
+                    .filter_map(|fname| model.transitions.iter()
+                        .position(|tr| tr.name == *fname))
+                    .collect()
+            };
+            let num = incidence_over(&indices(numerator))?;
+            let den = incidence_over(&indices(denominator))?;
+            Ok(num.iter().zip(&den).map(|(&a, &b)| flow_ratio(a, b)).collect())
+        }
     }
 }
 

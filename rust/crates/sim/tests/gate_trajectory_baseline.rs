@@ -218,6 +218,11 @@ const BASELINES: &[(&str, &str, u64)] = &[
     ("seir_erlang_via", "chain_binomial", 0x08b695ddf690d3f0),
     ("seir_erlang_staged", "gillespie", 0xee741459747732f2),
     ("seir_erlang_staged", "chain_binomial", 0xd5463d6b91a7545d),
+    // Proposal 2026-09-09: the community-death-fraction golden (a FlowRatio
+    // stream beside its explicit-instant sibling); forward trajectories only.
+    ("death_fraction_window", "gillespie", 0x1ac25baaa9152bb3),
+    ("death_fraction_window", "chain_binomial", 0x7f8dc835e362cce8),
+    ("death_fraction_window", "ode", 0xbd9f5fbede74c831),
     ("seir_observations", "gillespie", 0x1512c82543641dbc),
     ("seir_observations", "chain_binomial", 0x1620e4f54e9021bf),
     ("seir_seasonal_patch", "gillespie", 0xbab747d305e59679),
@@ -401,6 +406,7 @@ const ODE_STATE_BASELINES: &[(&str, u64)] = &[
     ("seir_erlang", 0xd67553e482930e56),
     ("seir_erlang_via", 0xd67553e482930e56),   // == seir_erlang (desugars identically)
     ("seir_erlang_staged", 0x9d71c13925516443),
+    ("death_fraction_window", 0x053b50def850a17a),
     ("seir_observations", 0xd98853739e669231),
     ("seir_seasonal_importation", 0x674f33759aab5fb8),
     ("seir_seasonal_patch", 0x647c238e73b173d3),

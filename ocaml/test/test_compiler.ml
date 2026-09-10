@@ -13503,6 +13503,7 @@ let () =
     ];
     "golden", [
       Alcotest.test_case "sir_basic"      `Quick (test_golden "sir_basic");
+      Alcotest.test_case "death_fraction_window" `Quick (test_golden "death_fraction_window");
       Alcotest.test_case "sir_demography" `Quick (test_golden "sir_demography");
       Alcotest.test_case "seir_age"       `Quick (test_golden "seir_age");
       Alcotest.test_case "sir_five_age"   `Quick (test_golden "sir_five_age");

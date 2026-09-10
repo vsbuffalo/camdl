@@ -1,0 +1,128 @@
+# Base: none — root model
+# Adds: a proportion-of-flows observation stream — the fraction of a window's
+#   deaths that occurred in the community — beside the explicit instant
+#   spelling of the same ratio, so the two quantities sit in one golden
+# Changes: nothing else
+#
+# What this model is
+# ------------------
+# A single population with susceptible (S), infectious (I), hospitalised (H),
+# recovered (R) compartments and two absorbing death compartments: deaths in
+# the community (Dc) and deaths in a facility (Df). A susceptible becomes
+# infectious at a rate proportional to the infectious count (`infection`). An
+# infectious person recovers (`recover`), is hospitalised (`hospitalise`), or
+# dies in the community (`die_comm`); a hospitalised person is discharged to
+# recovered (`discharge`) or dies in the facility (`die_fac`). Facility deaths
+# lag community deaths by the hospital stay, which is what makes the two
+# fraction streams below differ.
+#
+# What it is fitted to
+# --------------------
+# Four weekly streams.
+#
+#   deaths_comm, deaths_fac — the number of community and facility deaths in
+#     each week, the flow through `die_comm` and `die_fac` accumulated over the
+#     row's window (`closing_at`: the label is the boundary the week closes at).
+#
+#   comm_frac — of the week's deaths, the fraction that occurred in the
+#     community: the community-death flow over the total death flow, both
+#     accumulated over the same window. This is a ratio of two flows and is
+#     read when the window closes (`projected = incidence(...) / (...)`), so it
+#     declares `covers` like any incidence stream. Reported directly as a
+#     fraction and scored with `beta`.
+#
+#   comm_frac_instant — the same ratio written as a ratio of the two
+#     transitions' rates, read at the row's time label. This is a different
+#     quantity: the instantaneous hazard ratio at one moment, not the share of
+#     the week's events. It is spelled `prevalence(...)` because that is the
+#     only spelling the compiler admits for it — the bare rate ratio is refused
+#     (E352) precisely because it is so easily mistaken for the stream above.
+#     Kept here as the documented contrast; a model fitting a weekly fraction
+#     wants `comm_frac`.
+
+time_unit = 'days
+
+compartments { S, I, H, R, Dc, Df }
+
+let N = S + I + H + R
+
+parameters {
+  beta  : rate      # transmission rate per infectious person per day
+  gamma : rate      # recovery rate from the community
+  eta   : rate      # hospitalisation rate
+  delta : rate      # discharge rate from hospital
+  mu_c  : rate      # death rate in the community
+  mu_f  : rate      # death rate in a facility
+  phi   : positive  # beta concentration for the two fraction streams
+  N0    : count
+  I0    : count
+}
+
+transitions {
+  infection   : S --> I  @ beta * S * I / N
+  recover     : I --> R  @ gamma * I
+  hospitalise : I --> H  @ eta * I
+  discharge   : H --> R  @ delta * H
+  die_comm    : I --> Dc @ mu_c * I
+  die_fac     : H --> Df @ mu_f * H
+}
+
+observations {
+  deaths_comm {
+    columns       { time : time, deaths_comm : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(die_comm)
+    emit_schedule = every 7 'days
+    deaths_comm   ~ poisson(rate = projected)
+  }
+
+  deaths_fac {
+    columns       { time : time, deaths_fac : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(die_fac)
+    emit_schedule = every 7 'days
+    deaths_fac    ~ poisson(rate = projected)
+  }
+
+  comm_frac {
+    columns       { time : time, comm_frac : probability }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+    emit_schedule = every 7 'days
+    comm_frac     ~ beta(mean = projected, concentration = phi)
+  }
+
+  comm_frac_instant {
+    columns           { time : time, comm_frac_instant : probability }
+    projected         = prevalence(mu_c * I / (mu_c * I + mu_f * H))
+    emit_schedule     = every 7 'days
+    comm_frac_instant ~ beta(mean = projected, concentration = phi)
+  }
+}
+
+init {
+  S = N0 - I0
+  I = I0
+}
+
+simulate {
+  from = 0 'days
+  to   = 84 'days
+}
+
+scenarios {
+  baseline {
+    label = "community-death fraction"
+    set = {
+      beta  = 0.5
+      gamma = 0.1
+      eta   = 0.15
+      delta = 0.1
+      mu_c  = 0.05
+      mu_f  = 0.1
+      phi   = 200.0
+      N0    = 100000
+      I0    = 10
+    }
+  }
+}

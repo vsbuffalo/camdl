@@ -186,6 +186,10 @@ pub enum StreamProjection {
     /// Sum of per-transition flow counters, reset after each observation.
     /// Used for incidence data (`CumulativeFlow`).
     FlowSum(Vec<usize>),
+    /// Two flow sums over the same window; the value is their quotient, read
+    /// when the window closes (`FlowRatio`, proposal 2026-09-09). NaN when the
+    /// denominator flow is zero — see [`flow_ratio`].
+    FlowRatio { numerator: Vec<usize>, denominator: Vec<usize> },
     /// Sum of integer compartment counts read at the observation instant.
     /// Used for prevalence data (`CurrentPop`, `CurrentPopSum`). No reset.
     IntCompSum(Vec<usize>),
@@ -198,19 +202,22 @@ impl StreamProjection {
     /// Classify as incidence ([`TemporalKind::Interval`]) or prevalence
     /// ([`TemporalKind::Instant`]). Agrees by construction with the IR
     /// [`ir::observation::Projection::temporal_kind`] this was built from:
-    /// `FlowSum` ⇐ `CumulativeFlow*` (incidence); `IntCompSum`/`Expr` ⇐
+    /// `FlowSum` ⇐ `CumulativeFlow*` and `FlowRatio` ⇐ `FlowRatio`
+    /// (incidence — taken over the row's window); `IntCompSum`/`Expr` ⇐
     /// `CurrentPop*`/`DerivedExpr` (prevalence).
     pub fn temporal_kind(&self) -> ir::observation::TemporalKind {
         use ir::observation::TemporalKind;
         match self {
-            StreamProjection::FlowSum(_) => TemporalKind::Interval,
+            StreamProjection::FlowSum(_) | StreamProjection::FlowRatio { .. } => {
+                TemporalKind::Interval
+            }
             StreamProjection::IntCompSum(_) | StreamProjection::Expr(_) => TemporalKind::Instant,
         }
     }
 
     /// True for projections that accumulate between observations and must be
     /// reset after the likelihood is scored — exactly the `Interval`
-    /// (incidence) kind. Only `FlowSum` does.
+    /// (incidence) kind. `FlowSum` and `FlowRatio` do.
     pub fn resets_after_observation(&self) -> bool {
         self.temporal_kind() == ir::observation::TemporalKind::Interval
     }
@@ -297,12 +304,38 @@ impl StreamProjection {
                     obs_name, e))?;
                 Ok(StreamProjection::Expr(resolved))
             }
-            P::FlowRatio { .. } => Err(format!(
-                "observation '{}': the flow-ratio projection (`incidence(a) / (incidence(a) + \
-                 incidence(b))`) is in the IR but this runtime does not score it yet",
-                obs_name)),
+            P::FlowRatio { numerator, denominator } => {
+                // Each side resolves exactly as a `CumulativeFlowSum` does; the
+                // two lists become two bins (proposal 2026-09-09).
+                let resolve = |names: &[String], side: &str| -> Result<Vec<usize>, String> {
+                    names.iter().map(|fname| {
+                        compiled.model.transitions.iter()
+                            .position(|tr| tr.name == *fname)
+                            .ok_or_else(|| format!(
+                                "observation '{}': the {} of its flow ratio references \
+                                 flow '{}', but no transition with that name exists",
+                                obs_name, side, fname))
+                    }).collect()
+                };
+                Ok(StreamProjection::FlowRatio {
+                    numerator: resolve(numerator, "numerator")?,
+                    denominator: resolve(denominator, "denominator")?,
+                })
+            }
         }
     }
+}
+
+/// `num / den` over one window: the fraction of the window's events that were
+/// of the numerator's kind (proposal 2026-09-09). A zero denominator is not a
+/// number — the stream measures a fraction of events that did not occur — and
+/// `NaN` is a defined input to every likelihood family (gh#645): under
+/// `binomial` / `beta_binomial` a row with `n = 0` scores exactly 0 (gh#812)
+/// and a row with `n > 0` is refused with the argument named; under `beta` and
+/// `bernoulli` the row is refused. It is deliberately not 0: a particle that
+/// produced no deaths must not pass a row that recorded some.
+pub fn flow_ratio(num: f64, den: f64) -> f64 {
+    if den == 0.0 { f64::NAN } else { num / den }
 }
 
 /// Evaluate a pre-resolved [`StreamProjection`] at a single snapshot
@@ -334,6 +367,10 @@ pub fn eval_stream_projection(
         StreamProjection::FlowSum(idxs) => {
             idxs.iter().map(|&i| flows[i] as f64).sum()
         }
+        StreamProjection::FlowRatio { numerator, denominator } => flow_ratio(
+            numerator.iter().map(|&i| flows[i] as f64).sum(),
+            denominator.iter().map(|&i| flows[i] as f64).sum(),
+        ),
         StreamProjection::IntCompSum(idxs) => {
             idxs.iter().map(|&i| counts[i] as f64).sum()
         }
@@ -1317,22 +1354,34 @@ pub struct MultiStreamObsModel {
     /// Zero real state; likelihood eval never reads real compartments and
     /// `RealState` has no interior mutability.
     real_s: RealState,
-    /// One slot per `Interval` (incidence / `FlowSum`) stream, in dense order =
-    /// the `ParticleState.acc` layout (multi-cadence Phase 2a). `stream_idx`
-    /// points back into `streams`; `flow_indices` are the per-transition indices
-    /// this stream sums (the `FlowSum(idxs)` set). Prevalence/`Instant` streams
-    /// own no slot.
+    /// One entry per `acc` bin, in dense order = the `ParticleState.acc`
+    /// layout (multi-cadence Phase 2a). A `FlowSum` stream owns one bin; a
+    /// `FlowRatio` stream owns two consecutive bins, numerator first, on the
+    /// same reset schedule (proposal 2026-09-09). `stream_idx` points back into
+    /// `streams`; `flow_indices` are the per-transition indices the bin sums.
+    /// Prevalence/`Instant` streams own no bin.
     interval_slots: Vec<IntervalSlot>,
-    /// Per-stream → `acc` slot map (len == `streams.len()`): `Some(k)` if stream
-    /// `si` is the k-th Interval slot, `None` for a prevalence/`Instant` stream.
-    /// The scoring fork reads `acc[k]` for `Some(k)` and projects from `counts`
-    /// for `None`.
-    stream_to_slot: Vec<Option<usize>>,
+    /// Per-stream → `acc` bin range (len == `streams.len()`): `Some(range)` for
+    /// an Interval stream, `None` for a prevalence/`Instant` stream. The
+    /// scoring fork reads the bins at `range.first ..` for `Some` and projects
+    /// from `counts` for `None`.
+    stream_bins: Vec<Option<BinRange>>,
 }
 
-/// One `acc` bin for an `Interval` (incidence) stream (multi-cadence Phase 2a).
-/// `flow_indices` is exactly the stream's `FlowSum(idxs)` transition set; the
-/// fold sums `flow_accumulators` over them once per interval into `acc[k]`.
+/// Where a stream's bins live in the dense `acc` vector: `len` consecutive
+/// slots from `first` — one for a `FlowSum`, two for a `FlowRatio` (numerator
+/// at `first`, denominator at `first + 1`). Proposal 2026-09-09; Increment B's
+/// B2 (one bin per weighted term) inherits this layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BinRange {
+    first: usize,
+    len: usize,
+}
+
+/// One `acc` bin (multi-cadence Phase 2a). `flow_indices` is the transition
+/// set the bin sums — a `FlowSum` stream's `idxs`, or one side of a
+/// `FlowRatio`; the fold sums `flow_accumulators` over them once per interval
+/// into `acc[k]`.
 struct IntervalSlot {
     stream_idx: usize,
     flow_indices: Vec<usize>,
@@ -1426,7 +1475,7 @@ impl MultiStreamObsModel {
             compiled,
             real_s,
             interval_slots: vec![],
-            stream_to_slot: vec![],
+            stream_bins: vec![],
         }
     }
 
@@ -1466,24 +1515,33 @@ impl MultiStreamObsModel {
             });
         }
 
-        // Precompute the per-Interval-stream `acc` layout (Phase 2a): one slot
-        // per `FlowSum` (incidence) stream, in stream order = the dense `acc`
-        // index. `stream_to_slot[si]` is `Some(k)` iff stream `si` is the k-th
-        // Interval slot. Prevalence/`Instant` streams own no slot.
+        // Precompute the `acc` layout (Phase 2a): one bin per `FlowSum`
+        // (incidence) stream and two per `FlowRatio` stream, in stream order =
+        // the dense `acc` index. `stream_bins[si]` is the range stream `si`
+        // owns; prevalence/`Instant` streams own none.
         let mut interval_slots: Vec<IntervalSlot> = Vec::new();
-        let mut stream_to_slot: Vec<Option<usize>> = Vec::with_capacity(streams.len());
+        let mut stream_bins: Vec<Option<BinRange>> = Vec::with_capacity(streams.len());
         for (si, s) in streams.iter().enumerate() {
+            let slot = |flow_indices: &[usize]| IntervalSlot {
+                stream_idx: si,
+                flow_indices: flow_indices.to_vec(),
+                reset_at_union: s.reset_at_union.clone(),
+            };
             match &s.projection {
                 StreamProjection::FlowSum(idxs) => {
-                    stream_to_slot.push(Some(interval_slots.len()));
-                    interval_slots.push(IntervalSlot {
-                        stream_idx: si,
-                        flow_indices: idxs.clone(),
-                        reset_at_union: s.reset_at_union.clone(),
-                    });
+                    stream_bins.push(Some(BinRange { first: interval_slots.len(), len: 1 }));
+                    interval_slots.push(slot(idxs));
+                }
+                StreamProjection::FlowRatio { numerator, denominator } => {
+                    // Two consecutive bins on the stream's one reset schedule,
+                    // numerator first, so both fold and reset with the rest
+                    // and nothing in the fold/reset seam knows about ratios.
+                    stream_bins.push(Some(BinRange { first: interval_slots.len(), len: 2 }));
+                    interval_slots.push(slot(numerator));
+                    interval_slots.push(slot(denominator));
                 }
                 StreamProjection::IntCompSum(_) | StreamProjection::Expr(_) => {
-                    stream_to_slot.push(None);
+                    stream_bins.push(None);
                 }
             }
         }
@@ -1496,12 +1554,14 @@ impl MultiStreamObsModel {
             compiled,
             real_s,
             interval_slots,
-            stream_to_slot,
+            stream_bins,
         })
     }
 
-    /// Number of `Interval` (incidence) streams — the length of each particle's
-    /// `acc` bin vector (Phase 2a).
+    /// The length of each particle's `acc` bin vector (Phase 2a): one bin per
+    /// `Interval` (incidence) stream and two per flow-ratio stream (proposal
+    /// 2026-09-09). The name predates ratio streams and counts bins, not
+    /// streams; every caller sizes an `acc` buffer with it and nothing else.
     pub fn n_interval_streams(&self) -> usize {
         self.interval_slots.len()
     }
@@ -1522,24 +1582,36 @@ impl MultiStreamObsModel {
         self.streams.iter().map(|s| s.name.clone()).collect()
     }
 
-    /// The `Interval` (incidence / `FlowSum`) streams as `(name, flow_indices)`,
-    /// in dense `acc` order. The single source of truth for an `inc_<stream>`
-    /// output column: a posterior-trajectory writer sums per-transition flows
-    /// over `flow_indices` (the same `FlowSum(idxs)` set scoring uses), so the
-    /// emitted incidence is the model's declared projection — never a
-    /// finite-difference of compartment counts, which is unsafe under
-    /// event/balance interactions (gh#48 / gh#264). Prevalence/`Instant`
-    /// streams own no incidence column and are absent here.
+    /// The `acc` bins as `(name, flow_indices)`, in dense `acc` order. The
+    /// single source of truth for an `inc_<name>` output column: a
+    /// posterior-trajectory writer sums per-transition flows over
+    /// `flow_indices` (the same set scoring uses), so the emitted incidence is
+    /// the model's declared projection — never a finite-difference of
+    /// compartment counts, which is unsafe under event/balance interactions
+    /// (gh#48 / gh#264). A `FlowSum` stream is one entry under its own name; a
+    /// `FlowRatio` stream is two, `<stream>_numerator` then
+    /// `<stream>_denominator` — the two counts are what a reader wants to see,
+    /// and the ratio is one division away. Prevalence/`Instant` streams own no
+    /// incidence column and are absent here.
     ///
     /// Kept compatible with a future per-stream prequential (gh#269): the same
-    /// per-stream `FlowSum` density underlies both an `inc_<stream>` column and
-    /// a per-stream score.
+    /// per-stream bin density underlies both an `inc_<stream>` column and a
+    /// per-stream score.
     pub fn incidence_streams(&self) -> Vec<(String, Vec<usize>)> {
-        self.interval_slots.iter()
-            .map(|slot| (
-                self.streams[slot.stream_idx].name.clone(),
-                slot.flow_indices.clone(),
-            ))
+        self.interval_slots.iter().enumerate()
+            .map(|(k, slot)| {
+                let s = &self.streams[slot.stream_idx];
+                let name = match (&s.projection, self.stream_bins[slot.stream_idx]) {
+                    (StreamProjection::FlowRatio { .. }, Some(b)) if k == b.first => {
+                        format!("{}_numerator", s.name)
+                    }
+                    (StreamProjection::FlowRatio { .. }, Some(_)) => {
+                        format!("{}_denominator", s.name)
+                    }
+                    _ => s.name.clone(),
+                };
+                (name, slot.flow_indices.clone())
+            })
             .collect()
     }
 
@@ -1616,9 +1688,10 @@ impl MultiStreamObsModel {
     }
 
     /// Project stream `si` for SCORING given the per-stream folded `acc` and the
-    /// integer `counts` (Phase 2a fork). An Interval stream reads its already-
-    /// summed bin `acc[k]` directly (no `idxs` re-sum); a prevalence/`Instant`
-    /// stream projects from `counts` via `eval_stream_projection` (flows unused).
+    /// integer `counts` (Phase 2a fork). A `FlowSum` stream reads its already-
+    /// summed bin directly (no `idxs` re-sum); a `FlowRatio` stream reads its
+    /// two bins and takes their quotient; a prevalence/`Instant` stream
+    /// projects from `counts` via `eval_stream_projection` (flows unused).
     fn project_stream_from_acc(
         &self,
         stream_idx: usize,
@@ -1627,13 +1700,23 @@ impl MultiStreamObsModel {
         params: &[f64],
         t: f64,
     ) -> f64 {
-        match self.stream_to_slot[stream_idx] {
-            Some(k) => acc[k] as f64,
-            None => eval_stream_projection(
-                &self.streams[stream_idx].projection,
-                // Interval flows are never read for an `Instant` stream; pass
-                // an empty slice to make that explicit.
-                &[], counts, params, &self.compiled, &self.real_s, t,
+        match (&self.streams[stream_idx].projection, self.stream_bins[stream_idx]) {
+            (StreamProjection::FlowSum(_), Some(b)) => acc[b.first] as f64,
+            (StreamProjection::FlowRatio { .. }, Some(b)) => {
+                debug_assert_eq!(b.len, 2, "a ratio stream owns two bins");
+                flow_ratio(acc[b.first] as f64, acc[b.first + 1] as f64)
+            }
+            (StreamProjection::IntCompSum(_) | StreamProjection::Expr(_), None) => {
+                eval_stream_projection(
+                    &self.streams[stream_idx].projection,
+                    // Interval flows are never read for an `Instant` stream;
+                    // pass an empty slice to make that explicit.
+                    &[], counts, params, &self.compiled, &self.real_s, t,
+                )
+            }
+            _ => unreachable!(
+                "an interval projection owns a bin range and an instant one owns none, \
+                 by construction"
             ),
         }
     }
@@ -1649,11 +1732,21 @@ impl MultiStreamObsModel {
         params: &[f64],
         t: f64,
     ) -> f64 {
-        match self.stream_to_slot[stream_idx] {
-            Some(k) => acc[k],
-            None => eval_stream_projection(
-                &self.streams[stream_idx].projection,
-                &[], counts, params, &self.compiled, &self.real_s, t,
+        match (&self.streams[stream_idx].projection, self.stream_bins[stream_idx]) {
+            (StreamProjection::FlowSum(_), Some(b)) => acc[b.first],
+            (StreamProjection::FlowRatio { .. }, Some(b)) => {
+                debug_assert_eq!(b.len, 2, "a ratio stream owns two bins");
+                flow_ratio(acc[b.first], acc[b.first + 1])
+            }
+            (StreamProjection::IntCompSum(_) | StreamProjection::Expr(_), None) => {
+                eval_stream_projection(
+                    &self.streams[stream_idx].projection,
+                    &[], counts, params, &self.compiled, &self.real_s, t,
+                )
+            }
+            _ => unreachable!(
+                "an interval projection owns a bin range and an instant one owns none, \
+                 by construction"
             ),
         }
     }
@@ -1812,7 +1905,7 @@ impl MultiStreamObsModel {
     /// has no `ParticleState`.
     ///
     /// `acc` is the per-Interval-stream folded bin vector (Phase 2a), length
-    /// `n_interval_streams()`, indexed by `stream_to_slot`. An Interval stream
+    /// `n_interval_streams()`, indexed by `stream_bins`. An Interval stream
     /// reads `acc[k]` directly; a prevalence stream projects from `counts`.
     pub fn log_likelihood_from_flows_and_counts(
         &self,
@@ -2120,7 +2213,8 @@ impl MultiStreamObsModel {
     ///   ([`eval_likelihood_resolved_grad`], `projected` held fixed — the same seam
     ///   PGAS uses) and **factor 2** is the trajectory chain
     ///   `(∂logp/∂projected)·(∂projected/∂θ)`: the per-stream sensitivity bin
-    ///   `acc_sens[slot]` for an `Interval` (incidence / `FlowSum`) stream,
+    ///   `acc_sens[slot]` for an `Interval` (incidence / `FlowSum`) stream — the
+    ///   quotient rule over two such bins for a `FlowRatio` —,
     ///   `Σ_selected state_sens` off the record for an `Instant` (prevalence /
     ///   `IntCompSum`) stream. The `Sensitivity`-kind split is enforced by the
     ///   projection variant.
@@ -2206,12 +2300,35 @@ impl MultiStreamObsModel {
                         // Read the per-stream bin, NOT `rec.inc` — the record is the
                         // blanket union-interval tally, and only `acc` carries this
                         // stream's own reporting window (gh#680). Every `FlowSum`
-                        // stream owns a slot by construction (`stream_to_slot`).
-                        let slot = self.stream_to_slot[si].expect(
-                            "a FlowSum stream must own an Interval acc slot",
-                        );
+                        // stream owns a bin by construction (`stream_bins`).
+                        let slot = self.stream_bins[si]
+                            .expect("a FlowSum stream must own an Interval acc slot")
+                            .first;
                         let p = acc[slot];
                         let dp = acc_sens[slot * d..(slot + 1) * d].to_vec();
+                        (p, dp)
+                    }
+                    StreamProjection::FlowRatio { .. } => {
+                        // The two bins and their sensitivity blocks, numerator at
+                        // `first` and denominator at `first + 1`, folded and reset
+                        // by the same slot map as the values. The quotient rule:
+                        // ∂(a/b)/∂θ_k = (b·∂a_k − a·∂b_k) / b². With b = 0 the
+                        // value is NaN and the contribution is 0, the convention
+                        // every kernel in `obs_loglik.rs` follows at its −∞ floor
+                        // (proposal 2026-09-09).
+                        let b = self.stream_bins[si]
+                            .expect("a FlowRatio stream must own two Interval acc slots");
+                        let (na, nb) = (b.first, b.first + 1);
+                        let (a_v, b_v) = (acc[na], acc[nb]);
+                        let p = flow_ratio(a_v, b_v);
+                        let mut dp = vec![0.0; d];
+                        if b_v != 0.0 {
+                            for k in 0..d {
+                                let da = acc_sens[na * d + k];
+                                let db = acc_sens[nb * d + k];
+                                dp[k] = (b_v * da - a_v * db) / (b_v * b_v);
+                            }
+                        }
                         (p, dp)
                     }
                     StreamProjection::IntCompSum(idxs) => {
@@ -3042,6 +3159,9 @@ mod temporal_kind_tests {
         let expr = StreamProjection::Expr(ResolvedExpr::Const(0.0)); // prevalence-family
 
         assert_eq!(flow.temporal_kind(), TemporalKind::Interval);
+        let ratio = StreamProjection::FlowRatio { numerator: vec![0], denominator: vec![0, 1] };
+        assert_eq!(ratio.temporal_kind(), TemporalKind::Interval);
+        assert!(ratio.resets_after_observation(), "a ratio is taken over the row's window");
         assert_eq!(comp.temporal_kind(), TemporalKind::Instant);
         assert_eq!(expr.temporal_kind(), TemporalKind::Instant);
 

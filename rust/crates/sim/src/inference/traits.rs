@@ -210,8 +210,10 @@ pub trait ObservationModel<S>: Send + Sync {
     // Default impls keep `NullObsModel` and non-incidence mocks no-ops:
     // `n_interval_streams() == 0` ⇒ `acc` is empty ⇒ fold/reset are vacuous.
 
-    /// Number of `Interval` (incidence) streams — the length each particle's
-    /// `acc` bin vector must have. `0` for models with no incidence stream.
+    /// The length each particle's `acc` bin vector must have: one bin per
+    /// `Interval` (incidence) stream, two per flow-ratio stream (proposal
+    /// 2026-09-09), so it is the number of bins, not of streams — the name
+    /// predates ratio streams. `0` for models with no incidence stream.
     fn n_interval_streams(&self) -> usize { 0 }
 
     /// Fold this interval's per-transition `flow_accumulators` into the

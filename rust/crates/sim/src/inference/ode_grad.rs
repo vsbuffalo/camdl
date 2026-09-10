@@ -263,6 +263,9 @@ mod tests {
                                 idxs.iter().map(|&i| r.counts[i]).sum()
                             }
                             StreamProjection::Expr(_) => panic!("fixture has no Expr projection"),
+                            StreamProjection::FlowRatio { .. } => {
+                                panic!("fixture has no FlowRatio projection")
+                            }
                         };
                         v.round()
                     })
@@ -386,6 +389,9 @@ mod tests {
                                 idxs.iter().map(|&i| r.counts[i]).sum()
                             }
                             StreamProjection::Expr(_) => panic!("fixture has no Expr projection"),
+                            StreamProjection::FlowRatio { .. } => {
+                                panic!("fixture has no FlowRatio projection")
+                            }
                         };
                         v.round()
                     })
@@ -616,6 +622,9 @@ mod tests {
                                 idxs.iter().map(|&i| r.counts[i]).sum()
                             }
                             StreamProjection::Expr(_) => panic!("fixture has no Expr projection"),
+                            StreamProjection::FlowRatio { .. } => {
+                                panic!("fixture has no FlowRatio projection")
+                            }
                         };
                         v.round()
                     })
@@ -995,6 +1004,140 @@ mod tests {
                 names[i], grad[i], fd, rel
             );
         }
+        assert!(grad[0].abs() > 1.0, "∂/∂beta should be materially nonzero, got {}", grad[0]);
+        assert!(grad[1].abs() > 1.0, "∂/∂gamma should be materially nonzero, got {}", grad[1]);
+    }
+
+    /// Proposal 2026-09-09: a `FlowRatio` stream on the ODE gradient path.
+    ///
+    /// `cases_a = incidence(infection) / (incidence(infection) + incidence(recovery))`
+    /// at 7 d, scored `binomial(n = 200, p = projected)`, beside
+    /// `cases_b = incidence(recovery)` at 14 d. The ratio owns two bins and its
+    /// sibling one — three bins for two streams — and the ratio's
+    /// `∂projected/∂θ` is the quotient rule over the two sensitivity bins,
+    /// `(b·∂a − a·∂b) / b²`. The value path (`compute_ode_loglik`, which reads
+    /// the real bins) and the gradient path must agree on the value, and the
+    /// analytic gradient must match a central finite difference of the value
+    /// path. A reader that dropped the `a·∂b` term, or divided by `b` rather
+    /// than `b²`, fails the finite-difference check.
+    #[test]
+    fn det_grad_differentiates_a_flow_ratio_by_the_quotient_rule() {
+        let dt = 1.0;
+        let times_a: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect(); // 7 d
+        let times_b: Vec<f64> = (1..=4).map(|w| (w * 14) as f64).collect(); // 14 d
+        let t_end = 56.0;
+        let mut model = two_incidence_stream_model(t_end, [&["infection"], &["recovery"]]);
+        set_defaults(&mut model);
+        // The first stream becomes the ratio, scored k of a fixed n.
+        model.observations[0].projection = ir::observation::Projection::FlowRatio {
+            numerator: vec!["infection".into()],
+            denominator: vec!["infection".into(), "recovery".into()],
+        };
+        model.observations[0].likelihood =
+            Likelihood::Binomial(ir::observation::BinomialLikelihood {
+                n: Expr::Const(ConstExpr { value: 200.0 }),
+                p: Diffable {
+                    expr: projected(),
+                    grad: HashMap::new(),
+                    // p IS projected → ∂p/∂projected = 1.
+                    proj_grad: Some(DerivEntry::Grad(Expr::Const(ConstExpr { value: 1.0 }))),
+                },
+            });
+        let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+        let n = compiled.param_index.len();
+        let mut truth = vec![0.0; n];
+        for p in &compiled.model.parameters {
+            truth[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+        let cfg = OdeConfig { t_start: compiled.model.simulation.t_start, t_end, dt };
+        let traj = crate::ode::run_ode(&compiled, &truth, &cfg, None, None).unwrap();
+        let tr = |name: &str| {
+            compiled.model.transitions.iter().position(|t| t.name == name).unwrap()
+        };
+        let (inf, rec) = (tr("infection"), tr("recovery"));
+        // Data at the truth: k = round(200 · window fraction) for the ratio, a
+        // count for its sibling. The likelihood is evaluated away from the
+        // truth below, so the gradient is materially nonzero.
+        let a = windowed_counts(&traj, &[inf], &times_a);
+        let b = windowed_counts(&traj, &[rec], &times_a);
+        let data_a: Vec<f64> =
+            a.iter().zip(&b).map(|(&a, &b)| (200.0 * a / (a + b)).round()).collect();
+        let data_b = windowed_counts(&traj, &[rec], &times_b);
+
+        let specs: Vec<StreamSpec> = compiled
+            .model
+            .observations
+            .iter()
+            .zip([(&data_a, &times_a), (&data_b, &times_b)])
+            .map(|(om, (data, times))| {
+                let projection =
+                    StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap();
+                StreamSpec {
+                    times: StreamTimes::contiguous_for(
+                        &projection, compiled.model.simulation.t_start, times.to_vec(),
+                    ).unwrap(),
+                    projection,
+                    ir_model: om.clone(),
+                    observations: dense_cells(data.clone()),
+                    aux: vec![],
+                }
+            })
+            .collect();
+        let obs_model = MultiStreamObsModel::new(
+            BoundObs::bind(compiled.model.simulation.t_start, specs).unwrap().0,
+            compiled.clone(),
+        )
+        .unwrap();
+        assert_eq!(obs_model.n_interval_streams(), 3, "two bins for the ratio, one for its sibling");
+        assert_eq!(
+            obs_model.incidence_streams(),
+            vec![
+                ("cases_a_numerator".to_string(), vec![inf]),
+                ("cases_a_denominator".to_string(), vec![inf, rec]),
+                ("cases_b".to_string(), vec![rec]),
+            ],
+            "the ratio's two bins are named, numerator first, and the sibling follows"
+        );
+
+        let mut union: Vec<f64> = times_a.iter().chain(times_b.iter()).copied().collect();
+        union.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        union.dedup();
+        let mut params = truth.clone();
+        params[compiled.param_index["beta"]] = 0.66;
+        params[compiled.param_index["gamma"]] = 0.09;
+        let est = vec![compiled.param_index["beta"], compiled.param_index["gamma"]];
+
+        let (ll_grad, grad) =
+            det_grad(&compiled, &obs_model, &union, dt, dt, &params, &est).unwrap();
+        let ll_value =
+            compute_ode_loglik(&compiled, &obs_model, &union, dt, &params, dt).unwrap();
+        assert!(ll_grad.is_finite() && ll_value.is_finite());
+        assert!(
+            (ll_grad - ll_value).abs() < 1e-6,
+            "gradient-path loglik {ll_grad} disagrees with value-path loglik {ll_value} \
+             (Δ = {:.6e}) — the ratio must be read from the same two bins on both paths",
+            ll_grad - ll_value
+        );
+
+        let eps = 1e-6;
+        let names = ["beta", "gamma"];
+        for (i, &midx) in est.iter().enumerate() {
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let llp = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pp, dt).unwrap();
+            let llm = compute_ode_loglik(&compiled, &obs_model, &union, dt, &pm, dt).unwrap();
+            let fd = (llp - llm) / (2.0 * eps);
+            let rel = (grad[i] - fd).abs() / fd.abs().max(1e-8);
+            assert!(
+                rel < 1e-4,
+                "det_grad ∂/∂{} = {} vs value-path FD {} (rel err {:.2e})",
+                names[i], grad[i], fd, rel
+            );
+        }
+        // Non-vacuity: both directions must carry real signal.
         assert!(grad[0].abs() > 1.0, "∂/∂beta should be materially nonzero, got {}", grad[0]);
         assert!(grad[1].abs() > 1.0, "∂/∂gamma should be materially nonzero, got {}", grad[1]);
     }

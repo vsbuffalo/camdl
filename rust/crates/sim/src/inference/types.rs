@@ -330,8 +330,9 @@ pub struct ParticleState {
 }
 
 impl ParticleState {
-    /// `n_interval_streams` sizes `acc` (one bin per incidence stream — owned by
-    /// the OBS model, not the compiled model). The process model's
+    /// `n_interval_streams` sizes `acc` (one bin per incidence stream, two per
+    /// flow-ratio stream — owned by the OBS model, not the compiled model,
+    /// which reports it as `n_interval_streams()`). The process model's
     /// `initial_state` does not know it and passes `0`; the FILTER (which holds
     /// the obs model) allocates the swarm states with the real count, since the
     /// filter copies only `init.counts` into the swarm.
