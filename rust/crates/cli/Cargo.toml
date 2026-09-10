@@ -3,6 +3,24 @@ name = "cli"
 version = "0.1.0"
 edition = "2021"
 
+# See `crates/sim/Cargo.toml` for the long form of the first four reasons; the
+# same idioms cross the crate boundary, because `cli` validates the same floats
+# and calls the same kernels.
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+# `PGAS` and `PMMH` are the published names of the inference methods, spelled
+# that way in the docs, the `[method]` table and every diagnostic. The serde
+# wire names are pinned by `#[serde(rename)]`, so this is purely about whether
+# the Rust identifier still reads as the method's name.
+upper_case_acronyms = "allow"
+# `MreCmd`, `FitCmd` and `ResolvedWrite` are argv-dispatch enums, built once per
+# process from the command line and matched immediately. Boxing a clap args
+# struct to shrink a stack temporary that exists for one match costs an
+# indirection at every use and saves nothing measurable.
+large_enum_variant = "allow"
+
 [[bin]]
 name = "camdl"
 path = "src/main.rs"
