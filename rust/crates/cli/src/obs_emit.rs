@@ -800,4 +800,96 @@ mod tests {
         assert!(err.contains("'cases'") && err.contains("`tested`") && err.contains("gh#829"),
             "the refusal names the stream, the column and the issue: {err}");
     }
+
+    // ── The window fraction against the instant ratio (proposal 2026-09-09) ──
+
+    /// The golden `death_fraction_window` carries both spellings of the
+    /// community-death fraction: `comm_frac`, the ratio of the two death flows
+    /// accumulated over each week (a `FlowRatio`), and `comm_frac_instant`, the
+    /// ratio of the two transitions' rates read at the week's closing label
+    /// (`prevalence(...)`, the only spelling the compiler admits for it). On
+    /// the deterministic backend the window stream must equal, to floating
+    /// point, the ratio of the run's own `flow_die_comm` and `flow_die_fac`
+    /// sums over each window; the instant stream is a different quantity, and
+    /// sits below it because within each week the hospitalised pool is still
+    /// rising relative to the infectious one. This is the proposal's table,
+    /// asserted.
+    #[test]
+    fn the_window_fraction_is_the_runs_flow_ratio_and_the_instant_ratio_is_not() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let ir = Path::new(&manifest).join("../../../ocaml/golden/death_fraction_window.ir.json");
+        let overrides: std::collections::HashMap<String, f64> = [
+            ("beta", 0.5), ("gamma", 0.1), ("eta", 0.15), ("delta", 0.1),
+            ("mu_c", 0.05), ("mu_f", 0.1), ("phi", 200.0), ("N0", 100000.0), ("I0", 10.0),
+        ].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let run = crate::util::SimRun {
+            ir_path: ir.to_string_lossy().into_owned(),
+            overrides,
+            backend: crate::args::types::ForwardBackend::Ode,
+            dt: 0.25,
+            seed: 1,
+            ..Default::default()
+        };
+        let (traj, model) = crate::util::run_simulation(&run).unwrap();
+        let stream = |name: &str| model.observations.iter().find(|o| o.name == name).unwrap();
+
+        let labels: Vec<f64> = (1..=12).map(|w| 7.0 * w as f64).collect();
+        let windows: Vec<(f64, Coverage)> = labels.iter()
+            .map(|&t| (t, Coverage::Interval { start: t - 7.0, stop: t })).collect();
+        let instants: Vec<(f64, Coverage)> = labels.iter().map(|&t| (t, Coverage::Instant)).collect();
+        let window = crate::project_coverages(&traj, stream("comm_frac"), &model, &windows).unwrap();
+        let instant = crate::project_coverages(&traj, stream("comm_frac_instant"), &model, &instants).unwrap();
+
+        // The reference, from the run's own per-snapshot flow columns: a
+        // snapshot's flows are the events since the previous snapshot, so a
+        // window's total is the sum over the snapshots in (start, stop].
+        let tr = |n: &str| model.transitions.iter().position(|t| t.name == n).unwrap();
+        let (die_comm, die_fac) = (tr("die_comm"), tr("die_fac"));
+        let flow_over = |fi: usize, start: f64, stop: f64| -> f64 {
+            traj.snapshots.iter()
+                .filter(|s| s.t > start + 1e-9 && s.t <= stop + 1e-9)
+                .map(|s| s.flows.value(fi))
+                .sum()
+        };
+        let comp = |n: &str| model.compartments.iter().position(|c| c.name == n).unwrap();
+        let (i_ix, h_ix) = (comp("I"), comp("H"));
+
+        let mut table = String::from(
+            "\n   t    Σ comm     Σ fac   window   instant@close   instant/window − 1\n");
+        let mut gaps: Vec<f64> = Vec::new();
+        for (k, &t) in labels.iter().enumerate() {
+            let (c, f) = (flow_over(die_comm, t - 7.0, t), flow_over(die_fac, t - 7.0, t));
+            let want = c / (c + f);
+            assert!(
+                (window[k] - want).abs() <= 1e-12,
+                "week closing at {t}: the window stream must be Σ comm / (Σ comm + Σ fac) = \
+                 {want} off the run's own flows, got {}", window[k]
+            );
+            // The instant stream reads the state at the label, off the same
+            // snapshot the emitter reads (the rounded state on this backend).
+            let snap = crate::snap_at(&traj, t);
+            let (i, h) = (snap.int_state.counts[i_ix] as f64, snap.int_state.counts[h_ix] as f64);
+            let want_instant = 0.05 * i / (0.05 * i + 0.1 * h);
+            assert!(
+                (instant[k] - want_instant).abs() <= 1e-12,
+                "week closing at {t}: the instant stream is the rate ratio at the label, \
+                 {want_instant}, got {}", instant[k]
+            );
+            let gap = instant[k] / want - 1.0;
+            table.push_str(&format!(
+                "{t:>4} {c:>9.2} {f:>9.2}   {want:.4}   {:.4}          {:+.3}\n", instant[k], gap
+            ));
+            gaps.push(gap);
+        }
+        eprintln!("window fraction vs instant ratio, weekly windows on the ODE backend:{table}");
+
+        // The divergence. Every week's instant ratio sits below the window
+        // fraction, and at the worst week by more than a tenth: a modeller
+        // fitting a community share against the instant spelling is pulled
+        // low, most where the flows move fastest.
+        assert!(gaps.iter().all(|&g| g < 0.0),
+            "the instant ratio sits below the window fraction every week: {gaps:?}");
+        let worst = gaps.iter().cloned().fold(0.0_f64, f64::min);
+        assert!(worst < -0.10, "the worst week's gap exceeds a tenth: {worst:.3} ({gaps:?})");
+    }
 }
