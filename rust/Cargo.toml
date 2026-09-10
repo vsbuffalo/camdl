@@ -37,6 +37,43 @@ ir = { path = "crates/ir" }
 # because it's in the same workspace.
 external-harness = { path = "crates/external-harness" }
 
+# Dev profile: incremental OFF, minimal debug info.
+#
+# This deviates from Cargo's defaults (incremental = true, debug = 2) on
+# measured evidence, not preference. On macOS this workspace drove the
+# incremental cache into a pathological state: `target/debug/incremental` and
+# `target/debug/deps` reached 44 GB each, ~1.67M files in one directory, and
+# every one of those Mach-O artifacts is assessed by `syspolicyd` (Gatekeeper),
+# which saturated at ~70% of a core. A debug `cargo test` took 6m52s at 4% CPU;
+# the same work with incremental disabled took 19s at 471% CPU. Nothing was
+# compute-bound — the build was waiting on filesystem/security assessment.
+#
+# Incremental compilation is a good trade in the normal regime: more files for
+# faster edit-compile cycles. This workspace is outside it, and the cache is
+# making compilation dramatically worse rather than better.
+#
+# `line-tables-only` for our crates and no debug info for dependencies is
+# Cargo's own build-performance recommendation: panic backtraces still resolve
+# to source locations, without paying for full DWARF. `split-debuginfo` is left
+# at the macOS default (`unpacked`) deliberately — `packed` runs `dsymutil` on
+# every build, and with debug info this reduced there is little left to pack.
+# Benchmark before changing it.
+#
+# For LLDB-quality debugging use the `debugging` profile below rather than
+# making every agent and CI build carry metadata it does not need.
+[profile.dev]
+incremental = false
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Full DWARF when you actually need a debugger:
+#   cargo build --profile debugging
+[profile.debugging]
+inherits = "dev"
+debug = 2
+
 # Profiling profile: release-grade codegen + line tables so `samply`/`perf`
 # can resolve symbols and source lines. Kept separate so the shipped
 # `release` profile stays lean. Build with `cargo build --profile profiling`.
