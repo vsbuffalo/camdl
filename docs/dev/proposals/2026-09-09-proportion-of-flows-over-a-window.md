@@ -736,18 +736,17 @@ status.
    `k ~ binomial(n,
    ratio)`.** The denominator is model-generated, unlike
    surveillance effort, so this is the one shape gh#829 can resolve by emitting
-   rather than refusing. Recommendation: land it as a slice of gh#829's fix, not
-   in this proposal's first commit. Confidence: leaning; need you on whether
-   gh#829's general resolution (emit what the model can generate, refuse what it
-   cannot) is the frame you want.
+   rather than refusing. _Ruled 2026-09-09._ Emit `n` from the stream's
+   denominator bin, and "emit what the model can generate, refuse what it
+   cannot" is the general resolution of gh#829. Lands in this arc's emission
+   commit, on the design-preserving emitter.
 8. **Bin-range generalisation lands here.** `BinRange` and `n_acc_bins()`
    replace the one-slot-per-stream layout; Increment B's B2 inherits it.
    Recommendation: as stated. Confidence: solid.
 9. **Sequencing of the `ir/VERSION` bump.** Alone, or folded with
    `WeightedFlowSum` and gh#568 into one invalidation. Neither of the other two
    is implemented; waiting on them holds a correctness fix for an ergonomic one.
-   Recommendation: bump alone now; the next re-keying change pays its own.
-   Confidence: leaning; need you.
+   _Ruled 2026-09-09._ Bump alone, now; the next re-keying change pays its own.
 
 ## Found while reading
 
