@@ -540,8 +540,15 @@ pub fn run_stage(
             .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
     }
 
-    // The audit sidecar, captured before any sweep runs.
+    // The audit sidecar, captured before any sweep runs; rewritten after the
+    // chains finish with every start a retry rejected (gh#887).
     super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
+        std::sync::Mutex::new(vec![None; n_chains]);
+    let retry_rejected: std::sync::Mutex<Vec<super::chain_starts::RejectedStart>> =
+        std::sync::Mutex::new(Vec::new());
+    let retry_refused: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+    let can_redraw = super::chain_starts::can_redraw(&starts.rule, n_chains);
 
     let t0 = std::time::Instant::now();
     let _is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
@@ -1017,11 +1024,16 @@ pub fn run_stage(
                 heartbeat.bump(sweep as u64);
             };
 
-            let result = match run_pgas(
+            // gh#887: a spread start the sampler refuses at its first sweep
+            // is redrawn, up to MAX_START_ATTEMPTS; every attempt is recorded.
+            // A resumed chain's start is its resume state, not a draw.
+            let mut start_vec = chain_starts[chain_id].clone();
+            let mut attempt = 0usize;
+            let result = loop { match run_pgas(
                 compiled,
                 &config.estimated_params,
                 &priors,
-                &chain_starts[chain_id],
+                &start_vec,
                 &pgas_config,
                 &observations,
                 &obs_model,
@@ -1030,7 +1042,36 @@ pub fn run_stage(
                 resume_states[chain_id].clone(),
                 config_hash.clone(),
             ) {
-                Ok(r) => r,
+                Ok(r) => break r,
+                Err(sim::error::SimError::NonFiniteChainStart {
+                    log_posterior, transition, observation, ivp, log_prior, init,
+                }) if can_redraw && resume_states[chain_id].is_none()
+                    && attempt + 1 < super::chain_starts::MAX_START_ATTEMPTS =>
+                {
+                    let reason = format!(
+                        "initial complete-data log-posterior is {}, still non-finite after \
+                         the first trajectory update (transition {:.4}, observation {:.4}, \
+                         ivp {:.4}; log prior {:.4}); {}",
+                        log_posterior, transition, observation, ivp, log_prior, init);
+                    let values: std::collections::HashMap<String, f64> = config
+                        .estimated_params.iter()
+                        .map(|spec| (spec.name.clone(), start_vec[spec.index]))
+                        .collect();
+                    retry_rejected.lock().unwrap().push(super::chain_starts::RejectedStart {
+                        chain_id, attempt, values, reason: reason.clone(), ess: None,
+                    });
+                    eprintln!(
+                        "  chain {}: start {} of {} refused ({}); drawing another",
+                        chain_id + 1, attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
+                        reason);
+                    attempt += 1;
+                    let cs = super::runner::redraw_chain_start_for(
+                        &config, estimate, starts, n_chains, chain_id, seed, attempt,
+                    )?;
+                    start_vec = cs.to_param_vec(&config.estimated_params, &config.base_params);
+                    retry_accepted.lock().unwrap()[chain_id] = Some(cs);
+                    continue;
+                }
                 // gh#607. The chain's start has zero posterior density and did
                 // not recover on its first trajectory update, so it could only
                 // have produced `-inf` draws for the whole run. Skip it with a
@@ -1039,17 +1080,26 @@ pub fn run_stage(
                 Err(sim::error::SimError::NonFiniteChainStart {
                     log_posterior, transition, observation, ivp, log_prior, init,
                 }) => {
+                    if attempt > 0 {
+                        retry_refused.lock().unwrap().push(chain_id);
+                    }
                     // gh#784: the reason names WHERE X₀ came from, because a
                     // refusal after a successful unconditional initialization
                     // and a refusal after a failed one are different findings —
                     // only the second is an initialization failure. Neither ever
                     // claims p(y | θ) = 0.
+                    let tried = if attempt > 0 {
+                        format!("none of {} starts drawn under `starts = {}` could run; the last: ",
+                            attempt + 1, starts.rule.spelled())
+                    } else {
+                        String::new()
+                    };
                     let reason = format!(
-                        "initial complete-data log-posterior is {}, still \
+                        "{}initial complete-data log-posterior is {}, still \
                          non-finite after the first trajectory update \
                          (log-likelihood terms: transition {:.4}, observation \
                          {:.4}, ivp {:.4}; log prior {:.4}); {}",
-                        log_posterior, transition, observation, ivp, log_prior, init);
+                        tried, log_posterior, transition, observation, ivp, log_prior, init);
                     // The structured half of that prose. `init`'s Display
                     // renders from these same records, so the sentence a user
                     // reads and the fields a tool parses cannot disagree — and a
@@ -1068,7 +1118,7 @@ pub fn run_stage(
                         config.estimated_params.iter()
                             .map(|spec| (
                                 spec.name.clone(),
-                                chain_starts[chain_id][spec.index],
+                                start_vec[spec.index],
                             ))
                             .collect();
                     collector.push(DiagnosticKind::BadInit {
@@ -1083,7 +1133,7 @@ pub fn run_stage(
                 Err(e) => {
                     return Err(format!("pgas chain {} error: {}", chain_id + 1, e));
                 }
-            };
+            } };
 
             // Save resume state for future --resume
             let resume_path = chain_dir.join("resume_state.bin");
@@ -1198,6 +1248,17 @@ pub fn run_stage(
         .into_iter()
         .flatten()
         .collect();
+
+    // gh#887: the sidecar now records every start a retry rejected, and the
+    // start each chain actually ran from.
+    let drawn = drawn.with_retry_outcome(
+        retry_accepted.into_inner().unwrap(),
+        retry_rejected.into_inner().unwrap(),
+        retry_refused.into_inner().unwrap(),
+    );
+    if !drawn.rejected.is_empty() {
+        super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    }
 
     // gh#607. Skip + continue: surface "ran K of N chains" so the user knows
     // the downstream R̂/ESS exclude the skipped chains. This line is the

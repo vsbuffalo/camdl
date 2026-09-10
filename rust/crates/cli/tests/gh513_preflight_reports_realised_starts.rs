@@ -58,7 +58,9 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// chain 1's `beta` from the run's `chain_starts.tsv`.
+/// chain 1's `beta` from the run's `chain_starts.tsv` — the row the chain ran
+/// from (`status = accepted`; a start the pre-flight filter refused is on the
+/// record ahead of it as `rejected`, gh#887).
 fn chain_one_beta(root: &Path) -> f64 {
     let mut stack = vec![root.to_path_buf()];
     let mut found = None;
@@ -77,10 +79,14 @@ fn chain_one_beta(root: &Path) -> f64 {
     let txt = std::fs::read_to_string(&path).unwrap();
     let mut lines = txt.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    let col = header.iter().position(|h| *h == "beta")
-        .unwrap_or_else(|| panic!("no beta column in {header:?}"));
-    let row: Vec<&str> = lines.next().expect("chain 1 row").split('\t').collect();
-    row[col].parse().unwrap_or_else(|_| panic!("non-numeric beta {:?}", row[col]))
+    let col = |name: &str| header.iter().position(|h| *h == name)
+        .unwrap_or_else(|| panic!("no {name} column in {header:?}"));
+    let (beta, id, status) = (col("beta"), col("chain_id"), col("status"));
+    let row: Vec<&str> = lines
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .find(|r| r[id] == "0" && r[status] == "accepted")
+        .expect("chain 1's accepted row");
+    row[beta].parse().unwrap_or_else(|_| panic!("non-numeric beta {:?}", row[beta]))
 }
 
 /// The value inside `log(...)` on the preflight table's `beta` row.

@@ -35,23 +35,28 @@
 //! `starts = { from_posterior = … }`: each chain draws one row, so which chain
 //! gets the pathological row is a property of the seeded draw. The test reads
 //! `chain_starts.tsv` — the artifact that records exactly this — rather than
-//! assuming an assignment, and asserts the premise that the two chains drew
-//! different rows. The same lever `pmmh_bad_init_skip.rs` uses.
+//! assuming an assignment. The same lever `pmmh_bad_init_skip.rs` uses.
+//!
+//! `from_posterior` is a spread rule, so a refused start is redrawn, up to
+//! `MAX_START_ATTEMPTS` (gh#887): a chain that drew the `iota = 0` row draws
+//! again, and is refused only when every attempt drew it. Each attempt is on
+//! the record.
 //!
 //! ## Acceptance
 //!
-//! 1. `one_bad_chain_is_skipped_and_survivors_finish` — exit 0; exactly one
-//!    `bad_init` diagnostic, carrying the refused chain's index and the
-//!    `iota = 0` start it actually ran from; `fit_state.toml` records
-//!    `n_good_chains = 1` beside `n_chains = 2`; and `draws.tsv` holds draws
-//!    for the surviving chain ONLY — the skipped chain enters no pooled number.
-//! 2. `all_chains_refused_is_an_error` — both rows at `iota = 0` ⇒ non-zero
-//!    exit and an `initial_loglik_infinite` diagnostic, rather than a
-//!    degenerate posterior written at exit 0.
+//! 1. `a_refused_start_is_redrawn_and_the_chain_runs` — exit 0; no
+//!    `bad_init`; `chain_starts.tsv` carries a `rejected` row for every
+//!    `iota = 0` draw the chain made, naming the refusal, and an `accepted`
+//!    row at `iota = 0.2`; both chains contribute draws; `fit_state.toml`
+//!    carries no `n_good_chains`.
+//! 2. `all_chains_refused_is_an_error` — both rows at `iota = 0` ⇒ ten starts
+//!    tried per chain, every one recorded, non-zero exit naming the count, and
+//!    an `initial_loglik_infinite` diagnostic, rather than a degenerate
+//!    posterior written at exit 0.
 //! 3. `healthy_fit_keeps_every_chain` — the negative control. Both rows
-//!    healthy ⇒ NO `bad_init`, both chains present in `draws.tsv`, and
-//!    `fit_state.toml` carries no `n_good_chains` key, so a healthy fit's
-//!    output is unchanged by the guard.
+//!    healthy ⇒ NO `bad_init`, no `rejected` row, both chains present in
+//!    `draws.tsv`, and `fit_state.toml` carries no `n_good_chains` key, so a
+//!    healthy fit's output is unchanged by the guard.
 //! 4. `a_start_the_trajectory_move_can_rescue_is_not_refused` — the other half
 //!    of the predicate: a start that is `-inf` only because its reference draw
 //!    was unlucky must survive, because the `X|θ,y` move fixes it.
@@ -255,35 +260,37 @@ fn diagnostics_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Each chain's `iota` start, read from the leaf's `chain_starts.tsv` —
-/// `(chain_id, iota)` in file order.
-fn chain_iotas(leaf: &Path) -> Vec<(usize, f64)> {
+/// One row of the leaf's `chain_starts.tsv`.
+#[derive(Debug, Clone)]
+struct StartRow {
+    chain_id: usize,
+    attempt: usize,
+    status: String,
+    iota: f64,
+    reason: String,
+}
+
+/// Every attempt recorded in the leaf's `chain_starts.tsv`, in file order.
+fn start_rows(leaf: &Path) -> Vec<StartRow> {
     let path = leaf.join("chain_starts.tsv");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let mut body = raw.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
     let cols: Vec<&str> = body.next().expect("chain_starts.tsv header").split('\t').collect();
-    let id_idx = cols.iter().position(|c| *c == "chain_id").expect("chain_id column");
-    let iota_idx = cols.iter().position(|c| *c == "iota").expect("iota column");
+    let col = |name: &str| cols.iter().position(|c| *c == name)
+        .unwrap_or_else(|| panic!("{name} column in {cols:?}"));
+    let (id, attempt, status, iota, reason) =
+        (col("chain_id"), col("attempt"), col("status"), col("iota"), col("reason"));
     body.map(|l| {
         let cells: Vec<&str> = l.split('\t').collect();
-        (cells[id_idx].parse().unwrap(), cells[iota_idx].parse().unwrap())
+        StartRow {
+            chain_id: cells[id].parse().unwrap(),
+            attempt: cells[attempt].parse().unwrap(),
+            status: cells[status].to_string(),
+            iota: cells[iota].parse().unwrap(),
+            reason: cells[reason].to_string(),
+        }
     }).collect()
-}
-
-/// The chains that drew the `iota = 0` row and the ones that did not, from the
-/// leaf's own record of its starts. Asserts the premise every skip test
-/// stands on: the two chains drew different rows.
-fn split_chains_by_start(leaf: &Path) -> (Vec<usize>, Vec<usize>) {
-    let starts = chain_iotas(leaf);
-    assert_eq!(starts.len(), 2, "two chains, two recorded starts: {starts:?}");
-    let bad: Vec<usize> = starts.iter().filter(|(_, i)| *i == 0.0).map(|(c, _)| *c).collect();
-    let good: Vec<usize> = starts.iter().filter(|(_, i)| *i != 0.0).map(|(c, _)| *c).collect();
-    assert!(!bad.is_empty() && !good.is_empty(),
-        "the seeded from_posterior draw must hand the two chains different rows for \
-         this fixture to test a skip; chain_starts.tsv says {starts:?}. If the draw \
-         changed, pick a seed under which the rows differ.");
-    (bad, good)
 }
 
 /// The 0-based `chain` column of every row in `draws.tsv`.
@@ -334,76 +341,74 @@ fn run_fit(tag: &str, iotas: (f64, f64)) -> Option<Run> {
     })
 }
 
-/// gh#607 acceptance 1. One refused start must not kill the fit, and must not
-/// leak a single draw into the pooled posterior.
+/// gh#887 (and gh#780). A refused spread start is one unlucky draw, not a
+/// verdict on the chain: it is redrawn, the rejection is on the record with
+/// its reason, and the chain runs from the first draw the sampler accepts.
 #[test]
-fn one_bad_chain_is_skipped_and_survivors_finish() {
-    // rank-1 (chain 1, 0-based id 0) impossible; rank-2 (chain 2) healthy.
-    let Some(run) = run_fit("skip", (0.0, 0.2)) else { return };
+fn a_refused_start_is_redrawn_and_the_chain_runs() {
+    // One impossible row (iota = 0) beside one healthy row.
+    let Some(run) = run_fit("redraw", (0.0, 0.2)) else { return };
 
     assert!(run.ok,
-        "the fit must succeed when ONE chain's start is refused.\n\
+        "the fit must succeed: a refused draw is redrawn.\n\
          stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
 
     let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
         .expect("committed `pgas` method leaf");
-    let (bad_chains, good_chains) = split_chains_by_start(&stage_dir);
+    let rows = start_rows(&stage_dir);
+    let rejected: Vec<&StartRow> = rows.iter().filter(|r| r.status == "rejected").collect();
+    let accepted: Vec<&StartRow> = rows.iter().filter(|r| r.status == "accepted").collect();
+    assert!(!rejected.is_empty(),
+        "the seeded draw must hand at least one chain the iota = 0 row for this \
+         fixture to exercise a redraw; chain_starts.tsv rows: {rows:?}. If the draw \
+         changed, pick a seed under which one chain draws it.");
+    assert_eq!(accepted.len(), 2, "every chain ends on an accepted start: {rows:?}");
+    assert!(rows.iter().all(|r| r.status != "refused"),
+        "no chain may be refused while the other row is scoreable: {rows:?}");
+    for r in &rejected {
+        assert_eq!(r.iota, 0.0, "only the impossible row is rejected: {r:?}");
+        // The reason names which term was non-finite — `observation` is a
+        // bad start, `transition` would be a step_one/density bug (gh#80) —
+        // and that the chain was given its probation sweep before the redraw.
+        assert!(r.reason.contains("observation -inf")
+                && r.reason.contains("still non-finite after the first trajectory update"),
+            "a rejected row carries the refusal: {r:?}");
+    }
+    for a in &accepted {
+        assert_eq!(a.iota, 0.2, "the accepted start is the scoreable row: {a:?}");
+        let n_rejected = rejected.iter().filter(|r| r.chain_id == a.chain_id).count();
+        assert_eq!(a.attempt, n_rejected, "the accepted attempt follows the rejections: {a:?}");
+    }
+    // The header counts the retries, so a skim of the file says it happened.
+    let text = std::fs::read_to_string(stage_dir.join("chain_starts.tsv")).unwrap();
+    assert!(text.starts_with(&format!(
+        "# camdl chain_starts; starts=from_posterior ", )), "{text}");
+    assert!(text.lines().next().unwrap().ends_with(&format!("retried={}", rejected.len())), "{text}");
 
-    // Exactly one BadInit, naming the refused chain and the start it actually
-    // ran from.
-    let bad = bad_init_entries(&run.out_root);
-    assert_eq!(bad.len(), 1,
-        "expected exactly 1 bad_init diagnostic, got {}: {:#?}\nstderr:\n{}",
-        bad.len(), bad, run.stderr);
-    let chain_id = bad[0].get("chain_id").and_then(|c| c.as_u64())
-        .expect("bad_init must carry a chain_id") as usize;
-    assert_eq!(vec![chain_id], bad_chains,
-        "the refused chain must be the one that drew the iota = 0 row; \
-         bad_init:\n{:#?}", bad[0]);
-
-    // gh#513: the diagnostic quotes the start THIS chain ran from, which is
-    // the drawn row — not the `[estimate].start` value of 0.2.
-    let params = bad[0].get("params").expect("bad_init must carry params");
-    let iota = params.get("iota").and_then(|v| v.as_f64())
-        .expect("bad_init.params must include iota");
-    assert_eq!(iota, 0.0,
-        "bad_init must name the drawn start (iota=0), not the \
-         configured `start` (0.2); got {iota}. bad_init:\n{:#?}", bad[0]);
-
-    // The reason must identify WHICH term was non-finite — `observation` is a
-    // bad start, `transition` would be a step_one/density bug (gh#80) — and
-    // must say the chain was given its probation sweep before being refused.
-    let reason = bad[0].get("reason").and_then(|r| r.as_str()).unwrap_or("");
-    assert!(reason.contains("observation -inf"),
-        "the reason must name the offending component; got: {reason}");
-    assert!(reason.contains("still non-finite after the first trajectory update"),
-        "the reason must record that the X|θ,y rescue was attempted and failed; \
-         got: {reason}");
-
-    // `fit_state.toml`: 1 of 2 chains usable.
+    // Nothing was skipped: no bad_init, every chain in the pool, no
+    // n_good_chains, and the redraw was loud on stderr.
+    assert!(bad_init_entries(&run.out_root).is_empty(),
+        "a redrawn chain is not a refused chain; got {:#?}\nstderr:\n{}",
+        bad_init_entries(&run.out_root), run.stderr);
+    let mut chains = draws_chain_ids(&stage_dir.join("draws.tsv"));
+    chains.sort_unstable();
+    chains.dedup();
+    assert_eq!(chains, vec![0, 1], "both chains contribute draws; got {chains:?}");
     let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();
-    assert_eq!(state.get("n_good_chains").and_then(|v| v.as_integer()), Some(1),
-        "fit_state.toml must record n_good_chains = 1:\n{state_raw}");
-    assert_eq!(state.get("n_chains").and_then(|v| v.as_integer()), Some(2),
-        "n_chains stays at the requested count:\n{state_raw}");
-
-    // THE load-bearing assertion: the skipped chain contributes no draw.
-    let chains = draws_chain_ids(&stage_dir.join("draws.tsv"));
-    assert!(!chains.is_empty(), "the surviving chain must have written draws");
-    assert!(chains.iter().all(|c| good_chains.contains(c)),
-        "draws.tsv must hold ONLY the surviving chain {good_chains:?}; \
-         saw chain ids {:?}", {
-            let mut u = chains.clone(); u.sort_unstable(); u.dedup(); u
-        });
-
-    // And the skip was loud on stderr, not silent.
-    assert!(run.stderr.contains("ran 1 of 2 chains"),
-        "the run must report `ran 1 of 2 chains`.\nstderr:\n{}", run.stderr);
+    assert!(state.get("n_good_chains").is_none(),
+        "every chain ran, so n_good_chains is unset:\n{state_raw}");
+    assert!(run.stderr.contains("refused") && run.stderr.contains("drawing another"),
+        "the redraw must be announced.\nstderr:\n{}", run.stderr);
+    assert!(!run.stderr.contains("ran 1 of 2 chains"),
+        "nothing was skipped.\nstderr:\n{}", run.stderr);
 }
 
-/// gh#607 acceptance 2. Nothing to pool ⇒ the run fails, rather than writing a
-/// degenerate posterior and exiting 0.
+/// gh#607 acceptance 2, under gh#887's retry. Every row is impossible, so
+/// every redraw is too: each chain tries ten starts, every one is on the
+/// record, and only then is the chain refused. Nothing to pool ⇒ the run
+/// fails, naming the count, rather than writing a degenerate posterior and
+/// exiting 0.
 #[test]
 fn all_chains_refused_is_an_error() {
     let Some(run) = run_fit("allbad", (0.0, 0.0)) else { return };
@@ -411,8 +416,38 @@ fn all_chains_refused_is_an_error() {
     assert!(!run.ok,
         "a fit whose every chain start is refused must exit NON-ZERO.\n\
          stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
-    assert_eq!(bad_init_entries(&run.out_root).len(), 2,
+    let bad = bad_init_entries(&run.out_root);
+    assert_eq!(bad.len(), 2,
         "both refused chains must be named individually.\nstderr:\n{}", run.stderr);
+    for b in &bad {
+        let reason = b.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+        assert!(reason.starts_with("none of 10 starts drawn under `starts = from_posterior "),
+            "the refusal must say how many starts were tried: {reason}");
+    }
+    // The record: ten attempts per chain, nine rejected and the last refused.
+    let leaf = {
+        let mut hit = None;
+        let mut stack = vec![run.out_root.join("fits")];
+        while let Some(d) = stack.pop() {
+            if d.join("chain_starts.tsv").is_file() { hit = Some(d); break; }
+            if let Ok(es) = std::fs::read_dir(&d) {
+                for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
+            }
+        }
+        hit.expect("a chain_starts.tsv under the run tree")
+    };
+    let rows = start_rows(&leaf);
+    for chain in 0..2 {
+        let mine: Vec<&StartRow> = rows.iter().filter(|r| r.chain_id == chain).collect();
+        assert_eq!(mine.len(), 10, "chain {chain}: ten attempts on the record: {mine:?}");
+        assert_eq!(mine.iter().filter(|r| r.status == "rejected").count(), 9, "{mine:?}");
+        assert_eq!(mine.last().unwrap().status, "refused", "{mine:?}");
+        assert!(mine.iter().all(|r| r.iota == 0.0), "{mine:?}");
+        let attempts: Vec<usize> = mine.iter().map(|r| r.attempt).collect();
+        assert_eq!(attempts, (0..10).collect::<Vec<_>>(), "attempts are numbered in order");
+    }
+    assert!(run.stderr.contains("start 9 of 10 refused"),
+        "every attempt is announced.\nstderr:\n{}", run.stderr);
     assert!(has_diagnostic(&run.out_root, "initial_loglik_infinite"),
         "the all-refused path must also carry `initial_loglik_infinite` — the \
          signal the gh#226 backstop taught consumers to look for.\nstderr:\n{}",
@@ -476,6 +511,9 @@ fn healthy_fit_keeps_every_chain() {
 
     let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
         .expect("committed `pgas` method leaf");
+    let rows = start_rows(&stage_dir);
+    assert!(rows.iter().all(|r| r.status == "accepted" && r.attempt == 0),
+        "a healthy fit redraws nothing: {rows:?}");
 
     let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();

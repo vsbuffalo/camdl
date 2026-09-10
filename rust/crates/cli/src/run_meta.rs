@@ -1056,14 +1056,14 @@ mod tests {
         ];
         for (method, expected_tag) in &cases {
             // Single-chain DrawnStarts → InitProvenance → JSON.
-            let cs = DrawnStarts {
-                starts: vec![ChainStart {
+            let cs = DrawnStarts::fresh(
+                vec![ChainStart {
                     chain_id: 0,
                     values: HashMap::from([("beta".into(), 0.5_f64)]),
                     source: InitSource::SeededBase,
                 }],
-                rule: method.clone(),
-            };
+                method.clone(),
+            );
             let prov = InitProvenance::from_chain_starts(&cs);
             assert_eq!(prov.method, *expected_tag,
                 "InitProvenance.method tag mismatch for variant {:?}", method);
@@ -1109,7 +1109,7 @@ mod tests {
                 },
             },
         ];
-        let cs = DrawnStarts { starts, rule: ChainStarts::from_prior() };
+        let cs = DrawnStarts::fresh(starts, ChainStarts::from_prior());
         let prov = InitProvenance::from_chain_starts(&cs);
         // Each chain's per-parameter source matches the InitSource tag.
         assert_eq!(prov.chains[0]["beta"].source, "prior_draw");

@@ -11,18 +11,18 @@
 //!
 //! Each chain draws one row; which chain gets which is a property of the
 //! seeded draw, read back from `chain_starts.tsv` rather than assumed.
+//! `from_posterior` is a spread rule, so a start the init-eval refuses is
+//! redrawn, up to `MAX_START_ATTEMPTS` (gh#887), with every attempt and the
+//! ESS the filter reached on the record.
 //!
 //! Acceptance:
-//!   1. `camdl fit run` exits 0 (the run does NOT fail when one
-//!      chain's init triggers PFDegenerate — surviving chains
-//!      continue).
-//!   2. `diagnostics.json` contains a `bad_init` diagnostic for the
-//!      pathological chain. The variant tag uses the snake-case
-//!      rename declared on `DiagnosticKind`.
-//!   3. `fit_state.toml` reports `n_good_chains = 1` (the good
-//!      chain's MAP), distinct from `n_chains = 2`.
-//!   4. The good chain wrote its `chain_<n>/trace.tsv` with post-burn-in
-//!      rows.
+//!   1. `camdl fit run` exits 0 and no chain is skipped: the chain that
+//!      drew the pathological row draws again and runs.
+//!   2. `chain_starts.tsv` carries a `rejected` row for each pathological
+//!      draw, with the `EssCollapsed` reason and the ESS at refusal, and an
+//!      `accepted` row at the sane point.
+//!   3. `fit_state.toml` carries no `n_good_chains` (every chain ran).
+//!   4. Both chains wrote `chain_<n>/trace.tsv` with post-burn-in rows.
 //!
 //! Skipped when the release binary or camdlc isn't present.
 
@@ -193,26 +193,36 @@ fn cas_stage_leaf(fits_root: &Path, stage_substr: &str) -> PathBuf {
     panic!("no CAS '{}' method leaf under {}", stage_substr, fits_root.display());
 }
 
-/// Each chain's `beta` start, read from the leaf's `chain_starts.tsv` —
-/// `(chain_id, beta)` in file order.
-fn chain_betas(leaf: &Path) -> Vec<(usize, f64)> {
+/// One row of the leaf's `chain_starts.tsv`: `(chain_id, attempt, status,
+/// beta, ess, reason)` in file order.
+fn start_rows(leaf: &Path) -> Vec<(usize, usize, String, f64, Option<f64>, String)> {
     let path = leaf.join("chain_starts.tsv");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let mut body = raw.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
     let cols: Vec<&str> = body.next().expect("chain_starts.tsv header").split('\t').collect();
-    let id_idx = cols.iter().position(|c| *c == "chain_id").expect("chain_id column");
-    let beta_idx = cols.iter().position(|c| *c == "beta").expect("beta column");
+    let col = |name: &str| cols.iter().position(|c| *c == name)
+        .unwrap_or_else(|| panic!("{name} column in {cols:?}"));
+    let (id, attempt, status, beta, ess, reason) =
+        (col("chain_id"), col("attempt"), col("status"), col("beta"), col("ess"), col("reason"));
     body.map(|l| {
         let cells: Vec<&str> = l.split('\t').collect();
-        (cells[id_idx].parse().unwrap(), cells[beta_idx].parse().unwrap())
+        (
+            cells[id].parse().unwrap(),
+            cells[attempt].parse().unwrap(),
+            cells[status].to_string(),
+            cells[beta].parse().unwrap(),
+            cells[ess].parse().ok(),
+            cells[reason].to_string(),
+        )
     }).collect()
 }
 
-/// gh#110 acceptance: a pathological drawn start must not hang the run — the
-/// chain is skipped with a `BadInit` diagnostic and the sane chain completes.
+/// gh#110 under gh#887: a pathological drawn start must not hang the run —
+/// the init-eval refuses it, the chain draws again, and every attempt is on
+/// the record with the ESS the filter reached.
 #[test]
-fn pmmh_skips_pathological_drawn_start_and_continues() {
+fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("skip");
@@ -230,9 +240,9 @@ fn pmmh_skips_pathological_drawn_start_and_continues() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    // Acceptance 1: exit success.
+    // Acceptance 1: exit success, and no chain skipped.
     assert!(out.status.success(),
-        "pmmh fit must succeed when one chain hits PFDegenerate on init.\n\
+        "pmmh fit must succeed when one chain's first draw hits PFDegenerate on init.\n\
          elapsed: {:?}\nstdout:\n{}\nstderr:\n{}",
         elapsed, stdout, stderr);
 
@@ -244,90 +254,61 @@ fn pmmh_skips_pathological_drawn_start_and_continues() {
         "fit must complete well under the 120s-per-call watchdog \
          budget; took {:?}.\nstderr:\n{}", elapsed, stderr);
 
-    // Acceptance 2: diagnostics.json contains a `bad_init` entry.
+    // Acceptance 2: the record. The chain that drew β=4.8 has a rejected row
+    // for each such draw — the EssCollapsed refusal and the ESS the filter
+    // reached — and an accepted row at the sane point.
     let fits_dir = tmp.path().join("results/fits");
     let stage_dir = cas_stage_leaf(&fits_dir, "pmmh");
     assert!(stage_dir.join("run.json").is_file(),
         "pmmh method leaf missing run.json: {}\nstderr:\n{}", stage_dir.display(), stderr);
-
-    // The premise: the seeded draw handed the two chains different rows.
-    let starts = chain_betas(&stage_dir);
-    let bad_chain = starts.iter().find(|(_, b)| (b - 4.8).abs() < 1e-9).map(|(c, _)| *c)
-        .unwrap_or_else(|| panic!("no chain drew the pathological row: {starts:?}"));
-    let good_chain = starts.iter().find(|(_, b)| (b - 0.3).abs() < 1e-9).map(|(c, _)| *c)
-        .unwrap_or_else(|| panic!(
-            "no chain drew the sane row: {starts:?}. If the from_posterior draw \
-             changed, pick a seed under which the two chains draw different rows."));
-
+    let rows = start_rows(&stage_dir);
+    let rejected: Vec<_> = rows.iter().filter(|r| r.2 == "rejected").collect();
+    let accepted: Vec<_> = rows.iter().filter(|r| r.2 == "accepted").collect();
+    assert!(!rejected.is_empty(),
+        "the seeded draw must hand at least one chain the pathological row for this \
+         fixture to exercise a redraw; rows: {rows:?}. If the draw changed, pick a \
+         seed under which one chain draws it.");
+    assert_eq!(accepted.len(), 2, "every chain ends on an accepted start: {rows:?}");
+    assert!(rows.iter().all(|r| r.2 != "refused"), "no chain is refused: {rows:?}");
+    for r in &rejected {
+        assert!((r.3 - 4.8).abs() < 1e-9, "only the pathological row is rejected: {r:?}");
+        assert!(r.5.contains("EssCollapsed"), "the refusal is the filter's: {r:?}");
+        assert!(r.4.is_some(), "the ESS at refusal is recorded: {r:?}");
+    }
+    for a in &accepted {
+        assert!((a.3 - 0.3).abs() < 1e-9, "the accepted start is the sane row: {a:?}");
+    }
     let diag_path = stage_dir.join("diagnostics.json");
-    assert!(diag_path.exists(),
-        "diagnostics.json must be written under {}\nstderr:\n{}",
-        stage_dir.display(), stderr);
-    let diag_raw = std::fs::read_to_string(&diag_path).unwrap();
-    let diags: serde_json::Value = serde_json::from_str(&diag_raw)
-        .expect("diagnostics.json must be valid JSON");
-    let arr = diags.as_array().expect("diagnostics.json is an array");
-    let n_bad = arr.iter()
-        .filter(|d| d.get("kind").and_then(|k| k.get("type"))
-            .and_then(|t| t.as_str()) == Some("bad_init"))
-        .count();
-    assert_eq!(n_bad, 1,
-        "expected exactly 1 BadInit diagnostic; full diagnostics.json:\n{}\n\
-         stderr:\n{}", diag_raw, stderr);
+    if diag_path.exists() {
+        let diags: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&diag_path).unwrap()).unwrap();
+        let n_bad = diags.as_array().map(|arr| arr.iter()
+            .filter(|d| d.get("kind").and_then(|k| k.get("type"))
+                .and_then(|t| t.as_str()) == Some("bad_init"))
+            .count()).unwrap_or(0);
+        assert_eq!(n_bad, 0, "a redrawn chain is not a refused chain:\n{stderr}");
+    }
 
-    // The BadInit entry must carry the pathological chain's index and its
-    // β / γ pair.
-    let bad = arr.iter().find(|d|
-        d.get("kind").and_then(|k| k.get("type"))
-            .and_then(|t| t.as_str()) == Some("bad_init"))
-        .unwrap();
-    let bad_kind = bad.get("kind").unwrap();
-    let chain_id = bad_kind.get("chain_id").and_then(|c| c.as_u64())
-        .expect("BadInit must carry a chain_id") as usize;
-    assert_eq!(chain_id, bad_chain,
-        "the refused chain must be the one that drew β=4.8; got chain_id={}.\n\
-         BadInit:\n{}", chain_id, serde_json::to_string_pretty(bad).unwrap());
-
-    let params = bad_kind.get("params").expect("BadInit must carry params");
-    let beta = params.get("beta").and_then(|v| v.as_f64())
-        .expect("BadInit.params must include beta");
-    assert!((beta - 4.8).abs() < 1e-9,
-        "BadInit.params.beta should = 4.8 (the pathological row); got {}", beta);
-
-    // Acceptance 3: fit_state.toml reports n_good_chains = 1.
-    let state_path = stage_dir.join("fit_state.toml");
-    assert!(state_path.exists(),
-        "fit_state.toml must be written\nstderr:\n{}", stderr);
-    let state_raw = std::fs::read_to_string(&state_path).unwrap();
+    // Acceptance 3: every chain ran, so n_good_chains is unset.
+    let state_raw = std::fs::read_to_string(stage_dir.join("fit_state.toml")).unwrap();
     let state: toml::Value = toml::from_str(&state_raw).unwrap();
-    let n_good = state.get("n_good_chains").and_then(|v| v.as_integer())
-        .expect("fit_state.toml must record n_good_chains when a chain \
-                 was skipped (gh#110)");
-    assert_eq!(n_good, 1,
-        "n_good_chains should be 1 (the sane chain only). \
-         fit_state.toml:\n{}", state_raw);
-    let n_chains = state.get("n_chains").and_then(|v| v.as_integer())
-        .expect("n_chains field");
-    assert_eq!(n_chains, 2,
-        "n_chains should remain 2 (the requested chain count). \
-         fit_state.toml:\n{}", state_raw);
+    assert!(state.get("n_good_chains").is_none(),
+        "every chain ran, so n_good_chains is unset:\n{state_raw}");
+    assert_eq!(state.get("n_chains").and_then(|v| v.as_integer()), Some(2), "{state_raw}");
 
-    // Acceptance 4: the good chain produced a trace with posterior draws.
-    // The skipped chain may have a trace.tsv header but should not have
-    // post-burn-in rows (its loop never ran).
-    let good_trace = stage_dir.join(format!("chain_{}/trace.tsv", good_chain + 1));
-    assert!(good_trace.exists(),
-        "{} must exist for the surviving chain", good_trace.display());
-    let good_lines = std::fs::read_to_string(&good_trace).unwrap()
-        .lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        .count();
-    // Header + at least one post-burn-in draw. iterations=40, burn_in=5,
-    // thin=1 → ~35 draws expected.
-    assert!(good_lines >= 5,
-        "{} should have header + post-burn-in draws; got {} non-comment lines",
-        good_trace.display(), good_lines);
+    // Acceptance 4: both chains produced a trace with posterior draws.
+    for chain in 1..=2 {
+        let trace = stage_dir.join(format!("chain_{chain}/trace.tsv"));
+        assert!(trace.exists(), "{} must exist", trace.display());
+        let lines = std::fs::read_to_string(&trace).unwrap()
+            .lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .count();
+        assert!(lines >= 5, "{} should have header + post-burn-in draws; got {lines}", trace.display());
+    }
 
-    // Stderr should surface the user-facing "ran 1 of 2 chains" line.
-    assert!(stderr.contains("ran 1 of 2 chains"),
-        "stderr must surface 'ran 1 of 2 chains'; got:\n{}", stderr);
+    // The redraw was loud, and nothing was skipped.
+    assert!(stderr.contains("refused by the filter") && stderr.contains("drawing another"),
+        "the redraw must be announced; got:\n{}", stderr);
+    assert!(!stderr.contains("ran 1 of 2 chains"),
+        "nothing was skipped; got:\n{}", stderr);
 }

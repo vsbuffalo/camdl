@@ -178,6 +178,16 @@ starts    = \"uniform_unconstrained\"
         parse(&chain_starts_for_stage(&results, "if2"));
     let (_, pgas_cols, pgas_rows) =
         parse(&chain_starts_for_stage(&results, "pgas"));
+    // The rows the chains ran from. A start the filter refused is on the
+    // record ahead of its redraw as `rejected` (gh#887) — under twenty
+    // particles that happens — and is not a chain's start.
+    let accepted = |cols: &[String], rows: &[Vec<String>]| -> Vec<Vec<String>> {
+        let i = cols.iter().position(|c| c == "status")
+            .unwrap_or_else(|| panic!("no `status` column in {cols:?}"));
+        rows.iter().filter(|r| r[i] == "accepted").cloned().collect()
+    };
+    let if2_rows = accepted(&if2_cols, &if2_rows);
+    let pgas_rows = accepted(&pgas_cols, &pgas_rows);
 
     // The audit question: can a reader tell from this file alone whether the
     // chains were started apart?

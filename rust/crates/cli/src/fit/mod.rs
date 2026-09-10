@@ -1145,6 +1145,12 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, *chains, seed,
                 ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                // gh#887: a spread start the filter cannot score is redrawn,
+                // up to MAX_START_ATTEMPTS, before any chain runs; every
+                // attempt is on the record below.
+                let drawn = runner::preflight_spread_starts(
+                    &run_config, &sweep_config.estimate, &resolved_starts, drawn, seed,
+                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
                 let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
                     drawn.to_estimated_params(&run_config.estimated_params);
                 // The audit sidecar, captured before the first filter pass.

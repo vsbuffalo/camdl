@@ -92,16 +92,130 @@ pub struct ChainStart {
     pub source:   InitSource,
 }
 
-/// The full set of chain starts produced by [`draw_chain_starts`].
+/// How many starts a chain is drawn before it is refused (gh#887). A spread
+/// rule is a lottery over one draw; ten independent draws make the refusal
+/// a statement about the rule and the data rather than about luck. A point
+/// rule has nothing to redraw and gets one.
+pub const MAX_START_ATTEMPTS: usize = 10;
+
+/// A start the filter could not score, kept so `chain_starts.tsv` says how
+/// many starts were tried and why each was dropped (gh#887).
+#[derive(Debug, Clone)]
+pub struct RejectedStart {
+    pub chain_id: usize,
+    /// 0-based attempt index; the accepted start's attempt is one past the
+    /// last rejection.
+    pub attempt: usize,
+    pub values: HashMap<String, f64>,
+    /// Why the filter (or the sampler's first sweep) refused it.
+    pub reason: String,
+    /// The ESS the filter reached before refusing, when it measured one.
+    pub ess: Option<f64>,
+}
+
+/// The full set of chain starts produced by [`draw_chain_starts`], plus the
+/// attempts a retry rejected on the way to them.
 #[derive(Debug, Clone)]
 pub struct DrawnStarts {
-    /// Length = `n_chains` requested.
+    /// Length = `n_chains` requested: the start each chain ran from (or was
+    /// refused at, when every attempt failed).
     pub starts: Vec<ChainStart>,
     /// The rule that produced these starts.
     pub rule: ChainStarts,
+    /// Every start a retry rejected, in (chain, attempt) order.
+    pub rejected: Vec<RejectedStart>,
+    /// Chains whose last attempt was refused too — they did not run.
+    pub refused: Vec<usize>,
+}
+
+/// Does a rule admit a fresh draw for one chain? A point rule does not (the
+/// point is the point); the three bounds-based spread rules fall back to the
+/// base point at one chain, so there is nothing new to draw there either.
+pub fn can_redraw(rule: &ChainStarts, n_chains: usize) -> bool {
+    match rule {
+        ChainStarts::Point(_) => false,
+        ChainStarts::Spread(Spread::Uniform)
+        | ChainStarts::Spread(Spread::Lhs)
+        | ChainStarts::Spread(Spread::UniformUnconstrained) => n_chains >= 2,
+        ChainStarts::Spread(Spread::FromPrior) | ChainStarts::Spread(Spread::FromPosterior { .. }) => true,
+    }
+}
+
+/// A fresh, independent start for `chain_id` under the same rule: attempt
+/// `attempt` (1-based; 0 is the original draw) of the bounded retry. The
+/// rule is re-run at a seed derived from `(seed, attempt)` and this chain's
+/// slot is taken, so a redraw is a draw the rule could have made in the
+/// first place — an LHS redraw is a cell of a fresh design, a prior redraw
+/// is another prior draw. Under `uniform` chain 0 is the base point by
+/// definition, so its redraw takes slot 1's draw.
+pub fn redraw_chain_start(
+    ctx: &StartContext<'_>,
+    starts: &ResolvedStarts,
+    n_chains: usize,
+    chain_id: usize,
+    seed: u64,
+    attempt: usize,
+) -> Result<ChainStart, InitError> {
+    let seed_k = seed ^ (attempt as u64).wrapping_mul(0xa24b_aed4_963e_e407);
+    let fresh = draw_chain_starts(ctx, starts, n_chains, seed_k)?;
+    let slot = match starts.rule {
+        ChainStarts::Spread(Spread::Uniform) if chain_id == 0 => 1,
+        _ => chain_id,
+    };
+    let mut cs = fresh.starts.into_iter().nth(slot).ok_or(InitError::Unresolved {
+        rule: starts.rule.spelled(),
+    })?;
+    cs.chain_id = chain_id;
+    Ok(cs)
+}
+
+impl ChainStart {
+    /// This chain's full parameter vector: `base_params` with each estimated
+    /// slot overwritten by the start.
+    pub fn to_param_vec(&self, base_specs: &[EstimatedParam], base_params: &[f64]) -> Vec<f64> {
+        let mut params = base_params.to_vec();
+        for spec in base_specs {
+            if let Some(v) = self.values.get(&spec.name) {
+                params[spec.index] = *v;
+            }
+        }
+        params
+    }
 }
 
 impl DrawnStarts {
+    /// The starts as first drawn, with no retry yet.
+    pub fn fresh(starts: Vec<ChainStart>, rule: ChainStarts) -> Self {
+        DrawnStarts { starts, rule, rejected: Vec::new(), refused: Vec::new() }
+    }
+
+    /// Fold a retry's outcome in: `accepted[c]` replaces chain `c`'s start
+    /// when a redraw was taken, `rejected` lists every attempt dropped on the
+    /// way, and `refused` names the chains whose last attempt failed too.
+    pub fn with_retry_outcome(
+        mut self,
+        accepted: Vec<Option<ChainStart>>,
+        mut rejected: Vec<RejectedStart>,
+        refused: Vec<usize>,
+    ) -> Self {
+        for (chain_id, cs) in accepted.into_iter().enumerate() {
+            if let Some(cs) = cs {
+                if let Some(slot) = self.starts.get_mut(chain_id) {
+                    *slot = cs;
+                }
+            }
+        }
+        rejected.sort_by_key(|r| (r.chain_id, r.attempt));
+        self.rejected = rejected;
+        self.refused = refused;
+        self
+    }
+
+    /// How many attempts chain `chain_id` took before its start was accepted
+    /// (or refused): the rejected count for that chain.
+    pub fn attempts_before(&self, chain_id: usize) -> usize {
+        self.rejected.iter().filter(|r| r.chain_id == chain_id).count()
+    }
     /// Adapt to the IF2-shaped `Vec<Vec<EstimatedParam>>` view that
     /// `runner::run_chains_with_per_chain_params` and the PMMH / PGAS /
     /// NUTS / NLopt dispatch sites consume. Each chain's `EstimatedParam`s
@@ -418,7 +532,7 @@ pub fn draw_chain_starts(
 ) -> Result<DrawnStarts, InitError> {
     let rule = starts.rule.clone();
     if n_chains == 0 {
-        return Ok(DrawnStarts { starts: Vec::new(), rule });
+        return Ok(DrawnStarts::fresh(Vec::new(), rule));
     }
     let source_file = || -> Result<&Path, InitError> {
         starts
@@ -476,7 +590,7 @@ pub fn draw_chain_starts(
             draw_from_params(ctx.resolved, source_file()?, n_chains)?
         }
     };
-    Ok(DrawnStarts { starts: drawn, rule })
+    Ok(DrawnStarts::fresh(drawn, rule))
 }
 
 /// Lift the builders' `Vec<Vec<EstimatedParam>>` into `ChainStart`s.
@@ -944,26 +1058,57 @@ fn read_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
 #[derive(Debug, Clone)]
 pub struct ChainStartRecord {
     pub chain_id: usize,
+    /// 0-based attempt index within the chain's bounded retry (gh#887).
+    pub attempt: usize,
+    /// `accepted` (the start the chain ran from), `rejected` (a draw the
+    /// filter could not score; a redraw followed), or `refused` (the last
+    /// attempt, also unscoreable; the chain did not run).
+    pub status: &'static str,
     /// The `source` column: the rule's tag, with `:chain-<id>` appended only
     /// when that chain got a point of its own (gh#871).
     pub source: String,
     /// Values in `base_specs` order.
     pub values: Vec<f64>,
+    /// The ESS the filter reached before refusing, when it measured one.
+    pub ess: Option<f64>,
+    /// Why a rejected or refused start was dropped; empty for an accepted one.
+    pub reason: String,
 }
 
 impl DrawnStarts {
-    /// The rows the writer records, in `base_specs` order.
+    /// The rows the writer records, in (chain, attempt) order and
+    /// `base_specs` order within a row: every rejected attempt, then the
+    /// chain's final start as `accepted` or `refused`.
     pub fn records(&self, base_specs: &[EstimatedParam]) -> Vec<ChainStartRecord> {
         let per_chain = self.to_estimated_params(base_specs);
-        per_chain
-            .iter()
-            .enumerate()
-            .map(|(chain_id, specs)| ChainStartRecord {
+        let mut rows = Vec::new();
+        for (chain_id, specs) in per_chain.iter().enumerate() {
+            for r in self.rejected.iter().filter(|r| r.chain_id == chain_id) {
+                rows.push(ChainStartRecord {
+                    chain_id,
+                    attempt: r.attempt,
+                    status: "rejected",
+                    source: source_label(&self.rule, chain_id),
+                    values: base_specs
+                        .iter()
+                        .map(|s| r.values.get(&s.name).copied().unwrap_or(s.initial))
+                        .collect(),
+                    ess: r.ess,
+                    reason: r.reason.clone(),
+                });
+            }
+            let refused = self.refused.contains(&chain_id);
+            rows.push(ChainStartRecord {
                 chain_id,
+                attempt: self.attempts_before(chain_id),
+                status: if refused { "refused" } else { "accepted" },
                 source: source_label(&self.rule, chain_id),
                 values: specs.iter().map(|s| s.initial).collect(),
-            })
-            .collect()
+                ess: None,
+                reason: String::new(),
+            });
+        }
+        rows
     }
 }
 
@@ -1003,9 +1148,11 @@ pub fn write_chain_starts_tsv(
     let tmp = path.with_extension("tsv.tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
+        let n_chains = records.iter().map(|r| r.chain_id + 1).max().unwrap_or(0);
+        let n_retried = records.iter().filter(|r| r.status == "rejected").count();
         // Comment header — stable, machine-parseable.
-        writeln!(f, "# camdl chain_starts; starts={}; chains={}; kind={}",
-            rule.spelled(), records.len(), rule.kind().as_str())?;
+        writeln!(f, "# camdl chain_starts; starts={}; chains={}; kind={}; retried={}",
+            rule.spelled(), n_chains, rule.kind().as_str(), n_retried)?;
         // What the numbers are, for a reader holding only this file.
         writeln!(f, "# each chain's starting point, captured before the \
             sampler ran; an IF2 run")?;
@@ -1014,15 +1161,31 @@ pub fn write_chain_starts_tsv(
         writeln!(f, "# values that have already moved.")?;
         writeln!(f, "# chain_id is 0-based; that chain's outputs are under \
             chain_<chain_id + 1>/.")?;
+        writeln!(f, "# status: accepted = the start the chain ran from; \
+            rejected = a draw the filter")?;
+        writeln!(f, "# could not score, so a fresh one was drawn (gh#887); \
+            refused = the last attempt,")?;
+        writeln!(f, "# also unscoreable, so the chain did not run. ess is \
+            the filter's ESS at refusal.")?;
         // Header row.
-        let mut cols = vec!["chain_id".to_string(), "source".to_string()];
+        let mut cols = vec![
+            "chain_id".to_string(), "attempt".to_string(), "status".to_string(),
+            "source".to_string(),
+        ];
         for spec in base { cols.push(spec.name.clone()); }
+        cols.push("ess".to_string());
+        cols.push("reason".to_string());
         writeln!(f, "{}", cols.join("\t"))?;
         for rec in records {
-            let mut fields = vec![rec.chain_id.to_string(), rec.source.clone()];
+            let mut fields = vec![
+                rec.chain_id.to_string(), rec.attempt.to_string(),
+                rec.status.to_string(), rec.source.clone(),
+            ];
             for v in &rec.values {
                 fields.push(format_float_for_tsv(*v));
             }
+            fields.push(rec.ess.map(|e| format!("{e:.3}")).unwrap_or_default());
+            fields.push(rec.reason.replace(['\t', '\n'], " "));
             writeln!(f, "{}", fields.join("\t"))?;
         }
     }
@@ -1317,6 +1480,116 @@ mod tests {
     }
 
     // ─── `from_posterior` ──────────────────────────────────────────────
+
+    // ─── gh#887: the bounded retry's seam ────────────────────────────────
+
+    /// A point rule has nothing to redraw; the bounds-based spread rules fall
+    /// back to the base point at one chain, so there is nothing new there
+    /// either; every other spread rule admits a fresh draw.
+    #[test]
+    fn can_redraw_is_a_property_of_the_rule_and_the_chain_count() {
+        assert!(!can_redraw(&ChainStarts::Point(Point::Declared), 4));
+        assert!(!can_redraw(&ChainStarts::Point(Point::FromMle { source: super::super::starts::Handle("@a".into()) }), 4));
+        assert!(!can_redraw(&ChainStarts::Spread(Spread::Lhs), 1));
+        assert!(!can_redraw(&ChainStarts::Spread(Spread::UniformUnconstrained), 1));
+        assert!(can_redraw(&ChainStarts::Spread(Spread::UniformUnconstrained), 2));
+        assert!(can_redraw(&ChainStarts::Spread(Spread::Lhs), 2));
+        assert!(can_redraw(&ChainStarts::Spread(Spread::FromPrior), 1));
+        assert!(can_redraw(&ChainStarts::Spread(Spread::FromPosterior { source: super::super::starts::Handle("d.tsv".into()) }), 1));
+    }
+
+    /// A redraw is a fresh draw under the same rule — a different point,
+    /// reproducible from `(seed, attempt)`, and a different one per attempt.
+    #[test]
+    fn redraw_gives_a_fresh_reproducible_point_under_the_same_rule() {
+        let resolved = mk_resolved(
+            vec![
+                mk_param("beta", 0.3, Some(ir::parameter::PriorDist::LogNormal(
+                    ir::parameter::LogNormalPrior { mu: -1.0, sigma: 0.5 })), Some((0.01, 5.0))),
+                mk_param("gamma", 0.1, Some(ir::parameter::PriorDist::LogNormal(
+                    ir::parameter::LogNormalPrior { mu: -2.0, sigma: 0.5 })), Some((0.01, 1.0))),
+            ],
+            &["beta", "gamma"],
+        );
+        let base_specs = specs_for(&resolved);
+        let priors = priors_for(&resolved);
+        let ctx = StartContext { resolved: &resolved, base_specs: &base_specs, priors: &priors };
+        for rule in [
+            ChainStarts::Spread(Spread::FromPrior),
+            ChainStarts::Spread(Spread::UniformUnconstrained),
+            ChainStarts::Spread(Spread::Lhs),
+            ChainStarts::Spread(Spread::Uniform),
+        ] {
+            let starts = ResolvedStarts::bare(rule.clone());
+            let first = draw_chain_starts(&ctx, &starts, 3, 7).unwrap();
+            for chain_id in 0..3 {
+                let a1 = redraw_chain_start(&ctx, &starts, 3, chain_id, 7, 1).unwrap();
+                let a1_again = redraw_chain_start(&ctx, &starts, 3, chain_id, 7, 1).unwrap();
+                let a2 = redraw_chain_start(&ctx, &starts, 3, chain_id, 7, 2).unwrap();
+                assert_eq!(a1.chain_id, chain_id);
+                assert_eq!(a1.values, a1_again.values, "{rule}: a redraw is reproducible");
+                assert_ne!(a1.values["beta"], first.starts[chain_id].values["beta"],
+                    "{rule} chain {chain_id}: a redraw is a different point");
+                assert_ne!(a1.values["beta"], a2.values["beta"],
+                    "{rule} chain {chain_id}: each attempt is its own draw");
+                // In bounds, like any draw under the rule.
+                assert!(a1.values["beta"] > 0.01 && a1.values["beta"] < 5.0);
+            }
+        }
+    }
+
+    /// The record carries every attempt: rejected rows first, then the
+    /// chain's final start as `accepted` or `refused`, in (chain, attempt)
+    /// order, and the writer spells the columns a reader joins on.
+    #[test]
+    fn records_and_the_writer_carry_every_attempt() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let base_specs = specs_for(&resolved);
+        let mut drawn = draw(&resolved, &ResolvedStarts::bare(ChainStarts::Spread(Spread::Lhs)), 2, 1)
+            .unwrap();
+        let redrawn = ChainStart {
+            chain_id: 1,
+            values: HashMap::from([("beta".to_string(), 0.42)]),
+            source: InitSource::LhsCell { row: 1 },
+        };
+        drawn = drawn.with_retry_outcome(
+            vec![None, Some(redrawn)],
+            vec![RejectedStart {
+                chain_id: 1, attempt: 0,
+                values: HashMap::from([("beta".to_string(), 0.99)]),
+                reason: "EssCollapsed at obs_window=3".into(), ess: Some(1.02),
+            }],
+            vec![],
+        );
+        let rows = drawn.records(&base_specs);
+        let shape: Vec<(usize, usize, &str)> = rows.iter().map(|r| (r.chain_id, r.attempt, r.status)).collect();
+        assert_eq!(shape, vec![(0, 0, "accepted"), (1, 0, "rejected"), (1, 1, "accepted")]);
+        assert_eq!(rows[1].values, vec![0.99]);
+        assert_eq!(rows[1].ess, Some(1.02));
+        assert_eq!(rows[2].values, vec![0.42], "the accepted row is the redraw");
+        assert_eq!(drawn.starts[1].values["beta"], 0.42, "the chain runs from the redraw");
+
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_chain_starts_retry_{}_{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_chain_starts_tsv(&dir, &base_specs, &drawn.rule, &rows).unwrap();
+        let text = std::fs::read_to_string(dir.join("chain_starts.tsv")).unwrap();
+        assert!(text.starts_with("# camdl chain_starts; starts=lhs; chains=2; kind=spread; retried=1\n"), "{text}");
+        let header = text.lines().find(|l| !l.starts_with('#')).unwrap();
+        assert_eq!(header, "chain_id\tattempt\tstatus\tsource\tbeta\tess\treason");
+        assert!(text.contains("1\t0\trejected\tlhs:chain-1\t0.99\t1.020\tEssCollapsed at obs_window=3"), "{text}");
+        assert!(text.contains("1\t1\taccepted\tlhs:chain-1\t0.42\t\t\n"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // A chain whose last attempt failed too is `refused`.
+        let refused = drawn.clone().with_retry_outcome(vec![None, None], vec![], vec![1]);
+        let rows = refused.records(&base_specs);
+        assert_eq!(rows.iter().find(|r| r.chain_id == 1).unwrap().status, "refused");
+    }
 
     #[test]
     fn from_posterior_samples_uniformly_with_replacement() {
@@ -1674,18 +1947,21 @@ mod tests {
         let rule = ChainStarts::Point(Point::FromMle {
             source: super::super::starts::Handle("@up".into()),
         });
-        let records = vec![
-            ChainStartRecord { chain_id: 0, source: source_label(&rule, 0), values: vec![0.25] },
-            ChainStartRecord { chain_id: 1, source: source_label(&rule, 1), values: vec![0.25] },
-        ];
+        let accepted = |chain_id: usize| ChainStartRecord {
+            chain_id, attempt: 0, status: "accepted",
+            source: source_label(&rule, chain_id), values: vec![0.25],
+            ess: None, reason: String::new(),
+        };
+        let records = vec![accepted(0), accepted(1)];
         write_chain_starts_tsv(dir.path(), &base, &rule, &records).unwrap();
         let txt = std::fs::read_to_string(dir.path().join("chain_starts.tsv")).unwrap();
         let header = txt.lines().next().unwrap();
         assert!(header.contains("starts=from_mle @up"), "{header}");
         assert!(header.contains("kind=point"), "{header}");
         let body: Vec<&str> = txt.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(body[0], "chain_id\tsource\tbeta");
-        assert_eq!(body[1], "0\tfrom_mle\t0.25");
-        assert_eq!(body[2], "1\tfrom_mle\t0.25");
+        assert!(header.ends_with("retried=0"), "{header}");
+        assert_eq!(body[0], "chain_id\tattempt\tstatus\tsource\tbeta\tess\treason");
+        assert_eq!(body[1], "0\t0\taccepted\tfrom_mle\t0.25\t\t");
+        assert_eq!(body[2], "1\t0\taccepted\tfrom_mle\t0.25\t\t");
     }
 }

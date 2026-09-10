@@ -744,6 +744,132 @@ pub fn draw_chain_starts_for(
         .map_err(|e| format!("starts = {}: {}", starts.rule.spelled(), e))
 }
 
+/// A fresh start for one chain under the resolved rule — attempt `attempt`
+/// of the bounded retry (gh#887) — through the same context
+/// [`draw_chain_starts_for`] draws with.
+pub fn redraw_chain_start_for(
+    config: &FitRunConfig,
+    estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
+    starts: &super::chain_starts::ResolvedStarts,
+    n_chains: usize,
+    chain_id: usize,
+    seed: u64,
+    attempt: usize,
+) -> Result<super::chain_starts::ChainStart, String> {
+    let resolved = super::chain_starts::build_resolved_view_for_init(
+        &config.model, &config.base_params, &config.estimated_params,
+    );
+    let priors: Vec<(String, Prior)> = config
+        .estimated_params
+        .iter()
+        .map(|s| (s.name.clone(), resolve_prior(&s.name, estimate, &config.model).0))
+        .collect();
+    let ctx = super::chain_starts::StartContext {
+        resolved: &resolved,
+        base_specs: &config.estimated_params,
+        priors: &priors,
+    };
+    super::chain_starts::redraw_chain_start(&ctx, starts, n_chains, chain_id, seed, attempt)
+        .map_err(|e| format!("starts = {}: redraw for chain {}: {}", starts.rule.spelled(), chain_id + 1, e))
+}
+
+/// The ESS a refused particle filter reached, when its refusal carries one.
+pub fn ess_at_refusal(e: &sim::error::SimError) -> Option<f64> {
+    match e {
+        sim::error::SimError::PFDegenerate {
+            kind: sim::error::PFDegenerateKind::EssCollapsed { last_ess }, ..
+        } => last_ess.last().copied(),
+        _ => None,
+    }
+}
+
+/// Score every chain's start with one filter pass before IF2 runs, and
+/// redraw a start the filter cannot score (gh#887). A spread rule is a
+/// lottery over one draw; up to [`MAX_START_ATTEMPTS`] independent draws are
+/// tried, every rejected one is recorded with its ESS, and a chain is refused
+/// only when all of them fail. A point rule has nothing to redraw and is
+/// scored once, as before, by the chain itself. Runs the chains' pre-flight in
+/// parallel; a structural error (the model cannot run) aborts the fit.
+pub fn preflight_spread_starts(
+    config: &FitRunConfig,
+    estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
+    starts: &super::chain_starts::ResolvedStarts,
+    drawn: super::chain_starts::DrawnStarts,
+    seed: u64,
+) -> Result<super::chain_starts::DrawnStarts, String> {
+    use super::chain_starts::{can_redraw, RejectedStart, MAX_START_ATTEMPTS};
+    let n_chains = drawn.starts.len();
+    if !can_redraw(&starts.rule, n_chains) {
+        return Ok(drawn);
+    }
+    let n_particles = config.if2_config.n_particles;
+    let outcomes: Vec<Result<(Option<super::chain_starts::ChainStart>, Vec<RejectedStart>, bool), String>> =
+        (0..n_chains)
+            .into_par_iter()
+            .map(|chain_id| {
+                let mut current = drawn.starts[chain_id].clone();
+                let mut rejected = Vec::new();
+                let mut attempt = 0usize;
+                loop {
+                    let params = current.to_param_vec(&config.estimated_params, &config.base_params);
+                    let score_seed = crate::util::derive_chain_seed(seed ^ 0x5ca1_ab1e, chain_id)
+                        .wrapping_add(attempt as u64);
+                    match run_quick_pfilter_with_dt(config, &params, n_particles, None, score_seed) {
+                        Ok(_) => {
+                            let accepted = if attempt > 0 { Some(current) } else { None };
+                            return Ok((accepted, rejected, false));
+                        }
+                        Err(e @ sim::error::SimError::PFDegenerate { .. }) => {
+                            let reason = match &e {
+                                sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
+                                    format!("{:?} at obs_window={} after {:.2}s", kind, obs_window, elapsed_s),
+                                _ => unreachable!(),
+                            };
+                            let ess = ess_at_refusal(&e);
+                            rejected.push(RejectedStart {
+                                chain_id, attempt,
+                                values: current.values.clone(),
+                                reason: reason.clone(), ess,
+                            });
+                            if attempt + 1 >= MAX_START_ATTEMPTS {
+                                eprintln!(
+                                    "  chain {}: \x1b[31m✗ refused\x1b[0m — none of {} starts drawn \
+                                     under `starts = {}` could be scored by the filter (last: {}); \
+                                     see chain_starts.tsv for every attempt",
+                                    chain_id + 1, MAX_START_ATTEMPTS, starts.rule.spelled(), reason);
+                                return Ok((Some(current), rejected, true));
+                            }
+                            eprintln!(
+                                "  chain {}: start {} of {} refused by the filter ({}); drawing another",
+                                chain_id + 1, attempt + 1, MAX_START_ATTEMPTS, reason);
+                            attempt += 1;
+                            current = redraw_chain_start_for(
+                                config, estimate, starts, n_chains, chain_id, seed, attempt,
+                            )?;
+                        }
+                        Err(other) => {
+                            return Err(format!(
+                                "chain {} start pre-flight failed with structural error: {}",
+                                chain_id + 1, other));
+                        }
+                    }
+                }
+            })
+            .collect();
+    let mut accepted = Vec::with_capacity(n_chains);
+    let mut rejected = Vec::new();
+    let mut refused = Vec::new();
+    for (chain_id, o) in outcomes.into_iter().enumerate() {
+        let (acc, rej, was_refused) = o?;
+        accepted.push(acc);
+        rejected.extend(rej);
+        if was_refused {
+            refused.push(chain_id);
+        }
+    }
+    Ok(drawn.with_retry_outcome(accepted, rejected, refused))
+}
+
 /// Write `chain_starts.tsv` for a drawn set — the one sidecar writer every
 /// multi-chain sampler calls. Best-effort: a failure is reported, never
 /// fatal, since the file is an audit artifact and not an input.

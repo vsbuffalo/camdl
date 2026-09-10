@@ -304,8 +304,15 @@ pub fn run_stage(
     std::fs::create_dir_all(stage_dir)
         .map_err(|e| format!("cannot create {}: {}", stage_dir.display(), e))?;
 
-    // The audit sidecar, captured before any step runs.
+    // The audit sidecar, captured before any step runs; rewritten after the
+    // chains finish with every start a retry rejected (gh#887).
     super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
+        std::sync::Mutex::new(vec![None; n_chains]);
+    let retry_rejected: std::sync::Mutex<Vec<super::chain_starts::RejectedStart>> =
+        std::sync::Mutex::new(Vec::new());
+    let retry_refused: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+    let can_redraw = super::chain_starts::can_redraw(&starts.rule, n_chains);
 
     // Resolve priors: fit.toml override → model IR → Flat
     let priors: Vec<Prior> = config.estimated_params.iter()
@@ -417,6 +424,9 @@ pub fn run_stage(
         .into_par_iter()
         .map(|chain_id| -> Result<Option<(usize, PMMHResult)>, String> {
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
+            // gh#887: the start this chain runs from — the draw, or a redraw
+            // the init-eval guard below accepted after refusing earlier ones.
+            let mut start_vec = chain_starts[chain_id].clone();
 
             // gh#110 init-eval guard. Run a single PF at the chain's
             // starting θ to verify it isn't in the PF-degenerate
@@ -478,27 +488,67 @@ pub fn run_stage(
                     }
                 }
             } else if resume_states[chain_id].is_none() {
-                match runner::run_quick_pfilter_with_dt(
-                    &config, &chain_starts[chain_id],
-                    n_particles, None, chain_seed,
+                let mut attempt = 0usize;
+                loop { match runner::run_quick_pfilter_with_dt(
+                    &config, &start_vec,
+                    n_particles, None, chain_seed.wrapping_add(attempt as u64),
                 ) {
-                    Err(e @ sim::error::SimError::PFDegenerate { .. }) => {
-                        // A statistically-degenerate init (ESS collapse / all
-                        // particles dead) is skipped with a BadInit diagnostic;
-                        // the surviving chains continue. (PFIterationBudget is a
-                        // deterministic compute-budget bail → structural/fatal,
-                        // handled by the structural arm.)
+                    Err(e @ sim::error::SimError::PFDegenerate { .. })
+                        if can_redraw && attempt + 1 < super::chain_starts::MAX_START_ATTEMPTS =>
+                    {
                         let reason = match &e {
                             sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
                                 format!("{:?} at obs_window={} after {:.2}s",
                                     kind, obs_window, elapsed_s),
                             _ => unreachable!(),
                         };
+                        let values: std::collections::HashMap<String, f64> = config
+                            .estimated_params.iter()
+                            .map(|spec| (spec.name.clone(), start_vec[spec.index]))
+                            .collect();
+                        retry_rejected.lock().unwrap().push(super::chain_starts::RejectedStart {
+                            chain_id, attempt, values, reason: reason.clone(),
+                            ess: runner::ess_at_refusal(&e),
+                        });
+                        eprintln!(
+                            "  chain {}: start {} of {} refused by the filter ({}); drawing another",
+                            chain_id + 1, attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
+                            reason);
+                        attempt += 1;
+                        let cs = super::runner::redraw_chain_start_for(
+                            &config, estimate, starts, n_chains, chain_id, seed, attempt,
+                        )?;
+                        start_vec = cs.to_param_vec(&config.estimated_params, &config.base_params);
+                        retry_accepted.lock().unwrap()[chain_id] = Some(cs);
+                        continue;
+                    }
+                    Err(e @ sim::error::SimError::PFDegenerate { .. }) => {
+                        if attempt > 0 {
+                            retry_refused.lock().unwrap().push(chain_id);
+                        }
+                        // A statistically-degenerate init (ESS collapse / all
+                        // particles dead) is skipped with a BadInit diagnostic;
+                        // the surviving chains continue. (PFIterationBudget is a
+                        // deterministic compute-budget bail → structural/fatal,
+                        // handled by the structural arm.)
+                        let tried = if attempt > 0 {
+                            format!("none of {} starts drawn under `starts = {}` could be \
+                                     scored by the filter; the last: ",
+                                attempt + 1, starts.rule.spelled())
+                        } else {
+                            String::new()
+                        };
+                        let reason = match &e {
+                            sim::error::SimError::PFDegenerate { kind, obs_window, elapsed_s } =>
+                                format!("{}{:?} at obs_window={} after {:.2}s",
+                                    tried, kind, obs_window, elapsed_s),
+                            _ => unreachable!(),
+                        };
                         let params: std::collections::BTreeMap<String, f64> =
                             config.estimated_params.iter()
                                 .map(|spec| (
                                     spec.name.clone(),
-                                    chain_starts[chain_id][spec.index],
+                                    start_vec[spec.index],
                                 ))
                                 .collect();
                         // A PF degeneracy, not a swarm that lost support at
@@ -530,8 +580,9 @@ pub fn run_stage(
                         // initial loglik — PMMH can proceed. PMMH's
                         // MH ratio handles uninformative inits via
                         // the standard accept/reject path.
+                        break;
                     }
-                }
+                } }
             }
 
             let pmmh_config = PMMHConfig {
@@ -685,7 +736,7 @@ pub fn run_stage(
             // (config/model can't run); a ruled-out θ is handled internally as
             // a rejected −∞ proposal, so `run_pmmh` only `Err`s on structural.
             let result = run_pmmh(
-                &config.estimated_params, &priors, &chain_starts[chain_id],
+                &config.estimated_params, &priors, &start_vec,
                 &config.param_names,
                 &pmmh_config, &config.observations, eval_loglik.as_ref(), eval_corr_ref, chain_seed,
                 Some(&progress_cb), resume_states[chain_id].clone(), config_hash.clone(),
@@ -714,6 +765,17 @@ pub fn run_stage(
     // consumes, so it can't run on the per-chain borrow inside the loop). The
     // `acceptance rates:` report below carries the per-chain summary.
     for t in bars { t.finish(); }
+
+    // gh#887: the sidecar now records every start a retry rejected, and the
+    // start each chain actually ran from.
+    let drawn = drawn.with_retry_outcome(
+        retry_accepted.into_inner().unwrap(),
+        retry_rejected.into_inner().unwrap(),
+        retry_refused.into_inner().unwrap(),
+    );
+    if !drawn.rejected.is_empty() {
+        super::runner::record_chain_starts(stage_dir, &config, &drawn);
+    }
 
     // gh#110. Skip + continue: surface "ran K of N chains" so the
     // user knows downstream R̂/ESS exclude skipped chains. This
