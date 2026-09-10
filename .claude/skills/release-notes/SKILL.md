@@ -58,7 +58,12 @@ Write to `RELEASE_NOTES-<version>.md` (or stdout if asked), in this order:
 - <the 3–5 things a user actually cares about, one line each>
 
 ## Breaking changes
-- <surface that changed + the exact migration step. Omit the section if none.>
+- <surface that changed + the exact migration step, in the terms of a `.camdl`
+  or `fit.toml` author. Omit the section if none.>
+
+## Run identity
+- <which stored runs recompute and why — a change to how a fit, simulation, or
+  IR is keyed means a cached run is a cache miss, not lost data. Omit if none.>
 
 ## Language (DSL)
 ## CLI
@@ -71,6 +76,13 @@ Write to `RELEASE_NOTES-<version>.md` (or stdout if asked), in this order:
 Rules:
 
 - Group by **user-relevant area**, not by commit type.
+- The notes are read by two audiences and written for both: the modeller who
+  owns a `.camdl` and a `fit.toml`, and the agent that maintains them on the
+  modeller's behalf. A breaking change is stated as what _they_ must change,
+  never as what the code did.
+- The first release's notes open by marking the break from the pre-release
+  history: everything before it is unversioned, and from it onward every release
+  states the breaking changes a model owner must act on.
 - Every breaking change gets a concrete migration line ("rename
   `--focal X --grid …` to `--sweep "X=lin(…)"`").
 - Cite the surface, not the SHA, in the body; a trailing "Full changelog:
