@@ -184,6 +184,20 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     }
 }
 
+/// The two ways to attach a label, as the hint prints them: at fit time, and
+/// afterwards on a stored run.
+///
+/// This is the only labelling guidance camdl volunteers, and it goes to
+/// exactly the users who were about to label something — so each line has to
+/// be a command that exists. `camdl fit label` was not one (gh#701); the
+/// labeller is top-level `camdl label`, which works on any kind of run, not
+/// just a fit. `unlabelled_hint_commands_parse` runs both through the real
+/// command tree so a rename cannot leave this printing a command again.
+pub(crate) const UNLABELLED_HINT_COMMANDS: [&str; 2] = [
+    "camdl fit run --label \"<short description>\" fit.toml",
+    "camdl label <hash> \"<short description>\"",
+];
+
 /// Emit a one-line stderr hint when the count of unlabelled fits in
 /// the rendered output reaches the user's threshold. The threshold
 /// reads from `CAMDL_UNLABELED_THRESHOLD` (default 5). Setting the
@@ -200,9 +214,62 @@ pub(crate) fn emit_unlabelled_warning(unlabelled_count: usize) {
     eprintln!();
     eprintln!("note: {} unlabelled fit{} in output. Add labels with:",
         unlabelled_count, if unlabelled_count == 1 { "" } else { "s" });
-    eprintln!("        camdl fit run --label \"<short description>\" fit.toml");
-    eprintln!("        camdl fit label <hash> \"<short description>\"");
+    for cmd in UNLABELLED_HINT_COMMANDS {
+        eprintln!("        {cmd}");
+    }
     eprintln!("      Set CAMDL_UNLABELED_THRESHOLD=0 to disable this hint.");
+}
+
+#[cfg(test)]
+mod unlabelled_hint_tests {
+    use super::UNLABELLED_HINT_COMMANDS;
+    use clap::Parser;
+
+    /// Split a printed command line into argv, keeping a `"…"` run as one
+    /// token and filling the placeholders with something concrete.
+    fn argv(line: &str) -> Vec<String> {
+        let filled = line
+            .replace("<short description>", "a short description")
+            .replace("<hash>", "0a1b2c3d");
+        let mut out: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut quoted = false;
+        for c in filled.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => {
+                    if !cur.is_empty() { out.push(std::mem::take(&mut cur)); }
+                }
+                _ => cur.push(c),
+            }
+        }
+        if !cur.is_empty() { out.push(cur); }
+        out
+    }
+
+    /// gh#701: every command the hint names must be one the binary has.
+    /// It printed `camdl fit label <hash> "…"`, which is not a subcommand —
+    /// the labeller is top-level `camdl label` — so the one place camdl
+    /// volunteers help gave an instruction that fails.
+    #[test]
+    fn unlabelled_hint_commands_parse() {
+        for line in UNLABELLED_HINT_COMMANDS {
+            let args = argv(line);
+            assert_eq!(args.first().map(String::as_str), Some("camdl"),
+                "each hint line is a full invocation: {line}");
+            crate::Cli::try_parse_from(&args).unwrap_or_else(|e| panic!(
+                "the hint tells the user to run `{line}`, which does not parse:\n{e}"));
+        }
+    }
+
+    /// Non-vacuity: the harness above really does reject a command that does
+    /// not exist — `camdl fit label` is what the hint used to print.
+    #[test]
+    fn the_hint_harness_rejects_a_command_that_does_not_exist() {
+        let args = argv("camdl fit label <hash> \"<short description>\"");
+        assert!(crate::Cli::try_parse_from(&args).is_err(),
+            "`camdl fit label` must not parse — it is the defect gh#701 reported");
+    }
 }
 
 /// Load the fit.toml archived inside `<fit_dir>/fit.toml.original`.
