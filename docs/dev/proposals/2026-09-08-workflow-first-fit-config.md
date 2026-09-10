@@ -41,11 +41,13 @@ reads. The first half is the _problem_: model, data, the estimate/fixed
 partition, scenario, simulator settings. The second is one _method_
 (`[method]`): one algorithm with its knobs and a typed chain-starts policy. A
 file is one (problem, method) pair; a second way of fitting the same problem is
-a second file, and the store groups the two under one fit-level directory
-because that level hashes the problem alone. The store already factors this way
-— the fit-level digest excludes `[stages.*]` (`fit/cas.rs:5-8`) and the stage
-level is the method — so the config is being brought into line with the identity
-model, not the other way round.
+a second file. The two share the fit-level hash, which is computed from the
+problem alone, and sit in sibling store segments labelled by their file stems —
+which is what lets a per-file `--label` or `@handle` resolve to exactly one
+leaf. The store already factors this way — the fit-level digest excludes
+`[stages.*]` (`fit/cas.rs:5-8`) and the stage level is the method — so the
+config is being brought into line with the identity model, not the other way
+round.
 
 In-file chaining (`init_mle = "<stage>"`) is removed. Warm-starting stays, as an
 explicit `starts = { from_posterior = "@handle" }` (one posterior draw per
@@ -428,10 +430,11 @@ sweeps = 300
 ```
 
 The comparator is a second file with the same problem half — `fit-if2.toml`,
-say, with `[method] algorithm = "if2"` — and the store puts both under one
-`fit-<h>/` directory because that level hashes the problem alone. A file with no
-`[method]` at all is a complete problem and loads for every non-fit reader. Warm
-starts, when wanted, are written where they are used and say what they are:
+say, with `[method] algorithm = "if2"` — and the two share the fit-level hash
+(computed from the problem alone) in sibling segments labelled by file stem, so
+each resolves by its own handle. A file with no `[method]` at all is a complete
+problem and loads for every non-fit reader. Warm starts, when wanted, are
+written where they are used and say what they are:
 
 ```toml
 [method]
@@ -510,26 +513,27 @@ and positional on `fit run`, two spellings of one argument.
 
 ### 3.4 Chain starts: spread, point, and what the summary says
 
-The default is `from_prior` whenever every estimated parameter declares a prior,
-and `uniform_unconstrained` — an independent draw per chain on the unconstrained
-scale (Stan's initialization, described at §11.2, p. 195) — otherwise. The
-reason is measured (gh#876): a bounds-uniform draw at province scale is
-routinely a start the bootstrap filter cannot score, because a fixed relative
-error in a rate is a standardised residual that grows with the square root of
-the population, and wide bounds carry no scale. A prior does. A chain whose
-start cannot be scored is still refused (gh#887 records the bounded-retry
-follow-up); the default just stops manufacturing the case. The two spread
-warm-starts are the ones the workflow text endorses. Starting from posterior
-draws is the book's own recommendation for a hard posterior — run an approximate
-algorithm first and use its draws to initialize ("one way to obtain good
-starting points for HMC is to first run a variational algorithm to get near the
-typical set", §11.2, p. 196; the same move with Pathfinder in §12.3, p. 218: run
-many chains from different initial values to find modes, then start fewer chains
-from the found modes). `from_prior` constrains starts "to be within a reasonable
-region as determined by the prior", which §12.5 (p. 234) lists as the legitimate
-refinement of an initialization scheme once the geometry is understood. Both
-keep one independent draw per chain, so the between-chain comparison R̂ makes is
-still a comparison.
+The default is `from_prior` whenever every estimated parameter declares a prior
+— drawn from the prior the fit scores against, a `[estimate].prior` in the file
+over the model's `~` declaration — and `uniform_unconstrained` — an independent
+draw per chain on the unconstrained scale (Stan's initialization, described at
+§11.2, p. 195) — otherwise. The reason is measured (gh#876): a bounds-uniform
+draw at province scale is routinely a start the bootstrap filter cannot score,
+because a fixed relative error in a rate is a standardised residual that grows
+with the square root of the population, and wide bounds carry no scale. A prior
+does. A chain whose start cannot be scored is still refused (gh#887 records the
+bounded-retry follow-up); the default just stops manufacturing the case. The two
+spread warm-starts are the ones the workflow text endorses. Starting from
+posterior draws is the book's own recommendation for a hard posterior — run an
+approximate algorithm first and use its draws to initialize ("one way to obtain
+good starting points for HMC is to first run a variational algorithm to get near
+the typical set", §11.2, p. 196; the same move with Pathfinder in §12.3, p. 218:
+run many chains from different initial values to find modes, then start fewer
+chains from the found modes). `from_prior` constrains starts "to be within a
+reasonable region as determined by the prior", which §12.5 (p. 234) lists as the
+legitimate refinement of an initialization scheme once the geometry is
+understood. Both keep one independent draw per chain, so the between-chain
+comparison R̂ makes is still a comparison.
 
 A point start is kept as an explicit escape hatch — it is the right tool for
 continuing an optimizer, for reproducing a specific run, and for a deterministic
@@ -846,8 +850,8 @@ option. It buys the problem half being written once, and costs a `--method` flag
 on every verb that takes a config, a search in `fit predict` for the one leaf
 holding a posterior cloud — the terminal-stage rule under a new key — and a
 shape that reads as a pipeline after the text says it is not. The common case is
-one method; the comparison case is a second file, and the fit-level hash groups
-the two.
+one method; the comparison case is a second file; the two share the fit-level
+hash in sibling segments.
 
 **E. Workflow steps as config entries — a `[checks]` table or new `Stage`
 variants.** Every check's parameters (`n`, seed, rejection rule) would enter the
