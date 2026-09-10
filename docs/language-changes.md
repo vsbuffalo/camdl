@@ -13,6 +13,81 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-09-09 — a projection may divide two flow sums; a projection that divides transition rates is refused
+
+**What.** A stream that measures "of this window's events, what fraction were of
+kind A" — community deaths among classified deaths, positives among tests,
+deaths among cases — is the ratio of two flows accumulated over the same window.
+It now compiles: `projected` accepts exactly one division whose two sides are
+each a unit-weighted flow sum (a single `incidence(tr)`, added terms, or
+`sum(v in dim, incidence(tr[v]))`), and lowers to the new `flow_ratio` IR
+projection. The stream is interval-valued — it declares `covers` like any
+incidence stream (E350 without it) — and dimensionless, so it pairs with
+`binomial`, `beta_binomial`, `beta` and `bernoulli`; a count family refuses it
+(E304). A window in which no denominator event occurred projects `NaN`: a row
+with `n = 0` scores exactly `0`, a row with `n > 0` is refused and the refusal
+names the argument.
+
+Two things tighten in the same change. A projection that divides transition
+_rates_ — `mu_c * I / (mu_c * I + mu_f * H)`, the only spelling that compiled
+before — is an instantaneous hazard ratio read at the row's time label, not the
+share of the window's events. It fitted without complaint and was 7–27 % below
+the window fraction on a simulated epidemic, worst at the peak. It is now
+**E352**, which names both spellings. And a `where` guard that prunes every
+level of one side of a ratio is **E351** rather than a silent `x / 0`.
+
+**Migration.** Old, an instant reading that fitted silently:
+
+```camdl
+comm_frac {
+  columns     { time : time, comm_deaths : count, n_deaths : count }
+  projected   = mu_c * I / (mu_c * I + mu_f * H)
+  comm_deaths ~ binomial(n = n_deaths, p = projected)
+}
+```
+
+New, the fraction of the window's events — the likelihood line does not move,
+and `covers` is the one new line (which day a weekly label names: spec §12.1.1):
+
+```camdl
+comm_frac {
+  columns     { time : time, comm_deaths : count, n_deaths : count }
+  covers      = ending_on(time, 7 'days)
+  projected   = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+  comm_deaths ~ binomial(n = n_deaths, p = projected)
+}
+```
+
+If the instantaneous hazard ratio really is the quantity meant, say so —
+`projected = prevalence(mu_c * I / (mu_c * I + mu_f * H))` — and declare no
+`covers`.
+
+A term in the rate ratio that is not a transition's rate — an import rate `iota`
+added to a hazard, say — has no flow to accumulate. Give it a transition of its
+own (`import_deaths : --> Dc @ iota` accumulates as `incidence(import_deaths)`
+on both sides), or drop it if it was only there to keep the denominator away
+from zero: a zero denominator is scored as `NaN` under the rule above, not
+divided by zero.
+
+**Diagnostic.** The old spelling is refused, with the two replacements in the
+hint:
+
+```
+error[E352]: observation 'comm_frac': `projected` divides transition rates — `mu_c * I` is
+  the rate of `die_comm`, `mu_f * H` is the rate of `die_fac` — so it is read at the row's
+  instant, not accumulated over its window
+  = hint: if the column is the fraction of the window's events, write the flows and declare `covers`:
+              projected = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+          if you mean the instantaneous ratio of hazards, say so:
+              projected = prevalence(mu_c * I / (mu_c * I + mu_f * H))
+```
+
+Everything else E341 refused stays refused, by name: a weight on either side
+(`rho * incidence(a) / …`), a state read on either side (`incidence(a) / N`), a
+constant numerator, subtraction inside a side, and a second division.
+
+---
+
 ## 2026-09-06 — `condition_from` and W329 are removed
 
 **What.** The `fit.toml` key `condition_from` — a string or a per-stream table,

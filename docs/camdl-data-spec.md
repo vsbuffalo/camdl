@@ -771,6 +771,41 @@ no separate setting for that boundary — the declaration alone places the first
 bin. A first period that opens before `simulate.from` is an error, since that
 time is never simulated.
 
+### A fraction of the window's events
+
+A column that reports "of this window's events, how many were of one kind" —
+community deaths among the week's classified deaths, positives among tests — is
+a ratio of two counts accumulated over the same window, and the stream that
+scores it accumulates both: `projected` divides one flow sum by another, and the
+row's period is declared exactly as for a count. The denominator is a column the
+file supplies; the model's own denominator enters through `projected`, not
+through `n`.
+
+```camdl data-example=death-fraction preamble=deaths
+comm_frac {
+  columns     { week_ending : time, comm_deaths : count, n_deaths : count }
+  covers      = ending_on(week_ending, 7 'days)
+  projected   = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+  comm_deaths ~ binomial(n = n_deaths, p = projected)
+}
+```
+
+```tsv data-example=death-fraction
+week_ending	comm_deaths	n_deaths
+2026-07-07	3	5
+2026-07-14	9	17
+2026-07-21	0	0
+2026-07-28	14	41
+```
+
+The row for the week ending 21 July classified no deaths. It is not a hole:
+`n_deaths = 0` is an observation, and it scores exactly `0` whatever fraction
+the model produces, because a binomial with no trials has one possible outcome.
+A row with `n_deaths > 0` in a window where a trajectory produced no deaths at
+all is refused for that trajectory — the data recorded classified deaths where
+the model made none — and the refusal names the argument. That is the model
+disagreeing with the row, not a data error, so it is not softened.
+
 ## Missing observations: `NA` is a hole, not a zero
 
 In an **observation** file, the token `NA` in a value column marks a **hole**: a

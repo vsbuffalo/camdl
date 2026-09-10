@@ -1,0 +1,50 @@
+# Base: none — root model
+# Adds: nothing — this is a context for the data spec's examples, not a
+#   modelling claim
+# Changes: nothing else
+#
+# What this model is
+# ------------------
+# The smallest model a proportion-of-deaths stream can be attached to:
+# susceptible (S), infectious (I), hospitalised (H), and two absorbing death
+# compartments — deaths in the community (Dc) and in a facility (Df). An
+# infectious person is hospitalised (`hospitalise`) or dies in the community
+# (`die_comm`); a hospitalised person dies in the facility (`die_fac`).
+# `origin` maps 1 July 2026 to model time t = 0, so an example file can state
+# its times as ISO dates.
+#
+# What it is fitted to
+# --------------------
+# Nothing by itself. It carries no `observations { }` block: the data-spec
+# example harness (`tests/data_spec_examples.rs`) appends the stream the
+# document declares, so each documented file is bound under the declaration
+# the document prints beside it. The parameters in `deaths.params.toml` are
+# whatever makes the run finite; no number here is an estimate.
+
+time_unit = 'days
+origin    = date("2026-07-01")
+
+compartments { S, I, H, Dc, Df }
+
+parameters {
+  beta : rate in [0.001, 5.0]
+  eta  : rate in [0.01, 1.0]
+  mu_c : rate in [0.001, 0.5]
+  mu_f : rate in [0.001, 0.5]
+}
+
+let N = S + I + H
+
+transitions {
+  infection   : S --> I  @ beta * S * I / N
+  hospitalise : I --> H  @ eta * I
+  die_comm    : I --> Dc @ mu_c * I
+  die_fac     : H --> Df @ mu_f * H
+}
+
+init { S = 4000  I = 20 }
+
+simulate {
+  from = 0 'days
+  to   = 60 'days
+}

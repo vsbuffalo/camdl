@@ -297,6 +297,18 @@ Two traps that follow:
   the stream is `k / n`, fill `n` with `1` (or any positive value) on the `NA`
   rows. The observation is `NA` so the denominator is never read, but a `0`
   there can still reach a division depending on how the projection is written.
+- **A fraction of the window's events is a ratio of flows, not of rates.** If
+  the column is "of the week's classified deaths, how many were in the
+  community", write
+  `projected = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))`
+  with a `covers` line, and score it with
+  `binomial(n = n_deaths, p = projected)` where `n_deaths` is the file's
+  denominator. The ratio of the two transitions' _rates_
+  (`mu_c * I / (mu_c * I + mu_f * H)`) is a different quantity — the hazard
+  share at one instant, which sat 7–27 % below the window fraction on a
+  simulated epidemic — and the compiler refuses it (E352) unless it is spelled
+  `prevalence(...)`. A weekly ratio and a weekly count over its denominator are
+  two streams and two pieces of evidence, not a double count.
 - **`NA` is not a null token in every tool.** polars does not parse it as null
   by default, so one `NA` turns a numeric column into a string column, and a
   plotting library will then draw those strings at the axis baseline — holes

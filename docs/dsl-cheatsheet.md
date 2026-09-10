@@ -292,6 +292,8 @@ The compiler issues E-codes with source locations and fix-hints.
 | E347 | obs      | a stream declares its temporal columns twice or by half (`: time` plus window columns, half a pair) |
 | E348 | obs      | `covers` or window columns on a `prevalence(...)` / state-reading stream                            |
 | E350 | obs      | an `incidence(...)` stream with neither `covers = …` nor `window_start`/`window_stop`               |
+| E351 | obs      | a side of a ratio of flows names no flow after its `where` guard pruned every level                 |
+| E352 | obs      | `projected` divides transition rates — an instant reading; write the flows or `prevalence(…)`       |
 | E220 | date     | `date(...)` without `origin` declared                                                               |
 | E300 | dim      | transition rate not P·T⁻¹                                                                           |
 | E301 | dim      | non-dimensionless argument to `exp`/`log`                                                           |
@@ -359,6 +361,16 @@ before assuming the language doesn't do something — it usually does.
 
 ## Recent and incoming changes
 
+- **A fraction of the window's events** (proposal 2026-09-09) — `projected`
+  accepts one division of one flow sum by another:
+  `incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))` is the
+  share of the week's deaths that were in the community, accumulated over the
+  row's window, declares `covers` like any incidence stream, and pairs with
+  `binomial(n = n_deaths, p = projected)`, `beta_binomial`, `beta` or
+  `bernoulli`. The ratio of the two transitions' _rates_ is a different quantity
+  (the hazard share at one instant) and is now **E352**; write it
+  `prevalence(...)` if it is what you mean. See spec §12.1 and
+  `camdl docs language-changes`.
 - **`covers`** (gh#833) — an incidence stream states the period each row covers,
   right after its `columns { }`: `covers = day(time)`,
   `starting_on(time, 7 'days)`, `ending_on(time, 7 'days)` (the label is the

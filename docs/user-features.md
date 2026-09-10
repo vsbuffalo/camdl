@@ -624,6 +624,24 @@ observations {
 }
 ```
 
+A proportion reported over a window — of the week's classified deaths, how many
+were in the community — is a ratio of two flows accumulated over the same
+window, and is written as one:
+
+```camdl
+comm_frac {
+  columns     { time : time, comm_deaths : count, n_deaths : count }
+  covers      = ending_on(time, 7 'days)
+  projected   = incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+  comm_deaths ~ binomial(n = n_deaths, p = projected)
+}
+```
+
+The denominator the file supplies (`n_deaths`) is conditioned on; the model's
+own denominator enters through `projected`. A ratio of the two transitions'
+rates is the hazard share at one instant, not the week's fraction, and the
+compiler refuses it (E352) unless it is spelled `prevalence(...)`.
+
 Observation-model parameters (`rho`, `k` here, and parameters inside a derived
 projection such as `qgam * prevalence`) are estimated by gradient-based NUTS on
 the same footing as transition-rate and overdispersion parameters: the compiler

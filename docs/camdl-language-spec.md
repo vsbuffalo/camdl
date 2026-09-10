@@ -2844,14 +2844,47 @@ cell; `infection[patch = north, age = child]` names `infection_north_child`.
 and none is `E250`. To observe two flows as one column, **add the terms** —
 `incidence(a) + incidence(b)` lowers to a single `CumulativeFlowSum` over both
 — or pool strata of a single family with `sum(a in dim, incidence(tr[a]))`. The
-two spellings compose and flatten into one flow list; see "Projections" in §16
-for the lowering. Addition is the only arithmetic a projection admits over
-incidence terms: weighting a term, subtracting one, or mixing one with an
-instant state read is `E341`, and a per-stream reporting rate belongs in the
-likelihood (`cases ~ poisson(rate = rho * projected)`). `prevalence(...)`
-differs on arity: several arguments desugar to their sum
-(`prevalence(X1, X2)` is `prevalence(X1 + X2)`), because a compartment
-population is an expression leaf and a flow is not.
+two spellings compose and flatten into one flow list; see "Projections" in §25
+for the lowering. A projection admits two operations over incidence terms:
+addition, and **one division of one such sum by another** —
+`incidence(a) / (incidence(a) + incidence(b))` is the fraction of the row's
+events that were of kind `a`, a ratio of two flows accumulated over the same
+window, and lowers to `FlowRatio` (§25.4). The temporal kind of a projection is
+decided by its leaves, not its operator: all-flow leaves accumulate over the
+row's period, all-state leaves are read at an instant, and mixing them is
+`E341`. So is weighting a term, subtracting one, dividing by a constant or a
+state, or dividing twice; a per-stream reporting rate belongs in the likelihood
+(`cases ~ poisson(rate = rho * projected)`). A side of a ratio whose `where`
+guard prunes every level is `E351`. `prevalence(...)` differs on arity: several
+arguments desugar to their sum (`prevalence(X1, X2)` is `prevalence(X1 + X2)`),
+because a compartment population is an expression leaf and a flow is not.
+
+A ratio of two accumulated counts is dimensionless, so a `FlowRatio` stream
+pairs with `binomial`'s `p`, `beta_binomial`'s mean, `beta`'s `mean` and
+`bernoulli`'s `p`, and a count family (`poisson`, `neg_binomial`) refuses it
+(`E304`). When no denominator event occurred in a window the fraction is
+undefined and the projection is `NaN`: under `binomial`/`beta_binomial` a row
+with `n = 0` scores exactly `0` and a row with `n > 0` is refused with the
+argument named; under `beta` and `bernoulli` the row is refused. A ratio is not
+required to be a subset: `incidence(die) / incidence(onset)` is case fatality
+within a window and may exceed 1 for a trajectory whose deaths outrun its
+cases, which a binomial then scores as impossible — the truthful answer.
+
+**A ratio of rates is an instant reading, and is refused.** Before this rule
+the only spelling of a proportion that compiled was the ratio of the two
+transitions' rates, `mu_c * I / (mu_c * I + mu_f * H)`. That is a state
+expression: it is read at the row's time label and says what fraction of the
+_hazard_ is of kind `a` at that moment, not what fraction of the window's
+_events_ were. The two agree only when both flows are constant across the
+window; on a simulated epidemic the instant form sat 7–27 % below the window
+fraction, worst at the peak, and nothing at fit time said so. A projection
+that divides an expression at least one of whose additive terms is
+structurally a lowered transition's rate is therefore `E352`, whose hint
+writes out both spellings: the flows, if the column is the fraction of the
+window's events, and `prevalence(<the expression>)` if the instantaneous
+hazard ratio is meant. The comparison is structural, so a rate written
+differently in the two places is not matched — the check has no false
+positives and a documented residue of false negatives.
 
 **Arithmetic projections** (the general form). Beyond `incidence()` and
 `prevalence()` sugar, `projected` accepts any expression over compartment state,
@@ -2974,9 +3007,10 @@ July in a file whose label is the boundary its window closes at — the conventi
 of pomp's accumulator variables and of camdl's own `simulate --obs` output. No
 rule gets all four right, so **an incidence stream must state what each of its
 rows covers.** A stream whose `projected` accumulates a flow — `incidence(...)`,
-`sum(..., incidence(...))`, or added incidence terms (§12.1) — and declares
-neither `covers = …` nor `window_start`/`window_stop` columns is **E350**; there
-is no default. A stream whose `projected` reads state at an instant —
+`sum(..., incidence(...))`, added incidence terms, or a ratio of two such sums
+(§12.1) — and declares neither `covers = …` nor `window_start`/`window_stop`
+columns is **E350**; there is no default. A stream whose `projected` reads
+state at an instant —
 `prevalence(...)`, a compartment expression — has no window to state, and
 declaring one by either means is **E348**.
 
@@ -3084,6 +3118,14 @@ one-day accumulated count coincide numerically; at a weekly step the likelihood
 is wrong by roughly the window length. Use `incidence(<transition>)`, which
 accumulates the flow over the interval. A bare numeric literal (`mean = 100`) is
 a count by context and is exempt.
+
+**Proportion arguments are dimensionless.** `binomial`'s `p`, `beta`'s `mean`,
+`bernoulli`'s `p` and the `beta_binomial` mean are fractions, and the
+projections that feed them are a prevalence proportion (`I / N`) or a ratio of
+two accumulated flows (`incidence(a) / (incidence(a) + incidence(b))`, §12.1).
+A count there (`p = projected` over a bare `incidence(a)`) is **E304** — the
+missing-`/N` bug — and a fraction fed to a count family is **E304** the other
+way round.
 
 The two `beta_binomial` spellings are equivalent: `mean`/`concentration` lowers to
 `alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Use whichever
@@ -5836,6 +5878,17 @@ incidence(infection[child])    # indexed: specific stratum
 # IR:
 CumulativeFlow("infection_child")
 
+# DSL: the fraction of the row's events that were of one kind — one flow sum
+# divided by another, both accumulated over the same window (§12.1). The two
+# sides are the object CumulativeFlowSum carries; the same flow on both sides
+# is the expected shape, not a collision.
+incidence(die_comm) / (incidence(die_comm) + incidence(die_fac))
+incidence(infection[child]) / sum(a in age, incidence(infection[a]))
+
+# IR:
+FlowRatio { numerator: ["die_comm"], denominator: ["die_comm", "die_fac"] }
+FlowRatio { numerator: ["infection_child"], denominator: ["infection_child", "infection_adult"] }
+
 # DSL:
 prevalence(R)                  # bare: global total
 
@@ -6032,6 +6085,8 @@ authoritative list is whatever `ocaml/lib/compiler/` and `ocaml/lib/ir/` emit.
 | E347 | Error   | Observation stream declares its temporal columns twice or by half — `: time` plus window columns, half a pair, or `covers` with window columns (§12.1.1) |
 | E348 | Error   | `covers` or window columns on a stream whose `projected` reads state at an instant (§12.1.1) |
 | E350 | Error   | Incidence stream states no period — add `covers = …` or `window_start`/`window_stop` columns (§12.1.1) |
+| E351 | Error   | A side of a ratio of flows names no flow after its `where` guard pruned every level (§12.1) |
+| E352 | Error   | A projection divides transition rates — an instant reading; write the flows or `prevalence(…)` (§12.1) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 Diagnostics can be emitted as structured JSON by passing `--json-errors` to
