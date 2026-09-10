@@ -178,6 +178,22 @@ thin = 1
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // gh#890: the line saying where the draws came from names a *method* —
+    // the word the config, the store levels and the CLI all use since the
+    // `[stages]` → `[method]` split. It used to read "draws from pgas stage
+    // 'pgas'".
+    let predict_stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        predict_stderr.contains("draws from pgas method 'pgas'"),
+        "the resolution line must name the method it read the cloud \
+         from:\n{predict_stderr}"
+    );
+    assert!(
+        !predict_stderr.contains("stage"),
+        "and `fit predict` must not print the word `stage` \
+         anywhere:\n{predict_stderr}"
+    );
+
     let results = tmp.join("results");
 
     // ── predictive/weekly_cases.tsv: typed-axis columns + quantile band ──

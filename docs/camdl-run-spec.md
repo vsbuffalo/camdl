@@ -344,7 +344,7 @@ so a bare `toml` reader still sees the parameters at the top level. The block
 records `camdl_version`, `timestamp`, `content_hash` (a tamper hash over the
 numeric values only, at 12-decimal precision, so editing a provenance field does
 not invalidate it), `fit_hash`, `backend`, `dt`, `model`, `model_identity`,
-per-stream `[provenance.data]` path+hash entries, `seed`, `stage`, 1-indexed
+per-stream `[provenance.data]` path+hash entries, `seed`, `method`, 1-indexed
 `chain`, `log_likelihood`, `loglik_sd`, `n_particles`, and optional
 `ess_mean`/`ess_min`. `camdl simulate --params` reads `backend`/`dt` back to
 warn when a downstream simulation would run under different dynamics than the
@@ -3683,7 +3683,7 @@ writes the predicted-vs-observed pair:
 $ camdl fit predict fits/02_posterior.toml --n-draws 20
 fit predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
-fit predict: horizon=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas stage 'pgas'
+fit predict: horizon=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
 wrote fits/../results/fits/02_posterior-77595169/predictive/weekly_cases.tsv
 wrote fits/../results/fits/02_posterior-77595169/predictive.json
 wrote fits/../results/fits/02_posterior-77595169/observed/weekly_cases.tsv
@@ -3942,13 +3942,13 @@ created fits/04_derived.toml
 
 ```
 $ camdl fit table results/fits
-fit_id     label                  stem           method   stages converged     best_ll ll_type          age
+fit_id     label                  stem           method   methods converged     best_ll ll_type          age
 --------------------------------------------------------------------------------------------------------------
-649b2ecc   <unlabelled>           09_pgas_only   pgas     pgas   no                  — complete_data     4m
-2030ba2b   mle                    01_mle         if2      if2    no              -58.4 if2              11m
-812b33c5   <unlabelled>           08_holdoutfil… if2      if2    no              -48.0 if2              13m
-77595169   scout                  02_scout       if2      if2    no              -58.4 if2              23m
-8e6e8964   ode-mle                05_ode         nl-sbplx nl-sb… no              -58.9 marginal         23m
+649b2ecc   <unlabelled>           09_pgas_only   pgas     pgas    no                  — complete_data     4m
+2030ba2b   mle                    01_mle         if2      if2     no              -58.4 if2              11m
+812b33c5   <unlabelled>           08_holdoutfil… if2      if2     no              -48.0 if2              13m
+77595169   scout                  02_scout       if2      if2     no              -58.4 if2              23m
+8e6e8964   ode-mle                05_ode         nl-sbplx nl-sb…  no              -58.9 marginal         23m
 ```
 
 Labels come from `--label` at run time or from the top-level `camdl label`
@@ -4841,14 +4841,14 @@ Common to both families:
 
 An optimizer leaf (IF2, NLopt) additionally holds:
 
-| file                           | content                                                                                                                                                                                                                                                  |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mle_params.toml`              | flat `name = value` params plus a `[provenance]` block (camdl version, timestamp, tamper `content_hash`, `fit_hash`, backend, dt, model + `model_identity`, per-stream data hashes, seed, stage, chain, log-likelihood, `loglik_sd`, `n_particles`, ESS) |
-| `final_params.toml`            | the selected parameter vector                                                                                                                                                                                                                            |
-| `chain_N/final_params.toml`    | per-chain endpoint                                                                                                                                                                                                                                       |
-| `chain_N/parameter_traces.tsv` | per-chain trace (§10.4)                                                                                                                                                                                                                                  |
-| `chain_evaluations.tsv`        | per-chain loglik evaluation summary                                                                                                                                                                                                                      |
-| `diagnostics.tsv`              | per-parameter convergence diagnostics                                                                                                                                                                                                                    |
+| file                           | content                                                                                                                                                                                                                                                   |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mle_params.toml`              | flat `name = value` params plus a `[provenance]` block (camdl version, timestamp, tamper `content_hash`, `fit_hash`, backend, dt, model + `model_identity`, per-stream data hashes, seed, method, chain, log-likelihood, `loglik_sd`, `n_particles`, ESS) |
+| `final_params.toml`            | the selected parameter vector                                                                                                                                                                                                                             |
+| `chain_N/final_params.toml`    | per-chain endpoint                                                                                                                                                                                                                                        |
+| `chain_N/parameter_traces.tsv` | per-chain trace (§10.4)                                                                                                                                                                                                                                   |
+| `chain_evaluations.tsv`        | per-chain loglik evaluation summary                                                                                                                                                                                                                       |
+| `diagnostics.tsv`              | per-parameter convergence diagnostics                                                                                                                                                                                                                     |
 
 A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 
@@ -5120,7 +5120,7 @@ camdl simulate models/sir.camdl \
 It prints what it resolved:
 
 ```
-draws: posterior — 2 draws from pgas stage 'pgas' (…/pgas-a0b1da4f/seed_1-06cbd6b3/draws.tsv)
+draws: posterior — 2 draws from pgas method 'pgas' (…/pgas-a0b1da4f/seed_1-06cbd6b3/draws.tsv)
 ```
 
 Resolution is **by artifact, not by method name**: a leaf has a posterior iff it
@@ -5440,9 +5440,9 @@ verdict, best log-likelihood and its type, age. The `<ROOT>` argument is
 
 ```
 $ camdl fit table results/fits
-fit_id     label                  stem           method   stages converged     best_ll ll_type          age
+fit_id     label                  stem           method   methods converged     best_ll ll_type          age
 --------------------------------------------------------------------------------------------------------------
-4dadedae   <unlabelled>           fit_pgas       pgas     pgas   yes                 — complete_data    15s
+4dadedae   <unlabelled>           fit_pgas       pgas     pgas    yes                 — complete_data    15s
 ```
 
 Read-only by default: every cell is recovered from the on-disk `run.json` and
@@ -5463,7 +5463,7 @@ mode.
 carries considerably more than the text view:
 
 ```
-schema, fit_id, fit_hash, label, stem, model_identity, stages, method,
+schema, fit_id, fit_hash, label, stem, model_identity, methods, method,
 config_diff_from_baseline, converged, gate_verdict, best_loglik, loglik_type,
 max_chain_agreement, max_rhat, acceptance_rate, ess_at_mle, ess_posterior,
 ess_per_iter, ess_per_sec, params, delta_ll_vs_best, age_seconds, created_at,

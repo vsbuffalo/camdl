@@ -2757,7 +2757,7 @@ fn build_summary_table_row(fit_dir: &Path, now_unix: i64) -> TableRow {
                 label: None,
                 stem: String::new(),
                 model_identity: String::new(),
-                stages: Vec::new(),
+                methods: Vec::new(),
                 method: String::new(),
                 config_diff_from_baseline: ConfigDiff::identity(""),
                 converged: false,

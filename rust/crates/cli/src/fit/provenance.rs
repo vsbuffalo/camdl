@@ -55,7 +55,10 @@ pub struct MleProvenance {
     #[serde(default)]
     pub data: std::collections::BTreeMap<String, DataEntry>,
     pub seed: u64,
-    pub stage: String,
+    /// The method that produced this estimate, by the label of its `method`
+    /// store level (`if2`, `nl-sbplx`, …) — the same word the config, the
+    /// store path and the CLI use (gh#890).
+    pub method: String,
     pub chain: usize,
     pub log_likelihood: f64,
     pub loglik_sd: f64,
@@ -124,7 +127,7 @@ pub fn write_mle_params(
         model_identity: metadata.model_identity.clone(),
         data: data_map,
         seed: metadata.seed,
-        stage: metadata.stage.clone(),
+        method: metadata.method.clone(),
         // best_chain is zero-indexed internally; surface as 1-indexed
         // in the provenance block to match human-facing convention.
         chain: metadata.best_chain + 1,
@@ -188,7 +191,8 @@ pub struct MleMetadata {
     pub model_identity: String,
     pub data_hashes: Vec<(String, String)>,
     pub seed: u64,
-    pub stage: String,
+    /// The method label, written to `[provenance] method`.
+    pub method: String,
     pub best_chain: usize,
     /// Simulation backend the fit used. Load-bearing for the
     /// backend-provenance guardrail in `camdl simulate --params`
@@ -396,6 +400,47 @@ mod tests {
             },
             starts: Some(super::super::config_v2::ChainStarts::uniform_unconstrained()),
         }
+    }
+
+    /// gh#890: the `[provenance]` block names the method by the word every
+    /// other surface uses. The file is machine-read — `camdl simulate
+    /// --params` matches the backend off this block — so the key is a
+    /// contract, and after the `[stages]` → `[method]` split `stage` named a
+    /// concept the config, the store path and the CLI no longer have.
+    #[test]
+    fn the_provenance_block_names_the_method_not_a_stage() {
+        let dir = crate::test_support::unique_temp_dir("mle_params_provenance");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mle_params.toml");
+        let params: std::collections::BTreeMap<String, f64> =
+            [("beta".to_string(), 0.3)].into();
+        let meta = MleMetadata {
+            input_hash: "deadbeef".into(),
+            model_path: "sir.camdl".into(),
+            model_identity: "f00d".into(),
+            data_hashes: vec![("cases".into(), "abc".into())],
+            seed: 1,
+            method: "if2".into(),
+            best_chain: 0,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            dt: 1.0,
+            loglik: -12.5,
+            loglik_sd: 0.0,
+            n_particles: 100,
+            ess_at_mle: None,
+            timestamp: "2026-09-10T00:00:00Z".into(),
+        };
+        write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("method = \"if2\""),
+            "the block must name the method:\n{text}");
+        assert!(!text.contains("stage = "),
+            "and must not spell it `stage`, which no other surface does:\n{text}");
+        // Read back through the reader that consumers use, so the rename is
+        // pinned on both sides of the round trip.
+        let prov = read_mle_provenance(&path.to_string_lossy()).unwrap().unwrap();
+        assert_eq!(prov.method, "if2");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

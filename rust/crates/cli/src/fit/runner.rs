@@ -2870,16 +2870,29 @@ impl StageConvergence {
     /// about it — a location disagreement is a warm-up/drift problem, a spread
     /// disagreement points at per-chain effective diversity
     /// (`docs/dev/proposals/2026-08-22-reporting-two-rhat-estimators.md`).
+    ///
+    /// `withheld` is the refusal, when the run's shape means no R̂ of it may
+    /// be read as a verdict — today only a point start (gh#890). The block
+    /// then prints the refusal and the ESS, no R̂ number and no glyph, and
+    /// draws no `RhatHigh` finding: `fit summary` withholds R̂ for such a run
+    /// (proposal 2026-09-08 §3.4), and a stage that printed `Rhat=1.42 ✗` at
+    /// the end of the same run said a thing the summary of that run declines
+    /// to say. The ESS is unaffected by how the chains were started and is
+    /// reported either way.
     pub fn report(
         &self,
         collector: &sim::inference::diagnostic::DiagnosticCollector,
         rhat_threshold: f64,
+        withheld: Option<&sim::inference::convergence::ConvergenceError>,
     ) -> String {
         use crate::fit::method_result::{RhatBand, RHAT_CONVERGED_THRESHOLD};
-        let mut out = format!(
-            "\nR̂ (rank-normalized split, Vehtari et al. 2021) / ESS — \
-             R̂ threshold {RHAT_CONVERGED_THRESHOLD}:\n"
-        );
+        let mut out = match withheld {
+            Some(why) => format!("\nR̂ — not assessed: {why}. ESS:\n"),
+            None => format!(
+                "\nR̂ (rank-normalized split, Vehtari et al. 2021) / ESS — \
+                 R̂ threshold {RHAT_CONVERGED_THRESHOLD}:\n"
+            ),
+        };
         for (name, d) in self.iter() {
             let Some(r) = d.rank() else {
                 // `rank()` is `None` exactly when `refusal()` is `Some`.
@@ -2905,6 +2918,17 @@ impl StageConvergence {
             } else {
                 "—".to_string()
             };
+            if withheld.is_some() {
+                // No number, no glyph, no decomposition and no finding: each
+                // of those is a reading of an R̂ this run's shape does not
+                // support. The ESS is a within-cloud measurement and stands.
+                out.push_str(&format!(
+                    "  {:12} ESS bulk={:.0} tail={} ({:.1}% of {} draws)\n",
+                    name, r.ess_bulk, tail,
+                    100.0 * r.ess_bulk_ratio(), r.n_draws_total,
+                ));
+                continue;
+            }
             out.push_str(&format!(
                 "  {:12} Rhat={:.3} {} ESS bulk={:.0} tail={} ({:.1}% of {} draws)\n",
                 name, r.rhat, status, r.ess_bulk, tail,
@@ -5404,14 +5428,14 @@ dt = 1.0
             chains["ar1_mixed"].clone())]);
 
         let collector = DiagnosticCollector::new("test");
-        let lenient = conv.report(&collector, 1.1);
+        let lenient = conv.report(&collector, 1.1, None);
         assert!(lenient.contains("✓"), "1.027 is inside a 1.1 band: {lenient}");
         assert!(!collector.drain().iter().any(|d|
             matches!(d.kind, DiagnosticKind::RhatHigh { .. })),
             "and draws no finding there");
 
         let collector = DiagnosticCollector::new("test");
-        let strict = conv.report(&collector, 1.01);
+        let strict = conv.report(&collector, 1.01, None);
         assert!(!strict.contains("✓"),
             "the same R̂ must NOT print green under a 1.01 band: {strict}");
         assert!(collector.drain().iter().any(|d|
@@ -5476,7 +5500,7 @@ dt = 1.0
 
         let conv = StageConvergence::compute([("beta".to_string(), frozen)]);
         let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD);
+        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
         assert!(
             out.contains('✗'),
             "and the stage block must say so loudly:\n{out}"
@@ -5508,7 +5532,7 @@ dt = 1.0
 
         let conv = StageConvergence::compute([("beta".to_string(), chains)]);
         let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD);
+        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
 
         assert!(
             !out.contains('✓'),
@@ -5543,6 +5567,63 @@ dt = 1.0
         );
     }
 
+    /// gh#890: one run, one answer about R̂.
+    ///
+    /// A run whose chains all began at one point has its R̂ reported as **not
+    /// assessed** by `fit summary` (proposal 2026-09-08 §3.4) — chains that
+    /// began together agree by construction, so the between-chain statistic
+    /// says nothing about whether the posterior was explored. The stage block
+    /// printed at the end of that same run printed `Rhat=1.09 ✗` anyway, so
+    /// the two surfaces disagreed about the same numbers on the same
+    /// directory, and the one printed first is the one a user sees.
+    ///
+    /// The ESS is a within-cloud measurement, unaffected by how the chains
+    /// were started, and is still reported — the assertion below states that
+    /// so the fix cannot be read as "print less".
+    #[test]
+    fn a_point_started_run_reports_rhat_as_not_assessed_and_keeps_the_ess() {
+        use sim::inference::convergence::ConvergenceError;
+        use sim::inference::diagnostic::DiagnosticCollector;
+
+        let chains = offset_chains(0.09);
+        let conv = StageConvergence::compute([("beta".to_string(), chains)]);
+
+        // Premise: with no refusal this block prints a number, a glyph and
+        // (above the certification bar) a decomposition. Without this the
+        // assertions below could pass on a fixture that never had an R̂.
+        let collector = DiagnosticCollector::new("test");
+        let assessed = conv.report(&collector, RHAT_REPORT_THRESHOLD, None);
+        assert!(assessed.contains("Rhat="), "fixture premise:\n{assessed}");
+
+        let collector = DiagnosticCollector::new("test");
+        let withheld = ConvergenceError::PointStart {
+            n_chains: 4,
+            starts: "from_mle @scout".to_string(),
+        };
+        let out = conv.report(&collector, RHAT_REPORT_THRESHOLD, Some(&withheld));
+
+        assert!(
+            out.contains("R̂ — not assessed: all 4 chains started at one point \
+                          (starts = from_mle @scout)"),
+            "the block must say what `fit summary` says, and why:\n{out}"
+        );
+        assert!(!out.contains("Rhat="),
+            "no R̂ number may be printed as a verdict for a point start:\n{out}");
+        assert!(!out.contains('✗') && !out.contains('✓'),
+            "and no glyph, which is the same verdict in one character:\n{out}");
+        assert!(out.contains("ESS bulk="),
+            "the ESS does not depend on how the chains were started and is \
+             still reported:\n{out}");
+        assert!(
+            !collector.drain().iter().any(|f| matches!(
+                f.kind,
+                sim::inference::diagnostic::DiagnosticKind::RhatHigh { .. }
+            )),
+            "a `RhatHigh` finding is a reading of the withheld number, so the \
+             stage must not record one either"
+        );
+    }
+
     /// Two numbers camdl computes on every fit, writes to `*_summary.json`,
     /// and never showed anyone.
     ///
@@ -5571,7 +5652,7 @@ dt = 1.0
             chains["within_chain_drift"].clone(),
         )]);
         let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, 1.05);
+        let out = conv.report(&collector, 1.05, None);
 
         assert!(
             out.contains("classic 1.001"),
@@ -5611,7 +5692,7 @@ dt = 1.0
             chains["scale_disagree"].clone(),
         )]);
         let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, 1.05);
+        let out = conv.report(&collector, 1.05, None);
 
         assert!(
             out.contains("folded"),
@@ -5642,7 +5723,7 @@ dt = 1.0
             chains["within_chain_drift"].clone(),
         )]);
         let collector = DiagnosticCollector::new("test");
-        let out = conv.report(&collector, 1.05);
+        let out = conv.report(&collector, 1.05, None);
         assert!(
             out.contains("where the posterior sits"),
             "drifting chains disagree about WHERE the posterior sits:\n{out}"

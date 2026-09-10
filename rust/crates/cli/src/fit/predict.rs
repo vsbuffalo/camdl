@@ -2729,7 +2729,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     let scenario_labels: Vec<&str> = scenario_refs.iter().map(|s| s.name()).collect();
     eprintln!(
         "fit predict: horizon={} treatment=posterior, {} scenario(s) [{}], {} stream(s), \
-         {} draws from {} stage '{}'",
+         {} draws from {} method '{}'",
         horizons.join("+"),
         scenario_labels.len(),
         scenario_labels.join(", "),

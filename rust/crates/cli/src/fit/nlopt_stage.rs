@@ -312,7 +312,7 @@ pub fn run_stage(
         model_identity: model_identity.to_string(),
         data_hashes: data_hashes.to_vec(),
         seed,
-        stage: stage_name.to_string(),
+        method: stage_name.to_string(),
         best_chain: winner_idx,
         // NLopt stages always run on the ODE backend (validated by
         // methods::validate_combo); record it from the inference domain

@@ -1626,7 +1626,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             } else {
                 loaded
             };
-            eprintln!("draws: posterior — {} draws from {} stage '{}' ({})",
+            eprintln!("draws: posterior — {} draws from {} method '{}' ({})",
                 loaded.len(), method_label, resolved.stage, resolved.draws_path.display());
             loaded
             }

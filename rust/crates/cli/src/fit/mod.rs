@@ -1314,7 +1314,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     model_identity: model_identity.clone(),
                     data_hashes: data_hashes.clone(),
                     seed,
-                    stage: stage_name.to_string(),
+                    method: stage_name.to_string(),
                     best_chain: chain_results.best_chain,
                     // Record the backend the method actually fit on (gh#241):
                     // the `simulate --params` guardrail replays θ̂ with this,

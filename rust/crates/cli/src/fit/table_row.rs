@@ -24,13 +24,16 @@ use crate::fit::method_result::{
     NutsStageResult, PgasStageResult, PmmhStageResult,
 };
 
-/// Schema discriminator. The proposal pins `name = "table_row"` and
-/// `version = 1`. Field additions are non-breaking under v1; removals
-/// or semantic changes require a v2 emitted side-by-side for one
-/// minor release before v1 is dropped (proposal §3, Schema stability
-/// post-ship).
+/// Schema discriminator. Field additions are non-breaking under a
+/// version; a rename or a change of meaning bumps it, and pre-1.0 the old
+/// version is not emitted alongside the new one (`VERSIONING.md`) — the
+/// number is what a consumer keys on to know which contract it holds.
+///
+/// v2 (gh#890): `stages` is `methods`. The `[stages]` → `[method]` split
+/// left the plural key spelling a word the config, the store levels and
+/// the CLI no longer use, and it is machine-read.
 pub const SCHEMA_NAME: &str = "table_row";
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TableRowSchema {
@@ -67,13 +70,15 @@ pub struct TableRow {
     /// trailing `.fit.toml` / `.toml` extension.
     pub stem: String,
     pub model_identity: String,
-    /// Stage names that completed under this fit, in declaration order
-    /// (filtered by `FitView.stages_declared`). A multi-stage IF2 fit
-    /// reads `["scout", "refine", "validate"]`; a PGAS-only fit reads
-    /// `["pgas"]`. Stages that didn't complete are excluded.
-    pub stages: Vec<String>,
-    /// Method of the *terminal* completed stage (last in
-    /// `stages_declared` that has a `run.json` on disk).
+    /// The methods that completed under this fit, by the label of each
+    /// `method` store level, in the order the leaves carry. A fit whose
+    /// results directory holds an IF2 leaf and a PGAS leaf reads
+    /// `["if2", "pgas"]`; a PGAS-only fit reads `["pgas"]`. A method whose
+    /// leaf has no `run.json` did not complete and is excluded.
+    pub methods: Vec<String>,
+    /// The *terminal* completed method — the last of [`Self::methods`] with
+    /// a `run.json` on disk. `methods` is what ran; this is the one whose
+    /// numbers the rest of the row reports.
     pub method: String,
     pub config_diff_from_baseline: ConfigDiff,
     /// Method-uniform convergence boolean (proposal §3, `converged`):
@@ -211,7 +216,7 @@ pub fn build_row(
             fit_dir: fit_dir.to_path_buf(),
         }
     })?;
-    let completed_stages = completed_stage_names(&view, &nodes);
+    let completed_methods = completed_method_names(&view, &nodes);
 
     let method = terminal.stage.method.as_str().to_string();
     let method_result = MethodResult::load_from(&terminal.stage_dir, &method)?;
@@ -231,7 +236,7 @@ pub fn build_row(
         label: view.label.clone(),
         stem,
         model_identity: view.model_identity.clone(),
-        stages: completed_stages,
+        methods: completed_methods,
         method,
         config_diff_from_baseline: config_diff,
         converged: mview.converged,
@@ -433,7 +438,9 @@ fn best_node_for_stage<'a>(stage_name: &str, nodes: &'a [StageNode]) -> Option<&
     best.map(|(n, _)| n)
 }
 
-fn completed_stage_names(view: &FitView, nodes: &[StageNode]) -> Vec<String> {
+/// The label of every `method` level under this fit whose leaf completed, in
+/// the order the fit view lists them.
+fn completed_method_names(view: &FitView, nodes: &[StageNode]) -> Vec<String> {
     let completed: std::collections::HashSet<&str> =
         nodes.iter().map(|n| n.stage.stage.as_str()).collect();
     view.stages_declared
@@ -582,11 +589,14 @@ mod tests {
         assert!(parse_iso8601_to_unix("2026-04-27 18:30:21").is_none());
     }
 
+    /// The discriminator every consumer keys on. v2 is the `stages` →
+    /// `methods` rename (gh#890): a key that changes name under an unchanged
+    /// version is the vintage problem gh#728 describes, one file later.
     #[test]
-    fn schema_pin_is_v1() {
+    fn schema_pin_is_v2() {
         let s = TableRowSchema::current();
         assert_eq!(s.name, "table_row");
-        assert_eq!(s.version, 1);
+        assert_eq!(s.version, 2);
     }
 
     #[test]

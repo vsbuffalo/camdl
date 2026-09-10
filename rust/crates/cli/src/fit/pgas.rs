@@ -1373,9 +1373,21 @@ pub fn run_stage(
     }
 
     if n_chains > 1 {
+        // gh#890: chains that began at one point agree by construction, so no
+        // R̂ over them is a verdict — `fit summary` reports it as not assessed
+        // (proposal 2026-09-08 §3.4) and this block, printed at the end of the
+        // same run, has to say the same thing rather than a number and a glyph.
+        // Same predicate as the read side (`method_result::point_start`): a
+        // point rule, two chains or more.
+        let withheld = starts.rule.is_point().then(|| {
+            sim::inference::convergence::ConvergenceError::PointStart {
+                n_chains, starts: starts.rule.spelled(),
+            }
+        });
         // RHAT_REPORT_THRESHOLD is unchanged from the value this stage has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
-        eprint!("{}", diagnostics.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
+        eprint!("{}", diagnostics.report(
+            &collector, super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
     }
 
     // gh#791. Trajectory renewal resolved in time, pooled over the retained

@@ -525,15 +525,15 @@ fn render_json(rows: &[TableRow]) {
 fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
     let mut s = String::new();
     let mut head = format!(
-        "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {:>10} {:<13} {:>6}",
-        "fit_id", "label", "stem", "method", "stages", "converged", "best_ll", "ll_type", "age"
+        "{:<10} {:<22} {:<14} {:<8} {:<7} {:<10} {:>10} {:<13} {:>6}",
+        "fit_id", "label", "stem", "method", "methods", "converged", "best_ll", "ll_type", "age"
     );
     for q in quantities {
         head.push_str(&format!(" {:>12}", truncate(q, 12)));
     }
     head.push('\n');
     s.push_str(&head);
-    s.push_str(&"-".repeat(110 + quantities.len() * 13));
+    s.push_str(&"-".repeat(111 + quantities.len() * 13));
     s.push('\n');
     if rows.is_empty() {
         s.push_str("(no fits matched)\n");
@@ -541,7 +541,7 @@ fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
     }
     for r in rows {
         let label = r.label.as_deref().unwrap_or("<unlabelled>");
-        let stages = r.stages.join("+");
+        let methods = r.methods.join("+");
         let converged = if r.converged { "yes" } else { "no" };
         let best = r
             .best_loglik
@@ -552,9 +552,9 @@ fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
         let ll_type = super::loglik::LoglikType::tag_or_unknown(r.loglik_type);
         let age = format_age(r.age_seconds);
         let mut line = format!(
-            "{:<10} {:<22} {:<14} {:<8} {:<6} {:<10} {} {:<13} {:>6}",
+            "{:<10} {:<22} {:<14} {:<8} {:<7} {:<10} {} {:<13} {:>6}",
             r.fit_id, truncate(label, 22), truncate(&r.stem, 14),
-            r.method, truncate(&stages, 6), converged, best, ll_type, age,
+            r.method, truncate(&methods, 7), converged, best, ll_type, age,
         );
         for q in quantities {
             let cell = r
@@ -573,7 +573,7 @@ fn render_text(rows: &[TableRow], quantities: &[String]) -> String {
 fn render_md(rows: &[TableRow], quantities: &[String]) -> String {
     let mut s = String::new();
     let mut head =
-        String::from("| fit_id | label | stem | method | stages | converged | best_ll | ll_type | age |");
+        String::from("| fit_id | label | stem | method | methods | converged | best_ll | ll_type | age |");
     for q in quantities {
         head.push_str(&format!(" {} |", q));
     }
@@ -587,7 +587,7 @@ fn render_md(rows: &[TableRow], quantities: &[String]) -> String {
     s.push_str(&sep);
     for r in rows {
         let label = r.label.as_deref().unwrap_or("<unlabelled>");
-        let stages = r.stages.join("+");
+        let methods = r.methods.join("+");
         let converged = if r.converged { "✓" } else { "✗" };
         let best = r
             .best_loglik
@@ -597,7 +597,7 @@ fn render_md(rows: &[TableRow], quantities: &[String]) -> String {
         let age = format_age(r.age_seconds);
         let mut line = format!(
             "| `{}` | {} | `{}` | {} | {} | {} | {} | {} | {} |",
-            r.fit_id, label, r.stem, r.method, stages, converged, best, ll_type, age,
+            r.fit_id, label, r.stem, r.method, methods, converged, best, ll_type, age,
         );
         for q in quantities {
             let cell = r
@@ -618,7 +618,7 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
     // `loglik_type` is appended last (gh#280), then any `--quantity`
     // columns: CSV is positional, so a new column never shifts an
     // existing one out from under a consumer.
-    let mut head = String::from("fit_id,fit_hash,label,stem,model_identity,method,stages,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type,ess_per_iter,ess_per_sec");
+    let mut head = String::from("fit_id,fit_hash,label,stem,model_identity,method,methods,converged,gate_verdict,best_loglik,max_chain_agreement,max_rhat,acceptance_rate,delta_ll_vs_best,age_seconds,created_at,stale,loglik_type,ess_per_iter,ess_per_sec");
     for q in quantities {
         head.push(',');
         head.push_str(&csv_field(q));
@@ -627,7 +627,7 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
     s.push_str(&head);
     for r in rows {
         let label = csv_field(r.label.as_deref().unwrap_or(""));
-        let stages = r.stages.join("+");
+        let methods = r.methods.join("+");
         let best = r
             .best_loglik
             .map(|v| format!("{}", v))
@@ -648,7 +648,7 @@ fn render_csv(rows: &[TableRow], quantities: &[String]) -> String {
             csv_field(&r.stem),
             r.model_identity,
             r.method,
-            stages,
+            methods,
             r.converged,
             r.gate_verdict,
             best,
@@ -767,7 +767,7 @@ mod tests {
             label: None,
             stem: "model".into(),
             model_identity: "mid".into(),
-            stages: vec!["pgas".into()],
+            methods: vec!["pgas".into()],
             method: "pgas".into(),
             config_diff_from_baseline: super::super::config_diff::ConfigDiff::identity(""),
             converged: true,
@@ -814,6 +814,48 @@ mod tests {
         let csv2 = render_csv(&[row_with_type(None)], &[]);
         assert!(csv2.lines().nth(1).unwrap().contains(",unknown,"),
             "absent type renders `unknown`: {csv2}");
+    }
+
+    /// gh#890: no rendering of a fit row says "stage".
+    ///
+    /// The `[stages]` → `[method]` split moved the config, the store levels
+    /// (`fit · method · seed`) and the CLI onto *method*; this column and the
+    /// JSON key of the same name were left behind, and both are read by
+    /// tooling rather than only by people. All four renderings are asserted
+    /// together because they are four spellings of one field: a rename that
+    /// reaches the CSV and not the JSON leaves a consumer reading each format
+    /// under a different name.
+    #[test]
+    fn no_rendering_of_a_row_calls_the_methods_column_stages() {
+        let row = row_with_type(Some(crate::fit::loglik::LoglikType::CompleteData));
+
+        let text = render_text(&[row.clone()], &[]);
+        let head = text.lines().next().unwrap();
+        assert!(head.contains("methods") && !head.contains("stages"),
+            "the text header names the column `methods`: {head}");
+        // The header row and the data row still line up under the wider name.
+        let row_line = text.lines().nth(2).unwrap();
+        let col = head.find("methods").expect("the column");
+        assert_eq!(&row_line[col..col + 4], "pgas",
+            "the widened column must not shift the row out from under its \
+             header:\nhead={head}\nrow ={row_line}");
+
+        let md = render_md(&[row.clone()], &[]);
+        assert!(md.lines().next().unwrap().contains("| methods |"), "{md}");
+        assert!(!md.contains("stages"), "{md}");
+
+        let csv = render_csv(&[row.clone()], &[]);
+        let header = csv.lines().next().unwrap();
+        assert!(header.contains(",methods,") && !header.contains(",stages,"),
+            "the CSV header names the column `methods`: {header}");
+
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains("\"methods\":") && !json.contains("\"stages\":"),
+            "and so does the JSON key consumers parse: {json}");
+        // The tag a consumer keys on to know which of the two contracts it is
+        // holding. A rename under an unchanged version is the gh#728 problem.
+        assert_eq!(table_row::SCHEMA_VERSION, 2,
+            "a renamed key bumps the row schema version");
     }
 
     /// Cohort filtering on `--with-method` keeps only the requested

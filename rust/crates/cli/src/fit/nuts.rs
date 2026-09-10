@@ -375,7 +375,16 @@ pub fn run_stage(
     // pgas and pmmh.
     let collector = sim::inference::diagnostic::DiagnosticCollector::new("nuts");
     if opts.n_chains > 1 {
-        eprint!("{}", diag.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
+        // gh#890, as pgas: a point start makes the between-chain statistic
+        // uninformative, `fit summary` reports it as not assessed, and this
+        // block says the same rather than a number the summary declines.
+        let withheld = starts.rule.is_point().then(|| {
+            sim::inference::convergence::ConvergenceError::PointStart {
+                n_chains: opts.n_chains, starts: starts.rule.spelled(),
+            }
+        });
+        eprint!("{}", diag.report(
+            &collector, super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
     }
     collector.render_to_stderr(sim::inference::diagnostic::HintContext::default());
     let diag_path = stage_dir.join("diagnostics.json");

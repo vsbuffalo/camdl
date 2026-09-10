@@ -821,9 +821,18 @@ pub fn run_stage(
     }
 
     if n_chains > 1 {
+        // gh#890, as pgas: a point start makes the between-chain statistic
+        // uninformative, `fit summary` reports it as not assessed, and this
+        // block says the same rather than a number the summary declines.
+        let withheld = starts.rule.is_point().then(|| {
+            sim::inference::convergence::ConvergenceError::PointStart {
+                n_chains, starts: starts.rule.spelled(),
+            }
+        });
         // RHAT_REPORT_THRESHOLD is unchanged from the value this stage has
         // always applied; only the STATISTIC it is applied to changed (gh#84).
-        eprint!("{}", diagnostics.report(&collector, super::runner::RHAT_REPORT_THRESHOLD));
+        eprint!("{}", diagnostics.report(
+            &collector, super::runner::RHAT_REPORT_THRESHOLD, withheld.as_ref()));
     }
 
     // gh#110. All chains skipped via BadInit — no MAP to report.
