@@ -17,8 +17,9 @@
 //!   - backend preflight on the derive path (gh#729; no override — gh#312)
 //!   - formats: table (default), md, json
 //!   - compare.toml for reproducible multi-model specs
+//!
 //! Out of scope (Part II): betting mode, CAS ref resolution, obs-model
-//!   preflight, stacking, plotting.
+//! preflight, stacking, plotting.
 
 use crate::chain_selection::ChainSelection;
 use crate::fit::handle::ResolvedFit;
@@ -1781,7 +1782,7 @@ enum Field { LogScore, Crps }
 fn fmt_lr(lr: f64) -> String {
     if !lr.is_finite() { return "—".into(); }
     if lr == 0.0 { return "0".into(); }
-    if lr >= 1000.0 || lr < 0.001 {
+    if !(0.001..1000.0).contains(&lr) {
         format!("{:.2e}", lr)
     } else {
         format!("{:.3}", lr)
@@ -2155,9 +2156,9 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String]) -> String {
             // remedy 4): this row's own, and the pair's combined SE the
             // evidence gate reads. Null without replication.
             "mc_se_elpd": r.mc_se.map_or(serde_json::Value::Null,
-                |v| option_finite(v)),
+                option_finite),
             "mc_se_delta_elpd": mc_se_delta(r, &rows[base_idx])
-                .map_or(serde_json::Value::Null, |v| option_finite(v)),
+                .map_or(serde_json::Value::Null, option_finite),
             // Stage 4.3: serial dependence of the per-step Δelpd — the
             // reason se_delta_elpd is a Newey–West HAC SE (HLN-corrected,
             // t_{T−1} reference). Null for the baseline row.

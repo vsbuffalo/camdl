@@ -315,7 +315,7 @@ fn median_of(mut xs: Vec<f64>) -> Option<f64> {
     if xs.is_empty() { return None; }
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = xs.len();
-    Some(if n % 2 == 0 { (xs[n / 2 - 1] + xs[n / 2]) / 2.0 } else { xs[n / 2] })
+    Some(if n.is_multiple_of(2) { (xs[n / 2 - 1] + xs[n / 2]) / 2.0 } else { xs[n / 2] })
 }
 
 #[test]

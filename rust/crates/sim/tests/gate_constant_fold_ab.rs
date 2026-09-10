@@ -11,6 +11,7 @@
 //! (`sparse_coupling_ab.camdl`, a sparse ring W with K=2 neighbours per patch):
 //!   - `sparse_coupling_ab_unfolded.ir.json` — `camdlc` with the fold OFF
 //!   - `sparse_coupling_ab_folded.ir.json`   — `camdlc CAMDL_CONSTANT_FOLD=1`
+//!
 //! See the source header for the exact regeneration commands. The fixtures are
 //! static IR (the test does not recompile), so the default-flag flip is
 //! decoupled from this gate.

@@ -463,7 +463,7 @@ mod tests {
     /// enough history yet, must NOT trigger.
     #[test]
     fn insufficient_history_does_not_trigger() {
-        assert!(ESS_COLLAPSE_WINDOWS >= 2, "test assumes K-window threshold >= 2");
+        const _: () = assert!(ESS_COLLAPSE_WINDOWS >= 2, "test assumes K-window threshold >= 2");
         let short: Vec<f64> = (0..ESS_COLLAPSE_WINDOWS - 1).map(|_| 0.5).collect();
         assert!(check_pf_degeneracy(&short, 0, 1000).is_none());
     }

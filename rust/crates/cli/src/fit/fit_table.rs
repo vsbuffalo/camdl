@@ -477,7 +477,7 @@ fn read_scalar_quantity_q50(tsv: &std::path::Path) -> Option<f64> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next()?.split('\t').collect();
     // A `time` column means this is a series, not a scalar.
-    if header.iter().any(|c| *c == "time") {
+    if header.contains(&"time") {
         return None;
     }
     let scen_i = header.iter().position(|c| *c == "scenario")?;
@@ -829,7 +829,7 @@ mod tests {
     fn no_rendering_of_a_row_calls_the_methods_column_stages() {
         let row = row_with_type(Some(crate::fit::loglik::LoglikType::CompleteData));
 
-        let text = render_text(&[row.clone()], &[]);
+        let text = render_text(std::slice::from_ref(&row), &[]);
         let head = text.lines().next().unwrap();
         assert!(head.contains("methods") && !head.contains("stages"),
             "the text header names the column `methods`: {head}");
@@ -840,11 +840,11 @@ mod tests {
             "the widened column must not shift the row out from under its \
              header:\nhead={head}\nrow ={row_line}");
 
-        let md = render_md(&[row.clone()], &[]);
+        let md = render_md(std::slice::from_ref(&row), &[]);
         assert!(md.lines().next().unwrap().contains("| methods |"), "{md}");
         assert!(!md.contains("stages"), "{md}");
 
-        let csv = render_csv(&[row.clone()], &[]);
+        let csv = render_csv(std::slice::from_ref(&row), &[]);
         let header = csv.lines().next().unwrap();
         assert!(header.contains(",methods,") && !header.contains(",stages,"),
             "the CSV header names the column `methods`: {header}");

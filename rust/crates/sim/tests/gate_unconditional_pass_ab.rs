@@ -23,6 +23,10 @@
 //! `gate_pgas_density_baseline` / `gate_trajectory_baseline` files. Re-capture:
 //!   CAMDL_CAPTURE_BASELINE=1 cargo test -p sim --test gate_unconditional_pass_ab -- --nocapture
 
+// The `LL_*` constants are captured log-likelihoods, printed with more digits
+// than an f64 carries. Shortening them by hand is undone on the next capture.
+#![allow(clippy::excessive_precision)]
+
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;

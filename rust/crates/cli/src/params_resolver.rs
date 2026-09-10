@@ -40,16 +40,18 @@
 //!
 //! This implements `docs/camdl-run-spec.md §1.3` exactly:
 //!
+//! ```text
 //!   1. Model parameter default (`p.value` from DSL)
 //!   2. `fit.toml [fixed]` block (when present)
 //!   3. `--fixed-file <toml>` (each file layered in order; later
 //!      overrides earlier)
 //!   3.5. Draw row / sweep point (`point_overrides`) — automated
-//!      M-layer variation (a posterior/prior/uniform draw, an
-//!      explicit draws file, or a sweep grid point)
+//!        M-layer variation (a posterior/prior/uniform draw, an
+//!        explicit draws file, or a sweep grid point)
 //!   4. Scenario (`preset.params` + multiplicative `preset.scale`, or
 //!      an inline ad-hoc scenario's `set`/`scale`)
 //!   5. `--fixed NAME=VALUE` (highest)
+//! ```
 //!
 //! The structural distinction between tiers 3.5 and 5: a draw/sweep
 //! value is *automated M-layer variation* and is counterfactual-

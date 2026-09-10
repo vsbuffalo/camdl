@@ -648,9 +648,9 @@ pub fn render_observed_tsv(index_dims: &[String], rows: &[ObservedRow]) -> Strin
             out.push_str(level_for(&row.stratum, dim));
         }
         out.push('\t');
-        match row.value {
-            Some(v) => out.push_str(&fmt_value(v)),
-            None => {} // hole → empty cell
+        // A `None` leaves the cell empty — that is how a hole is written.
+        if let Some(v) = row.value {
+            out.push_str(&fmt_value(v));
         }
         out.push('\n');
     }
@@ -2071,7 +2071,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                 .map(|e| e.eval_paths(quantity_obs_anchors))
                 .unwrap_or_default();
             let any_smoothed =
-                quant_paths.iter().any(|p| *p == sim::quantity::QuantityPath::Smoothed);
+                quant_paths.contains(&sim::quantity::QuantityPath::Smoothed);
             // Named, not silent: an `observations.<stream>` reduction anchored
             // inside the record has the same defect, and no saved path carries a
             // y_sim draw to fix it with.
@@ -3929,12 +3929,13 @@ mod tests {
                 "rhat_not_reported": {"tau": "constant_draws"}}"#,
         )
         .unwrap();
-        match read_convergence(&dir, Some(FitAlgorithm::Pgas)) {
-            ConvergenceStatus::Reported { rhat_max, .. } => panic!(
+        if let ConvergenceStatus::Reported { rhat_max, .. } =
+            read_convergence(&dir, Some(FitAlgorithm::Pgas))
+        {
+            panic!(
                 "a fit with a refused parameter must not report a band off the \
                  parameters that survived; got max R̂ = {rhat_max}"
-            ),
-            _ => {}
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -237,18 +237,6 @@ pub struct IF2Result {
     pub last_loglik: f64,
 }
 
-/// Run IF2.
-///
-/// # Arguments
-/// * `model` — compiled model
-/// * `base_params` — starting parameter values (full vector)
-/// * `if2_params` — parameters to estimate (subset of base_params)
-/// * `observations` — data sorted by time
-/// * `config` — IF2 settings
-/// * `step_fn` — chain-binomial step function
-/// * `project_fn` — extract projected quantity from particle state
-/// * `obs_loglik_fn` — observation log-likelihood (takes projected, observed, params)
-/// * `seed` — base RNG seed
 /// Optional callback invoked after each IF2 iteration.
 /// Arguments: `(iteration_index, log_likelihood, param_means)`.
 ///
@@ -263,6 +251,15 @@ pub struct IF2Result {
 /// scout runs and watch parameters move in real time.
 pub type ProgressCallback<'a> = Option<&'a dyn Fn(usize, f64, &[f64])>;
 
+/// Run IF2.
+///
+/// # Arguments
+/// * `process` — the process model the particles are propagated under
+/// * `obs_model` — the observation model scoring each particle against the data
+/// * `base_params` — starting parameter values (full vector)
+/// * `if2_params` — parameters to estimate (subset of `base_params`)
+/// * `config` — IF2 settings
+/// * `seed` — base RNG seed
 pub fn run_if2<P: ProcessModel<State = ParticleState>>(
     process: &P,
     obs_model: &(dyn ObservationModel<ParticleState> + Sync),

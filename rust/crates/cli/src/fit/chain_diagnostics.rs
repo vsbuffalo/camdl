@@ -407,7 +407,7 @@ fn read_trace_cols(trace_path: &Path, names: &[&str]) -> Option<Vec<Option<Vec<f
     let mut lines = contents.lines();
     let header = lines.next()?;
     let cols: Vec<&str> = header.split('\t').collect();
-    if !cols.iter().any(|c| *c == TRACE_COL_LOG_POSTERIOR) {
+    if !cols.contains(&TRACE_COL_LOG_POSTERIOR) {
         return None;
     }
     let idx: Vec<Option<usize>> = names

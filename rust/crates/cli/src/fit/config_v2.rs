@@ -1754,17 +1754,14 @@ impl CliStageOverrides {
 
 /// How to combine M independent particle-filter replicate log-likelihoods
 /// into a single score for ranking candidate parameter points.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CombineMode {
     /// log( (1/M) Σ exp(ll_k) ) — unbiased on the likelihood scale.
+    #[default]
     LogMeanExp,
     /// (1/M) Σ ll_k — biased low, but lower variance.
     Mean,
-}
-
-impl Default for CombineMode {
-    fn default() -> Self { CombineMode::LogMeanExp }
 }
 
 /// Re-evaluate IF2 candidate points (final iter, tail mean, best-in-run)
@@ -2903,6 +2900,7 @@ impl Problem {
     ///  - No member is `perturb_only_at_t0 = true` (the simplex transform
     ///    owns the initial perturbation; the two would conflict)
     ///  - Each member's bounds lower must be ≥ 0 (members are non-negative)
+    ///
     /// The algorithm-aware warning (a non-IF2 method does not honour the
     /// constraint) lives in [`FitConfig::validate`], which sees the method.
     fn validate_simplex_groups(&self) -> Result<(), String> {

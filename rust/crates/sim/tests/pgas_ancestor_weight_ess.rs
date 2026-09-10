@@ -167,7 +167,7 @@ fn the_sweep_value_is_the_mean_over_measured_steps() {
     let mut m = AncestorEssMean::new();
     m.record(&log_w(&[0.25, 0.25, 0.25, 0.25]));            // ESS 4
     m.record(&log_w(&[1.0, 0.0, 0.0, 0.0]));                 // ESS 1
-    m.record(&vec![f64::NEG_INFINITY; 4]);                   // no data
+    m.record(&[f64::NEG_INFINITY; 4]);                       // no data
     assert_eq!(m.n_steps(), 2);
     assert!((m.mean() - 2.5).abs() < 1e-12,
         "mean of 4 and 1 over two measured steps is 2.5, got {}", m.mean());

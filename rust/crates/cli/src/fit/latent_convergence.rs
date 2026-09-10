@@ -224,7 +224,7 @@ impl ChainPaths {
                 }
                 Some(_) => {}
             }
-            if draws.last().map_or(true, |(d, _, _)| *d != draw) {
+            if draws.last().is_none_or(|(d, _, _)| *d != draw) {
                 draws.push((draw, Vec::new(), Vec::new()));
             }
             let (_, times, values) = draws.last_mut().expect("just pushed");

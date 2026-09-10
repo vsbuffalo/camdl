@@ -14,6 +14,7 @@
 //! unit time and a weekly (7-unit) grid:
 //!   - reset fires at the hole  → week-(k+1) tally = 7·K (one week)
 //!   - reset SKIPPED at the hole → week-(k+1) tally = 14·K (merged k + k+1)
+//!
 //! Asserting the week-(k+1) prediction equals 7·K (not 14·K) pins the reset.
 
 use std::collections::HashMap;

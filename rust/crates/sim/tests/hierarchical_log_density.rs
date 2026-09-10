@@ -11,6 +11,14 @@
 //! Class C (reference-graph safety: cycles, self-ref, deep chains) is
 //! tested on the OCaml compiler side — rejections happen at compile time.
 
+// The expected values are scipy output committed verbatim, so that the test is
+// hermetic against scipy version drift. Two lints object to them and both would
+// have us edit the oracle: `excessive_precision` wants digits trimmed off a
+// pasted number, and `approx_constant` wants `-LN_2` substituted for scipy's
+// `expon(scale=2).logpdf(0)`, which merely happens to equal it. Either edit
+// replaces the oracle with our own arithmetic.
+#![allow(clippy::excessive_precision, clippy::approx_constant)]
+
 use std::collections::HashMap;
 
 use ir::expr::Expr;

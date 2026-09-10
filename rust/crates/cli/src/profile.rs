@@ -1960,11 +1960,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 /// lhs, from_prior, from_posterior) — the caller can
 /// blindly call this and let the resolver handle errors downstream.
 ///
-/// Takes `&mut Vec<Parameter>` rather than `&mut Model` because the
+/// Takes the parameter slice rather than `&mut Model` because the
 /// helper only ever touches `model.parameters[i].value`. Narrower
 /// surface = simpler tests + less coupling to the rest of the IR.
 fn seed_params_from_init_method(
-    params: &mut Vec<ir::parameter::Parameter>,
+    params: &mut [ir::parameter::Parameter],
     init_method: &crate::fit::starts::ChainStarts,
 ) -> Result<(), String> {
     use crate::fit::starts::{ChainStarts, Point};

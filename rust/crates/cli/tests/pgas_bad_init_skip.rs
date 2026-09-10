@@ -381,8 +381,7 @@ fn a_refused_start_is_redrawn_and_the_chain_runs() {
     }
     // The header counts the retries, so a skim of the file says it happened.
     let text = std::fs::read_to_string(stage_dir.join("chain_starts.tsv")).unwrap();
-    assert!(text.starts_with(&format!(
-        "# camdl chain_starts; starts=from_posterior ", )), "{text}");
+    assert!(text.starts_with("# camdl chain_starts; starts=from_posterior "), "{text}");
     assert!(text.lines().next().unwrap().ends_with(&format!("retried={}", rejected.len())), "{text}");
 
     // Nothing was skipped: no bad_init, every chain in the pool, no

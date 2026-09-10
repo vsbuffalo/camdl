@@ -4,7 +4,7 @@
 //! boundaries (the log here is larger than the writer's `BATCH_ROWS = 8192`,
 //! so it spans multiple row groups).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sim::lineage::{
     event_log::{EventLog, EventRecord, RouteInfo},
@@ -74,12 +74,12 @@ fn big_log(n_events: usize) -> EventLog {
     EventLog { initial_pools, transitions: routes, events }
 }
 
-fn realize_in_memory(log: &EventLog, seed: u64, out: &PathBuf) {
+fn realize_in_memory(log: &EventLog, seed: u64, out: &Path) {
     let mut w = TsvLineListWriter::create(out).unwrap();
     realize(log, seed, &mut w).unwrap();
 }
 
-fn realize_streamed(path: &PathBuf, seed: u64, out: &PathBuf) {
+fn realize_streamed(path: &Path, seed: u64, out: &Path) {
     let mut w = TsvLineListWriter::create(out).unwrap();
     realize_from_path(path, seed, &mut w).unwrap();
 }

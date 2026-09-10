@@ -96,6 +96,10 @@ fn tier2a_chain_binomial_byte_identical_with_and_without_lineages() {
 }
 
 #[test]
+// The backend list is a single element today because only the chain-binomial
+// backend emits a line list; it stays a loop so adding Gillespie or ODE is a
+// one-word change rather than a restructuring.
+#[allow(clippy::single_element_loop)]
 fn batch_backends_produce_line_lists() {
     let mut m = load_fixture("sir_lineage");
     set_params(&mut m, &[("beta", 0.8), ("gamma", 0.2), ("N0", 500.0)]);
@@ -247,6 +251,7 @@ fn sub_dt_fraction_grows_with_dt() {
 }
 
 #[test]
+#[allow(clippy::single_element_loop)] // see `batch_backends_produce_line_lists`
 fn batch_line_list_reproducible_given_seed() {
     let mut m = load_fixture("sir_lineage");
     set_params(&mut m, &[("beta", 0.7), ("gamma", 0.2), ("N0", 500.0)]);

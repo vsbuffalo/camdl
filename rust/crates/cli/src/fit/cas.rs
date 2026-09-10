@@ -420,6 +420,7 @@ fn build_holdout_digests(problem: &Problem) -> Result<Vec<DataDigest>, String> {
 /// — so `ic_free`/`holdout`/`[config]`/priors can't be silently dropped) with
 /// the one provenance slice normalized out:
 ///   - `output_dir` — pure write-location provenance.
+///
 /// `[method]` and `fit_seeds` are not in the problem at all — the method
 /// level owns the first and the seed level the second — so a second method on
 /// the same problem, or another seed, shares this digest. model/data *paths*

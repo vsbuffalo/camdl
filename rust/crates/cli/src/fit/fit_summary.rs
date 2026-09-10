@@ -2353,8 +2353,7 @@ impl Formatter {
         }
 
         // fit_state winner ↔ final_params
-        if !state.start_values.is_empty() && final_params.is_some() {
-            let f = final_params.as_ref().unwrap();
+        if let Some(f) = final_params.as_ref().filter(|_| !state.start_values.is_empty()) {
             let mut state_matches = true;
             for (k, fv) in f {
                 if let Some(sv) = state.start_values.get(k) {
@@ -2413,11 +2412,11 @@ fn ci_env_set() -> bool {
     matches!(std::env::var("CI").as_deref(), Ok("true") | Ok("1"))
 }
 
-/// Resolve color preference with the standard Unix precedence:
-/// `--no-color` flag > `NO_COLOR` env (forces off; see no-color.org)
-/// > `CLICOLOR_FORCE` env (forces on regardless of TTY; common
-/// convention used by ls / grep / git when piped through `less -R`)
-/// > TTY auto-detect.
+/// Resolve color preference with the standard Unix precedence, highest first:
+/// the `--no-color` flag, then the `NO_COLOR` env var (forces off; see
+/// no-color.org), then `CLICOLOR_FORCE` (forces on regardless of TTY; the
+/// convention ls / grep / git use when piped through `less -R`), then TTY
+/// auto-detect.
 ///
 /// Default behavior (no flag, no env): colored when stdout is a TTY,
 /// plain text otherwise. Pipe to `less -R` with `CLICOLOR_FORCE=1`
@@ -4156,7 +4155,7 @@ mod tests {
         let flagged: Vec<&str> = table
             .lines()
             .filter(|l| l.contains("← outlier"))
-            .map(|l| l.trim_start().split_whitespace().next().unwrap_or(""))
+            .map(|l| l.split_whitespace().next().unwrap_or(""))
             .collect();
         assert_eq!(flagged, vec!["6"],
             "only chain 6 (the bad DATA fit) may be flagged:\n{table}");

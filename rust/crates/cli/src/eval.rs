@@ -71,7 +71,7 @@ fn references_compartments(expr: &Expr) -> Option<String> {
         Expr::Cond(w) => references_compartments(&w.cond.pred)
             .or_else(|| references_compartments(&w.cond.then))
             .or_else(|| references_compartments(&w.cond.else_)),
-        Expr::Reduce(w) => w.reduce.iter().find_map(|t| references_compartments(t)),
+        Expr::Reduce(w) => w.reduce.iter().find_map(references_compartments),
         // Hoisted bindings are state-derived → effectively reference compartments.
         Expr::BindingRef(w) => Some(w.binding_ref.clone()),
         _ => None,

@@ -21,6 +21,11 @@
 //! Re-capture:
 //!   CAMDL_CAPTURE_BASELINE=1 cargo test -p sim --test gate_pgas_density_baseline -- --nocapture
 
+// `BASELINES` is pasted verbatim from the capture run, which prints more digits
+// than an f64 carries. Shortening the literals by hand is undone the next time
+// someone re-captures.
+#![allow(clippy::excessive_precision)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -441,7 +441,7 @@ impl ReactiveAgenda {
         for (iv_idx, iv) in compiled.model.interventions.iter().enumerate() {
             if let ir::intervention::FireSource::Reactive(t) = &iv.fire {
                 for s in trigger_stream_refs(&t.when_) {
-                    if !stream_names.iter().any(|n| *n == s) {
+                    if !stream_names.contains(&s) {
                         stream_names.push(s);
                     }
                 }
@@ -795,9 +795,9 @@ mod tests {
         });
         let set = Action::Set(SetAction { compartment: "S".into(), value: Expr::const_(0.0) });
         let add = Action::Add(AddAction { compartment: "I".into(), count: Expr::const_(1.0) });
-        assert_eq!(action_verbs(&[frac.clone()]), "transfer");
-        assert_eq!(action_verbs(&[set.clone()]), "set");
-        assert_eq!(action_verbs(&[add.clone()]), "add");
+        assert_eq!(action_verbs(std::slice::from_ref(&frac)), "transfer");
+        assert_eq!(action_verbs(std::slice::from_ref(&set)), "set");
+        assert_eq!(action_verbs(std::slice::from_ref(&add)), "add");
         assert_eq!(action_verbs(&[frac, set, add]), "transfer;set;add");
     }
 }

@@ -70,7 +70,7 @@ impl ObsStream {
         };
         let idx = filtered(self.data.len());
         self.data = idx.iter().map(|&i| self.data[i].clone()).collect();
-        self.cells = idx.iter().map(|&i| self.cells[i].clone()).collect();
+        self.cells = idx.iter().map(|&i| self.cells[i]).collect();
         self.aux = idx.iter().map(|&i| self.aux[i].clone()).collect();
         self.times = match &self.times {
             sim::inference::StreamTimes::Intervals(ps) =>
@@ -2036,7 +2036,7 @@ fn run_one_chain(
                     let _ = write!(w, "\t{}", v); // round-trippable; gh#266
                 }
                 let _ = writeln!(w);
-                if iter % 10 == 0 || iter + 1 == n_iter { let _ = w.flush(); }
+                if iter.is_multiple_of(10) || iter + 1 == n_iter { let _ = w.flush(); }
             }
         }
     };
@@ -4342,19 +4342,11 @@ mod tests {
             "error must explain the truncation/bounds disagreement: {}", err);
     }
 
-    /// Cover every distribution supported in fit.toml `prior = ...` strings.
-    /// Regression guard for the asymmetry bug where fit.toml could only override
-    /// 4 of the 7 IR distributions.
-    /// End-to-end: priors declared in a .camdl file survive compilation to
-    /// Regression for the `init_mle = "scout"` bug: when a FitState
-    /// (scout's output) is supplied to `FitRunConfig::build`, the
-    /// resulting `base_params` must reflect the scout-best values —
-    /// NOT the fit.toml `[estimate].*.start` values. The fix for this
-    /// was reversing the application order in build. See
-    /// docs/dev/incidents/2026-04-18-starts-from-scout-ignored.md.
-    ///
     // ── IC-free inference: config validation ────────────────────────────
 
+    /// A minimal v2 `fit.toml` over the `seir_observations` golden IR, with
+    /// `ic_free` and I0's `perturb_only_at_t0` flag set independently so the
+    /// tests below can build all four combinations.
     fn ic_free_fixture(dir: &std::path::Path, ic_free: bool, perturb_t0: bool)
         -> super::super::config_v2::Problem
     {
