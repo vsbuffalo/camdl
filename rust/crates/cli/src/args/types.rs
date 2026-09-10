@@ -308,7 +308,8 @@ impl FromStr for SweepSpec {
 fn parse_grid(spec: &str, name: &str) -> Result<Grid, String> {
     if let Some(args) = strip_call(spec, "lin") {
         let (min, max, n) = parse_min_max_n(args, "lin", name)?;
-        if !(min < max) {
+        // NaN arm explicit: `min >= max` alone is false for NaN.
+        if min.is_nan() || max.is_nan() || min >= max {
             return Err(format!(
                 "lin(min, max, n) requires min < max for --sweep {} (got min={}, max={})",
                 name, min, max));
@@ -317,12 +318,13 @@ fn parse_grid(spec: &str, name: &str) -> Result<Grid, String> {
     }
     if let Some(args) = strip_call(spec, "log10") {
         let (min, max, n) = parse_min_max_n(args, "log10", name)?;
-        if !(min > 0.0) {
+        // NaN arm explicit: `min <= 0.0` alone is false for NaN.
+        if min.is_nan() || min <= 0.0 {
             return Err(format!(
                 "log10(min, max, n) requires min > 0 for --sweep {} (got min={})",
                 name, min));
         }
-        if !(min < max) {
+        if min.is_nan() || max.is_nan() || min >= max {
             return Err(format!(
                 "log10(min, max, n) requires min < max for --sweep {} (got min={}, max={})",
                 name, min, max));

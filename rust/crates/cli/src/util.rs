@@ -3889,7 +3889,8 @@ pub fn rematerialize_with_output_every(
         Some(s) => s,
         None => return Ok((ir_path.to_string(), None)),
     };
-    if !(step > 0.0) {
+    // NaN arm explicit: `step <= 0.0` alone is false for NaN.
+    if step.is_nan() || step <= 0.0 {
         return Err(format!(
             "--output-every must be a positive number, got {}", step
         ));

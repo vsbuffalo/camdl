@@ -1871,9 +1871,11 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                     continue; // stream not bound to data (or filtered out)
                 }
                 let last_obs = times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                // Negated `>`, not `<=`: an unresolved horizon arrives as NaN and
-                // must fall through to "no forecast window", never to "extend".
-                if !(model.simulation.t_end > last_obs) {
+                // NaN arm explicit: an unresolved horizon arrives as NaN and
+                // must fall through to "no forecast window", never to "extend"
+                // — and `t_end <= last_obs` alone is false for NaN.
+                let t_end = model.simulation.t_end;
+                if t_end.is_nan() || last_obs.is_nan() || t_end <= last_obs {
                     continue; // no forecast window — byte-identical to before
                 }
                 // A likelihood whose arguments read an observation data column
@@ -3001,10 +3003,11 @@ fn forecast_times(obs_times: &[f64], output_times: &[f64]) -> Vec<f64> {
     if gaps.is_empty() {
         return Vec::new();
     }
-    // Negated `>`, not `<=`: `modal_value` returns NaN when it finds no positive
-    // gap, and NaN must fall through to "no cadence", not to "cadence is fine".
+    // NaN arm explicit: `modal_value` returns NaN when it finds no positive
+    // gap, and NaN must fall through to "no cadence", not to "cadence is fine"
+    // — which `cadence <= 0.0` alone would do, being false for NaN.
     let cadence = crate::util::modal_value(&gaps);
-    if !(cadence > 0.0) {
+    if cadence.is_nan() || cadence <= 0.0 {
         return Vec::new();
     }
     let Some(&grid_end) = output_times.last() else {

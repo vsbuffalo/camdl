@@ -897,7 +897,10 @@ impl BoundObs {
                 // against zero trials. Only the `n > 0` half is relaxed.
                 if let Some(dn) = denom {
                     if let Some((_, n)) = aux_row.iter().find(|(k, _)| k == dn) {
-                        if !(*n >= 0.0) {
+                        // NaN arm explicit: `*n < 0.0` alone is false for NaN,
+                        // which would let a NaN denominator past this error and
+                        // into the `value <= n` comparisons below.
+                        if n.is_nan() || *n < 0.0 {
                             findings.push(Finding {
                                 severity: Severity::Error,
                                 message: format!(
@@ -1141,7 +1144,9 @@ impl Period {
                 "a period's endpoints must be finite (got start={start}, stop={stop})"
             ));
         }
-        if !(stop > start) {
+        // No NaN arm here, and that is deliberate: the finiteness check above
+        // has already returned on a NaN endpoint, so `stop <= start` is exact.
+        if stop <= start {
             return Err(format!(
                 "a period must have positive width (stop > start); got \
                  [{start}, {stop})"
