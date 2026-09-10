@@ -18,6 +18,49 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+/// The `schema` tag every `<algorithm>_summary.json` carries as its first key,
+/// in the form the predictive manifests use (`camdl.predictive/v3`,
+/// `camdl.predict-report/v1`).
+///
+/// It exists because two keys of this file changed *meaning* under unchanged
+/// names (gh#728): `rhat` was the classic Gelman–Rubin statistic and is now
+/// `max(rank-normalized split-R̂, folded split-R̂)`; `ess` was a sum of
+/// per-chain Geyer estimates, suppressed to NaN above R̂ 1.1, and is now the
+/// cross-chain bulk-ESS of Vehtari et al. (2021), never suppressed. Both
+/// vintages sit in one store for as long as a project keeps its fits, and
+/// nothing in an untagged file distinguishes them — a summary with no nulls is
+/// either a new fit or an old fit that converged. A consumer that labels a
+/// column "R̂" is therefore labelling two different estimators.
+///
+/// **Absence means the pre-tag vintage** — the classic statistics — and this
+/// tag means the rank-normalized ones. A later change of meaning bumps the
+/// version rather than reusing it.
+pub const FIT_SUMMARY_SCHEMA: &str = "camdl.fit-summary/v1";
+
+/// Check a parsed `<algorithm>_summary.json` against [`FIT_SUMMARY_SCHEMA`].
+///
+/// The one place the check lives, so a reader cannot half-do it. `filename` is
+/// only for the message.
+pub fn check_fit_summary_schema(v: &serde_json::Value, filename: &str) -> Result<(), String> {
+    match v.get("schema").and_then(|s| s.as_str()) {
+        Some(FIT_SUMMARY_SCHEMA) => Ok(()),
+        Some(other) => Err(format!(
+            "{filename} declares `schema = \"{other}\"`; this camdl reads \
+             `{FIT_SUMMARY_SCHEMA}`. The file was written by a different \
+             version of camdl — re-run the fit, or read it with the version \
+             that wrote it."
+        )),
+        None => Err(format!(
+            "{filename} carries no `schema` tag, so it predates \
+             `{FIT_SUMMARY_SCHEMA}` (gh#728). Its `rhat` is the classic \
+             Gelman–Rubin statistic and its `ess` a suppressed per-chain sum, \
+             not the rank-normalized and bulk statistics this camdl reports \
+             under those names — the numbers would be read as something they \
+             are not. Re-run the fit to refresh it."
+        )),
+    }
+}
+
 /// Inference algorithm tag — discriminator enum naming the algorithm
 /// independent of the simulation backend. Recorded in a fit-stage leaf's
 /// `inputs` alongside `Backend` to capture the (algorithm, backend) pair the
@@ -760,6 +803,33 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Option<FitSidecar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#728: an untagged summary is refused by name, and the refusal says
+    /// what the untagged file's numbers actually are.
+    ///
+    /// The keys `rhat` and `ess` changed estimator without changing name, so
+    /// the absence of a tag is the only thing that distinguishes the two
+    /// vintages — and it is one-directional in the wrong direction: a file
+    /// with no nulls is either a new fit or an old fit that converged.
+    #[test]
+    fn a_summary_without_a_schema_tag_is_refused_by_name() {
+        let tagged = serde_json::json!({
+            "schema": FIT_SUMMARY_SCHEMA, "rhat": {"beta": 1.01},
+        });
+        assert!(check_fit_summary_schema(&tagged, "pgas_summary.json").is_ok());
+
+        let untagged = serde_json::json!({ "rhat": {"beta": 1.01} });
+        let why = check_fit_summary_schema(&untagged, "pgas_summary.json")
+            .expect_err("an untagged summary is of unknown vintage");
+        assert!(why.contains("pgas_summary.json"), "{why}");
+        assert!(why.contains("no `schema` tag"), "{why}");
+        assert!(why.contains("Gelman"), "the refusal says what the old numbers were: {why}");
+
+        let other = serde_json::json!({ "schema": "camdl.fit-summary/v99" });
+        let why = check_fit_summary_schema(&other, "nuts_summary.json")
+            .expect_err("a tag this camdl does not read is refused too");
+        assert!(why.contains("v99") && why.contains(FIT_SUMMARY_SCHEMA), "{why}");
+    }
 
     /// gh#585: the recorded training window is the §3.7.3(b) proof, and a
     /// rerun that skips the data load (all-cache-hit) rewrites the sidecar

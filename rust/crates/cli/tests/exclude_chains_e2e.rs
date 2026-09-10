@@ -582,7 +582,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
     let stage_dir = draws.parent().unwrap();
     std::fs::write(
         stage_dir.join("pgas_summary.json"),
-        r#"{"stage":"pgas","n_chains":4,"thin":1,"rhat":{"beta":1.5700,"gamma":1.3000},"ess":{"beta":55,"gamma":47}}"#,
+        r#"{"schema":"camdl.fit-summary/v1","stage":"pgas","n_chains":4,"thin":1,"rhat":{"beta":1.5700,"gamma":1.3000},"ess":{"beta":55,"gamma":47}}"#,
     )
     .unwrap();
     const STORED_RHAT: f64 = 1.5700;

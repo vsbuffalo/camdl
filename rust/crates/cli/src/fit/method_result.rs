@@ -1492,6 +1492,10 @@ fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64>
 /// `pmmh_summary.json` / `nuts_summary.json`) into a serde value. These files
 /// are written by the runners and persist scalar diagnostics that aren't in
 /// fit_state.toml.
+///
+/// The `schema` tag is **required** (gh#728). This is the one typed loader
+/// every `MethodResult` goes through, so refusing here is what keeps a
+/// `rhat` written under one definition from being reported under another.
 fn read_summary_json(
     stage_dir: &Path,
     filename: &str,
@@ -1501,10 +1505,15 @@ fn read_summary_json(
         stage_dir: stage_dir.to_owned(),
         message: format!("{}: {}", filename, e),
     })?;
-    serde_json::from_str(&contents).map_err(|e| MethodResultError::Io {
-        stage_dir: stage_dir.to_owned(),
-        message: format!("{}: parse error: {}", filename, e),
-    })
+    let value: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|e| MethodResultError::Io {
+            stage_dir: stage_dir.to_owned(),
+            message: format!("{}: parse error: {}", filename, e),
+        })?;
+    crate::run_meta::check_fit_summary_schema(&value, filename).map_err(|message| {
+        MethodResultError::Io { stage_dir: stage_dir.to_owned(), message }
+    })?;
+    Ok(value)
 }
 
 /// Read `<stage>/draws.tsv` and compute (n_samples, mean, q025, q975)
@@ -1789,6 +1798,7 @@ mod tests {
         std::fs::write(
             dir.join("pgas_summary.json"),
             serde_json::to_string(&serde_json::json!({
+                "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
                 "stage": "pgas",
                 "n_chains": 2,
                 "acceptance_rates": [[0.32, 0.35], [0.28, 0.30]],
@@ -1853,7 +1863,7 @@ mod tests {
         );
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"stage":"pgas","n_chains":4,"acceptance_rates":[],
+            r#"{"schema":"camdl.fit-summary/v1","stage":"pgas","n_chains":4,"acceptance_rates":[],
                 "rhat":{"R0":1.001,"sigma":1.002},"ess":{"R0":900.0,"sigma":880.0}}"#,
         )
         .unwrap();
@@ -1920,6 +1930,7 @@ mod tests {
         std::fs::write(
             dir.join("pmmh_summary.json"),
             serde_json::to_string(&serde_json::json!({
+                "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
                 "stage": "pmmh",
                 "n_chains": 2,
                 "acceptance_rate": [0.20, 0.30],
@@ -1986,6 +1997,7 @@ mod tests {
         std::fs::write(
             dir.join("nuts_summary.json"),
             serde_json::to_string(&serde_json::json!({
+                "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
                 "stage": "nuts",
                 "n_chains": 2,
                 "rhat": {"beta": 1.01, "gamma": 1.03},

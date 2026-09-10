@@ -1988,6 +1988,10 @@ fn write_summary(
         .collect();
 
     let mut summary = serde_json::json!({
+        // gh#728: the tag a consumer keys on to know which statistics the
+        // `rhat` and `ess` keys below hold. `serde_json` writes a map in key
+        // order, so it lands where the sort puts it rather than first.
+        "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
         "stage": "pgas",
         "n_chains": results.len(),
         "acceptance_rates": acceptance_rates,

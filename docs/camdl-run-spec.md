@@ -2831,6 +2831,18 @@ Per-algorithm leaf contents: IF2 writes `mle_params.toml`, `final_params.toml`,
 NLopt optimizers write `mle_params.toml` and `chain_results.tsv`. A `pfilter`
 method with `record_prequential` writes `prequential.{tsv,json}`.
 
+Every `<algorithm>_summary.json` carries `schema = "camdl.fit-summary/v1"`, and
+every reader requires it: a file without the tag, or with a tag this camdl does
+not know, is refused by name rather than read. The tag exists because two of its
+keys changed _meaning_ under unchanged names — `rhat` was the classic
+Gelman–Rubin statistic and is now
+`max(rank-normalized split-R̂, folded split-R̂)`; `ess` was a sum of per-chain
+Geyer estimates suppressed to NaN above R̂ 1.1 and is now the cross-chain
+bulk-ESS, never suppressed. Absence of the tag therefore means the pre-tag
+vintage, and nothing else in the file distinguishes the two. Re-running a fit
+refreshes it; a stored fit from before the tag is read by the camdl that wrote
+it.
+
 A completed leaf is reused on a second identical invocation ("cache hit"); pass
 `--force` to re-run and overwrite.
 
@@ -4861,7 +4873,7 @@ A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 | `chain_N/trajectories.json` | the matching manifest (`format`, `version`, `method`, `granularity`, `n_chains`, `n_draws`, `columns`, `model_hash`, `conditioned`, `calendar`, …)                                                                                                                                                                                                                                                       |
 | `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at run end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                                 |
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
-| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared                                                                                                                                                                                                                                                                     |
+| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared; each carries `schema = "camdl.fit-summary/v1"`, which every reader requires                                                                                                                                                                                        |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
 | `progress.json`             | sampler progress, written live, plus per-chain liveness (§10.10)                                                                                                                                                                                                                                                                                                                                         |
 

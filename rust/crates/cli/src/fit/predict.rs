@@ -788,6 +788,14 @@ fn read_convergence(stage_dir: &Path, method: Option<FitAlgorithm>) -> Convergen
     let try_read = |name: &str| -> Option<ConvergenceStatus> {
         let bytes = std::fs::read(stage_dir.join(name)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        // gh#728: a summary of another vintage holds `rhat` and `ess` keys
+        // that are different estimators under the same names, so labelling a
+        // band with them would be labelling something else. Say so once and
+        // report the band as not assessed rather than carrying the number.
+        if let Err(why) = crate::run_meta::check_fit_summary_schema(&v, name) {
+            eprintln!("warning: {why}");
+            return None;
+        }
         // Reduce through the SAME classification `fit summary` uses, over the
         // same per-parameter type, read by the same reader, so a band and the
         // summary cannot disagree about one fit (gh#409). A stored summary is
@@ -3819,7 +3827,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("mh_summary.json"),
-            r#"{"rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
         )
         .unwrap();
 
@@ -3857,7 +3865,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"rhat": {"beta": 1.001}, "ess": {"beta": 900.0}}"#,
+            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"beta": 1.001}, "ess": {"beta": 900.0}}"#,
         )
         .unwrap();
         std::fs::write(
@@ -3891,7 +3899,7 @@ mod tests {
         // `tau` never moved — a sampler pathology, not a missing number.
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"rhat": {"a2": 1.01},
+            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"a2": 1.01},
                 "ess":  {"a2": 145.0},
                 "rhat_not_reported": {"tau": "constant_draws"}}"#,
         )
@@ -3915,7 +3923,7 @@ mod tests {
         // `a2` mixed and carries 145.
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"rhat": {"a2": 1.01, "tau": 2.639},
+            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"a2": 1.01, "tau": 2.639},
                 "ess":  {"a2": 145.0, "tau": null}}"#,
         )
         .unwrap();
@@ -3933,7 +3941,7 @@ mod tests {
         // Control: with every assessed parameter reporting, the minimum is real.
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"rhat": {"a2": 1.01, "tau": 2.639},
+            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"a2": 1.01, "tau": 2.639},
                 "ess":  {"a2": 145.0, "tau": 9.0}}"#,
         )
         .unwrap();
@@ -3955,7 +3963,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pmmh_summary.json"),
-            r#"{"rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
         )
         .unwrap();
         assert!(
