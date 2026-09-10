@@ -293,6 +293,90 @@ pub(crate) fn camdlc_checked_flag() -> &'static std::sync::OnceLock<()> {
     &CAMDLC_CHECKED
 }
 
+// ─── The emitted-IR version guard (gh#888) ───────────────────────────────────
+//
+// `check_camdlc_version_once` compares the git hashes of the two *binaries*, and
+// every test harness and every ad-hoc worktree run skips it
+// (`CAMDL_SKIP_VERSION_CHECK=1`). The guard below checks the *artefact* instead:
+// whatever camdlc just emitted must declare the IR schema version this runtime
+// was built against (`ir/VERSION`). It has no opt-out, because a document at
+// another schema version is unusable here — `ir::from_str` rejects it — and
+// because the IR cache keys on the version the runtime *expects*, never on the one
+// the compiler emitted. Publishing such a document files, say, 0.39 content
+// under the 0.40 key: an entry that hard-errors on every later read of that
+// model until someone deletes the file by hand.
+
+/// How far into an IR document to look for the envelope's `ir_version`. camdlc
+/// writes it as the envelope's first key (`ocaml/lib/ir/serde.ml`), so it lands
+/// in the first few dozen bytes; the window is generous only to tolerate
+/// whitespace. Reading a fixed head instead of parsing matters on the cache-hit
+/// path, whose whole purpose is to not touch a document that can run to hundreds
+/// of megabytes.
+const IR_VERSION_SCAN_BYTES: usize = 4096;
+
+/// The `ir_version` an IR document declares, read out of the head of the
+/// document without parsing it. `None` when the head carries no
+/// `"ir_version": "…"` — for camdlc output that means a malformed envelope.
+fn declared_ir_version(head: &[u8]) -> Option<&str> {
+    const KEY: &[u8] = b"\"ir_version\"";
+    let after_key = head.windows(KEY.len()).position(|w| w == KEY)? + KEY.len();
+    let rest = &head[after_key..];
+    let colon = rest.iter().position(|b| !b.is_ascii_whitespace())?;
+    if rest[colon] != b':' {
+        return None; // `"ir_version"` appeared as a value, not as a key
+    }
+    let rest = &rest[colon + 1..];
+    let open = rest.iter().position(|b| !b.is_ascii_whitespace())?;
+    if rest[open] != b'"' {
+        return None;
+    }
+    let rest = &rest[open + 1..];
+    let close = rest.iter().position(|&b| b == b'"')?;
+    std::str::from_utf8(&rest[..close]).ok()
+}
+
+/// Refuse a compile whose emitted document declares a different IR schema
+/// version than this runtime reads. Fails closed: such a document is neither run
+/// nor cached, so a stale compiler produces one clear error instead of a durable
+/// wrong cache entry.
+fn check_emitted_ir_version(
+    json: &str,
+    model_path: &str,
+    camdlc: &std::path::Path,
+) -> Result<(), String> {
+    let expected = ir::IR_VERSION.trim();
+    let head = &json.as_bytes()[..json.len().min(IR_VERSION_SCAN_BYTES)];
+    // `find_camdlc`'s PATH branch returns the bare name, which on its own tells
+    // the reader nothing about *which* file ran. Name the lookup instead, so the
+    // next step (`which camdlc`) is obvious.
+    let camdlc = if camdlc.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
+        camdlc.display().to_string()
+    } else {
+        format!("{} (found on PATH — `which {0}` names the file)", camdlc.display())
+    };
+    match declared_ir_version(head) {
+        Some(found) if found == expected => Ok(()),
+        Some(found) => Err(format!(
+            "camdlc emitted IR at schema version {found}, but this camdl reads {expected}\n  \
+             model:  {model_path}\n  \
+             camdlc: {camdlc}\n  \
+             The compiler and the runtime are out of step — almost always a stale camdlc\n  \
+             on PATH with the version handshake skipped (CAMDL_SKIP_VERSION_CHECK=1, or a\n  \
+             CAMDLC / CAMDLC_PATH override pointing at another build).\n  \
+             Run `make build-ocaml && make install` to sync them.\n  \
+             Nothing was cached: an IR-cache entry keyed on {expected} but holding {found}\n  \
+             would fail every later read of this model.",
+        )),
+        None => Err(format!(
+            "camdlc emitted a document whose envelope does not open with an `ir_version`\n  \
+             field (expected \"ir_version\": \"{expected}\").\n  \
+             model:  {model_path}\n  \
+             camdlc: {camdlc}\n  \
+             Run `make build-ocaml && make install` to rebuild the compiler.",
+        )),
+    }
+}
+
 /// Run camdlc on a .camdl file and return the IR JSON as a string.
 ///
 /// camdlc can take ~20s on large stratified models and `.output()` blocks
@@ -415,8 +499,12 @@ pub(crate) fn run_camdlc_compile(
         // camdlc prints errors to stderr — pass them through
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
-    String::from_utf8(output.stdout)
-        .map_err(|e| format!("camdlc output not UTF-8: {}", e))
+    let json = String::from_utf8(output.stdout)
+        .map_err(|e| format!("camdlc output not UTF-8: {}", e))?;
+    // gh#888: the check the binary handshake cannot make, and that nothing
+    // downstream makes before the IR cache has already stored the document.
+    check_emitted_ir_version(&json, camdl_path, &camdlc)?;
+    Ok(json)
 }
 
 /// Compile `camdl_path` and write its read-closure depfile to `deps_out` (for
@@ -654,6 +742,55 @@ fn read_deps_fresh(cache_path: &std::path::Path, model_path: &str) -> bool {
         }
     }
     true
+}
+
+/// True iff the cached IR document declares the IR schema version its key was
+/// built from — i.e. the one this runtime reads (gh#888). A stale compiler whose
+/// output slipped past the binary handshake writes an older document under the
+/// current key; serving it makes every read of that model a hard error, so such
+/// an entry reads as a miss and is recompiled (the recompile's atomic rename
+/// replaces it in place). An unreadable or version-less entry is a miss too —
+/// fail closed, like the sidecar-schema check above.
+fn entry_ir_version_matches(cache_path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(IR_VERSION_SCAN_BYTES);
+    let read = std::fs::File::open(cache_path).and_then(|f| {
+        let mut window = f.take(IR_VERSION_SCAN_BYTES as u64);
+        window.read_to_end(&mut head)
+    });
+    if read.is_err() {
+        return false;
+    }
+    declared_ir_version(&head) == Some(ir::IR_VERSION.trim())
+}
+
+/// True iff a cache entry may be served for `model_path`: present, declaring the
+/// IR schema version its key was built from (gh#888), and with every `read()`
+/// input still hashing to what that compile saw (gh#260). Anything else is a
+/// miss — the caller recompiles and republishes.
+fn cache_entry_servable(cache_path: &std::path::Path, model_path: &str) -> bool {
+    cache_path.exists()
+        && entry_ir_version_matches(cache_path)
+        && read_deps_fresh(cache_path, model_path)
+}
+
+/// One line on stderr when an entry is skipped for declaring the wrong IR
+/// version, so "why does this model recompile every time?" is diagnosable
+/// without reading the cache by hand. Called once per resolve (not from the
+/// single-flight poll loop, which re-tests the predicate while it waits).
+fn note_version_mismatched_entry(cache_path: &std::path::Path, model_path: &str) {
+    if !cache_path.exists() || entry_ir_version_matches(cache_path) {
+        return;
+    }
+    crate::status::step(
+        "ir-cache",
+        format!(
+            "entry for {} was compiled at a different IR schema version than {} — \
+             recompiling and replacing it",
+            crate::status::concise_path(model_path),
+            ir::IR_VERSION.trim(),
+        ),
+    );
 }
 
 /// Build sidecar contents from camdlc's emitted depfile: hash each resolved
@@ -1011,9 +1148,11 @@ pub fn resolve_ir_path_with_quantities(
     };
 
     // Cache HIT: reuse the compiled IR, skip camdlc entirely — but only if the
-    // entry's read()-loaded inputs are unchanged (gh#260).
+    // entry's read()-loaded inputs are unchanged (gh#260) and it declares the IR
+    // schema version its key was built from (gh#888).
     if let Some((cache_path, key)) = &cache_target {
-        if cache_path.exists() && read_deps_fresh(cache_path, path) {
+        note_version_mismatched_entry(cache_path, path);
+        if cache_entry_servable(cache_path, path) {
             crate::status::step("cached",
                 format!("IR for {} ({})", crate::status::concise_path(path), &key[..8.min(key.len())]));
             return Ok((cache_path.to_string_lossy().into_owned(), None));
@@ -1028,7 +1167,7 @@ pub fn resolve_ir_path_with_quantities(
     // populated cache.
     let mut _compile_lock: Option<single_flight::LockGuard> = None;
     if let Some((cache_path, key)) = &cache_target {
-        let is_cached = || cache_path.exists() && read_deps_fresh(cache_path, path);
+        let is_cached = || cache_entry_servable(cache_path, path);
         match single_flight::acquire(cache_path, &is_cached) {
             single_flight::Lease::AlreadyCached => {
                 crate::status::step("cached",
@@ -1720,6 +1859,68 @@ mod ir_cache_key_tests {
         );
         // Length-prefixed, so an empty vocabulary is distinguishable from none.
         assert_ne!(none, ir_cache_key(b"model A", "git1", "0.7", false, false, true, Some(b"")));
+    }
+}
+
+#[cfg(test)]
+mod emitted_ir_version_tests {
+    use super::{check_emitted_ir_version, declared_ir_version};
+
+    fn v(s: &str) -> Option<&str> {
+        declared_ir_version(s.as_bytes())
+    }
+
+    #[test]
+    fn reads_the_version_camdlc_puts_first_in_the_envelope() {
+        // The compact form camdlc emits (`ocaml/lib/ir/serde.ml`).
+        assert_eq!(
+            v(r#"{"ir_version":"0.40","validated_by":"ocaml-compiler-v0.40","model":{"#),
+            Some("0.40")
+        );
+        // ...and the pretty form Rust emits (`ir::to_string_pretty`).
+        assert_eq!(v("{\n  \"ir_version\": \"0.40\",\n  \"model\": {"), Some("0.40"));
+    }
+
+    #[test]
+    fn absent_or_malformed_reads_as_no_version() {
+        assert_eq!(v(r#"{"model":{"name":"sir"}}"#), None);
+        // `ir_version` as a *value*, not a key: not a version declaration.
+        assert_eq!(v(r#"{"name":"ir_version","model":{}}"#), None);
+        // A non-string value is not a version either.
+        assert_eq!(v(r#"{"ir_version":40}"#), None);
+    }
+
+    #[test]
+    fn a_document_at_the_expected_version_is_accepted() {
+        let expected = ir::IR_VERSION.trim();
+        let json = format!("{{\"ir_version\":\"{expected}\",\"model\":{{}}}}");
+        assert!(check_emitted_ir_version(&json, "sir.camdl", std::path::Path::new("camdlc")).is_ok());
+    }
+
+    /// The refusal has to carry all three facts, or the next person rediscovers
+    /// the whole incident: which version came out, which one goes in, and that a
+    /// stale compiler with the handshake skipped is the usual cause.
+    #[test]
+    fn a_document_at_another_version_is_refused_with_a_diagnosable_message() {
+        let expected = ir::IR_VERSION.trim();
+        let json = r#"{"ir_version":"0.39","validated_by":"ocaml-compiler-v0.39","model":{}}"#;
+        let e = check_emitted_ir_version(json, "sir.camdl", std::path::Path::new("/opt/bin/camdlc"))
+            .unwrap_err();
+        assert!(e.contains("0.39"), "names the emitted version: {e}");
+        assert!(e.contains(expected), "names the expected version: {e}");
+        assert!(e.contains("/opt/bin/camdlc"), "names the compiler that emitted it: {e}");
+        assert!(e.contains("CAMDL_SKIP_VERSION_CHECK"), "names the likely cause: {e}");
+        assert!(e.contains("sir.camdl"), "names the model: {e}");
+    }
+
+    #[test]
+    fn a_document_with_no_version_is_refused_too() {
+        // Fail closed: `ir::from_str` would reject it downstream anyway, and it
+        // must never reach the cache in the meantime.
+        let e = check_emitted_ir_version(
+            r#"{"model":{"name":"sir"}}"#, "sir.camdl", std::path::Path::new("camdlc"))
+            .unwrap_err();
+        assert!(e.contains("ir_version"), "{e}");
     }
 }
 
@@ -3895,6 +4096,32 @@ mod tests {
         assert!(persist_cache_entry(&cache, "IR-NEW", &deps_new));
         assert!(read_deps_fresh(&cache, model.to_str().unwrap()));
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), "IR-NEW");
+    }
+
+    /// gh#888: an entry whose document declares another IR schema version is not
+    /// servable, even with a perfectly fresh sidecar — the key says one version
+    /// and the content says another, so serving it is the hard error the cache
+    /// exists to avoid. It reads as a miss and the caller recompiles.
+    #[test]
+    fn an_entry_declaring_another_ir_version_is_not_servable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = tmp.path().join("m.camdl");
+        std::fs::write(&model, b"// model").unwrap();
+        let cache = tmp.path().join("e.ir.json");
+        let model_path = model.to_str().unwrap();
+
+        let at_current = format!(
+            "{{\"ir_version\":\"{}\",\"model\":{{}}}}", ir::IR_VERSION.trim());
+        assert!(persist_cache_entry(&cache, &at_current, &[]));
+        assert!(cache_entry_servable(&cache, model_path),
+            "an entry at the current schema version, with no read() inputs, is servable");
+
+        // Same key, same (empty) read-closure — only the declared version moves.
+        assert!(persist_cache_entry(&cache, "{\"ir_version\":\"0.0\",\"model\":{}}", &[]));
+        assert!(read_deps_fresh(&cache, model_path),
+            "the sidecar is still valid: the version is the only defect");
+        assert!(!cache_entry_servable(&cache, model_path),
+            "a version-mismatched entry must read as a miss, not be served");
     }
 
     /// Atomicity invariant: if the sidecar can't be written, the just-written IR
