@@ -13,7 +13,7 @@
 //! schedules to the union axis and the per-stream incidence reset scores each
 //! stream over its own cadence):
 //!   1. the model SIMULATES and `--obs-only-dir` emits one long-form TSV per
-//!      observation SOURCE (`time, patch, <scored>`), AFP on a 30-day grid and
+//!      observation `source` (`time, patch, <scored>`), AFP on a 30-day grid and
 //!      ES on a 14-day grid (two distinct cadences);
 //!   2. each source's file LOADS through the §4.2 long-form router and scores a
 //!      finite loglik (rows routed to their leaf by the `patch` column);
@@ -113,7 +113,7 @@ fn generate_data(bin: &Path, ir: &Path, dir: &Path) -> (PathBuf, PathBuf) {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Property 1: one long-form TSV per SOURCE, both leaves in it (gh#884),
+    // Property 1: one long-form TSV per `source`, both leaves in it (gh#884),
     // AFP monthly + ES biweekly.
     let afp = obs_dir.join("afp.tsv");
     let es = obs_dir.join("es.tsv");

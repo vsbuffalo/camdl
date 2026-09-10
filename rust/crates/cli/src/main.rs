@@ -3086,9 +3086,9 @@ impl StreamSink {
             eprintln!("observations written to {}", path);
         }
 
-        // --obs-dir / --obs-only-dir: one file per observation SOURCE, under
+        // --obs-dir / --obs-only-dir: one file per observation `source`, under
         // the columns the stream declared, so the file re-loads under its own
-        // model (gh#833, gh#830, gh#884): the value under the SCORED column's
+        // model (gh#833, gh#830, gh#884): the value under the `scored` column's
         // name, the time under the `: time` column's name — or both window
         // boundaries under their `window_start`/`window_stop` names, each dated
         // when `--dates` is on. A stratified family's leaves share a source, so
