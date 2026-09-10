@@ -113,6 +113,25 @@ pub fn cells_are_dated(cells: &[&str], opts: &TimeOpts) -> bool {
         })
 }
 
+/// Quote an internal time back to the modeller the way the file states it: as
+/// an ISO date when the column was dated and the model carries the `origin` to
+/// render through, and as the bare number otherwise.
+///
+/// An error that names a time is only useful if the modeller can find the row
+/// it means. On a dated file every other time is a calendar date, so a bare
+/// `-3` is a conversion the reader has to do by hand (gh#842). Rendering goes
+/// through `internal_to_date_hires`, which stays one-to-one with the timepoint,
+/// so a quoted sub-day boundary never reads as the whole day it falls in. A
+/// time the calendar cannot render falls back to the number rather than
+/// swallowing the diagnostic.
+pub fn quote_time(t: f64, dated: bool, opts: &TimeOpts) -> String {
+    match (dated, opts.origin) {
+        (true, Some(origin)) => ir::caltime::internal_to_date_hires(origin, t, opts.time_unit)
+            .unwrap_or_else(|_| format!("{t}")),
+        _ => format!("{t}"),
+    }
+}
+
 /// Detect the column kind over *all* cells (proposal §6.3). A cell that is
 /// both numeric and date-shaped cannot occur (a date has dashes; a bare
 /// number never parses as a date), so the two predicates partition the
