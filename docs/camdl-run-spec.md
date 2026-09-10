@@ -1821,6 +1821,12 @@ Simulating on a regular grid gives the synthetic fit more information than the
 real one has: a three-day row becomes three one-day rows, and a hole becomes an
 observation.
 
+The temporal columns are written in the representation the bound file used. A
+stream whose cells were ISO dates is re-emitted as ISO dates, rendered through
+the model's `origin` and `time_unit`; one whose cells were numbers keeps the
+numbers. So the synthetic replicate is the same shape as the file it stands in
+for, column names and cells alike, and pairs with it directly.
+
 ```
 camdl simulate model.camdl --params theta.toml \
     --design-from fit.toml --obs-only-dir synth/

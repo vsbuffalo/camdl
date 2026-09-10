@@ -863,7 +863,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     write_cas_leaf(result.log_likelihood, 0.0, 1);
 }
 
-use crate::caltime_load::{check_substeps_and_grid, convert_time_column, TimeFormat, TimeOpts};
+use crate::caltime_load::{check_substeps_and_grid, convert_time_column, TimeOpts};
 
 
 /// gh#90: fit-toml fallback for `camdl pfilter --fit fit.toml` (no CLI
@@ -1094,6 +1094,27 @@ fn read_boundary_column<'a>(
         }
     }
     Ok((cells, rows))
+}
+
+/// Whether the file at `path` wrote stream `obs`'s temporal cells as ISO
+/// dates. Read off the stream's own label column — `window_stop` for a
+/// windowed stream, its `: time` column otherwise — through the same predicate
+/// the loader applies when it decides a column was dated
+/// ([`crate::caltime_load::cells_are_dated`]).
+///
+/// The design-preserving emitter asks this so it can write the boundaries back
+/// in the representation the modeller published them in (gh#882). A windowed
+/// stream's two boundary columns are one representation: both are read by the
+/// same conversion, so the closing boundary settles the pair.
+pub(crate) fn stream_cells_were_dated(
+    obs: &ir::observation::ObservationModel,
+    path: &str,
+    opts: &TimeOpts,
+) -> Result<bool, String> {
+    let column = obs_time_column(obs)?;
+    let content = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+    let (cells, _rows) = read_boundary_column(&content, path, column)?;
+    Ok(crate::caltime_load::cells_are_dated(&cells, opts))
 }
 
 /// The error for an interval stream whose IR carries no `covers`: the compiler
@@ -1614,11 +1635,7 @@ fn finalize_observations(
 ) -> Result<Vec<Observation>, String> {
     let row_offset = rows.first().copied().unwrap_or(2);
     let times = convert_time_column(&time_cells, opts, row_offset)?;
-    let was_dated = opts.format != TimeFormat::Numeric
-        && time_cells.iter().any(|c| {
-            !c.trim().is_empty() && ir::caltime::parse_iso_date(c.trim()).is_ok()
-                && c.trim().parse::<f64>().is_err()
-        });
+    let was_dated = crate::caltime_load::cells_are_dated(&time_cells, opts);
     check_substeps_and_grid(&times, &rows, opts, was_dated)?;
 
     let observations: Vec<Observation> = times
@@ -1772,6 +1789,7 @@ fn fmt_implied_n(x: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caltime_load::TimeFormat;
 
     // ── pf-health implied-N formatting (gh#509) ─────────────────────────
     #[test]

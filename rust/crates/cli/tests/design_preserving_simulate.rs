@@ -291,10 +291,10 @@ fn compile_real_shaped(dir: &Path) -> PathBuf {
 /// The fixture model's `origin`.
 const REAL_SHAPED_ORIGIN: &str = "2026-06-29";
 
-/// A temporal cell as model time. The bound file states ISO dates; the
-/// re-emitted one states day offsets from the origin (gh#882 — the design
-/// writer does not yet carry the input's representation through). Both name
-/// the same instant, which is what the design must preserve.
+/// A temporal cell as model time, whichever representation the file states it
+/// in — an ISO date read through the fixture's origin, or a bare day offset.
+/// The assertions that compare periods are about the instants, not the cells;
+/// the cells are asserted separately (gh#882).
 fn as_time(cell: &str) -> f64 {
     if cell.contains('-') {
         ir::caltime::date_to_internal(REAL_SHAPED_ORIGIN, cell, "days")
@@ -331,9 +331,17 @@ fn real_shaped_truth(dir: &Path) -> PathBuf {
 
 /// A fit config binding the named streams to the named committed files.
 fn real_shaped_fit(dir: &Path, ir: &Path, binds: &[(&str, &str)]) -> PathBuf {
+    let paths: Vec<(&str, PathBuf)> =
+        binds.iter().map(|(s, f)| (*s, real_shaped(f))).collect();
+    real_shaped_fit_paths(dir, ir, &paths)
+}
+
+/// The same, binding streams to arbitrary paths — for re-binding a dataset the
+/// emitter just wrote.
+fn real_shaped_fit_paths(dir: &Path, ir: &Path, binds: &[(&str, PathBuf)]) -> PathBuf {
     let mut s = format!("[model]\ncamdl = \"{}\"\n\n[data.observations]\n", ir.display());
     for (stream, file) in binds {
-        s.push_str(&format!("{stream} = \"{}\"\n", real_shaped(file).display()));
+        s.push_str(&format!("{stream} = \"{}\"\n", file.display()));
     }
     s.push_str(REAL_SHAPED_STAGES);
     let p = dir.join("fit.toml");
@@ -401,6 +409,76 @@ fn design_from_reproduces_the_real_shaped_windows_and_hole() {
         "the row with no count stays a row with no count");
     assert!(simulated.iter().filter(|(_, _, v)| v != "NA").any(|(_, _, v)| v != "0"),
         "the values are drawn from the model, not written as zeros: {simulated:?}");
+}
+
+/// The raw temporal cells of a file, as the file spells them: the first `n`
+/// tab-separated fields of every row after the header.
+fn temporal_cells(path: &Path, n: usize) -> Vec<Vec<String>> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    text.lines().skip(1)
+        .map(|l| l.split('\t').take(n).map(str::to_string).collect())
+        .collect()
+}
+
+/// gh#882: a design bound from an ISO-dated file is re-emitted dated. The
+/// bulletin's two window boundaries and the stock stream's single label column
+/// are all written as ISO dates in the fixture, so the design-preserving
+/// writer renders them back through the model's `origin` and `time_unit` —
+/// cell for cell the strings that went in, not the day offsets they convert
+/// to. That is the round-trip property gh#831 asked for, extended from column
+/// names to column representation.
+#[test]
+fn design_from_writes_a_dated_design_back_as_dates() {
+    let tmp = tempdir("real_shaped_dates");
+    let ir = compile_real_shaped(tmp.path());
+    let truth = real_shaped_truth(tmp.path());
+    let fit_toml = real_shaped_fit(
+        tmp.path(), &ir, &[("cases", "bulletin.tsv"), ("in_care", "bulletin.tsv")]);
+
+    let out_dir = tmp.path().join("synth");
+    let output = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--design-from", fit_toml.to_str().unwrap(),
+        "--obs-only-dir", out_dir.to_str().unwrap(),
+        "--backend", "chain_binomial", "--dt", "0.5", "--seed", "11",
+    ]);
+    assert!(output.status.success(),
+        "simulate --design-from must run on the real-shaped design:\n{}",
+        String::from_utf8_lossy(&output.stderr));
+
+    // Non-vacuous: the bound file really is dated.
+    let observed = temporal_cells(&real_shaped("bulletin.tsv"), 2);
+    assert!(observed.iter().all(|r| r[0].contains('-') && r[1].contains('-')),
+        "the fixture's window boundaries are ISO dates: {observed:?}");
+
+    // A per-row window pair: both declared boundary columns come back dated.
+    assert_eq!(temporal_cells(&out_dir.join("cases.tsv"), 2), observed,
+        "every window boundary is written as the date the bound file stated");
+
+    // A single `: time` label column on the same dated table.
+    let stops: Vec<Vec<String>> = observed.iter().map(|r| vec![r[1].clone()]).collect();
+    assert_eq!(temporal_cells(&out_dir.join("in_care.tsv"), 1), stops,
+        "the stock stream's label column is written dated too");
+
+    // And the dated file re-loads: the loader binds it with the same periods.
+    let reload_toml = real_shaped_fit_paths(tmp.path(), &ir, &[
+        ("cases", out_dir.join("cases.tsv")),
+        ("in_care", out_dir.join("in_care.tsv")),
+    ]);
+    let reload = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--design-from", reload_toml.to_str().unwrap(),
+        "--obs-only-dir", tmp.path().join("synth2").to_str().unwrap(),
+        "--backend", "chain_binomial", "--dt", "0.5", "--seed", "11",
+    ]);
+    assert!(reload.status.success(),
+        "the emitted dated file must re-load under its own model:\n{}",
+        String::from_utf8_lossy(&reload.stderr));
+    assert_eq!(temporal_cells(&tmp.path().join("synth2").join("cases.tsv"), 2), observed,
+        "and re-emits the same dates, so the representation is a fixed point");
 }
 
 /// gh#829 on real-shaped input. The fixture's survey stream reads `tested` from

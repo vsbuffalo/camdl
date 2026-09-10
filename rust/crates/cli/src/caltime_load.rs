@@ -94,6 +94,25 @@ enum ColKind {
     Date,
 }
 
+/// Whether a temporal column was written as ISO dates — the representation the
+/// *file* used, as distinct from the internal `f64` time the loader converts it
+/// to. `--time-format numeric` (and `internal-days`) forces the numeric
+/// reading, so a column read that way is never dated whatever its cells look
+/// like.
+///
+/// Two callers share this one predicate: the off-grid warning, which only
+/// applies to a column the model's `origin` translated, and the
+/// design-preserving emitter, which writes a stream's temporal columns back in
+/// the representation they came in as (gh#882). They must agree on what
+/// "dated" means, so the test is defined once here rather than at each site.
+pub fn cells_are_dated(cells: &[&str], opts: &TimeOpts) -> bool {
+    opts.format != TimeFormat::Numeric
+        && cells.iter().any(|c| {
+            let c = c.trim();
+            !c.is_empty() && is_date_cell(c) && !is_numeric_cell(c)
+        })
+}
+
 /// Detect the column kind over *all* cells (proposal §6.3). A cell that is
 /// both numeric and date-shaped cannot occur (a date has dashes; a bare
 /// number never parses as a date), so the two predicates partition the

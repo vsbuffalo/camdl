@@ -63,6 +63,52 @@ pub(crate) enum TemporalColumns {
     Window { start: String, stop: String },
 }
 
+/// How an emitted file spells its temporal cells.
+///
+/// A file bound as a design was published in one of two representations, and
+/// the design-preserving writer gives it back in the one it came in as
+/// (gh#882): a stream whose cells were ISO dates is re-emitted as ISO dates
+/// through the model's `origin` and `time_unit`, and one whose cells were
+/// numbers keeps the numbers. Rows planned from the model's own declaration
+/// have no input file to have been written in, and stay numeric.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TemporalFormat {
+    /// Internal model time, written as the number it is.
+    Numeric,
+    /// ISO dates, rendered through the model's calendar anchor.
+    Dated { origin: String, time_unit: String },
+}
+
+impl TemporalFormat {
+    /// One temporal cell, as this format spells it.
+    ///
+    /// A dated cell must name the same instant it renders from, or the file
+    /// would re-load as a different design — so the rendered date is converted
+    /// back and compared before it is written. A boundary that is not a whole
+    /// day (a `covers` span of half a day, say) has no ISO-date spelling, and
+    /// is an error here rather than a cell silently snapped to midnight.
+    fn cell(&self, t: f64) -> Result<String, String> {
+        match self {
+            TemporalFormat::Numeric => Ok(format!("{t}")),
+            TemporalFormat::Dated { origin, time_unit } => {
+                let date = ir::caltime::internal_to_date(origin, t, time_unit)
+                    .map_err(|e| format!(
+                        "cannot write t = {t} as a date under origin {origin}: {e:?}"))?;
+                let back = ir::caltime::date_to_internal(origin, &date, time_unit)
+                    .map_err(|e| format!("{date}: {e:?}"))?;
+                if (back - t).abs() > 1e-9 {
+                    return Err(format!(
+                        "the temporal cell t = {t} falls between calendar days: the nearest \
+                         date, {date}, is t = {back} under origin {origin} and time_unit \
+                         '{time_unit}'. A dated file cannot state it, so writing one would \
+                         re-load as a different design."));
+                }
+                Ok(date)
+            }
+        }
+    }
+}
+
 /// One row the emitter writes: what its temporal column(s) say, what the
 /// value is drawn over, and whether the row carries a value at all.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +131,9 @@ pub(crate) struct EmitRow {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EmitPlan {
     pub columns: TemporalColumns,
+    /// How the temporal column(s) are spelled — the representation the bound
+    /// file used (gh#882).
+    pub format: TemporalFormat,
     /// The scored column's name — the header the value goes under (gh#830:
     /// it was the stream's name, which is not what the loader reads).
     pub scored: String,
@@ -186,7 +235,7 @@ pub(crate) fn plan_emission(
             rows
         }
     };
-    Ok(EmitPlan { columns, scored, rows })
+    Ok(EmitPlan { columns, format: TemporalFormat::Numeric, scored, rows })
 }
 
 /// Plan the rows a stream's **bound data** occupies — the design-preserving
@@ -197,6 +246,9 @@ pub(crate) fn plan_emission(
 /// `cells` the loaded values, `None` for an `NA` hole. All three are parallel,
 /// as `resolve_and_load_obs_streams` builds them.
 ///
+/// `format` is how the bound file spelled its temporal cells, so the emitted
+/// one spells them the same way (gh#882).
+///
 /// Nothing here is re-derived: the periods are the ones the fit will score
 /// over, per-row window widths included, and a hole stays a row so the file
 /// reloads with the same holes it was drawn on.
@@ -205,6 +257,7 @@ pub(crate) fn plan_bound_rows(
     times: &StreamTimes,
     labels: &[f64],
     cells: &[Option<ObsCell>],
+    format: TemporalFormat,
 ) -> Result<EmitPlan, String> {
     let columns = temporal_columns(obs)?;
     if times.len() != labels.len() || times.len() != cells.len() {
@@ -228,7 +281,7 @@ pub(crate) fn plan_bound_rows(
             observed: cells[k].is_some(),
         })
         .collect();
-    Ok(EmitPlan { columns, scored: obs.scored.clone(), rows })
+    Ok(EmitPlan { columns, format, scored: obs.scored.clone(), rows })
 }
 
 /// One stream's rows in a dataset about to be written, and the identities the
@@ -242,12 +295,22 @@ pub(crate) struct StreamPlan {
 }
 
 /// The design a fit's bound data fixes: per stream, the rows the loader gives
-/// the fit (gh#831).
+/// the fit (gh#831), under the temporal representation that fit's own files
+/// used (gh#882).
+///
+/// `files` maps each stream's `source` to the data file bound to it — the
+/// `effective` map the caller already resolved. The files are re-read here for
+/// one thing only: whether their temporal cells were written as ISO dates, so
+/// the emitted file states the boundaries the way the modeller published them
+/// rather than as the day offsets they convert to. A model with no `origin`
+/// has no date to render through and stays numeric.
 ///
 /// The streams are checked first ([`check_streams_round_trip`]), so
 /// `--design-from` refuses before it spends a forward simulation.
 pub(crate) fn design_from_bound_streams(
     streams: &[crate::fit::runner::ObsStream],
+    files: &indexmap::IndexMap<String, String>,
+    time_opts: &crate::caltime_load::TimeOpts<'_>,
 ) -> Result<Vec<StreamPlan>, String> {
     let irs: Vec<&ObservationModel> = streams.iter().map(|s| &s.obs_model_ir).collect();
     check_streams_round_trip(&irs)?;
@@ -255,13 +318,35 @@ pub(crate) fn design_from_bound_streams(
         .map(|s| {
             let obs = &s.obs_model_ir;
             let labels: Vec<f64> = s.data.iter().map(|o| o.time).collect();
+            let format = bound_temporal_format(obs, files, time_opts)?;
             Ok(StreamPlan {
                 name: obs.name.clone(),
                 source: obs.source.clone(),
-                plan: plan_bound_rows(obs, &s.times, &labels, &s.cells)?,
+                plan: plan_bound_rows(obs, &s.times, &labels, &s.cells, format)?,
             })
         })
         .collect()
+}
+
+/// How the file bound to `obs` spelled its temporal cells. Dated only when the
+/// file's cells were dates *and* the model carries the `origin` that renders
+/// them — without an anchor there is no date to write, and the loader could
+/// not have read one either.
+fn bound_temporal_format(
+    obs: &ObservationModel,
+    files: &indexmap::IndexMap<String, String>,
+    time_opts: &crate::caltime_load::TimeOpts<'_>,
+) -> Result<TemporalFormat, String> {
+    let (Some(path), Some(origin)) = (files.get(&obs.source), time_opts.origin) else {
+        return Ok(TemporalFormat::Numeric);
+    };
+    match crate::pfilter::stream_cells_were_dated(obs, path, time_opts)? {
+        true => Ok(TemporalFormat::Dated {
+            origin: origin.to_string(),
+            time_unit: time_opts.time_unit.to_string(),
+        }),
+        false => Ok(TemporalFormat::Numeric),
+    }
 }
 
 /// Refuse, by name, a stream this writer cannot produce the loader's own file
@@ -547,11 +632,13 @@ pub(crate) fn write_stream_file(
     }
     writeln!(out).map_err(io)?;
     for (ri, (row, &value)) in plan.rows.iter().zip(values).enumerate() {
+        let cell = |t: f64| plan.format.cell(t)
+            .map_err(|e| format!("{}: {e}", path.display()));
         match (&plan.columns, row.coverage) {
             (TemporalColumns::Window { .. }, Coverage::Interval { start, stop }) => {
-                write!(out, "{start}\t{stop}").map_err(io)?
+                write!(out, "{}\t{}", cell(start)?, cell(stop)?).map_err(io)?
             }
-            _ => write!(out, "{}", row.label).map_err(io)?,
+            _ => write!(out, "{}", cell(row.label)?).map_err(io)?,
         }
         match row.observed {
             true => write!(out, "\t{}", format_obs_value(value)).map_err(io)?,
@@ -773,6 +860,13 @@ mod tests {
         }
     }
 
+    /// The `source -> file` map a fit config's `[data.observations]` resolves
+    /// to for these one-stream fixtures.
+    fn effective(data_path: &Path) -> indexmap::IndexMap<String, String> {
+        [("cases".to_string(), data_path.to_string_lossy().into_owned())]
+            .into_iter().collect()
+    }
+
     /// Load the streams a fit would bind for `data_path`, the way `fit run`
     /// binds them.
     fn bind(
@@ -780,10 +874,6 @@ mod tests {
         data_path: &Path,
     ) -> Vec<crate::fit::runner::ObsStream> {
         let (compiled, model) = crate::util::resolve_run_model(run).unwrap();
-        let effective: indexmap::IndexMap<String, String> = [(
-            "cases".to_string(),
-            data_path.to_string_lossy().into_owned(),
-        )].into_iter().collect();
         let opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
             time_unit: &model.time_unit,
@@ -792,8 +882,26 @@ mod tests {
             format: crate::caltime_load::TimeFormat::Auto,
         };
         crate::fit::runner::resolve_and_load_obs_streams(
-            &model, &compiled, &effective, run.dt, &opts,
+            &model, &compiled, &effective(data_path), run.dt, &opts,
         ).unwrap()
+    }
+
+    /// The design `simulate --design-from` would preserve for `data_path`,
+    /// built through the same seam that command uses.
+    fn design_of(
+        run: &crate::util::SimRun,
+        data_path: &Path,
+        bound: &[crate::fit::runner::ObsStream],
+    ) -> Result<Vec<StreamPlan>, String> {
+        let (compiled, model) = crate::util::resolve_run_model(run).unwrap();
+        let opts = crate::caltime_load::TimeOpts {
+            origin: model.origin.as_deref(),
+            time_unit: &model.time_unit,
+            dt: run.dt,
+            t_start: compiled.model.simulation.t_start,
+            format: crate::caltime_load::TimeFormat::Auto,
+        };
+        design_from_bound_streams(bound, &effective(data_path), &opts)
     }
 
     /// gh#831. A dataset simulated on a fit's bound design re-loads with that
@@ -832,7 +940,7 @@ mod tests {
         assert_eq!(want_holes, vec![false, false, false, false, true, false, false]);
 
         let out = tmp.path().join("synth");
-        let design = design_from_bound_streams(&bound).unwrap();
+        let design = design_of(&run, &data, &bound).unwrap();
         let written = simulate_dataset(&run, ObservationDesign::Bound(&design), &out).unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].source, "cases");
@@ -922,7 +1030,7 @@ mod tests {
 
         let run = fixture_run(&ir, 7);
         let bound = bind(&run, &data);
-        let err = design_from_bound_streams(&bound)
+        let err = design_of(&run, &data, &bound)
             .expect_err("a covariate stream must be refused, not written as zeros");
         assert!(err.contains("'cases'") && err.contains("`tested`") && err.contains("gh#829"),
             "the refusal names the stream, the column and the issue: {err}");

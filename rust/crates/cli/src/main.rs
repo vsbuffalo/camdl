@@ -3196,7 +3196,7 @@ fn simulate_on_bound_design(
     let streams = fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, dt, &time_opts,
     )?;
-    let design = obs_emit::design_from_bound_streams(&streams)?;
+    let design = obs_emit::design_from_bound_streams(&streams, &effective, &time_opts)?;
 
     for (i, point) in points.iter().enumerate() {
         let out_dir = if points.len() == 1 {
