@@ -579,14 +579,26 @@ list that is empty when nothing refused:
 
 A _deterministic failure_ is a fact about the model as written that holds for
 whatever produced it regardless of how often it occurs — an unresolvable
-horizon, a scenario window this verb cannot honour. One occurrence is a defect,
-so the run exits **1**. What it does not do is discard a complete object: the
-one-step-ahead band is data-conditioned and never reaches the forecast horizon,
-so a free-forward tail that refuses cannot invalidate it. `fit predict` writes
-the one-step artifact, records the tail's failure here, prints what failed and
-what was written, and exits 1. `--horizon one_step` remains the way to ask for
-that half alone — and because such a run never builds a tail, a scenario it
-could not have honoured is a plain usage error there, refused outright.
+horizon, a scenario window this verb cannot honour, a `NaN`/±∞ where a number
+was about to be banded. One occurrence is a defect, so the run exits **1**. What
+it does not do is discard the objects that computed. Two kinds are recorded:
+
+- `evaluation_failed`, at `"free_forward"` — the tail as a whole refused. The
+  one-step-ahead band is data-conditioned and never reaches the forecast
+  horizon, so it cannot be invalidated by this: it is written, the tail's
+  failure is recorded, and the run exits 1. `--horizon one_step` remains the way
+  to ask for that half alone — and because such a run never builds a tail, a
+  scenario it could not have honoured is a plain usage error there, refused
+  outright.
+- `non_finite`, at `{"quantity": "<name>"}` with the `draw` that produced it —
+  one `quantities {}` entry could not be banded. That entry writes no file and
+  gets no manifest entry; every other quantity and every stream artifact is
+  written, and the run exits 1. An entry that refused in one design cell is
+  dropped from all of them, since the cells share one file and a partial file
+  reads as a table over every cell.
+
+`simulate` renders the same quantity tables but has no report to write into, so
+a non-finite quantity is an error there, named, with nothing written.
 
 **A chain subset is a different address, not a rewrite of the pooled one.**
 `fit predict --exclude-chains 3,5` writes `predictive-excl3,5/<stream>.tsv` +

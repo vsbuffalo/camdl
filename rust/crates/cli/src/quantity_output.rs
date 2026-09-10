@@ -74,6 +74,59 @@ enum BandResult {
     AllCensored { n_draws: usize },
 }
 
+/// One logical quantity that could not be banded because at least one draw's
+/// value is not finite.
+///
+/// Recorded rather than raised (gh#715). A `NaN`/±∞ is an upstream bug and the
+/// band must not be published — but it is a bug in ONE reporting expression,
+/// and taking twenty other quantities and four observation streams down with it
+/// destroys a predictive object that was otherwise complete. The entry drops
+/// out, its failure is named with the draw that produced it, and the run exits
+/// 1 (proposal 2026-09-08 §3.5).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NonFiniteQuantity {
+    /// The logical quantity's declared name — the entry a reader must fix.
+    pub name: String,
+    /// The first draw whose value is not finite, indexed into the draws this
+    /// design cell replayed.
+    pub draw: usize,
+    /// How many of `n_draws` were not finite. One is enough to refuse; the
+    /// count is what tells a reader whether this is a tail or the whole thing.
+    pub n_non_finite: usize,
+    pub n_draws: usize,
+    /// The snapshot time the offending value sits at, for a series quantity;
+    /// `None` for a scalar, which has no time axis.
+    pub at_time: Option<f64>,
+}
+
+impl NonFiniteQuantity {
+    /// The sentence this failure carries into `report.json` and onto stderr.
+    ///
+    /// The FACT only, with no claim about what was kept: what happens next
+    /// differs by caller — `fit predict` writes everything else and says so,
+    /// `simulate` writes nothing — and a shared sentence asserting either one
+    /// would be false in the other's output.
+    pub fn reason(&self) -> String {
+        let at = match self.at_time {
+            Some(t) => format!(" at t={}", fmt_time(t)),
+            None => String::new(),
+        };
+        format!(
+            "non-finite predictive sample{at} ({} draws, {} non-finite) — refusing to \
+             quantile a NaN/±∞ value",
+            self.n_draws, self.n_non_finite
+        )
+    }
+}
+
+/// The first non-finite entry of `xs`, with the total count — `None` when every
+/// value is finite. The one place the "may this be banded?" question is asked,
+/// so the detector and the failure record cannot disagree about which draw.
+fn first_non_finite(xs: &[f64]) -> Option<(usize, usize)> {
+    let first = xs.iter().position(|x| !x.is_finite())?;
+    Some((first, xs.iter().filter(|x| !x.is_finite()).count()))
+}
+
 /// Partition a scalar quantity's per-draw values into the finite set and the
 /// censored count, band the finite set (reusing [`band`], which rejects a
 /// non-finite value so a `NaN`/±∞ arithmetic result surfaces as an error rather
@@ -291,7 +344,7 @@ pub(crate) fn render_quantities(
     evaluated_on: Option<EvaluatedOn>,
     chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
     calendar: &io::CalendarMeta,
-) -> Result<(Vec<(String, String)>, String), String> {
+) -> Result<RenderedQuantities, String> {
     use ir::quantity::{QuantityBody, TemporalReduce};
 
     let n_draws = quant_draws.len();
@@ -345,6 +398,9 @@ pub(crate) fn render_quantities(
 
     let mut outputs: Vec<(String, String)> = Vec::new();
     let mut manifest_entries: Vec<serde_json::Value> = Vec::new();
+    // gh#715: entries that could not be banded. Collected, not raised — the
+    // loop below carries on to the next quantity.
+    let mut failures: Vec<NonFiniteQuantity> = Vec::new();
 
     for name in &order {
         let leaf_idxs = &groups[name];
@@ -367,18 +423,31 @@ pub(crate) fn render_quantities(
         }
         out.push('\n');
 
+        // A failure in ANY stratum leaf drops the whole logical quantity: the
+        // leaves share one file, and a file holding the strata that happened to
+        // band reads as a table over every stratum.
+        let mut refused: Option<NonFiniteQuantity> = None;
         for &gi in leaf_idxs {
             let levels: Vec<String> =
                 quantities[gi].stratum.iter().map(|k| k.level.clone()).collect();
             match mode {
-                Mode::Banded => render_banded_leaf(
-                    name, gi, shape, &levels, n_draws, quant_draws, snapshot_times, coords,
-                    chains, &mut out,
-                )?,
+                Mode::Banded => {
+                    if let Some(f) = render_banded_leaf(
+                        name, gi, shape, &levels, n_draws, quant_draws, snapshot_times, coords,
+                        chains, &mut out,
+                    )? {
+                        refused = Some(f);
+                        break;
+                    }
+                }
                 Mode::Point => render_point_leaf(
                     name, gi, shape, &levels, quant_draws, snapshot_times, coords, &mut out,
                 )?,
             }
+        }
+        if let Some(f) = refused {
+            failures.push(f);
+            continue; // no file, and no manifest entry advertising one
         }
 
         // Manifest entry for this logical quantity (one per group) — mode-independent.
@@ -446,7 +515,20 @@ pub(crate) fn render_quantities(
     });
     let manifest_str = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("serializing quantities manifest: {e}"))?;
-    Ok((outputs, manifest_str))
+    Ok(RenderedQuantities { files: outputs, manifest: manifest_str, failures })
+}
+
+/// What one render produced: the file text per logical quantity, the manifest
+/// describing them, and the entries that refused (gh#715).
+///
+/// The three travel together because a consumer must not write the files
+/// without reading the failures — a table whose refused entry is simply absent
+/// looks like a model that declares nineteen quantities, not twenty.
+#[derive(Debug)]
+pub(crate) struct RenderedQuantities {
+    pub files: Vec<(String, String)>,
+    pub manifest: String,
+    pub failures: Vec<NonFiniteQuantity>,
 }
 
 // ── Stacking design cells into one file set ────────────────────────────────
@@ -473,12 +555,22 @@ pub(crate) struct StackedQuantities {
     /// One manifest entry per (quantity, design cell), each tagged with its
     /// coordinates so a consumer can group by them.
     manifest_entries: Vec<serde_json::Value>,
+    /// Quantity name → the first design cell's refusal (gh#715). A quantity
+    /// that refused in ANY cell is dropped from the whole file set: one cell's
+    /// rows under a header naming every cell is a table that lies about its
+    /// own scope.
+    failures: IndexMap<String, NonFiniteQuantity>,
     mode: Mode,
 }
 
 impl StackedQuantities {
     pub(crate) fn new(mode: Mode) -> Self {
-        StackedQuantities { bodies: IndexMap::new(), manifest_entries: Vec::new(), mode }
+        StackedQuantities {
+            bodies: IndexMap::new(),
+            manifest_entries: Vec::new(),
+            failures: IndexMap::new(),
+            mode,
+        }
     }
 
     /// Render one design cell and stack it. The first cell for a quantity
@@ -493,10 +585,13 @@ impl StackedQuantities {
         chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
         calendar: &io::CalendarMeta,
     ) -> Result<(), String> {
-        let (outs, manifest) = render_quantities(
+        let rendered = render_quantities(
             quantities, draws, times, self.mode, coords, evaluated_on, chains, calendar,
         )?;
-        for (name, content) in outs {
+        for f in rendered.failures {
+            self.failures.entry(f.name.clone()).or_insert(f);
+        }
+        for (name, content) in rendered.files {
             match self.bodies.entry(name) {
                 indexmap::map::Entry::Vacant(e) => {
                     e.insert(content);
@@ -509,7 +604,7 @@ impl StackedQuantities {
                 }
             }
         }
-        let m: serde_json::Value = serde_json::from_str(&manifest)
+        let m: serde_json::Value = serde_json::from_str(&rendered.manifest)
             .map_err(|e| format!("parsing quantities manifest: {e}"))?;
         if let Some(arr) = m["quantities"].as_array() {
             self.manifest_entries.extend(arr.iter().cloned());
@@ -531,15 +626,36 @@ impl StackedQuantities {
     pub(crate) fn finish(
         self,
         calendar: &io::CalendarMeta,
-    ) -> Result<(Vec<(String, String)>, String), String> {
+    ) -> Result<RenderedQuantities, String> {
+        // A quantity that refused in ANY cell is dropped everywhere, including
+        // the cells that had already stacked cleanly, and its manifest entries
+        // go with it — a manifest naming a file nobody wrote is worse than no
+        // entry at all (gh#715).
+        let refused: Vec<String> = self.failures.keys().cloned().collect();
+        let manifest_entries: Vec<serde_json::Value> = self
+            .manifest_entries
+            .into_iter()
+            .filter(|e| {
+                e["name"].as_str().map(|n| !refused.iter().any(|r| r == n)).unwrap_or(true)
+            })
+            .collect();
         let merged = serde_json::json!({
             "schema": "camdl.quantities/v1",
             "calendar": calendar.to_json(),
-            "quantities": self.manifest_entries,
+            "quantities": manifest_entries,
         });
         let manifest = serde_json::to_string_pretty(&merged)
             .map_err(|e| format!("serializing quantities manifest: {e}"))?;
-        Ok((self.bodies.into_iter().collect(), manifest))
+        let files: Vec<(String, String)> = self
+            .bodies
+            .into_iter()
+            .filter(|(name, _)| !refused.iter().any(|r| r == name))
+            .collect();
+        Ok(RenderedQuantities {
+            files,
+            manifest,
+            failures: self.failures.into_values().collect(),
+        })
     }
 }
 
@@ -598,7 +714,7 @@ fn render_banded_leaf(
     coords: DesignCoords,
     chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
     out: &mut String,
-) -> Result<(), String> {
+) -> Result<Option<NonFiniteQuantity>, String> {
     use sim::quantity::{QuantityDrawValue, QuantityResult};
     if shape.is_series() {
         // Validate the series shape/length once for this leaf.
@@ -624,6 +740,18 @@ fn render_banded_leaf(
                     QuantityResult::Scalar(_) => f64::NAN,
                 })
                 .collect();
+            // gh#715: a non-finite value is this QUANTITY's failure, not the
+            // run's. Report which draw and stop rendering the entry; the
+            // caller drops it and writes everything else.
+            if let Some((draw, n_non_finite)) = first_non_finite(&col) {
+                return Ok(Some(NonFiniteQuantity {
+                    name: name.to_string(),
+                    draw,
+                    n_non_finite,
+                    n_draws: col.len(),
+                    at_time: Some(t),
+                }));
+            }
             let bands = band(&col).map_err(|e| format!("quantity '{name}' at t={}: {e}", fmt_time(t)))?;
             let mut cells: Vec<String> = Vec::with_capacity(3 + levels.len() + bands.len());
             push_design_row_cells(&mut cells, coords);
@@ -643,6 +771,36 @@ fn render_banded_leaf(
                 QuantityResult::Series(_) => QuantityDrawValue::Value(f64::NAN),
             })
             .collect();
+        // gh#715, the scalar half. `band_with_censoring` bands the values it
+        // was handed, so the non-finite check happens before it, over the
+        // per-draw list, where the draw index is still known.
+        {
+            let finite: Vec<f64> = vals
+                .iter()
+                .filter_map(|v| match v {
+                    QuantityDrawValue::Value(x) => Some(*x),
+                    QuantityDrawValue::Censored => None,
+                })
+                .collect();
+            if let Some((finite_idx, n_non_finite)) = first_non_finite(&finite) {
+                // Map back to the DRAW index: `finite` skipped the censored
+                // draws, so its positions are not the cloud's.
+                let draw = vals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| matches!(v, QuantityDrawValue::Value(_)))
+                    .map(|(di, _)| di)
+                    .nth(finite_idx)
+                    .unwrap_or(finite_idx);
+                return Ok(Some(NonFiniteQuantity {
+                    name: name.to_string(),
+                    draw,
+                    n_non_finite,
+                    n_draws: vals.len(),
+                    at_time: None,
+                }));
+            }
+        }
         let (n_value, n_censored, bands_opt) =
             match band_with_censoring(&vals).map_err(|e| format!("quantity '{name}': {e}"))? {
                 BandResult::Banded { bands, n_value, n_censored } => (n_value, n_censored, Some(bands)),
@@ -674,7 +832,7 @@ fn render_banded_leaf(
         out.push_str(&cells.join("\t"));
         out.push('\n');
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Point rendering of one leaf — a single realization writes a bare `value`. A
@@ -874,7 +1032,7 @@ mod tests {
             QuantityResult::Scalar(QuantityDrawValue::Censored),
         ]];
         let times = vec![0.0, 7.0];
-        let (outs, _manifest) =
+        let RenderedQuantities { files: outs, .. } =
             render_quantities(&quantities, &draws, &times, Mode::Point, DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal()).unwrap();
 
         let prev = &outs.iter().find(|(n, _)| n == "prevalence").unwrap().1;
@@ -920,6 +1078,224 @@ mod tests {
         assert!(err.contains("exactly one realization"), "got: {err}");
     }
 
+    // ── gh#715: one non-finite entry does not take the table down ────────
+
+    /// A plain value scalar over `values`, one draw each.
+    #[cfg(test)]
+    fn scalar_quantity(name: &str) -> ir::quantity::Quantity {
+        use ir::observation::StratumKey;
+        use ir::quantity::{Quantity, QuantityBody, QuantitySource, TemporalReduce, ValueReduce};
+        Quantity {
+            name: name.to_string(),
+            stratum: Vec::<StratumKey>::new(),
+            body: QuantityBody::Reduced {
+                source: QuantitySource::State(ir::expr::Expr::Const(
+                    ir::expr::ConstExpr { value: 0.0 },
+                )),
+                reduce: Some(TemporalReduce::Value(ValueReduce::Max)),
+            },
+            dimension: None,
+        }
+    }
+
+    /// gh#715: `growth` divides by an empty compartment on two of five draws.
+    /// Before, the whole render refused and `fit predict` wrote nothing at all
+    /// — no bands for any stream, no other quantity. Now the refusal is
+    /// attributed to `growth`, with the FIRST offending draw named, and `peak`
+    /// is rendered as if nothing had happened.
+    #[test]
+    fn a_non_finite_quantity_is_reported_by_name_and_draw_and_the_others_render() {
+        use sim::quantity::{QuantityDrawValue, QuantityResult};
+
+        let quantities = vec![scalar_quantity("peak"), scalar_quantity("growth")];
+        // 5 draws; `growth` is +inf on draws 2 and 4.
+        let growth = [1.0, 2.0, f64::INFINITY, 4.0, f64::INFINITY];
+        let draws: Vec<Vec<QuantityResult>> = (0..5)
+            .map(|i| {
+                vec![
+                    QuantityResult::Scalar(QuantityDrawValue::Value(0.1 * (i + 1) as f64)),
+                    QuantityResult::Scalar(QuantityDrawValue::Value(growth[i])),
+                ]
+            })
+            .collect();
+
+        let rendered = render_quantities(
+            &quantities, &draws, &[], Mode::Banded,
+            DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal(),
+        )
+        .expect("a non-finite quantity is a recorded failure, never a hard error");
+
+        assert_eq!(rendered.failures.len(), 1, "exactly the one entry refused");
+        let f = &rendered.failures[0];
+        assert_eq!(f.name, "growth");
+        assert_eq!(f.draw, 2, "the FIRST offending draw, not 0 and not the last");
+        assert_eq!(f.n_non_finite, 2);
+        assert_eq!(f.n_draws, 5);
+        assert!(f.reason().contains("5 draws, 2 non-finite"), "reason: {}", f.reason());
+
+        let names: Vec<&str> = rendered.files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names, vec!["peak"],
+            "every other quantity is still rendered; only the refused one drops"
+        );
+        let mjson: serde_json::Value = serde_json::from_str(&rendered.manifest).unwrap();
+        let listed: Vec<&str> = mjson["quantities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            listed, vec!["peak"],
+            "the manifest must not advertise a file that was not written"
+        );
+    }
+
+    /// The draw index is an index into the DRAWS, not into the finite subset.
+    /// A censored draw ahead of the offending one would otherwise shift it, and
+    /// the report would send a reader to the wrong draw.
+    #[test]
+    fn the_reported_draw_index_counts_censored_draws_too() {
+        use sim::quantity::{QuantityDrawValue, QuantityResult};
+
+        let quantities = vec![scalar_quantity("growth")];
+        let vals = [
+            QuantityDrawValue::Censored,
+            QuantityDrawValue::Censored,
+            QuantityDrawValue::Value(1.0),
+            QuantityDrawValue::Value(f64::NAN),
+        ];
+        let draws: Vec<Vec<QuantityResult>> =
+            vals.iter().map(|v| vec![QuantityResult::Scalar(v.clone())]).collect();
+
+        let rendered = render_quantities(
+            &quantities, &draws, &[], Mode::Banded,
+            DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal(),
+        )
+        .unwrap();
+        assert_eq!(rendered.failures.len(), 1);
+        assert_eq!(
+            rendered.failures[0].draw, 3,
+            "draw 3 is the NaN; the finite list's index 1 would name draw 2"
+        );
+    }
+
+    /// A series quantity names the snapshot time as well as the draw — the two
+    /// coordinates a reader needs to find the value.
+    #[test]
+    fn a_non_finite_series_names_the_time_it_happened_at() {
+        use sim::quantity::QuantityResult;
+
+        let quantities = vec![{
+            use ir::observation::StratumKey;
+            use ir::quantity::{Quantity, QuantityBody, QuantitySource};
+            Quantity {
+                name: "prevalence".to_string(),
+                stratum: Vec::<StratumKey>::new(),
+                body: QuantityBody::Reduced {
+                    source: QuantitySource::State(ir::expr::Expr::Const(
+                        ir::expr::ConstExpr { value: 0.0 },
+                    )),
+                    reduce: None,
+                },
+                dimension: None,
+            }
+        }];
+        let draws = vec![
+            vec![QuantityResult::Series(vec![0.1, 0.2])],
+            vec![QuantityResult::Series(vec![0.1, f64::NAN])],
+        ];
+        let times = vec![0.0, 7.0];
+
+        let rendered = render_quantities(
+            &quantities, &draws, &times, Mode::Banded,
+            DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal(),
+        )
+        .unwrap();
+        assert_eq!(rendered.failures.len(), 1);
+        assert_eq!(rendered.failures[0].at_time, Some(7.0));
+        assert_eq!(rendered.failures[0].draw, 1);
+        assert!(rendered.failures[0].reason().contains("at t=7"),
+            "reason: {}", rendered.failures[0].reason());
+        assert!(rendered.files.is_empty(), "the one quantity refused, so no file");
+    }
+
+    /// Negative control: a table with no non-finite value reports no failure
+    /// and renders every quantity, so the assertions above are not passing
+    /// merely because the detector fires on everything.
+    #[test]
+    fn a_finite_table_reports_no_failure() {
+        use sim::quantity::{QuantityDrawValue, QuantityResult};
+
+        let quantities = vec![scalar_quantity("peak"), scalar_quantity("growth")];
+        let draws: Vec<Vec<QuantityResult>> = (0..3)
+            .map(|i| {
+                vec![
+                    QuantityResult::Scalar(QuantityDrawValue::Value(0.1 * (i + 1) as f64)),
+                    QuantityResult::Scalar(QuantityDrawValue::Value(1.0 + i as f64)),
+                ]
+            })
+            .collect();
+        let rendered = render_quantities(
+            &quantities, &draws, &[], Mode::Banded,
+            DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal(),
+        )
+        .unwrap();
+        assert!(rendered.failures.is_empty());
+        assert_eq!(rendered.files.len(), 2);
+    }
+
+    /// A quantity that refused in ONE design cell is dropped from every cell,
+    /// including the ones that banded cleanly. Half a stacked file, under a
+    /// header naming every cell, is a table that lies about its own scope.
+    #[test]
+    fn a_quantity_that_refused_in_one_cell_is_dropped_from_the_stacked_file() {
+        use sim::quantity::{QuantityDrawValue, QuantityResult};
+
+        let quantities = vec![scalar_quantity("peak"), scalar_quantity("growth")];
+        let clean: Vec<Vec<QuantityResult>> = (0..2)
+            .map(|i| {
+                vec![
+                    QuantityResult::Scalar(QuantityDrawValue::Value(0.1 * (i + 1) as f64)),
+                    QuantityResult::Scalar(QuantityDrawValue::Value(1.0 + i as f64)),
+                ]
+            })
+            .collect();
+        let dirty: Vec<Vec<QuantityResult>> = (0..2)
+            .map(|i| {
+                vec![
+                    QuantityResult::Scalar(QuantityDrawValue::Value(0.1 * (i + 1) as f64)),
+                    QuantityResult::Scalar(QuantityDrawValue::Value(f64::INFINITY)),
+                ]
+            })
+            .collect();
+
+        let mut stacked = StackedQuantities::new(Mode::Banded);
+        stacked
+            .push_group(&quantities, DesignCoords { scenario: Some("fitted"), sweep: &[] },
+                &clean, &[], None, None, &test_cal())
+            .unwrap();
+        stacked
+            .push_group(&quantities, DesignCoords { scenario: Some("counterfactual"), sweep: &[] },
+                &dirty, &[], None, None, &test_cal())
+            .unwrap();
+        let rendered = stacked.finish(&test_cal()).unwrap();
+
+        let names: Vec<&str> = rendered.files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["peak"], "growth is dropped from BOTH cells");
+        assert_eq!(rendered.failures.len(), 1);
+        assert_eq!(rendered.failures[0].name, "growth");
+        let mjson: serde_json::Value = serde_json::from_str(&rendered.manifest).unwrap();
+        let listed: Vec<&str> = mjson["quantities"].as_array().unwrap().iter()
+            .map(|e| e["name"].as_str().unwrap()).collect();
+        // One manifest entry per (quantity, design cell), so `peak` appears
+        // once per cell and `growth` not at all.
+        assert_eq!(
+            listed, vec!["peak", "peak"],
+            "the clean cell's manifest entry for `growth` goes too"
+        );
+    }
+
     #[test]
     fn banded_render_with_scenario_tags_header_rows_and_manifest() {
         // The `fit predict` overlay axis: a leading `scenario` column on the TSV
@@ -944,7 +1320,7 @@ mod tests {
             vec![QuantityResult::Scalar(QuantityDrawValue::Value(0.5))],
         ];
 
-        let (outs, manifest) =
+        let RenderedQuantities { files: outs, manifest, .. } =
             render_quantities(&quantities, &draws, &[], Mode::Banded,
                 DesignCoords { scenario: Some("with_sia"), sweep: &[] }, None, None, &test_cal()).unwrap();
         let peak = &outs.iter().find(|(n, _)| n == "peak").unwrap().1;
@@ -969,7 +1345,7 @@ mod tests {
         // every row carries this cell's swept value, and the manifest entry gains
         // a `sweep` object.
         let sweep = [("k".to_string(), 8.0)];
-        let (outs_sw, manifest_sw) = render_quantities(
+        let RenderedQuantities { files: outs_sw, manifest: manifest_sw, .. } = render_quantities(
             &quantities, &draws, &[], Mode::Banded,
             DesignCoords { scenario: Some("with_sia"), sweep: &sweep },
             None,
@@ -994,7 +1370,7 @@ mod tests {
         );
 
         // None → no scenario column or field (simulate's byte-identical path).
-        let (outs2, manifest2) =
+        let RenderedQuantities { files: outs2, manifest: manifest2, .. } =
             render_quantities(&quantities, &draws, &[], Mode::Banded, DesignCoords { scenario: None, sweep: &[] }, None, None, &test_cal()).unwrap();
         let peak2 = &outs2.iter().find(|(n, _)| n == "peak").unwrap().1;
         assert_eq!(
@@ -1058,7 +1434,7 @@ mod tests {
         }
         let chains = ChainOfDraw(ids);
         let times = vec![0.0, 7.0];
-        let (outs, _m) = render_quantities(
+        let RenderedQuantities { files: outs, .. } = render_quantities(
             &quantities,
             &draws,
             &times,
@@ -1133,7 +1509,7 @@ mod tests {
                 &test_cal(),
             )
             .unwrap()
-            .0
+            .files
             .into_iter()
             .find(|(n, _)| n == "prevalence")
             .unwrap()

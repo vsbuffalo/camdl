@@ -2065,10 +2065,22 @@ fn run_simulate(a: &args::SimulateArgs) {
                         std::process::exit(1);
                     });
             }
-            let (outs, manifest) = stacked.finish(&q.calendar).unwrap_or_else(|e| {
+            let rendered = stacked.finish(&q.calendar).unwrap_or_else(|e| {
                 eprintln!("error rendering quantities: {}", e);
                 std::process::exit(1);
             });
+            // gh#715 partitions a non-finite quantity out of the render rather
+            // than raising it, so that `fit predict` can keep the rest of its
+            // artifact and record the failure. `simulate` has no such record to
+            // write into, so here it stays what it has always been: an error,
+            // named, with nothing written.
+            if !rendered.failures.is_empty() {
+                for f in &rendered.failures {
+                    eprintln!("error: quantity '{}': {}", f.name, f.reason());
+                }
+                std::process::exit(1);
+            }
+            let (outs, manifest) = (rendered.files, rendered.manifest);
             std::fs::create_dir_all(&q.out_dir).unwrap_or_else(|e| {
                 eprintln!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e);
                 std::process::exit(1);

@@ -2325,9 +2325,27 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             }
 
             if !stacked.is_empty() {
-                let (outs, manifest) = stacked.finish(&calendar)?;
-                quantity_outputs = outs;
-                quantity_manifest = Some(manifest);
+                let rendered = stacked.finish(&calendar)?;
+                // gh#715: one reporting expression that produced a NaN/±∞ is a
+                // failure of THAT entry. It drops out of the table and is named
+                // with the draw that produced it; every other quantity, and
+                // every stream artifact below, is still written.
+                for f in &rendered.failures {
+                    // The fact here; the reason travels with the failure and is
+                    // printed once, at the end, beside the exit status.
+                    eprintln!(
+                        "fit predict: quantity `{}` refused and is dropped from the \
+                         table — the reason is below and in report.json.",
+                        f.name
+                    );
+                    failures.push(DeterministicFailure::NonFinite {
+                        at: Site::Quantity(f.name.clone()),
+                        draw: f.draw,
+                        reason: f.reason(),
+                    });
+                }
+                quantity_outputs = rendered.files;
+                quantity_manifest = Some(rendered.manifest);
             }
             free_forward = Some(ff_cells);
             Ok(())
