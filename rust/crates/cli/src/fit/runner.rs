@@ -2261,10 +2261,8 @@ pub fn run_chains_with_per_chain_params(
         results.len(), config.loglik_eval.n_replicates, config.loglik_eval.n_particles);
     let loglik_eval_outcome = loglik_eval::run_loglik_eval(
         config, &results, &config.loglik_eval, config.seed,
-    ).unwrap_or_else(|e| {
-        eprintln!("error: loglik-eval failed: {}", e);
-        std::process::exit(1);
-    });
+    ).unwrap_or_else(|e| super::abandon_stage(
+        heartbeat, format!("error: loglik-eval failed: {e}")));
 
     let (best_chain, best_loglik, best_se) =
         select_winner_summary(&loglik_eval_outcome);

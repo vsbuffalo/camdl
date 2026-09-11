@@ -225,10 +225,7 @@ pub fn run_stage(
         dt,
         dt_check_cfg,
     )
-    .unwrap_or_else(|e| {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    });
+    .unwrap_or_else(|e| super::abandon_stage(heartbeat, format!("error: {e}")));
     dt_check::print_terminal_report(&dt_check_result);
 
     // Persist the winner's full parameter vector via fit_state.toml so

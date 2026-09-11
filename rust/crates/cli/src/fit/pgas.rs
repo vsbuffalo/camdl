@@ -464,15 +464,15 @@ pub fn run_stage(
                 Ok(data) => match bincode::deserialize::<ChainResumeState>(&data) {
                     Ok(state) => {
                         if state.config_hash != config_hash {
-                            eprintln!("error: config hash mismatch for chain {} — \
+                            super::abandon_stage(heartbeat, format!(
+                                "error: config hash mismatch for chain {} — \
                                 cannot resume. Either the model/data/priors changed \
                                 since the original run, or this chain predates a camdl \
                                 version that changed how a stage's identity is computed \
                                 (the 2026-08-23 subtractive-identity change re-keyed \
                                 every pgas/pmmh/mh/nuts stage). Re-run from scratch \
                                 with --force.",
-                                chain_id + 1);
-                            std::process::exit(1);
+                                chain_id + 1));
                         }
                         eprintln!("  chain {}: resuming from sweep {}", chain_id + 1, state.completed_sweeps);
                         states.push(Some(state));
@@ -493,10 +493,11 @@ pub fn run_stage(
             }
         }
         if any_failed {
-            eprintln!("error: --resume requires resume state files for all chains.");
-            eprintln!("  These are written automatically at the end of every PGAS run.");
-            eprintln!("  If the original run was interrupted before saving, use --force to start fresh.");
-            std::process::exit(1);
+            super::abandon_stage(heartbeat, format!(
+                "error: --resume requires resume state files for all chains.\n  \
+                 These are written automatically at the end of every PGAS run.\n  \
+                 If the original run was interrupted before saving, use --force to \
+                 start fresh."));
         }
         states
     } else {
