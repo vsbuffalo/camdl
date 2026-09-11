@@ -249,6 +249,20 @@ fn mh_ode_recovers_known_beta() {
     assert!(any_dt_check,
         "mh+ode fit_state.toml has no [dt_check] block — the ODE dt-check did \
          not run on the mh path (regression: gh#227 wiring).");
+
+    // gh#901: the convergence summary names the method that wrote it. `mh`
+    // shares the PMMH runner and gets its own `mh_summary.json`, and that
+    // runner hardcoded the label `pmmh` — so the file named `mh` said `pmmh`
+    // inside. Now that the key is `method`, a wrong value is a contradiction.
+    let summaries = find_named(&out, "mh_summary.json");
+    assert!(!summaries.is_empty(),
+        "an mh method leaf must write mh_summary.json under {}", out.display());
+    let text = std::fs::read_to_string(&summaries[0]).expect("read mh_summary.json");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("parse mh_summary.json");
+    assert_eq!(v["method"], serde_json::json!("mh"),
+        "mh_summary.json must name `mh`, not the runner it shares:\n{text}");
+    assert!(v.get("stage").is_none(),
+        "and must not carry the old `stage` key (gh#901):\n{text}");
 }
 
 /// gh#166 Phase B (B7): the same recovery, but the observation projects

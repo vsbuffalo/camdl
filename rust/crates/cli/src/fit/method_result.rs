@@ -1795,7 +1795,7 @@ mod tests {
             dir.join("pgas_summary.json"),
             serde_json::to_string(&serde_json::json!({
                 "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
-                "stage": "pgas",
+                "method": "pgas",
                 "n_chains": 2,
                 "acceptance_rates": [[0.32, 0.35], [0.28, 0.30]],
                 "rhat": {"R0": 1.02, "sigma": 1.04},
@@ -1859,7 +1859,7 @@ mod tests {
         );
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"schema":"camdl.fit-summary/v1","stage":"pgas","n_chains":4,"acceptance_rates":[],
+            r#"{"schema":"camdl.fit-summary/v2","method":"pgas","n_chains":4,"acceptance_rates":[],
                 "rhat":{"R0":1.001,"sigma":1.002},"ess":{"R0":900.0,"sigma":880.0}}"#,
         )
         .unwrap();
@@ -1927,7 +1927,7 @@ mod tests {
             dir.join("pmmh_summary.json"),
             serde_json::to_string(&serde_json::json!({
                 "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
-                "stage": "pmmh",
+                "method": "pmmh",
                 "n_chains": 2,
                 "acceptance_rate": [0.20, 0.30],
                 "rhat": {"R0": 1.03},
@@ -1994,7 +1994,7 @@ mod tests {
             dir.join("nuts_summary.json"),
             serde_json::to_string(&serde_json::json!({
                 "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
-                "stage": "nuts",
+                "method": "nuts",
                 "n_chains": 2,
                 "rhat": {"beta": 1.01, "gamma": 1.03},
                 "ess": {"beta": 300.0, "gamma": 150.0},

@@ -477,7 +477,7 @@ fn write_nuts_summary(
         // `rhat` and `ess` keys below hold. `serde_json` writes a map in key
         // order, so it lands where the sort puts it rather than first.
         "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
-        "stage": "nuts",
+        "method": "nuts",
         "n_chains": n_chains,
         "n_divergent": n_divergent,
         // nuts draws are unthinned: n_samples (kept) × thin = raw sampling iters.

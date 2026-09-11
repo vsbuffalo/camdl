@@ -1143,7 +1143,12 @@ fn write_summary(
         // `rhat` and `ess` keys below hold. `serde_json` writes a map in key
         // order, so it lands where the sort puts it rather than first.
         "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
-        "stage": "pmmh",
+        // `algo`, not the literal `"pmmh"`: deterministic mh-ODE shares this
+        // runner and writes its own `mh_summary.json`, so a hardcoded label
+        // put `pmmh` inside a file named `mh`. The key now names the method
+        // (gh#901), which makes a wrong value a contradiction rather than a
+        // cosmetic one.
+        "method": algo.as_str(),
         "n_chains": results.len(),
         "steps_per_chain": results.first().map(|(_, r)| r.n_steps).unwrap_or(0),
         "acceptance_rate": acceptance_rates,

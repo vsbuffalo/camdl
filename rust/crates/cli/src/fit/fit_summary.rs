@@ -4504,7 +4504,7 @@ mod tests {
         per_chain: &[(u64, u64, u64)],
     ) {
         let summary = serde_json::json!({
-            "stage": "pgas",
+            "method": "pgas",
             "thin": thin,
             "trajectories": {
                 "draw_stride": draw_stride,
@@ -4570,7 +4570,7 @@ mod tests {
     fn saved_path_table_is_empty_without_the_block() {
         let dir = crate::test_support::unique_temp_dir("summary_gh727_absent");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("pgas_summary.json"), r#"{"stage":"pgas","thin":5}"#).unwrap();
+        std::fs::write(dir.join("pgas_summary.json"), r#"{"method":"pgas","thin":5}"#).unwrap();
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 2, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS),
@@ -5166,7 +5166,7 @@ mod tests {
         let dir = crate::test_support::unique_temp_dir("summary_saved_path_no_ids");
         std::fs::create_dir_all(&dir).unwrap();
         let summary = serde_json::json!({
-            "stage": "pgas",
+            "method": "pgas",
             "thin": 1,
             "trajectories": {
                 "draw_stride": 600,

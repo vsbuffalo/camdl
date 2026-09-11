@@ -35,7 +35,13 @@ use std::collections::{BTreeMap, HashMap};
 /// **Absence means the pre-tag vintage** — the classic statistics — and this
 /// tag means the rank-normalized ones. A later change of meaning bumps the
 /// version rather than reusing it.
-pub const FIT_SUMMARY_SCHEMA: &str = "camdl.fit-summary/v1";
+///
+/// v2 (gh#901): the key naming the algorithm is `method`, not `stage`. The
+/// `[stages]` → `[method]` split left this file spelling a word the store
+/// levels, the fit config and the CLI no longer use, and the file is
+/// machine-read. A key that changes name under an unchanged tag is exactly
+/// the vintage problem the tag exists to prevent, so the rename is a bump.
+pub const FIT_SUMMARY_SCHEMA: &str = "camdl.fit-summary/v2";
 
 /// Check a parsed `<algorithm>_summary.json` against [`FIT_SUMMARY_SCHEMA`].
 ///
@@ -51,8 +57,9 @@ pub fn check_fit_summary_schema(v: &serde_json::Value, filename: &str) -> Result
              that wrote it."
         )),
         None => Err(format!(
-            "{filename} carries no `schema` tag, so it predates \
-             `{FIT_SUMMARY_SCHEMA}` (gh#728). Its `rhat` is the classic \
+            "{filename} carries no `schema` tag, so it predates the tag \
+             altogether (gh#728) and this camdl reads \
+             `{FIT_SUMMARY_SCHEMA}`. Its `rhat` is the classic \
              Gelman–Rubin statistic and its `ess` a suppressed per-chain sum, \
              not the rank-normalized and bulk statistics this camdl reports \
              under those names — the numbers would be read as something they \

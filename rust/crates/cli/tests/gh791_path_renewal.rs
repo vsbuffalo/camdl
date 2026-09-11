@@ -339,13 +339,13 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
             .expect("parse pgas_summary.json");
 
     // ── Nothing that was already there moved (camdl-scope reads this) ─────
-    for key in ["stage", "n_chains", "acceptance_rates", "thin", "trajectories",
+    for key in ["method", "n_chains", "acceptance_rates", "thin", "trajectories",
                 "rhat", "ess", "ess_tail"] {
         assert!(v.get(key).is_some(),
             "gh#791 is additive: `{key}` must still be in pgas_summary.json; \
              keys are {:?}", v.as_object().map(|o| o.keys().collect::<Vec<_>>()));
     }
-    assert_eq!(v["stage"], serde_json::json!("pgas"));
+    assert_eq!(v["method"], serde_json::json!("pgas"));
     assert_eq!(v["n_chains"], serde_json::json!(CHAINS));
 
     // ── The block, and what it says about itself ──────────────────────────

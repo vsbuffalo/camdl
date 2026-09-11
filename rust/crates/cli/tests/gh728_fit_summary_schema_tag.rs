@@ -131,7 +131,7 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
     let text = std::fs::read_to_string(&path).unwrap();
     let summary: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(
-        summary["schema"], "camdl.fit-summary/v1",
+        summary["schema"], "camdl.fit-summary/v2",
         "the summary must declare which contract its `rhat` and `ess` keys \
          were written under:\n{text}"
     );
@@ -139,6 +139,21 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
     // describing something rather than decorating an empty file.
     assert!(summary.get("rhat").is_some(), "{text}");
     assert!(summary.get("ess").is_some(), "{text}");
+
+    // gh#901, the rename the v2 tag is about: the algorithm is named under
+    // `method`, the word the store levels, the fit config and the CLI use.
+    // Two-sided, so the rename cannot be half-reverted — the old key must be
+    // gone from the file, not merely joined by a new one.
+    assert_eq!(
+        summary["method"], "pgas",
+        "the summary must name its algorithm under `method` (gh#901):\n{text}"
+    );
+    assert!(
+        summary.get("stage").is_none(),
+        "and must not carry the old `stage` key alongside it — a consumer \
+         that kept reading `stage` would never learn the vocabulary \
+         changed:\n{text}"
+    );
 
     let segment = leaf.parent().unwrap().parent().unwrap();
     let seg = segment.to_string_lossy().into_owned();

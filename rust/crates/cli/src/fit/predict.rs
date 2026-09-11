@@ -3855,7 +3855,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("mh_summary.json"),
-            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+            r#"{"schema": "camdl.fit-summary/v2", "rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
         )
         .unwrap();
 
@@ -3893,7 +3893,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"beta": 1.001}, "ess": {"beta": 900.0}}"#,
+            r#"{"schema": "camdl.fit-summary/v2", "rhat": {"beta": 1.001}, "ess": {"beta": 900.0}}"#,
         )
         .unwrap();
         std::fs::write(
@@ -3927,7 +3927,7 @@ mod tests {
         // `tau` never moved — a sampler pathology, not a missing number.
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"a2": 1.01},
+            r#"{"schema": "camdl.fit-summary/v2", "rhat": {"a2": 1.01},
                 "ess":  {"a2": 145.0},
                 "rhat_not_reported": {"tau": "constant_draws"}}"#,
         )
@@ -3952,7 +3952,7 @@ mod tests {
         // `a2` mixed and carries 145.
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"a2": 1.01, "tau": 2.639},
+            r#"{"schema": "camdl.fit-summary/v2", "rhat": {"a2": 1.01, "tau": 2.639},
                 "ess":  {"a2": 145.0, "tau": null}}"#,
         )
         .unwrap();
@@ -3970,7 +3970,7 @@ mod tests {
         // Control: with every assessed parameter reporting, the minimum is real.
         std::fs::write(
             dir.join("pgas_summary.json"),
-            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"a2": 1.01, "tau": 2.639},
+            r#"{"schema": "camdl.fit-summary/v2", "rhat": {"a2": 1.01, "tau": 2.639},
                 "ess":  {"a2": 145.0, "tau": 9.0}}"#,
         )
         .unwrap();
@@ -3992,7 +3992,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("pmmh_summary.json"),
-            r#"{"schema": "camdl.fit-summary/v1", "rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
+            r#"{"schema": "camdl.fit-summary/v2", "rhat": {"beta": 1.03}, "ess": {"beta": 250.0}}"#,
         )
         .unwrap();
         assert!(

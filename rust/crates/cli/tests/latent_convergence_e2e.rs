@@ -327,7 +327,7 @@ fn pgas_stage_publishes_latent_path_convergence_that_matches_its_own_paths() {
     // ── The JSON block is the table, reduced ──────────────────────────────
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(stage.join("pgas_summary.json")).unwrap()).unwrap();
-    for key in ["stage", "n_chains", "acceptance_rates", "thin", "trajectories",
+    for key in ["method", "n_chains", "acceptance_rates", "thin", "trajectories",
                 "path_renewal", "rhat", "ess", "ess_tail"] {
         assert!(v.get(key).is_some(), "additive: `{key}` must still be in pgas_summary.json");
     }
