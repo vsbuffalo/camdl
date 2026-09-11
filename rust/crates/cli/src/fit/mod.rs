@@ -155,6 +155,87 @@ fn gate_run_method_against_model(
     Ok(())
 }
 
+/// How often the heartbeat thread rewrites a running stage's `progress.json`.
+/// Wall-clock and fixed, deliberately independent of step cadence: one
+/// national-scale PGAS sweep can take minutes, so a step-boundary heartbeat
+/// would be as stale as the trace it is meant to substitute for (gh#278).
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The liveness/progress heartbeat one stage of `algorithm` runs under: what
+/// its step counter counts, how many of those a complete run takes, and — for
+/// the one method that reports per-chain liveness — the roster it was
+/// configured to run.
+///
+/// Built here, at the one point every method reaches the dispatch through,
+/// rather than inside a method's own runner. A heartbeat constructed per runner
+/// is the heartbeat some other method silently does not have: before gh#900
+/// only PGAS built one, so a five-hour PMMH fit and a dead one looked identical
+/// to any reader deciding liveness from the artifact's freshness (the gh#278
+/// contract).
+///
+/// The step unit, one line each:
+///
+/// - PGAS — one sweep, split into warm-up and sampling at `burn_in`. The chain
+///   roster rides along so the artifact can say "1 of 24 sampling" from its
+///   first write (gh#751).
+/// - PMMH and `mh` — one MCMC iteration, split the same way.
+/// - NUTS — one warm-up or sampling iteration, counted end to end, so `warmup`
+///   is the burn-in boundary and `warmup + samples` the total.
+/// - IF2 — one cooling iteration; a search, so a single `optimizing` phase.
+/// - `nl-sbplx` / `nl-bobyqa` — one objective evaluation against `max_evals`.
+/// - `pfilter` — replicates of one point, which is neither an MCMC phase nor a
+///   search. It gets an inert guard and writes no `progress.json` at all,
+///   rather than a counter labelled with a phase it is not in.
+///
+/// A method whose options fail to parse also gets an inert guard: the dispatch
+/// arm reports that error and exits, and there is no run to report progress
+/// for.
+fn stage_heartbeat(
+    stage_dir: &std::path::Path,
+    algorithm: &config_v2::Algorithm,
+) -> io::HeartbeatGuard {
+    use config_v2::Algorithm as A;
+    let dir = stage_dir.to_path_buf();
+    let held = io::HeartbeatGuard::new;
+    match algorithm {
+        A::PGAS { .. } => match pgas::PgasStageOpts::from_algorithm(algorithm) {
+            Ok(o) => held(io::Heartbeat::mcmc(
+                dir, o.burn_in as u64, o.n_sweeps as u64, HEARTBEAT_INTERVAL, o.n_chains)),
+            Err(_) => io::HeartbeatGuard::inert(),
+        },
+        // The roster is 0, so no `chains` block is written: gh#751 wired
+        // per-chain reporting into PGAS only, and a table of rows that never
+        // fill would say less than no table at all.
+        A::PMMH { .. } | A::Mh { .. } => match pmmh::PmmhStageOpts::from_algorithm(algorithm) {
+            Ok(o) => held(io::Heartbeat::mcmc(
+                dir, o.burn_in as u64, o.n_steps as u64, HEARTBEAT_INTERVAL, 0)),
+            Err(_) => io::HeartbeatGuard::inert(),
+        },
+        A::Nuts { warmup, samples, .. } => held(io::Heartbeat::mcmc(
+            dir, *warmup as u64, (warmup + samples) as u64, HEARTBEAT_INTERVAL, 0)),
+        A::IF2 { iterations, .. } =>
+            held(io::Heartbeat::optimizing(dir, *iterations as u64, HEARTBEAT_INTERVAL)),
+        A::NlSbplx(c) | A::NlBobyqa(c) =>
+            held(io::Heartbeat::optimizing(dir, c.max_evals as u64, HEARTBEAT_INTERVAL)),
+        A::PFilter { .. } => io::HeartbeatGuard::inert(),
+    }
+}
+
+/// Abandon the running stage: record the terminal `failed` state in its
+/// `progress.json`, carrying the same sentence the user is about to read, then
+/// print it and exit non-zero.
+///
+/// `std::process::exit` runs no destructor, so the guard's `Drop` backstop
+/// cannot see these paths. Routing every fatal exit in the dispatch through one
+/// function is what makes "a stage always leaves a terminal record" true rather
+/// than nearly true — and it is why a reader holding only `progress.json`
+/// learns what a reader of stderr learns.
+fn abandon_stage(heartbeat: &io::HeartbeatGuard, message: String) -> ! {
+    heartbeat.failed(message.as_str());
+    eprintln!("{}", message);
+    std::process::exit(1);
+}
+
 pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     use config_v2::{Algorithm, FitConfig};
 
@@ -1098,6 +1179,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
         }
 
+        // gh#278, gh#900: the stage's liveness/progress heartbeat. A background
+        // thread writes `progress.json` into the stage dir on a fixed
+        // wall-clock timer, and the guard writes the terminal record however
+        // the stage exits — `done()` below when it returns, `abandon_stage` on
+        // every fatal path, its `Drop` on a panic. Built here, before the
+        // dispatch, so no method can silently be the one without a heartbeat.
+        let heartbeat = stage_heartbeat(&stage_dir, &method.algorithm);
+
         match &method.algorithm {
             Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
                 // clean_eval comes straight from the method TOML — it is part
@@ -1120,8 +1209,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // the base point carries `[estimate].start`.
                     seed, false,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error building run config: {}", e);
-                    std::process::exit(1);
+                    abandon_stage(&heartbeat, format!("error building run config: {e}"))
                 });
                 run_config.loglik_eval = effective_loglik_eval.clone();
                 run_config.gate = effective_gate.clone();
@@ -1135,8 +1223,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
 
                 std::fs::create_dir_all(&stage_dir).unwrap_or_else(|e| {
-                    eprintln!("error creating {}: {}", stage_dir.display(), e);
-                    std::process::exit(1);
+                    abandon_stage(
+                        &heartbeat,
+                        format!("error creating {}: {e}", stage_dir.display()),
+                    )
                 });
 
                 let collector = sim::inference::diagnostic::DiagnosticCollector::new(stage_name);
@@ -1145,13 +1235,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // draws from, under the resolved `starts` rule.
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, *chains, seed,
-                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                ).unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 // gh#887: a spread start the filter cannot score is redrawn,
                 // up to MAX_START_ATTEMPTS, before any chain runs; every
                 // attempt is on the record below.
                 let drawn = runner::preflight_spread_starts(
                     &run_config, &sweep_config.estimate, &resolved_starts, drawn, seed,
-                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                ).unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
                     drawn.to_estimated_params(&run_config.estimated_params);
                 // The audit sidecar, captured before the first filter pass.
@@ -1162,7 +1252,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let chain_results = runner::run_chains_with_per_chain_params(
                     &run_config, Some(&per_chain_params), &collector,
                     Some(stage_dir_str.as_ref()))
-                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 let elapsed = t0.elapsed();
 
                 // Write outputs
@@ -1232,7 +1322,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     },
                     dt_check_seed,
                 )
-                .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 dt_check::print_terminal_report(&dt_check_result);
                 let fit_state = state::FitState {
                     method: stage_name.to_string(),
@@ -1294,7 +1384,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let model_identity =
                     crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
                 let data_hashes: Vec<(String, String)> = sweep_config.data_spec()
-                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); })
+                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")))
                     .observations.iter()
                     .map(|(name, path)| {
                         let bytes = std::fs::read(path).unwrap_or_default();
@@ -1347,7 +1437,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             }
             Algorithm::PGAS { .. } => {
                 let pgas_opts = pgas::PgasStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 // gh#540: no CLI overrides here. Every flag that reaches this
                 // method was written into it before its content address was
                 // taken, so `from_algorithm` above already carries them.
@@ -1359,18 +1449,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     seed, force,
                     a.resume.is_some(),
                     &resolved_starts,
+                    &heartbeat,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running pgas: {}", e);
-                    std::process::exit(1);
+                    abandon_stage(&heartbeat, format!("error running pgas: {e}"))
                 });
                 // Bubble loglik from fit_state.toml written by PGAS runner
-                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
             Algorithm::PMMH { .. } => {
                 let pmmh_opts = pmmh::PmmhStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 pmmh::run_stage(
                     &sweep_config,
                     &method,
@@ -1382,10 +1472,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     // PMMH's dt-check is the PF-based one wired on the IF2 path.
                     /* dt_check_opt */ None,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running pmmh: {}", e);
-                    std::process::exit(1);
+                    abandon_stage(&heartbeat, format!("error running pmmh: {e}"))
                 });
-                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
@@ -1398,7 +1487,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // fields with `n_particles = 0` / `rho = None` (the
                 // deterministic path uses neither).
                 let pmmh_opts = pmmh::PmmhStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
                 // default; honours the same CLI flags as the IF2 path
                 // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
@@ -1417,10 +1506,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &resolved_starts,
                     Some(mh_dt_check),
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running mh: {}", e);
-                    std::process::exit(1);
+                    abandon_stage(&heartbeat, format!("error running mh: {e}"))
                 });
-                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
@@ -1428,7 +1516,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // Gradient-based Bayesian sampling of the deterministic ODE
                 // marginal likelihood (gh#275 Phase 2) via `det_grad` + NUTS.
                 let nuts_opts = nuts::NutsStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 nuts::run_stage(
                     &sweep_config,
                     &method,
@@ -1438,10 +1526,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     a.resume.is_some(),
                     &resolved_starts,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error running nuts: {}", e);
-                    std::process::exit(1);
+                    abandon_stage(&heartbeat, format!("error running nuts: {e}"))
                 });
-                let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
@@ -1493,23 +1580,27 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         &data_hashes_for_prov,
                         &nl_dt_check,
                     ).unwrap_or_else(|e| {
-                        eprintln!("error running {}: {}", stage_name, e);
-                        std::process::exit(1);
+                        abandon_stage(
+                            &heartbeat,
+                            format!("error running {stage_name}: {e}"),
+                        )
                     });
-                    let fs = load_stage_result_or_exit(stage_name, &stage_dir);
+                    let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
                     stage_best_loglik = Some(fs.best_loglik);
                     stage_best_chain = Some(fs.best_chain);
                 }
                 #[cfg(not(feature = "ode"))]
                 {
                     let _ = (stage_name, &sweep_config, &stage_dir, seed, nl_cfg, &resolved_starts);
-                    eprintln!(
-                        "error: this binary was built without --features ode, \
-                         which is required for algorithm = \"{}\". Rebuild \
-                         with `cargo build --features ode` (default).",
-                        method.algorithm.method_name()
+                    abandon_stage(
+                        &heartbeat,
+                        format!(
+                            "error: this binary was built without --features ode, \
+                             which is required for algorithm = \"{}\". Rebuild \
+                             with `cargo build --features ode` (default).",
+                            method.algorithm.method_name()
+                        ),
                     );
-                    std::process::exit(1);
                 }
             }
             Algorithm::PFilter { particles, replicates, record_ancestry, record_prequential, .. } => {
@@ -1532,8 +1623,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     Some(&method.algorithm),
                     1, *particles, 1, 1.0, 1, seed, false,
                 ).unwrap_or_else(|e| {
-                    eprintln!("error building pfilter config: {}", e);
-                    std::process::exit(1);
+                    abandon_stage(&heartbeat, format!("error building pfilter config: {e}"))
                 });
 
                 // gh#585: same §3.7.3(b) proof recording as the IF2/Bayesian
@@ -1544,8 +1634,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 }
 
                 std::fs::create_dir_all(&stage_dir).unwrap_or_else(|e| {
-                    eprintln!("error creating {}: {}", stage_dir.display(), e);
-                    std::process::exit(1);
+                    abandon_stage(
+                        &heartbeat,
+                        format!("error creating {}: {e}", stage_dir.display()),
+                    )
                 });
 
                 // The point the filter scores: the base point, or the point a
@@ -1554,7 +1646,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // so one draw of the rule is the point.
                 let drawn = runner::draw_chain_starts_for(
                     &run_config, &sweep_config.estimate, &resolved_starts, 1, seed,
-                ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+                ).unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 let mle_params: Vec<f64> = drawn
                     .to_param_vecs(&run_config.estimated_params, &run_config.base_params)
                     .into_iter()
@@ -1585,8 +1677,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let result = sim::inference::bootstrap_filter(
                         &process, &obs_model, &mle_params, &smc_config, pf_seed,
                     ).unwrap_or_else(|e| {
-                        eprintln!("pfilter error: {:?}", e);
-                        std::process::exit(1);
+                        abandon_stage(&heartbeat, format!("pfilter error: {e:?}"))
                     });
                     if record_preq {
                         if let Some(ref recorded) = result.prequential {
@@ -1649,8 +1740,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let stem = format!("{}/prequential", stage_dir.display());
                     crate::prequential_out::write_prequential_outputs(&stem, trace)
                         .unwrap_or_else(|e| {
-                            eprintln!("error writing prequential: {}", e);
-                            std::process::exit(1);
+                            abandon_stage(
+                                &heartbeat,
+                                format!("error writing prequential: {e}"),
+                            )
                         });
                     eprintln!("  prequential: elpd={:.2}, mean_crps={:.3}, PIT 90% cov={:.2}",
                         trace.elpd(), trace.mean_crps(), trace.pit_coverage(0.90));
@@ -1659,6 +1752,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 stage_best_loglik = Some(mean_ll);
             }
         }
+
+        // The stage is done: every arm either reached here or abandoned the run
+        // through `abandon_stage`. The terminal write goes down BEFORE
+        // `finalize` below, so the timer thread is stopped before the leaf's
+        // manifest is taken over its files — a `progress.json` rewritten during
+        // the manifest walk would be hashed mid-flight.
+        heartbeat.done();
 
         // ── finalize the CAS fit-method leaf ──
         // The runners streamed every output (chains, fit_state.toml,
@@ -1851,13 +1951,19 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
 /// corrupt file at that point is a runner bug or a torn write; the previous
 /// `if let Ok` swallow left a silent `null` in run.json where the result
 /// belonged. Fail loudly instead.
-fn load_stage_result_or_exit(stage_name: &str, stage_dir: &std::path::Path) -> state::FitState {
+fn load_stage_result_or_exit(
+    heartbeat: &io::HeartbeatGuard,
+    stage_name: &str,
+    stage_dir: &std::path::Path,
+) -> state::FitState {
     state::FitState::load(&stage_dir.to_string_lossy()).unwrap_or_else(|e| {
-        eprintln!(
-            "error: method '{}' reported success but its fit_state.toml \
-             cannot be read back from {}: {}",
-            stage_name, stage_dir.display(), e);
-        std::process::exit(1);
+        abandon_stage(
+            heartbeat,
+            format!(
+                "error: method '{}' reported success but its fit_state.toml \
+                 cannot be read back from {}: {}",
+                stage_name, stage_dir.display(), e),
+        )
     })
 }
 

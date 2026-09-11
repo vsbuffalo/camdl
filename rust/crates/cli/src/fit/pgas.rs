@@ -18,7 +18,6 @@ use sim::inference::{
 use io::trajectories::{
     Granularity, PosteriorDraw, TrajColumnSpec, TrajManifest, write_trajectories_tsv,
 };
-use io::progress::{Heartbeat, RunState};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
@@ -290,6 +289,9 @@ pub fn run_stage(
     force: bool,
     resume: bool,
     starts: &super::chain_starts::ResolvedStarts,
+    // The stage's liveness/progress heartbeat, owned by the runner so that
+    // every method has one and every exit leaves a terminal record (gh#900).
+    heartbeat: &io::HeartbeatGuard,
 ) -> Result<(), String> {
     let stage_name = method.algorithm.method_name();
     let estimate = &fit.estimate;
@@ -615,28 +617,20 @@ pub fn run_stage(
         .map(|chain_id| reporter.task(n_sweeps as u64, format!("chain {}", chain_id + 1), "sweeps"))
         .collect();
 
-    // gh#278: per-run liveness/progress heartbeat. A background thread writes
-    // `progress.json` into the stage dir every 5 s on a FIXED wall-clock timer —
-    // independent of sweep cadence (one spatial PGAS sweep can take minutes, so
-    // a sweep-boundary heartbeat would be as stale as the trace). Each chain
-    // only `bump`s a shared atomic (no I/O), so this cannot affect any fit
-    // number. On clean completion we write `Done`; any error/panic drops the
-    // heartbeat, leaving the last `Running` to go stale → consumer reads
-    // `PresumedDead`.
-    // gh#751: the roster goes in with it, so the artifact can say "1 of 24
+    // gh#278: the run's liveness/progress heartbeat, built by the runner
+    // (`fit::stage_heartbeat`) and passed in. A background thread writes
+    // `progress.json` into the stage dir on a fixed wall-clock timer —
+    // independent of sweep cadence, because one spatial PGAS sweep can take
+    // minutes and a sweep-boundary heartbeat would be as stale as the trace.
+    // Each chain only `bump`s a shared atomic (no I/O), so this cannot affect
+    // any fit number.
+    // gh#751: the roster went in with it, so the artifact can say "1 of 24
     // sampling" from the first write. A chain is refused at its START, so how
     // many of the chains paid for are running is knowable in the first minutes;
     // `fit_state.toml` and `diagnostics.json` report the same thing only after
     // the stage finishes, which on a multi-hour fit is hours too late to act
     // on. Each chain reports below when a worker picks it up, when it is
     // refused, and when it finishes.
-    let heartbeat = Heartbeat::mcmc(
-        stage_dir.to_path_buf(),
-        burn_in as u64,
-        n_sweeps as u64,
-        std::time::Duration::from_secs(5),
-        n_chains,
-    );
 
     // Posterior-trajectory output metadata, computed once and shared across the
     // per-chain writers (the model is shared, so these are chain-invariant).
@@ -1332,15 +1326,12 @@ pub fn run_stage(
              name. {}",
             stage_name, n_chains,
             super::chain_starts::UNSCOREABLE_START_ADVICE);
-        // gh#891: the worst case a fit can have — nothing ran — was the one
-        // whose `progress.json` said the least. Returning here dropped the
-        // heartbeat without a terminal write, leaving the last periodic
-        // `Running` (up to five seconds stale, possibly from before any chain
-        // reported) as the file's final word, so an agent polling it saw
-        // `running` for ever. `finish` writes `failed` with this reason, and
-        // the per-chain block beside it already shows every chain refused —
-        // each one reported it as it happened.
-        heartbeat.finish(RunState::Failed { reason: reason.clone() });
+        // gh#891/gh#900: the worst case a fit can have — nothing ran — was the
+        // one whose `progress.json` said the least, because returning here left
+        // the last periodic `Running` as the file's final word. Returning the
+        // reason is now enough: the heartbeat's owner records it as the stage's
+        // terminal `failed` state, beside the per-chain block that already
+        // shows every chain refused.
         return Err(reason);
     }
 
@@ -1816,7 +1807,7 @@ pub fn run_stage(
     // gh#278: clean terminal — all output (pgas_summary.json with R̂/ESS,
     // diagnostics.json, draws.tsv) is written above, so the heartbeat's `Done`
     // is the consumer's cue that the final stats are ready to read.
-    heartbeat.finish(RunState::Done);
+    heartbeat.done();
 
     Ok(())
 }
