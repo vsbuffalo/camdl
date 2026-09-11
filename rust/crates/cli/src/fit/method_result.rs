@@ -1653,7 +1653,7 @@ mod tests {
         agreement.insert("R0".into(), 1.04);
         agreement.insert("sigma".into(), 1.01);
         FitState {
-            stage: "scout".into(),
+            method: "scout".into(),
             seed: 42,
             timestamp: "2026-04-27T00:00:00Z".into(),
             input_hash: None,
@@ -1831,7 +1831,7 @@ mod tests {
     /// A `fit_state.toml` with only the fields the point-start check reads.
     fn write_state_with_starts(dir: &Path, n_chains: usize, kind: Option<&str>, source: &str) {
         let mut body = format!(
-            "stage = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+            "method = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
              best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = {n_chains}\n\
              chain_init_source = \"{source}\"\n"
         );

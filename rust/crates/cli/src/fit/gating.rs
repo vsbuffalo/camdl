@@ -475,7 +475,7 @@ mod tests {
         best_loglik: f64,
     ) -> FitState {
         FitState {
-            stage: "scout".into(),
+            method: "scout".into(),
             seed: 1,
             timestamp: "2026-04-19T00:00:00Z".into(),
             input_hash: None, camdl_version: None,

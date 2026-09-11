@@ -1682,7 +1682,7 @@ pub fn run_stage(
     }
 
     let state = FitState {
-        stage: stage_name.to_string(),
+        method: stage_name.to_string(),
         seed,
         timestamp: iso8601_utc(std::time::SystemTime::now()),
         input_hash: None,

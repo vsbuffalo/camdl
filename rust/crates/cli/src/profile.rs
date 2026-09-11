@@ -2355,7 +2355,7 @@ mod tests {
         let leaf = tmp.path().join("if2-abcdef12").join("seed_1-01234567");
         std::fs::create_dir_all(&leaf).unwrap();
         write_toml(&leaf, "fit_state.toml",
-            "stage = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+            "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
              best_loglik = -311.13\ninitial_loglik = -400.0\nbest_chain = 0\nn_chains = 2\n\n\
              [start_values]\nbeta = 0.5\n\n[rw_sd]\n");
         let mut params = build_params(&[

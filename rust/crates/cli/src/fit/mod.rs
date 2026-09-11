@@ -1235,7 +1235,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
                 dt_check::print_terminal_report(&dt_check_result);
                 let fit_state = state::FitState {
-                    stage: stage_name.to_string(),
+                    method: stage_name.to_string(),
                     seed,
                     timestamp: crate::cas::iso8601_utc(std::time::SystemTime::now()),
                     input_hash: None,

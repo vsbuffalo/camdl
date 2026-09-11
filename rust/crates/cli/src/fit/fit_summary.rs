@@ -3640,7 +3640,7 @@ mod tests {
         agreement.insert("sigma".into(), 1.01);
         agreement.insert("gamma".into(), 1.21);
         FitState {
-            stage: "scout".into(),
+            method: "scout".into(),
             seed: 42,
             timestamp: "2026-04-25T00:00:00Z".into(),
             input_hash: Some("deadbeef".into()),

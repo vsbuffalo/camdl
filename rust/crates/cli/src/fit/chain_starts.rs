@@ -1486,7 +1486,7 @@ mod tests {
     fn write_fit_state(dir: &Path, values: &[(&str, f64)]) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let mut body = String::from(
-            "stage = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+            "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
              best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = 2\n\n\
              [start_values]\n");
         for (k, v) in values {

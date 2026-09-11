@@ -4540,7 +4540,7 @@ dt = 1.0
             "the scout's fit_state must record I0 as perturb_only_at_t0");
 
         let mk_state = |t0_params: Vec<String>| FitState {
-            stage: "scout".into(),
+            method: "scout".into(),
             seed: 1,
             timestamp: "2026-08-23T00:00:00Z".into(),
             input_hash: None,

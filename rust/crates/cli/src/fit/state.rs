@@ -1,4 +1,4 @@
-//! `fit_state.toml` — inter-stage handoff file.
+//! `fit_state.toml` — inter-method handoff file.
 
 use serde::{Deserialize, Serialize};
 // gh#519: `fit_state.toml` is a serialized artifact whose digest is recorded
@@ -17,7 +17,10 @@ use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FitState {
-    pub stage: String,
+    /// The inference method that wrote this leaf (`if2`, `pgas`,
+    /// `pmmh`, `mh`, `nuts`, `nl-sbplx`, `nl-bobyqa`) — the label of the
+    /// `method` store level the file sits under.
+    pub method: String,
     pub seed: u64,
     pub timestamp: String,
     /// Input hash identifying the computation that produced this state.
@@ -43,8 +46,8 @@ pub struct FitState {
     pub acceptance_rate: Option<f64>,
 
     /// Per-parameter tail chain-agreement Â (last half of iterations).
-    /// Populated at end-of-stage so downstream stages (notably refine)
-    /// can gate on scout's convergence without re-running. Absent in
+    /// Populated when the method finishes, so a downstream method
+    /// (notably refine) can gate on scout's convergence without re-running. Absent in
     /// legacy fit_state.toml files — downstream readers must treat
     /// absence as "unknown, proceed with warning," not "converged."
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -95,10 +98,9 @@ pub struct FitState {
     pub chain_eval_ses: Vec<f64>,
 
     /// Resolved compound-gate configuration as it was applied at the
-    /// end of this stage. "Resolved" = the value that was actually in
-    /// force at runtime, after the priority chain `CLI flag >
-    /// fit.toml [stages.<stage>.gate] > GateConfig::default()`
-    /// collapsed.
+    /// end of this method's run. "Resolved" = the value that was actually
+    /// in force at runtime, after the priority chain `CLI flag >
+    /// fit.toml [method.gate] > GateConfig::default()` collapsed.
     ///
     /// Persisted so `camdl fit summary` can render the verdict line
     /// against the threshold the run was actually judged by — not
@@ -116,7 +118,7 @@ pub struct FitState {
     pub resolved_gate: Option<GateConfig>,
 
     /// Resolved clean-eval configuration as it was applied at the end
-    /// of this stage. Same priority chain and persistence rationale as
+    /// of this method's run. Same priority chain and persistence rationale as
     /// `resolved_gate` — what particle count and replicate count were
     /// actually used to compute the per-chain `chain_eval_logliks`
     /// and `chain_eval_ses` above. Without this, a reader can't
@@ -145,14 +147,14 @@ pub struct FitState {
     pub chain_starts_kind: Option<crate::fit::starts::ChainStartsKind>,
 
     /// Post-fit Richardson dt-convergence check at θ̂ (gh#52).
-    /// `None` on legacy fit_state.toml files or stages where
+    /// `None` on legacy fit_state.toml files or methods where
     /// `dt_check.enabled = false`. `Some(_)` carries the full
     /// ladder + verdict + notes; `camdl fit summary` reads this and
     /// renders the verdict line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dt_check: Option<crate::fit::dt_check::DtCheckResult>,
 
-    /// Measured likelihood noise at the base θ for a pseudo-marginal stage
+    /// Measured likelihood noise at the base θ for a pseudo-marginal method
     /// (gh#764): the spread of a single `log L̂`, the spread of the difference
     /// that enters the Metropolis ratio, and the particle and pair counts they
     /// were measured at. `σ` scales as `1/√N`, so a spread stored without its
@@ -164,8 +166,8 @@ pub struct FitState {
     /// re-running an expensive fit to read a value the first run had already
     /// produced.
     ///
-    /// `None` on IF2/PGAS/NUTS stages, on the deterministic `mh` stage (an ODE
-    /// likelihood has no filter noise), on any stage whose base θ or proposed
+    /// `None` on IF2/PGAS/NUTS runs, on the deterministic `mh` method (an ODE
+    /// likelihood has no filter noise), on any run whose base θ or proposed
     /// θ' the filter ruled out, and on `fit_state.toml` files written before
     /// this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,7 +241,7 @@ mod tests {
         tail_chain_agreement.insert("beta".into(), 1.02);
         tail_chain_agreement.insert("gamma".into(), 1.07);
         FitState {
-            stage: "scout".into(),
+            method: "scout".into(),
             seed: 42,
             timestamp: "2026-04-24T00:00:00Z".into(),
             input_hash: Some("deadbeef".into()),
@@ -270,7 +272,7 @@ mod tests {
 
     /// fit_state.toml round-trips through save/load with the new
     /// Step-8/9 fields populated. Catches schema regressions where a
-    /// rename or type change would break inter-stage handoff.
+    /// rename or type change would break the inter-method handoff.
     #[test]
     fn fit_state_round_trip_with_clean_eval_fields() {
         let dir = std::env::temp_dir().join(format!(
@@ -326,7 +328,7 @@ mod tests {
         // resolved_gate / resolved_loglik_eval block). Mirrors what a
         // pre-2026-04-25 fit_state.toml looked like.
         std::fs::write(&path, r#"
-stage = "scout"
+method = "scout"
 seed = 42
 timestamp = "2026-04-20T00:00:00Z"
 best_loglik = -123.45
@@ -362,5 +364,29 @@ beta = 0.8
         let legacy = body.replace("chain_starts_kind = \"point\"\n", "");
         let back: FitState = toml::from_str(&legacy).unwrap();
         assert_eq!(back.chain_starts_kind, None, "a leaf without the field says nothing");
+    }
+
+    /// gh#901: the file names the inference method under the key the rest of
+    /// the tool uses. `fit_state.toml` is the inter-method handoff file — a
+    /// `from_mle` start reads it — and it spelled the method `stage` after the
+    /// store levels, the config and the CLI had all moved to `method`. The
+    /// assertion is two-sided: the new key is emitted *and* the old one is
+    /// absent, so the rename cannot be half-reverted.
+    #[test]
+    fn fit_state_names_the_method_and_never_a_stage() {
+        let body = toml::to_string_pretty(&synthetic_state()).expect("serialize");
+        assert!(body.contains("method = \"scout\""),
+            "fit_state.toml must name the method under `method`:\n{body}");
+        assert!(!body.contains("stage = "),
+            "and must not spell it `stage`, which no other surface does:\n{body}");
+        // The reader is the other half of the handoff: a file written with the
+        // new key must load, and one written with the old key must not quietly
+        // parse into a default.
+        let back: FitState = toml::from_str(&body).expect("round-trips");
+        assert_eq!(back.method, "scout");
+        let old = body.replace("method = \"scout\"", "stage = \"scout\"");
+        assert!(toml::from_str::<FitState>(&old).is_err(),
+            "a file spelling the key `stage` is not read (no compatibility \
+             alias, VERSIONING.md alpha posture)");
     }
 }
