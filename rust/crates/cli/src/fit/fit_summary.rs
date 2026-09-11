@@ -433,9 +433,9 @@ fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[L
 }
 
 /// Walk the fit_dir and return one `ResolvedStage` per completed method
-/// leaf. Order matches `FitView.stages_declared` (label order); leaves that
+/// leaf. Order matches `FitView.methods_declared` (label order); leaves that
 /// didn't complete are dropped; leaves that completed but aren't in
-/// `stages_declared` (shouldn't happen in v2 layouts, but the walker is
+/// `methods_declared` (shouldn't happen in v2 layouts, but the walker is
 /// permissive) are appended at the end in walker order so they're still
 /// visible.
 ///
@@ -444,10 +444,10 @@ fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[L
 /// `fit_seed`, then lex-first stage_dir — same priority as
 /// [`crate::fit::table_row::build_row`]'s terminal-stage picker.
 fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
-    // Read the fit-level view for `stages_declared`; if missing, fall back to
+    // Read the fit-level view for `methods_declared`; if missing, fall back to
     // walker-order (covers user-built non-canonical fits).
-    let stages_declared: Vec<String> = FitView::read(fit_dir)
-        .map(|v| v.stages_declared)
+    let methods_declared: Vec<String> = FitView::read(fit_dir)
+        .map(|v| v.methods_declared)
         .unwrap_or_default();
     let nodes = fit_tree::walk_fit_dir(fit_dir).unwrap_or_default();
 
@@ -481,7 +481,7 @@ fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
 
     let mut out: Vec<ResolvedStage> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for name in &stages_declared {
+    for name in &methods_declared {
         if let Some((method, _, dir)) = best.get(name) {
             out.push(ResolvedStage {
                 stage: name.clone(),
@@ -3527,7 +3527,7 @@ pub(crate) fn winner_params_toml(segment: &Path) -> Result<String, String> {
 ///
 /// `stage_filter` selects an explicit stage (must be present in
 /// `discovered`); when `None`, picks the *terminal* stage in
-/// declaration order (`FitView.stages_declared` walked in reverse).
+/// declaration order (`FitView.methods_declared` walked in reverse).
 fn dump_params_only(
     dir: &str,
     discovered: &[ResolvedStage],

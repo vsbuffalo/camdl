@@ -241,7 +241,7 @@ mod tests {
 
     /// Write a fit-level sidecar (`fit.meta.json`) under a segment dir so
     /// `FitView::read` treats it as a well-formed fit. Minimal provenance —
-    /// `stages_declared`/per-stage numbers come from the leaves.
+    /// `methods_declared`/per-stage numbers come from the leaves.
     fn write_sidecar(seg: &Path) {
         std::fs::create_dir_all(seg).unwrap();
         std::fs::write(
@@ -428,11 +428,11 @@ mod tests {
             .map(|e| e.fit_dir.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, ["fit_a-11111111", "fit_b-22222222"]);
-        // The view is pre-parsed (derived from the stage leaves); `stages_declared`
+        // The view is pre-parsed (derived from the stage leaves); `methods_declared`
         // comes from the leaves' stage levels. gh#147: `estimated`/`fixed`/priors
         // are config detail not carried on the leaves, so they default empty —
         // config-diff reads the archived `fit.toml.original` for those.
-        assert_eq!(entries[0].view.stages_declared, vec!["if2"]);
+        assert_eq!(entries[0].view.methods_declared, vec!["if2"]);
         assert!(!entries[0].view.fit_hash.is_empty());
         assert_eq!(entries[0].view.stages.len(), 1);
     }

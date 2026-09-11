@@ -418,7 +418,7 @@ mod tests {
             fixed: HashMap::new(),
             resolved_priors: Vec::new(),
             parameters_provenance: Default::default(),
-            stages_declared: Vec::new(),
+            methods_declared: Vec::new(),
             stages: Vec::new(),
         }
     }

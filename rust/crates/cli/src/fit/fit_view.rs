@@ -35,6 +35,19 @@ pub struct FitStageView {
     /// the `method` store level's directory name — so there is no separate
     /// name field to drift from it (gh#901).
     pub method: FitAlgorithm,
+    /// The `method` level's full 64-char hash; its first 8 chars are the
+    /// `<h8>` in `<method>-<h8>/` on disk.
+    ///
+    /// This is what tells two leaves of one algorithm apart (gh#895). Before
+    /// the `[stages]` → `[method]` split a segment held one leaf per stage
+    /// *name* and the name was the key; after it a segment holds one leaf per
+    /// method *hash*, so two PGAS leaves differing only in `sweeps` have
+    /// identical `method`, `backend` and `seed` and are distinguished by
+    /// nothing else. `""` when the record carries no `method` level.
+    pub method_hash: String,
+    /// The leaf's own `run_id` (full 64-char hex) — the address `camdl show`
+    /// and `fit predict` accept.
+    pub run_id: String,
     /// Simulation backend the stage ran on. Defaults to `ChainBinomial` when
     /// absent.
     pub backend: InferenceBackend,
@@ -80,7 +93,7 @@ pub struct FitView {
     // ── from the leaves ──
     /// The method labels found among the leaves, in label order,
     /// deduplicated. One per method that ran on this problem.
-    pub stages_declared: Vec<String>,
+    pub methods_declared: Vec<String>,
     /// One view per discovered method leaf, sorted by method label then seed.
     pub stages: Vec<FitStageView>,
 }
@@ -122,6 +135,13 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Option<Fit
     Some(FitStageView {
         stage_dir: dir.to_path_buf(),
         method,
+        method_hash: rec
+            .levels
+            .iter()
+            .find(|l| l.name == "method")
+            .map(|l| l.hash.to_hex())
+            .unwrap_or_default(),
+        run_id: rec.run_id.to_hex(),
         backend,
         seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
         n_chains: inputs.get("n_chains").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
@@ -180,11 +200,11 @@ impl FitView {
             .map(|(_, r)| r.provenance.argv.clone())
             .unwrap_or_default();
         // Method labels in label order, dedup preserving order.
-        let mut stages_declared: Vec<String> = Vec::new();
+        let mut methods_declared: Vec<String> = Vec::new();
         for (_, r) in &leaves {
             let label = stage_label(r);
-            if !stages_declared.contains(&label) {
-                stages_declared.push(label);
+            if !methods_declared.contains(&label) {
+                methods_declared.push(label);
             }
         }
 
@@ -239,7 +259,7 @@ impl FitView {
             fixed: side.fixed.into_iter().collect(),
             resolved_priors: side.resolved_priors,
             parameters_provenance: side.parameters_provenance.into_iter().collect(),
-            stages_declared,
+            methods_declared,
             stages,
         })
     }
@@ -296,7 +316,7 @@ mod tests {
 
     /// Pins the N→1 aggregation `FitView` performs over a realistic
     /// two-method fixture: the fit-level fold (fit_hash, latest created_at,
-    /// engine/argv, sidecar provenance, label-order `stages_declared`) and the
+    /// engine/argv, sidecar provenance, label-order `methods_declared`) and the
     /// per-leaf fold (label / method / backend / seed / n_chains /
     /// best_loglik / best_chain). Asserts real values — not `None == None` —
     /// so a degenerate projection (all-empty / all-None) fails.
@@ -326,8 +346,8 @@ mod tests {
         assert_eq!(view.estimated, vec!["beta", "gamma"], "estimated");
         assert_eq!(view.fixed.get("N0"), Some(&1000.0), "fixed");
 
-        // stages_declared: label order, deduped.
-        assert_eq!(view.stages_declared, vec!["if2", "pgas"], "label order");
+        // methods_declared: label order, deduped.
+        assert_eq!(view.methods_declared, vec!["if2", "pgas"], "label order");
 
         // Per-leaf fold, leaf-for-leaf.
         assert_eq!(view.stages.len(), 2, "two method leaves");

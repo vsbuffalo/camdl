@@ -623,7 +623,7 @@ fn list_shows_fit_entries() {
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
     // gh#147 (M3.2): a CAS fit segment with two method leaves + the fit-level
-    // sidecar. `read_fit_segment` derives one fit entry whose `stages_declared`
+    // sidecar. `read_fit_segment` derives one fit entry whose `methods_declared`
     // comes from the leaves (`if2`, `pgas`).
     write_cas_fit(&output, "demo", "abc12345", &["if2", "pgas"], "m000");
 
@@ -967,7 +967,7 @@ fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf 
 /// `FitStage` leaf per method (`<method>-<h8>/seed_1-<h8>/run.json`) plus the
 /// fit-level sidecar (`fit.meta.json` — the label + model-identity home). This is
 /// the shape `read_fit_segment` derives a single fit-level entry from, so
-/// `list` / `fit table` see one fit with `stages_declared` taken from the
+/// `list` / `fit table` see one fit with `methods_declared` taken from the
 /// leaves. Returns the segment dir.
 fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], model_identity: &str) -> PathBuf {
     let seg = output.join("fits").join(format!("{label}-{fit_h8}"));
@@ -1007,6 +1007,114 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], mode
     )
     .unwrap();
     seg
+}
+
+/// Write a fit segment holding two leaves of the SAME algorithm that differ
+/// only in their `method`-level hash — the shape a store takes when one fit is
+/// run twice at different hyperparameters (two PGAS leaves, 12 sweeps vs 16).
+/// Returns the segment dir and the two method hashes, in on-disk order.
+fn write_two_leaves_of_one_method(output: &Path, method: &str) -> (PathBuf, [String; 2]) {
+    let seg = output.join("fits").join("twin-abc12345");
+    std::fs::create_dir_all(&seg).unwrap();
+    let fit_hash = format!("abc12345{}", "0".repeat(56));
+    let hashes = [
+        format!("34f379b8{}", "0".repeat(56)),
+        format!("d5c282ce{}", "0".repeat(56)),
+    ];
+    for (i, method_hash) in hashes.iter().enumerate() {
+        let leaf = seg
+            .join(format!("{method}-{}", &method_hash[..8]))
+            .join("seed_1-06cbd6b3");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let run_id = format!("{:0<64}", format!("beef{}", i + 1));
+        let rec = format!(r#"{{
+            "format_version": 1,
+            "kind": "fit_stage",
+            "run_id": "{run_id}",
+            "hash_version": 1,
+            "ir_version": "0.7",
+            "engine_version": "0.1.0+test",
+            "levels": [
+                {{"name":"fit","label":"twin","hash":"{fit_hash}","schema_version":1}},
+                {{"name":"method","label":"{method}","hash":"{method_hash}","schema_version":1}},
+                {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
+            ],
+            "status": "completed",
+            "artifacts": {{}},
+            "inputs": {{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":2}},
+            "provenance": {{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}
+        }}"#);
+        std::fs::write(leaf.join("run.json"), rec).unwrap();
+    }
+    std::fs::write(
+        seg.join("fit.meta.json"),
+        r#"{"model_identity":"m000","model_path":"demo.camdl","fit_toml_path":"demo.toml"}"#,
+    )
+    .unwrap();
+    (seg, hashes)
+}
+
+/// gh#895 + gh#901: `camdl list --kind fit --format json` speaks *method*, and
+/// its per-leaf entries are distinguishable from one another.
+///
+/// Two things were wrong with the row. The keys were `stages`,
+/// `stages_declared` and per-entry `stage` — a vocabulary the store levels, the
+/// fit config and the CLI had all left. And two leaves of one algorithm in one
+/// segment were indistinguishable: each carries its own `method`-level hash and
+/// its own `run_id`, and the row carried neither, so a reader could not say
+/// which entry was which leaf or address either one.
+#[test]
+fn fit_list_json_names_methods_and_can_tell_two_leaves_apart() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let output = tmp.path().join("output");
+    let (_seg, hashes) = write_two_leaves_of_one_method(&output, "pgas");
+
+    let out = Command::new(&bin)
+        .args(["list", "--kind", "fit", "--format", "json", &output.to_string_lossy()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "list failed: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let line = text.lines().find(|l| l.contains("\"kind\":\"fit\""))
+        .unwrap_or_else(|| panic!("no fit row in list output:\n{text}"));
+    let row: serde_json::Value = serde_json::from_str(line).expect("the row is JSON");
+
+    // The vocabulary.
+    assert_eq!(row["methods_declared"], serde_json::json!(["pgas"]), "{line}");
+    assert!(row.get("stages").is_none(), "no `stages` array: {line}");
+    assert!(row.get("stages_declared").is_none(), "no `stages_declared`: {line}");
+    // Tagged, in `table_row`'s form, so a consumer keys on the contract.
+    assert_eq!(row["schema"]["name"], "fit_list_row", "{line}");
+    assert_eq!(row["schema"]["version"], 1, "{line}");
+
+    // The two entries, and what tells them apart.
+    let methods = row["methods"].as_array().expect("a `methods` array");
+    assert_eq!(methods.len(), 2, "both leaves are listed: {line}");
+    for m in methods {
+        assert_eq!(m["method"], "pgas", "each entry names its method: {line}");
+        assert!(m.get("stage").is_none(), "and carries no `stage` key: {line}");
+    }
+    let seen: Vec<&str> = methods.iter()
+        .map(|m| m["method_hash"].as_str().expect("method_hash is a string"))
+        .collect();
+    assert!(seen.contains(&hashes[0].as_str()) && seen.contains(&hashes[1].as_str()),
+        "each entry carries its own method-level hash; got {seen:?}: {line}");
+    let ids: std::collections::BTreeSet<&str> = methods.iter()
+        .map(|m| m["run_id"].as_str().expect("run_id is a string"))
+        .collect();
+    assert_eq!(ids.len(), 2, "two distinct run_ids: {line}");
+    // Each entry's path addresses its own leaf, under the segment's own path.
+    let seg_path = row["path"].as_str().expect("the segment path");
+    for m in methods {
+        let p = m["path"].as_str().expect("each entry carries a path");
+        assert!(p.starts_with(seg_path),
+            "a leaf path sits under the segment path `{seg_path}`: {p}");
+        assert!(Path::new(p).join("run.json").is_file()
+                || std::path::Path::new(p).is_dir()
+                || p.contains("seed_1"),
+            "the path names the leaf directory: {p}");
+    }
 }
 
 /// gh#147 (M3.2): `camdl show <fit-stage path | run_id prefix>` renders the

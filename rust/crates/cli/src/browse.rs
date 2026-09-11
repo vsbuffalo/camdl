@@ -499,7 +499,7 @@ fn keyed_children(segment: &Path, family: &str, dirs: bool) -> Vec<String> {
 }
 
 /// Render a fit SEGMENT as its *output envelope*: the fit-level identity (label,
-/// fit hash, declared stages) plus the discoverable output files the fit
+/// fit hash, declared methods) plus the discoverable output files the fit
 /// produced (predictive / observed / quantities artifacts + top-level
 /// manifests). A read-side projection of the segment directory — there is no
 /// fit-wide `run.json`, so this is the fit's `show` view. Mirrors the visual
@@ -513,14 +513,14 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
     {
         println!("{}", "label".bright_black()); println!("  {}", label);
     }
-    // Fit-level hash + declared stages from the folded view (when the segment
-    // holds stage leaves; an output-only / incomplete segment skips these).
+    // Fit-level hash + declared methods from the folded view (when the segment
+    // holds method leaves; an output-only / incomplete segment skips these).
     if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
         let short = if view.fit_hash.len() >= 8 { &view.fit_hash[..8] } else { &view.fit_hash };
         println!("{}", "fit".bright_black()); println!("  {}", short.dimmed());
-        if !view.stages_declared.is_empty() {
-            println!("{}", "stages".bright_black());
-            println!("  {}", view.stages_declared.join(", "));
+        if !view.methods_declared.is_empty() {
+            println!("{}", "methods".bright_black());
+            println!("  {}", view.methods_declared.join(", "));
         }
     }
     // Output envelope: the predict/quantities artifacts the fit produced,
@@ -960,6 +960,9 @@ fn find_obs_stream(sim_dir: &Path, stream: &str) -> Option<PathBuf> {
 #[derive(Debug, Clone)]
 struct FitEntry {
     view: crate::fit::fit_view::FitView,
+    /// The segment directory itself, so a leaf's path can be rendered in the
+    /// same frame as `rel_path` (gh#895).
+    fit_dir: PathBuf,
     rel_path: String,
     created: SystemTime,
 }
@@ -1176,7 +1179,7 @@ fn discover_fits(root: &str) -> Result<Vec<FitEntry>, String> {
                     .and_then(|m| m.modified())
                     .unwrap_or(SystemTime::UNIX_EPOCH));
             let rel_path = pathdiff_str(&e.fit_dir, &cwd);
-            FitEntry { view: e.view, rel_path, created }
+            FitEntry { view: e.view, fit_dir: e.fit_dir, rel_path, created }
         })
         .collect())
 }
@@ -1596,24 +1599,43 @@ fn print_ensemble_json(rows: &[EnsembleRow]) {
     }
 }
 
+/// Schema discriminator for the `camdl list --kind fit --format json` row,
+/// mirroring `table_row`'s `{name, version}` form so a consumer keys on the
+/// contract rather than on the shape it happens to see.
+///
+/// v1 is the first tagged vintage and is also the gh#895 shape: the per-leaf
+/// array is `methods`, and each entry carries the leaf's `method_hash`,
+/// `run_id` and `path` so two leaves of one algorithm in one segment are
+/// distinguishable and addressable.
+const FIT_LIST_ROW_SCHEMA_NAME: &str = "fit_list_row";
+const FIT_LIST_ROW_SCHEMA_VERSION: u32 = 1;
+
 fn print_fits_json(fits: &[FitEntry]) {
     for f in fits {
         let v = &f.view;
-        // Per-stage summary, one object per discovered stage leaf — surfaces the
-        // headline numbers `FitView` folds from the leaves.
-        let stages: Vec<serde_json::Value> = v
+        // One object per discovered method leaf — the headline numbers
+        // `FitView` folds from the leaves, plus the leaf's address.
+        let methods: Vec<serde_json::Value> = v
             .stages
             .iter()
             .map(|s| {
                 serde_json::json!({
                     "method": s.method.as_str(),
-                    "method": s.method.as_str(),
+                    // gh#895: `method` alone does not identify a leaf. Two PGAS
+                    // leaves of one segment that differ only in `sweeps` agree
+                    // on method, backend and seed and differ in the `method`
+                    // level's hash — which is the `<h8>` in their directory
+                    // names. Without it the two entries are indistinguishable
+                    // and neither is addressable.
+                    "method_hash": s.method_hash,
+                    "run_id": s.run_id,
+                    "path": leaf_rel_path(&f.rel_path, &f.fit_dir, &s.stage_dir),
                     "backend": s.backend.as_str(),
                     "seed": s.seed,
                     "n_chains": s.n_chains,
                     "best_loglik": s.best_loglik,
                     // The loglik class is a property of the method (gh#280), so
-                    // a PGAS stage reads `complete_data` even though it carries
+                    // a PGAS leaf reads `complete_data` even though it carries
                     // no scalar `best_loglik`.
                     "loglik_type": crate::fit::loglik::LoglikType::from(s.method).tag(),
                     "best_chain": s.best_chain,
@@ -1621,6 +1643,10 @@ fn print_fits_json(fits: &[FitEntry]) {
             })
             .collect();
         let json = serde_json::json!({
+            "schema": {
+                "name": FIT_LIST_ROW_SCHEMA_NAME,
+                "version": FIT_LIST_ROW_SCHEMA_VERSION,
+            },
             "kind": "fit",
             "hash": v.fit_hash,
             "label": v.label,
@@ -1633,14 +1659,25 @@ fn print_fits_json(fits: &[FitEntry]) {
             "fixed": v.fixed,
             "resolved_priors": v.resolved_priors,
             "parameters_provenance": v.parameters_provenance,
-            "stages_declared": v.stages_declared,
-            "stages": stages,
+            "methods_declared": v.methods_declared,
+            "methods": methods,
             "created_at": v.created_at,
             "engine_version": v.engine_version,
             "argv": v.argv,
             "path": f.rel_path,
         });
         println!("{}", serde_json::to_string(&json).unwrap_or_default());
+    }
+}
+
+/// A method leaf's path in the same frame as the segment's `path` field: the
+/// row's own `rel_path` with the leaf's suffix under the segment appended, so a
+/// consumer can pass the string straight to `camdl show` / `fit predict`.
+/// Falls back to the leaf's own path when it is not under the segment.
+fn leaf_rel_path(seg_rel: &str, seg_dir: &Path, leaf_dir: &Path) -> String {
+    match leaf_dir.strip_prefix(seg_dir) {
+        Ok(suffix) => Path::new(seg_rel).join(suffix).to_string_lossy().into_owned(),
+        Err(_) => leaf_dir.to_string_lossy().into_owned(),
     }
 }
 
@@ -1656,7 +1693,7 @@ fn print_fits_table(fits: &[FitEntry], now: SystemTime) {
             Cell::new("LABEL").add_attribute(comfy_table::Attribute::Bold),
             Cell::new("MODEL").add_attribute(comfy_table::Attribute::Bold),
             Cell::new("ESTIMATE").add_attribute(comfy_table::Attribute::Bold),
-            Cell::new("STAGES").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("METHODS").add_attribute(comfy_table::Attribute::Bold),
             Cell::new("PATH").add_attribute(comfy_table::Attribute::Bold),
         ]);
     let mut unlabelled = 0usize;
@@ -1669,7 +1706,7 @@ fn print_fits_table(fits: &[FitEntry], now: SystemTime) {
                 let mut s: String = joined.chars().take(29).collect(); s.push('…'); s
             } else { joined }
         };
-        let stages = f.view.stages_declared.join(",");
+        let methods = f.view.methods_declared.join(",");
         if f.view.label.is_none() { unlabelled += 1; }
         let hash_short = short_hash_cell(&f.view.fit_hash);
         let label_cell = label_cell(&f.view.label);
@@ -1679,7 +1716,7 @@ fn print_fits_table(fits: &[FitEntry], now: SystemTime) {
             label_cell,
             Cell::new(model),
             Cell::new(estimate).add_attribute(comfy_table::Attribute::Dim),
-            Cell::new(stages).fg(comfy_table::Color::Green),
+            Cell::new(methods).fg(comfy_table::Color::Green),
             Cell::new(&f.rel_path).fg(comfy_table::Color::Cyan),
         ]);
     }

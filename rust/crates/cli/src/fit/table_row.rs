@@ -395,7 +395,7 @@ impl MethodView {
     }
 }
 
-/// Find the terminal completed stage. Walks `stages_declared` in
+/// Find the terminal completed stage. Walks `methods_declared` in
 /// reverse and returns the first node whose stage name matches a
 /// completed run. Picks Real over Synthetic, lowest `fit_seed`, then
 /// lex-first stage_dir — same priority as
@@ -404,7 +404,7 @@ fn pick_terminal_stage<'a>(
     view: &FitView,
     nodes: &'a [StageNode],
 ) -> Option<&'a StageNode> {
-    for stage_name in view.stages_declared.iter().rev() {
+    for stage_name in view.methods_declared.iter().rev() {
         if let Some(node) = best_node_for_stage(stage_name, nodes) {
             return Some(node);
         }
@@ -443,7 +443,7 @@ fn best_node_for_stage<'a>(stage_name: &str, nodes: &'a [StageNode]) -> Option<&
 fn completed_method_names(view: &FitView, nodes: &[StageNode]) -> Vec<String> {
     let completed: std::collections::HashSet<&str> =
         nodes.iter().map(|n| n.stage.method.as_str()).collect();
-    view.stages_declared
+    view.methods_declared
         .iter()
         .filter(|s| completed.contains(s.as_str()))
         .cloned()
