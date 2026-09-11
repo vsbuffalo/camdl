@@ -605,7 +605,7 @@ impl DiagnosticKind {
                 let mut hints = vec![
                     "Inspect chain_starts.tsv to see which init was used",
                     "If using survey_top_k, the survey may be putting \
-                     bound-pinned points into the top-K; consider --init lhs",
+                     bound-pinned points into the top-K; consider --starts lhs",
                 ];
                 // Only when a chain actually finished. A run in which every
                 // chain was refused printed this line once per refusal,
@@ -870,6 +870,29 @@ mod tests {
             assert!(bad.hints(ctx).iter().any(|h| h.contains("chain_starts.tsv")),
                 "the chain_starts.tsv pointer holds whatever the run did");
         }
+    }
+
+    /// gh#899. Every hint has to name a flag the CLI still accepts. `--init`
+    /// was removed when chain starts became a `--starts` rule, and `camdl fit
+    /// run --init lhs` is now refused at parse, so a hint recommending it
+    /// sends the reader to an error instead of a remedy.
+    #[test]
+    fn no_hint_recommends_a_removed_flag() {
+        let bad = bad_init("mu", 1e-4);
+        for ctx in [
+            HintContext::default(),
+            HintContext { chains_completed: Some(0) },
+            HintContext { chains_completed: Some(3) },
+        ] {
+            for h in bad.hints(ctx) {
+                assert!(!h.contains("--init"),
+                    "`--init` was removed — this hint recommends a flag the \
+                     CLI refuses to parse: {h}");
+            }
+        }
+        assert!(bad.hints(HintContext::default()).iter()
+                .any(|h| h.contains("--starts lhs")),
+            "the survey_top_k remedy still has to name a drawing rule");
     }
 
     /// The threshold in a `RhatHigh` message was formatted `{:.1}`, so every

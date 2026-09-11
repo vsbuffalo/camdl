@@ -1887,6 +1887,69 @@ mod tests {
         assert!(a.contains("more likely, not less"), "{a}");
     }
 
+    /// gh#899: no message this crate emits may *recommend* `--init`. The flag
+    /// was removed from `fit run` with the `[stages]` → `[method]` split and
+    /// from `camdl profile` by gh#889; chain starts are a `--starts` rule.
+    /// Three no-finite-anchor refusals (PGAS, PMMH, IF2) kept telling the user
+    /// to "try `--init lhs`", which `fit run` answers by refusing to parse.
+    ///
+    /// Scan every `.rs` under the cli crate's `src/` and flag any production
+    /// line naming `--init ` (the trailing space excludes the live
+    /// `simulate --init-state`). One shape is allowed: the removed-flag
+    /// corrector's `--init <mode>: write `<replacement>`.` line, which names
+    /// the removed flag only to say what replaced it. Comment lines and test
+    /// code are skipped, so a comment recording the history stays legal.
+    #[test]
+    fn no_emitted_message_recommends_the_removed_init_flag() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![src_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path.strip_prefix(&src_root).unwrap()
+                    .to_string_lossy().replace('\\', "/");
+                let text = std::fs::read_to_string(&path).unwrap();
+                let mut in_test = false;
+                for line in text.lines() {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("#[cfg(test)]")
+                        || trimmed.starts_with("#[test]")
+                        || trimmed.starts_with("mod tests")
+                    {
+                        in_test = true;
+                    }
+                    if in_test || trimmed.starts_with("//") {
+                        continue;
+                    }
+                    if !line.contains("--init ") || line.contains("--init-state") {
+                        continue;
+                    }
+                    // The removed-flag corrector: names the flag, then says
+                    // what to write instead.
+                    if line.contains(": write ") {
+                        continue;
+                    }
+                    offenders.push(format!("{}: {}", rel, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "`--init` was removed — these emitted messages recommend a flag \
+             `camdl fit run` refuses to parse; say `--starts` instead \
+             (gh#899):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     // ─── Per-variant provenance tag check ─────────────────────────────
 
     #[test]

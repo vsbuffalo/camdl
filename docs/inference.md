@@ -844,10 +844,9 @@ if2, fit run, survey) were removed in the same revision. Their replacements are:
 
 - `--fixed-file <toml>` for the "load many values from a file" case.
 - `--fixed NAME=VALUE` for the "change one value" case.
-- `--starts from_params=<toml>` on `fit run` (and
-  `--init from_params --params
-  <toml>` on `profile`) for the _warm-start chain
-  origin_ case — when the file is a starting point for inference, not a pin.
+- `--starts from_params=<toml>`, on `fit run` and on `profile` alike, for the
+  _warm-start chain origin_ case — when the file is a starting point for
+  inference, not a pin.
 
 `--fixed`/`--fixed-file` on inference subcommands also removes the listed
 parameter from the `[estimate]` set if it was there — so
@@ -1557,10 +1556,10 @@ uniform-random chains by ~80,000 nats) can set `starts = "lhs"`.
    and says so.
 
 **`camdl profile`** dispatches the same way at each grid cell:
-`--starts N --init lhs` draws N stratified per-cell starts across the non-focal
-estimated parameters; the focal parameters stay pinned to the grid point.
-`--init single` reproduces the historical "every start at the same point, IF2
-RNG provides the spread" behaviour.
+`--starts lhs --n-starts N` draws N stratified per-cell starts across the
+non-focal estimated parameters; the focal parameters stay pinned to the grid
+point. `--starts single` reproduces the historical "every start at the same
+point, IF2 RNG provides the spread" behaviour.
 
 ### Out-of-sample validation
 

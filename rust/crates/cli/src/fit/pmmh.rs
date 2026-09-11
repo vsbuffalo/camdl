@@ -878,8 +878,9 @@ pub fn run_stage(
              MH chain never moves (-inf - (-inf) = NaN, never accepted) and \
              the posterior is degenerate. Most often the starting values sit \
              in an impossible region — an MH chain cannot escape a -inf init — \
-             so check those first (try `--init lhs` or a different start); less \
-             often the data are impossible under this model, or a recoverable \
+             so check those first (try `--starts lhs`, or `starts = \"lhs\"` \
+             under `[method]`, or a different start); less often the data are \
+             impossible under this model, or a recoverable \
              error fires at every θ (gh#226). Also check the observation model \
              and parameter bounds; run with --verbosity debug for per-substep \
              diagnostics.",
