@@ -2291,7 +2291,7 @@ impl Formatter {
             // positional guess, and the omission is stated (gh#727 follow-up).
             if facts.n_chains_with_paths > 0 {
                 s.push_str(&self.note(Tone::Dim,
-                    "(no per-chain path counts: this stage's `trajectories` block \
+                    "(no per-chain path counts: this leaf's `trajectories` block \
                      predates the chain ids that key them, and a row's position is \
                      not an answer — re-run the stage to recover the columns)"));
             }
@@ -2307,7 +2307,7 @@ impl Formatter {
             s.push_str(&self.note(Tone::Dim, &format!(
                 "a path is written on every {} retained draw (thin {}), so every \
                  one should be joinable; the shortfall is paths that were \
-                 written outside this stage's retained set or skipped as \
+                 written outside this leaf's retained set or skipped as \
                  incoherent records",
                 report.draw_stride.map_or("—".to_string(), |v| v.to_string()),
                 report.thin)));
@@ -2328,7 +2328,7 @@ impl Formatter {
         s.push_str(&self.filter_ess_lines(stage_dir));
         match &facts.latent {
             None => {
-                s.push_str(&format!("  {}\n", self.dim("(this stage saved no latent path)")));
+                s.push_str(&format!("  {}\n", self.dim("(this leaf saved no latent path)")));
             }
             Some(Err(e)) => {
                 s.push_str(&self.note(Tone::Warn, &format!("not computed: {e}")));
@@ -2352,9 +2352,9 @@ impl Formatter {
                 if !table.is_file() {
                     match lc.write_tsv(&table) {
                         Ok(()) => s.push_str(&format!("  {}\n", self.dim(&format!(
-                            "the stage predates this block; {LATENT_CONVERGENCE_TSV} written now from its saved paths")))),
+                            "the leaf predates this block; {LATENT_CONVERGENCE_TSV} written now from its saved paths")))),
                         Err(e) => s.push_str(&format!("  {}\n", self.dim(&format!(
-                            "the stage predates this block and the table could not be written: {e}")))),
+                            "the leaf predates this block and the table could not be written: {e}")))),
                     }
                 }
             }
@@ -3345,7 +3345,7 @@ fn render_id_csv(v: &serde_json::Value) -> String {
 fn render_latex_stage(stage: &MethodReport) -> String {
     let mut s = String::new();
     s.push_str(&format!(
-        "\\subsection*{{Stage: \\texttt{{{}}} ({})}}\n\n",
+        "\\subsection*{{Method: \\texttt{{{}}} ({})}}\n\n",
         escape_latex(&stage.name),
         stage.method
     ));
@@ -4546,7 +4546,7 @@ mod tests {
 "      2     250        250\n",
 "  200 of 500 written paths cannot be joined to a posterior draw\n",
 "  a path is written on every 28 retained draw (thin 5), so every one should\n",
-"  be joinable; the shortfall is paths that were written outside this stage's\n",
+"  be joinable; the shortfall is paths that were written outside this leaf's\n",
 "  retained set or skipped as incoherent records\n",
         ), "the counts survive the absence of the traces, and the shortfall is named");
         std::fs::remove_dir_all(&dir).ok();
@@ -4830,7 +4830,7 @@ mod tests {
 "      3       -1400.00  -377.05        -3000.00       -4400.00      10         10   ← outlier\n",
 "  2 of 30 written paths cannot be joined to a posterior draw\n",
 "  a path is written on every 40 retained draw (thin 1), so every one should\n",
-"  be joinable; the shortfall is paths that were written outside this stage's\n",
+"  be joinable; the shortfall is paths that were written outside this leaf's\n",
 "  retained set or skipped as incoherent records\n",
 "  ⚠ chains disagree (chain 3 — obs_ll far from the rest) — is a parameter\n",
 "  weakly identified? Inspect its per-chain posterior.\n",
@@ -5372,7 +5372,7 @@ mod tests {
         let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
         let tex = render_latex(&doc);
         // No preamble, but tabular blocks per stage.
-        assert!(tex.contains("\\subsection*{Stage:"));
+        assert!(tex.contains("\\subsection*{Method:"));
         assert!(tex.contains("\\begin{tabular}"));
         assert!(tex.contains("$\\hat A$"));
         assert!(tex.contains("\\bottomrule"));

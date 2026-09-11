@@ -3777,23 +3777,37 @@ fn observed_by_stream(
         .collect()
 }
 
+/// How a refusal names the leaf it is about: the leaf's own label, which after
+/// the `[stages]` → `[method]` split is the method's name. Falls back to the
+/// typed method, then to a neutral word, so a directory passed with no
+/// `run.json` produces "the posterior method leaf" rather than "the '' …".
+fn leaf_name(leaf: &str, method: Option<FitAlgorithm>) -> String {
+    if !leaf.is_empty() {
+        return leaf.to_string();
+    }
+    method.map(|m| m.as_str()).unwrap_or("posterior").to_string()
+}
+
 /// The actionable refusal for an explicit `--horizon one_step` on a fit whose
 /// backend cannot drive a particle filter. ODE's one-step predictive is
 /// identical to free-forward (deterministic given θ), so the redirect points the
 /// user there rather than emit a relabelled-identical band.
-fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, stage: &str) -> String {
-    let m = method.map(|m| m.as_str()).unwrap_or("posterior");
+fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, leaf: &str) -> String {
+    // A leaf's label IS its method's name, so naming both would read
+    // `'pgas' (pgas)`. Name it once, falling back to the typed method when a
+    // directory was passed whose `run.json` did not say.
+    let leaf = leaf_name(leaf, method);
     match why {
         NotFilterable::Deterministic => format!(
-            "stage '{stage}' ({m}) ran on the ODE backend, which is deterministic given \
-             the parameters — its one-step-ahead predictive p(y_t | y_{{1:t-1}}) reduces \
-             to the observation model at the deterministic state, identical to the \
-             free-forward band. There is no separate one-step object to emit.\n  \
+            "the '{leaf}' method leaf ran on the ODE backend, which is deterministic \
+             given the parameters — its one-step-ahead predictive p(y_t | y_{{1:t-1}}) \
+             reduces to the observation model at the deterministic state, identical to \
+             the free-forward band. There is no separate one-step object to emit.\n  \
              Use the free-forward horizon instead:\n    \
              camdl fit predict --fit <run> --horizon free_forward"
         ),
         NotFilterable::NotAnInferenceBackend => format!(
-            "stage '{stage}' ({m}) ran on the Gillespie backend, which is not an \
+            "the '{leaf}' method leaf ran on the Gillespie backend, which is not an \
              inference backend — a fit never produces Gillespie posterior draws, so a \
              one-step-ahead predictive is not defined. This should not occur; please \
              report it."
@@ -3802,39 +3816,40 @@ fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, stage: &st
 }
 
 /// The actionable refusal when a fit reaches `predict` with no posterior band to
-/// draw. Two genuinely different causes, told apart by the stage's method
+/// draw. Two genuinely different causes, told apart by the leaf's method
 /// (gh#343): a Bayesian sampler (PGAS / PMMH / MH) that simply has not written
 /// its `draws.tsv` yet — incomplete or still running — versus a real optimizer
 /// (IF2 / NLopt) that returns a single point and never has a band. Framing a
 /// sampler as an "optimizer fit" misdirected the user of the *default* Bayesian
 /// method to the plug-in workflow, discarding the posterior it does have.
-fn plugin_refusal(method: Option<FitAlgorithm>, stage: &str) -> String {
+fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
+    let leaf = leaf_name(leaf, method);
     if let Some(m) = method.filter(|m| m.is_posterior_sampler()) {
         return format!(
-            "stage '{stage}' ({m}) is a Bayesian posterior sampler, but it has not \
-             written its posterior draws (draws.tsv) — that file is written at stage \
-             completion, so the fit is likely incomplete or still running.\n  \
-             Let the fit finish (or re-run it); a completed {m} stage has a full \
+            "the '{leaf}' method leaf is a Bayesian posterior sampler, but it has not \
+             written its posterior draws (draws.tsv) — that file is written when the \
+             method finishes, so the fit is likely incomplete or still running.\n  \
+             Let the fit finish (or re-run it); a completed {m} leaf has a full \
              posterior cloud, and `camdl fit predict` will draw the band with no \
              extra flags."
         );
     }
     if let Some(m) = method.filter(|m| m.is_optimizer()) {
         return format!(
-            "stage '{stage}' is an optimizer fit ({m}) — it returns a single best-fit \
-             parameter set, not a distribution, so there is no posterior band to draw.\n  \
+            "the '{leaf}' method leaf is an optimizer fit ({m}) — it returns a single \
+             best-fit parameter set, not a distribution, so there is no posterior band \
+             to draw.\n  \
              Get those parameters and run a plug-in forward simulation instead:\n    \
              camdl fit summary <run> --params-only > params.toml\n    \
              camdl simulate <model> --params params.toml --obs-only-dir out/\n  \
              (A labelled plug-in predictive is a future cell; v1 emits posterior bands only.)"
         );
     }
-    // Neither a posterior sampler nor an optimizer (a likelihood-eval stage such
-    // as pfilter, or an unrecognized method): this stage kind yields no posterior
+    // Neither a posterior sampler nor an optimizer (a likelihood-eval method
+    // such as pfilter, or an unrecognized one): this kind yields no posterior
     // distribution, so there is nothing to band — but it is NOT an optimizer fit.
-    let m = method.map(|m| m.as_str()).unwrap_or("this stage");
     format!(
-        "stage '{stage}' ({m}) produced no posterior draws and is not a posterior \
+        "the '{leaf}' method leaf produced no posterior draws and is not a posterior \
          sampler, so there is no band to draw for it."
     )
 }
@@ -4384,7 +4399,7 @@ mod tests {
             let msg = plugin_refusal(Some(m), "posterior");
             assert!(
                 !msg.contains("optimizer"),
-                "a {m} stage must not be described as an optimizer fit; got: {msg}"
+                "a {m} leaf must not be described as an optimizer fit; got: {msg}"
             );
             assert!(
                 msg.contains("draws.tsv"),
@@ -4403,7 +4418,7 @@ mod tests {
         // so the plug-in-simulate workflow is the right redirect (no over-correction).
         for m in [FitAlgorithm::If2, FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa] {
             let msg = plugin_refusal(Some(m), "scout");
-            assert!(msg.contains("optimizer fit"), "a {m} stage is an optimizer fit; got: {msg}");
+            assert!(msg.contains("optimizer fit"), "a {m} leaf is an optimizer fit; got: {msg}");
             assert!(
                 msg.contains("--params-only"),
                 "the optimizer refusal points at the plug-in workflow; got: {msg}"

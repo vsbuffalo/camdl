@@ -741,7 +741,7 @@ fn resolve_paired_posterior(
     eprintln!(
         "simulate: --init-state fit → {n_forkable}/{} posterior draws have a saved \
          latent path; forecasting that paired (θ_i, X_i) subset from t = {}{}\n  \
-         stage '{}' ({})",
+         method '{}' ({})",
         ens.n_total,
         ens.origin_t,
         if n_forkable < ens.n_total {

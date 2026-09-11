@@ -302,7 +302,7 @@ pub fn cmd_compare(a: &crate::args::CompareArgs) {
         }).collect();
         (models, None, None, None)
     } else {
-        eprintln!("error: compare requires either --config FILE or ≥2 fit stage paths");
+        eprintln!("error: compare requires either --config FILE or ≥2 fit leaf paths");
         std::process::exit(1);
     };
 
@@ -893,7 +893,7 @@ fn load_trace(
              - as a fit handle: {resolve_err}\n  \
              - as a prequential path: no prequential.json at '{path}' (or \
              '{path}/prequential.json') — run `camdl pfilter --save-prequential` \
-             or `camdl fit run` with a pfilter stage to generate one."
+             or `camdl fit run` with a pfilter method to generate one."
         )),
     }
 }
@@ -921,7 +921,7 @@ fn check_derivable_backend(
     match backend {
         InferenceBackend::ChainBinomial => Ok(()),
         other => Err(format!(
-            "the fit at {} ran its terminal stage on the `{}` backend, but \
+            "the fit at {} ran its terminal method on the `{}` backend, but \
              `compare` derives a prequential by invoking `camdl pfilter`, a \
              bootstrap particle filter over the `chain_binomial` process.\n  \
              The derived scores would come from a different forward process \
