@@ -304,8 +304,11 @@ pub fn run_stage(
     std::fs::create_dir_all(stage_dir)
         .map_err(|e| format!("cannot create {}: {}", stage_dir.display(), e))?;
 
-    // The audit sidecar, captured before any step runs; rewritten after the
-    // chains finish with every start a retry rejected (gh#887).
+    // The audit sidecar, captured before any step runs so a watcher can read
+    // the starts while the chains are still going, and rewritten from the
+    // final record once they finish (gh#887, gh#904). The pre-run write can
+    // only say `accepted` — no chain has been refused yet — so the rewrite is
+    // what makes the file true, and it is unconditional.
     super::runner::record_chain_starts(stage_dir, &config, &drawn);
     let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
         std::sync::Mutex::new(vec![None; n_chains]);
@@ -523,9 +526,12 @@ pub fn run_stage(
                         continue;
                     }
                     Err(e @ sim::error::SimError::PFDegenerate { .. }) => {
-                        if attempt > 0 {
-                            retry_refused.lock().unwrap().push(chain_id);
-                        }
+                        // gh#904: unconditionally. A chain refused on its only
+                        // attempt — the whole of the point rules, which do not
+                        // redraw — is as refused as one refused after three,
+                        // and this is the only channel by which
+                        // `chain_starts.tsv` learns the chain never ran.
+                        retry_refused.lock().unwrap().push(chain_id);
                         // A statistically-degenerate init (ESS collapse / all
                         // particles dead) is skipped with a BadInit diagnostic;
                         // the surviving chains continue. (PFIterationBudget is a
@@ -768,16 +774,17 @@ pub fn run_stage(
     // `acceptance rates:` report below carries the per-chain summary.
     for t in bars { t.finish(); }
 
-    // gh#887: the sidecar now records every start a retry rejected, and the
-    // start each chain actually ran from.
+    // gh#887: the sidecar records every start a retry rejected, and the start
+    // each chain actually ran from. gh#904: always rewritten, not only when a
+    // retry rejected something — a chain refused at its only start leaves
+    // `rejected` empty, and the pre-run file would otherwise stand, saying
+    // `accepted` for a chain that never ran.
     let drawn = drawn.with_retry_outcome(
         retry_accepted.into_inner().unwrap(),
         retry_rejected.into_inner().unwrap(),
         retry_refused.into_inner().unwrap(),
     );
-    if !drawn.rejected.is_empty() {
-        super::runner::record_chain_starts(stage_dir, &config, &drawn);
-    }
+    super::runner::record_chain_starts(stage_dir, &config, &drawn);
 
     // gh#110. Skip + continue: surface "ran K of N chains" so the
     // user knows downstream R̂/ESS exclude skipped chains. This
