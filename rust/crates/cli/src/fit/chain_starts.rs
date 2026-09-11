@@ -1487,7 +1487,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         let mut body = String::from(
             "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
-             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = 2\n\n\
+             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 1\nn_chains = 2\n\n\
              [start_values]\n");
         for (k, v) in values {
             body.push_str(&format!("{k} = {v}\n"));

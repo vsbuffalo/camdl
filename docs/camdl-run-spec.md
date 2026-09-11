@@ -4507,6 +4507,13 @@ wildcard, and carries a populated `inputs`:
 }
 ```
 
+`inputs.best_chain` is the **1-based chain number** that produced
+`inputs.best_loglik` — the number of a `chain_N/` directory on this leaf, the
+same value the leaf's `fit_state.toml` stores and the method's own stderr line
+prints, so `chain_<best_chain>/` opens with no arithmetic. It is `null` for a
+method with replicates rather than competing chains (`pfilter`). `camdl show`
+and `camdl list --format json` print it as recorded.
+
 **Fields.**
 
 | field            | type                                       | meaning                                                                                       |
@@ -4872,11 +4879,11 @@ present is listed in `run.json.artifacts` and subject to the exact-set gate.
 
 Common to both families:
 
-| file               | content                                                                                                                                                                                                  |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge                             |
-| `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6) |
-| `progress.json`    | the run's liveness/progress heartbeat, written live, and the terminal state it ends on; every method but `pfilter` writes it (§10.10)                                                                    |
+| file               | content                                                                                                                                                                                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, `best_chain` as the 1-based number of the `chain_N/` directory that won, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge |
+| `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6)                                              |
+| `progress.json`    | the run's liveness/progress heartbeat, written live, and the terminal state it ends on; every method but `pfilter` writes it (§10.10)                                                                                                                 |
 
 An optimizer leaf (IF2, NLopt) additionally holds:
 

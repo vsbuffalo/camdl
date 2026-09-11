@@ -54,6 +54,11 @@ pub struct FitStageView {
     pub seed: u64,
     pub n_chains: usize,
     pub best_loglik: Option<f64>,
+    /// `inputs.best_chain` as recorded: the **1-based chain number** that won,
+    /// naming a `chain_N/` directory under `stage_dir` (gh#912). Renderers
+    /// print it as it stands — adding one here would name the neighbour.
+    /// `None` for a method with replicates rather than competing chains
+    /// (pfilter), and on a leaf written before the field existed.
     pub best_chain: Option<usize>,
     /// Path-derived `(data_kind, fit_seed, sweep_slug)` axes — `None` for a
     /// stage outside the canonical `{real,synthetic}/...` layout.

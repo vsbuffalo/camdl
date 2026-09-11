@@ -969,7 +969,10 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik: map_result.map_loglik,
         initial_loglik: ll_mean,
-        best_chain: *map_chain,
+        // gh#912: `map_chain` is the 0-based chain id; the stored value is the
+        // 1-based chain NUMBER, so it names the `chain_N/` directory beside
+        // this file and matches the `MAP loglik: … (chain N)` line below.
+        best_chain: *map_chain + 1,
         n_chains,
         // gh#110. Surface "ran K of N chains" through fit_state so
         // downstream consumers (fit_summary, the book chapters) can

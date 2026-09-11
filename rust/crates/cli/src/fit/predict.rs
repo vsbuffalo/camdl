@@ -3914,7 +3914,7 @@ mod tests {
         std::fs::write(
             dir.join("fit_state.toml"),
             "method = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
-             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = 4\n\
+             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 1\nn_chains = 4\n\
              chain_init_source = \"from_mle @mle\"\nchain_starts_kind = \"point\"\n\n\
              [start_values]\n\n[rw_sd]\n",
         )

@@ -433,7 +433,10 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik,
         initial_loglik: f64::NEG_INFINITY,
-        best_chain,
+        // gh#912: `best_chain` is the 0-based `ChainOut::chain_id`; the stored
+        // value is the 1-based chain NUMBER, so it names the `chain_N/`
+        // directory beside this file and matches the per-chain status lines.
+        best_chain: best_chain + 1,
         n_chains: opts.n_chains,
         n_good_chains: None,
         start_values: start_values.iter().map(|(k, v)| (k.clone(), *v)).collect(),

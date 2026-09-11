@@ -142,6 +142,10 @@ pub struct FitRunConfig {
 /// `loglik_eval.per_chain[overall_winner_idx]`.
 pub struct ChainResults {
     pub results: Vec<(usize, IF2Result)>,
+    /// The winner as a **0-based chain index** — the in-memory id every
+    /// runner works in. Every artifact that names a chain writes the 1-based
+    /// number instead (`fit_state.toml`, `run.json`, `chain_N/`, the stderr
+    /// lines), so a writer adds one here at its boundary (gh#912).
     pub best_chain: usize,
     pub best_loglik: f64,
     pub chain_agreement: HashMap<String, f64>,
@@ -4558,7 +4562,7 @@ dt = 1.0
             camdl_version: None,
             best_loglik: -60.2,
             initial_loglik: f64::NEG_INFINITY,
-            best_chain: 0,
+            best_chain: 1,
             n_chains: 2,
             n_good_chains: None,
             start_values: Default::default(),

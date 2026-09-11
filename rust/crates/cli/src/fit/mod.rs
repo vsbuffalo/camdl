@@ -1149,8 +1149,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // loglik (or exit) — the compiler enforces that no arm can fall
         // through to the finalize below with a silent None.
         let stage_best_loglik: Option<f64>;
-        // PFilter has replicates, not competing chains, so it legitimately
-        // leaves this None.
+        // The 1-based chain NUMBER that won, as it goes into run.json's
+        // `inputs.best_chain` — the same value the stage's `fit_state.toml`
+        // stores, naming an existing `chain_N/` directory (gh#912). PFilter
+        // has replicates, not competing chains, so it legitimately leaves
+        // this None.
         let mut stage_best_chain: Option<usize> = None;
 
         // Surface the registry caveat for Beta/Experimental methods, once per
@@ -1332,7 +1335,11 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     camdl_version: Some(crate::version::VERSION_SHORT.into()),
                     best_loglik: chain_results.best_loglik,
                     initial_loglik: f64::NEG_INFINITY,
-                    best_chain: chain_results.best_chain,
+                    // gh#912: `ChainResults::best_chain` is the 0-based chain
+                    // index; the stored value is the 1-based chain NUMBER, so
+                    // it names the `chain_N/` directory beside this file and
+                    // matches the `best ll=… (chain N)` line below.
+                    best_chain: chain_results.best_chain + 1,
                     n_chains: *chains,
                     n_good_chains: None,
                     start_values,
@@ -1428,7 +1435,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 });
 
                 stage_best_loglik = Some(chain_results.best_loglik);
-                stage_best_chain = Some(chain_results.best_chain);
+                // 1-based, as the fit_state.toml written just above (gh#912).
+                stage_best_chain = Some(chain_results.best_chain + 1);
 
                 eprintln!();
                 crate::status::done("stored", format!("{} \u{b7} {}/", stage_name, stage_dir.display()));

@@ -481,7 +481,7 @@ mod tests {
             input_hash: None, camdl_version: None,
             best_loglik,
             initial_loglik: f64::NEG_INFINITY,
-            best_chain: 0,
+            best_chain: 1,
             n_chains: chain_logliks.len().max(1),
             n_good_chains: None,
             start_values: Default::default(),

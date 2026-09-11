@@ -70,6 +70,8 @@ pub enum GateVerdict {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct If2StageResult {
     pub best_loglik: f64,
+    /// The winning chain as `fit_state.toml` stores it: a **1-based chain
+    /// number** naming a `chain_N/` directory in the stage dir (gh#912).
     pub best_chain: usize,
     /// Winner θ̂ from clean-eval. Estimated parameters only — fixed
     /// params live elsewhere (e.g. `final_params.toml` carries both).
@@ -776,6 +778,9 @@ fn default_thin() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NloptStageResult {
     pub best_loglik: f64,
+    /// The winning chain as `fit_state.toml` stores it: a **1-based chain
+    /// number**, matching the `chain` column of `chain_results.tsv` beside
+    /// it (gh#912).
     pub best_chain: usize,
     /// Winner θ̂ — estimated parameters only. Fixed params live in
     /// `mle_params.toml` (full vector with provenance).
@@ -1831,7 +1836,7 @@ mod tests {
     fn write_state_with_starts(dir: &Path, n_chains: usize, kind: Option<&str>, source: &str) {
         let mut body = format!(
             "method = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
-             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 0\nn_chains = {n_chains}\n\
+             best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 1\nn_chains = {n_chains}\n\
              chain_init_source = \"{source}\"\n"
         );
         if let Some(k) = kind {

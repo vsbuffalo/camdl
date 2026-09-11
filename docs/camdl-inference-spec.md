@@ -460,6 +460,8 @@ seed = 1
 timestamp = "2026-03-30T14:30:00Z"
 best_loglik = -3891.2
 initial_loglik = -4523.7
+# The chain that reached best_loglik, numbered from 1 — the number of the
+# `chain_N/` directory beside this file, so `chain_4/` is that chain's output.
 best_chain = 4
 n_chains = 8
 n_good_chains = 6

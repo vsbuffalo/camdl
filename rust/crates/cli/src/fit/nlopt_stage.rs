@@ -259,7 +259,10 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION.to_string()),
         best_loglik: winner.loglik,
         initial_loglik: f64::NAN,
-        best_chain: winner_idx,
+        // gh#912: `winner_idx` is the 0-based chain index; the stored value is
+        // the 1-based chain NUMBER, matching the `chain` column of
+        // `chain_results.tsv` beside this file.
+        best_chain: winner_idx + 1,
         n_chains,
         n_good_chains: Some(
             chain_outcomes

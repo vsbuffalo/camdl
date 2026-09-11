@@ -1681,7 +1681,11 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik: best_sweep.log_complete_data_ll,
         initial_loglik: f64::NEG_INFINITY,
-        best_chain: best_chain.0,
+        // gh#912: `best_chain.0` is the 0-based chain id the sampler runs on;
+        // the stored value is the 1-based chain NUMBER, so it names the
+        // `chain_N/` directory beside this file and matches the stderr line
+        // below. The one is added here, at the boundary.
+        best_chain: best_chain.0 + 1,
         n_chains,
         // gh#607: `None` unless a chain was skipped, so a healthy fit's
         // `fit_state.toml` is unchanged. Same convention as PMMH.

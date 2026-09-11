@@ -31,6 +31,13 @@ pub struct FitState {
     pub camdl_version: Option<String>,
     pub best_loglik: f64,
     pub initial_loglik: f64,
+    /// The chain that produced `best_loglik`, as a **1-based chain number** —
+    /// the number of the `chain_N/` directory beside this file, the number
+    /// the method's own stderr line prints, and the number
+    /// `mle_params.toml`'s `[provenance] chain` carries. Every method writes
+    /// it that way; the writers add one to their 0-based internal index at
+    /// the boundary, so `chain_<best_chain>/` can be opened with no
+    /// arithmetic and `0` is not a value this field takes (gh#781, gh#912).
     pub best_chain: usize,
     pub n_chains: usize,
     pub n_good_chains: Option<usize>,

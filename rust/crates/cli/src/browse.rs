@@ -446,7 +446,10 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
             println!("  {} {} ({})", d.run_id.short8().dimmed(), d.artifact, d.digest.short8().dimmed());
         }
     }
-    // Display fields recorded in `inputs` (display-only, never hashed).
+    // Display fields recorded in `inputs` (display-only, never hashed), each
+    // printed exactly as recorded — `best_chain` is the 1-based chain number
+    // naming a `chain_N/` directory on this leaf, so nothing is added to it
+    // here (gh#912).
     if let Some(obj) = rec.inputs.as_object() {
         for key in ["method", "backend", "n_chains", "best_chain", "best_loglik"] {
             if let Some(v) = obj.get(key) {
@@ -1638,6 +1641,8 @@ fn print_fits_json(fits: &[FitEntry]) {
                     // a PGAS leaf reads `complete_data` even though it carries
                     // no scalar `best_loglik`.
                     "loglik_type": crate::fit::loglik::LoglikType::from(s.method).tag(),
+                    // Printed exactly as recorded: the 1-based chain number,
+                    // naming a `chain_N/` directory on the leaf (gh#912).
                     "best_chain": s.best_chain,
                 })
             })
