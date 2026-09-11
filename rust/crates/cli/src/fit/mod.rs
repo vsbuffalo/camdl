@@ -1471,6 +1471,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     &resolved_starts,
                     // PMMH's dt-check is the PF-based one wired on the IF2 path.
                     /* dt_check_opt */ None,
+                    &heartbeat,
                 ).unwrap_or_else(|e| {
                     abandon_stage(&heartbeat, format!("error running pmmh: {e}"))
                 });
@@ -1505,6 +1506,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     a.resume.is_some(),
                     &resolved_starts,
                     Some(mh_dt_check),
+                    &heartbeat,
                 ).unwrap_or_else(|e| {
                     abandon_stage(&heartbeat, format!("error running mh: {e}"))
                 });

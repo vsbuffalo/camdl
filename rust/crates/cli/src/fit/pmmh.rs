@@ -109,6 +109,9 @@ pub fn run_stage(
     // wired on the IF2 path). `--dt-check-strict` is resolved into the config's
     // `threshold_nats` before identity is taken (gh#730), so no flag rides here.
     dt_check_opt: Option<super::config_v2::DtCheckConfig>,
+    // The stage's liveness/progress heartbeat, owned by the runner
+    // (`fit::stage_heartbeat`). Its step is one MCMC iteration (gh#900).
+    heartbeat: &io::HeartbeatGuard,
 ) -> Result<(), String> {
     // The PMMH prefer-PGAS-for-long-series caveat banner is emitted by the
     // dispatch chokepoint (`methods::emit_status_banner`), driven by the
@@ -738,6 +741,13 @@ pub fn run_stage(
                 // line) / None (no-op) — no mode branching here.
                 task.set(crate::progress::mcmc(loglik, acc));
                 task.inc(1);
+
+                // gh#900: and to the run's heartbeat, whose step is one MCMC
+                // iteration and whose phase reads `burn_in` off the same
+                // boundary this callback does. A monotonic `fetch_max` across
+                // the parallel chains — a cheap atomic, no I/O on the step
+                // path, so it cannot touch a fit number.
+                heartbeat.bump(step as u64);
             };
 
             // gh#224: a structural error from the sampling PF aborts the fit
