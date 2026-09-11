@@ -419,5 +419,5 @@ fn test_diagnostic_collector_basics() {
     let json = serde_json::to_string(&diags).unwrap();
     let decoded: Vec<sim::inference::diagnostic::Diagnostic> = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.len(), 4);
-    assert_eq!(decoded[0].stage, "test");
+    assert_eq!(decoded[0].method, "test");
 }
