@@ -176,7 +176,13 @@ pub fn run_stage(
     let chain_outs: Vec<ChainOut> = (0..opts.n_chains)
         .into_par_iter()
         .map(|chain_id| -> Result<ChainOut, String> {
-            let chain_dir = stage_dir.join(format!("chain_{}", chain_id));
+            // 1-based on disk, as pgas/pmmh/if2 write it. `chain_starts.tsv`,
+            // the `fit summary` chain table, the `bad_init` records and the
+            // stderr lines all number chains from one (gh#781), so the
+            // directory a reader opens is the number they were handed, with no
+            // arithmetic (gh#910). The id stays 0-based in here, and in
+            // `draws.tsv`'s `chain` join column.
+            let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
             std::fs::create_dir_all(&chain_dir)
                 .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
 

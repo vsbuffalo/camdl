@@ -363,10 +363,10 @@ fn retained_mean(all: &[f64], k: Option<usize>) -> f64 {
 }
 
 /// Collect `(chain_number, dir)` for every `chain_<N>` subdirectory of
-/// `stage_dir` with a parseable trailing integer. The on-disk base differs by
-/// sampler (nuts numbers from 0, pmmh/pgas from 1); sorting by the parsed
-/// number gives a stable order either way, and the display index is assigned
-/// sequentially by the caller.
+/// `stage_dir` with a parseable trailing integer. Every sampler numbers these
+/// directories from one (gh#781, gh#910); sorting by the parsed number gives
+/// the chain order, and the display index the caller assigns sequentially then
+/// matches the directory name.
 fn discover_chain_dirs(stage_dir: &Path) -> Vec<(usize, std::path::PathBuf)> {
     let mut dirs = Vec::new();
     let Ok(entries) = std::fs::read_dir(stage_dir) else {
@@ -678,7 +678,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let warmup = "1\t-900.0\t-905.0\n2\t-880.0\t-885.0\n";
-        // dir numbering starts at 1 (pmmh/pgas convention). Distinct good means.
+        // dir numbering starts at 1 (every sampler's convention). Distinct
+        // good means.
         let write_trace = |c: usize, kept: &str| {
             let cd = dir.join(format!("chain_{c}"));
             std::fs::create_dir_all(&cd).unwrap();
