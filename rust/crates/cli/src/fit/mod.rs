@@ -1251,7 +1251,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 let stage_dir_str = stage_dir.to_string_lossy();
                 let chain_results = runner::run_chains_with_per_chain_params(
                     &run_config, Some(&per_chain_params), &collector,
-                    Some(stage_dir_str.as_ref()))
+                    Some(stage_dir_str.as_ref()), &heartbeat)
                     .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 let elapsed = t0.elapsed();
 

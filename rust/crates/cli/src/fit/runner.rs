@@ -1976,6 +1976,9 @@ fn run_one_chain(
     per_chain_params: Option<&[EstimatedParam]>,
     task: Option<&crate::progress::Task>,
     stage_dir: Option<&str>,
+    // The stage's liveness/progress heartbeat, owned by the runner
+    // (`fit::stage_heartbeat`). Its step is one IF2 cooling iteration (gh#900).
+    heartbeat: &io::HeartbeatGuard,
 ) -> Result<IF2Result, sim::error::SimError> {
     let chain_seed = crate::util::derive_chain_seed(config.seed, chain_id);
     let if2_params = per_chain_params.unwrap_or(&config.estimated_params);
@@ -2023,6 +2026,11 @@ fn run_one_chain(
             t.set(crate::progress::ll(loglik));
             t.inc(1);
         }
+        // gh#900: and to the run's heartbeat, whose step is one cooling
+        // iteration. A relaxed `fetch_max` on a shared atomic — no I/O on the
+        // iteration path, monotonic across the parallel chains, and it
+        // consumes no RNG, so it cannot touch a fit number.
+        heartbeat.bump(iter as u64);
         // Stream one row per iteration. `loglik` column is `NA` until
         // the post-hoc clean-PF re-eval; `if2_perturbed_loglik` is the
         // in-run value the callback already has. Flush every 10 rows
@@ -2085,6 +2093,7 @@ pub fn run_chains_with_per_chain_params(
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
     stage_dir: Option<&str>,
+    heartbeat: &io::HeartbeatGuard,
 ) -> Result<ChainResults, String> {
     eprintln!("running {} chains × {} particles × {} iterations, cooling={}, dt={}",
         config.n_chains, config.if2_config.n_particles, config.if2_config.n_iterations,
@@ -2108,7 +2117,9 @@ pub fn run_chains_with_per_chain_params(
         .into_par_iter()
         .filter_map(|chain_id| {
             let per_chain = per_chain_params.map(|pcp| &pcp[chain_id][..]);
-            match run_one_chain(chain_id, config, per_chain, Some(&bars[chain_id]), stage_dir) {
+            match run_one_chain(
+                chain_id, config, per_chain, Some(&bars[chain_id]), stage_dir, heartbeat,
+            ) {
                 Ok(result) => Some((chain_id, result)),
                 // gh#110 (IF2 follow-up): a chain whose IF2 search wandered
                 // into the PF-degenerate region is skipped with a BadInit
@@ -2166,10 +2177,10 @@ pub fn run_chains_with_per_chain_params(
                 // Any non-degeneracy error is structural (config bug,
                 // unknown compartment, …) — every chain would hit it, so
                 // there is no survivor to fall back to. Fail loudly.
-                Err(other) => {
-                    eprintln!("chain {} error: {:?}", chain_id + 1, other);
-                    std::process::exit(1);
-                }
+                Err(other) => super::abandon_stage(
+                    heartbeat,
+                    format!("chain {} error: {:?}", chain_id + 1, other),
+                ),
             }
         })
         .collect();
@@ -2190,13 +2201,15 @@ pub fn run_chains_with_per_chain_params(
         // though the bounds were the lever; they are, but only in the
         // direction the shared sentence names, and the cause is the start the
         // filter cannot score.
-        eprintln!(
-            "error: all {} IF2 chain(s) bailed via the PF degeneracy watchdog — no usable \
-             chain. This is sustained ESS collapse: the swarm lost support and did not \
-             recover (see the per-chain errors above). {}",
-            config.n_chains,
-            crate::fit::chain_starts::UNSCOREABLE_START_ADVICE);
-        std::process::exit(1);
+        super::abandon_stage(
+            heartbeat,
+            format!(
+                "error: all {} IF2 chain(s) bailed via the PF degeneracy watchdog — no usable \
+                 chain. This is sustained ESS collapse: the swarm lost support and did not \
+                 recover (see the per-chain errors above). {}",
+                config.n_chains,
+                crate::fit::chain_starts::UNSCOREABLE_START_ADVICE),
+        );
     }
 
     // Evaluate true (unperturbed) loglik at selected iterations for ALL chains.
