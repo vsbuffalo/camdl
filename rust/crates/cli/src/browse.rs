@@ -1606,7 +1606,7 @@ fn print_fits_json(fits: &[FitEntry]) {
             .iter()
             .map(|s| {
                 serde_json::json!({
-                    "stage": s.stage,
+                    "method": s.method.as_str(),
                     "method": s.method.as_str(),
                     "backend": s.backend.as_str(),
                     "seed": s.seed,

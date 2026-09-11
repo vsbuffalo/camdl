@@ -1624,13 +1624,12 @@ mod tests {
             "engine_version": "0.1.0+test",
             "levels": [
                 {"name": "fit",   "label": "fit",   "hash": "f00d".repeat(16), "schema_version": 1},
-                {"name": "stage", "label": "01-scout", "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
+                {"name": "method", "label": "if2", "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
                 {"name": "seed",  "label": "seed_1", "hash": "06cbd6b300000000000000000000000000000000000000000000000000000000", "schema_version": 1}
             ],
             "status": "completed",
             "artifacts": {},
             "inputs": {
-                "stage": "scout",
                 "method": method.as_str(),
                 "backend": "chain_binomial",
                 "seed": 1,
@@ -1973,13 +1972,12 @@ mod tests {
             "engine_version": "0.1.0+test",
             "levels": [
                 {"name": "fit",   "label": "fit",   "hash": "f00d".repeat(16), "schema_version": 1},
-                {"name": "stage", "label": "01-posterior", "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
+                {"name": "method", "label": "nuts", "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
                 {"name": "seed",  "label": "seed_1", "hash": "06cbd6b300000000000000000000000000000000000000000000000000000000", "schema_version": 1}
             ],
             "status": "completed",
             "artifacts": {},
             "inputs": {
-                "stage": "posterior",
                 "method": "nuts",
                 "backend": "ode",
                 "seed": 1,

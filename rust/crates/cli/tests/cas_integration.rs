@@ -470,7 +470,7 @@ fn starts_from_resolves_short_hash() {
             {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
         ],
         "status":"completed","artifacts":{{}},
-        "inputs":{{"stage":"if2","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
+        "inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
         "provenance":{{"created_at":"2026-04-19T12:00:00Z","argv":[]}}
     }}"#, target_hash);
     std::fs::write(stage.join("run.json"), run_json).unwrap();
@@ -956,7 +956,7 @@ fn write_cas_fit_stage(output: &Path, run_id: &str, fit_label: &str) -> PathBuf 
         ],
         "status": "completed",
         "artifacts": {{}},
-        "inputs": {{"stage":"if2","method":"if2","backend":"chain_binomial","seed":42,"n_chains":4,"best_loglik":-123.45,"best_chain":1}},
+        "inputs": {{"method":"if2","backend":"chain_binomial","seed":42,"n_chains":4,"best_loglik":-123.45,"best_chain":1}},
         "provenance": {{"created_at":"2026-04-30T12:00:00Z","argv":["camdl","fit","run"]}}
     }}"#);
     std::fs::write(leaf.join("run.json"), rec).unwrap();
@@ -996,7 +996,7 @@ fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, stages: &[&str], mode
             ],
             "status": "completed",
             "artifacts": {{}},
-            "inputs": {{"stage":"{stage}","method":"{stage}","backend":"chain_binomial","seed":1,"n_chains":2}},
+            "inputs": {{"method":"{stage}","backend":"chain_binomial","seed":1,"n_chains":2}},
             "provenance": {{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}
         }}"#);
         std::fs::write(leaf.join("run.json"), rec).unwrap();

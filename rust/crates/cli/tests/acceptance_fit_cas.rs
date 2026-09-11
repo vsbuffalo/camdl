@@ -241,6 +241,48 @@ fn chained_method_reuse_only_rekeys_the_downstream() {
     }
 }
 
+/// gh#901: a method leaf's `run.json` names its algorithm once, under
+/// `method`.
+///
+/// It used to carry the same string twice — `inputs.stage` beside
+/// `inputs.method`, both set from `Algorithm::method_name()` — so the leaf
+/// published one fact under two vocabularies and a consumer could key on
+/// either. Two-sided: `method` is the algorithm the fit declared, and `stage`
+/// is gone from `inputs` rather than kept beside it.
+///
+/// The `kind` string stays `fit_stage`: it is read back from every store on
+/// disk, and renaming it would orphan them for a word that no consumer
+/// interprets as a workflow stage.
+#[test]
+fn a_method_leaf_names_its_algorithm_once() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let data = write_data(tmp.path());
+    let scout = write_scout_toml(tmp.path(), &out, &data);
+    let r = run_fit(&bin, &scout, 1);
+    assert!(r.status.success(), "scout run failed: {}", String::from_utf8_lossy(&r.stderr));
+
+    let (leaf, _) = only_leaf(&out);
+    let text = std::fs::read_to_string(leaf.join("run.json")).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let inputs = rec["inputs"].as_object().expect("run.json carries an inputs object");
+    assert_eq!(inputs.get("method").and_then(|v| v.as_str()), Some("if2"),
+        "inputs must name the algorithm under `method`:\n{text}");
+    assert!(inputs.get("stage").is_none(),
+        "and must not also carry it under `stage` (gh#901):\n{text}");
+
+    // The middle store level is `method` too — same word, same leaf.
+    let levels = rec["levels"].as_array().expect("run.json carries levels");
+    let names: Vec<&str> = levels.iter().filter_map(|l| l["name"].as_str()).collect();
+    assert_eq!(names, vec!["fit", "method", "seed"], "level names:\n{text}");
+
+    // Deliberately kept: the artifact-kind string.
+    assert_eq!(rec["kind"].as_str(), Some("fit_stage"),
+        "the kind string is read back from every existing store and is not \
+         renamed by gh#901:\n{text}");
+}
+
 /// Property 2: the same fit at 1 vs 8 rayon threads yields bit-identical θ̂
 /// (CAS fits run watchdog-None; the engine is parallel-invariant).
 #[test]

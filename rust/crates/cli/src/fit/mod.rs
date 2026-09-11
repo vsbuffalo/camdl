@@ -1685,10 +1685,10 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
         };
-        // `stage` keeps its key for the readers that project a leaf
-        // (`FitStageView`); its value is the method's name, the leaf's label.
+        // gh#901: no `stage` key. It held exactly `algo_tag` — the method's
+        // own name — so the leaf carried the same string twice under two
+        // vocabularies, and `FitStageView` now reads the label off `method`.
         let inputs_json = serde_json::json!({
-            "stage": stage_name,
             "method": algo_tag,
             "backend": backend_tag,
             "seed": seed,

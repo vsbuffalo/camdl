@@ -417,7 +417,7 @@ fn best_node_for_stage<'a>(stage_name: &str, nodes: &'a [StageNode]) -> Option<&
     use crate::fit::fit_tree::DataKind;
     let mut best: Option<(&'a StageNode, (u8, u64))> = None;
     for node in nodes {
-        if node.stage.stage != stage_name {
+        if node.stage.method.as_str() != stage_name {
             continue;
         }
         let rank: (u8, u64) = match &node.stage.axes {
@@ -442,7 +442,7 @@ fn best_node_for_stage<'a>(stage_name: &str, nodes: &'a [StageNode]) -> Option<&
 /// the order the fit view lists them.
 fn completed_method_names(view: &FitView, nodes: &[StageNode]) -> Vec<String> {
     let completed: std::collections::HashSet<&str> =
-        nodes.iter().map(|n| n.stage.stage.as_str()).collect();
+        nodes.iter().map(|n| n.stage.method.as_str()).collect();
     view.stages_declared
         .iter()
         .filter(|s| completed.contains(s.as_str()))

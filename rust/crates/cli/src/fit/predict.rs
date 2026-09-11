@@ -763,7 +763,7 @@ impl FitResult {
                     if let Some(s) = view.stages.last() {
                         return Ok(FitResult::PointEstimate {
                             method: Some(s.method),
-                            stage: s.stage.clone(),
+                            stage: s.method.as_str().to_string(),
                         });
                     }
                 }

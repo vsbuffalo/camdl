@@ -456,7 +456,8 @@ fn discover_stages(fit_dir: &Path) -> Vec<ResolvedStage> {
     type Rank = (u8, u64, PathBuf);
     let mut best: BTreeMap<String, (String, Rank, PathBuf)> = BTreeMap::new();
     for node in &nodes {
-        let (stage, method) = (node.stage.stage.clone(), node.stage.method.as_str().to_string());
+        let method = node.stage.method.as_str().to_string();
+        let stage = method.clone();
         let rank: Rank = match &node.stage.axes {
             Some(axes) => {
                 let kind_rank = match axes.data_kind {
@@ -5257,8 +5258,8 @@ mod tests {
     /// Write a `FitStage` `runid::RunRecord` leaf for `stage` under `stage_dir`.
     /// `parent_hash` seeds the shared `fit`-level hash; the `inputs` carry the
     /// per-leaf numbers (`method`, `n_chains`, `best_loglik`, …) the views
-    /// project. The `method` LEVEL label is the leaf's name; `inputs.stage`
-    /// carries the same name for the consumers that read it.
+    /// project. The `method` LEVEL label is the leaf's name, and it is the
+    /// same string as `inputs.method`.
     fn write_stage_run(stage_dir: &std::path::Path, parent_hash: &str, stage: &str, method: crate::run_meta::FitAlgorithm) {
         std::fs::create_dir_all(stage_dir).unwrap();
         let stage_label = stage.to_string();
@@ -5289,7 +5290,6 @@ mod tests {
             "status": "completed",
             "artifacts": {},
             "inputs": {
-                "stage": stage,
                 "method": method.as_str(),
                 "backend": "chain_binomial",
                 "seed": 1,
@@ -5315,7 +5315,7 @@ mod tests {
     fn json_format_round_trips_and_carries_schema_version() {
         let state = synthetic_fit_state();
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
-        let dir = make_fit_dir("scout", &state, &params);
+        let dir = make_fit_dir("if2", &state, &params);
 
         let stages = discover_stages(&dir);
         let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
@@ -5326,7 +5326,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["schema"]["version"], 2);
         assert_eq!(parsed["fit_dir"], dir.to_string_lossy().as_ref());
-        assert_eq!(parsed["methods"][0]["name"], "scout");
+        assert_eq!(parsed["methods"][0]["name"], "if2");
         assert!(parsed.get("stages").is_none(),
             "the old `stages` key must be gone, not kept beside `methods`: {json}");
         assert!((parsed["methods"][0]["best_loglik"].as_f64().unwrap() - (-3804.9)).abs() < 1e-6);
@@ -5345,13 +5345,13 @@ mod tests {
     fn markdown_format_renders_gate_table_and_params() {
         let state = synthetic_fit_state();
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
-        let dir = make_fit_dir("scout", &state, &params);
+        let dir = make_fit_dir("if2", &state, &params);
 
         let stages = discover_stages(&dir);
         let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
-        assert!(md.contains("## `scout`"));
+        assert!(md.contains("## `if2`"));
         assert!(md.contains("### Compound scout-convergence gate"));
         assert!(md.contains("| Â (max over params"));
         assert!(md.contains("### Parameter estimates"));
@@ -5366,7 +5366,7 @@ mod tests {
     fn latex_format_renders_tabular_blocks() {
         let state = synthetic_fit_state();
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
-        let dir = make_fit_dir("scout", &state, &params);
+        let dir = make_fit_dir("if2", &state, &params);
 
         let stages = discover_stages(&dir);
         let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
@@ -5390,7 +5390,7 @@ mod tests {
     fn params_only_emits_loadable_toml() {
         let state = synthetic_fit_state();
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
-        let dir = make_fit_dir("scout", &state, &params);
+        let dir = make_fit_dir("if2", &state, &params);
 
         let stages = discover_stages(&dir);
         let s = dump_params_only(&dir.to_string_lossy(), &stages).unwrap();

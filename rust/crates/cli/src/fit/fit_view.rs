@@ -31,9 +31,9 @@ pub struct FitStageView {
     /// Stage directory holding this leaf's `run.json` (the consumer loads the
     /// typed θ̂ / diagnostics from sibling `fit_state.toml` etc. itself).
     pub stage_dir: PathBuf,
-    /// Bare stage name (`scout`, `refine`, `pgas`), from the `inputs.stage`.
-    pub stage: String,
-    /// Inference algorithm tag.
+    /// Inference algorithm tag. Its `as_str()` is also the leaf's label —
+    /// the `method` store level's directory name — so there is no separate
+    /// name field to drift from it (gh#901).
     pub method: FitAlgorithm,
     /// Simulation backend the stage ran on. Defaults to `ChainBinomial` when
     /// absent.
@@ -121,11 +121,6 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Option<Fit
         .unwrap_or(InferenceBackend::ChainBinomial);
     Some(FitStageView {
         stage_dir: dir.to_path_buf(),
-        stage: inputs
-            .get("stage")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
         method,
         backend,
         seed: inputs.get("seed").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -263,17 +258,17 @@ mod tests {
     fn write_two_stage_fit(seg: &Path, fit_h8: &str) {
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
         let stages = [
-            // (ordinal, method label, inputs.stage, method, best_loglik, best_chain, created_at)
-            (1_u8, "if2", "if2", "if2", -120.5_f64, 2_u64, "2026-04-27T00:00:01Z"),
-            (2_u8, "pgas", "pgas", "pgas", -56.7_f64, 1_u64, "2026-04-27T00:00:02Z"),
+            // (ordinal, method label, method, best_loglik, best_chain, created_at)
+            (1_u8, "if2", "if2", -120.5_f64, 2_u64, "2026-04-27T00:00:01Z"),
+            (2_u8, "pgas", "pgas", -56.7_f64, 1_u64, "2026-04-27T00:00:02Z"),
         ];
-        for (ord, label, stage, method, best_ll, best_chain, created_at) in stages {
+        for (ord, label, method, best_ll, best_chain, created_at) in stages {
             let leaf = seg.join(format!("{label}-1fb03eee")).join("seed_1-06cbd6b3");
             std::fs::create_dir_all(&leaf).unwrap();
             // run_id must be valid 64-char hex (ContentHash rejects non-hex).
             let run_id = format!("{:0<64}", format!("{fit_h8}0{ord}"));
             let rec = format!(
-                r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{stage}","method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
+                r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
             );
             std::fs::write(leaf.join("run.json"), rec).unwrap();
         }
@@ -336,14 +331,14 @@ mod tests {
 
         // Per-leaf fold, leaf-for-leaf.
         assert_eq!(view.stages.len(), 2, "two method leaves");
-        let scout = view.stages.iter().find(|s| s.stage == "if2").unwrap();
+        let scout = view.stages.iter().find(|s| s.method == FitAlgorithm::If2).unwrap();
         assert_eq!(scout.method, FitAlgorithm::If2, "if2 method");
         assert_eq!(scout.backend, InferenceBackend::ChainBinomial, "if2 backend");
         assert_eq!(scout.seed, 1, "if2 seed");
         assert_eq!(scout.n_chains, 4, "if2 n_chains");
         assert_eq!(scout.best_loglik, Some(-120.5), "if2 best_loglik");
         assert_eq!(scout.best_chain, Some(2), "if2 best_chain");
-        let refine = view.stages.iter().find(|s| s.stage == "pgas").unwrap();
+        let refine = view.stages.iter().find(|s| s.method == FitAlgorithm::Pgas).unwrap();
         assert_eq!(refine.method, FitAlgorithm::Pgas, "pgas method");
         assert_eq!(refine.best_loglik, Some(-56.7), "pgas best_loglik");
         assert_eq!(refine.best_chain, Some(1), "pgas best_chain");

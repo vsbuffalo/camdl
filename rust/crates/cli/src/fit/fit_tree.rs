@@ -258,7 +258,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let run_id = format!("{:0<64}", format!("ae{ord:06x}"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"{stage}","method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":0}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"deadbeef00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"method","label":"{stage}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_{seed}","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":{seed},"n_chains":2,"best_loglik":-100.0,"best_chain":0}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(dir.join("run.json"), rec).unwrap();
     }
@@ -273,7 +273,7 @@ mod tests {
         let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
         let run_id = format!("{:0<64}", format!("{fit_h8}01"));
         let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"stage":"mle","method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
         );
         std::fs::write(leaf.join("run.json"), rec).unwrap();
         std::fs::write(
@@ -288,8 +288,8 @@ mod tests {
         let tmp = tempdir("real_only");
         let fit_dir = tmp.path().join("fit_he-deadbeef");
         write_sidecar(&fit_dir);
-        place_stage(&fit_dir, "real/fit_1/scout", 1, "scout", "if2", 1);
-        place_stage(&fit_dir, "real/fit_1/refine", 2, "refine", "if2", 1);
+        place_stage(&fit_dir, "real/fit_1/if2", 1, "if2", "if2", 1);
+        place_stage(&fit_dir, "real/fit_1/pgas", 2, "pgas", "pgas", 1);
 
         let nodes = walk_fit_dir(&fit_dir).unwrap();
         assert_eq!(nodes.len(), 2);
@@ -300,9 +300,9 @@ mod tests {
             assert_eq!(axes.fit_seed, 1);
             assert_eq!(axes.sweep_slug, None);
         }
-        let stage_names: Vec<&str> = nodes.iter().map(|n| n.stage.stage.as_str()).collect();
-        assert!(stage_names.contains(&"scout"));
-        assert!(stage_names.contains(&"refine"));
+        let method_names: Vec<&str> = nodes.iter().map(|n| n.stage.method.as_str()).collect();
+        assert!(method_names.contains(&"if2"));
+        assert!(method_names.contains(&"pgas"));
     }
 
     #[test]

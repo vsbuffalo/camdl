@@ -1217,7 +1217,7 @@ mod tests {
         // sidecar to carry resolved_priors.
         std::fs::write(
             leaf.join("run.json"),
-            r#"{"format_version":1,"kind":"fit_stage","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"stage":"pgas","method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
+            r#"{"format_version":1,"kind":"fit_stage","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
         )
         .unwrap();
 
