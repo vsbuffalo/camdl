@@ -5,7 +5,7 @@
 //! leaf, rendered a summary with no stage in it, and returned success. A
 //! script that asks "summarise this fit" and checks the status code was told
 //! the fit had been summarised. `--format json` was worse: the load error was
-//! swallowed entirely (`.ok()`), so the reader got `"stages": []` with nothing
+//! swallowed entirely (`.ok()`), so the reader got `"methods": []` with nothing
 //! on stderr saying why.
 //!
 //! End to end because the defect is the process exit code and the emitted
@@ -226,9 +226,9 @@ fn the_json_document_carries_the_failure_it_exits_on() {
     let doc: serde_json::Value =
         serde_json::from_str(&stdout).expect("the document must still be valid JSON");
     assert_eq!(
-        doc["stages"].as_array().map(Vec::len),
+        doc["methods"].as_array().map(Vec::len),
         Some(0),
-        "premise: the unreadable leaf contributes no stage"
+        "premise: the unreadable leaf contributes no method"
     );
     let failures = doc["failures"].as_array().expect("the document must carry a `failures` list");
     assert_eq!(failures.len(), 1, "one leaf failed, so one entry: {failures:?}");
