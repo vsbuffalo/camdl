@@ -149,9 +149,15 @@ fn chain_selection_advisory(
 
 /// Top-level entry point. Resolves `args.fit` (the fit handle) to its segment
 /// directory, walks every completed fit-stage run, and dispatches to the right
-/// formatter based on `--format` and `--params-only`. Exits with code 1 if the
-/// handle does not resolve or the segment is empty; with code 1 in `--strict`
-/// mode if any IF2 stage's provenance cross-check fails.
+/// formatter based on `--format` and `--params-only`.
+///
+/// Exits with code 1 when the handle does not resolve; when `--strict` is set
+/// and any IF2 stage's provenance cross-check fails; and when every method
+/// leaf the walker found failed to load, so the rendered summary has nothing
+/// behind it (gh#905, [`exit_if_nothing_loaded`]).
+///
+/// A segment with no completed leaf at all is not an error: it reports
+/// "(no completed stages found)" and exits 0.
 pub fn cmd_fit_summary(args: &FitSummaryArgs) {
     // Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) → its
     // segment directory. summary operates on the directory; it needs no config.
@@ -219,12 +225,16 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
         None => None,
     };
 
-    match args.format {
+    let failures = match args.format {
         FitSummaryFormat::Text => format_text(&dir, args, &selected, strict, selection.as_ref()),
         FitSummaryFormat::Json => format_json(&dir, &selected, strict, selection.as_ref()),
         FitSummaryFormat::Md => format_md(&dir, &selected, strict, selection.as_ref()),
         FitSummaryFormat::Latex => format_latex(&dir, &selected, strict, selection.as_ref()),
-    }
+    };
+
+    // One exit decision for all four formats: an unreadable leaf is reported
+    // the same way whatever was being rendered (gh#905).
+    exit_if_nothing_loaded(&dir, &discovered, &failures);
 }
 
 /// Calendar context for date-rendering `instant`-kind estimands
@@ -360,6 +370,62 @@ struct ResolvedStage {
     stage_dir: PathBuf,
 }
 
+/// A method leaf the walker found but whose stored result could not be read
+/// back — a truncated `<method>_summary.json`, an unparseable `fit_state.toml`,
+/// a file removed under the store.
+///
+/// Carried out of every formatter so the exit code is decided in one place
+/// (gh#905), and serialized into `--format json` so a reader parsing the
+/// document finds the cause of an empty `stages` array inside the document
+/// rather than on a stderr stream it may not have captured.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadFailure {
+    /// The method-leaf directory, spelled as the stderr warning spells it.
+    pub leaf: String,
+    /// The loader's own message: which file, and what was wrong with it.
+    pub reason: String,
+}
+
+/// Whether the unreadable leaves leave the summary with nothing to stand on.
+///
+/// `fit summary` used to warn about a leaf it could not read, skip it, render
+/// a summary with no stage in it, and exit 0 — so "this fit has nothing to
+/// say" and "this fit could not be read" were the same status code, and a
+/// caller that checked it carried on (gh#905).
+///
+/// True when every leaf that was found failed. The single-leaf case gh#905
+/// reports falls under the same rule: when the handle named one leaf, that
+/// leaf failing IS every leaf failing. False when at least one leaf loaded —
+/// the summary is a complete answer for those leaves, the per-leaf warning
+/// names the ones it is missing, and the caller did get an answer.
+fn nothing_loaded(discovered: &[ResolvedStage], failures: &[LoadFailure]) -> bool {
+    !discovered.is_empty() && failures.len() >= discovered.len()
+}
+
+/// Report the leaves that could not be read, and exit non-zero when they leave
+/// no summary behind. Returns normally when at least one leaf loaded.
+fn exit_if_nothing_loaded(dir: &str, discovered: &[ResolvedStage], failures: &[LoadFailure]) {
+    if !nothing_loaded(discovered, failures) {
+        return;
+    }
+    // The rendered document is already on stdout; flush it before the process
+    // ends so a reader piping stdout still gets what was produced.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    eprintln!();
+    eprintln!(
+        "error: no method leaf under {} could be read back, so there is nothing to \
+         summarise ({} found, {} unreadable):",
+        dir,
+        discovered.len(),
+        failures.len()
+    );
+    for f in failures {
+        eprintln!("  {}: {}", f.leaf, f.reason);
+    }
+    std::process::exit(1);
+}
+
 /// Walk the fit_dir and return one `ResolvedStage` per completed method
 /// leaf. Order matches `FitView.stages_declared` (label order); leaves that
 /// didn't complete are dropped; leaves that completed but aren't in
@@ -436,7 +502,8 @@ fn format_text(
     stages: &[ResolvedStage],
     strict: bool,
     selection: Option<&ChainSelection>,
-) {
+) -> Vec<LoadFailure> {
+    let mut failures: Vec<LoadFailure> = Vec::new();
     let use_color = should_use_color(args.no_color);
     let cal = load_calendar_context(Path::new(dir));
     let fmt = Formatter { use_color, cal, explain: args.explain };
@@ -485,6 +552,10 @@ fn format_text(
                     "warning: cannot load {} ({}): {}",
                     stage_dir_str, resolved.method, e
                 );
+                failures.push(LoadFailure {
+                    leaf: stage_dir_str.clone(),
+                    reason: e.to_string(),
+                });
                 continue;
             }
         };
@@ -535,6 +606,10 @@ fn format_text(
                             "warning: cannot load {}/fit_state.toml: {}",
                             stage_dir_str, e
                         );
+                        failures.push(LoadFailure {
+                            leaf: stage_dir_str.clone(),
+                            reason: format!("fit_state.toml: {e}"),
+                        });
                         continue;
                     }
                 };
@@ -637,6 +712,8 @@ fn format_text(
         eprintln!("error: provenance cross-checks failed (--strict).");
         std::process::exit(1);
     }
+
+    failures
 }
 
 /// gh#322: the keyed-joint (θ, X) forkable count for one stage — how many of
@@ -660,7 +737,7 @@ fn forkability(
         .ok()
 }
 
-fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) {
+fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
     let doc = build_summary_doc(dir, stages, selection);
     let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
     let s = serde_json::to_string_pretty(&doc).expect("FitSummaryDoc must serialize");
@@ -669,9 +746,10 @@ fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Opt
         eprintln!("error: provenance cross-checks failed (--strict).");
         std::process::exit(1);
     }
+    doc.failures
 }
 
-fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) {
+fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
     let doc = build_summary_doc(dir, stages, selection);
     let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
     print!("{}", render_markdown(&doc));
@@ -679,9 +757,10 @@ fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Optio
         eprintln!("error: provenance cross-checks failed (--strict).");
         std::process::exit(1);
     }
+    doc.failures
 }
 
-fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) {
+fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
     let doc = build_summary_doc(dir, stages, selection);
     let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
     print!("{}", render_latex(&doc));
@@ -689,6 +768,7 @@ fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Op
         eprintln!("error: provenance cross-checks failed (--strict).");
         std::process::exit(1);
     }
+    doc.failures
 }
 
 enum BayesianView<'a> {
@@ -2478,6 +2558,11 @@ pub struct FitSummaryDoc {
     /// `fit table`'s row output, enforced by Deliverable C.
     pub table_row: TableRow,
     pub stages: Vec<StageReport>,
+    /// Method leaves the walker found but could not read back (gh#905). Always
+    /// present, empty when every leaf loaded — so a consumer that sees an empty
+    /// `stages` array can tell "this fit has no completed method" from "this
+    /// fit could not be read", without parsing stderr.
+    pub failures: Vec<LoadFailure>,
     /// Read-side chain selection (`--exclude-chains`), when active: the
     /// `{excluded, kept, n_total}` provenance for the subset the stages'
     /// diagnostics were recomputed over. Absent (omitted) for a full-cloud
@@ -2640,10 +2725,25 @@ fn build_summary_doc(
     let mut prev_stage_name_owned: Option<String> = None;
     // The chain-selection provenance (stamped on the doc) + one-shot advisory.
     let mut chain_selection_json: Option<serde_json::Value> = None;
+    let mut failures: Vec<LoadFailure> = Vec::new();
     let mut advised = false;
     for resolved in stages {
         let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
-        let mut typed = MethodResult::load_from(&resolved.stage_dir, &resolved.method).ok();
+        let typed_loaded = MethodResult::load_from(&resolved.stage_dir, &resolved.method);
+        // Same warning the text formatter prints. `.ok()` alone left a machine
+        // reader with an empty `stages` array and nothing at all saying why
+        // (gh#905).
+        if let Err(e) = &typed_loaded {
+            eprintln!(
+                "warning: cannot load {} ({}): {}",
+                stage_dir_str, resolved.method, e
+            );
+            failures.push(LoadFailure {
+                leaf: stage_dir_str.clone(),
+                reason: e.to_string(),
+            });
+        }
+        let mut typed = typed_loaded.ok();
         // Chain selection: recompute this Bayesian stage's diagnostics over the
         // retained chains before the report is built from the (now mutated)
         // typed payload — so JSON / MD / LaTeX all carry the subset diagnostics.
@@ -2677,7 +2777,17 @@ fn build_summary_doc(
             (Some(MethodResult::If2(_)), _) => {
                 let state = match FitState::load(&stage_dir_str) {
                     Ok(s) => s,
-                    Err(_) => continue,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: cannot load {}/fit_state.toml: {}",
+                            stage_dir_str, e
+                        );
+                        failures.push(LoadFailure {
+                            leaf: stage_dir_str.clone(),
+                            reason: format!("fit_state.toml: {e}"),
+                        });
+                        continue;
+                    }
                 };
                 let r = if2_stage_report(
                     &resolved.stage,
@@ -2730,6 +2840,7 @@ fn build_summary_doc(
         fit_dir: dir.to_string(),
         table_row,
         stages: stage_reports,
+        failures,
         chain_selection: chain_selection_json,
     }
 }
@@ -5672,5 +5783,55 @@ mod tests {
         let tex = render_latex_stage(&pmmh);
         assert!(tex.contains("Best log-likelihood") && tex.contains("(marginal)"),
             "latex PMMH headline carries (marginal): {tex}");
+    }
+
+    // ─── Unreadable method leaves (gh#905) ────────────────────────────
+
+    fn leaf(name: &str) -> ResolvedStage {
+        ResolvedStage {
+            stage: name.to_string(),
+            method: "pgas".to_string(),
+            stage_dir: PathBuf::from(format!("/nonexistent/{name}")),
+        }
+    }
+
+    fn failed(name: &str) -> LoadFailure {
+        LoadFailure {
+            leaf: format!("/nonexistent/{name}"),
+            reason: "pgas_summary.json: parse error".to_string(),
+        }
+    }
+
+    /// gh#905. The exit rule, at the boundary that matters: a summary with no
+    /// leaf behind it is a failure, a summary missing one of several leaves is
+    /// not.
+    ///
+    /// The mixed case is pinned here rather than end to end because a single
+    /// `fit run` produces one method leaf per segment, so a segment holding a
+    /// readable leaf beside an unreadable one is not something the e2e fixture
+    /// can build. Exiting non-zero there would be the worse regression of the
+    /// two: it would fail a summary that answered the question for every leaf
+    /// it could read.
+    #[test]
+    fn only_a_summary_with_no_leaf_behind_it_is_a_failure() {
+        let one = [leaf("a")];
+        let three = [leaf("a"), leaf("b"), leaf("c")];
+
+        assert!(nothing_loaded(&one, &[failed("a")]),
+            "the one leaf the handle named failed — there is no summary");
+        assert!(nothing_loaded(&three, &[failed("a"), failed("b"), failed("c")]),
+            "every leaf failed — there is no summary");
+
+        assert!(!nothing_loaded(&three, &[failed("b")]),
+            "two of three leaves rendered; the warning names the third");
+        assert!(!nothing_loaded(&three, &[failed("a"), failed("c")]),
+            "one leaf rendered, so the summary still answers the question");
+        assert!(!nothing_loaded(&one, &[]),
+            "nothing failed");
+
+        // A segment with no completed leaf at all is a different report — it
+        // prints "(no completed stages found)" and is not a load failure.
+        assert!(!nothing_loaded(&[], &[]),
+            "an empty segment is not an unreadable one");
     }
 }

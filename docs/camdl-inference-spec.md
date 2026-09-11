@@ -1020,7 +1020,8 @@ Top-level shape:
         "interpretation": "chains disagree on basin (Â and decibans-spread both fail)"
       }
     }
-  ]
+  ],
+  "failures": []
 }
 ```
 
@@ -1038,6 +1039,27 @@ Schema-stability rules:
   `"default_fallback"` for legacy fit_state files written before Phase 3 — in
   which case the rendered thresholds come from `GateConfig::default()` and may
   differ from what the run was actually judged against.
+- **`failures` is always present**, one entry per method leaf the walker found
+  and could not read back. Each entry carries `leaf` (the method-leaf directory)
+  and `reason` (which file, and what was wrong with it), and is also warned
+  about on stderr. It is how a consumer tells an empty `stages` array that means
+  "this fit completed no method" from one that means "this fit could not be
+  read".
+
+#### 7.2.2.1 Exit code on an unreadable leaf
+
+A leaf that cannot be read back — a truncated `<method>_summary.json`, an
+unparseable `fit_state.toml` — is warned about on stderr and dropped from the
+output, in every format.
+
+`camdl fit summary` then **exits non-zero when no leaf loaded at all**: with
+nothing behind it the rendered summary is empty, and an empty summary that exits
+0 is indistinguishable from a fit with nothing to say. When the handle named one
+leaf, that is the case a single unreadable leaf produces.
+
+A segment holding several leaves of which only some failed **exits 0**: the
+summary answers the question for every leaf it could read, and the warning (and
+the `failures` entry) names the ones it is missing.
 
 #### 7.2.3 `--params-only`
 
