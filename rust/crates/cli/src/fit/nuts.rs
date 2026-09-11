@@ -66,6 +66,10 @@ pub fn run_stage(
     force: bool,
     resume: bool,
     starts: &super::chain_starts::ResolvedStarts,
+    // The stage's liveness/progress heartbeat, owned by the runner
+    // (`fit::stage_heartbeat`). Its step is one warm-up or sampling iteration,
+    // counted end to end, so `warmup` is the phase boundary (gh#900).
+    heartbeat: &io::HeartbeatGuard,
 ) -> Result<(), String> {
     let stage_name = method.algorithm.method_name();
     if !force && !resume && stage_dir.join("fit_state.toml").exists() {
@@ -237,26 +241,38 @@ pub fn run_stage(
                 use sim::inference::ode_nuts::{NutsIter, NutsPhase};
                 // Borrows `writer` (not `move`): the callback streams rows through
                 // it, and it must remain live to flush after the run.
-                |it: &NutsIter| match it.phase {
-                    NutsPhase::Sampling => {
-                        let div = if it.divergent { "1" } else { "0" };
-                        let depth = it.tree_depth.to_string();
-                        writer.write_row(
-                            it.iter, it.loglik, it.log_posterior, &[div, &depth],
-                            &it.params_natural,
-                        );
-                        if it.iter.is_multiple_of(sample_every) || it.iter + 1 == it.total {
-                            log::info!(target: "nuts",
-                                "chain {} sampling {}/{} · depth={} · logpost={:.1}{}",
-                                chain_id + 1, it.iter + 1, it.total, it.tree_depth,
-                                it.log_posterior, if it.divergent { " · DIVERGENT" } else { "" });
+                |it: &NutsIter| {
+                    // gh#900: warm-up and sampling are one run to a watcher, so the
+                    // heartbeat counts them end to end — `warmup + it.iter` in the
+                    // sampling phase — and the `burn_in` boundary the runner set to
+                    // `warmup` is what turns the reported phase over. A relaxed
+                    // `fetch_max` on a shared atomic: no I/O on the iteration path,
+                    // monotonic across the parallel chains, no RNG consumed.
+                    heartbeat.bump(match it.phase {
+                        NutsPhase::Warmup => it.iter as u64,
+                        NutsPhase::Sampling => (opts.warmup + it.iter) as u64,
+                    });
+                    match it.phase {
+                        NutsPhase::Sampling => {
+                            let div = if it.divergent { "1" } else { "0" };
+                            let depth = it.tree_depth.to_string();
+                            writer.write_row(
+                                it.iter, it.loglik, it.log_posterior, &[div, &depth],
+                                &it.params_natural,
+                            );
+                            if it.iter.is_multiple_of(sample_every) || it.iter + 1 == it.total {
+                                log::info!(target: "nuts",
+                                    "chain {} sampling {}/{} · depth={} · logpost={:.1}{}",
+                                    chain_id + 1, it.iter + 1, it.total, it.tree_depth,
+                                    it.log_posterior, if it.divergent { " · DIVERGENT" } else { "" });
+                            }
                         }
-                    }
-                    NutsPhase::Warmup => {
-                        if it.iter.is_multiple_of(warmup_every) || it.iter + 1 == it.total {
-                            log::info!(target: "nuts",
-                                "chain {} warmup {}/{} · depth={} · step={:.4}",
-                                chain_id + 1, it.iter + 1, it.total, it.tree_depth, it.step_size);
+                        NutsPhase::Warmup => {
+                            if it.iter.is_multiple_of(warmup_every) || it.iter + 1 == it.total {
+                                log::info!(target: "nuts",
+                                    "chain {} warmup {}/{} · depth={} · step={:.4}",
+                                    chain_id + 1, it.iter + 1, it.total, it.tree_depth, it.step_size);
+                            }
                         }
                     }
                 }

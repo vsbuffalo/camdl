@@ -1527,6 +1527,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     seed, force,
                     a.resume.is_some(),
                     &resolved_starts,
+                    &heartbeat,
                 ).unwrap_or_else(|e| {
                     abandon_stage(&heartbeat, format!("error running nuts: {e}"))
                 });
