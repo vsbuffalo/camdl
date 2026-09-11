@@ -33,6 +33,11 @@
 //! inference from staleness**, never a self-claim. [`liveness`] folds the
 //! artifact + the clock into that judgement once ([`RunLiveness`]).
 //!
+//! That inference only works if a *caught* failure looks different from an
+//! uncaught death, which means every exit a stage can see must write a
+//! terminal state. [`HeartbeatGuard`] owns the heartbeat for the length of one
+//! stage and does exactly that, so `PresumedDead` keeps meaning what it says.
+//!
 //! The heartbeat is a **pure observer**: the step loop only stores into a shared
 //! atomic ([`Heartbeat::bump`]); a background thread does the file I/O. It reads
 //! nothing the inference writes and consumes no RNG — it cannot change a fit
@@ -322,7 +327,8 @@ impl Shared {
 /// timer thread writes `progress.json` every `interval`. [`finish`](Heartbeat::finish)
 /// writes the clean terminal state and joins. If dropped without `finish`
 /// (panic/early return), the thread stops and the last `Running` is left to go
-/// stale — a consumer then reads `PresumedDead`.
+/// stale — a consumer then reads `PresumedDead`. A run hands ownership to a
+/// [`HeartbeatGuard`] so that path writes a terminal state instead.
 pub struct Heartbeat {
     shared: Arc<Shared>,
     handle: Option<JoinHandle<()>>,
@@ -448,8 +454,115 @@ impl Drop for Heartbeat {
     fn drop(&mut self) {
         // finish() already joined; this only fires on an un-finished drop
         // (panic/early return). Stop the thread and leave the last Running on
-        // disk — the consumer infers PresumedDead from its staleness.
+        // disk — the consumer infers PresumedDead from its staleness. Own the
+        // heartbeat through a [`HeartbeatGuard`] to get a terminal record on
+        // that path instead.
         self.stop_thread();
+    }
+}
+
+// ── The terminal-state guard ─────────────────────────────────────────────────
+
+/// What a run records when its stage stopped and nothing said why — a panic,
+/// or a return that did not route through the runner's failure path.
+///
+/// Deliberately not a diagnosis. All the guard knows is that the stage body
+/// exited without reporting, and the honest form of that is a terminal
+/// [`RunState::Failed`] carrying this sentence — not a `Running` counter left
+/// on disk to go stale, which a consumer reads as
+/// [`RunLiveness::PresumedDead`], the judgement reserved for a process that
+/// vanished.
+pub const UNREPORTED_FAILURE: &str =
+    "the fit stopped without reporting a reason; see the command's output";
+
+/// Owns a [`Heartbeat`] for one stage and makes the stage leave a terminal
+/// record however it exits.
+///
+/// The terminal write used to be a call at the end of one method's happy path,
+/// so every other exit — an early `?`, an aborted chain, a whole-fit backstop —
+/// left the last periodic `Running` on disk as the run's final word (gh#900).
+/// That is the SIGKILL signature, so a caught refusal camdl printed a sentence
+/// for looked exactly like a process that died. The guard moves the
+/// responsibility off the exit sites onto one owner: [`done`](Self::done) when
+/// the stage returns, [`failed`](Self::failed) with the error text when it does
+/// not, and a [`Drop`] that records [`UNREPORTED_FAILURE`] if neither happened.
+///
+/// The first terminal write wins, so a method that reported its own reason
+/// keeps it and `Drop` is only ever the backstop.
+///
+/// Two limits, stated because neither is obvious. `std::process::exit` runs no
+/// destructor, so a call site that exits the process directly has to report
+/// through [`failed`](Self::failed) itself — the `Drop` arm cannot see it. And
+/// a SIGKILLed run still writes nothing at all: deadness remains a consumer
+/// inference from staleness ([`liveness`]), never a self-claim.
+pub struct HeartbeatGuard {
+    /// The heartbeat, taken by whichever terminal write happens first, and
+    /// `None` from construction for an [`inert`](Self::inert) guard.
+    hb: std::sync::Mutex<Option<Heartbeat>>,
+}
+
+impl HeartbeatGuard {
+    /// Take ownership of a heartbeat for the length of one stage.
+    pub fn new(hb: Heartbeat) -> HeartbeatGuard {
+        HeartbeatGuard { hb: std::sync::Mutex::new(Some(hb)) }
+    }
+
+    /// A guard over no heartbeat: this method publishes no progress, so every
+    /// call below is a no-op and no `progress.json` is written at all. It
+    /// lets the runner hand *every* method a guard, so no call site branches
+    /// on whether this one has a counter it can honestly advance.
+    pub fn inert() -> HeartbeatGuard {
+        HeartbeatGuard { hb: std::sync::Mutex::new(None) }
+    }
+
+    /// A poisoned lock is recovered rather than propagated: this is a
+    /// diagnostic and must not be able to take a fit down.
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Heartbeat>> {
+        self.hb.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Report the furthest step reached — see [`Heartbeat::bump`].
+    pub fn bump(&self, step: u64) {
+        if let Some(hb) = self.slot().as_ref() {
+            hb.bump(step);
+        }
+    }
+
+    /// Report what one chain is doing — see [`Heartbeat::chain`].
+    pub fn chain(&self, chain: usize, state: ChainState) {
+        if let Some(hb) = self.slot().as_ref() {
+            hb.chain(chain, state);
+        }
+    }
+
+    /// Record a clean completion. A no-op once any terminal state is written.
+    pub fn done(&self) {
+        self.terminal(RunState::Done);
+    }
+
+    /// Record a caught failure, carrying the sentence the command reports, so
+    /// a reader holding only `progress.json` learns the same thing as one
+    /// reading stderr. A no-op once any terminal state is written.
+    pub fn failed(&self, reason: impl Into<String>) {
+        self.terminal(RunState::Failed { reason: reason.into() });
+    }
+
+    fn terminal(&self, state: RunState) {
+        // Take first, then finish: `finish` joins the timer thread, and
+        // holding the lock across that join would block a concurrent `bump`
+        // for no reason.
+        let hb = self.slot().take();
+        if let Some(hb) = hb {
+            hb.finish(state);
+        }
+    }
+}
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        // The backstop, and a no-op in the normal case where `done`/`failed`
+        // already ran.
+        self.terminal(RunState::Failed { reason: UNREPORTED_FAILURE.to_string() });
     }
 }
 
@@ -637,6 +750,100 @@ mod tests {
         let live = read_progress(dir.path()).unwrap().chains.unwrap();
         assert_eq!((live.total, live.not_started), (2, 2));
         assert!(live.chains.is_empty());
+    }
+
+    // ── gh#900: the guard always leaves a terminal record ────────────────
+
+    /// The claim the guard exists for. A stage body that returns without
+    /// reporting — an early `?`, a panic — used to leave the last periodic
+    /// `Running` on disk, which a consumer reads as `PresumedDead`: the
+    /// judgement reserved for a process that vanished. Dropping the guard
+    /// writes `failed` instead.
+    #[test]
+    fn a_guard_dropped_without_reporting_records_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let guard = HeartbeatGuard::new(Heartbeat::mcmc(
+                dir.path().to_path_buf(), 5, 30, Duration::from_millis(20), 0,
+            ));
+            guard.bump(7);
+            std::thread::sleep(Duration::from_millis(50));
+            // The periodic write a dropped heartbeat used to leave behind.
+            assert!(
+                matches!(read_progress(dir.path()).unwrap().state, RunState::Running { .. }),
+                "premise: the timer thread has written a `running` record"
+            );
+        }
+        assert_eq!(
+            read_progress(dir.path()).unwrap().state,
+            RunState::Failed { reason: UNREPORTED_FAILURE.to_string() },
+            "a guard that fell out of scope unreported must say so"
+        );
+        assert!(
+            !matches!(
+                liveness(&read_progress(dir.path()).unwrap(), u64::MAX / 2, 30),
+                RunLiveness::PresumedDead(_)
+            ),
+            "and the record must read as terminal however long it sits"
+        );
+    }
+
+    /// The first terminal write wins, so a method that reported its own
+    /// reason keeps it and `Drop` is only ever the backstop.
+    #[test]
+    fn the_first_terminal_state_wins_over_the_drop_backstop() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let guard = HeartbeatGuard::new(Heartbeat::mcmc(
+                dir.path().to_path_buf(), 1, 2, Duration::from_millis(20), 0,
+            ));
+            guard.failed("all 2 chain(s) were refused at their starting point");
+            guard.done(); // a later report cannot overwrite the first
+        }
+        assert_eq!(
+            read_progress(dir.path()).unwrap().state,
+            RunState::Failed {
+                reason: "all 2 chain(s) were refused at their starting point".to_string()
+            },
+        );
+    }
+
+    /// A clean stage still ends `done`, and the chain block survives the
+    /// guard's terminal write exactly as it survives `Heartbeat::finish`.
+    #[test]
+    fn a_guard_that_is_told_the_stage_finished_records_done() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let guard = HeartbeatGuard::new(Heartbeat::mcmc(
+                dir.path().to_path_buf(), 1, 4, Duration::from_millis(20), 2,
+            ));
+            guard.chain(0, ChainState::Completed);
+            guard.chain(1, ChainState::Refused { reason: RefusedReason::NonFiniteStart });
+            guard.bump(4);
+            guard.done();
+        }
+        let end = read_progress(dir.path()).unwrap();
+        assert_eq!(end.state, RunState::Done);
+        let live = end.chains.expect("the per-chain block survives the guard");
+        assert_eq!((live.completed, live.refused), (1, 1));
+    }
+
+    /// A method with no counter it can honestly advance gets an inert guard,
+    /// which writes no artifact at all — an absent `progress.json` says "this
+    /// method does not report progress", where a frozen `running` would lie.
+    #[test]
+    fn an_inert_guard_writes_no_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let guard = HeartbeatGuard::inert();
+            guard.bump(3);
+            guard.chain(0, ChainState::Running);
+            guard.done();
+        }
+        assert!(
+            !dir.path().join(PROGRESS_FILE).exists(),
+            "an inert guard must write nothing"
+        );
     }
 
     #[test]

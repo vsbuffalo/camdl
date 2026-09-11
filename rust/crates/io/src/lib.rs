@@ -16,7 +16,8 @@ pub mod trajectories;
 pub use calendar::CalendarMeta;
 pub use final_state::{read_final_states, write_final_states, FinalStates};
 pub use progress::{
-    Heartbeat, Phase, Progress, RunLiveness, RunState, liveness, read_progress, write_progress,
+    Heartbeat, HeartbeatGuard, Phase, Progress, RunLiveness, RunState, liveness, read_progress,
+    write_progress,
 };
 pub use trajectories::{
     Granularity, PosteriorDraw, TrajManifest, write_trajectories_tsv,
