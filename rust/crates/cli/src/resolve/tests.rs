@@ -750,3 +750,55 @@ fn gh442_did_not_re_key_sim_or_fit() {
         );
     }
 }
+
+
+/// gh#901: a profile-point leaf's levels are named
+/// `profile / point / method / seed / start` — `method`, not `stage`, the same
+/// word the fit store's middle level and the rest of the tool use.
+///
+/// The rename is identity-neutral, and the test says so in the only two places
+/// it could bite. The `run_id` folds level *hashes* — no name, no label — and
+/// the on-disk segment is `{label}-{hash8}`, also nameless. Both are asserted
+/// here, so a future change that made a level's name identity-bearing fails
+/// this test rather than silently orphaning every profile already on disk.
+#[test]
+fn a_profile_points_method_level_is_named_method_and_naming_it_rekeys_nothing() {
+    let model = tiny_model();
+    let base_config = crate::fit::cas::canonical_config_hash(
+        &serde_json::json!({ "fixed": { "N0": 1000.0 } }), &[]).unwrap();
+    let method_config = crate::fit::cas::canonical_config_hash(
+        &serde_json::json!({ "algorithm": "if2" }), &[]).unwrap();
+    let focal = [("beta".to_string(), 0.3_f64)];
+    let grid = [("beta".to_string(), vec![0.1_f64, 0.3, 0.5])];
+    let pr = resolve_profile_point(&ProfilePointCtx {
+        model: &model,
+        ir_version: IRV,
+        engine_version: ENGV,
+        stem: "sir",
+        method_name: "if2",
+        data: &[],
+        base_config,
+        method_config,
+        focal: &focal,
+        grid: &grid,
+        seed: 7,
+        start_index: 0,
+        deps: vec![],
+    })
+    .expect("profile point resolves");
+
+    let names: Vec<&str> = pr.levels.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, vec!["profile", "point", "method", "seed", "start"],
+        "the level a profile's sub-fit method rides is named `method`");
+
+    let hashes: Vec<ContentHash> = pr.levels.iter().map(|l| l.hash).collect();
+    assert_eq!(pr.run_id, runid::run_id(runid::ArtifactKind::ProfilePoint, &hashes),
+        "run_id folds level hashes only — a level's NAME is not in it, so \
+         renaming one cannot re-key a leaf");
+
+    let method_level = pr.levels.iter().find(|l| l.name == "method").unwrap();
+    assert_eq!(runid::segment(method_level),
+        format!("if2-{}", method_level.hash.short8()),
+        "the path segment is {{label}}-{{hash8}}; renaming the level moves no \
+         directory on disk");
+}

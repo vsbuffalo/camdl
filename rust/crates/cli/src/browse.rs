@@ -582,7 +582,7 @@ fn show_fit_envelope(segment: &Path, rel_path: &str) {
 }
 
 /// Render a new-format (`RunRecord`) profile-point leaf: the five factored
-/// levels (`profile`/`point`/`stage`/`seed`/`start`), the run_id address, the
+/// levels (`profile`/`point`/`method`/`seed`/`start`), the run_id address, the
 /// `--label` (read from the profile-base `fit.meta.json` sidecar — its single
 /// authoritative home, NOT copied per leaf), and the recorded `inputs`
 /// including the per-leaf provenance (gh#83/85 parameter resolution, per-chain
@@ -598,7 +598,7 @@ fn show_profile_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTim
             println!("{}", "label".bright_black()); println!("  {}", l);
         }
     }
-    for lvl_name in ["profile", "point", "stage", "seed", "start"] {
+    for lvl_name in ["profile", "point", "method", "seed", "start"] {
         println!("{}", lvl_name.bright_black());
         println!("  {}", leaf.level_label(lvl_name));
     }

@@ -1,5 +1,5 @@
 //! gh#147 (M3.3). The profile-point CAS identity: map a resolved profile grid
-//! point into the `runid` factored levels (`profile` / `point` / `stage` /
+//! point into the `runid` factored levels (`profile` / `point` / `method` /
 //! `seed` / `start`) and its leaf `run_id`. Mirrors
 //! [`crate::fit::cas::resolve_fit_stage`].
 //!
@@ -10,7 +10,7 @@
 //!     the base fit's `starts_from` as a dep (guardrail 3-base). A path segment
 //!     with no base-level record (guardrail 2 — enforced by the writer).
 //!   - **point** — the single pinned focal value(s) for this grid point.
-//!   - **stage** — the sub-fit method + hyperparams (shared across the grid).
+//!   - **method** — the sub-fit method + hyperparams (shared across the grid).
 //!   - **seed** — the resolved profile seed (hashed; guardrail 3); **start** —
 //!     the multi-start index. The `(seed, point, start)` triple pins each job's
 //!     RNG deterministically (`job_seed = seed ^ (grid_idx*1000 + start_idx)`).
@@ -39,7 +39,7 @@ pub struct ProfilePointCtx<'a> {
     pub engine_version: &'a str,
     /// Provenance label for the `profile` path segment (the model stem).
     pub stem: &'a str,
-    /// Display label for the `stage` segment (the method name, e.g. `if2`).
+    /// Display label for the `method` segment (the method name, e.g. `if2`).
     pub method_name: &'a str,
     /// `(stream name, sha256-hex)` — profile's already-computed data hashes.
     /// SHA-256, the same function as [`ContentHash::digest_bytes`], so
@@ -126,7 +126,11 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
     let levels = vec![
         level("profile", ctx.stem, structural_level_hash(&base)),
         level("point", &point_label, structural_level_hash(&point)),
-        level("stage", ctx.method_name, structural_level_hash(&stage)),
+        // gh#901: the level is named `method`, matching the fit store's middle
+        // level and the word the rest of the tool uses. `run_id` folds level
+        // HASHES only and the path segment is built from the label, so the
+        // rename re-keys nothing and moves no directory.
+        level("method", ctx.method_name, structural_level_hash(&stage)),
         level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
         level("start", &format!("start_{}", ctx.start_index), structural_level_hash(&start)),
     ];
