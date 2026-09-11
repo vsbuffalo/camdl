@@ -787,7 +787,7 @@ opt-in), `camdl fit run` errors with a 2-column table naming every offending
 parameter plus all three remedies:
 
 ```
-error: stage 'posterior' (method=pmmh) has parameters with no resolved prior:
+error: [method] (algorithm = "pmmh") has parameters with no resolved prior:
 
   beta        no prior in fit toml, no `~` in model file
   gamma       no prior in fit toml, no `~` in model file
@@ -1752,10 +1752,10 @@ it used against the full posterior:
 simulate: --init-state fit → 300/606 posterior draws have a saved latent path;
 forecasting that paired (θ_i, X_i) subset from t = 196 (the other 306 draws have
 no state to fork)
-  stage 'posterior' (results/fits/…/draws.tsv)
+  method 'pgas' (results/fits/…/draws.tsv)
 ```
 
-Raise `n_trajectories` on the fit stage if you want the whole posterior
+Raise `n_trajectories` on the fit's `[method]` if you want the whole posterior
 forecastable. A PGAS fit that saved **no** paths — and every PMMH or
 particle-filter fit, which never writes any — is refused by name rather than
 falling back to `init {}`, which would look like a forecast and be a

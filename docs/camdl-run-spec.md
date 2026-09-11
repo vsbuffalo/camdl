@@ -239,7 +239,7 @@ The levels per kind:
 | `fit_stage`     | `fits`      | fit · method · seed                       |
 | `pfilter`       | `pfilters`  | model · config · params · seed            |
 | `survey`        | `surveys`   | model · config · box · seed               |
-| `profile_point` | `profiles`  | profile · point · stage · seed · start    |
+| `profile_point` | `profiles`  | profile · point · method · seed · start   |
 
 **The one rule for consumers: resolve runs by reading `run.json`, never by
 parsing path segments.** Path segments mirror the `levels` array for human
@@ -552,7 +552,7 @@ chain-subset band is never mistakable for a full-cloud one.
 **The tag is load-bearing, and a stored artifact must be read under its own.**
 The three versions do not carry the same numbers under the same column names:
 
-| tag  | the two stage-provenance columns         | what they hold                                                                                                            |
+| tag  | the two fit-provenance columns           | what they hold                                                                                                            |
 | ---- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `v1` | `rhat_max`, `ess_min`                    | classic Gelman–Rubin R̂ and a Geyer per-chain sum                                                                          |
 | `v2` | `rhat_max`, `ess_min` — _the same names_ | rank-normalized split R̂ and bulk-ESS (gh#84), `ess_min` withheld rather than minimized when any parameter has none        |
@@ -1741,6 +1741,23 @@ JSON Lines (one object per line) and the survey section as a pretty-printed JSON
 array. The stream is therefore not a single JSON document; parse it per section
 or filter with `--kind`.
 
+A fit row carries `schema = {"name": "fit_list_row", "version": 1}`, the
+fit-level provenance, `methods_declared` (the algorithms that ran on this
+problem), and `methods` — one entry per method leaf:
+
+```json
+{"method":"pgas","method_hash":"34f379b8…","run_id":"9e1c…",
+ "path":"results/fits/pgas-9a53c2c4/pgas-34f379b8/seed_1-06cbd6b3",
+ "backend":"chain_binomial","seed":1,"n_chains":4,
+ "best_loglik":null,"loglik_type":"complete_data","best_chain":null}
+```
+
+`method` alone does not identify a leaf. One segment can hold several leaves of
+the same algorithm — the same problem fitted at two `sweeps` settings, say —
+and they agree on `method`, `backend` and `seed`; the `method` level's hash is
+what separates them, and it is the `<h8>` in each leaf's directory name.
+`run_id` and `path` are the addresses `camdl show` and `fit predict` accept.
+
 `<root>/index.json` is a derived run_id → leaf index, rebuilt lazily on a
 prefix-resolution miss and by `camdl dev reindex <root>`. Deleting it is safe.
 
@@ -2837,7 +2854,7 @@ Per-algorithm leaf contents: IF2 writes `mle_params.toml`, `final_params.toml`,
 NLopt optimizers write `mle_params.toml` and `chain_results.tsv`. A `pfilter`
 method with `record_prequential` writes `prequential.{tsv,json}`.
 
-Every `<algorithm>_summary.json` carries `schema = "camdl.fit-summary/v1"`, and
+Every `<algorithm>_summary.json` carries `schema = "camdl.fit-summary/v2"`, and
 every reader requires it: a file without the tag, or with a tag this camdl does
 not know, is refused by name rather than read. The tag exists because two of its
 keys changed _meaning_ under unchanged names — `rhat` was the classic
@@ -2848,6 +2865,10 @@ bulk-ESS, never suppressed. Absence of the tag therefore means the pre-tag
 vintage, and nothing else in the file distinguishes the two. Re-running a fit
 refreshes it; a stored fit from before the tag is read by the camdl that wrote
 it.
+
+`v2` is the same statistics under one renamed key: the algorithm is named by
+`method`, not `stage`. A rename under an unchanged tag is the vintage problem
+the tag exists to prevent, so it is a version rather than a silent edit.
 
 A completed leaf is reused on a second identical invocation ("cache hit"); pass
 `--force` to re-run and overwrite.
@@ -4123,7 +4144,7 @@ if the field did not exist.
 | `FitStage` (`fits/`)         | fit · method · seed                       | `cli/src/fit/cas.rs`             |
 | `Pfilter` (`pfilters/`)      | model · config · params · seed            | `cli/src/pfilter_cas.rs:65`      |
 | `Survey` (`surveys/`)        | model · config · box · seed               | `cli/src/survey_cas.rs:61`       |
-| `ProfilePoint` (`profiles/`) | profile · point · stage · seed · start    | `cli/src/profile_cas.rs`         |
+| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start   | `cli/src/profile_cas.rs`         |
 
 **`Sim` levels** (`resolve::resolve_trajectory`; the level types are in
 `runid::inputs`):
@@ -4481,7 +4502,6 @@ wildcard, and carries a populated `inputs`:
   "method": "if2",
   "n_chains": 2,
   "seed": 1,
-  "stage": "if2",
   "starts": "from_prior",
   "wall_time_seconds": 25.255000542
 }
@@ -4854,7 +4874,7 @@ Common to both families:
 
 | file               | content                                                                                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fit_state.toml`   | θ̂ + run state, with `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge                                                                               |
+| `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge                             |
 | `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6) |
 
 An optimizer leaf (IF2, NLopt) additionally holds:
@@ -4879,7 +4899,7 @@ A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 | `chain_N/trajectories.json` | the matching manifest (`format`, `version`, `method`, `granularity`, `n_chains`, `n_draws`, `columns`, `model_hash`, `conditioned`, `calendar`, …)                                                                                                                                                                                                                                                       |
 | `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at run end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                                 |
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
-| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared; each carries `schema = "camdl.fit-summary/v1"`, which every reader requires                                                                                                                                                                                        |
+| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared; each names its algorithm under `method` and carries `schema = "camdl.fit-summary/v2"`, which every reader requires                                                                                                                                                 |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
 | `progress.json`             | sampler progress, written live, plus per-chain liveness (§10.10)                                                                                                                                                                                                                                                                                                                                         |
 

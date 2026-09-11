@@ -138,7 +138,7 @@ than guessing: `camdl mre fit fit.toml` bundles the model, its compile-time
 **Safe to do autonomously:**
 
 - Run `camdl check`, `camdl simulate`, `camdl survey`, `camdl pfilter`,
-  `camdl fit run` (single stage, not committing the fit dir),
+  `camdl fit run` (a single method, not committing the fit dir),
   `camdl fit
   summary`, `camdl fit predict`, `camdl list`, `camdl show`,
   `camdl fit diff`.
@@ -206,7 +206,7 @@ not all "the fit failed"; they're typed signals.
 | Diagnostic                   | Threshold                           | What it means                                                                           | What to do                                                                                                                                         |
 | ---------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `RhatHigh`                   | R̂ > 1.1 (warn), > 1.5 (error)       | Chains haven't agreed on this parameter's posterior                                     | More sweeps; check for multimodality with `survey`. R̂ > 1.5 → almost certainly a real basin problem.                                               |
-| `LowESSAtMLE`                | ESS < 5% × n_particles              | Particle filter is struggling at the point estimate. Loglik estimate has wide variance. | Increase `n_particles` in the validate stage, or check for model misspecification at the MLE.                                                      |
+| `LowESSAtMLE`                | ESS < 5% × n_particles              | Particle filter is struggling at the point estimate. Loglik estimate has wide variance. | Increase `n_particles` for the likelihood evaluation, or check for model misspecification at the MLE.                                              |
 | `ParamNearBound`             | within 1% of natural-scale bound    | Posterior pile-up at a bound                                                            | Almost always: widen the bound. The data is telling you the parameter wants to live outside your prior support.                                    |
 | `DivergentTransitions`       | any post-burn-in divergence         | NUTS hit a divergent trajectory (high curvature in posterior geometry)                  | Reparameterise (log/logit transforms), shrink the step size, or check for funnel geometry. Stan-canonical: any post-burn divergence is suspicious. |
 | `MaxTreeDepthHits`           | > 5% of post-burn-in sweeps         | NUTS trees not finishing — step size too small or posterior too elongated               | Increase `max_tree_depth`, or reparameterise.                                                                                                      |

@@ -2608,7 +2608,7 @@ pub struct MethodReport {
     /// Compound IF2 gate. `None` for Bayesian stages (the gate
     /// doesn't apply).
     pub gate: Option<GateReport>,
-    pub stage_progression: Option<StageProgression>,
+    pub method_progression: Option<MethodProgression>,
     /// IF2 estimated parameters with Â. Empty for Bayesian stages
     /// (consult `method_result` for posterior_mean / ess).
     pub parameters: Vec<ParameterReport>,
@@ -2656,8 +2656,8 @@ pub struct GateReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StageProgression {
-    pub previous_stage: String,
+pub struct MethodProgression {
+    pub previous_method: String,
     pub previous_loglik: f64,
     pub delta_nats: f64,
 }
@@ -2937,7 +2937,7 @@ fn bayesian_stage_report(
         initial_loglik: None,
         camdl_version: Some(version::VERSION_SHORT.to_string()),
         gate: None,
-        stage_progression: None,
+        method_progression: None,
         parameters: Vec::new(),
         chains: Vec::new(),
         provenance: None,
@@ -3073,8 +3073,8 @@ fn if2_stage_report(
         stale_camdl_version: stale,
     };
 
-    let stage_progression = prev_loglik.zip(prev_stage_name).map(|(prev, prev_name)| StageProgression {
-        previous_stage: prev_name.to_string(),
+    let method_progression = prev_loglik.zip(prev_stage_name).map(|(prev, prev_name)| MethodProgression {
+        previous_method: prev_name.to_string(),
         previous_loglik: prev,
         delta_nats: state.best_loglik - prev,
     });
@@ -3111,7 +3111,7 @@ fn if2_stage_report(
         } else { None },
         camdl_version: state.camdl_version.clone(),
         gate: Some(gate),
-        stage_progression,
+        method_progression,
         parameters,
         chains,
         provenance: Some(provenance),
@@ -3159,9 +3159,9 @@ fn render_md_stage(stage: &MethodReport) -> String {
     if let Some(init) = stage.initial_loglik {
         s.push_str(&format!("- initial loglik: {:.2}\n", init));
     }
-    if let Some(prog) = &stage.stage_progression {
+    if let Some(prog) = &stage.method_progression {
         s.push_str(&format!("- vs `{}`: Δ = {:+.2} nats\n",
-            prog.previous_stage, prog.delta_nats));
+            prog.previous_method, prog.delta_nats));
     }
     if let Some(prov) = &stage.provenance {
         if let Some(stale) = &prov.stale_camdl_version {
