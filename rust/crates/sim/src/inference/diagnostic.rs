@@ -22,7 +22,10 @@ pub struct Diagnostic {
     pub kind: DiagnosticKind,
     pub severity: Severity,
     pub message: String,
-    pub stage: String,
+    /// The inference method that emitted it (`if2`, `pgas`, `pmmh`, `nuts`,
+    /// …) — the label of the `method` store level the run wrote under, which
+    /// is what every collector is constructed with (gh#901).
+    pub method: String,
     pub timestamp: String,
 }
 
@@ -687,14 +690,16 @@ impl DiagnosticKind {
 /// Thread-safe via Mutex.
 pub struct DiagnosticCollector {
     diagnostics: std::sync::Mutex<Vec<Diagnostic>>,
-    stage: String,
+    method: String,
 }
 
 impl DiagnosticCollector {
-    pub fn new(stage: &str) -> Self {
+    /// `method` is the inference method's own name — the string every call
+    /// site already passes (`"pgas"`, `"nuts"`, `Algorithm::method_name()`).
+    pub fn new(method: &str) -> Self {
         DiagnosticCollector {
             diagnostics: std::sync::Mutex::new(Vec::new()),
-            stage: stage.into(),
+            method: method.into(),
         }
     }
 
@@ -705,7 +710,7 @@ impl DiagnosticCollector {
             kind,
             severity,
             message,
-            stage: self.stage.clone(),
+            method: self.method.clone(),
             timestamp: chrono_now(),
         };
         self.diagnostics.lock().unwrap().push(diag);
@@ -1006,5 +1011,24 @@ mod tests {
         let stuck = acceptance_diagnostic(0.004, None, AcceptanceKernel::Nuts)
             .expect("0.4% under NUTS is a finding");
         assert_eq!(stuck.severity(), Severity::Error);
+    }
+
+    /// gh#901: an entry in `diagnostics.json` names the method that emitted
+    /// it, under `method`.
+    ///
+    /// The field held the string every collector is constructed with — the
+    /// method's own name (`"pgas"`, `"nuts"`, `Algorithm::method_name()`) —
+    /// but spelled it `stage`, a word the store levels, the fit config and the
+    /// CLI all left with the `[stages]` -> `[method]` split. Two-sided on the
+    /// serialized form, since that is what a reader of the file sees.
+    #[test]
+    fn a_serialized_diagnostic_names_its_method_and_never_a_stage() {
+        let c = DiagnosticCollector::new("pgas");
+        c.push(bad_init("beta", 0.3));
+        let json = serde_json::to_string(&c.drain()).expect("diagnostics serialize");
+        assert!(json.contains(r#""method":"pgas""#),
+            "the entry must name its method under `method`:\n{json}");
+        assert!(!json.contains(r#""stage""#),
+            "and must not carry the old `stage` key:\n{json}");
     }
 }
