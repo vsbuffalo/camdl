@@ -1718,6 +1718,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     &full_start,
                     tolerance,
                     max_evals,
+                    // A profile's progress unit is a grid cell, not an
+                    // evaluation; `profile` reports its own bar (gh#900).
+                    None,
                 ) {
                     Ok(r) => {
                         // Reproject the optimizer-space result back into

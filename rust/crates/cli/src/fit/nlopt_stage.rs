@@ -43,6 +43,10 @@ pub fn run_stage(
     model_identity: &str,
     data_hashes: &[(String, String)],
     dt_check_cfg: &DtCheckConfig,
+    // The stage's liveness/progress heartbeat, owned by the runner
+    // (`fit::stage_heartbeat`). Its step is one objective evaluation, against
+    // the `max_evals` budget (gh#900).
+    heartbeat: &io::HeartbeatGuard,
 ) -> Result<(), String> {
     let stage_name = method.algorithm.method_name();
     let (algorithm, knobs) = extract_nlopt_config(&method.algorithm)?;
@@ -161,6 +165,7 @@ pub fn run_stage(
                 &bounds_ref,
                 &est_indices_ref,
                 &chain_starts[chain_idx],
+                heartbeat,
             );
             (chain_idx, outcome)
         })
@@ -357,6 +362,7 @@ struct ChainOutcome {
     n_evals: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_one_chain(
     algorithm: NloptAlgorithm,
     knobs: &NloptStageConfig,
@@ -367,7 +373,15 @@ fn run_one_chain(
     bounds: &[(f64, f64)],
     est_indices: &[usize],
     full_start: &[f64],
+    heartbeat: &io::HeartbeatGuard,
 ) -> ChainOutcome {
+    // gh#900: one objective evaluation is one step of the run's progress. It is
+    // the only thing that happens often enough to report on a search whose
+    // single chain may run for minutes — a per-chain counter would sit at zero
+    // for the whole of the usual one-chain Sbplx fit. A relaxed `fetch_max` on
+    // a shared atomic, so "furthest any chain has reached" is what the artifact
+    // shows; no I/O per evaluation and no RNG consumed.
+    let on_eval = |evals: u64| heartbeat.bump(evals);
     let result = optimize_cell(
         algorithm,
         compiled,
@@ -379,6 +393,7 @@ fn run_one_chain(
         full_start,
         knobs.tolerance,
         knobs.max_evals,
+        Some(&on_eval),
     );
     match result {
         Ok(r) => ChainOutcome {
@@ -410,6 +425,12 @@ fn run_one_chain(
 /// parameter vector per evaluation, calls `compute_ode_loglik`, and
 /// returns the loglik (or `f64::NEG_INFINITY` if the model blew up).
 ///
+/// `on_eval` is called with this cell's running evaluation count each time the
+/// objective is scored — the seam a caller uses to report search progress
+/// (gh#900). It is the only per-evaluation hook there is: the objective closure
+/// is built here, so a caller cannot wrap it from outside. `camdl profile`
+/// passes `None`; its progress is a grid cell, not an evaluation.
+///
 /// This function is the single source of truth for "deterministic-MLE
 /// optimization on the ODE skeleton given a focal pin." Both consumers
 /// pass an `Arc<MultiStreamObsModel>` and obs_times built once outside
@@ -426,6 +447,7 @@ pub fn optimize_cell(
     full_start: &[f64],
     tolerance: f64,
     max_evals: usize,
+    on_eval: Option<&(dyn Fn(u64) + Sync)>,
 ) -> Result<OptResult, String> {
     let initial_est: Vec<f64> = est_indices.iter().map(|&i| full_start[i]).collect();
 
@@ -438,9 +460,14 @@ pub fn optimize_cell(
     let compiled_local = Arc::clone(compiled);
     let obs_model_local = Arc::clone(obs_model);
     let obs_times_local = obs_times.to_vec();
+    let mut evals: u64 = 0;
     let objective = move |est: &[f64]| -> f64 {
         for (slot, &model_idx) in est_indices_local.iter().enumerate() {
             full_params[model_idx] = est[slot];
+        }
+        evals += 1;
+        if let Some(report) = on_eval {
+            report(evals);
         }
         compute_ode_loglik(
             &compiled_local,

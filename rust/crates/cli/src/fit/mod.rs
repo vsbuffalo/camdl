@@ -1582,6 +1582,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                         &model_identity_for_prov,
                         &data_hashes_for_prov,
                         &nl_dt_check,
+                        &heartbeat,
                     ).unwrap_or_else(|e| {
                         abandon_stage(
                             &heartbeat,
