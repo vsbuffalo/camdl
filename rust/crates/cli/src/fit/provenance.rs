@@ -128,9 +128,9 @@ pub fn write_mle_params(
         data: data_map,
         seed: metadata.seed,
         method: metadata.method.clone(),
-        // best_chain is zero-indexed internally; surface as 1-indexed
-        // in the provenance block to match human-facing convention.
-        chain: metadata.best_chain + 1,
+        // The runner's chain index is 0-based; surface as 1-indexed in the
+        // provenance block, matching the `chain_N/` directories.
+        chain: metadata.best_chain_index + 1,
         log_likelihood: metadata.loglik,
         loglik_sd: metadata.loglik_sd,
         n_particles: metadata.n_particles,
@@ -193,7 +193,13 @@ pub struct MleMetadata {
     pub seed: u64,
     /// The method label, written to `[provenance] method`.
     pub method: String,
-    pub best_chain: usize,
+    /// The winning chain as the runner's own **0-based** index, which is what
+    /// every caller has in hand. `write_mle_params` adds one when it writes
+    /// `[provenance] chain`, so the file is 1-based like the `chain_N/`
+    /// directories. Named `_index` so it cannot be confused with
+    /// [`crate::fit::state::FitState::best_chain`], which is the 1-based
+    /// chain *number* as stored (gh#912).
+    pub best_chain_index: usize,
     /// Simulation backend the fit used. Load-bearing for the
     /// backend-provenance guardrail in `camdl simulate --params`
     /// — downstream can only auto-match if we record this.
@@ -421,7 +427,7 @@ mod tests {
             data_hashes: vec![("cases".into(), "abc".into())],
             seed: 1,
             method: "if2".into(),
-            best_chain: 0,
+            best_chain_index: 0,
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             loglik: -12.5,

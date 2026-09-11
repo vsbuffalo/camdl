@@ -315,7 +315,7 @@ pub fn run_stage(
         data_hashes: data_hashes.to_vec(),
         seed,
         method: stage_name.to_string(),
-        best_chain: winner_idx,
+        best_chain_index: winner_idx,
         // NLopt stages always run on the ODE backend (validated by
         // methods::validate_combo); record it from the inference domain
         // (total `From<InferenceBackend>` into the forward provenance field).

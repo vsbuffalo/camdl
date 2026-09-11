@@ -1407,7 +1407,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     data_hashes: data_hashes.clone(),
                     seed,
                     method: stage_name.to_string(),
-                    best_chain: chain_results.best_chain,
+                    best_chain_index: chain_results.best_chain,
                     // Record the backend the method actually fit on (gh#241):
                     // the `simulate --params` guardrail replays θ̂ with this,
                     // so it must be the method's backend. `InferenceBackend`
