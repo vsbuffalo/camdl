@@ -4876,6 +4876,7 @@ Common to both families:
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge                             |
 | `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6) |
+| `progress.json`    | the run's liveness/progress heartbeat, written live, and the terminal state it ends on; every method but `pfilter` writes it (§10.10)                                                                    |
 
 An optimizer leaf (IF2, NLopt) additionally holds:
 
@@ -4901,7 +4902,6 @@ A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
 | `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared; each names its algorithm under `method` and carries `schema = "camdl.fit-summary/v2"`, which every reader requires                                                                                                                                                 |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
-| `progress.json`             | sampler progress, written live, plus per-chain liveness (§10.10)                                                                                                                                                                                                                                                                                                                                         |
 
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
 `{name}={value:.12}\0` pairs, truncated to 8 hex — so a hand-edited parameter
@@ -5023,12 +5023,13 @@ omitted from `run.json` when empty.
 > subcommand that produced those was removed. Equivalent reductions are
 > expressed in the model's `quantities {}` block (§10.8).
 
-### 10.10 `progress.json`'s per-chain liveness
+### 10.10 `progress.json`: what a stage says while it runs, and how it ends
 
-A background thread rewrites `progress.json` on a fixed wall-clock timer, so it
-is the one thing a watcher can read while a stage runs. Alongside `updated_at`,
-`pid` and the `state` counter it carries a `chains` block for any method that
-has chains:
+A background thread rewrites `progress.json` every five seconds — a fixed
+wall-clock timer, not a step boundary, because one national-scale PGAS sweep can
+take minutes — so it is the one thing a watcher can read while a stage runs.
+Alongside `updated_at`, `pid` and the `state` counter it carries a `chains`
+block for any method that reports per-chain liveness:
 
 ```json
 {
@@ -5061,10 +5062,43 @@ not started is neither good nor bad.
 `chain_N/` directory cannot make: a refused chain and one queued behind
 `--parallel` call for opposite responses (respecify, or wait), so a chain that
 has not been picked up by a worker is counted in `not_started` and reports
-nothing. The block is **absent**, not null, for a method with no chains (an
-NLopt search, a profile grid), and `chain` is 1-based here — the same numbering
-`chain_starts.tsv`'s `chain_id` column, the `bad_init` records and the
-`chain_N/` directories use, so joining any two of them takes no arithmetic.
+nothing. The block is **absent**, not null, for a method that does not report
+per-chain liveness — today every method but PGAS — and `chain` is 1-based here:
+the same numbering `chain_starts.tsv`'s `chain_id` column, the `bad_init`
+records and the `chain_N/` directories use, so joining any two of them takes no
+arithmetic.
+
+#### Which methods write it, and what a step is
+
+Every method writes `progress.json` except `pfilter`, whose unit of work is a
+replicate of one fixed point — neither an MCMC phase nor a search, so it
+publishes no counter rather than one labelled with a phase it is not in. For the
+rest, `step` of `total` counts:
+
+| method                  | one step is                                            | `total`            | `phase`                             |
+| ----------------------- | ------------------------------------------------------ | ------------------ | ----------------------------------- |
+| `pgas`                  | one sweep                                              | `sweeps`           | `burn_in` → `sampling` at `burn_in` |
+| `pmmh`, `mh`            | one MCMC iteration                                     | `iterations`       | `burn_in` → `sampling` at `burn_in` |
+| `nuts`                  | one iteration, warm-up and sampling counted end to end | `warmup + samples` | `burn_in` → `sampling` at `warmup`  |
+| `if2`                   | one cooling iteration                                  | `iterations`       | `optimizing`                        |
+| `nl-sbplx`, `nl-bobyqa` | one objective evaluation                               | `max_evals`        | `optimizing`                        |
+
+`step` is the furthest **any** chain has reached, and it never moves backward.
+
+#### The terminal state
+
+A stage that finishes writes `"state": "done"` after every other output in the
+leaf is on disk, so `done` is the cue that the final statistics are ready to
+read. A stage that camdl stops writes `"state": {"failed": {"reason": …}}`,
+carrying the same sentence the command printed on stderr — so a reader holding
+only `progress.json` learns what a reader of the terminal learns. Both are
+written before the leaf is finalized.
+
+A `running` record that has stopped being refreshed means neither: it is what a
+run leaves when it is SIGKILLed or panics, and **deadness is the reader's
+inference from staleness, never a self-claim** — a killed process cannot write
+"I died". Treat a `running` record older than a few refresh intervals as
+presumed dead, and a `failed` record as a failure camdl saw and explained.
 
 ## 11. Predictive Workflows
 

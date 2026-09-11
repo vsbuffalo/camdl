@@ -676,6 +676,18 @@ deliberately distinct roles. Not every producer declares one: `sim` leaves and
 completed fit leaves do; `pfilter`, `survey`, `profile` and the `fit predict`
 outputs do not.
 
+**To ask whether a long fit is still alive, read `progress.json`, not the
+mtimes.** Every method but `pfilter` writes one into its leaf and a background
+thread refreshes it every five seconds, independent of step cadence — one
+national-scale sweep can take minutes, so `trace.tsv`'s mtime is not a
+heartbeat. Its `state` is `{"running": {phase, step, total}}`, `"done"`, or
+`{"failed": {"reason": …}}`, where the failure reason is the sentence the
+command printed. Deadness is **your** inference from staleness, never a claim
+the file makes: a `running` record that has stopped being refreshed is a run
+that was killed or panicked, and a run that was SIGKILLed cannot write anything
+at all. Spec: `docs/camdl-run-spec.md` §10.10, which tabulates what one step
+means for each method.
+
 ### Workflow tooling — the principle, not a mandated tool
 
 **Every artifact is a named, re-runnable target.** Nothing that feeds a model, a
