@@ -327,19 +327,25 @@ fn fit_summary_walks_real_fit_run_v2_output() {
 
     let fit_dir = exec_fit_run_v2(&camdl, &fit_toml, &output_dir);
 
-    // Sanity-check the walker found at least one if2 stage somewhere
+    // Sanity-check the walker found at least one if2 method leaf somewhere
     // under fit_dir. The summary command is the proxy: if its JSON
-    // `stages` is non-empty, the walker landed on a real
-    // run.json-bearing v2 stage_dir.
+    // `methods` is non-empty, the walker landed on a real
+    // run.json-bearing method leaf.
     let json = exec_fit_summary_json(&camdl, &fit_dir);
-    let stages = json
-        .get("stages")
+    let methods = json
+        .get("methods")
         .and_then(|s| s.as_array())
-        .unwrap_or_else(|| panic!("summary JSON missing `stages` array: {}", json));
+        .unwrap_or_else(|| panic!("summary JSON missing `methods` array: {}", json));
     assert!(
-        !stages.is_empty(),
-        "summary JSON `stages` is empty — walker did not find any stage_dir under {}",
+        !methods.is_empty(),
+        "summary JSON `methods` is empty — walker did not find any method leaf under {}",
         fit_dir.display()
+    );
+    // gh#901: the old spelling is gone, not kept beside the new one.
+    assert!(
+        json.get("stages").is_none(),
+        "summary JSON must not still carry a `stages` array: {}",
+        json
     );
 
     // Spot-check: the canonical CAS method leaf is on disk where the runner

@@ -174,7 +174,7 @@ impl std::fmt::Display for TableRowError {
             ),
             TableRowError::NoStages { fit_dir } => write!(
                 f,
-                "no completed fit-stage runs found under {}",
+                "no completed method leaves found under {}",
                 fit_dir.display()
             ),
             TableRowError::Method(e) => write!(f, "{}", e),

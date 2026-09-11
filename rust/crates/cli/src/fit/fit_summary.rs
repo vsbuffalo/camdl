@@ -40,7 +40,13 @@ use std::path::{Path, PathBuf};
 
 /// Versioned JSON schema. Bumped when fields are renamed / removed /
 /// retyped; field additions are non-breaking and keep version stable.
-const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (gh#901): the per-method array is `methods`, not `stages`. The
+/// `[stages]` → `[method]` split left the plural key spelling a word the fit
+/// config, the store levels and the CLI no longer use, and the array is
+/// machine-read (the book pipeline and `fit table`'s byte-equality check both
+/// parse it).
+const SCHEMA_VERSION: u32 = 2;
 
 /// Recompute a Bayesian stage's diagnostics + posterior means over a
 /// chain-filtered draws cloud, mutating `diag`/`posterior_mean` in place, and
@@ -117,7 +123,7 @@ fn apply_selection_to_typed(
             recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
         }
         _ => Err(
-            "--exclude-chains applies only to Bayesian stages (PGAS / PMMH / NUTS)".to_string(),
+            "--exclude-chains applies only to Bayesian methods (PGAS / PMMH / NUTS)".to_string(),
         ),
     }
 }
@@ -210,8 +216,8 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
                 });
                 if !has_bayesian {
                     eprintln!(
-                        "error: --exclude-chains needs a Bayesian stage (PGAS / PMMH / NUTS) to \
-                         subset; this fit's selected stage(s) have no posterior chains"
+                        "error: --exclude-chains needs a Bayesian method (PGAS / PMMH / NUTS) to \
+                         subset; this fit's selected method(s) have no posterior chains"
                     );
                     std::process::exit(1);
                 }
@@ -689,7 +695,7 @@ fn format_text(
     if stages.is_empty() {
         // The version still has to be reported; no stage line carried it.
         println!("  camdl {}", fmt.dim(version::VERSION_SHORT));
-        println!("  (no completed stages found in {})", dir);
+        println!("  (no completed methods found in {})", dir);
     }
 
     // The two flags that ADD to this output, named where a reader has just
@@ -739,7 +745,7 @@ fn forkability(
 
 fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
     let doc = build_summary_doc(dir, stages, selection);
-    let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
+    let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     let s = serde_json::to_string_pretty(&doc).expect("FitSummaryDoc must serialize");
     println!("{}", s);
     if strict && any_failed {
@@ -751,7 +757,7 @@ fn format_json(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Opt
 
 fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
     let doc = build_summary_doc(dir, stages, selection);
-    let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
+    let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     print!("{}", render_markdown(&doc));
     if strict && any_failed {
         eprintln!("error: provenance cross-checks failed (--strict).");
@@ -762,7 +768,7 @@ fn format_md(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Optio
 
 fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Option<&ChainSelection>) -> Vec<LoadFailure> {
     let doc = build_summary_doc(dir, stages, selection);
-    let any_failed = doc.stages.iter().any(|s| s.provenance_failed());
+    let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     print!("{}", render_latex(&doc));
     if strict && any_failed {
         eprintln!("error: provenance cross-checks failed (--strict).");
@@ -2557,10 +2563,10 @@ pub struct FitSummaryDoc {
     /// cross-fit schema: any field added here must also appear in
     /// `fit table`'s row output, enforced by Deliverable C.
     pub table_row: TableRow,
-    pub stages: Vec<StageReport>,
+    pub methods: Vec<MethodReport>,
     /// Method leaves the walker found but could not read back (gh#905). Always
     /// present, empty when every leaf loaded — so a consumer that sees an empty
-    /// `stages` array can tell "this fit has no completed method" from "this
+    /// `methods` array can tell "this fit has no completed method" from "this
     /// fit could not be read", without parsing stderr.
     pub failures: Vec<LoadFailure>,
     /// Read-side chain selection (`--exclude-chains`), when active: the
@@ -2583,7 +2589,7 @@ pub struct SchemaInfo {
 /// `method_result` payload, which carries posterior summaries / R̂ /
 /// ESS for Bayesian methods.
 #[derive(Debug, Clone, Serialize)]
-pub struct StageReport {
+pub struct MethodReport {
     pub name: String,
     /// Inference method: `"if2"`, `"pgas"`, or `"pmmh"`.
     pub method: String,
@@ -2693,7 +2699,7 @@ impl ProvenanceReport {
     }
 }
 
-impl StageReport {
+impl MethodReport {
     /// Helper for `--strict`: returns whether this stage's provenance
     /// cross-check (when applicable) reported any failure. Bayesian
     /// stages always return false (no provenance check applies).
@@ -2720,7 +2726,7 @@ fn build_summary_doc(
     selection: Option<&ChainSelection>,
 ) -> FitSummaryDoc {
     let cal = load_calendar_context(Path::new(dir));
-    let mut stage_reports: Vec<StageReport> = Vec::new();
+    let mut method_reports: Vec<MethodReport> = Vec::new();
     let mut prev_loglik: Option<f64> = None;
     let mut prev_stage_name_owned: Option<String> = None;
     // The chain-selection provenance (stamped on the doc) + one-shot advisory.
@@ -2819,7 +2825,7 @@ fn build_summary_doc(
             }
             _ => continue,
         };
-        stage_reports.push(report);
+        method_reports.push(report);
         prev_stage_name_owned = Some(resolved.stage.clone());
     }
 
@@ -2839,7 +2845,7 @@ fn build_summary_doc(
         },
         fit_dir: dir.to_string(),
         table_row,
-        stages: stage_reports,
+        methods: method_reports,
         failures,
         chain_selection: chain_selection_json,
     }
@@ -2900,7 +2906,7 @@ fn bayesian_stage_report(
     method: &str,
     method_result: Option<MethodResult>,
     cal: &CalendarContext,
-) -> StageReport {
+) -> MethodReport {
     let (n_chains, best_loglik) = match &method_result {
         Some(MethodResult::Pgas(r)) => (r.diagnostics.n_chains, None),
         Some(MethodResult::Pmmh(r)) => (r.diagnostics.n_chains, Some(r.map_loglik)),
@@ -2921,7 +2927,7 @@ fn bayesian_stage_report(
         _ => BTreeMap::new(),
     };
     let loglik_type = method_result.as_ref().map(crate::fit::loglik::LoglikType::from);
-    StageReport {
+    MethodReport {
         name: stage.to_string(),
         method: method.to_string(),
         n_chains,
@@ -2948,7 +2954,7 @@ fn if2_stage_report(
     prev_loglik: Option<f64>,
     prev_stage_name: Option<&str>,
     cal: &CalendarContext,
-) -> StageReport {
+) -> MethodReport {
     // Gate analysis — same logic as Formatter::gate_verdict_block but
     // returning structured data instead of pre-formatted strings.
     let (gate_cfg, threshold_source) = match &state.resolved_gate {
@@ -3087,7 +3093,7 @@ fn if2_stage_report(
         None
     };
 
-    StageReport {
+    MethodReport {
         name: stage.to_string(),
         method: "if2".into(),
         n_chains: state.n_chains,
@@ -3131,17 +3137,17 @@ pub fn render_markdown(doc: &FitSummaryDoc) -> String {
             render_id_csv(&cs["excluded"]),
         ));
     }
-    if doc.stages.is_empty() {
-        s.push_str("_(no MLE stages found)_\n");
+    if doc.methods.is_empty() {
+        s.push_str("_(no completed methods found)_\n");
         return s;
     }
-    for stage in &doc.stages {
+    for stage in &doc.methods {
         s.push_str(&render_md_stage(stage));
     }
     s
 }
 
-fn render_md_stage(stage: &StageReport) -> String {
+fn render_md_stage(stage: &MethodReport) -> String {
     let mut s = String::new();
     s.push_str(&format!("## `{}` ({})\n\n", stage.name, stage.method));
     if let Some(ll) = stage.best_loglik {
@@ -3315,7 +3321,7 @@ pub fn render_latex(doc: &FitSummaryDoc) -> String {
             render_id_csv(&cs["excluded"]),
         ));
     }
-    for stage in &doc.stages {
+    for stage in &doc.methods {
         s.push_str(&render_latex_stage(stage));
     }
     s
@@ -3335,7 +3341,7 @@ fn render_id_csv(v: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-fn render_latex_stage(stage: &StageReport) -> String {
+fn render_latex_stage(stage: &MethodReport) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "\\subsection*{{Stage: \\texttt{{{}}} ({})}}\n\n",
@@ -3529,7 +3535,7 @@ fn dump_params_only(
         .iter()
         .next_back()
         .cloned()
-        .ok_or_else(|| format!("no completed fit-stage runs found in {}", dir))?;
+        .ok_or_else(|| format!("no completed method leaves found in {}", dir))?;
     let target_stage = target.stage.clone();
     let stage_path = target.stage_dir.clone();
     let path = format!("{}/final_params.toml", stage_path.to_string_lossy());
@@ -5297,10 +5303,14 @@ mod tests {
         std::fs::write(stage_dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
     }
 
-    /// JSON output is parseable, schema.version is 1, stage report
-    /// fields match the FitState we constructed it from. Catches any
-    /// future schema rename / removal that would break the book
+    /// JSON output is parseable, `schema.version` is the current one, and the
+    /// per-method report fields match the `FitState` we constructed it from.
+    /// Catches any future schema rename / removal that would break the book
     /// pipeline.
+    ///
+    /// gh#901: the per-method array is `methods`, and `stages` is absent — a
+    /// consumer keyed on the old word must break loudly at the tag, not read
+    /// an array that quietly stopped being there.
     #[test]
     fn json_format_round_trips_and_carries_schema_version() {
         let state = synthetic_fit_state();
@@ -5310,18 +5320,20 @@ mod tests {
         let stages = discover_stages(&dir);
         let doc = build_summary_doc(&dir.to_string_lossy(), &stages, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
-        assert!(json.contains("\"version\": 1"),
-            "schema.version must be present and = 1: {}", json);
+        assert!(json.contains("\"version\": 2"),
+            "schema.version must be present and = 2: {}", json);
         // Reparse and pin the load-bearing fields.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["schema"]["version"], 1);
+        assert_eq!(parsed["schema"]["version"], 2);
         assert_eq!(parsed["fit_dir"], dir.to_string_lossy().as_ref());
-        assert_eq!(parsed["stages"][0]["name"], "scout");
-        assert!((parsed["stages"][0]["best_loglik"].as_f64().unwrap() - (-3804.9)).abs() < 1e-6);
+        assert_eq!(parsed["methods"][0]["name"], "scout");
+        assert!(parsed.get("stages").is_none(),
+            "the old `stages` key must be gone, not kept beside `methods`: {json}");
+        assert!((parsed["methods"][0]["best_loglik"].as_f64().unwrap() - (-3804.9)).abs() < 1e-6);
         // Heuristic block is namespaced.
-        assert!(parsed["stages"][0]["_heuristic"]["overall_status"].is_string());
+        assert!(parsed["methods"][0]["_heuristic"]["overall_status"].is_string());
         // Provenance keys present.
-        let prov = &parsed["stages"][0]["provenance"];
+        let prov = &parsed["methods"][0]["provenance"];
         assert_eq!(prov["final_params_matches_mle_params"], true);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -5398,12 +5410,12 @@ mod tests {
     }
 
     #[test]
-    fn params_only_errors_when_no_completed_stage() {
+    fn params_only_errors_when_no_completed_method() {
         let dir = crate::test_support::unique_temp_dir("summary_empty");
         std::fs::create_dir_all(&dir).unwrap();
         let stages = discover_stages(&dir);
         let err = dump_params_only(&dir.to_string_lossy(), &stages).unwrap_err();
-        assert!(err.contains("no completed fit-stage runs"));
+        assert!(err.contains("no completed method leaves"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -5724,7 +5736,7 @@ mod tests {
         })
     }
 
-    /// gh#280: every `StageReport` JSON object carries `loglik_type`,
+    /// gh#280: every `MethodReport` JSON object carries `loglik_type`,
     /// derived from the typed `method_result`. Fails on the pre-gh#280 code
     /// (the struct had no such field). The PGAS value MUST read
     /// `complete_data` even though its `best_loglik` is null — that is the

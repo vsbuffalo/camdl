@@ -200,12 +200,12 @@ fn instant_estimand_renders_as_calendar_date() {
     let json: serde_json::Value =
         serde_json::from_str(&exec_summary(&camdl, &fit_dir, "json"))
             .expect("summary JSON must parse");
-    let stages = json["stages"].as_array().expect("stages array");
-    assert!(!stages.is_empty(), "expected at least one stage: {json}");
+    let methods = json["methods"].as_array().expect("methods array");
+    assert!(!methods.is_empty(), "expected at least one method: {json}");
 
     let mut saw_tau_date = false;
     let mut saw_beta = false;
-    for stage in stages {
+    for stage in methods {
         let Some(params) = stage["parameters"].as_array() else { continue };
         for p in params {
             match p["name"].as_str() {
