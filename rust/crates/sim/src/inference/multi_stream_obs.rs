@@ -496,6 +496,55 @@ mod projection_state_grad_tests {
         let expected = compiled.global_to_int[compiled.comp_index[int_comp.as_str()]].unwrap();
         assert_eq!(resolved[0].0, expected, "the surviving entry is the int compartment");
     }
+
+    /// gh#682: the resolved `∂projection/∂compartment` list must be ordered by
+    /// compartment index. Its order is the summation order of
+    /// `∂projected/∂θ_k = Σ_j (∂proj/∂x_j)·state_sens[j,k]` in
+    /// `ode_loglik_and_grad`, and `HashMap` iteration order is per-process random,
+    /// so an unordered list makes the ODE observation gradient differ in its last
+    /// bits from run to run.
+    ///
+    /// Each iteration builds a fresh `HashMap` (`RandomState` re-keys per map), so
+    /// twelve rounds over four compartments leave an accidental pass — a random
+    /// order is sorted about one time in 24 — vanishingly unlikely.
+    #[test]
+    fn resolve_orders_projection_state_grad_by_compartment_index() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_observations.ir.json");
+        let mut model: ir::Model =
+            ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                p.value = p.value.with_value(0.5);
+            }
+        }
+        let compiled = CompiledModel::new(model).unwrap();
+
+        let int_comps: Vec<String> = compiled.model.compartments.iter()
+            .filter(|c| matches!(c.kind, CompartmentKind::Integer))
+            .map(|c| c.name.clone())
+            .collect();
+        assert!(int_comps.len() >= 2, "need several int compartments to order");
+
+        for round in 0..12 {
+            let mut inner: HashMap<String, DerivEntry> = HashMap::new();
+            for (i, name) in int_comps.iter().enumerate() {
+                inner.insert(
+                    name.clone(),
+                    DerivEntry::Grad(Expr::Const(ConstExpr { value: i as f64 + 1.0 })),
+                );
+            }
+            let resolved = resolve_projection_state_grad(&CompGradMap(inner), &compiled).unwrap();
+            let idxs: Vec<usize> = resolved.iter().map(|(j, _)| *j).collect();
+            assert_eq!(idxs.len(), int_comps.len(), "every int compartment resolves");
+            assert!(
+                idxs.windows(2).all(|w| w[0] < w[1]),
+                "round {round}: ∂projection/∂compartment is not ordered by compartment \
+                 index: {idxs:?}"
+            );
+        }
+    }
 }
 
 /// Severity of a [`Finding`] emitted by [`BoundObs::bind`]. `Error` is fatal

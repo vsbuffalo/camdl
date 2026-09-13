@@ -211,12 +211,15 @@ mod tests {
         MultiStreamObsModel::new(BoundObs::bind(t_start, specs).unwrap().0, compiled).unwrap()
     }
 
-    /// The det_grad FD oracle (gh#275 §1f): `∇_symbolic` vs a central finite
-    /// difference of the loglik, over an incidence stream and a prevalence stream,
-    /// exercising factor-1 (`k`) and factor-2 (`beta`, `gamma`, through both an
-    /// `inc_sens` incidence chain and a `state_sens` prevalence chain).
-    #[test]
-    fn det_grad_matches_finite_difference_seir_incidence_and_prevalence() {
+    /// Everything `det_grad` needs for the SEIR incidence+prevalence scenario:
+    /// the compiled model, the bound observation model (data synthesized at the
+    /// true parameters), the parameter vector, the estimated-parameter model
+    /// indices (`beta`, `gamma`, `k`, `rho`), the observation times and the RK4
+    /// step. Shared by the finite-difference oracle and the cross-process
+    /// reproducibility pin so both score exactly the same object.
+    #[allow(clippy::type_complexity)]
+    fn seir_det_grad_scenario(
+    ) -> (Arc<CompiledModel>, MultiStreamObsModel, Vec<f64>, Vec<usize>, Vec<f64>, f64) {
         let mut model = seir_ode_grad_fixture();
         set_defaults(&mut model);
         model.simulation.t_end = 60.0;
@@ -277,6 +280,16 @@ mod tests {
         assert!(per_stream[1].iter().sum::<f64>() > 1.0, "detection prevalence data must be nonzero");
 
         let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+        (compiled, obs_model, params, est, obs_times, dt)
+    }
+
+    /// The det_grad FD oracle (gh#275 §1f): `∇_symbolic` vs a central finite
+    /// difference of the loglik, over an incidence stream and a prevalence stream,
+    /// exercising factor-1 (`k`) and factor-2 (`beta`, `gamma`, through both an
+    /// `inc_sens` incidence chain and a `state_sens` prevalence chain).
+    #[test]
+    fn det_grad_matches_finite_difference_seir_incidence_and_prevalence() {
+        let (compiled, obs_model, params, est, obs_times, dt) = seir_det_grad_scenario();
 
         let (ll, grad) = det_grad(&compiled, &obs_model, &obs_times, dt, dt, &params, &est).unwrap();
         assert!(ll.is_finite(), "det_grad loglik must be finite, got {ll}");
@@ -310,6 +323,146 @@ mod tests {
         // carry materially nonzero gradients, or the test proves little.
         assert!(grad[0].abs() > 1e-6, "∂/∂beta should be materially nonzero");
         assert!(grad[2].abs() > 1e-6, "∂/∂k should be materially nonzero");
+    }
+
+    /// Environment marker that turns this test binary into the child half of
+    /// [`det_grad_is_bit_identical_across_processes`].
+    const GH682_CHILD: &str = "CAMDL_GH682_DET_GRAD_CHILD";
+
+    /// gh#682: `det_grad` must return the SAME BITS in every process.
+    ///
+    /// The compiler-emitted `∂rate/∂compartment` map is a `HashMap`, and Rust's
+    /// default `RandomState` is seeded per process, so the resolved entry order —
+    /// which is the summation order of `Σ_j ∂rate/∂x_j · S[j,p]` in
+    /// `ode::sensitivity_derivs` — used to vary from run to run. Floating-point
+    /// addition is not associative, so the returned gradient varied in its last
+    /// bits, and `nuts` on the `ode` backend and the gradient MLE did not
+    /// reproduce: four invocations of one identical `nl-lbfgs` config took 94, 95,
+    /// 96 and 106 objective evaluations.
+    ///
+    /// A single process cannot observe this, so the test re-invokes its own test
+    /// binary with `GH682_CHILD` set; each child scores the same scenario, prints
+    /// the loglik and gradient as raw `f64` bits, and the parent requires every
+    /// child to agree exactly. Eight children: a random order over the four
+    /// compartments of the `infection` rate agrees across all eight only by
+    /// accident.
+    #[test]
+    fn det_grad_is_bit_identical_across_processes() {
+        if std::env::var_os(GH682_CHILD).is_some() {
+            let (compiled, obs_model, params, est, obs_times, dt) = seir_det_grad_scenario();
+            let (ll, grad) =
+                det_grad(&compiled, &obs_model, &obs_times, dt, dt, &params, &est).unwrap();
+            let mut line = format!("GH682-BITS {:016x}", ll.to_bits());
+            for g in &grad {
+                line.push_str(&format!(" {:016x}", g.to_bits()));
+            }
+            println!("{line}");
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("the running test binary's path");
+        let mut seen: Vec<String> = Vec::new();
+        for run in 0..8 {
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "inference::ode_grad::tests::det_grad_is_bit_identical_across_processes",
+                    "--nocapture",
+                ])
+                .env(GH682_CHILD, "1")
+                .output()
+                .expect("spawn the child test process");
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            assert!(
+                out.status.success(),
+                "child run {run} failed ({}):\n{stdout}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let line = stdout
+                .lines()
+                .find(|l| l.starts_with("GH682-BITS "))
+                .unwrap_or_else(|| panic!("child run {run} printed no bits line:\n{stdout}"))
+                .to_string();
+            seen.push(line);
+        }
+
+        // Non-vacuity: the scenario must carry a real gradient, not four zeros
+        // that would agree whatever the summation order.
+        let fields: Vec<&str> = seen[0].split_whitespace().skip(1).collect();
+        assert_eq!(fields.len(), 5, "one loglik + four gradient components");
+        assert!(
+            fields[1..].iter().any(|h| {
+                let v = f64::from_bits(u64::from_str_radix(h, 16).unwrap());
+                v.abs() > 1e-6
+            }),
+            "the scenario must produce a materially nonzero gradient: {}",
+            seen[0]
+        );
+
+        let distinct: std::collections::BTreeSet<&String> = seen.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "det_grad returned {} distinct results over 8 processes (gh#682 — the \
+             ∂rate/∂compartment summation order is not pinned):\n{}",
+            distinct.len(),
+            seen.join("\n")
+        );
+    }
+
+    /// gh#682, the in-process half: every resolved gradient map must be ordered by
+    /// its index, because that order is the summation order the ODE forward
+    /// sensitivity uses and `HashMap` iteration order is not stable.
+    ///
+    /// One compile would not catch a shuffle: `RandomState` re-keys per `HashMap`,
+    /// so every fresh deserialize of the golden orders differently. Twelve compiles
+    /// make an accidental pass (a random order over five compartments is sorted
+    /// about one time in 120) vanishingly unlikely.
+    ///
+    /// `seir_vaccine_seasonal` rather than the `det_grad` fixture: its widest
+    /// `∂rate/∂θ` map carries three parameters and its widest `∂rate/∂compartment`
+    /// map five compartments, so neither check is vacuous. (Every `seir_observations`
+    /// rate reads a single parameter, which is sorted whatever the hash seed.)
+    #[test]
+    fn resolved_gradient_maps_are_index_ordered() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_vaccine_seasonal.ir.json");
+        let src = std::fs::read_to_string(&path).unwrap();
+
+        let mut widest_state = 0usize;
+        let mut widest_param = 0usize;
+        for compile in 0..12 {
+            let mut model: ir::Model = ir::from_str(&src).unwrap();
+            for p in &mut model.parameters {
+                if p.value.resolved_value().is_none() {
+                    p.value = p.value.with_value(0.5);
+                }
+            }
+            let compiled = CompiledModel::new(model).unwrap();
+            for (tr_idx, cg) in compiled.resolved.rate_state_grads_indexed.iter().enumerate() {
+                let idxs: Vec<usize> = cg.0.iter().map(|(j, _)| *j).collect();
+                widest_state = widest_state.max(idxs.len());
+                assert!(
+                    idxs.windows(2).all(|w| w[0] < w[1]),
+                    "compile {compile}: rate_state_grad for transition {tr_idx} is not \
+                     ordered by compartment index: {idxs:?}"
+                );
+            }
+            for (tr_idx, g) in compiled.resolved.rate_grads_indexed.iter().enumerate() {
+                let idxs: Vec<usize> = g.iter().map(|(p, _)| *p).collect();
+                widest_param = widest_param.max(idxs.len());
+                assert!(
+                    idxs.windows(2).all(|w| w[0] < w[1]),
+                    "compile {compile}: rate_grad for transition {tr_idx} is not ordered by \
+                     parameter index: {idxs:?}"
+                );
+            }
+        }
+        // Non-vacuity: a map of one entry is sorted whatever the hash seed.
+        assert!(widest_state >= 2, "no multi-entry ∂rate/∂compartment map was checked");
+        assert!(widest_param >= 2, "no multi-entry ∂rate/∂θ map was checked");
     }
 
     /// The COARSE-`burnin_dt` FD oracle (gh#396 follow-on) — the correctness gate
