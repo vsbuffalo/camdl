@@ -2535,6 +2535,84 @@ impl FitConfig {
         Ok(())
     }
 
+    /// Refuse `nl-lbfgs` on a model whose ODE gradient cannot be taken —
+    /// here, at config-validation time, rather than partway through a search.
+    ///
+    /// `nl-lbfgs` is the only method whose objective calls `det_grad`
+    /// (`fit::nlopt_stage::score_with_gradient`), and `det_grad` runs
+    /// `preflight_gradient_ode` — the ONE place that answers "can this model be
+    /// fit by the ODE gradient?" — before any gradient is taken. Running that
+    /// same gate here, against the same model, converts a mid-search failure
+    /// into a refusal before a leaf is claimed: the user is told what is wrong
+    /// and which method to reach for instead, and no half-written stage is left
+    /// behind. The rules are not restated; the gate's own sentence is quoted.
+    ///
+    /// Like [`Self::validate_priors_present`], this is factored out of
+    /// [`Self::validate`] because it needs the model IR in scope; production
+    /// callers run both.
+    ///
+    /// **What the parameter values are for.** `preflight_gradient_ode` reads
+    /// `params` in exactly one place: to ask whether the model has any
+    /// scheduled effect (`EffectTimes::from_model`). That is a question about
+    /// the model's structure, not about where the optimizer will end up, so the
+    /// declared/`[fixed]`/`[estimate].start` values seeded below answer it as
+    /// well as the fitted ones would.
+    ///
+    /// **What it does NOT do** is re-report parameter-resolution problems. If a
+    /// value is still missing, or the model does not compile, this returns `Ok`
+    /// and leaves the report to `FitRunConfig::build`, whose resolver says
+    /// which parameter and which tier — a better message than anything phrased
+    /// in terms of gradients.
+    pub fn validate_gradient_capability(&self, model: &ir::Model) -> Result<(), String> {
+        let Some(method) = &self.inference.method else {
+            return Ok(());
+        };
+        if method.algorithm.method_kind() != crate::run_meta::FitAlgorithm::NlLbfgs {
+            return Ok(());
+        }
+
+        let mut seeded = model.clone();
+        let fixed = self.problem.fixed.resolve().unwrap_or_default();
+        for p in &mut seeded.parameters {
+            if p.value.resolved_value().is_some() {
+                continue;
+            }
+            let spec = self.problem.estimate.get(&p.name);
+            let v = fixed
+                .get(&p.name)
+                .copied()
+                .or_else(|| spec.and_then(|s| s.start))
+                .or_else(|| spec.and_then(|s| s.bounds).map(|(lo, hi)| 0.5 * (lo + hi)));
+            match v {
+                Some(v) => p.value = p.value.with_value(v),
+                // Unresolved: not this check's error to report.
+                None => return Ok(()),
+            }
+        }
+        let Ok(compiled) = sim::CompiledModel::new(seeded) else {
+            return Ok(());
+        };
+        let estimated: std::collections::HashSet<&str> =
+            self.problem.estimate.keys().map(|s| s.as_str()).collect();
+        let default_params = compiled.default_params.clone();
+        match sim::inference::gradient_capability::preflight_gradient_ode(
+            &compiled,
+            &default_params,
+            &estimated,
+        ) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!(
+                "[method]: `algorithm = \"nl-lbfgs\"` optimizes the ODE marginal \
+                 likelihood using its gradient, and the gradient capability gate \
+                 refuses this model. The gate is shared with `nuts`, the other \
+                 method that takes this gradient, and names it in its reason:\n\n  \
+                 {e}\n\n  \
+                 `algorithm = \"nl-sbplx\"` optimizes the same ODE marginal \
+                 likelihood without a gradient, and has no such requirement."
+            )),
+        }
+    }
+
     /// gh#75: Validate that every estimated parameter has a prior available
     /// from at least one source — either this fit toml's
     /// `[estimate.<name>.prior]` block, or the model IR's `~` syntax —
@@ -3769,6 +3847,70 @@ cooling = 0.7
                 "the {algorithm} error must name the unknown key and the table; got: {err}"
             );
         }
+    }
+
+    /// `nl-lbfgs` on a model the ODE gradient cannot be taken of is refused at
+    /// validation, quoting the capability gate's own sentence and naming the
+    /// derivative-free alternative — so the user learns it before a search
+    /// starts, not from a chain that failed partway through.
+    ///
+    /// The refusal here is the adaptive integrator (`rk45`), whose step
+    /// sequence is discontinuous in θ. Two controls make the assertion
+    /// specific: the same model under `nl-sbplx` validates (the refusal is
+    /// about the gradient, not the model), and `nl-lbfgs` on the same model
+    /// with `rk4` validates (the refusal is about the integrator, not the
+    /// method).
+    #[test]
+    fn nl_lbfgs_is_refused_at_validation_on_a_model_the_gradient_refuses() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_observations.ir.json");
+        let base_model: ir::Model = ir::from_str(
+            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse golden: {e}"));
+
+        let cfg = |algorithm: &str| -> FitConfig {
+            let toml_str = format!(
+                "[model]\ncamdl = \"models/seir.camdl\"\n\n\
+                 [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\n\
+                 [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n\n\
+                 [fixed]\nsigma = 0.2\ngamma = 0.1\nrho = 0.5\nk = 5.0\n\
+                 p_detect = 0.8\nN0 = 100000\nI0 = 10\n\n\
+                 [method]\nalgorithm = \"{algorithm}\"\nbackend = \"ode\"\nchains = 2\n"
+            );
+            FitConfig::from_toml_str(&toml_str)
+                .unwrap_or_else(|e| panic!("parse {algorithm}: {e}"))
+        };
+
+        let mut adaptive = base_model.clone();
+        adaptive.simulation.integrator =
+            ir::model::Integrator::Rk45 { atol: None, rtol: None };
+
+        let err = cfg("nl-lbfgs")
+            .validate_gradient_capability(&adaptive)
+            .expect_err("an rk45 model has no fixed-step forward sensitivity");
+        assert!(
+            err.contains("rk4"),
+            "the gate's own reason must be quoted; got: {err}"
+        );
+        assert!(
+            err.contains("nl-sbplx"),
+            "the refusal must name the derivative-free alternative; got: {err}"
+        );
+        assert!(
+            err.starts_with("[method]:"),
+            "the refusal must say which table it is about; got: {err}"
+        );
+
+        // Control 1: the derivative-free sibling has no gradient requirement.
+        cfg("nl-sbplx")
+            .validate_gradient_capability(&adaptive)
+            .expect("nl-sbplx never asks for a gradient");
+        // Control 2: the same method on the fixed-step model is fine.
+        cfg("nl-lbfgs")
+            .validate_gradient_capability(&base_model)
+            .expect("rk4 is exactly what the forward sensitivity needs");
     }
 
     /// A three-stage pipeline file — the shape the split retires — is refused
