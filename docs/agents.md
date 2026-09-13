@@ -544,11 +544,11 @@ if the model source has drifted from the one the fit ran on.
 
 The full, verified schema — `[model]`, `[data.observations]`, `[estimate]`
 (bounds, prior, transform), `[fixed]`, and one `[method]` with
-`algorithm = if2|pgas|pmmh|pfilter|mh|nuts|nl-sbplx|nl-bobyqa` and its `starts`
-rule — is `camdl docs fit-toml`. Two load-bearing rules: every estimated
-parameter needs an explicit prior for a Bayesian method (in the model's `~`
-declaration or `[estimate].prior`; PGAS refuses _silent_ flat), and the
-stochastic-process methods run the `chain_binomial` backend.
+`algorithm = if2|pgas|pmmh|pfilter|mh|nuts|nl-sbplx|nl-bobyqa|nl-lbfgs` and its
+`starts` rule — is `camdl docs fit-toml`. Two load-bearing rules: every
+estimated parameter needs an explicit prior for a Bayesian method (in the
+model's `~` declaration or `[estimate].prior`; PGAS refuses _silent_ flat), and
+the stochastic-process methods run the `chain_binomial` backend.
 
 ---
 

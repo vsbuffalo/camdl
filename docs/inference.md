@@ -1276,7 +1276,35 @@ this object — appropriate for equilibrium or large-population models where
 demographic stochasticity is negligible and running a particle filter would be
 structurally redundant.
 
-Two Bayesian samplers run on this likelihood. Both are `[beta]`.
+Two things can be asked of this likelihood: where its maximum is, and what the
+posterior around it looks like. Three NLopt optimizers answer the first and two
+samplers answer the second; all five are `[beta]`.
+
+**Maximum likelihood: `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`.** Each runs a local
+NLopt algorithm on `p(y | θ, ODE)` inside the `[estimate]` box, from as many
+independent starts as `chains` says, and reports the best. They differ only in
+how they search. `nl-sbplx` (a Nelder–Mead variant) and `nl-bobyqa` (a quadratic
+trust region) are **derivative-free**: they learn the local shape by evaluating
+the likelihood at neighbouring points, so one objective evaluation is one ODE
+solve, and a search in `d` dimensions needs many of them before it can take a
+confident step. `nl-lbfgs` is **gradient-based**: each evaluation integrates the
+augmented `(x, ∂x/∂θ)` system once — the same forward sensitivities `nuts` uses
+— and returns the log-likelihood together with its exact gradient, so the
+direction to move in is read off rather than sampled for.
+
+The trade is one of cost per step against number of steps. A gradient evaluation
+costs more than a value evaluation, and more as the number of estimated
+parameters grows, because the sensitivity block carries one column per
+parameter; but it replaces the dozens of probing evaluations a derivative-free
+method spends discovering the same direction. On a five-parameter SEIR fitted to
+weekly incidence, `nl-sbplx` reached its own convergence in 3609 objective
+evaluations and 2.9 s where `nl-lbfgs` took 94 and 0.22 s — the same optimum,
+the same log-likelihood to six decimals. On a two-parameter SIR the counts were
+216 and 14. Start with `nl-sbplx`, which fits anything the ODE backend can
+integrate; reach for `nl-lbfgs` when the search itself is the bottleneck and the
+model is differentiable.
+
+**Bayesian posteriors: `mh` and `nuts`.**
 
 **`mh` — gradient-free.** Adaptive Metropolis-Hastings on the deterministic
 marginal. It needs no gradient, so it runs on any ODE model the backend can
@@ -1313,9 +1341,10 @@ message naming the right alternative.
 
 ### The differentiability requirement
 
-`nuts` needs a closed-form gradient of the whole likelihood, so it accepts only
-a **differentiable model**. The capability gate refuses, before the chain starts
-and with a message naming the reason, a model that has:
+`nuts` and `nl-lbfgs` both need a closed-form gradient of the whole likelihood,
+so they accept only a **differentiable model**. One capability gate answers for
+both — there is no second list to drift — and it refuses, with a message naming
+the reason, a model that has:
 
 - a rate or observation term whose gradient the compiler cannot emit (a
   live-but-undifferentiated coefficient — see the NUTS-refusal list in
@@ -1329,16 +1358,31 @@ and with a message naming the reason, a model that has:
   distribution, or a parameterized one whose expression camdl emits no
   initial-condition gradient for.
 
-Any of these is a hard error that points at the fix. A model that genuinely
-needs one of them — a mid-run campaign, an estimated $S_0$ — is fit either with
-gradient-free `mh` on the ODE backend, or with the stochastic-process methods,
-which handle scheduled effects and estimated initial states.
+Any of these is a hard error that points at the fix, raised at config validation
+— before a leaf is claimed, so a refusal costs a message rather than a
+half-written stage. A model that genuinely needs one of them — a mid-run
+campaign, an estimated $S_0$ — is fit either with the gradient-free ODE methods
+(`mh` for a posterior, `nl-sbplx` for an MLE), or with the stochastic-process
+methods, which handle scheduled effects and estimated initial states.
 
-### Running an ODE Bayesian fit
+The gate answers about the model the run will integrate, not the model as
+written. `interventions { }` is toggleable and defaults off, so a fit that
+declares a campaign and never enables it is not refused for a scheduled effect
+its trajectory does not contain.
 
-`mh` and `nuts` are methods like any other: pick the algorithm, set
-`backend = "ode"`, and give each estimated parameter a prior (Bayesian methods
-require one — see "Priors and precedence").
+A refusal that survives to the search is possible in one more way: the gradient
+may be finite everywhere the gate can check and still not be computable at some
+θ the optimizer reaches (a solve that diverges there). `nl-lbfgs` fails that
+chain with the reason and the θ rather than scoring the point badly and carrying
+on, because a gradient method given no derivative has no direction to search in
+— unlike the derivative-free methods, which treat such a point as merely very
+bad and steer away from it.
+
+### Running an ODE fit
+
+These are methods like any other: pick the algorithm and set `backend = "ode"`.
+The Bayesian ones additionally need a prior on every estimated parameter (see
+"Priors and precedence"); the MLE ones do not read priors at all.
 
 ```toml
 [method]
@@ -1347,6 +1391,18 @@ backend = "ode"
 chains = 4
 warmup = 500 # step-size adaptation draws (discarded)
 samples = 500 # posterior draws kept per chain
+```
+
+The MLE methods take `chains` (independent multi-start optimizations),
+`tolerance` (NLopt's `xtol_rel`) and `max_evals` (per-chain evaluation budget),
+and no prior:
+
+```toml
+[method]
+algorithm = "nl-lbfgs" # gradient MLE; needs a differentiable model
+backend = "ode"
+chains = 4
+starts = "uniform_unconstrained" # a spread rule; `single` collapses to one chain
 ```
 
 Gradient-free `mh` takes `iterations` (total MCMC steps) with an optional
@@ -1494,7 +1550,7 @@ How chain (or per-cell) starting points are drawn. Set under `[method]` with the
 `camdl profile --starts <spec>` takes the same rules for its per-cell starts,
 and `--n-starts <N>` says how many chains are drawn from them. Honoured by every
 method: **IF2**, **PGAS**, **PMMH**, **mh**, **nuts**, **NLopt** (`nl-sbplx`,
-`nl-bobyqa`), and **profile**.
+`nl-bobyqa`, `nl-lbfgs`), and **profile**.
 
 ```toml
 [method]
@@ -1550,10 +1606,10 @@ uniform-random chains by ~80,000 nats) can set `starts = "lhs"`.
 2. **Reproducibility-critical tests** — `single` gives byte-identical chain
    starts across runs at the same seed; LHS/uniform draws shift if the RNG order
    changes upstream.
-3. **Deterministic NLopt with no spread desired** — `nl-sbplx` and `nl-bobyqa`
-   are deterministic, so `single` + `chains > 1` gives N identical optimisations
-   and the chain-agreement gate is uninformative; the run collapses to one chain
-   and says so.
+3. **Deterministic NLopt with no spread desired** — `nl-sbplx`, `nl-bobyqa` and
+   `nl-lbfgs` are all deterministic, so `single` + `chains > 1` gives N
+   identical optimisations and the chain-agreement gate is uninformative; the
+   run collapses to one chain and says so.
 
 **`camdl profile`** dispatches the same way at each grid cell:
 `--starts lhs --n-starts N` draws N stratified per-cell starts across the

@@ -2552,16 +2552,17 @@ at load against the `METHODS` registry
 (`rust/crates/cli/src/fit/methods.rs:68`), which is the single source of truth
 for `camdl fit methods`, the runtime banners, and the invalid-pair error.
 
-| `algorithm` | `backend`        | status | category   | role                                                             |
-| ----------- | ---------------- | ------ | ---------- | ---------------------------------------------------------------- |
-| `if2`       | `chain_binomial` | stable | inference  | Iterated filtering → MLE.                                        |
-| `pgas`      | `chain_binomial` | stable | inference  | Particle Gibbs + NUTS on θ → posterior. Default Bayesian path.   |
-| `pmmh`      | `chain_binomial` | stable | inference  | Pseudo-marginal MH → posterior. Degrades for T > 500.            |
-| `pfilter`   | `chain_binomial` | stable | diagnostic | Bootstrap particle filter at fixed θ → loglik, ESS, prequential. |
-| `nl-sbplx`  | `ode`            | beta   | inference  | NLopt Sbplx → deterministic MLE. Robust at bounds.               |
-| `nl-bobyqa` | `ode`            | beta   | inference  | NLopt BOBYQA → deterministic MLE. Faster, fails at bounds.       |
-| `mh`        | `ode`            | beta   | inference  | Gradient-free MH on the ODE marginal likelihood → posterior.     |
-| `nuts`      | `ode`            | beta   | inference  | NUTS via forward sensitivities on the ODE marginal → posterior.  |
+| `algorithm` | `backend`        | status | category   | role                                                                                                  |
+| ----------- | ---------------- | ------ | ---------- | ----------------------------------------------------------------------------------------------------- |
+| `if2`       | `chain_binomial` | stable | inference  | Iterated filtering → MLE.                                                                             |
+| `pgas`      | `chain_binomial` | stable | inference  | Particle Gibbs + NUTS on θ → posterior. Default Bayesian path.                                        |
+| `pmmh`      | `chain_binomial` | stable | inference  | Pseudo-marginal MH → posterior. Degrades for T > 500.                                                 |
+| `pfilter`   | `chain_binomial` | stable | diagnostic | Bootstrap particle filter at fixed θ → loglik, ESS, prequential.                                      |
+| `nl-sbplx`  | `ode`            | beta   | inference  | NLopt Sbplx → deterministic MLE. Robust at bounds.                                                    |
+| `nl-bobyqa` | `ode`            | beta   | inference  | NLopt BOBYQA → deterministic MLE. Faster, fails at bounds.                                            |
+| `nl-lbfgs`  | `ode`            | beta   | inference  | NLopt L-BFGS with the forward-sensitivity gradient → deterministic MLE; needs a differentiable model. |
+| `mh`        | `ode`            | beta   | inference  | Gradient-free MH on the ODE marginal likelihood → posterior.                                          |
+| `nuts`      | `ode`            | beta   | inference  | NUTS via forward sensitivities on the ODE marginal → posterior.                                       |
 
 The `ode`-backend samplers fit the deterministic marginal likelihood
 `p(y | θ, ODE skeleton)`, not the stochastic `p(y | θ)` — a different
@@ -2646,8 +2647,8 @@ as `{ from_mle = "@scout" }` names.
 | `record_ancestry`    | `false` | Record per-step ancestor indices for smoothing-path reconstruction.         |
 | `record_prequential` | `true`  | Record per-step predictive samples and log-likelihoods for `camdl compare`. |
 
-**`nl-sbplx` / `nl-bobyqa`** — `backend`, `chains` required (`NloptStageConfig`,
-`config_v2.rs:1340`).
+**`nl-sbplx` / `nl-bobyqa` / `nl-lbfgs`** — `backend`, `chains` required
+(`NloptStageConfig`, `config_v2.rs`). All three read the same keys.
 
 | key         | default | meaning                                                              |
 | ----------- | ------- | -------------------------------------------------------------------- |
@@ -2659,8 +2660,24 @@ as `{ from_mle = "@scout" }` names.
 `starts = "single"` defeats multi-start, since every chain then converges from
 the same point.
 
+`nl-sbplx` and `nl-bobyqa` are derivative-free: one objective evaluation is one
+ODE solve. `nl-lbfgs` is the gradient method — one objective evaluation is one
+_augmented_ solve carrying `∂x/∂θ` alongside the state, returning the
+log-likelihood and its gradient together (the same forward-sensitivity machinery
+`nuts` uses, `sim::inference::ode_grad::det_grad`). The budget and the progress
+step count that unit for all three.
+
+Because it takes a gradient, `nl-lbfgs` accepts only a **differentiable model**
+— the same capability gate `nuts` runs, listed under `nuts` above. The
+difference is when it fires: for `nl-lbfgs` it is checked at config validation,
+before any leaf is claimed, and the refusal names `nl-sbplx` as the
+derivative-free alternative on the same likelihood. If the gradient later turns
+out not to be computable at some θ the search reaches, that chain fails with the
+reason and the θ rather than scoring the point badly and continuing — L-BFGS has
+no direction to search in there.
+
 **Observation alignment.** `[config] obs_alignment` is resolved per algorithm
-(`methods.rs:495`). `if2` and `pfilter` step exactly to observation times and
+(`methods.rs:516`). `if2` and `pfilter` step exactly to observation times and
 reject `"snap"`. `pgas` uses a uniform grid and rejects `"exact"`. Plain `pmmh`
 is exact; correlated `pmmh` (`rho` set) pre-draws one block of random numbers
 per observation window, each sized at that window's own substeps, so an
@@ -5082,13 +5099,13 @@ replicate of one fixed point — neither an MCMC phase nor a search, so it
 publishes no counter rather than one labelled with a phase it is not in. For the
 rest, `step` of `total` counts:
 
-| method                  | one step is                                            | `total`            | `phase`                             |
-| ----------------------- | ------------------------------------------------------ | ------------------ | ----------------------------------- |
-| `pgas`                  | one sweep                                              | `sweeps`           | `burn_in` → `sampling` at `burn_in` |
-| `pmmh`, `mh`            | one MCMC iteration                                     | `iterations`       | `burn_in` → `sampling` at `burn_in` |
-| `nuts`                  | one iteration, warm-up and sampling counted end to end | `warmup + samples` | `burn_in` → `sampling` at `warmup`  |
-| `if2`                   | one cooling iteration                                  | `iterations`       | `optimizing`                        |
-| `nl-sbplx`, `nl-bobyqa` | one objective evaluation                               | `max_evals`        | `optimizing`                        |
+| method                              | one step is                                            | `total`            | `phase`                             |
+| ----------------------------------- | ------------------------------------------------------ | ------------------ | ----------------------------------- |
+| `pgas`                              | one sweep                                              | `sweeps`           | `burn_in` → `sampling` at `burn_in` |
+| `pmmh`, `mh`                        | one MCMC iteration                                     | `iterations`       | `burn_in` → `sampling` at `burn_in` |
+| `nuts`                              | one iteration, warm-up and sampling counted end to end | `warmup + samples` | `burn_in` → `sampling` at `warmup`  |
+| `if2`                               | one cooling iteration                                  | `iterations`       | `optimizing`                        |
+| `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs` | one objective evaluation                               | `max_evals`        | `optimizing`                        |
 
 `step` is the furthest **any** chain has reached, and it never moves backward.
 
@@ -5203,11 +5220,11 @@ draws: posterior — 2 draws from pgas method 'pgas' (…/pgas-a0b1da4f/seed_1-0
 ```
 
 Resolution is **by artifact, not by method name**: a leaf has a posterior iff it
-wrote `draws.tsv`. An optimizer-only fit (IF2, `nl-sbplx`, `nl-bobyqa`) resolves
-to an error rather than dressing a single point up as a distribution. The
-canonical file is the method leaf's `draws.tsv` — post-warm-up and thinned —
-**not** `trace.tsv`, which carries warm-up rows for live observability. There is
-no `<fit-dir>/posterior/` directory; the path is
+wrote `draws.tsv`. An optimizer-only fit (IF2, `nl-sbplx`, `nl-bobyqa`,
+`nl-lbfgs`) resolves to an error rather than dressing a single point up as a
+distribution. The canonical file is the method leaf's `draws.tsv` — post-warm-up
+and thinned — **not** `trace.tsv`, which carries warm-up rows for live
+observability. There is no `<fit-dir>/posterior/` directory; the path is
 `<fit-dir>/<method>-<h8>/seed_<N>-<h8>/draws.tsv`.
 
 A raw TSV path still works. If the file carries only the estimated columns (a
@@ -5433,12 +5450,12 @@ sources `fit_toml`, `model_ir`, `flat_explicit`, `flat_fallback`.
 
 ### 12.2 When priors are used at all
 
-| Stage algorithm              | Prior used?                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------ |
-| `pgas`, `pmmh`, `mh`, `nuts` | Yes — the prior density enters the acceptance ratio; a missing prior is a hard error |
-| `if2`                        | No — iterated filtering is maximum likelihood; the code never reads a prior          |
-| `nl-sbplx`, `nl-bobyqa`      | No — deterministic MLE                                                               |
-| `pfilter`                    | No — likelihood evaluation only                                                      |
+| Stage algorithm                     | Prior used?                                                                          |
+| ----------------------------------- | ------------------------------------------------------------------------------------ |
+| `pgas`, `pmmh`, `mh`, `nuts`        | Yes — the prior density enters the acceptance ratio; a missing prior is a hard error |
+| `if2`                               | No — iterated filtering is maximum likelihood; the code never reads a prior          |
+| `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs` | No — deterministic MLE                                                               |
+| `pfilter`                           | No — likelihood evaluation only                                                      |
 
 `--draws prior` needs a proper prior on every _sampled_ parameter; parameters
 with a concrete value (model default, `--scenario`, or fit `[fixed]`) are held
