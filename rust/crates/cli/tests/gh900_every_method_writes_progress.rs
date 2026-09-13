@@ -105,8 +105,8 @@ fn fit_run(dir: &Path, tag: &str, fit_toml: String) -> Run {
 // ── Claim 1: every method ends `done` ────────────────────────────────────────
 
 /// SIR with a daily prevalence count. Runs on both backends the methods below
-/// need: chain-binomial for PGAS / PMMH / IF2, the ODE skeleton for NUTS and
-/// `nl-sbplx`.
+/// need: chain-binomial for PGAS / PMMH / IF2, the ODE skeleton for NUTS and the
+/// three NLopt MLEs.
 const SIR: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -181,6 +181,17 @@ max_evals = 40
 [method.dt_check]
 enabled = false
 "#,
+        // The gradient NLopt method counts the SAME step — one objective
+        // evaluation — so the heartbeat has to bump on the `det_grad` branch
+        // too. A method absent from this list is exactly the silent gap gh#900
+        // was about.
+        "nl-lbfgs" => r#"algorithm = "nl-lbfgs"
+backend   = "ode"
+chains    = 1
+max_evals = 40
+[method.dt_check]
+enabled = false
+"#,
         other => panic!("unknown method {other}"),
     }
 }
@@ -209,7 +220,7 @@ fn every_method_leaves_a_terminal_progress_record() {
         .unwrap();
     assert!(sim.status.success(), "data gen: {}", String::from_utf8_lossy(&sim.stderr));
 
-    for method in ["pgas", "pmmh", "if2", "nuts", "nl-sbplx"] {
+    for method in ["pgas", "pmmh", "if2", "nuts", "nl-sbplx", "nl-lbfgs"] {
         let run = fit_run(
             dir,
             method,
