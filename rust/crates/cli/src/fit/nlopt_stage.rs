@@ -29,9 +29,9 @@ use sim::inference::compute_ode_loglik;
 use crate::fit::state::FitState;
 use crate::fit::provenance;
 
-/// Run a single NLopt-flavoured method (`Algorithm::NlSbplx` or
-/// `Algorithm::NlBobyqa`). Errors with a clear message if the algorithm is
-/// anything else — caller's job to dispatch correctly.
+/// Run a single NLopt-flavoured method (`Algorithm::NlSbplx`,
+/// `Algorithm::NlBobyqa` or `Algorithm::NlLbfgs`). Errors with a clear message
+/// if the algorithm is anything else — caller's job to dispatch correctly.
 #[allow(clippy::too_many_arguments)]
 pub fn run_stage(
     fit: &Problem,
@@ -58,6 +58,8 @@ pub fn run_stage(
         match algorithm {
             NloptAlgorithm::Sbplx => "Subspace simplex; robust to boundary non-smoothness",
             NloptAlgorithm::Bobyqa => "Quadratic trust region; smooth-objective only",
+            NloptAlgorithm::Lbfgs =>
+                "Quasi-Newton on the forward-sensitivity gradient; differentiable models only",
         }
     );
     eprintln!(
@@ -115,18 +117,18 @@ pub fn run_stage(
         .map(|p| p.name.clone())
         .collect();
 
-    // Sbplx/BOBYQA are deterministic, so under a point rule every chain's
-    // outcome is identical: run one chain and skip the wasted compute. A
-    // spread rule (`lhs` is the natural one here) gives multi-start basin
+    // Every NLopt algorithm here is deterministic, so under a point rule every
+    // chain's outcome is identical: run one chain and skip the wasted compute.
+    // A spread rule (`lhs` is the natural one here) gives multi-start basin
     // exploration, and the chain-agreement gate then becomes informative.
     let effective_chains = if starts.rule.is_point() { 1 } else { n_chains };
     if effective_chains < n_chains {
         eprintln!(
             "  starts = {} with chains={}: collapsing to 1 chain \
-             (Sbplx/BOBYQA are deterministic, redundant chains would \
-             produce identical output). Set `starts = \"lhs\"` for \
-             multi-start basin exploration.",
-            starts.rule.spelled(), n_chains
+             ({} is deterministic, redundant chains would produce \
+             identical output). Set `starts = \"lhs\"` for multi-start \
+             basin exploration.",
+            starts.rule.spelled(), n_chains, algorithm.as_str()
         );
     }
     let drawn = crate::fit::runner::draw_chain_starts_for(
@@ -345,8 +347,9 @@ fn extract_nlopt_config(
     match algorithm {
         Algorithm::NlSbplx(c) => Ok((NloptAlgorithm::Sbplx, c)),
         Algorithm::NlBobyqa(c) => Ok((NloptAlgorithm::Bobyqa, c)),
+        Algorithm::NlLbfgs(c) => Ok((NloptAlgorithm::Lbfgs, c)),
         other => Err(format!(
-            "nlopt_stage::run_stage: expected nl-sbplx or nl-bobyqa, got {}",
+            "nlopt_stage::run_stage: expected nl-sbplx, nl-bobyqa or nl-lbfgs, got {}",
             other.method_name()
         )),
     }
@@ -720,6 +723,15 @@ mod tests {
     }
 
     #[test]
+    fn extract_nlopt_config_lbfgs_returns_lbfgs_algorithm() {
+        let stage = Algorithm::NlLbfgs(nlopt_config());
+        let (algo, cfg) = extract_nlopt_config(&stage).expect("ok");
+        assert_eq!(algo, NloptAlgorithm::Lbfgs);
+        assert!(algo.uses_gradient(), "nl-lbfgs is the gradient algorithm");
+        assert_eq!(cfg.chains, 4);
+    }
+
+    #[test]
     fn extract_nlopt_config_rejects_non_nlopt_stage() {
         // PFilter is the simplest non-nlopt variant to construct.
         let stage = Algorithm::PFilter {
@@ -730,7 +742,7 @@ mod tests {
             record_prequential: false,
         };
         let err = extract_nlopt_config(&stage).expect_err("must reject");
-        assert!(err.contains("expected nl-sbplx or nl-bobyqa"),
+        assert!(err.contains("expected nl-sbplx, nl-bobyqa or nl-lbfgs"),
             "error must name the expected variants; got: {err}");
         assert!(err.contains("pfilter"),
             "error must name the actual variant; got: {err}");

@@ -188,7 +188,8 @@ impl From<FitAlgorithm> for LoglikType {
             FitAlgorithm::Mh
             | FitAlgorithm::Nuts
             | FitAlgorithm::NlSbplx
-            | FitAlgorithm::NlBobyqa => LoglikType::OdeMarginal,
+            | FitAlgorithm::NlBobyqa
+            | FitAlgorithm::NlLbfgs => LoglikType::OdeMarginal,
         }
     }
 }

@@ -6,8 +6,8 @@
 //! Each algorithm structurally requires a specific backend — PF-based
 //! algorithms (if2 / pgas / pmmh) need the stochastic process kernel
 //! (`chain_binomial`); deterministic-optimizer or exact-likelihood algorithms
-//! (nl-sbplx / nl-bobyqa, and Phase 2/3's `mh` / `nuts`) need the deterministic
-//! `ode` skeleton.
+//! (nl-sbplx / nl-bobyqa / nl-lbfgs, and Phase 2/3's `mh` / `nuts`) need the
+//! deterministic `ode` skeleton.
 //!
 //! `METHODS` is the canonical list of supported pairs. The fit.toml validator,
 //! `camdl fit methods` subcommand, runtime status banners, and invalid-pair
@@ -137,6 +137,24 @@ pub const METHODS: &[InferenceMethod] = &[
              nl-sbplx unless you've confirmed the boundary is interior.",
     },
     InferenceMethod {
+        algorithm: FitAlgorithm::NlLbfgs,
+        backend: InferenceBackend::Ode,
+        category: MethodCategory::Inference,
+        status: MethodStatus::Beta,
+        one_liner: "NLopt L-BFGS with the forward-sensitivity gradient → \
+                    deterministic MLE; needs a differentiable model.",
+        use_for: "deterministic MLE where the derivative-free search is the \
+                  bottleneck — many estimated parameters, or a smooth \
+                  likelihood whose curvature Sbplx has to rediscover by \
+                  sampling.",
+        status_note:
+            "Requires a differentiable model: the same capability gate `nuts` \
+             runs refuses an unsupported rate/observation gradient, an \
+             adaptive integrator, a scheduled effect, or a parameterized \
+             initial condition — at config validation, before any \
+             optimization. Use `nl-sbplx` when the gate refuses.",
+    },
+    InferenceMethod {
         algorithm: FitAlgorithm::Mh,
         backend: InferenceBackend::Ode,
         category: MethodCategory::Inference,
@@ -218,6 +236,7 @@ fn parse_algorithm(s: &str) -> Option<FitAlgorithm> {
         "pfilter" => FitAlgorithm::Pfilter,
         "nl-sbplx" => FitAlgorithm::NlSbplx,
         "nl-bobyqa" => FitAlgorithm::NlBobyqa,
+        "nl-lbfgs" => FitAlgorithm::NlLbfgs,
         _ => return None,
     })
 }
@@ -304,8 +323,10 @@ fn rejection_reason(
              algorithm = \"mh\"     vanilla MH on the deterministic \
                                        likelihood directly (Phase 2)",
         ),
-        (A::NlSbplx, B::ChainBinomial) | (A::NlBobyqa, B::ChainBinomial) => Some(
-            "NLopt deterministic optimizers (Sbplx, BOBYQA) operate on a \
+        (A::NlSbplx, B::ChainBinomial)
+        | (A::NlBobyqa, B::ChainBinomial)
+        | (A::NlLbfgs, B::ChainBinomial) => Some(
+            "NLopt deterministic optimizers (Sbplx, BOBYQA, L-BFGS) operate on a \
              smooth objective. Under the chain_binomial backend the \
              single-trajectory loglik is a noisy estimator of the true \
              marginal likelihood — the optimizer sees ranking noise that \
@@ -545,7 +566,7 @@ pub fn resolve_obs_alignment(
         // PF algorithms (if2/pgas/pmmh/pfilter). The arm exists for exhaustiveness;
         // obs alignment is a particle-filter concept (ODE scores on the integrator
         // grid), so it is a clear error rather than a panic.
-        A::NlSbplx | A::NlBobyqa | A::Mh | A::Nuts => Err(format!(
+        A::NlSbplx | A::NlBobyqa | A::NlLbfgs | A::Mh | A::Nuts => Err(format!(
             "obs_alignment does not apply to the ODE algorithm '{algorithm}' — \
              observations are scored on the integrator grid."
         )),
@@ -673,7 +694,7 @@ pub fn validate_ic_free(
              Use one of those, or remove `ic_free = true` from the fit."
                 .into(),
         ),
-        A::NlSbplx | A::NlBobyqa | A::Mh | A::Nuts => Err(format!(
+        A::NlSbplx | A::NlBobyqa | A::NlLbfgs | A::Mh | A::Nuts => Err(format!(
             "ic_free = true is not supported with the `{algorithm}` algorithm \
              (ODE backend). The deterministic likelihood (compute_ode_loglik) \
              sums over every observation time with no first-observation skip, so \

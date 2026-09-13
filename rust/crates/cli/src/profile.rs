@@ -91,6 +91,8 @@ impl ProfileAlgo {
                 crate::run_meta::FitAlgorithm::NlSbplx,
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) =>
                 crate::run_meta::FitAlgorithm::NlBobyqa,
+            ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs) =>
+                crate::run_meta::FitAlgorithm::NlLbfgs,
         }
     }
 }
@@ -1159,6 +1161,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         ProfileAlgo::Pmmh => "PMMH",
         ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx) => "nl-sbplx",
         ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) => "nl-bobyqa",
+        ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs) => "nl-lbfgs",
     };
     eprintln!("profile: {} grid ({}) × {} starts × {} seeds = {} {} runs",
         grid_points.len(), dim_str, n_starts, seeds.len(), total_jobs, algo_label);

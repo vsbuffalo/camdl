@@ -84,6 +84,7 @@ pub enum FitAlgorithm {
     #[serde(rename = "pfilter")]  Pfilter,
     #[serde(rename = "nl-sbplx")] NlSbplx,
     #[serde(rename = "nl-bobyqa")] NlBobyqa,
+    #[serde(rename = "nl-lbfgs")] NlLbfgs,
 }
 
 impl FitAlgorithm {
@@ -99,6 +100,7 @@ impl FitAlgorithm {
             FitAlgorithm::Pfilter  => "pfilter",
             FitAlgorithm::NlSbplx  => "nl-sbplx",
             FitAlgorithm::NlBobyqa => "nl-bobyqa",
+            FitAlgorithm::NlLbfgs  => "nl-lbfgs",
         }
     }
 
@@ -127,13 +129,17 @@ impl FitAlgorithm {
 
     /// An optimizer: it returns a single best-fit point (no posterior cloud), so
     /// a predictive can only ever plug those parameters in — there is no band.
-    /// IF2 and the NLopt family (sbplx / bobyqa) are optimizers. `Pfilter` is a
+    /// IF2 and the NLopt family (sbplx / bobyqa / lbfgs) are optimizers.
+    /// `Pfilter` is a
     /// likelihood evaluation, not a fit, so it is *neither* a sampler nor an
     /// optimizer.
     pub fn is_optimizer(self) -> bool {
         matches!(
             self,
-            FitAlgorithm::If2 | FitAlgorithm::NlSbplx | FitAlgorithm::NlBobyqa
+            FitAlgorithm::If2
+                | FitAlgorithm::NlSbplx
+                | FitAlgorithm::NlBobyqa
+                | FitAlgorithm::NlLbfgs
         )
     }
 }

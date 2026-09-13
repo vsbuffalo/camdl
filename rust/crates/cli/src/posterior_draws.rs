@@ -243,6 +243,7 @@ fn fit_algorithm_label(m: FitAlgorithm) -> &'static str {
         FitAlgorithm::Pfilter => "particle filter",
         FitAlgorithm::NlSbplx => "NLopt/sbplx",
         FitAlgorithm::NlBobyqa => "NLopt/bobyqa",
+        FitAlgorithm::NlLbfgs => "NLopt/lbfgs",
     }
 }
 

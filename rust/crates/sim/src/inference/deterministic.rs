@@ -18,14 +18,17 @@ use nlopt::{Algorithm, Nlopt, Target};
 // that fact callable.
 pub use nlopt::SuccessState;
 
-/// Which NLopt algorithm to run. Phase 1 surfaces two — `Sbplx` is the default
-/// for compartmental likelihoods (smooth interior, possibly non-smooth at
-/// parameter-bound boundaries); `Bobyqa` is faster on smooth objectives but
-/// fails at boundaries.
+/// Which NLopt algorithm to run. `Sbplx` is the default for compartmental
+/// likelihoods (smooth interior, possibly non-smooth at parameter-bound
+/// boundaries); `Bobyqa` is faster on smooth objectives but fails at
+/// boundaries. Both are derivative-free. `Lbfgs` is the gradient method: it
+/// asks for `∇` at every point, which the caller supplies through the
+/// objective's gradient slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NloptAlgorithm {
     Sbplx,
     Bobyqa,
+    Lbfgs,
 }
 
 impl NloptAlgorithm {
@@ -33,6 +36,7 @@ impl NloptAlgorithm {
         match self {
             Self::Sbplx => Algorithm::Sbplx,
             Self::Bobyqa => Algorithm::Bobyqa,
+            Self::Lbfgs => Algorithm::Lbfgs,
         }
     }
 
@@ -40,7 +44,17 @@ impl NloptAlgorithm {
         match self {
             Self::Sbplx => "nl-sbplx",
             Self::Bobyqa => "nl-bobyqa",
+            Self::Lbfgs => "nl-lbfgs",
         }
+    }
+
+    /// Whether NLopt will ask this algorithm's objective for a gradient — the
+    /// `NLOPT_{G,L}D_*` half of the naming convention, where `D` "denotes
+    /// derivative-free/gradient-based algorithms" (NLopt Algorithms reference,
+    /// "Local gradient-based optimization"). A derivative-free algorithm passes
+    /// `None` in the gradient slot and the caller must not compute one.
+    pub fn uses_gradient(self) -> bool {
+        matches!(self, Self::Lbfgs)
     }
 }
 
@@ -191,6 +205,15 @@ where
         Target::Maximize,
         user_data,
     );
+    // Box bounds are set for every algorithm here, gradient ones included.
+    // `NLOPT_LD_LBFGS` ("Low-storage BFGS") is one of the local gradient-based
+    // algorithms, and the NLopt Algorithms reference says of that family: "Of
+    // these algorithms, only MMA and SLSQP support arbitrary nonlinear
+    // inequality constraints, and only SLSQP supports nonlinear equality
+    // constraints; the rest support bound-constrained or unconstrained problems
+    // only." (NLopt Algorithms, "Local gradient-based optimization".) So the
+    // box is honoured — which this caller depends on, since every estimated
+    // parameter carries a natural-scale `[lower, upper]`.
     opt.set_lower_bounds(&lower)
         .map_err(|e| format!("nlopt set_lower_bounds: {:?}", e))?;
     opt.set_upper_bounds(&upper)

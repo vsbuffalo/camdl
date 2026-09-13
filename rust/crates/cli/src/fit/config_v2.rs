@@ -1256,10 +1256,19 @@ pub enum Algorithm {
     /// fails at parameter-bound boundaries.
     #[serde(rename = "nl-bobyqa")]
     NlBobyqa(NloptStageConfig),
+
+    /// NLopt L-BFGS — the gradient deterministic MLE on the ODE-skeleton
+    /// likelihood. Its objective supplies `∇_θ log p(y | θ, ODE)` from the
+    /// forward sensitivities (`sim::inference::ode_grad::det_grad`), so the
+    /// model has to be one that gradient can be taken of; the gradient
+    /// capability gate refuses the rest at config-validation time, naming
+    /// `nl-sbplx` as the derivative-free alternative.
+    #[serde(rename = "nl-lbfgs")]
+    NlLbfgs(NloptStageConfig),
 }
 
-/// Shared config for the two NLopt deterministic MLE stages
-/// (`nl-sbplx`, `nl-bobyqa`). Both algorithms read identical knobs;
+/// Shared config for the three NLopt deterministic MLE stages
+/// (`nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`). All three read identical knobs;
 /// the variant tag picks which NLopt algorithm runs.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1426,7 +1435,8 @@ impl Method {
             Algorithm::IF2 { .. }
             | Algorithm::PFilter { .. }
             | Algorithm::NlSbplx(_)
-            | Algorithm::NlBobyqa(_) => self.payload_minus(&[]),
+            | Algorithm::NlBobyqa(_)
+            | Algorithm::NlLbfgs(_) => self.payload_minus(&[]),
         }
     }
 
@@ -1503,6 +1513,7 @@ impl Algorithm {
             Algorithm::PFilter  { .. } => FitAlgorithm::Pfilter,
             Algorithm::NlSbplx  { .. } => FitAlgorithm::NlSbplx,
             Algorithm::NlBobyqa { .. } => FitAlgorithm::NlBobyqa,
+            Algorithm::NlLbfgs  { .. } => FitAlgorithm::NlLbfgs,
         }
     }
 
@@ -1518,7 +1529,7 @@ impl Algorithm {
             | Algorithm::Mh      { backend, .. }
             | Algorithm::Nuts    { backend, .. }
             | Algorithm::PFilter { backend, .. } => *backend,
-            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) => c.backend,
+            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) => c.backend,
         }
     }
 
@@ -1534,7 +1545,7 @@ impl Algorithm {
             Algorithm::Mh { chains, .. } => *chains,
             Algorithm::Nuts { chains, .. } => *chains,
             Algorithm::PFilter { .. } => 1,
-            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) => c.chains,
+            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) => c.chains,
         }
     }
 
@@ -1551,7 +1562,10 @@ impl Algorithm {
             Algorithm::PMMH { iterations, .. } => *iterations as u64,
             Algorithm::Mh { iterations, .. } => *iterations as u64,
             Algorithm::Nuts { samples, .. } => *samples as u64,
-            Algorithm::PFilter { .. } | Algorithm::NlSbplx(_) | Algorithm::NlBobyqa(_) => 0,
+            Algorithm::PFilter { .. }
+            | Algorithm::NlSbplx(_)
+            | Algorithm::NlBobyqa(_)
+            | Algorithm::NlLbfgs(_) => 0,
         }
     }
 
@@ -1640,7 +1654,7 @@ impl Algorithm {
                 if cli.record_ancestry { *record_ancestry = true; }
                 if cli.record_prequential { *record_prequential = true; }
             }
-            Algorithm::NlSbplx(cfg) | Algorithm::NlBobyqa(cfg) => {
+            Algorithm::NlSbplx(cfg) | Algorithm::NlBobyqa(cfg) | Algorithm::NlLbfgs(cfg) => {
                 if let Some(db) = cli.decibans_thresh { cfg.gate.decibans_thresh = db; }
                 if cli.no_dt_check { cfg.dt_check.enabled = false; }
                 if let Some(n) = cli.dt_check_halvings { cfg.dt_check.n_halvings = n; }
@@ -1687,7 +1701,7 @@ pub struct CliStageOverrides {
     /// the MLE.
     pub cooling_target_iters: Option<usize>,
     /// `--decibans-thresh`: overrides `gate.decibans_thresh` on stages that
-    /// carry a `GateConfig` (IF2, nl-sbplx, nl-bobyqa). The applied gate is
+    /// carry a `GateConfig` (IF2, nl-sbplx, nl-bobyqa, nl-lbfgs). The applied gate is
     /// persisted in the leaf (`resolved_gate`), so it is stored output.
     pub decibans_thresh: Option<f64>,
     /// `--no-dt-check`: disables the post-fit Richardson dt-check, whose
@@ -2354,20 +2368,23 @@ impl FitConfig {
     }
 
     /// gh#439 A2: does the method read the WrtPop state-Jacobian
-    /// (`rate_state_grad` / `projection_state_grad`)? Only `nuts` on the `ode`
-    /// backend does — it drives the ODE forward-sensitivity gradient
-    /// (`ode_grad::det_grad`). Every other (algorithm, backend) cell — IF2, PGAS,
-    /// PMMH, `mh`, the particle filter — is gradient-free with respect to the
+    /// (`rate_state_grad` / `projection_state_grad`)? The two `ode`-backend
+    /// gradient cells do — `nuts` (Bayesian) and `nl-lbfgs` (MLE), both driven
+    /// by the ODE forward-sensitivity gradient (`ode_grad::det_grad`). Every
+    /// other (algorithm, backend) cell — IF2, PGAS, PMMH, `mh`, `nl-sbplx`,
+    /// `nl-bobyqa`, the particle filter — is gradient-free with respect to the
     /// state, so the model can compile lean (`camdlc --no-state-grad`), dropping
     /// the dense ~O(G^3) Jacobian that dominates coupled-model IR. Consumed by
     /// `cmd_fit_run_v2` to pick the compile mode; the resulting bit is folded into
-    /// the IR-cache key, so a lean entry is never reused for a nuts+ode fit (and
+    /// the IR-cache key, so a lean entry is never reused for a gradient fit (and
     /// run identity is gradient-independent, so lean vs full hash the same model).
     pub fn needs_state_grad(&self) -> bool {
         use crate::run_meta::{FitAlgorithm, InferenceBackend};
         self.inference.method.as_ref().is_some_and(|m| {
-            m.algorithm.method_kind() == FitAlgorithm::Nuts
-                && m.algorithm.backend() == InferenceBackend::Ode
+            matches!(
+                m.algorithm.method_kind(),
+                FitAlgorithm::Nuts | FitAlgorithm::NlLbfgs
+            ) && m.algorithm.backend() == InferenceBackend::Ode
         })
     }
 
@@ -3708,6 +3725,50 @@ cooling = 0.7
         let err = parse(&stale_chain).expect_err("`init_mle` under [method] is not a key");
         assert!(err.contains("from_posterior") && err.contains("from_mle"),
             "must name both sourced rules; got: {err}");
+    }
+
+    /// The NLopt stages carry the same five keys whether or not the algorithm
+    /// takes a gradient, so a key invented for the gradient one — `gradient =
+    /// true`, the shape a user reaches for after reading that `nl-lbfgs` is
+    /// "the gradient method" — is not a knob on either. serde cannot deny it
+    /// (the `Algorithm` enum is internally tagged, gh#241 C3), so the
+    /// post-parse `validate_method_keys` pass is what refuses it; pin that for
+    /// `nl-lbfgs` and for a gradient-free sibling so the two cannot drift.
+    #[test]
+    fn nlopt_methods_reject_a_key_neither_of_them_has() {
+        let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
+                    [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
+                    [estimate]\nbeta = { bounds = [0.01, 2.0] }\n\
+                    [fixed]\nN0 = 1000000\n";
+        for algorithm in ["nl-lbfgs", "nl-sbplx"] {
+            let ok = format!(
+                "{base}[method]\nalgorithm = \"{algorithm}\"\nbackend = \"ode\"\n\
+                 chains = 2\ntolerance = 1e-8\nmax_evals = 200\n"
+            );
+            let cfg = parse(&ok)
+                .unwrap_or_else(|e| panic!("a valid {algorithm} method must parse: {e}"));
+            assert_eq!(
+                cfg.inference.method.as_ref().unwrap().algorithm.method_name(),
+                algorithm,
+                "the parsed variant must be the one the tag named"
+            );
+
+            let bad = format!(
+                "{base}[method]\nalgorithm = \"{algorithm}\"\nbackend = \"ode\"\n\
+                 chains = 2\ngradient = true\n"
+            );
+            let err = parse(&bad).err().unwrap_or_else(|| {
+                panic!(
+                    "`gradient = true` under a {algorithm} [method] must be rejected, \
+                     not silently dropped — a dropped key is neither applied nor \
+                     hashed into the stage identity"
+                )
+            });
+            assert!(
+                err.contains("gradient") && err.contains("[method]"),
+                "the {algorithm} error must name the unknown key and the table; got: {err}"
+            );
+        }
     }
 
     /// A three-stage pipeline file — the shape the split retires — is refused
@@ -5654,12 +5715,14 @@ cooling = 0.70
         assert_eq!(resolved["I0"], 50.0); // inline overrides from_file
     }
 
-    /// gh#439 A2: `needs_state_grad` is true for exactly the nuts+ode cell — the
-    /// only consumer of the WrtPop state-Jacobian — and false for every other
-    /// (algorithm, backend) combination, including the near-miss `mh` on `ode`
-    /// (Bayesian on the ODE backend, but gradient-free → must compile lean).
+    /// gh#439 A2: `needs_state_grad` is true for exactly the two ODE gradient
+    /// cells — `nuts` and `nl-lbfgs`, the consumers of the WrtPop
+    /// state-Jacobian — and false for every other (algorithm, backend)
+    /// combination, including the near-misses `mh` on `ode` (Bayesian on the
+    /// ODE backend, but gradient-free) and `nl-sbplx` on `ode` (deterministic
+    /// MLE on the ODE backend, but derivative-free); both must compile lean.
     #[test]
-    fn needs_state_grad_only_for_nuts_ode() {
+    fn needs_state_grad_only_for_the_ode_gradient_cells() {
         let cfg = |stage: &str| -> FitConfig {
             let toml_str = format!(
                 "[model]\ncamdl = \"models/sir.camdl\"\n\n\
@@ -5677,11 +5740,28 @@ cooling = 0.70
             "nuts+ode drives the ODE forward-sensitivity gradient — needs the Jacobian"
         );
 
+        // nl-lbfgs + ode → the same forward-sensitivity gradient, used for MLE
+        // rather than sampling (true). Without this the model compiles lean and
+        // the gradient preflight refuses every nl-lbfgs fit as
+        // "--no-state-grad".
+        assert!(
+            cfg("[method]\nalgorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 2")
+                .needs_state_grad(),
+            "nl-lbfgs+ode drives the same ODE forward-sensitivity gradient as nuts"
+        );
+
         // mh + ode → gradient-free Bayesian on the ODE backend → lean (false).
         assert!(
             !cfg("[method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 100")
                 .needs_state_grad(),
             "mh on ode is gradient-free — must compile lean"
+        );
+
+        // nl-sbplx + ode → derivative-free MLE on the ODE backend → lean (false).
+        assert!(
+            !cfg("[method]\nalgorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 2")
+                .needs_state_grad(),
+            "nl-sbplx is derivative-free — must compile lean"
         );
 
         // if2 + chain_binomial → gradient-free MLE → lean (false).

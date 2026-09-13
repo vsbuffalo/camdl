@@ -34,7 +34,7 @@ pub enum MethodResult {
     Pgas(PgasStageResult),
     Pmmh(PmmhStageResult),
     Nuts(NutsStageResult),
-    #[serde(rename = "nl-sbplx", alias = "nl-bobyqa")]
+    #[serde(rename = "nl-sbplx", alias = "nl-bobyqa", alias = "nl-lbfgs")]
     Nlopt(NloptStageResult),
 }
 
@@ -785,8 +785,8 @@ pub struct NloptStageResult {
     /// Winner θ̂ — estimated parameters only. Fixed params live in
     /// `mle_params.toml` (full vector with provenance).
     pub theta_hat: BTreeMap<String, f64>,
-    /// Which NLopt algorithm produced this result: `"nl-sbplx"` or
-    /// `"nl-bobyqa"`.
+    /// Which NLopt algorithm produced this result: `"nl-sbplx"`,
+    /// `"nl-bobyqa"` or `"nl-lbfgs"`.
     pub algorithm: String,
     /// Number of converged (`Success` / `XtolReached` / `FtolReached`)
     /// chains. `n_chains - n_converged` includes both `MaxEvalReached`
@@ -852,7 +852,7 @@ impl std::fmt::Display for MethodResultError {
             MethodResultError::UnknownMethod { method, stage_dir } => write!(
                 f,
                 "unknown fit-stage method `{}` at {} (expected if2, pgas, \
-                 pmmh, mh, nuts, nl-sbplx, or nl-bobyqa)",
+                 pmmh, mh, nuts, nl-sbplx, nl-bobyqa, or nl-lbfgs)",
                 method,
                 stage_dir.display()
             ),
@@ -889,7 +889,7 @@ impl MethodResult {
                 Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir, algo)?))
             }
             "nuts" => Ok(MethodResult::Nuts(NutsStageResult::load(stage_dir)?)),
-            "nl-sbplx" | "nl-bobyqa" => Ok(MethodResult::Nlopt(
+            "nl-sbplx" | "nl-bobyqa" | "nl-lbfgs" => Ok(MethodResult::Nlopt(
                 NloptStageResult::load(stage_dir, method)?,
             )),
             unknown => Err(MethodResultError::UnknownMethod {

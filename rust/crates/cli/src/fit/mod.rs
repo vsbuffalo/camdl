@@ -182,7 +182,9 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5
 /// - NUTS — one warm-up or sampling iteration, counted end to end, so `warmup`
 ///   is the burn-in boundary and `warmup + samples` the total.
 /// - IF2 — one cooling iteration; a search, so a single `optimizing` phase.
-/// - `nl-sbplx` / `nl-bobyqa` — one objective evaluation against `max_evals`.
+/// - `nl-sbplx` / `nl-bobyqa` / `nl-lbfgs` — one objective evaluation against
+///   `max_evals`. The gradient method counts the same unit: one `det_grad`
+///   call is one evaluation.
 /// - `pfilter` — replicates of one point, which is neither an MCMC phase nor a
 ///   search. It gets an inert guard and writes no `progress.json` at all,
 ///   rather than a counter labelled with a phase it is not in.
@@ -215,7 +217,7 @@ fn stage_heartbeat(
             dir, *warmup as u64, (warmup + samples) as u64, HEARTBEAT_INTERVAL, 0)),
         A::IF2 { iterations, .. } =>
             held(io::Heartbeat::optimizing(dir, *iterations as u64, HEARTBEAT_INTERVAL)),
-        A::NlSbplx(c) | A::NlBobyqa(c) =>
+        A::NlSbplx(c) | A::NlBobyqa(c) | A::NlLbfgs(c) =>
             held(io::Heartbeat::optimizing(dir, c.max_evals as u64, HEARTBEAT_INTERVAL)),
         A::PFilter { .. } => io::HeartbeatGuard::inert(),
     }
@@ -1543,7 +1545,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Algorithm::NlSbplx(nl_cfg) | Algorithm::NlBobyqa(nl_cfg) => {
+            Algorithm::NlSbplx(nl_cfg)
+            | Algorithm::NlBobyqa(nl_cfg)
+            | Algorithm::NlLbfgs(nl_cfg) => {
                 #[cfg(feature = "ode")]
                 {
                     // Model identity + data digests for the mle_params.toml
@@ -1794,7 +1798,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "warmup": warmup, "samples": samples }),
             Algorithm::PFilter { particles, replicates, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
-            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) =>
+            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
         };
         // gh#901: no `stage` key. It held exactly `algo_tag` — the method's
