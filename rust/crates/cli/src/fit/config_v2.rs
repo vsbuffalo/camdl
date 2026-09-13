@@ -2571,7 +2571,30 @@ impl FitConfig {
             return Ok(());
         }
 
+        // A named scenario composes its own enable/disable lists, and composing
+        // them lives inside `params_resolver::resolve_parameters` rather than in
+        // a function this could call. Rather than fork that walk, defer: a
+        // scenario fit is checked by `det_grad` itself on the first evaluation,
+        // which the objective's latch turns into the same sentence one stage
+        // later. Lateness, not a wrong answer.
+        if self.problem.scenario.is_some() {
+            return Ok(());
+        }
+
         let mut seeded = model.clone();
+        // Toggleable interventions default OFF (spec §14.4), so the model this
+        // gate sees must be the one the run will integrate — otherwise a fit
+        // that never enables its `interventions { }` block would be refused for
+        // a scheduled effect that is not in its trajectory. Same seam the
+        // resolver uses.
+        if let Err(e) = crate::util::apply_scenario_filter(
+            &mut seeded, &self.problem.enable, &self.problem.disable,
+        ) {
+            // An unresolvable enable/disable name is the resolver's error to
+            // report, in its own words.
+            let _ = e;
+            return Ok(());
+        }
         let fixed = self.problem.fixed.resolve().unwrap_or_default();
         for p in &mut seeded.parameters {
             if p.value.resolved_value().is_some() {
@@ -3911,6 +3934,56 @@ cooling = 0.7
         cfg("nl-lbfgs")
             .validate_gradient_capability(&base_model)
             .expect("rk4 is exactly what the forward sensitivity needs");
+    }
+
+    /// The gate sees the model the run will integrate, not the model as
+    /// written. Toggleable interventions default OFF (spec §14.4), so a fit
+    /// that never enables a declared `interventions { }` block has no scheduled
+    /// effect in its trajectory and must NOT be refused for one; the same fit
+    /// with `enable` must be.
+    ///
+    /// Without the filter the first case is a false refusal — a method rejected
+    /// for a feature the run would not have used, with no way for the user to
+    /// tell the difference from a real limitation.
+    #[test]
+    fn the_gradient_gate_sees_interventions_as_the_run_will_resolve_them() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_vaccine.ir.json");
+        let model: ir::Model = ir::from_str(
+            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse golden: {e}"));
+        assert!(
+            model.interventions.iter().any(|iv| iv.name == "sia_round_1"),
+            "the fixture must declare a toggleable intervention"
+        );
+
+        let cfg = |toggle: &str| -> FitConfig {
+            let toml_str = format!(
+                "{toggle}\
+                 [model]\ncamdl = \"models/seir_vaccine.camdl\"\n\n\
+                 [data.observations]\ncases = \"data/cases.tsv\"\n\n\
+                 [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n\n\
+                 [fixed]\nsigma = 0.2\ngamma = 0.1\nomega = 0.003\n\
+                 vacc_frac = 0.8\nN0 = 100000\nI0 = 10\n\n\
+                 [method]\nalgorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 1\n"
+            );
+            FitConfig::from_toml_str(&toml_str).unwrap_or_else(|e| panic!("parse: {e}"))
+        };
+
+        cfg("").validate_gradient_capability(&model).expect(
+            "a declared-but-not-enabled intervention is not in the fitted \
+             trajectory, so it cannot be a reason to refuse the gradient",
+        );
+
+        let err = cfg("enable = [\"sia_round_1\"]\n\n")
+            .validate_gradient_capability(&model)
+            .expect_err("an enabled intervention IS a scheduled effect");
+        assert!(
+            err.contains("intervention") || err.contains("event"),
+            "the refusal must name the scheduled effect; got: {err}"
+        );
     }
 
     /// A three-stage pipeline file — the shape the split retires — is refused
