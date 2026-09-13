@@ -406,7 +406,12 @@ fn run_one_chain(
             n_evals: r.n_evals,
         },
         Err(e) => {
-            eprintln!("nlopt chain failed config: {e}");
+            // Either the cell was mis-configured (dimension / bounds) or the
+            // gradient could not be taken somewhere along the search. Both are
+            // structural: this chain has no optimum to report, so it carries
+            // `Failed` and a `-inf` loglik, which loses the winner comparison
+            // to any chain that did converge.
+            eprintln!("\x1b[31m✗\x1b[0m {}: {e}", algorithm.as_str());
             ChainOutcome {
                 params: est_indices.iter().map(|&i| full_start[i]).collect(),
                 loglik: f64::NEG_INFINITY,
@@ -425,14 +430,41 @@ fn run_one_chain(
 ///
 /// `bounds` are the natural-scale (lower, upper) box for the slots in
 /// `est_indices`, in the same order. The closure builds a fresh full
-/// parameter vector per evaluation, calls `compute_ode_loglik`, and
-/// returns the loglik (or `f64::NEG_INFINITY` if the model blew up).
+/// parameter vector per evaluation and scores it:
+///
+/// - **derivative-free** (`nl-sbplx`, `nl-bobyqa`) — NLopt passes no gradient
+///   slot, so one `compute_ode_loglik` call gives the loglik (or
+///   `f64::NEG_INFINITY` if the model blew up at this θ).
+/// - **gradient** (`nl-lbfgs`) — NLopt passes a slot, so the same point is
+///   scored by `det_grad`, which returns the loglik AND `∇_θ` from one
+///   augmented forward-sensitivity solve. The gradient is written into the
+///   slot; the value returned is the same ODE marginal likelihood the
+///   derivative-free path computes, off the same trajectory.
+///
+/// Both pass `burnin_dt = dt`, i.e. no coarse warm-up: the NLopt stage uses
+/// the fine step throughout, and value and gradient must be taken on the same
+/// trajectory or the reported optimum is not the optimum of the reported
+/// likelihood.
 ///
 /// `on_eval` is called with this cell's running evaluation count each time the
 /// objective is scored — the seam a caller uses to report search progress
 /// (gh#900). It is the only per-evaluation hook there is: the objective closure
 /// is built here, so a caller cannot wrap it from outside. `camdl profile`
-/// passes `None`; its progress is a grid cell, not an evaluation.
+/// passes `None`; its progress is a grid cell, not an evaluation. One
+/// `det_grad` call counts as one evaluation, the same unit as one
+/// `compute_ode_loglik` call.
+///
+/// **When the gradient cannot be taken** — `det_grad` errors, or hands back a
+/// value or a gradient component that is not finite — this returns `Err` with
+/// the reason, and never an `OptResult`. There is nothing to report at such a
+/// point: the derivative-free answer (return `NEG_INFINITY` and let the search
+/// steer away) has no gradient analogue, because L-BFGS has no direction to
+/// steer in. The first reason is latched, every later evaluation short-circuits
+/// to it without paying for another solve, and the latched reason is what comes
+/// back — so the chain fails with `det_grad`'s own sentence rather than a bare
+/// "failed", and no optimum is reported from a point whose gradient was not
+/// computable. The latch is what makes this true; NLopt's own `NLOPT_FAILURE`
+/// on a non-finite gradient only makes it prompt.
 ///
 /// This function is the single source of truth for "deterministic-MLE
 /// optimization on the ODE skeleton given a focal pin." Both consumers
@@ -454,6 +486,12 @@ pub fn optimize_cell(
 ) -> Result<OptResult, String> {
     let initial_est: Vec<f64> = est_indices.iter().map(|&i| full_start[i]).collect();
 
+    // The first reason the gradient could not be taken, if any. Read after the
+    // optimization finishes; the closure borrows it, and the borrow ends when
+    // `optimize_det` returns (it consumes the closure).
+    let grad_failure: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let grad_failure_ref = &grad_failure;
+
     // Closure-owned mutable state. NLopt's callback signature requires
     // `Fn`; the user_data smuggle inside `optimize_det` lets `objective`
     // be `FnMut`, so we mutate `full_params` in place per call (avoids
@@ -464,10 +502,7 @@ pub fn optimize_cell(
     let obs_model_local = Arc::clone(obs_model);
     let obs_times_local = obs_times.to_vec();
     let mut evals: u64 = 0;
-    // `_grad` is NLopt's gradient slot. Every algorithm here is
-    // derivative-free, so it arrives as `None` and there is nothing to fill;
-    // the gradient path fills it from `det_grad`.
-    let objective = move |est: &[f64], _grad: Option<&mut [f64]>| -> f64 {
+    let objective = move |est: &[f64], grad: Option<&mut [f64]>| -> f64 {
         for (slot, &model_idx) in est_indices_local.iter().enumerate() {
             full_params[model_idx] = est[slot];
         }
@@ -475,25 +510,133 @@ pub fn optimize_cell(
         if let Some(report) = on_eval {
             report(evals);
         }
-        compute_ode_loglik(
+        let Some(slot) = grad else {
+            // Derivative-free: value only.
+            return compute_ode_loglik(
+                &compiled_local,
+                &obs_model_local,
+                &obs_times_local,
+                dt,
+                &full_params,
+                dt, // burnin_dt = dt ⇒ coarse burn-in off (fine step throughout)
+            )
+            .unwrap_or(f64::NEG_INFINITY);
+        };
+        // Already given up: wind down without another augmented solve.
+        if grad_failure_ref.borrow().is_some() {
+            slot.fill(f64::NAN);
+            return f64::NEG_INFINITY;
+        }
+        match score_with_gradient(
             &compiled_local,
             &obs_model_local,
             &obs_times_local,
             dt,
             &full_params,
-            dt, // burnin_dt = dt ⇒ coarse burn-in off (nlopt uses the fine step)
-        )
-        .unwrap_or(f64::NEG_INFINITY)
+            &est_indices_local,
+            slot,
+        ) {
+            Ok(value) => value,
+            Err(reason) => {
+                let mut latched = grad_failure_ref.borrow_mut();
+                if latched.is_none() {
+                    *latched = Some(reason);
+                }
+                slot.fill(f64::NAN);
+                f64::NEG_INFINITY
+            }
+        }
     };
 
-    optimize_det(
+    let result = optimize_det(
         algorithm,
         &initial_est,
         bounds,
         tolerance,
         max_evals,
         objective,
-    )
+    );
+    if let Some(reason) = grad_failure.into_inner() {
+        return Err(reason);
+    }
+    result
+}
+
+/// One gradient-path objective evaluation: score `full_params` on the ODE
+/// marginal likelihood with `det_grad` and write `∇_θ` into NLopt's `slot`.
+///
+/// `slot` is filled only on success, and only with a gradient every component
+/// of which is finite beside a finite value — the two come from one augmented
+/// forward-sensitivity solve, so a `slot` written here is the derivative of
+/// the number returned here. `burnin_dt = dt` (no coarse warm-up), matching
+/// the value path in [`optimize_cell`].
+///
+/// The `Err` is the sentence the chain fails with, so it names the θ it
+/// happened at and what to do instead. Two shapes reach it: `det_grad`
+/// refusing or erroring, and a solve that ran but produced a non-finite value
+/// or gradient. Both mean the same thing to an L-BFGS line search — there is
+/// no direction here — which is why neither is softened into a score the
+/// search could "steer away" from, the way the derivative-free path softens a
+/// blown-up θ into `NEG_INFINITY`.
+fn score_with_gradient(
+    compiled: &sim::CompiledModel,
+    obs_model: &sim::inference::MultiStreamObsModel,
+    obs_times: &[f64],
+    dt: f64,
+    full_params: &[f64],
+    est_indices: &[usize],
+    slot: &mut [f64],
+) -> Result<f64, String> {
+    let at = || describe_point(est_indices, compiled, full_params);
+    match sim::inference::ode_grad::det_grad(
+        compiled, obs_model, obs_times, dt, dt, full_params, est_indices,
+    ) {
+        Ok((value, gradient)) => {
+            if value.is_finite() && gradient.iter().all(|g| g.is_finite()) {
+                slot.copy_from_slice(&gradient);
+                Ok(value)
+            } else {
+                Err(format!(
+                    "the ODE gradient is not finite at {}: log-likelihood {value}, \
+                     gradient {gradient:?}. The deterministic likelihood has no \
+                     usable derivative there, so `nl-lbfgs` has no direction to \
+                     search in. Narrow the `[estimate]` bounds to exclude the \
+                     region, start elsewhere, or use the derivative-free \
+                     `algorithm = \"nl-sbplx\"`.",
+                    at()
+                ))
+            }
+        }
+        Err(e) => Err(format!(
+            "the ODE gradient could not be taken at {}: {e}\n  \
+             `algorithm = \"nl-sbplx\"` optimizes the same ODE marginal \
+             likelihood without a gradient.",
+            at()
+        )),
+    }
+}
+
+/// `name = value` for each estimated coordinate, so a gradient failure names
+/// the θ it happened at rather than a bare index. Off the hot path — built only
+/// when something has already gone wrong.
+fn describe_point(
+    est_indices: &[usize],
+    compiled: &sim::CompiledModel,
+    full_params: &[f64],
+) -> String {
+    let parts: Vec<String> = est_indices
+        .iter()
+        .map(|&idx| {
+            let name = compiled
+                .model
+                .parameters
+                .get(idx)
+                .map(|p| p.name.as_str())
+                .unwrap_or("?");
+            format!("{name} = {}", full_params[idx])
+        })
+        .collect();
+    format!("({})", parts.join(", "))
 }
 
 fn write_per_chain_files(
@@ -686,6 +829,260 @@ mod tests {
     use crate::fit::config_v2::{Algorithm, GateConfig, NloptStageConfig};
     use crate::run_meta::InferenceBackend;
     use sim::inference::deterministic::SuccessState;
+
+    // ── The ODE-gradient fixture ─────────────────────────────────────
+    //
+    // The `seir_observations` golden, in the configuration the ODE gradient's
+    // own finite-difference oracle uses
+    // (`sim::inference::ode_grad::tests::det_grad_matches_finite_difference_*`):
+    // emitted `rate_state_grad`, a native `neg_binomial(mean = rho·incidence)`
+    // incidence stream, a `prevalence(I)` stream, and an explicit (constant)
+    // initial condition so `∂init/∂θ = 0`. That oracle establishes the
+    // gradient is RIGHT; the tests here establish it is the gradient that
+    // reaches NLopt.
+
+    /// The golden model with the explicit initial condition the oracle uses,
+    /// and its scenario values resolved.
+    fn seir_gradient_model() -> ir::Model {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/seir_observations.ir.json");
+        let mut model: ir::Model = ir::from_str(
+            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse golden: {e}"));
+        assert!(
+            model.transitions.iter().any(|t| !t.rate_state_grad.0.is_empty()),
+            "seir_observations must carry emitted rate_state_grad \
+             (run `make update-golden`)"
+        );
+        // Explicit IC: the ∂init/∂θ seed is zero, which is the configuration
+        // the oracle checks. The golden's own parameterized IC would drag
+        // `N0`/`I0` into the seed and is a separate case.
+        model.initial_conditions = ir::model::InitialConditions::constants([
+            ("S".to_string(), 99990.0),
+            ("E".to_string(), 0.0),
+            ("I".to_string(), 10.0),
+            ("R".to_string(), 0.0),
+        ]);
+        model.ic_grad = std::collections::HashMap::new();
+        model.simulation.t_end = 56.0;
+        let defaults = [
+            ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1), ("k", 5.0),
+            ("rho", 0.5), ("p_detect", 0.8), ("N0", 100000.0), ("I0", 10.0),
+        ];
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                let v = defaults.iter().find(|(n, _)| *n == p.name)
+                    .map(|(_, v)| *v).unwrap_or(0.5);
+                p.value = p.value.with_value(v);
+            }
+        }
+        model
+    }
+
+    /// `(compiled, obs_model, obs_times, params)` — the fixture bound to eight
+    /// weekly observations.
+    ///
+    /// The weekly case counts are a growing epidemic curve of the magnitude
+    /// this SEIR produces at the scenario values, so the point is near enough
+    /// to the mode for the likelihood and its gradient to be materially
+    /// nonzero (asserted at each use). `detection` is the golden's own
+    /// `bernoulli(p = p_detect)`, whose likelihood does not read `projected`
+    /// at all, so it contributes a constant — a second stream on the axis
+    /// without a second gradient chain.
+    fn seir_gradient_fixture() -> (
+        Arc<sim::CompiledModel>,
+        Arc<sim::inference::MultiStreamObsModel>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        use sim::inference::multi_stream_obs::{StreamProjection, StreamSpec, StreamTimes};
+        use sim::inference::{dense_cells, BoundObs, MultiStreamObsModel};
+
+        let compiled = Arc::new(sim::CompiledModel::new(seir_gradient_model()).unwrap());
+        let mut params = vec![0.0; compiled.param_index.len()];
+        for p in &compiled.model.parameters {
+            params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+        let obs_times: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect();
+        let per_stream: Vec<Vec<f64>> = vec![
+            vec![3.0, 6.0, 13.0, 27.0, 55.0, 110.0, 215.0, 410.0],
+            vec![1.0; 8],
+        ];
+
+        let projections: Vec<StreamProjection> = compiled
+            .model
+            .observations
+            .iter()
+            .map(|om| StreamProjection::from_ir(&om.projection, &compiled, &om.name).unwrap())
+            .collect();
+        let t_start = compiled.model.simulation.t_start;
+        let specs: Vec<StreamSpec> = compiled
+            .model
+            .observations
+            .iter()
+            .enumerate()
+            .map(|(si, om)| StreamSpec {
+                times: StreamTimes::contiguous_for(
+                    &projections[si], t_start, obs_times.clone(),
+                )
+                .unwrap(),
+                projection: projections[si].clone(),
+                ir_model: om.clone(),
+                observations: dense_cells(per_stream[si].clone()),
+                aux: vec![],
+            })
+            .collect();
+        let obs_model = Arc::new(
+            MultiStreamObsModel::new(
+                BoundObs::bind(t_start, specs).unwrap().0,
+                compiled.clone(),
+            )
+            .unwrap(),
+        );
+        (compiled, obs_model, obs_times, params)
+    }
+
+    /// The gradient NLopt is handed is EXACTLY `det_grad`'s gradient at that
+    /// point — bit for bit, not merely close.
+    ///
+    /// `score_with_gradient` is the function the gradient objective calls once
+    /// per evaluation, so what it writes into the slot is what NLopt reads.
+    /// Anything between `det_grad` and the slot — a re-scaled gradient, a
+    /// gradient taken with a different `burnin_dt`, an `est_indices` order that
+    /// drifted from the one the value used — would leave the run converging on
+    /// a direction that is not the likelihood's, and every diagnostic
+    /// downstream would still look healthy.
+    #[test]
+    fn the_gradient_nlopt_receives_is_det_grads_gradient() {
+        let (compiled, obs_model, obs_times, params) = seir_gradient_fixture();
+        let dt = 1.0;
+        let est_indices: Vec<usize> = ["beta", "gamma", "k", "rho"]
+            .iter()
+            .map(|n| compiled.param_index[*n])
+            .collect();
+
+        let mut slot = vec![f64::NAN; est_indices.len()];
+        let value = score_with_gradient(
+            &compiled, &obs_model, &obs_times, dt, &params, &est_indices, &mut slot,
+        )
+        .expect("the fixture is differentiable");
+
+        let (want_value, want_grad) = sim::inference::ode_grad::det_grad(
+            &compiled, &obs_model, &obs_times, dt, dt, &params, &est_indices,
+        )
+        .expect("det_grad at the same point");
+
+        assert_eq!(value, want_value, "the objective's value must be det_grad's value");
+        assert_eq!(
+            slot, want_grad,
+            "the slot NLopt reads must be det_grad's gradient exactly"
+        );
+        // Non-vacuity: a fixture whose gradient were all zeros would satisfy
+        // the equality above while proving nothing.
+        assert!(
+            slot.iter().any(|g| g.abs() > 1e-6),
+            "the fixture's gradient must be materially nonzero; got {slot:?}"
+        );
+    }
+
+    /// The whole gradient path, from `optimize_cell` down: L-BFGS improves the
+    /// log-likelihood from a displaced start on the same fixture, and reports
+    /// having converged. The `est_indices` mapping is exercised here — the
+    /// optimizer works in estimated-slot space and the model in
+    /// model-parameter space.
+    #[test]
+    fn optimize_cell_with_lbfgs_improves_the_loglik_from_a_displaced_start() {
+        let (compiled, obs_model, obs_times, params) = seir_gradient_fixture();
+        let dt = 1.0;
+        let est_indices: Vec<usize> = ["beta", "rho"]
+            .iter()
+            .map(|n| compiled.param_index[*n])
+            .collect();
+        let bounds = vec![(0.05, 0.5), (0.05, 0.95)];
+
+        let mut start = params.clone();
+        start[est_indices[0]] = 0.22; // true 0.3
+        start[est_indices[1]] = 0.35; // true 0.5
+        let at_start = sim::inference::compute_ode_loglik(
+            &compiled, &obs_model, &obs_times, dt, &start, dt,
+        )
+        .expect("the start is scorable");
+
+        let r = optimize_cell(
+            NloptAlgorithm::Lbfgs,
+            &compiled, &obs_model, &obs_times, dt,
+            &bounds, &est_indices, &start,
+            1e-8, 400, None,
+        )
+        .expect("the fixture is differentiable, so the cell must optimize");
+        assert!(
+            r.loglik > at_start,
+            "L-BFGS must improve on the start: {} vs {at_start}",
+            r.loglik
+        );
+        assert!(r.status.is_converged(), "status: {:?}", r.status);
+        for (slot, (lo, hi)) in r.params.iter().zip(&bounds) {
+            assert!(
+                (*lo..=*hi).contains(slot),
+                "the box bounds must be honoured on the gradient algorithm: \
+                 {slot} outside [{lo}, {hi}]"
+            );
+        }
+    }
+
+    /// A model the ODE gradient refuses fails the CELL, with the preflight's
+    /// own reason, rather than returning an `OptResult` from a search that had
+    /// no gradient. Here the refusal is the adaptive integrator (`rk45`), one
+    /// of `preflight_gradient_ode`'s cases.
+    ///
+    /// The derivative-free sibling on the same model is the control: it
+    /// optimizes fine, which is what makes the refusal specific to the
+    /// gradient path rather than a broken fixture.
+    #[test]
+    fn a_model_the_gradient_refuses_fails_the_cell_with_the_reason() {
+        let (compiled, obs_model, obs_times, params) = seir_gradient_fixture();
+        let mut model = (*compiled.model).clone();
+        model.simulation.integrator =
+            ir::model::Integrator::Rk45 { atol: None, rtol: None };
+        let adaptive = Arc::new(sim::CompiledModel::new(model).unwrap());
+        let dt = 1.0;
+        let est_indices: Vec<usize> = vec![adaptive.param_index["beta"]];
+        let bounds = vec![(0.05, 0.5)];
+
+        let err = optimize_cell(
+            NloptAlgorithm::Lbfgs,
+            &adaptive, &obs_model, &obs_times, dt,
+            &bounds, &est_indices, &params,
+            1e-6, 50, None,
+        )
+        .expect_err("an rk45 model has no forward sensitivity to differentiate");
+        assert!(
+            err.contains("rk4"),
+            "the preflight's own reason must survive to the caller; got: {err}"
+        );
+        assert!(
+            err.contains("nl-sbplx"),
+            "the message must name the derivative-free alternative; got: {err}"
+        );
+        assert!(
+            err.contains("beta = "),
+            "the message must name the point it failed at; got: {err}"
+        );
+
+        // Control: the same model optimizes derivative-free.
+        assert!(
+            optimize_cell(
+                NloptAlgorithm::Sbplx,
+                &adaptive, &obs_model, &obs_times, dt,
+                &bounds, &est_indices, &params,
+                1e-6, 50, None,
+            )
+            .is_ok(),
+            "nl-sbplx has no gradient requirement, so the same model must run"
+        );
+    }
 
     fn nlopt_config() -> NloptStageConfig {
         NloptStageConfig {
