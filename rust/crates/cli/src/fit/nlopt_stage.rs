@@ -464,7 +464,10 @@ pub fn optimize_cell(
     let obs_model_local = Arc::clone(obs_model);
     let obs_times_local = obs_times.to_vec();
     let mut evals: u64 = 0;
-    let objective = move |est: &[f64]| -> f64 {
+    // `_grad` is NLopt's gradient slot. Every algorithm here is
+    // derivative-free, so it arrives as `None` and there is nothing to fill;
+    // the gradient path fills it from `det_grad`.
+    let objective = move |est: &[f64], _grad: Option<&mut [f64]>| -> f64 {
         for (slot, &model_idx) in est_indices_local.iter().enumerate() {
             full_params[model_idx] = est[slot];
         }

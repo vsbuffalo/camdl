@@ -1,13 +1,17 @@
 //! Deterministic-likelihood optimization (Phase 1 of the ODE-inference proposal).
 //!
 //! `optimize_det()` runs a local NLopt algorithm — Sbplx (default, robust to
-//! boundary non-smoothness) or BOBYQA (faster on smooth interior objectives) —
-//! on a user-supplied loglik closure with parameter bounds. Used by
-//! `cli::fit::nlopt_stage::run_stage` for ODE-backed MLE; see
+//! boundary non-smoothness), BOBYQA (faster on smooth interior objectives), or
+//! L-BFGS (quasi-Newton, needs a gradient) — on a user-supplied loglik closure
+//! with parameter bounds. Used by `cli::fit::nlopt_stage::run_stage` for
+//! ODE-backed MLE; see
 //! `docs/dev/proposals/2026-05-04-ode-inference-three-phase.md` §Phase 1.
 //!
 //! This module is pure: it knows nothing about ODE solves, observation
-//! models, or fit.toml schemas. The caller wires those into the closure.
+//! models, or fit.toml schemas. The caller wires those into the closure —
+//! including the gradient, which arrives through NLopt's own slot on the
+//! objective rather than through a second callback, so one objective type
+//! serves the derivative-free and gradient algorithms alike.
 
 use nlopt::{Algorithm, Nlopt, Target};
 
@@ -121,6 +125,11 @@ impl OptStatus {
     }
 }
 
+/// The value reported to NLopt in place of a non-finite objective. Large
+/// enough that any scorable point beats it, finite so the optimizer's own
+/// arithmetic stays defined.
+const NONFINITE_FLOOR: f64 = -1e100;
+
 #[derive(Debug, Clone)]
 pub struct OptResult {
     pub params: Vec<f64>,
@@ -129,8 +138,14 @@ pub struct OptResult {
     pub n_evals: usize,
 }
 
-/// Maximize `objective(params)` subject to `bounds` using the given local
-/// NLopt algorithm.
+/// Maximize `objective(params, grad)` subject to `bounds` using the given
+/// local NLopt algorithm.
+///
+/// `grad` is NLopt's own gradient slot, passed through verbatim: `Some(g)` for
+/// a gradient algorithm (`NloptAlgorithm::uses_gradient`), in which case the
+/// objective must write `∇` of the value it returns into `g`; `None` for a
+/// derivative-free one, which ignores it. Nothing here computes a gradient —
+/// the caller owns that, the same way it owns the value.
 ///
 /// `tolerance` is `xtol_rel` — relative parameter tolerance for convergence.
 /// `max_evals` caps the per-call objective-evaluation count; hitting it is
@@ -148,7 +163,7 @@ pub fn optimize_det<F>(
     objective: F,
 ) -> Result<OptResult, String>
 where
-    F: FnMut(&[f64]) -> f64,
+    F: FnMut(&[f64], Option<&mut [f64]>) -> f64,
 {
     let dim = initial.len();
     if dim != bounds.len() {
@@ -174,27 +189,35 @@ where
     // NLopt's `ObjFn<T>` trait requires an `Fn`-callable objective. We
     // smuggle our `FnMut` user closure through `user_data`: the framework
     // passes it as `&mut UserData<F>` to the static callback, which in
-    // turn calls `(ud.f)(params)` (legal because we have `&mut F`).
-    struct UserData<F: FnMut(&[f64]) -> f64> {
+    // turn calls `(ud.f)(params, grad)` (legal because we have `&mut F`).
+    struct UserData<F: FnMut(&[f64], Option<&mut [f64]>) -> f64> {
         f: F,
         n_evals: usize,
     }
 
-    fn callback<F: FnMut(&[f64]) -> f64>(
+    fn callback<F: FnMut(&[f64], Option<&mut [f64]>) -> f64>(
         params: &[f64],
-        _grad: Option<&mut [f64]>,
+        grad: Option<&mut [f64]>,
         ud: &mut UserData<F>,
     ) -> f64 {
         ud.n_evals += 1;
-        let v = (ud.f)(params);
-        if v.is_finite() {
-            v
-        } else {
-            // NLopt is undefined on NaN. Map non-finite logliks (model
-            // blew up at this θ) to a large negative value so the
-            // optimizer steers away from this region.
-            -1e100
-        }
+        // The gradient slot goes through UNTOUCHED. It is tempting to sanitize
+        // a non-finite gradient to zeros the way the value is floored below,
+        // and it is wrong: measured against nlopt 0.8.1, `Lbfgs` answers a
+        // non-finite gradient with `NLOPT_FAILURE`, ending the optimization at
+        // the last point — which `optimize_det` reports as `OptStatus::Failed`,
+        // the loud outcome. Zeroing the slot instead turns that same point into
+        // a stationary one: the run returns `Ok((Success, …))` sitting exactly
+        // where the gradient could not be computed, i.e. a reported optimum
+        // whose only property is that the gradient failed there. A caller that
+        // wants a specific message latches its own reason (see
+        // `cli::fit::nlopt_stage::optimize_cell`); correctness does not rest on
+        // NLopt's handling, only the promptness of the stop does.
+        let raw = (ud.f)(params, grad);
+        // NLopt is undefined on NaN. Map non-finite logliks (model blew up at
+        // this θ) to a large negative value so the optimizer steers away from
+        // this region.
+        if raw.is_finite() { raw } else { NONFINITE_FLOOR }
     }
 
     let user_data = UserData { f: objective, n_evals: 0 };
@@ -262,10 +285,28 @@ mod tests {
     /// Quadratic in 2D: f(x, y) = -((x-3)^2 + (y+1)^2). Maximum at (3, -1)
     /// with value 0. Both Sbplx and BOBYQA should find this within a few
     /// dozen evaluations.
-    fn quadratic(p: &[f64]) -> f64 {
+    fn quadratic_value(p: &[f64]) -> f64 {
         let dx = p[0] - 3.0;
         let dy = p[1] + 1.0;
         -(dx * dx + dy * dy)
+    }
+
+    /// [`quadratic_value`] in the objective shape `optimize_det` takes. The
+    /// derivative-free algorithms get `None` and this ignores it, which is
+    /// the whole point of the widened signature: one type, two consumers.
+    fn quadratic(p: &[f64], _grad: Option<&mut [f64]>) -> f64 {
+        quadratic_value(p)
+    }
+
+    /// The same quadratic WITH its analytic gradient
+    /// `∇ = (-2(x-3), -2(y+1))`, written into NLopt's slot when one is asked
+    /// for.
+    fn quadratic_with_grad(p: &[f64], grad: Option<&mut [f64]>) -> f64 {
+        if let Some(g) = grad {
+            g[0] = -2.0 * (p[0] - 3.0);
+            g[1] = -2.0 * (p[1] + 1.0);
+        }
+        quadratic_value(p)
     }
 
     #[test]
@@ -300,6 +341,123 @@ mod tests {
         assert!(result.status.is_converged(), "status: {:?}", result.status);
         assert!((result.params[0] - 3.0).abs() < 1e-3);
         assert!((result.params[1] - (-1.0)).abs() < 1e-3);
+    }
+
+    /// The widened objective, from the gradient side: NLopt hands `Some(slot)`
+    /// to an `LD_` algorithm, the closure writes `∇` into it, and the box
+    /// bounds are honoured (the NLopt Algorithms reference: the local
+    /// gradient-based family "support[s] bound-constrained or unconstrained
+    /// problems only" — bounds are in, nonlinear constraints are not).
+    #[test]
+    fn lbfgs_finds_quadratic_maximum_from_the_gradient_slot() {
+        let result = optimize_det(
+            NloptAlgorithm::Lbfgs,
+            &[0.0, 0.0],
+            &[(-10.0, 10.0), (-10.0, 10.0)],
+            1e-8,
+            500,
+            quadratic_with_grad,
+        )
+        .unwrap();
+        assert!(result.status.is_converged(), "status: {:?}", result.status);
+        assert!((result.params[0] - 3.0).abs() < 1e-3);
+        assert!((result.params[1] - (-1.0)).abs() < 1e-3);
+        assert!(result.loglik > -1e-4);
+    }
+
+    /// The gradient slot really is `Some` for `Lbfgs` and `None` for the
+    /// derivative-free algorithms — the fact the caller's "compute a gradient
+    /// only when asked" branch rests on. Without it a derivative-free fit
+    /// would pay for a gradient nothing reads, and a gradient fit would hand
+    /// NLopt an unwritten slot.
+    #[test]
+    fn the_slot_is_some_only_for_the_gradient_algorithm() {
+        for (algorithm, want_slot) in [
+            (NloptAlgorithm::Sbplx, false),
+            (NloptAlgorithm::Bobyqa, false),
+            (NloptAlgorithm::Lbfgs, true),
+        ] {
+            let mut saw_slot: Option<bool> = None;
+            let _ = optimize_det(
+                algorithm,
+                &[0.0, 0.0],
+                &[(-10.0, 10.0), (-10.0, 10.0)],
+                1e-8,
+                5,
+                |p: &[f64], grad: Option<&mut [f64]>| {
+                    if saw_slot.is_none() {
+                        saw_slot = Some(grad.is_some());
+                    }
+                    if let Some(g) = grad {
+                        g[0] = -2.0 * (p[0] - 3.0);
+                        g[1] = -2.0 * (p[1] + 1.0);
+                    }
+                    quadratic_value(p)
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                saw_slot,
+                Some(want_slot),
+                "{}: NLopt's gradient slot presence must match \
+                 `uses_gradient()` = {}",
+                algorithm.as_str(),
+                algorithm.uses_gradient()
+            );
+        }
+    }
+
+    /// A gradient the caller could not compute reaches NLopt unsanitized, and
+    /// NLopt ends the run: `OptStatus::Failed` at the last point, never a
+    /// converged optimum. This is the contract `optimize_cell`'s latched
+    /// reason rides on — the status says "this is not an answer" and the
+    /// caller's message says why.
+    ///
+    /// The negative control is the same objective with a real gradient at the
+    /// same start: it converges. Without it the assertion would pass for a
+    /// run that failed for any other reason.
+    #[test]
+    fn a_non_finite_gradient_fails_the_run_rather_than_converging() {
+        let bad = optimize_det(
+            NloptAlgorithm::Lbfgs,
+            &[9.0, 9.0],
+            &[(0.0, 10.0), (0.0, 10.0)],
+            1e-6,
+            50,
+            |p: &[f64], grad: Option<&mut [f64]>| {
+                if let Some(g) = grad {
+                    g.fill(f64::NAN);
+                }
+                // Finite value throughout: only the gradient is missing, so
+                // nothing but the gradient can be what stopped the run.
+                quadratic_value(p)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            bad.status,
+            OptStatus::Failed,
+            "a non-finite gradient must end the run as Failed, not as a \
+             converged optimum sitting where the gradient could not be taken; \
+             got {:?} at {:?}",
+            bad.status,
+            bad.params
+        );
+
+        let good = optimize_det(
+            NloptAlgorithm::Lbfgs,
+            &[9.0, 9.0],
+            &[(0.0, 10.0), (0.0, 10.0)],
+            1e-6,
+            50,
+            quadratic_with_grad,
+        )
+        .unwrap();
+        assert!(
+            good.status.is_converged(),
+            "negative control: the same start with a real gradient must converge"
+        );
+        assert!((good.params[0] - 3.0).abs() < 1e-3);
     }
 
     #[test]
@@ -373,7 +531,7 @@ mod tests {
             &[(1.0, 1.0)],
             1e-6,
             10,
-            |_| 0.0,
+            |_: &[f64], _: Option<&mut [f64]>| 0.0,
         )
         .unwrap_err();
         assert!(err.contains("lower"));
@@ -389,11 +547,11 @@ mod tests {
             &[(0.0, 10.0), (-10.0, 10.0)],
             1e-6,
             500,
-            |p| {
+            |p: &[f64], _grad: Option<&mut [f64]>| {
                 if p[0] < 0.0 {
                     f64::NAN
                 } else {
-                    quadratic(p)
+                    quadratic_value(p)
                 }
             },
         )
