@@ -443,6 +443,14 @@ fn resolve_projection_state_grad(
             ir::deriv::DerivEntry::Unsupported { .. } => {}
         }
     }
+    // gh#682: this list's order IS the summation order of
+    // `dp[k] += g * state_sens[j*d + k]` in `ode_loglik_and_grad`'s
+    // `StreamProjection::Expr` arm, and floating-point addition is not
+    // associative. `CompGradMap` iteration is `HashMap` iteration, whose order
+    // Rust seeds per process, so without this sort a `DerivedExpr` stream's
+    // observation gradient differed in its last bits from run to run — the same
+    // defect as the `rate_state_grad` sibling in `resolve_comp_grad_map`.
+    out.sort_by_key(|(local, _)| *local);
     Ok(out)
 }
 

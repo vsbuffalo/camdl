@@ -883,6 +883,15 @@ pub(crate) fn resolve_grad_map(
         };
         out.push((model_idx, resolved));
     }
+    // gh#682: `grad` is a `HashMap`, so the push order above is per-process
+    // random (`RandomState` is seeded per process). Order the resolved entries by
+    // parameter index so this list is a function of the model alone. Today every
+    // consumer indexes or assigns rather than accumulating — `eval_emitted_grad`
+    // finds by index, `pgas_grad::log_transition_density_grad` writes
+    // `d_rate[est_idx]` — so the numbers do not move; the ordering is what keeps
+    // a future consumer that sums over the list (the shape that broke the
+    // compartment-keyed sibling below) reproducible by construction.
+    out.sort_by_key(|(model_idx, _)| *model_idx);
     Ok(out)
 }
 
@@ -925,6 +934,14 @@ pub(crate) fn resolve_comp_grad_map(
         };
         out.push((comp_idx, resolved));
     }
+    // gh#682: this list's order IS the summation order of
+    // `total += drate/dx_j * S[j, p]` in `ode::sensitivity_derivs`, and floating-
+    // point addition is not associative. `CompGradMap` iteration is `HashMap`
+    // iteration, whose order Rust seeds per process, so without this sort the
+    // forward-sensitivity gradient — and every consumer of `det_grad`, i.e. `nuts`
+    // on the `ode` backend and the gradient MLE — differed in its last bits from
+    // run to run, and a rerun of a published posterior did not reproduce it.
+    out.sort_by_key(|(comp_idx, _)| *comp_idx);
     Ok(ResolvedCompGradMap(out))
 }
 
