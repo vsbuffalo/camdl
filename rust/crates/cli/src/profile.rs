@@ -201,11 +201,19 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx),
         crate::run_meta::FitAlgorithm::NlBobyqa =>
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa),
+        // gh#275: the same per-cell `optimize_cell` the derivative-free NLopt
+        // algorithms use, taking the gradient branch. `profile` reaches it
+        // without further wiring because it loads the model through
+        // `util::load_model`, which always compiles the full IR — the WrtPop
+        // state-Jacobian the forward sensitivity reads is present, unlike the
+        // `fit run` path, which compiles lean unless the method asks for it.
+        crate::run_meta::FitAlgorithm::NlLbfgs =>
+            ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs),
         other => {
             eprintln!(
                 "error: --algorithm = \"{}\" is not yet supported for `camdl profile`. \
                  Currently supported: if2 (chain_binomial), pmmh (chain_binomial), \
-                 nl-sbplx (ode), nl-bobyqa (ode).",
+                 nl-sbplx (ode), nl-bobyqa (ode), nl-lbfgs (ode).",
                 other
             );
             std::process::exit(1);
@@ -750,6 +758,35 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let if2_params = crate::fit::runner::build_if2_params_from_specs(
         &model, &compiled, &base_params, &specs,
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+
+    // `nl-lbfgs` takes each cell's optimum with the ODE forward-sensitivity
+    // gradient, so ask the gradient capability gate once, here, rather than
+    // letting every cell in the grid discover the same refusal and report it as
+    // a failed cell. The estimated set is the non-focal free parameters, which
+    // is exactly what `optimize_cell` will differentiate with respect to —
+    // pinned focal parameters never enter it. (`fit run` asks the same question
+    // in `FitConfig::validate_gradient_capability`.)
+    if matches!(
+        profile_algo,
+        ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs)
+    ) {
+        let estimated: std::collections::HashSet<&str> =
+            if2_params.iter().map(|p| p.name.as_str()).collect();
+        if let Err(e) = sim::inference::gradient_capability::preflight_gradient_ode(
+            &compiled, &base_params, &estimated,
+        ) {
+            eprintln!(
+                "error: --algorithm nl-lbfgs takes each cell's optimum with the ODE \
+                 forward-sensitivity gradient, and the gradient capability gate refuses \
+                 this model. The gate is shared with `nuts`, the other method that takes \
+                 this gradient, and names it in its reason:\n\n  {e}\n\n  \
+                 `--algorithm nl-sbplx` profiles the same ODE marginal likelihood without \
+                 a gradient."
+            );
+            std::process::exit(1);
+        }
+    }
+
     let if2_params = Arc::new(if2_params);
 
     // gh#118: focal params are pinned at grid values and excluded

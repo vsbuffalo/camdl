@@ -803,7 +803,7 @@ pub struct FitRunArgs {
 
     /// Skip the post-fit Richardson dt-convergence check at θ̂.
     /// Default: the check runs on every IF2 stage (PF likelihood) and
-    /// every ODE inference stage — nl-sbplx, nl-bobyqa, and mh
+    /// every ODE inference stage — nl-sbplx, nl-bobyqa, nl-lbfgs, and mh
     /// (deterministic likelihood). Use this for CI smoke fits or
     /// known-converged-dt rerenders where the audit cost is unwelcome.
     ///: the dt-check result is stored in the leaf, so
@@ -1917,7 +1917,7 @@ pub struct ProfileArgs {
 
     /// Simulation backend. Defaults to `chain_binomial`; pass
     /// `--backend ode` together with an ODE-compatible algorithm
-    /// (`nl-sbplx`, `nl-bobyqa`) for deterministic per-cell MLE.
+    /// (`nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`) for deterministic per-cell MLE.
     #[arg(long, value_name = "NAME")]
     pub backend: Option<String>,
 
