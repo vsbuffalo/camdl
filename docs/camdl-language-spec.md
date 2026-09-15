@@ -92,7 +92,7 @@ the base model with global names and specifies how dimensions interact.
 :    structural definition (what something IS)
 =    value binding (what something EQUALS)
 @    rate expression (how fast, always total propensity)
--->  flow direction
+-->  flow direction (Unicode → is an exact alias)
 #    comment
 #'   doc comment (attaches to the declaration below it; at the top
      of the file, to the model as a whole)
@@ -100,6 +100,32 @@ the base model with global names and specifies how dimensions interact.
 [ ]  index access and list literals
 ( )  function arguments
 '    unit literal prefix ('days, 'years)
+```
+
+**Arrow: `-->` or `→`.** The flow arrow is written `-->` in committed models;
+the Unicode rightwards arrow `→` (U+2192) is accepted as an exact alias, so a
+transition pasted from prose, or typed in an editor that autocorrects `->`,
+compiles as written. The arrow is purely syntactic — it separates sources from
+destinations — and the two spellings produce identical IR:
+
+```camdl
+compartments { S, I, R }
+parameters {
+  beta  : rate
+  gamma : rate
+  N0    : count
+  I0    : count
+}
+let N = S + I + R
+transitions {
+  infection : S → I @ beta * S * I / N
+  recovery  : I → R @ gamma * I
+}
+init {
+  S = N0 - I0
+  I = I0
+}
+simulate { from = 0 'days  to = 120 'days }
 ```
 
 #### Doc comments (`#'`)

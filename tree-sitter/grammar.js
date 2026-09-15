@@ -232,7 +232,7 @@ module.exports = grammar({
           // no arrow target is written (staged-residence proposal §4).
           seq("via", field("law", $.via_call), optional($.where_clause)),
           seq(
-            "-->",
+            choice("-->", "→"),
             choice(
               // standard form: dsts @ rate | via LAW | { rate = ... | via = ... }
               seq(

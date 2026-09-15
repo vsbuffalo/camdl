@@ -1209,6 +1209,39 @@ let test_dim_sep_asterisk_equals_cross () =
       "IR differs between `×` and `*` dim separators:\n× =\n%s\n\n* =\n%s"
       s_cross s_star
 
+(* ── Unicode `→` as an alias for `-->` in transitions ─────────────────────────
+   The flow arrow accepts both the canonical ASCII `-->` and the Unicode `→`
+   (U+2192), so a transition pasted from prose or typed under `->` autocorrect
+   compiles as written. The arrow is purely syntactic — it separates sources
+   from destinations — so the two spellings must yield byte-identical IR. *)
+let flow_arrow_src arrow = Printf.sprintf {|
+    compartments { S, I, R }
+    parameters {
+      beta  : rate
+      gamma : rate
+      N0    : count
+      I0    : count
+    }
+    let N = S + I + R
+    transitions {
+      infection : S %s I @ beta * S * I / N
+      recovery  : I %s R @ gamma * I
+    }
+    init {
+      S = N0 - I0
+      I = I0
+    }
+    simulate { from = 0 'days  to = 120 'days }
+  |} arrow arrow
+
+let test_flow_arrow_unicode_equals_ascii () =
+  let s_ascii   = Serde.model_to_string (compile_expect_ok (flow_arrow_src "-->")) in
+  let s_unicode = Serde.model_to_string (compile_expect_ok (flow_arrow_src "→")) in
+  if not (String.equal s_ascii s_unicode) then
+    Alcotest.failf
+      "IR differs between `-->` and `→` flow arrows:\n--> =\n%s\n\n→ =\n%s"
+      s_ascii s_unicode
+
 (* ── Table unit conversion (spec §6.1) ───────────────────────────────────────
    `tables { x : dim 'unit = [...] }` annotations must scale inline values
    from the declared unit to the model's `time_unit`. Pre-fix, the unit was
@@ -13620,6 +13653,10 @@ let () =
     "dim_separator", [
       Alcotest.test_case "ASCII `*` and Unicode `×` yield byte-identical IR"
         `Quick test_dim_sep_asterisk_equals_cross;
+    ];
+    "flow_arrow", [
+      Alcotest.test_case "ASCII `-->` and Unicode `→` yield byte-identical IR"
+        `Quick test_flow_arrow_unicode_equals_ascii;
     ];
     "table_unit_conversion", [
       Alcotest.test_case "'years table scales to days"

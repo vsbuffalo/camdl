@@ -250,8 +250,13 @@ rule token = parse
   | "<="    { LE }
   | ">="    { GE }
 
-  (* Unicode cross product *)
-  | "\xc3\x97" { CROSS }   (* UTF-8 for × *)
+  (* Unicode aliases. ocamllex matches bytes, so each glyph is spelled as its
+     UTF-8 sequence. `×` (U+00D7) is the canonical dimension-product separator
+     and doubles as multiplication in expressions; `→` (U+2192) is an alias for
+     the ASCII flow arrow `-->`, so a transition pasted from prose, or typed in
+     an editor that autocorrects `->`, lexes identically. *)
+  | "\xc3\x97"     { CROSS }   (* × *)
+  | "\xe2\x86\x92" { ARROW }   (* → *)
 
   (* Single-character tokens *)
   | '='     { EQ }
