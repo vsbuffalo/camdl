@@ -99,11 +99,43 @@ check_fail_fast_when_missing() {
   fi
 }
 
+# ------------------------------------- fail-fast, opam's own prerequisites
+# `unzip` and a C compiler are what `opam init` and the from-source switch
+# build actually require. Neither was probed, so a box missing them got the
+# failure 200 lines later, reported as a bubblewrap problem (gh#755).
+check_fail_fast_on_opam_prereqs() {
+  echo "fail-fast (opam prerequisites):"
+  OS=linux ARCH=x86_64
+  local out rc
+
+  out=$(
+    have() { [ "$1" = unzip ] && return 1; command -v "$1" >/dev/null 2>&1; }
+    ensure_base_tools 2>&1
+  ); rc=$?
+  if [ "$rc" -eq 0 ]; then bad "ensure_base_tools should fail when unzip is missing"
+  elif ! grep -q 'unzip' <<<"$out"; then bad "message should name unzip: $out"
+  else ok "missing unzip is named here, not left for opam init to hit"
+  fi
+
+  # `cc` is the command opam and cargo probe for, but no distro ships a
+  # package called `cc`. The hint has to name gcc or it cannot be pasted.
+  out=$(
+    have() { [ "$1" = cc ] && return 1; command -v "$1" >/dev/null 2>&1; }
+    ensure_base_tools 2>&1
+  ); rc=$?
+  if [ "$rc" -eq 0 ]; then bad "ensure_base_tools should fail when cc is missing"
+  elif ! grep -q 'apt-get install -y gcc' <<<"$out"; then
+    bad "hint should name the gcc package, not the cc command: $out"
+  else ok "missing cc is named, and the install hint says gcc"
+  fi
+}
+
 echo "== install.sh unit tests =="
 check_version_ge
 check_cmake_plat
 check_no_sudo_when_present
 check_fail_fast_when_missing
+check_fail_fast_on_opam_prereqs
 echo
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

@@ -8,7 +8,8 @@
 #   - OCaml switch + packages                   → $HOME/.opam
 #   - Rust toolchain                            → $HOME/.cargo, $HOME/.rustup
 #
-# It expects a handful of base build tools (make, git, curl, tar) to already
+# It expects a handful of base build tools (make, git, curl, tar, unzip, and a
+# C compiler) to already
 # be present; if any are missing it tells you the one-time command to install
 # them and stops, rather than running a privileged install on your behalf.
 #
@@ -70,18 +71,33 @@ cmake_plat() {
 # box that can build OCaml + Rust they are already present. If something is
 # missing we print the exact one-time command and stop.
 ensure_base_tools() {
-    log "Checking base build tools (make, git, curl, tar)..."
-    local missing=()
+    log "Checking base build tools (make, git, curl, tar, unzip, cc)..."
+    # The probe list is what the rest of this script cannot proceed without:
+    #   make git curl tar  the build itself
+    #   unzip              opam refuses to init without it — a hard
+    #                      requirement, not a nicety
+    #   cc                 the OCaml switch is compiled from source, and
+    #                      cargo invokes `cc` as its linker driver
+    # Probing a command and naming a package are different things: opam and
+    # cargo look for `cc`, but no distro ships a package by that name, so the
+    # hint has to say gcc or it cannot be pasted (gh#755).
+    local missing=() packages=()
     local t
-    for t in make git curl tar; do
-        have "$t" || missing+=("$t")
+    for t in make git curl tar unzip cc; do
+        have "$t" && continue
+        missing+=("$t")
+        case "$t" in
+            cc) packages+=(gcc) ;;
+            *)  packages+=("$t") ;;
+        esac
     done
     [ ${#missing[@]} -eq 0 ] && return
 
     warn "Missing required tools: ${missing[*]}"
     if [ "$OS" = macos ]; then
         cat >&2 <<EOF
-Install the Xcode Command Line Tools (provides make, git, curl, tar):
+Install the Xcode Command Line Tools (provides make, git, curl, tar, cc;
+unzip ships with macOS):
 
     xcode-select --install
 
@@ -91,9 +107,9 @@ EOF
         cat >&2 <<EOF
 Install them once with your system package manager, e.g.:
 
-    Debian/Ubuntu : sudo apt-get install -y ${missing[*]}
-    Fedora/RHEL   : sudo dnf install -y ${missing[*]}
-    Arch          : sudo pacman -S ${missing[*]}
+    Debian/Ubuntu : sudo apt-get install -y ${packages[*]}
+    Fedora/RHEL   : sudo dnf install -y ${packages[*]}
+    Arch          : sudo pacman -S ${packages[*]}
 
 then re-run this script. (This script never calls sudo itself — run the
 above yourself, or ask an admin, on a box where you don't have root.)
@@ -191,24 +207,40 @@ ensure_ocaml_switch() {
             warn "scripts without filesystem isolation."
             opam init --bare --disable-sandboxing -y
         elif ! opam init --bare -y; then
-            cat >&2 <<'EOF'
-Sandboxed opam init failed.
+            # Report what was checked, not a guess. This branch used to assert
+            # that bubblewrap was probably missing or that the kernel blocked
+            # unprivileged user namespaces — for *any* opam init failure. On a
+            # box where bubblewrap was installed and namespaces were fine, that
+            # sent the reader off to debug a problem that did not exist, while
+            # the real cause sat in opam's own output just above (gh#755).
+            echo >&2
+            if [ "$OS" != macos ] && ! have bwrap; then
+                cat >&2 <<'EOF'
+opam init failed, and bubblewrap (bwrap) is not installed. opam sandboxes
+every package build with it, so that is the likely cause:
 
-Most common cause on Linux: bubblewrap isn't installed,
-or your kernel doesn't allow unprivileged user namespaces.
-
-To proceed, either:
-  1. Install bubblewrap and re-run:
-       sudo apt-get install bubblewrap   # Debian/Ubuntu
-       sudo dnf install bubblewrap       # Fedora/RHEL
-       sudo pacman -S bubblewrap         # Arch
-  2. Or skip sandboxing explicitly:
-       NO_SANDBOX=1 ./install.sh
-     (this reduces supply-chain protection on every package
-     you install via opam in this switch — recommended only
-     if option 1 isn't available)
+    sudo apt-get install bubblewrap   # Debian/Ubuntu
+    sudo dnf install bubblewrap       # Fedora/RHEL
+    sudo pacman -S bubblewrap         # Arch
 EOF
-            err "opam init failed without sandboxing fallback."
+            else
+                cat >&2 <<'EOF'
+opam init failed. Its own output above is the authoritative reason; read
+that first. If it names bwrap, a namespace, or a permission error, then
+the sandbox is being blocked by your kernel or container runtime rather
+than by a missing package.
+EOF
+            fi
+            cat >&2 <<'EOF'
+
+If the sandbox cannot be made to work, skip it explicitly:
+
+    NO_SANDBOX=1 ./install.sh
+
+That reduces supply-chain protection on every package you install via opam
+in this switch, so prefer fixing the sandbox where you can.
+EOF
+            err "opam init failed."
         fi
     fi
 
