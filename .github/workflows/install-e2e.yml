@@ -7,8 +7,8 @@ name: install-e2e
 # from-source build — the part the fast install-script job (in ci.yml) can't.
 #
 # Slow (full toolchain + project build), so it runs nightly and on demand, not
-# per-PR. A green build == install.sh produced a working `camdl` with zero
-# privilege.
+# per-PR. Green == install.sh produced a working `camdl` with zero privilege,
+# with opam's bubblewrap sandbox active throughout.
 
 on:
   schedule:
@@ -20,5 +20,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # The image only provisions the box and copies the source in; it does not
+      # install. See the Dockerfile for why the install cannot run in a RUN
+      # layer.
       - name: Build install image (Ubuntu 18.04, non-root, no sudo)
         run: docker build -f tests/install/Dockerfile.ubuntu1804 -t camdl-install-test .
+
+      # The actual test. The two security options are what let opam's
+      # bubblewrap sandbox create an unprivileged user namespace: Docker's
+      # default seccomp profile blocks the clone flag it needs, so without them
+      # the sandbox fails and we would be back to choosing between a red job
+      # and NO_SANDBOX=1. Unconfining them here makes the sandbox *work*, which
+      # is the configuration a real user gets; it does not disable it.
+      - name: Install and verify (unprivileged, opam sandbox active)
+        run: |
+          docker run --rm \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            camdl-install-test

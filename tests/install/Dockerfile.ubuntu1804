@@ -4,8 +4,10 @@
 # by install.sh to escalate fails loudly ("sudo: command not found"). A green
 # build proves install.sh produced a working `camdl` with zero privilege.
 #
-# Build from the repo root:
+# Build and run from the repo root — both steps, the run is the test:
 #   docker build -f tests/install/Dockerfile.ubuntu1804 -t camdl-install-test .
+#   docker run --rm --security-opt seccomp=unconfined \
+#     --security-opt apparmor=unconfined camdl-install-test
 #
 # What it exercises that the unit tests can't:
 #   - the portable-CMake fetch (system cmake 3.10 is present but too old)
@@ -19,14 +21,19 @@
 
 FROM ubuntu:18.04
 
-# Genuine base prerequisites only — exactly what ensure_base_tools checks for —
-# plus ca-certificates (TLS), bubblewrap (so opam can sandbox), and the OLD
-# system cmake (3.10) to reproduce gh#205 friction #1. Installed as root *in
-# the image build*; this stands in for "an admin provisioned the box". The
-# camdl install below runs unprivileged and `sudo` is deliberately NOT present.
+# Genuine base prerequisites only — exactly what ensure_base_tools checks for
+# (make, git, curl, tar, unzip, and gcc for `cc`) — plus ca-certificates (TLS),
+# bubblewrap (so opam can sandbox), and the OLD system cmake (3.10) to
+# reproduce gh#205 friction #1. Installed as root *in the image build*; this
+# stands in for "an admin provisioned the box". The camdl install runs
+# unprivileged and `sudo` is deliberately NOT present.
+#
+# `unzip` and `gcc` are prerequisites, not conveniences: opam refuses to init
+# without unzip, and the OCaml switch is compiled from source. Leaving them out
+# is what made this job fail in ~45s on every run since it was added (gh#755).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      make git curl tar ca-certificates bubblewrap cmake \
+      make git curl tar unzip gcc ca-certificates bubblewrap cmake \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user, no sudo. If install.sh reaches for root, the build dies here.
@@ -35,9 +42,14 @@ USER builder
 WORKDIR /home/builder/camdl
 COPY --chown=builder:builder . .
 
-# The test: a clean no-sudo install...
-RUN ./install.sh
-# ...then prove the binary actually runs (mirrors the rc lines install.sh prints).
-RUN export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" \
- && eval "$(opam env)" \
- && camdl --version
+# The image stops here, holding only a provisioned box and the source. The
+# install itself runs in `docker run` (see .github/workflows/install-e2e.yml),
+# NOT in a RUN layer: opam sandboxes package builds with bubblewrap, bubblewrap
+# needs an unprivileged user namespace, and buildkit gates that behind an
+# `insecure` entitlement requiring a custom builder. Under `docker run` with
+# seccomp and apparmor unconfined, the sandbox is genuinely active — which is
+# the configuration a real user gets, and therefore the one worth testing.
+#
+# Running it here instead would leave two bad options: fail on the sandbox, or
+# pass `NO_SANDBOX=1` and turn the job green by deleting what it verifies.
+CMD ["bash", "tests/install/run-install-test.sh"]

@@ -257,7 +257,7 @@ test-data-spec: build
 # container test, tests/install/Dockerfile.ubuntu1804 (amd64, run in CI/nightly).
 test-install:
 	@if command -v shellcheck >/dev/null 2>&1; then \
-	  shellcheck install.sh tests/install_sh_test.sh; \
+	  shellcheck install.sh tests/install_sh_test.sh tests/install/run-install-test.sh; \
 	else \
 	  echo "shellcheck not found — skipping lint (CI installs it)"; \
 	fi

@@ -1,0 +1,28 @@
+# Build context for tests/install/Dockerfile.ubuntu1804, which copies the repo
+# in and builds it from source. The context needs the tracked source tree and
+# nothing else. On a clean CI checkout that is already nearly true; on a working
+# machine the untracked output dwarfs it — 31 GB here when this file was written
+# — and the documented `docker build` would sit copying it instead of building.
+#
+# `.git` is deliberately NOT excluded: rust/crates/cli/build.rs stamps the
+# binary via `git rev-parse`, and without it `camdl --version` reports
+# "unknown", which is the one thing this test asserts.
+
+# Build output. Regenerated inside the image, and a host build must not leak in:
+# an amd64 image carrying an arm64 binary would pass without building anything.
+rust/target/
+target/
+ocaml/_build/
+_build/
+
+# Agent worktrees and local scratch.
+.claude/
+results/
+review-zips/
+tb-household-probe/
+
+# Generated fit/validation data under the external-validation corpus. Its
+# tracked files are the case definitions, a few hundred KB; the rest is output.
+# The image only runs `make build` and `make install`, never the suite.
+tests/external/runs/
+tests/external/cases/*/results/
