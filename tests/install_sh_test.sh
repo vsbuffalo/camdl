@@ -141,8 +141,10 @@ check_fail_fast_on_opam_prereqs() {
   # stands in for a compiler that exists but cannot link.
   out=$(
     # compiler_works invokes this through "$drv", which shellcheck cannot see,
-    # so SC2329 reports it as dead. It is the whole point of the test.
-    # shellcheck disable=SC2329
+    # so it reports the body as dead. It is the whole point of the test. Both
+    # codes are listed because which one is emitted depends on the shellcheck
+    # version: SC2317 on the runner's, SC2329 on 0.11.
+    # shellcheck disable=SC2317,SC2329
     cc() { return 1; }
     ensure_base_tools 2>&1
   ); rc=$?

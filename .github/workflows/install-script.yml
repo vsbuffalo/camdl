@@ -4,7 +4,8 @@ name: install-script
 # cmake >= 3.13 gate, cmake_plat, and the no-sudo contract — a sudo shim aborts
 # if any ensure_* reaches for root). Runs only when the installer or its tests
 # change. The end-to-end no-sudo build on gh#205's box is the separate nightly
-# install-e2e workflow. shellcheck is preinstalled on GitHub's ubuntu runner.
+# install-e2e workflow. shellcheck is preinstalled on GitHub's ubuntu runner,
+# and `make test-install` skips it with a notice where it is absent.
 
 on:
   push:
@@ -12,12 +13,16 @@ on:
     paths:
       - "install.sh"
       - "tests/install_sh_test.sh"
+      - "tests/install/**"
+      - "Makefile"
       - ".github/workflows/install-script.yml"
   pull_request:
     branches: [main]
     paths:
       - "install.sh"
       - "tests/install_sh_test.sh"
+      - "tests/install/**"
+      - "Makefile"
       - ".github/workflows/install-script.yml"
 
 jobs:
@@ -25,7 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: shellcheck
-        run: shellcheck install.sh tests/install_sh_test.sh
-      - name: install.sh unit tests
-        run: bash tests/install_sh_test.sh
+
+      # Call the Makefile target rather than restating what it does. When this
+      # job spelled out its own shellcheck file list, that list drifted from
+      # the Makefile's the moment a script was added to one and not the other,
+      # and the local gate stopped predicting the CI one.
+      - name: shellcheck + install.sh unit tests
+        run: make test-install
