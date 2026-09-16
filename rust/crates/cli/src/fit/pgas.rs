@@ -493,11 +493,11 @@ pub fn run_stage(
             }
         }
         if any_failed {
-            super::abandon_stage(heartbeat, format!(
+            super::abandon_stage(heartbeat,
                 "error: --resume requires resume state files for all chains.\n  \
                  These are written automatically at the end of every PGAS run.\n  \
                  If the original run was interrupted before saving, use --force to \
-                 start fresh."));
+                 start fresh.".to_string());
         }
         states
     } else {
