@@ -8,8 +8,8 @@
 #   - OCaml switch + packages                   → $HOME/.opam
 #   - Rust toolchain                            → $HOME/.cargo, $HOME/.rustup
 #
-# It expects a handful of base build tools (make, git, curl, tar, unzip, and a
-# working C compiler) to already
+# It expects a handful of base build tools (make, git, curl, tar, unzip, and
+# working C and C++ compilers) to already
 # be present; if any are missing it tells you the one-time command to install
 # them and stops, rather than running a privileged install on your behalf.
 #
@@ -78,24 +78,34 @@ cmake_plat() {
 # switch build, hundreds of lines later, which is precisely the kind of
 # late-and-misattributed report this preflight exists to prevent (gh#755).
 # So compile and link something trivial and see.
-cc_works() {
-    have cc || return 1
+#
+# $1 is the driver to invoke, $2 the source extension to hand it.
+compiler_works() {
+    local drv="$1" ext="$2"
+    have "$drv" || return 1
     local d rc=0
     d="$(mktemp -d)" || return 1
-    printf 'int main(void){return 0;}\n' > "$d/probe.c"
-    cc -o "$d/probe" "$d/probe.c" >/dev/null 2>&1 || rc=1
+    printf 'int main(void){return 0;}\n' > "$d/probe.$ext"
+    "$drv" -o "$d/probe" "$d/probe.$ext" >/dev/null 2>&1 || rc=1
     rm -rf "$d"
     return "$rc"
 }
 
+# Several probes can map to one package — build-essential covers both cc and
+# c++ — and printing it twice makes the install line look like a mistake.
+dedupe() { printf '%s\n' "$@" | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//'; }
+
 ensure_base_tools() {
-    log "Checking base build tools (make, git, curl, tar, unzip, cc)..."
+    log "Checking base build tools (make, git, curl, tar, unzip, cc, c++)..."
     # The probe list is what the rest of this script cannot proceed without:
     #   make git curl tar  the build itself
     #   unzip              opam refuses to init without it — a hard
     #                      requirement, not a nicety
     #   cc                 the OCaml switch is compiled from source, and
     #                      cargo invokes `cc` as its linker driver
+    #   c++                the vendored nlopt declares a CXX CMake project, so
+    #                      its build configures for a C++ compiler even though
+    #                      camdl links only the C library
     #
     # Probing a command and naming a package are different things, and for the
     # compiler they are different per distro too: no distro ships a package
@@ -105,12 +115,17 @@ ensure_base_tools() {
     # install line that does not work.
     local missing=() apt_pkgs=() dnf_pkgs=() pac_pkgs=()
     local t
-    for t in make git curl tar unzip cc; do
-        if [ "$t" = cc ]; then cc_works && continue; else have "$t" && continue; fi
+    for t in make git curl tar unzip cc c++; do
+        case "$t" in
+            cc)  compiler_works cc  c  && continue ;;
+            c++) compiler_works c++ cc && continue ;;
+            *)   have "$t" && continue ;;
+        esac
         missing+=("$t")
         case "$t" in
-            cc) apt_pkgs+=(build-essential); dnf_pkgs+=(gcc); pac_pkgs+=(gcc) ;;
-            *)  apt_pkgs+=("$t"); dnf_pkgs+=("$t"); pac_pkgs+=("$t") ;;
+            cc)  apt_pkgs+=(build-essential); dnf_pkgs+=(gcc);     pac_pkgs+=(gcc) ;;
+            c++) apt_pkgs+=(build-essential); dnf_pkgs+=(gcc-c++); pac_pkgs+=(gcc) ;;
+            *)   apt_pkgs+=("$t"); dnf_pkgs+=("$t"); pac_pkgs+=("$t") ;;
         esac
     done
     [ ${#missing[@]} -eq 0 ] && return
@@ -118,7 +133,7 @@ ensure_base_tools() {
     warn "Missing or unusable required tools: ${missing[*]}"
     if [ "$OS" = macos ]; then
         cat >&2 <<EOF
-Install the Xcode Command Line Tools (provides make, git, curl, tar, cc;
+Install the Xcode Command Line Tools (provides make, git, curl, tar, cc, c++;
 unzip ships with macOS):
 
     xcode-select --install
@@ -129,9 +144,9 @@ EOF
         cat >&2 <<EOF
 Install them once with your system package manager, e.g.:
 
-    Debian/Ubuntu : sudo apt-get install -y ${apt_pkgs[*]}
-    Fedora/RHEL   : sudo dnf install -y ${dnf_pkgs[*]}
-    Arch          : sudo pacman -S ${pac_pkgs[*]}
+    Debian/Ubuntu : sudo apt-get install -y $(dedupe "${apt_pkgs[@]}")
+    Fedora/RHEL   : sudo dnf install -y $(dedupe "${dnf_pkgs[@]}")
+    Arch          : sudo pacman -S $(dedupe "${pac_pkgs[@]}")
 
 then re-run this script. (This script never calls sudo itself — run the
 above yourself, or ask an admin, on a box where you don't have root.)

@@ -140,6 +140,9 @@ check_fail_fast_on_opam_prereqs() {
   # function exists to prevent. Shadowing `cc` with a function that fails
   # stands in for a compiler that exists but cannot link.
   out=$(
+    # compiler_works invokes this through "$drv", which shellcheck cannot see,
+    # so SC2329 reports it as dead. It is the whole point of the test.
+    # shellcheck disable=SC2329
     cc() { return 1; }
     ensure_base_tools 2>&1
   ); rc=$?
@@ -147,6 +150,33 @@ check_fail_fast_on_opam_prereqs() {
   elif ! grep -q 'build-essential' <<<"$out"; then
     bad "a non-linking cc should give the same install hint: $out"
   else ok "a cc that exists but cannot link is caught here, not in opam"
+  fi
+
+  # The vendored nlopt declares a CXX CMake project, so a box with a C
+  # compiler and no C++ one configures fine for six minutes and then fails in
+  # the Rust build with "CMAKE_CXX_COMPILER: c++ ... was not found".
+  out=$(
+    have() { [ "$1" = c++ ] && return 1; command -v "$1" >/dev/null 2>&1; }
+    ensure_base_tools 2>&1
+  ); rc=$?
+  if [ "$rc" -eq 0 ]; then bad "ensure_base_tools should fail when c++ is missing"
+  elif ! grep -q 'dnf install -y gcc-c++' <<<"$out"; then
+    bad "dnf hint should name gcc-c++: $out"
+  else ok "missing c++ is named before the nlopt build discovers it"
+  fi
+
+  # build-essential provides both cc and c++, so when both are missing the apt
+  # line must name it once, not twice.
+  out=$(
+    have() { case "$1" in cc|c++) return 1 ;; esac; command -v "$1" >/dev/null 2>&1; }
+    ensure_base_tools 2>&1
+  ); rc=$?
+  if [ "$rc" -eq 0 ]; then bad "ensure_base_tools should fail when both compilers are missing"
+  elif grep -q 'build-essential build-essential' <<<"$out"; then
+    bad "apt hint repeats a package: $out"
+  elif ! grep -q 'apt-get install -y build-essential' <<<"$out"; then
+    bad "apt hint should still name build-essential: $out"
+  else ok "one package covering two probes is listed once"
   fi
 }
 
