@@ -116,13 +116,26 @@ dev-camdlc: build-ocaml
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-.PHONY: test test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-install
+.PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-install
 
 # `make test` runs the full surface. The Rust suite is split into two groups so
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
-test: test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden test-rust test-inference test-integration test-docs test-cli-docs test-install
+
+# Clippy, the same invocation CI's `test` job runs as its second step. Kept in
+# `make test` because CI aborts that job on a lint error before a single test
+# runs: a red clippy there hides the Rust suite, the golden determinism check
+# and the integration suite, so a lint we cannot reproduce locally costs the
+# whole downstream gate.
+#
+# `--workspace` is required, not decoration. `rust/Cargo.toml` declares the
+# workspace root as a package of its own (`camdl-tests`), so a bare
+# `cargo clippy` lints only that package and compiles `sim`, `cli` and `io` as
+# dependencies, which clippy-driver never inspects (gh#743).
+lint:
+	cd rust && $(CARGO_WRAP) cargo clippy --workspace --all-targets -- -D warnings
 
 # Inner-loop gate: the whole Rust workspace (unit + integration + doctests) via
 # `cargo test`. Deliberately SKIPS the slow cross-language / doc phases
