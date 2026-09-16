@@ -22,18 +22,26 @@
 FROM ubuntu:18.04
 
 # Genuine base prerequisites only — exactly what ensure_base_tools checks for
-# (make, git, curl, tar, unzip, and gcc for `cc`) — plus ca-certificates (TLS),
-# bubblewrap (so opam can sandbox), and the OLD system cmake (3.10) to
-# reproduce gh#205 friction #1. Installed as root *in the image build*; this
-# stands in for "an admin provisioned the box". The camdl install runs
-# unprivileged and `sudo` is deliberately NOT present.
+# (make, git, curl, tar, unzip, and a C compiler that links) — plus
+# ca-certificates (TLS), bubblewrap (so opam can sandbox), and the OLD system
+# cmake (3.10) to reproduce gh#205 friction #1. Installed as root *in the image
+# build*; this stands in for "an admin provisioned the box". The camdl install
+# runs unprivileged and `sudo` is deliberately NOT present.
 #
-# `unzip` and `gcc` are prerequisites, not conveniences: opam refuses to init
-# without unzip, and the OCaml switch is compiled from source. Leaving them out
-# is what made this job fail in ~45s on every run since it was added (gh#755).
+# `unzip` and a working C compiler are prerequisites, not conveniences: opam
+# refuses to init without unzip, and the OCaml switch is compiled from source.
+# Leaving them out is what made this job fail in ~45s on every run since it was
+# added (gh#755).
+#
+# `libc6-dev` is spelled out because `gcc` only *recommends* it, and this image
+# installs with --no-install-recommends deliberately. Without it gcc is on PATH
+# and cannot link, and the OCaml compiler build dies at "C compiler cannot
+# create executables". Users are pointed at build-essential instead, which is
+# the one apt name that reliably carries both; the pair here keeps the image
+# minimal, which is the point of this test.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      make git curl tar unzip gcc ca-certificates bubblewrap cmake \
+      make git curl tar unzip gcc libc6-dev ca-certificates bubblewrap cmake \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user, no sudo. If install.sh reaches for root, the build dies here.

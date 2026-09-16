@@ -9,7 +9,7 @@
 #   - Rust toolchain                            → $HOME/.cargo, $HOME/.rustup
 #
 # It expects a handful of base build tools (make, git, curl, tar, unzip, and a
-# C compiler) to already
+# working C compiler) to already
 # be present; if any are missing it tells you the one-time command to install
 # them and stops, rather than running a privileged install on your behalf.
 #
@@ -70,6 +70,24 @@ cmake_plat() {
 # system packages (git in particular drags in many runtime deps) and on any
 # box that can build OCaml + Rust they are already present. If something is
 # missing we print the exact one-time command and stop.
+# A compiler that exists is not the same as a compiler that works. On
+# Debian/Ubuntu the `gcc` package only *recommends* libc6-dev, so a minimal
+# box — or any image built with `--no-install-recommends gcc` — has `cc` on
+# PATH and no crt objects to link against. `command -v cc` passes; the failure
+# then resurfaces as "C compiler cannot create executables" inside the OCaml
+# switch build, hundreds of lines later, which is precisely the kind of
+# late-and-misattributed report this preflight exists to prevent (gh#755).
+# So compile and link something trivial and see.
+cc_works() {
+    have cc || return 1
+    local d rc=0
+    d="$(mktemp -d)" || return 1
+    printf 'int main(void){return 0;}\n' > "$d/probe.c"
+    cc -o "$d/probe" "$d/probe.c" >/dev/null 2>&1 || rc=1
+    rm -rf "$d"
+    return "$rc"
+}
+
 ensure_base_tools() {
     log "Checking base build tools (make, git, curl, tar, unzip, cc)..."
     # The probe list is what the rest of this script cannot proceed without:
@@ -78,22 +96,26 @@ ensure_base_tools() {
     #                      requirement, not a nicety
     #   cc                 the OCaml switch is compiled from source, and
     #                      cargo invokes `cc` as its linker driver
-    # Probing a command and naming a package are different things: opam and
-    # cargo look for `cc`, but no distro ships a package by that name, so the
-    # hint has to say gcc or it cannot be pasted (gh#755).
-    local missing=() packages=()
+    #
+    # Probing a command and naming a package are different things, and for the
+    # compiler they are different per distro too: no distro ships a package
+    # called `cc`, Debian/Ubuntu need build-essential to get a compiler that
+    # can actually link, and gcc alone is right on Fedora and Arch. Printing
+    # the probe name, or one package name for everyone, hands the reader an
+    # install line that does not work.
+    local missing=() apt_pkgs=() dnf_pkgs=() pac_pkgs=()
     local t
     for t in make git curl tar unzip cc; do
-        have "$t" && continue
+        if [ "$t" = cc ]; then cc_works && continue; else have "$t" && continue; fi
         missing+=("$t")
         case "$t" in
-            cc) packages+=(gcc) ;;
-            *)  packages+=("$t") ;;
+            cc) apt_pkgs+=(build-essential); dnf_pkgs+=(gcc); pac_pkgs+=(gcc) ;;
+            *)  apt_pkgs+=("$t"); dnf_pkgs+=("$t"); pac_pkgs+=("$t") ;;
         esac
     done
     [ ${#missing[@]} -eq 0 ] && return
 
-    warn "Missing required tools: ${missing[*]}"
+    warn "Missing or unusable required tools: ${missing[*]}"
     if [ "$OS" = macos ]; then
         cat >&2 <<EOF
 Install the Xcode Command Line Tools (provides make, git, curl, tar, cc;
@@ -107,9 +129,9 @@ EOF
         cat >&2 <<EOF
 Install them once with your system package manager, e.g.:
 
-    Debian/Ubuntu : sudo apt-get install -y ${packages[*]}
-    Fedora/RHEL   : sudo dnf install -y ${packages[*]}
-    Arch          : sudo pacman -S ${packages[*]}
+    Debian/Ubuntu : sudo apt-get install -y ${apt_pkgs[*]}
+    Fedora/RHEL   : sudo dnf install -y ${dnf_pkgs[*]}
+    Arch          : sudo pacman -S ${pac_pkgs[*]}
 
 then re-run this script. (This script never calls sudo itself — run the
 above yourself, or ask an admin, on a box where you don't have root.)

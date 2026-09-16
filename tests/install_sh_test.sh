@@ -118,15 +118,35 @@ check_fail_fast_on_opam_prereqs() {
   fi
 
   # `cc` is the command opam and cargo probe for, but no distro ships a
-  # package called `cc`. The hint has to name gcc or it cannot be pasted.
+  # package called `cc`. On Debian/Ubuntu the answer is build-essential:
+  # gcc alone only *recommends* libc6-dev, so `--no-install-recommends gcc`
+  # yields a compiler that cannot link.
   out=$(
     have() { [ "$1" = cc ] && return 1; command -v "$1" >/dev/null 2>&1; }
     ensure_base_tools 2>&1
   ); rc=$?
   if [ "$rc" -eq 0 ]; then bad "ensure_base_tools should fail when cc is missing"
-  elif ! grep -q 'apt-get install -y gcc' <<<"$out"; then
-    bad "hint should name the gcc package, not the cc command: $out"
-  else ok "missing cc is named, and the install hint says gcc"
+  elif ! grep -q 'apt-get install -y build-essential' <<<"$out"; then
+    bad "apt hint should name build-essential, not the cc command: $out"
+  elif ! grep -q 'dnf install -y gcc' <<<"$out"; then
+    bad "dnf hint should name gcc: $out"
+  else ok "missing cc is named, and each distro hint names its own package"
+  fi
+
+  # The case that got past the first version of this check: gcc present,
+  # libc6-dev absent. `command -v cc` succeeds, so a presence probe passes,
+  # and the failure resurfaces as "C compiler cannot create executables" deep
+  # inside the OCaml switch build — the exact 200-lines-later report this
+  # function exists to prevent. Shadowing `cc` with a function that fails
+  # stands in for a compiler that exists but cannot link.
+  out=$(
+    cc() { return 1; }
+    ensure_base_tools 2>&1
+  ); rc=$?
+  if [ "$rc" -eq 0 ]; then bad "ensure_base_tools should fail when cc cannot link"
+  elif ! grep -q 'build-essential' <<<"$out"; then
+    bad "a non-linking cc should give the same install hint: $out"
+  else ok "a cc that exists but cannot link is caught here, not in opam"
   fi
 }
 
