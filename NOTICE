@@ -1,7 +1,26 @@
 camdl — A Compartmental Epidemic Modeling DSL
-Copyright 2025-2026 Vince Buffalo
+Copyright (c) 2025-2026 Vince Buffalo
+
+Licensed under the MIT License; see LICENSE.
 
 This product was originally created by Vince Buffalo at the Institute for
 Disease Modeling (IDM), Gates Foundation.
 
 Project creator and lead developer: Vince Buffalo <vsbuffalo@gmail.com>
+
+
+Third-party code
+----------------
+
+Portions of `rust/crates/sim/src/rng.rs` are transcribed from TensorFlow's
+`random_binomial_op.cc` — the `btrs` binomial sampler and the
+`stirling_approx_tail` correction series. That code is:
+
+    Copyright 2019 The TensorFlow Authors
+    Licensed under the Apache License, Version 2.0
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Apache-2.0 is not the license of this project, and this material is not
+relicensed by the MIT grant above: it remains under Apache-2.0, whose
+attribution and notice terms this file exists to satisfy. The transcribed
+functions carry the same attribution inline, next to the code.

@@ -3,7 +3,7 @@
 [![CI](https://github.com/vsbuffalo/camdl/actions/workflows/ci.yml/badge.svg)](https://github.com/vsbuffalo/camdl/actions/workflows/ci.yml)
 [![Compiler](https://github.com/vsbuffalo/camdl/actions/workflows/compiler.yml/badge.svg)](https://github.com/vsbuffalo/camdl/actions/workflows/compiler.yml)
 [![Inference](https://github.com/vsbuffalo/camdl/actions/workflows/inference.yml/badge.svg)](https://github.com/vsbuffalo/camdl/actions/workflows/inference.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](VERSIONING.md)
 
 camdl is a small domain-specific language (DSL), simulation runtime, and
@@ -449,4 +449,4 @@ silent-zero for the rare legitimate case.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE). Developed at the
+MIT — see [LICENSE](LICENSE). Developed at the

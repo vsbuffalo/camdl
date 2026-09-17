@@ -137,8 +137,9 @@ fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
 ///
 /// Exact tabulated values below `k = 10`, where the asymptotic series has not
 /// yet converged; the series above. Transcribed from TensorFlow's
-/// `random_binomial_op.cc` (`stirling_approx_tail`), Apache-2.0 — the same
-/// license as this project. See [`btrs_binomial`] for the full attribution.
+/// `random_binomial_op.cc` (`stirling_approx_tail`), which is Apache-2.0 and
+/// stays Apache-2.0 — camdl is MIT, and the MIT grant does not cover this
+/// material. See [`btrs_binomial`] for the full attribution, and NOTICE.
 fn stirling_approx_tail(k: f64) -> f64 {
     debug_assert!(k >= 0.0 && k.fract() == 0.0, "tail wants a non-negative integer, got {k}");
     /// `δ(k+1) = ln((k+1)!) − Stirling(k+1)` for k = 0..=9 — note the shift,
@@ -377,7 +378,9 @@ impl BtrsHat {
 /// `O(n·ε)` precision loss described above and nothing else.
 ///
 /// **Source.** Transcribed from TensorFlow's `random_binomial_op.cc` (`btrs`),
-/// Apache-2.0 — the same license as this project. This is deliberately the
+/// Copyright 2019 The TensorFlow Authors, Apache-2.0. camdl is MIT; this
+/// material is not relicensed by that grant and remains under Apache-2.0,
+/// which is why NOTICE carries its attribution. This is deliberately the
 /// **TensorFlow variant**, not the paper's: TensorFlow Probability's sibling
 /// implementation notes that it "deviates from Hormann's BTRS algorithm, as there
 /// is a log missing". The variant transcribed here is the one whose hat is
