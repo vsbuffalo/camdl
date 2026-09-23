@@ -169,7 +169,7 @@ impl ReactiveObs {
                 })?;
             let projection = StreamProjection::from_ir(&obs.projection, compiled, name)?;
             let kind = obs.projection.temporal_kind();
-            let resolved = resolve_likelihood_from_model(&obs.likelihood, compiled)
+            let resolved = resolve_likelihood_from_model(&obs.likelihood, compiled, name)
                 .map_err(|e| {
                     format!("reactive trigger stream '{name}': likelihood resolution failed: {e:?}")
                 })?;

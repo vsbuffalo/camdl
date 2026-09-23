@@ -1083,6 +1083,27 @@ pub enum ResolvedLikelihood {
     },
 }
 
+impl ResolvedLikelihood {
+    /// Every argument expression the value path evaluates, with its DSL name.
+    /// Excludes the `_grad`/`_proj` derivative maps (gradient path only).
+    pub fn value_args(&self) -> Vec<(&'static str, &ResolvedExpr)> {
+        match self {
+            ResolvedLikelihood::Poisson { rate, .. } => vec![("rate", rate)],
+            ResolvedLikelihood::NegBinomial { mean, dispersion, .. } =>
+                vec![("mean", mean), ("dispersion", dispersion)],
+            ResolvedLikelihood::Normal { mean, sd, .. } => vec![("mean", mean), ("sd", sd)],
+            ResolvedLikelihood::Binomial { n, p, .. } => vec![("n", n), ("p", p)],
+            ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } =>
+                vec![("n", n), ("alpha", alpha), ("beta", beta)],
+            ResolvedLikelihood::Beta { mean, concentration, .. } =>
+                vec![("mean", mean), ("concentration", concentration)],
+            ResolvedLikelihood::Bernoulli { p, .. } => vec![("p", p)],
+            ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi, .. } =>
+                vec![("mean", mean), ("dispersion", dispersion), ("pi", pi)],
+        }
+    }
+}
+
 /// Resolve a single argument's `∂arg/∂projected` (`Diffable::proj_grad`).
 fn resolve_proj_grad(
     pg: &Option<DerivEntry>,

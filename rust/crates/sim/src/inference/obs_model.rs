@@ -31,7 +31,34 @@ use rand_distr::{Gamma, Normal};
 /// failures (unknown parameter / compartment / table name inside a
 /// likelihood expression). Now returns the underlying `SimError` so
 /// the CLI can surface a proper diagnostic.
+///
+/// gh#681: refuses an argument that reads a real (ODE) compartment. Every
+/// value-path evaluator (`MultiStreamObsModel`, `compile_obs_sample_pf`,
+/// `compile_obs_mean_pf`) passes a real state that is never written, so the
+/// compartment would read as zero. `obs_name` names the stream in the error.
 pub(crate) fn resolve_likelihood_from_model(
+    likelihood: &ir::observation::Likelihood,
+    compiled: &CompiledModel,
+    obs_name: &str,
+) -> Result<ResolvedLikelihood, crate::error::SimError> {
+    let resolved = resolve_likelihood_unchecked(likelihood, compiled)?;
+    for (arg, expr) in resolved.value_args() {
+        if let Some(local) = crate::resolved_expr::first_real_state_read(
+            expr, &compiled.resolved.bindings,
+        ) {
+            let name = &compiled.model.compartments[compiled.real_local_to_global[local]].name;
+            return Err(crate::error::SimError::Validation(format!(
+                "observation '{obs_name}': its likelihood argument `{arg}` reads the \
+                 real-valued (ODE) compartment '{name}', which observation scoring and \
+                 emission do not yet support — it would be read as zero (gh#681). \
+                 Use integer compartments, flows, parameters or data columns only."
+            )));
+        }
+    }
+    Ok(resolved)
+}
+
+fn resolve_likelihood_unchecked(
     likelihood: &ir::observation::Likelihood,
     compiled: &CompiledModel,
 ) -> Result<ResolvedLikelihood, crate::error::SimError> {
@@ -691,8 +718,8 @@ pub fn compile_obs_sample_pf(
     compiled: Arc<CompiledModel>,
     params: &[f64],
 ) -> ObsSampleFn {
-    let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled)
-        .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {:?}", e));
+    let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled, &obs_model.name)
+        .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {e}"));
     let params = params.to_vec();
     let real_s = RealState::new(compiled.real_local_to_global.len());
     let n_int  = compiled.int_local_to_global.len();
@@ -735,8 +762,8 @@ pub fn compile_obs_mean_pf(
     compiled: Arc<CompiledModel>,
     params: &[f64],
 ) -> ObsMeanFn {
-    let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled)
-        .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {:?}", e));
+    let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled, &obs_model.name)
+        .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {e}"));
     let params = params.to_vec();
     let real_s = RealState::new(compiled.real_local_to_global.len());
     let n_int = compiled.int_local_to_global.len();

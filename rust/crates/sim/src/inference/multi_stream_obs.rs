@@ -531,6 +531,62 @@ mod real_state_projection_tests {
         assert!(err.contains("'W'") && err.contains("gh#681"), "{err}");
     }
 
+    /// A Poisson observation of `prevalence(I)` whose `rate` is `rate_expr`.
+    fn poisson_obs(rate_expr: Expr) -> ir::observation::ObservationModel {
+        use ir::observation::{ColumnRole, Likelihood, ObsColumn, PoissonLikelihood};
+        ir::observation::ObservationModel {
+            name: "env".into(),
+            source: "env".into(),
+            columns: vec![
+                ObsColumn { name: "time".into(), role: ColumnRole::Time },
+                ObsColumn { name: "env".into(),
+                            role: ColumnRole::Value(ir::parameter::ParamKind::Count) },
+            ],
+            scored: "env".into(),
+            emit_schedule: None,
+            stratum: vec![],
+            covers: None,
+            projection: Projection::CurrentPop("I".into()),
+            projection_state_grad: Default::default(),
+            likelihood: Likelihood::Poisson(PoissonLikelihood {
+                rate: ir::Diffable::new(rate_expr),
+            }),
+        }
+    }
+
+    fn build(
+        compiled: CompiledModel, obs: ir::observation::ObservationModel,
+    ) -> Result<super::MultiStreamObsModel, crate::error::SimError> {
+        let compiled = std::sync::Arc::new(compiled);
+        let projection = StreamProjection::from_ir(&obs.projection, &compiled, &obs.name)
+            .unwrap();
+        let bound = crate::inference::BoundObs::bind(0.0, vec![super::StreamSpec::dense(
+            0.0, projection, obs, crate::inference::dense_cells(vec![3.0]), vec![7.0],
+        )]).unwrap().0;
+        super::MultiStreamObsModel::new(bound, compiled)
+    }
+
+    /// gh#681, the likelihood-argument half: `rate = projected + W` is
+    /// evaluated against the same never-written real state as the projection,
+    /// so it is scored as `rate = projected`. Building the model must refuse.
+    #[test]
+    fn likelihood_argument_reading_real_compartment_is_refused() {
+        let rate = Expr::bin_op(BinOp::Add, Expr::Projected(ir::expr::ProjectedExpr {
+            projected: () }), Expr::pop("W"));
+        let err = match build(sir_reservoir(vec![]), poisson_obs(rate)) {
+            Ok(_) => panic!("a likelihood argument reading real state must be refused (gh#681)"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(err.contains("'env'") && err.contains("'W'") && err.contains("rate")
+            && err.contains("gh#681"),
+            "the refusal must name the stream, the argument, the compartment and the issue: {err}");
+
+        // An integer-only argument still builds.
+        let ok_rate = Expr::bin_op(BinOp::Mul, Expr::const_(0.5), Expr::binding_ref("N"));
+        build(sir_reservoir(vec![]), poisson_obs(ok_rate))
+            .expect("an integer-only likelihood argument must still build");
+    }
+
     /// Integer-only projections, including through an integer-only binding
     /// (`N = S + I + R`), are unaffected.
     #[test]
@@ -1651,7 +1707,7 @@ impl MultiStreamObsModel {
         let mut streams = Vec::with_capacity(bound_streams.len());
         for spec in bound_streams {
             let resolved = resolve_likelihood_from_model(
-                &spec.ir_model.likelihood, &compiled,
+                &spec.ir_model.likelihood, &compiled, &spec.ir_model.name,
             )?;
             let projection_state_grad =
                 resolve_projection_state_grad(&spec.ir_model.projection_state_grad, &compiled)?;
