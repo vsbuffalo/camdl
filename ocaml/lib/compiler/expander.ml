@@ -6351,6 +6351,34 @@ let expand_simulate ctx =
       | Some _ -> Float.nan
       | None   -> resolve_float_expr ctx sd.sim_to
     in
+    (* gh#453: the horizon must be a forward interval. An empty or reversed
+       one gives an empty output grid, so every backend's loop never runs and
+       the run exits 0 with a header-only table. The Rust IR loader refuses it
+       (`InvalidHorizon`), but only after `camdlc` has reported success, so
+       refuse it here, naming both resolved values. An anchored `to` bakes NaN
+       on purpose and is resolved later (gh#616), so it is skipped exactly as
+       the loader skips it. Located at the `to = ...` entry. *)
+    if t_end_anchor = None
+       && not (Float.is_finite t_start && Float.is_finite t_end
+               && t_end > t_start) then begin
+      let unit = match ctx.time_unit with
+        | Days -> " 'days" | Weeks -> " 'weeks" | Months -> " 'months"
+        | Years -> " 'years" | _ -> "" in
+      let loc = match sd.sim_to_loc with
+        | Some l -> diag_loc_of_ast_ctx ctx l
+        | None -> Diagnostics.no_loc in
+      Diagnostics.error ctx.diags ~code:"E602" ~loc
+        ~message:(Printf.sprintf
+          "`simulate` horizon is not a forward interval: from = %g%s, \
+           to = %g%s (model time); `to` must be later than `from`"
+          t_start unit t_end unit)
+        ~hint:(if t_end = t_start then
+                 "an empty horizon simulates nothing — set `to` later than `from`"
+               else
+                 "`from` and `to` look swapped — if they are dates, check their \
+                  order; `to` is the end of the simulated period")
+        ()
+    end;
     (* gh#161: `dt` is a model knob. It is unit-aware like from/to —
        `dt = 0.05 'months` resolves through resolve_float_expr (EUnit →
        model time units). None when omitted, so the CLI default / --dt

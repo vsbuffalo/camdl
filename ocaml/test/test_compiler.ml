@@ -10518,6 +10518,44 @@ let test_lint_warning_has_location () =
     Alcotest.(check bool) "L402 points at the compartment (line > 0)"
       true (d.loc.Diagnostics.line > 0)
 
+(* gh#453: a `simulate` horizon that is not a forward interval. `camdlc check`
+   accepted `from > to` and `from == to`; only the Rust IR loader
+   (`InvalidHorizon`) refused it, after compilation had reported success.
+   The reversed-dates case is the likely real-world one. *)
+let horizon_src ?(origin = "") ~from_ ~to_ () = Printf.sprintf {|
+time_unit = 'days
+%s
+compartments { S, I }
+parameters { beta : rate in [0,1] }
+transitions { infection : S --> I @ beta * S * I / (S + I) }
+init { S = 99 I = 1 }
+simulate { from = %s to = %s }
+|} origin from_ to_
+
+let test_gh453_reversed_horizon_is_e602 () =
+  compile_expect_error_code ~code:"E602" ~contains:"from = 100"
+    (horizon_src ~from_:"100 'days" ~to_:"10 'days" ())
+
+let test_gh453_empty_horizon_is_e602 () =
+  compile_expect_error_code ~code:"E602" ~contains:"to = 10"
+    (horizon_src ~from_:"10 'days" ~to_:"10 'days" ())
+
+let test_gh453_reversed_dates_is_e602 () =
+  compile_expect_error_code ~code:"E602" ~contains:"swapped"
+    (horizon_src ~origin:{|origin = date("2020-01-01")|}
+       ~from_:{|date("2020-06-01")|} ~to_:{|date("2020-03-01")|} ())
+
+let test_gh453_forward_horizons_compile () =
+  List.iter (fun src ->
+    match Compiler.compile ~name:"gh453_ok" src with
+    | Ok _ -> ()
+    | Error e -> Alcotest.failf "a forward horizon must compile: %s" e)
+    [ horizon_src ~from_:"0 'days" ~to_:"10 'days" ();
+      horizon_src ~origin:{|origin = date("2020-01-01")|}
+        ~from_:{|date("2020-03-01")|} ~to_:{|date("2020-06-01")|} ();
+      horizon_src ~origin:{|origin = date("2020-01-01")|}
+        ~from_:"origin" ~to_:"add_calendar_years(origin, 2)" () ]
+
 (* gh#501 / gh#674: a transition's or stream's loc must start at its NAME.
    Every `transition_decl` / `obs_decl` production begins with nullable
    nonterminals (`doc_opt`, `lineage_attr_opt`); with both empty, menhir's bare
@@ -10593,6 +10631,13 @@ simulate { from = 0 'days to = 10 'days }
 |} in
   Alcotest.(check (pair int int)) "E350 carets `deaths` (line 16, col 3)"
     (16, 3) (loc_of_first ~code:"E350" ~name:"gh501_e350" src)
+
+(* gh#453: E602 is located at the `to = ...` entry (line 8, col 29 below). *)
+let test_gh453_horizon_error_is_located_at_to () =
+  Alcotest.(check (pair int int)) "E602 carets `to = ...`"
+    (8, 29)
+    (loc_of_first ~code:"E602" ~name:"gh453_loc"
+       (horizon_src ~from_:"100 'days" ~to_:"10 'days" ()))
 
 (* ── gh#112: table-lookup arity validation ──────────────────────────────────
    A table declared `C_age : age × age` (rank 2) must be indexed with exactly
@@ -14081,6 +14126,13 @@ let () =
     "compile_outcome", [
       Alcotest.test_case "clean model returns Some value, no errors" `Quick test_compile_outcome_clean_returns_value;
       Alcotest.test_case "late error is a value, not a raise"        `Quick test_compile_outcome_late_error_is_value_not_raise;
+    ];
+    "simulate_horizon_gh453", [
+      Alcotest.test_case "E602: from > to" `Quick test_gh453_reversed_horizon_is_e602;
+      Alcotest.test_case "E602: from == to" `Quick test_gh453_empty_horizon_is_e602;
+      Alcotest.test_case "E602: reversed dates, hint says swapped" `Quick test_gh453_reversed_dates_is_e602;
+      Alcotest.test_case "forward horizons (numeric, dates, calendar) compile" `Quick test_gh453_forward_horizons_compile;
+      Alcotest.test_case "E602 is located at `to = ...`" `Quick test_gh453_horizon_error_is_located_at_to;
     ];
     "diagnostic_locations", [
       Alcotest.test_case "decl-keyed validate error carries a loc"   `Quick test_validate_decl_error_has_location;

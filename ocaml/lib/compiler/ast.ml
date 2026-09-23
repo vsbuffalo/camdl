@@ -596,6 +596,7 @@ type output_decl = {
 type simulate_decl = {
   sim_from: expr;
   sim_to: expr;
+  sim_to_loc: loc option;   (* span of the `to = ...` entry, for E602 *)
   sim_dt: expr option;
   sim_integrator: (string * loc) option;
   sim_atol: (expr * loc) option;

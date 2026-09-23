@@ -1347,13 +1347,14 @@ simulate_body:
   | kvs = list(simulate_kv)
       { let sim_from = ref (EConst 0.0) in
         let sim_to   = ref (EConst 100.0) in
+        let sim_to_loc = ref None in
         let sim_dt   = ref None in
         let sim_integrator = ref None in
         let sim_atol = ref None in
         let sim_rtol = ref None in
         List.iter (function
           | `From e -> sim_from := e
-          | `To   e -> sim_to   := e
+          | `To (e, l) -> sim_to := e; sim_to_loc := Some l
           | `Dt   e -> sim_dt   := Some e
           | `Integrator (meth, mloc, opts) ->
             sim_integrator := Some (meth, mloc);
@@ -1364,7 +1365,7 @@ simulate_body:
             ) opts
           | `UnknownKey _ -> ()  (* already diagnosed in simulate_kv *)
         ) kvs;
-        { sim_from = !sim_from; sim_to = !sim_to; sim_dt = !sim_dt;
+        { sim_from = !sim_from; sim_to = !sim_to; sim_to_loc = !sim_to_loc; sim_dt = !sim_dt;
           sim_integrator = !sim_integrator; sim_atol = !sim_atol; sim_rtol = !sim_rtol } }
 
 (* `dt` is the discretization step (gh#161). It is a model knob — models are
@@ -1376,7 +1377,7 @@ simulate_body:
    silent drop. *)
 simulate_kv:
   | FROM EQ e = expr { `From e }
-  | TO   EQ e = expr { `To   e }
+  | TO   EQ e = expr { `To (e, Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos) }
   (* gh#166: TAGGED integrator with an optional tolerance block —
      `integrator = rk45 { atol = 1e-8  rtol = 1e-6 }`. atol/rtol are keys of the
      rk45 block, so they cannot be written without rk45 (illegal-states-
@@ -1671,7 +1672,7 @@ scenario_field:
            Suppressed when a rejected key was already reported: in
            `simulate { from = 10 }` the missing `to` is a CONSEQUENCE of the
            `from`, and the rejection points at the actual mistake. *)
-        let e = match List.find_map (function `To e -> Some e | _ -> None) kvs with
+        let e = match List.find_map (function `To (e, _) -> Some e | _ -> None) kvs with
                 | Some e -> e
                 | None ->
                   if rejected = None then
