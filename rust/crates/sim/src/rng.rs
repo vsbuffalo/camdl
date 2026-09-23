@@ -693,7 +693,8 @@ impl StatefulRng {
         // large-n initial term without `powi`.
         //
         // Reachable from user data, not just exotic models:
-        // `obs_model.rs:499` takes its binomial denominator from a data column,
+        // the Binomial arms of `inference/obs_model.rs` take their denominator
+        // from a resolved expression (a data column among them), cast `as u64`,
         // so a TSV with a large `n_examined` and a small reporting probability
         // crashed the process.
         //
@@ -726,10 +727,13 @@ impl StatefulRng {
         // unchanged. `Binomial::new` re-derives the flip internally, so this
         // is the same call the pre-gh#510 code made.
         // Above `BTRS_MAX_N` the hat stops dominating, so BTRS de-selects itself
-        // and the draw falls back to BTPE — the pre-BTRS behaviour, unchanged,
-        // including its own huge-`n` fallback. Resolved BEFORE the match so the
-        // match stays exhaustive over the enum: a third algorithm must not be
-        // able to reach the hot path through a `_` arm.
+        // and the draw falls back to BTPE — the pre-BTRS behaviour, unchanged.
+        // BTPE has no huge-`n` fallback: for `n >= 2^63` `rand_distr` asserts
+        // (`f64_to_i64`) on some branches, a panic the `Err(_)` arm below cannot
+        // catch, and nothing bounds `n` above (gh#803).
+        // Resolved BEFORE the match so the match stays exhaustive over the
+        // enum: a third algorithm must not be able to reach the hot path
+        // through a `_` arm.
         let algo = match self.algo {
             BinomialAlgorithm::Btrs if n > BTRS_MAX_N => BinomialAlgorithm::Btpe,
             other => other,
@@ -907,10 +911,10 @@ mod binomial_termination_tests {
     /// triangle radius `p1 = (2.195·sqrt(npq) − 4.6·q).floor() + 0.5` goes
     /// negative and `Uniform::new(0., p4)` panics with `low >= high`.
     ///
-    /// The reachable path is a DATA COLUMN: `obs_model.rs:499` takes the
-    /// binomial denominator from the user's TSV, so a large `n_examined` with
-    /// a small reporting probability aborted the process from inside a
-    /// dependency, mid-fit, with no model context.
+    /// The reachable path is a DATA COLUMN: the Binomial arms of
+    /// `inference/obs_model.rs` take the binomial denominator from the user's
+    /// TSV, so a large `n_examined` with a small reporting probability aborted
+    /// the process from inside a dependency, mid-fit, with no model context.
     #[test]
     fn huge_n_with_small_np_returns_instead_of_panicking() {
         let mut rng = StatefulRng::new(11);
