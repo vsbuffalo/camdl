@@ -1082,6 +1082,13 @@ R0       = { range = { min = 1.0, max = 5.0, step = 0.5 } }
 values, not their exponents). `range` walks `min` upward by `step` while
 `x <= max`, with `step` defaulting to `1.0`.
 
+A spec is refused when the manifest is read, never expanded into something
+other than it says: a key its form does not have (so
+`{ range = [0.1, 0.3], step = 0.1 }` is an error, not a one-point sweep), a
+`range` written as an array, an empty list, `n = 0`, a non-finite value, a
+non-positive `logspace` bound, a `range` whose `max` is below its `min`, and a
+`step` that is not positive and finite (gh#594).
+
 **CLI `--sweep NAME=SPEC`** — `rust/crates/cli/src/args/types.rs`, used by
 `camdl profile`, `camdl fit run`, and `camdl fit predict`.
 

@@ -131,8 +131,15 @@ struct RangeMinMax {
 ///   vacc_eff = { linspace = { min = 0.1, max = 0.9, n = 9 } }
 ///   kappa    = { logspace = { min = 0.001, max = 0.1, n = 5 } }
 ///   R0       = { range = { min = 1.0, max = 5.0, step = 0.5 } }
+///
+/// Parsed by hand ([`SweepSpec::try_from`]) rather than as an untagged enum,
+/// so a spec is refused when it is read rather than expanded wrongly: a key its
+/// form does not have, a `range` written as an array (which filled `min`/`max`
+/// and dropped a `step` written beside it, gh#594), and every value that would
+/// expand to no points, to NaN, or — a `step` that is not positive — to an
+/// unbounded loop.
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[serde(try_from = "toml::Value")]
 enum SweepSpec {
     List(Vec<f64>),
     Linspace { linspace: LinspaceSpec },
@@ -141,6 +148,7 @@ enum SweepSpec {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LinspaceSpec {
     min: f64,
     max: f64,
@@ -148,6 +156,7 @@ struct LinspaceSpec {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RangeSpec {
     min: f64,
     max: f64,
@@ -156,6 +165,93 @@ struct RangeSpec {
 }
 
 fn default_step() -> f64 { 1.0 }
+
+const SWEEP_FORMS: &str = "a list `[a, b, …]`, `{ linspace = { min, max, n } }`, \
+    `{ logspace = { min, max, n } }`, or `{ range = { min, max, step } }`";
+
+impl TryFrom<toml::Value> for SweepSpec {
+    type Error = String;
+
+    fn try_from(v: toml::Value) -> Result<Self, String> {
+        use toml::Value;
+        let finite = |what: &str, x: f64| -> Result<f64, String> {
+            if x.is_finite() { Ok(x) } else { Err(format!("{what} must be finite, got {x}")) }
+        };
+        let spec = match v {
+            Value::Array(items) => {
+                if items.is_empty() {
+                    return Err("an empty list sweeps no values, so the batch would \
+                                run no cells".to_string());
+                }
+                let vals = items.iter()
+                    .map(|x| match x {
+                        Value::Float(f) => finite("a list value", *f),
+                        Value::Integer(i) => Ok(*i as f64),
+                        other => Err(format!("a list value must be a number, got {other}")),
+                    })
+                    .collect::<Result<Vec<f64>, String>>()?;
+                SweepSpec::List(vals)
+            }
+            Value::Table(t) => {
+                let mut keys = t.keys();
+                let (Some(form), None) = (keys.next(), keys.next()) else {
+                    return Err(format!(
+                        "a sweep spec is one of {SWEEP_FORMS}; this table has the keys \
+                         {:?}", t.keys().collect::<Vec<_>>()));
+                };
+                let body = t[form].clone();
+                if !body.is_table() {
+                    return Err(format!(
+                        "`{form}` takes a table ({SWEEP_FORMS}), not {}", body.type_str()));
+                }
+                match form.as_str() {
+                    "linspace" | "logspace" => {
+                        let s: LinspaceSpec = body.try_into()
+                            .map_err(|e| format!("`{form}`: {e}"))?;
+                        finite(&format!("`{form}` min"), s.min)?;
+                        finite(&format!("`{form}` max"), s.max)?;
+                        if s.n == 0 {
+                            return Err(format!("`{form}` n = 0 sweeps no values, so the \
+                                                batch would run no cells"));
+                        }
+                        if form == "logspace" && (s.min <= 0.0 || s.max <= 0.0) {
+                            return Err(format!(
+                                "`logspace` min and max must be positive (it spaces their \
+                                 logarithms), got min = {}, max = {}", s.min, s.max));
+                        }
+                        if form == "linspace" {
+                            SweepSpec::Linspace { linspace: s }
+                        } else {
+                            SweepSpec::Logspace { logspace: s }
+                        }
+                    }
+                    "range" => {
+                        let s: RangeSpec = body.try_into().map_err(|e| format!("`range`: {e}"))?;
+                        finite("`range` min", s.min)?;
+                        finite("`range` max", s.max)?;
+                        if !s.step.is_finite() || s.step <= 0.0 {
+                            return Err(format!(
+                                "`range` step must be a positive, finite number, got {} — \
+                                 a step that does not advance from min never reaches max",
+                                s.step));
+                        }
+                        if s.max < s.min {
+                            return Err(format!(
+                                "`range` max ({}) is below min ({}), so it sweeps no values",
+                                s.max, s.min));
+                        }
+                        SweepSpec::Range { range: s }
+                    }
+                    other => return Err(format!(
+                        "unknown sweep form `{other}`; a sweep spec is one of {SWEEP_FORMS}")),
+                }
+            }
+            other => return Err(format!(
+                "a sweep spec is one of {SWEEP_FORMS}, not {}", other.type_str())),
+        };
+        Ok(spec)
+    }
+}
 
 impl SweepSpec {
     /// Expand to a concrete vector of values.
@@ -2436,6 +2532,80 @@ mod tests {
         let points = expand_sweep(&sweep);
         assert_eq!(points.len(), 1);
         assert!(points[0].is_empty());
+    }
+
+    /// Parse a manifest whose `[sweep]` has the one entry `mu = <spec>`.
+    fn parse_sweep(spec: &str) -> Result<ExperimentToml, String> {
+        toml::from_str::<ExperimentToml>(&format!(
+            "[config]\nmodel = \"m.camdl\"\n\n[sweep]\nmu = {spec}\n"))
+            .map_err(|e| e.to_string())
+    }
+
+    /// The documented forms parse, and expand to what they say.
+    #[test]
+    fn sweep_documented_forms_parse_and_expand() {
+        let exp = |spec: &str| {
+            parse_sweep(spec).unwrap_or_else(|e| panic!("{spec}: {e}")).sweep["mu"].expand()
+        };
+        assert_eq!(exp("[0.1, 0.3, 0.5]"), vec![0.1, 0.3, 0.5]);
+        assert_eq!(exp("[1, 2]"), vec![1.0, 2.0], "integer list entries are numbers");
+        assert_eq!(exp("{ linspace = { min = 0.0, max = 1.0, n = 3 } }"), vec![0.0, 0.5, 1.0]);
+        assert_eq!(exp("{ logspace = { min = 1.0, max = 100.0, n = 3 } }").len(), 3);
+        assert_eq!(exp("{ range = { min = 1.0, max = 5.0, step = 0.5 } }").len(), 9);
+        assert_eq!(exp("{ range = { min = 1.0, max = 3.0 } }"), vec![1.0, 2.0, 3.0],
+            "step defaults to 1");
+        assert_eq!(exp("{ range = { min = 1, max = 3 } }"), vec![1.0, 2.0, 3.0],
+            "integer bounds are numbers");
+    }
+
+    /// gh#594 item 3. A `range` whose `step` is not positive never advanced
+    /// the loop variable, so expansion pushed points until the process was
+    /// killed (the gh#257 class). It is refused when the manifest is parsed —
+    /// before any expansion is attempted, so this test cannot hang.
+    #[test]
+    fn a_range_with_a_non_positive_or_non_finite_step_is_refused_at_parse() {
+        for step in ["0.0", "-0.5", "nan", "inf"] {
+            let err = parse_sweep(&format!("{{ range = {{ min = 0.1, max = 0.3, step = {step} }} }}"))
+                .err()
+                .unwrap_or_else(|| panic!("step = {step} must be refused"));
+            assert!(err.contains("step"), "step = {step}: the error names the key: {err}");
+        }
+    }
+
+    /// gh#594 item 3. `range = [min, max]` with the step written beside it
+    /// parsed as a one-point sweep: the array filled `min`/`max`, `step`
+    /// defaulted to 1, and the outer `step` key was dropped as unknown. Keys a
+    /// form does not have, and the array spelling of a table, are refused.
+    #[test]
+    fn a_sweep_spec_with_a_key_or_shape_its_form_does_not_have_is_refused() {
+        for spec in [
+            "{ range = [0.1, 0.3], step = 0.1 }",
+            "{ range = [0.1, 0.3, 0.1] }",
+            "{ range = { min = 0.1, max = 0.3, stepp = 0.1 } }",
+            "{ linspace = { min = 0.0, max = 1.0, n = 3, step = 0.5 } }",
+            "{ linspace = { min = 0.0, max = 1.0, n = 3 }, n = 4 }",
+            "{ grid = [1.0, 2.0] }",
+        ] {
+            assert!(parse_sweep(spec).is_err(), "{spec} must be refused, not parsed");
+        }
+    }
+
+    /// The other ways a sweep spec silently expands to no points or to NaN:
+    /// an empty list, `n = 0`, a `range` whose `max` is below its `min`, a
+    /// non-positive `logspace` bound. Each would run zero cells, or cells at
+    /// NaN, with exit 0.
+    #[test]
+    fn a_sweep_spec_that_expands_to_nothing_or_nan_is_refused() {
+        for spec in [
+            "[]",
+            "[1.0, nan]",
+            "{ linspace = { min = 0.0, max = 1.0, n = 0 } }",
+            "{ linspace = { min = 0.0, max = inf, n = 3 } }",
+            "{ logspace = { min = 0.0, max = 1.0, n = 3 } }",
+            "{ range = { min = 3.0, max = 1.0, step = 1.0 } }",
+        ] {
+            assert!(parse_sweep(spec).is_err(), "{spec} must be refused, not parsed");
+        }
     }
 
     // ── --table content folds into the run identity (Q1) ─────────────────────
