@@ -327,3 +327,26 @@ fn nb_valid_arguments_unchanged() {
     assert!((mean - 5.0).abs() < 0.4, "NB(5, 10) sample mean ≈ 5, got {mean}");
     assert!(draws.iter().any(|&y| y > 0.0), "healthy NB must draw non-zero values");
 }
+
+/// gh#651: a non-positive Normal `sd` is out of the likelihood's domain — the
+/// value path scores it `-inf` — so it has no defined draw either. Pre-fix the
+/// sampler drew `Normal(m, s.max(1e-10))`, emitting the rounded mean (10 here)
+/// for parameters the scorer calls impossible. Same contract as a NaN
+/// argument: draw 0 and count it.
+#[test]
+fn normal_non_positive_sd_draws_zero_and_counts() {
+    let lik = || Likelihood::Normal(NormalLikelihood {
+        mean: Diffable::new(const_expr(10.0)),
+        sd: Diffable::new(projected()),
+    });
+    // Non-vacuity control: a positive sd draws near the mean.
+    let y = draw_one(lik(), 1.0, 42);
+    assert!((y - 10.0).abs() <= 5.0, "sd = 1 must draw near 10, got {y}");
+
+    for sd in [-3.0, 0.0] {
+        let before = nan_counter();
+        let y = draw_one(lik(), sd, 42);
+        assert_eq!(y, 0.0, "sd = {sd} must draw 0, got {y}");
+        assert!(nan_counter() > before, "sd = {sd} must increment obs_sample_nan");
+    }
+}

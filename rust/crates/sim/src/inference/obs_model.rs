@@ -867,7 +867,12 @@ pub(crate) fn sample_obs_resolved(
         }
         ResolvedLikelihood::Normal { mean, sd, .. } => {
             let m = eval_resolved(mean, &ctx(projected));
+            // gh#651: a non-positive sd is out of the domain — the value path
+            // scores it `-inf` via `normal_variance` — so it has no defined
+            // draw either; route it through the NaN-argument contract (draw 0,
+            // counted) rather than drawing a point mass at the mean.
             let s = eval_resolved(sd, &ctx(projected));
+            let s = if s > 0.0 { s } else { f64::NAN };
             if obs_args_nan(&[m, s]) { return 0.0; }
             let draw = Normal::new(m, s.max(1e-10)).unwrap().sample(rng.inner_mut());
             draw.round().max(0.0)
