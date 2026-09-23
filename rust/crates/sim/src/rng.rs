@@ -84,7 +84,10 @@ const SQUEEZE_US_MIN: f64 = 0.07;
 fn binv_inverse_cdf(n: u64, p: f64, u: f64) -> u64 {
     let q = 1.0 - p;
     let s = p / q;
-    let a = ((n + 1) as f64) * s;
+    // gh#548: `n + 1` in f64, not u64 — `(n + 1) as f64` overflows at
+    // `n = u64::MAX`. Bit-identical to the upstream `((n + 1) as f64)` for
+    // `n < 2^53`, where both are exact; above that only the rounding differs.
+    let a = (n as f64 + 1.0) * s;
     // The pmf at x = 0, i.e. q^n.
     //
     // Below `i32::MAX` this is `powi`, byte-for-byte what `rand_distr` computes
@@ -808,6 +811,56 @@ mod binomial_termination_tests {
             if steps > cap { return None; }
         }
         Some(x)
+    }
+
+    /// gh#548: `(n + 1) as f64` overflowed at `n = u64::MAX` — a panic in debug,
+    /// `a = 0` in release (every draw 1, or 0 with probability `exp(-n·p)`,
+    /// gh#803). Reachable from data: a saturating `f64 → u64` cast of an
+    /// overlarge binomial denominator lands on exactly `u64::MAX`. The draw
+    /// there must equal the draw at `u64::MAX - 1` — both have `n as f64 ==
+    /// 2^64`, so they share `a` and the initial term — and its mean over a
+    /// uniform `u` grid must be `n·p`.
+    #[test]
+    fn binv_survives_n_equal_to_u64_max() {
+        let p = 5e-19; // n·p ≈ 9.22, the BINV regime
+        let m = 2000usize;
+        let mut sum = 0.0;
+        for i in 0..m {
+            let u = (i as f64 + 0.5) / m as f64;
+            let k = binv_inverse_cdf(u64::MAX, p, u);
+            assert_eq!(k, binv_inverse_cdf(u64::MAX - 1, p, u), "u = {u}");
+            sum += k as f64;
+        }
+        let mean = sum / m as f64;
+        let np = u64::MAX as f64 * p;
+        assert!((mean - np).abs() < 0.05, "mean over the u grid {mean} != n·p = {np}");
+    }
+
+    /// gh#548: the fix computes `n as f64 + 1.0` in place of `(n + 1) as f64`.
+    /// For `n < 2^53` both are exact (`n` and `n + 1 <= 2^53` are
+    /// representable), so every trajectory drawn below that is unchanged. At
+    /// and above `2^53` the new form rounds twice; the last assertion pins
+    /// that the grid reaches the point where the two forms first differ, so
+    /// the claim is bounded where it stops being true, not just asserted.
+    #[test]
+    fn binv_n_plus_one_is_bit_identical_below_2_pow_53() {
+        let limit = 1u64 << 53;
+        let mut grid: Vec<u64> = vec![0, 1, 2, 3, 10, 1_000, 5_000_000,
+            i32::MAX as u64, i32::MAX as u64 + 1, u32::MAX as u64, limit - 2, limit - 1];
+        for e in 1..53 {
+            let b = 1u64 << e;
+            grid.extend([b - 1, b, b + 1]);
+        }
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..100_000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            grid.push(x % limit);
+        }
+        for n in grid {
+            assert_eq!(((n + 1) as f64).to_bits(), (n as f64 + 1.0).to_bits(), "n = {n}");
+        }
+        assert_ne!(((limit + 1 + 1) as f64).to_bits(), ((limit + 1) as f64 + 1.0).to_bits(),
+            "2^53 + 1 is where the two forms first differ");
     }
 
     /// The whole point: for every input the upstream loop resolves, we return
