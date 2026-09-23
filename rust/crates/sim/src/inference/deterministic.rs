@@ -127,7 +127,8 @@ impl OptStatus {
 
 /// The value reported to NLopt in place of a non-finite objective. Large
 /// enough that any scorable point beats it, finite so the optimizer's own
-/// arithmetic stays defined.
+/// arithmetic stays defined. Never reported back as a log-likelihood:
+/// `optimize_det` maps it to `-inf` on the way out.
 const NONFINITE_FLOOR: f64 = -1e100;
 
 #[derive(Debug, Clone)]
@@ -270,6 +271,12 @@ where
         }
         Err((_e, ll)) => (ll, OptStatus::Failed),
     };
+    // The floor is NLopt's stand-in for "not scorable here", not a
+    // log-likelihood. If it is the best value the search found, no point it
+    // scored was finite, and the caller must see that as `-inf` — a finite
+    // `-1e100` passes `no_finite_anchor` and would be written out as a fitted
+    // value (gh#916). No real model reaches `-1e100` nats.
+    let loglik = if loglik <= NONFINITE_FLOOR { f64::NEG_INFINITY } else { loglik };
     Ok(OptResult {
         params: x,
         loglik,
@@ -458,6 +465,46 @@ mod tests {
             "negative control: the same start with a real gradient must converge"
         );
         assert!((good.params[0] - 3.0).abs() < 1e-3);
+    }
+
+    /// gh#916: when every point the optimizer scored was non-finite, the
+    /// reported log-likelihood is `-inf`, not the internal floor NLopt was
+    /// handed in its place. A finite `-1e100` would pass every caller's
+    /// `no_finite_anchor` check and be written out as a fitted value.
+    ///
+    /// The negative control is a finite objective: its value comes back
+    /// untouched, so the mapping is of the floor only.
+    #[test]
+    fn an_everywhere_non_finite_objective_reports_neg_infinity() {
+        for algorithm in [NloptAlgorithm::Sbplx, NloptAlgorithm::Bobyqa] {
+            let r = optimize_det(
+                algorithm,
+                &[1.0, 1.0],
+                &[(0.0, 10.0), (0.0, 10.0)],
+                1e-6,
+                200,
+                |_p: &[f64], _g: Option<&mut [f64]>| f64::NEG_INFINITY,
+            )
+            .unwrap();
+            assert_eq!(
+                r.loglik,
+                f64::NEG_INFINITY,
+                "{}: an objective that is -inf everywhere must report -inf, \
+                 got {}",
+                algorithm.as_str(),
+                r.loglik
+            );
+        }
+        let finite = optimize_det(
+            NloptAlgorithm::Sbplx,
+            &[1.0, 1.0],
+            &[(0.0, 10.0), (0.0, 10.0)],
+            1e-6,
+            200,
+            |_p: &[f64], _g: Option<&mut [f64]>| -5.0,
+        )
+        .unwrap();
+        assert_eq!(finite.loglik, -5.0);
     }
 
     #[test]

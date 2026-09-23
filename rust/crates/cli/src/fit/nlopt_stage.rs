@@ -187,8 +187,31 @@ pub fn run_stage(
         .map(|(i, c)| (*i, c.clone()))
         .ok_or_else(|| "no chains ran".to_string())?;
 
-    // Per-chain final params dump for inspection.
+    // Per-chain final params dump for inspection. Written before the refusal
+    // below, so a refused stage still records what each chain reached.
     write_per_chain_files(stage_dir, &chain_outcomes, &est_names)?;
+
+    // gh#226 / gh#916. Whole-fit backstop, as in the PGAS, PMMH and IF2
+    // drivers: the winner is the maximum over every chain, so a non-finite
+    // winner means not one chain scored a finite point. Without this the
+    // stage writes a `-inf` best log-likelihood and an `mle_params.toml` at
+    // wherever the search stopped, and exits 0. `optimize_det` reports its
+    // internal non-finite floor as `-inf`, which is what makes this reachable.
+    if sim::inference::no_finite_anchor(winner.loglik) {
+        return Err(format!(
+            "{stage_name}: all {n_chains} chain(s) reached no finite \
+             log-likelihood (best = {}). The ODE likelihood is `-inf` at every \
+             θ the search evaluated, so there is no optimum to report. Most \
+             often the starting values sit in an impossible region — check \
+             those first (try `starts = \"lhs\"` under `[method]`, or a \
+             different start); less often the data are impossible under this \
+             model (for example a positive count observed where the projected \
+             mean is 0 for every θ in the bounds). Also check the observation \
+             model and parameter bounds. Per-chain results: {}.",
+            winner.loglik,
+            stage_dir.join("chain_results.tsv").display()
+        ));
+    }
 
     // Emit convergence diagnostic before writing fit_state — the stdout
     // verdict tells the user whether to trust the winner.

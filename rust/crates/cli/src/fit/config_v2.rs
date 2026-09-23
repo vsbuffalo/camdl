@@ -1283,8 +1283,9 @@ pub struct NloptStageConfig {
     /// transmission collapses (e.g. R0 < 1 in any setting), some spread draws
     /// may evaluate to `Poisson(rate=0) | obs > 0 = -inf`. NLopt's
     /// xtol-reached signal can lie there (every neighbouring point also
-    /// -inf). For such models, narrow the bounds or pre-validate the starts
-    /// with a quick `camdl pfilter` loglik check.
+    /// -inf); such a chain reports a `-inf` log-likelihood and loses the
+    /// winner comparison to any finite chain, and when every chain lands
+    /// there the stage refuses (gh#916). For such models, narrow the bounds.
     pub chains: usize,
     /// `xtol_rel` passed to NLopt. Optimizer stops when relative
     /// parameter change between iterations falls below this.
