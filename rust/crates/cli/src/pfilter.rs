@@ -27,6 +27,41 @@ const PFILTER_SUPPLY: &str = "pass `--data PATH` (single-stream), \
     `--data NAME=PATH` (repeatable, multi-stream), or `--fit FOO.toml` with a \
     [data.observations] section.";
 
+/// Refuse `--replicates N` (N > 1) beside any output that describes one filter
+/// run. The replicate path writes only the per-replicate log-likelihoods; every
+/// flag named here is written on the single-run path alone (gh#686).
+fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), String> {
+    if a.replicates <= 1 {
+        return Ok(());
+    }
+    let per_run: Vec<&str> = [
+        ("--trace", a.trace.is_some()),
+        ("--pf-health", a.pf_health.is_some()),
+        ("--save-final-state", a.save_final_state.is_some()),
+        ("--save-paths", a.save_paths.is_some()),
+        ("--save-filtering", a.save_filtering.is_some()),
+        ("--save-prequential", a.save_prequential.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, set)| set.then_some(flag))
+    .collect();
+    if per_run.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "--replicates {} cannot be combined with {}: {} one filter run, and \
+         `--replicates` reports the spread of the log-likelihood over {} \
+         independent runs without writing any single run's outputs. Run \
+         `--replicates 1` (with a separate `--seed` per run if you want \
+         several) for the per-run file, and `--replicates` on its own for the \
+         spread.",
+        a.replicates,
+        per_run.join(", "),
+        if per_run.len() == 1 { "that output describes" } else { "those outputs describe" },
+        a.replicates,
+    ))
+}
+
 pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
     sim::eval_stats::set_allow_degenerate_rates(a.inference.allow_degenerate_rates);  // gh#audit-C6
@@ -47,6 +82,15 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     let adhoc_enable = a.scenario.enable.clone();
     let adhoc_disable = a.scenario.disable.clone();
     let obs_name = a.stream.obs.clone();
+
+    // gh#686: the replicate path reports the spread of the log-likelihood
+    // estimate over independent runs and writes nothing per run, so every
+    // per-run output would be silently not written — at exit 0, leaving any
+    // stale file of that name to be read as this run's. Refuse instead.
+    if let Err(e) = check_per_run_outputs(a) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
 
     // Load model (supports .camdl via camdlc)
     let (mut model_in, _model_json) = crate::util::load_model(&ir_path)
