@@ -413,6 +413,75 @@ name = "baseline"
     }
 }
 
+/// The model directories (`sims/<name>-<hash>`) directly under `sims`.
+fn model_dirs(sims: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(sims).unwrap().flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// gh#583 item E. `simulate` and `batch run` of the same cell of a `.camdl`
+/// SOURCE model must land on the same store path. `batch run` named the
+/// model directory after the compiled IR it resolved the source to — the IR
+/// cache's content hash, or `camdl_<pid>` with the cache off — so the same
+/// run_id lived under a different directory per entry point (and, with the
+/// cache off, per invocation), and the directory-scoped cache lookup missed on
+/// every rerun.
+#[test]
+fn simulate_and_batch_of_a_camdl_source_land_on_the_same_path() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir_basic.camdl");
+    std::fs::copy(golden_sir_basic().with_extension("").with_extension("camdl"), &model)
+        .unwrap();
+    let params = tmp.path().join("params.toml");
+    std::fs::write(&params, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
+    let store = tmp.path().join("store");
+
+    let out = Command::new(&bin)
+        .args(["simulate", &model.to_string_lossy(),
+               "--scenario", "baseline",
+               "--params", &params.to_string_lossy(),
+               "--seed", "10",
+               "--output-dir", &store.to_string_lossy()])
+        .output().expect("spawn");
+    assert!(out.status.success(), "simulate: {}", String::from_utf8_lossy(&out.stderr));
+    let sims = store.join("sims");
+    let after_simulate = model_dirs(&sims);
+    assert_eq!(after_simulate.len(), 1, "one model directory: {after_simulate:?}");
+    assert!(after_simulate[0].starts_with("sir_basic-"),
+        "named for the model: {after_simulate:?}");
+
+    let batch_toml = tmp.path().join("b.toml");
+    std::fs::write(&batch_toml, format!(r#"
+[config]
+model = "{model}"
+params = "{params}"
+output_dir = "{out}"
+seeds = {{ list = [10] }}
+
+[[scenario]]
+name = "baseline"
+"#,
+        model = model.display(), params = params.display(), out = store.display(),
+    )).unwrap();
+    // With the IR cache on and off: the second names the compiled temp file
+    // after the process id, so it would differ from every other invocation.
+    for no_cache in [false, true] {
+        let mut cmd = Command::new(&bin);
+        cmd.args(["batch", "run", &batch_toml.to_string_lossy()]);
+        if no_cache { cmd.env("CAMDL_NO_IR_CACHE", "1"); }
+        let out = cmd.output().expect("spawn");
+        assert!(out.status.success(), "batch run: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(model_dirs(&sims), after_simulate,
+            "batch run (IR cache {}) must land in simulate's model directory",
+            if no_cache { "off" } else { "on" });
+    }
+}
+
 #[test]
 fn list_shows_cached_runs() {
     let bin = skip_if_missing_binary();

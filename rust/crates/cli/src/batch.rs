@@ -556,7 +556,13 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         }
     }
 
-    let model_stem = crate::hashing::path_stem_slug(&ir_path_resolved);
+    // The store's model directory and the leaf's provenance name the model
+    // the manifest points at, never the IR it resolved to: for `.camdl`
+    // source that is the IR cache's content hash, or `camdl_<pid>` with the
+    // cache off, so the same run_id would land in a different directory per
+    // entry point and per invocation (gh#583 item E). `simulate` threads its
+    // original path the same way (`build_simulate_cas_sink`'s `display_path`).
+    let model_stem = crate::hashing::path_stem_slug(&model_path);
 
     // Validate [sweep] and [design.*] are mutually exclusive.
     if !exp.sweep.is_empty() && !exp.design.is_empty() {
@@ -765,7 +771,7 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
 
     let mut sink = CasSink {
         resolved_scenarios: resolved_scenarios.clone(),
-        model_path: ir_path_resolved.clone(),
+        model_path: model_path.clone(),
         model_stem: model_stem.clone(),
         base_model: batch_model.clone(),
         base_params: base_params.clone(),
