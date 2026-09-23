@@ -2295,7 +2295,8 @@ fn materialize_obs_for_quantities(
             None => continue, // fit-only — consumes no RNG, mirroring `--obs`
         };
         let sampler =
-            sim::inference::obs_model::compile_obs_sample_pf(obs_ir, compiled.clone(), params);
+            sim::inference::obs_model::compile_obs_sample_pf(obs_ir, compiled.clone(), params)
+                .map_err(|e| e.to_string())?;
         // The rows the stream's declaration assigns to these times (gh#833):
         // the same rows `--obs` writes, so a quantity sourced from a stream
         // reduces over exactly the file the stream would emit.
@@ -3002,7 +3003,7 @@ impl engine::RunSink for StreamSink {
             for (si, obs_ir) in model.observations.iter().enumerate() {
                 let sampler = sim::inference::obs_model::compile_obs_sample_pf(
                     obs_ir, compiled.clone(), &params,
-                );
+                ).map_err(|e| e.to_string())?;
                 let rows = self.obs_plans[si].coverages();
                 let projected_values = project_coverages(traj, obs_ir, model, &rows)?;
                 for (ti, &(obs_t, coverage)) in rows.iter().enumerate() {

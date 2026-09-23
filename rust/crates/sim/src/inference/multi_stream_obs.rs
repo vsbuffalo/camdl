@@ -587,6 +587,30 @@ mod real_state_projection_tests {
             .expect("an integer-only likelihood argument must still build");
     }
 
+    /// gh#681: the emission builders (`simulate --obs`, `fit predict`) must
+    /// return the refusal as an error the CLI can report, not panic with it.
+    #[test]
+    fn obs_samplers_return_the_real_state_refusal_as_an_error() {
+        use crate::inference::obs_model::{compile_obs_mean_pf, compile_obs_sample_pf};
+        let compiled = std::sync::Arc::new(sir_reservoir(vec![]));
+        let params = compiled.default_params.clone();
+        let rate = Expr::bin_op(BinOp::Add, Expr::Projected(ir::expr::ProjectedExpr {
+            projected: () }), Expr::pop("W"));
+        let obs = poisson_obs(rate);
+        let err = match compile_obs_sample_pf(&obs, compiled.clone(), &params) {
+            Ok(_) => panic!("the sampler builder must refuse (gh#681)"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(err.contains("'env'") && err.contains("'W'") && err.contains("gh#681"), "{err}");
+        assert!(compile_obs_mean_pf(&obs, compiled.clone(), &params).is_err(),
+            "the mean builder must refuse (gh#681)");
+
+        // Control: an integer-only rate still builds both.
+        let ok = poisson_obs(Expr::binding_ref("N"));
+        assert!(compile_obs_sample_pf(&ok, compiled.clone(), &params).is_ok());
+        assert!(compile_obs_mean_pf(&ok, compiled, &params).is_ok());
+    }
+
     /// Integer-only projections, including through an integer-only binding
     /// (`N = S + I + R`), are unaffected.
     #[test]

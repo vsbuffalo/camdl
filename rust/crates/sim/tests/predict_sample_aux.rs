@@ -134,7 +134,8 @@ fn predictive_sampler_carries_data_column_denominator() {
     let obs = &compiled.model.observations[0];
     let params = compiled.default_params.clone();
     let sampler =
-        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params);
+        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params)
+            .expect("the fixture resolves");
 
     let counts = vec![0_i64]; // one integer compartment (R)
     let p = 0.5_f64; // projected positivity

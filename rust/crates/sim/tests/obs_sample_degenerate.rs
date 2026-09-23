@@ -139,7 +139,8 @@ fn draw_one(likelihood: Likelihood, projected_val: f64, seed: u64) -> f64 {
     let obs = &compiled.model.observations[0];
     let params = compiled.default_params.clone();
     let sampler =
-        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params);
+        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params)
+            .expect("the fixture resolves");
     let counts = vec![0_i64];
     let mut rng = StatefulRng::new(seed);
     sampler(projected_val, 7.0, &counts, &[], &mut rng)
@@ -188,7 +189,8 @@ fn nb_infinite_dispersion_is_poisson_limit() {
     let obs = &compiled.model.observations[0];
     let params = compiled.default_params.clone();
     let sampler =
-        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params);
+        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params)
+            .expect("the fixture resolves");
     let counts = vec![0_i64];
     let mut rng = StatefulRng::new(7);
     let n = 4000;
@@ -315,7 +317,8 @@ fn nb_valid_arguments_unchanged() {
     let obs = &compiled.model.observations[0];
     let params = compiled.default_params.clone();
     let sampler =
-        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params);
+        sim::inference::obs_model::compile_obs_sample_pf(obs, compiled.clone(), &params)
+            .expect("the fixture resolves");
     let counts = vec![0_i64];
     let mut rng = StatefulRng::new(11);
     let n = 4000;

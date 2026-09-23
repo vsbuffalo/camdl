@@ -724,18 +724,21 @@ pub type ObsMeanFn = Box<dyn Fn(f64, f64, &[i64], &[(String, f64)]) -> f64>;
 /// PopSum([S, I, R])`) against this state. Passing a zero-filled
 /// slice silently corrupts state-dependent likelihoods — see
 /// `docs/dev/incidents/2026-04-22-observation-sampler-scratch-state.md`.
+///
+/// Errors when a likelihood argument cannot be resolved, or reads a real
+/// compartment (gh#681, [`resolve_likelihood_from_model`]).
 pub fn compile_obs_sample_pf(
     obs_model: &ObservationModel,
     compiled: Arc<CompiledModel>,
     params: &[f64],
-) -> ObsSampleFn {
-    let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled, &obs_model.name)
-        .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {e}"));
+) -> Result<ObsSampleFn, crate::error::SimError> {
+    let resolved =
+        resolve_likelihood_from_model(&obs_model.likelihood, &compiled, &obs_model.name)?;
     let params = params.to_vec();
     let real_s = RealState::new(compiled.real_local_to_global.len());
     let n_int  = compiled.int_local_to_global.len();
 
-    Box::new(move |projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)], rng: &mut StatefulRng| {
+    Ok(Box::new(move |projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)], rng: &mut StatefulRng| {
         // GH #6 fix: evaluate likelihood args against the real state,
         // not a zero-filled scratch. Caller is responsible for passing
         // the compartment snapshot at the obs time.
@@ -750,7 +753,7 @@ pub fn compile_obs_sample_pf(
         // likelihood that references an unavailable aux column then evaluates its
         // denominator to 0 and draws 0, the honest data-free behaviour.
         sample_obs_resolved(&resolved, t, projected, aux, &params, &compiled, &int_s, &real_s, rng)
-    })
+    }))
 }
 
 /// Build the mean companion of [`compile_obs_sample_pf`] (fixed params).
@@ -772,21 +775,21 @@ pub fn compile_obs_mean_pf(
     obs_model: &ObservationModel,
     compiled: Arc<CompiledModel>,
     params: &[f64],
-) -> ObsMeanFn {
-    let resolved = resolve_likelihood_from_model(&obs_model.likelihood, &compiled, &obs_model.name)
-        .unwrap_or_else(|e| panic!("observation likelihood resolution failed: {e}"));
+) -> Result<ObsMeanFn, crate::error::SimError> {
+    let resolved =
+        resolve_likelihood_from_model(&obs_model.likelihood, &compiled, &obs_model.name)?;
     let params = params.to_vec();
     let real_s = RealState::new(compiled.real_local_to_global.len());
     let n_int = compiled.int_local_to_global.len();
 
-    Box::new(move |projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)]| {
+    Ok(Box::new(move |projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)]| {
         assert_eq!(counts.len(), n_int,
             "compile_obs_mean_pf: counts length {} != expected {}", counts.len(), n_int);
         let int_s = IntState::from_vec(counts.to_vec());
         eval_obs_mean_resolved(
             &resolved, t, projected, aux, &params, &compiled, &int_s, &real_s,
         )
-    })
+    }))
 }
 
 /// True iff any likelihood argument is NaN — typically `0/0` from a

@@ -1947,7 +1947,7 @@ fn write_obs_into_cas(
     for (obs_ir, plan) in model.observations.iter().zip(&plans) {
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs_ir, compiled.clone(), &params,
-        );
+        ).map_err(|e| e.to_string())?;
         // The cell's own horizon (a per-scenario `simulate { to }` has already
         // moved `model.simulation.t_end`) bounded the plan, so the CAS `obs/`
         // subtree never carries rows past the end of the trajectory beside it

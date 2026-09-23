@@ -562,7 +562,7 @@ pub(crate) fn simulate_dataset(
         let obs = declaration(&sp.name)?;
         let sampler = sim::inference::obs_model::compile_obs_sample_pf(
             obs, compiled.clone(), &params,
-        );
+        ).map_err(|e| e.to_string())?;
         // gh#6: the compartment state at each row's label, so likelihood arg
         // expressions (`p = projected / N`) resolve. The aux slice is the row's
         // model denominator for a ratio stream and empty otherwise — a stream

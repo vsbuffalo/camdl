@@ -1139,14 +1139,14 @@ impl crate::engine::RunSink for PredictiveSink {
                 obs_ir,
                 self.compiled.clone(),
                 &params,
-            );
+            ).map_err(|e| e.to_string())?;
             // Consumes no RNG, so it cannot perturb the paired-seed replay the
             // sampler above drives.
             let meaner = sim::inference::obs_model::compile_obs_mean_pf(
                 obs_ir,
                 self.compiled.clone(),
                 &params,
-            );
+            ).map_err(|e| e.to_string())?;
             // Each row is projected over the period the LIKELIHOOD scored it
             // over — the stream's declared coverage — so the first bin opens
             // where the likelihood's did, not at the model origin (gh#702).
