@@ -740,12 +740,15 @@ transition_decl:
      The optional `#[lineage]` attribute may sit on its own line above
      the transition or inline immediately before it — camdl has no
      statement separators, so both forms are the same production and
-     produce identical IR. *)
+     produce identical IR.
+     Every production here opens with two nullable nonterminals; when both
+     are empty, menhir's bare `$startpos` is the END of the previous token, so
+     `trloc` starts at `$startpos(name)` (gh#501). `obs_decl` does the same. *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
           trdyn = Rate rate; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* inline staged residence: [#[lineage]] name[...] : srcs --> dst via LAW(args)
      where guard.  `via` REPLACES the `@ rate` clause — a transition is `@ rate`
      XOR `via law`, never both (staged-residence proposal §3). The dwell law is
@@ -754,7 +757,7 @@ transition_decl:
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
           trdyn = Via law; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* no-arrow staged residence: [#[lineage]] name[...] : srcs via LAW(args)
      where guard.  A `via` law whose branches carry their own `to =` (the
      per-destination `hyper_erlang`) needs no arrow target — each branch decides
@@ -766,7 +769,7 @@ transition_decl:
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum [];
           trdyn = Via law; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* block form: [#[lineage]] name[...] : srcs --> dsts { rate = ... | via = ...; where ... } *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW dsts = stoich_ref_list LBRACE tbody = transition_body RBRACE
       { let (rate_opt, via_opt, guard) = tbody in
@@ -800,13 +803,13 @@ transition_decl:
         { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstSum dsts;
           trdyn; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
   (* branching: [#'][#[lineage]] name[...] : srcs --> { D1 : w1, ... } @ rate where guard *)
   | d = doc_opt lin = lineage_attr_opt name = IDENT ibs = index_bindings_opt COLON srcs = stoich_ref_list ARROW LBRACE branches = separated_nonempty_list(COMMA, branch_entry) RBRACE AT rate = expr guard = where_clause_opt
       { { trname = name; trindices = ibs;
           trsrc = srcs; trdst = DstBranch branches;
           trdyn = Rate rate; trguard = guard; trlineage = lin; trdoc = d;
-          trloc = Parser_errors.ast_loc_of ~sp:$startpos ~ep:$endpos } }
+          trloc = Parser_errors.ast_loc_of ~sp:$startpos(name) ~ep:$endpos } }
 
 (* A dwell-law call: `LAW(k1 = e1, k2 = e2, …)`. Reuses the same parenthesised
    keyword-argument machinery as distribution / function calls (`kw_expr`),
@@ -933,18 +936,18 @@ obs_decl_sep:
    migration diagnostic. *)
 obs_decl:
   | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt LBRACE obs_kvs = list(obs_kv) RBRACE
-      { build_obs_decl name ibs src obs_kvs ~doc:d ~sp:$startpos ~ep:$endpos }
+      { build_obs_decl name ibs src obs_kvs ~doc:d ~sp:$startpos(name) ~ep:$endpos }
   (* Migration: the stream header colon was dropped (2026-06-10 §9). Reject
      `name : { ... }` with a diagnostic that names the rewrite, not a bare
      E001. *)
   | d = doc_opt name = IDENT ibs = index_bindings_opt src = obs_source_opt COLON LBRACE obs_kvs = list(obs_kv) RBRACE
-      { Parser_errors.push_error_hint ~sp:$startpos ~ep:$endpos
+      { Parser_errors.push_error_hint ~sp:$startpos(name) ~ep:$endpos
           ~code:"E270"
           ~msg:(Printf.sprintf
             "observation '%s': the stream-header colon was removed" name)
           ~hint:(Printf.sprintf
             "write `%s { ... }` (no colon) — see `camdl docs language-changes`" name);
-        build_obs_decl name ibs src obs_kvs ~doc:d ~sp:$startpos ~ep:$endpos }
+        build_obs_decl name ibs src obs_kvs ~doc:d ~sp:$startpos(name) ~ep:$endpos }
 
 obs_source_opt:
   | (* empty *)        { None }

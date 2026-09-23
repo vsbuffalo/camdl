@@ -10518,6 +10518,82 @@ let test_lint_warning_has_location () =
     Alcotest.(check bool) "L402 points at the compartment (line > 0)"
       true (d.loc.Diagnostics.line > 0)
 
+(* gh#501 / gh#674: a transition's or stream's loc must start at its NAME.
+   Every `transition_decl` / `obs_decl` production begins with nullable
+   nonterminals (`doc_opt`, `lineage_attr_opt`); with both empty, menhir's bare
+   `$startpos` is the END of the previous token, so the caret landed on the
+   previous declaration (or on `transitions {` / `observations {`). *)
+let loc_of_first ~code ~name src =
+  match List.find_opt (fun (d : Diagnostics.diagnostic) -> d.code = code)
+          (Compiler.collect_diagnostics ~name src) with
+  | None -> Alcotest.failf "expected %s" code
+  | Some d -> (d.loc.Diagnostics.line, d.loc.Diagnostics.col)
+
+let test_gh501_transition_diagnostic_on_its_own_line () =
+  (* The issue's reproduction: E225 is about `progress`, on line 7 here. *)
+  let src = {|
+time_unit = 'days
+compartments { S, E, I }
+parameters { beta : rate in [0,2]  gamma : rate in [0,1] }
+transitions {
+  infection : S --> E @ beta * S * I
+  progress : E --> I via hyper_erlang(branch(label = a, stages = 2, mean = 3.0, weight = 1.5))
+  recovery : I --> S @ gamma * I
+}
+init { S = 99 I = 1 }
+simulate { from = 0 'days to = 10 'days }
+|} in
+  Alcotest.(check (pair int int)) "E225 carets `progress` (line 7, col 3)"
+    (7, 3) (loc_of_first ~code:"E225" ~name:"gh501_e225" src)
+
+let test_gh674_dimcheck_diagnostic_on_its_own_line () =
+  let src = {|
+time_unit = 'days
+compartments { S, I, R }
+parameters { beta : rate in [0,1]  gamma : rate in [0,1] }
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma + I
+}
+init { S = 99 I = 1 }
+simulate { from = 0 'days to = 10 'days }
+|} in
+  let prev = !Compiler.no_dim_check in
+  Compiler.no_dim_check := false;
+  let got = loc_of_first ~code:"E300" ~name:"gh674_e300" src in
+  Compiler.no_dim_check := prev;
+  Alcotest.(check (pair int int)) "E300 carets `recovery` (line 7, col 3)"
+    (7, 3) got
+
+let test_gh501_observation_diagnostic_on_its_own_line () =
+  (* The observation twin: E350 (no `covers`) is about `deaths`, line 16. *)
+  let src = {|
+time_unit = 'days
+compartments { S, I, R }
+parameters { beta : rate in [0,1]  gamma : rate in [0,1] }
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ gamma * I
+}
+observations {
+  cases {
+    columns   { time : time, cases : count }
+    covers    = day(time)
+    projected = incidence(infection)
+    cases ~ poisson(rate = projected)
+  }
+  deaths {
+    columns   { time : time, deaths : count }
+    projected = incidence(recovery)
+    deaths ~ poisson(rate = projected)
+  }
+}
+init { S = 99 I = 1 }
+simulate { from = 0 'days to = 10 'days }
+|} in
+  Alcotest.(check (pair int int)) "E350 carets `deaths` (line 16, col 3)"
+    (16, 3) (loc_of_first ~code:"E350" ~name:"gh501_e350" src)
+
 (* ── gh#112: table-lookup arity validation ──────────────────────────────────
    A table declared `C_age : age × age` (rank 2) must be indexed with exactly
    two indices. Under-indexing (`C_age[a]`) previously fell through the
@@ -13949,6 +14025,9 @@ let () =
       Alcotest.test_case "reference validate error carries a loc"    `Quick test_validate_reference_error_has_location;
       Alcotest.test_case "dimcheck error carries a loc"              `Quick test_dimcheck_error_has_location;
       Alcotest.test_case "lint warning carries a loc"                `Quick test_lint_warning_has_location;
+      Alcotest.test_case "transition diagnostic on its own line (gh#501)" `Quick test_gh501_transition_diagnostic_on_its_own_line;
+      Alcotest.test_case "dimcheck diagnostic on its own line (gh#674)" `Quick test_gh674_dimcheck_diagnostic_on_its_own_line;
+      Alcotest.test_case "observation diagnostic on its own line (gh#501)" `Quick test_gh501_observation_diagnostic_on_its_own_line;
     ];
     "trig_primitives", [
       Alcotest.test_case "pi resolves to Const ≈ π"                 `Quick test_trig_pi_resolves_to_const;
