@@ -405,6 +405,37 @@ pub(crate) struct RunEntry {
     pub(crate) draw_idx: usize,
 }
 
+// ─── The manifest's model ───────────────────────────────────────────────
+
+/// The manifest's `model` as `batch run` executes it. The temp files the IR
+/// lives in are held here, so the paths stay valid while this is alive.
+struct ManifestModel {
+    /// The IR the engine loads and the cells' identity is resolved from.
+    ir_path: String,
+    ir_json: String,
+    _compiled: Option<std::path::PathBuf>,
+    _every: Option<tempfile::NamedTempFile>,
+}
+
+/// Load the manifest's model the one way `batch run` and `batch status` share:
+/// `.camdl` source compiled (a `.ir.json` taken as is), then `[output] every`
+/// lowered into the IR. Status predicts which leaves exist from the identity
+/// this IR resolves to, so a second loader — one that skipped the compile, or
+/// the cadence — would count against a different identity (gh#592).
+fn load_manifest_model(model_path: &str, output_every: Option<f64>) -> Result<ManifestModel, String> {
+    // Batch runs are forward simulations — no state-Jacobian consumer, so
+    // compile lean (`needs_state_grad = false`, gh#439 A2).
+    let (compiled_path, compiled) = resolve_ir_path(model_path, false)?;
+    // gh#156: `[output] every` rewrites the compiled IR's output schedule once,
+    // so both the engine and the CAS identity (loaded from this path) see the
+    // overridden cadence.
+    let (ir_path, every) =
+        crate::util::rematerialize_with_output_every(&compiled_path, output_every)?;
+    let ir_json = std::fs::read_to_string(&ir_path)
+        .map_err(|e| format!("cannot read {}: {}", ir_path, e))?;
+    Ok(ManifestModel { ir_path, ir_json, _compiled: compiled, _every: every })
+}
+
 // ─── cmd_batch_run ──────────────────────────────────────────────────────
 
 pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
@@ -429,25 +460,12 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
     let dt         = exp.config.dt;
     let model_path = exp.config.model.clone();
 
-    // Batch runs are forward simulations — no state-Jacobian consumer, so compile
-    // lean (`needs_state_grad = false`, gh#439 A2).
-    let (ir_path_resolved, _tmpfile) = resolve_ir_path(&model_path, false).unwrap_or_else(|e| {
+    let loaded = load_manifest_model(&model_path, exp.output.every).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
-    // gh#156: `[output] every` rewrites the compiled IR's output schedule once,
-    // so both the engine and the CAS identity (loaded from this path) see the
-    // overridden cadence.
-    let (ir_path_resolved, _every_tmp) =
-        crate::util::rematerialize_with_output_every(&ir_path_resolved, exp.output.every)
-            .unwrap_or_else(|e| {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            });
-    let ir_json = std::fs::read_to_string(&ir_path_resolved).unwrap_or_else(|e| {
-        eprintln!("error: cannot read {}: {}", ir_path_resolved, e);
-        std::process::exit(1);
-    });
+    let ir_path_resolved = loaded.ir_path.clone();
+    let ir_json = loaded.ir_json.clone();
 
     let base_params: HashMap<String, f64> = if let Some(ref pf) = exp.config.params {
         // Surface fit-provenance status for the params file: a verified MLE
@@ -2039,14 +2057,14 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
 
     let seeds = exp.config.seeds.resolve().unwrap_or_default();
 
-    let ir_json = match std::fs::read_to_string(&exp.config.model) {
-        Ok(j) => j,
-        Err(e) => {
-            println!("  (cannot read model {}: {})", exp.config.model, e);
-            println!("  Run 'camdl batch run {}' to start.", toml_path);
-            return;
-        }
-    };
+    // The model exactly as `batch run` loads it, so every cell resolves to the
+    // identity the run would give it. A model that cannot be loaded is an
+    // error, not a sweep that has not started.
+    let loaded = load_manifest_model(&exp.config.model, exp.output.every).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+    let ir_json = &loaded.ir_json;
 
     let base_params: HashMap<String, f64> = exp.config.params.as_ref()
         .and_then(|p| load_params_toml(p).ok())
@@ -2056,14 +2074,10 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
     // the prediction resolves each cell's identity exactly as the run path
     // does (CLI review #3). A parse/resolution failure means the model itself
     // is broken — report and bail rather than mis-predict from raw scenarios.
-    let batch_model: ir::Model = match ir::from_str(&ir_json) {
-        Ok(m) => m,
-        Err(e) => {
-            println!("  (cannot parse model {}: {})", exp.config.model, e);
-            println!("  Run 'camdl batch run {}' to start.", toml_path);
-            return;
-        }
-    };
+    let batch_model: ir::Model = ir::from_str(ir_json).unwrap_or_else(|e| {
+        eprintln!("error: cannot parse model IR for {}: {}", exp.config.model, e);
+        std::process::exit(1);
+    });
     let raw_scenarios: Vec<ScenarioEntry> = if exp.scenario.is_empty() {
         vec![ScenarioEntry { name: "baseline".to_string(), params: HashMap::new(), enable: vec![], disable: vec![] }]
     } else {
@@ -2116,7 +2130,8 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
     if !remaining.is_empty() {
         println!("  Remaining:  {} cell(s) to run:", remaining.len());
         for c in remaining.iter().take(6) {
-            println!("    scenario={} seed={}  → {}/{}", c.scenario, c.seed, runs_dir, c.rel);
+            // `rel` is store-relative and already begins `sims/`.
+            println!("    scenario={} seed={}  → {}/{}", c.scenario, c.seed, output_dir, c.rel);
         }
         if remaining.len() > 6 {
             println!("    ... ({} more)", remaining.len() - 6);

@@ -482,6 +482,64 @@ name = "baseline"
     }
 }
 
+/// gh#592. `batch status` on a manifest whose `model` is `.camdl` source —
+/// the shape of every example in its `--help` — read the source as IR JSON,
+/// failed to parse it, and reported a completed sweep as not started. It also
+/// printed a remaining cell's path with `sims/` twice. Status must predict the
+/// identity `batch run` resolves, so it loads the model the way run does:
+/// compiled from source, with `[output] every` lowered into it.
+#[test]
+fn batch_status_reads_a_camdl_manifest_and_counts_its_leaves() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir_basic.camdl");
+    std::fs::copy(golden_sir_basic().with_extension("").with_extension("camdl"), &model)
+        .unwrap();
+    let params = tmp.path().join("params.toml");
+    std::fs::write(&params, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
+    let store = tmp.path().join("store");
+    let manifest = |seeds: &str| format!(r#"
+[config]
+model = "{model}"
+params = "{params}"
+output_dir = "{out}"
+seeds = {{ list = [{seeds}] }}
+
+[[scenario]]
+name = "baseline"
+
+[output]
+every = 2.0
+"#,
+        model = model.display(), params = params.display(), out = store.display());
+    let batch_toml = tmp.path().join("b.toml");
+    std::fs::write(&batch_toml, manifest("1, 2")).unwrap();
+
+    let out = Command::new(&bin).args(["batch", "run", &batch_toml.to_string_lossy()])
+        .output().expect("spawn");
+    assert!(out.status.success(), "batch run: {}", String::from_utf8_lossy(&out.stderr));
+
+    let status = |toml: &Path| {
+        let out = Command::new(&bin).args(["batch", "status", &toml.to_string_lossy()])
+            .output().expect("spawn");
+        assert!(out.status.success(), "batch status: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let s = status(&batch_toml);
+    assert!(s.contains("Completed:  2/2 leaves present"),
+        "a completed .camdl sweep reports every leaf present:\n{s}");
+
+    // One more seed: that cell is the one left, printed under the store once.
+    std::fs::write(&batch_toml, manifest("1, 2, 3")).unwrap();
+    let s = status(&batch_toml);
+    assert!(s.contains("Completed:  2/3 leaves present"), "{s}");
+    let line = s.lines().find(|l| l.contains("seed=3")).unwrap_or_else(|| panic!("{s}"));
+    let path = line.split("→ ").nth(1).unwrap_or_else(|| panic!("{line}")).trim();
+    assert!(path.starts_with(&format!("{}/sims/sir_basic-", store.display())),
+        "rooted at the store, under the model's own directory: {path}");
+    assert!(!path.contains("sims/sims"), "sims/ printed once: {path}");
+}
+
 #[test]
 fn list_shows_cached_runs() {
     let bin = skip_if_missing_binary();
