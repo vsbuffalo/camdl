@@ -81,6 +81,17 @@ fn resolve_likelihood_unchecked(
     resolve_likelihood(likelihood, &ctx)
 }
 
+/// The variance a Normal likelihood's `sd` argument implies: `sd²` for a
+/// positive sd, NaN otherwise (gh#651). Squaring a negative sd would make the
+/// likelihood even in sd — `sd = -3` scoring as `sd = 3`, a mirror mode at the
+/// negative reflection — so a non-positive sd is out of the domain instead,
+/// and the NaN routes it to the discretized-Normal domain guard (`-inf`, and
+/// the zero gradient on both gradient arms). One helper for the value, the
+/// classifier and both gradient arms, so they cannot disagree about it.
+fn normal_variance(sd: f64) -> f64 {
+    if sd > 0.0 { sd * sd } else { f64::NAN }
+}
+
 /// Evaluate a resolved likelihood at (projected, observed, params).
 ///
 /// `t` is the observation time. Likelihood expressions may reference
@@ -135,7 +146,7 @@ pub(crate) fn eval_likelihood_resolved(
             }
             let m = eval_resolved(mean, &ctx(projected));
             let s = eval_resolved(sd, &ctx(projected));
-            discretized_normal_logpmf_tol(observed, m, s * s, DEFAULT_TOL)
+            discretized_normal_logpmf_tol(observed, m, normal_variance(s), DEFAULT_TOL)
         }
         ResolvedLikelihood::Poisson { rate, .. } => {
             let r = eval_resolved(rate, &ctx(projected));
@@ -297,7 +308,7 @@ pub(crate) fn explain_likelihood_neg_inf(
                 nan("mean")
             } else if s.is_nan() {
                 nan("sd")
-            } else if !(s * s).is_finite() || s * s <= 0.0 {
+            } else if !normal_variance(s).is_finite() || normal_variance(s) <= 0.0 {
                 domain("sd", s)
             } else {
                 // Past the domain guard the discretized-Normal probability is
@@ -439,7 +450,7 @@ pub(crate) fn eval_likelihood_resolved_grad(
             // then chain-ruled to (mean, sd) via d(var)/d(sd) = 2·sd.
             let m = eval_resolved(mean, &ctx);
             let s = eval_resolved(sd, &ctx);
-            let var = s * s;
+            let var = normal_variance(s);
             let (d_mu, d_var) = discretized_normal_logpmf_grad(observed, m, var, DEFAULT_TOL);
             // d(log L)/d(sd) = d(log L)/d(var) · d(var)/d(sd) = d_var · 2·sd.
             // The `2·sd` Jacobian stays in this runtime factor — the emitted
@@ -617,7 +628,7 @@ pub(crate) fn dlogp_dprojected(
         ResolvedLikelihood::Normal { mean, sd, mean_proj, sd_proj, .. } => {
             let m = eval_resolved(mean, &ctx);
             let s = eval_resolved(sd, &ctx);
-            let var = s * s;
+            let var = normal_variance(s);
             let (d_mu, d_var) = discretized_normal_logpmf_grad(observed, m, var, DEFAULT_TOL);
             let d_sd = d_var * 2.0 * s;
             d_mu * eval_proj_grad(mean_proj, &ctx) + d_sd * eval_proj_grad(sd_proj, &ctx)
@@ -1110,6 +1121,67 @@ mod tests {
         // two guards cannot drift apart.
         let g = bernoulli_grad(ResolvedExpr::Const(f64::NAN), 1.0);
         assert_eq!(g, 0.0, "NaN p must accumulate nothing, got {}", g);
+    }
+
+    // ── gh#651: a non-positive Normal sd is out of domain, not |sd| ──
+
+    /// `(value, ∂/∂θ, ∂/∂projected, −∞ cause)` for `Normal(mean = 10, sd)` at
+    /// `observed`, with `∂sd/∂θ = ∂sd/∂projected = 1` and a constant mean, so
+    /// both gradient arms are exactly `d(log L)/d(sd)`.
+    fn normal_arms(sd: f64, observed: f64) -> (f64, f64, f64, NegInfCause) {
+        let compiled = compiled_bernoulli_fixture();
+        let likelihood = ResolvedLikelihood::Normal {
+            mean: ResolvedExpr::Const(10.0),
+            mean_grad: vec![],
+            mean_proj: None,
+            sd: ResolvedExpr::Const(sd),
+            sd_grad: vec![(0, ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0)))],
+            sd_proj: Some(ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0))),
+        };
+        let int_s = IntState::from_vec(vec![0; compiled.int_local_to_global.len()]);
+        let real_s = RealState::new(compiled.real_local_to_global.len());
+        let params = vec![0.0; compiled.param_index.len()];
+        let value = eval_likelihood_resolved(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        let mut grad = vec![0.0];
+        eval_likelihood_resolved_grad(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled,
+            &int_s, &real_s, &[0], &mut grad,
+        );
+        let d_proj = dlogp_dprojected(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        let cause = explain_likelihood_neg_inf(
+            &likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        (value, grad[0], d_proj, cause)
+    }
+
+    /// gh#651: the arms squared `sd`, so `sd = -3` scored exactly as `sd = 3`
+    /// (a mirror mode at the negative reflection). A non-positive sd is out of
+    /// the domain: `-inf`, the zero gradient of `-inf` on both gradient arms,
+    /// and the classifier names `sd`.
+    #[test]
+    fn normal_rejects_a_negative_sd_instead_of_squaring_it() {
+        // Non-vacuity control: sd = 3 scores a finite density with a nonzero
+        // sd-gradient (observed 13 is one sd from the mean).
+        let (v, d_theta, d_proj, _) = normal_arms(3.0, 13.0);
+        assert!(v.is_finite(), "sd = 3 must score finitely, got {v}");
+        assert!(d_theta != 0.0 && d_proj != 0.0,
+            "sd = 3 must carry an sd-gradient, got {d_theta}, {d_proj}");
+
+        for sd in [-3.0, -0.0, 0.0] {
+            let (v, d_theta, d_proj, cause) = normal_arms(sd, 13.0);
+            assert_eq!(v, f64::NEG_INFINITY, "sd = {sd} must score -inf, got {v}");
+            assert_eq!((d_theta, d_proj), (0.0, 0.0),
+                "sd = {sd} must carry the zero gradient of -inf, got {d_theta}, {d_proj}");
+            assert!(matches!(cause, NegInfCause::ArgumentOutOfDomain { ref arg, .. } if arg == "sd"),
+                "sd = {sd} must be classified as sd out of domain, got {cause:?}");
+        }
+        let (v, _, _, cause) = normal_arms(f64::NAN, 13.0);
+        assert_eq!(v, f64::NEG_INFINITY, "a NaN sd must score -inf, got {v}");
+        assert!(matches!(cause, NegInfCause::ArgumentNaN { ref arg } if arg == "sd"), "{cause:?}");
     }
 
     // ── gh#877: a NaN observation under a Binomial is not an observed zero ──
