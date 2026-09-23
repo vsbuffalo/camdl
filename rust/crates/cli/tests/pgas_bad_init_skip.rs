@@ -317,6 +317,15 @@ struct Run {
 /// Drive `camdl fit run` on the fixture with the given (rank-1, rank-2) `iota`
 /// starts.
 fn run_fit(tag: &str, iotas: (f64, f64)) -> Option<Run> {
+    run_fit_seeded(tag, |dir| write_draws(dir, iotas), "1")
+}
+
+/// [`run_fit`] with the draws file and the seed supplied by the caller.
+fn run_fit_seeded(
+    tag: &str,
+    draws: impl FnOnce(&Path) -> PathBuf,
+    seed: &str,
+) -> Option<Run> {
     let (Some(bin), Some(camdlc)) = (camdl_bin(), camdlc_bin()) else {
         eprintln!("skip: release camdl / camdlc not built");
         return None;
@@ -324,12 +333,12 @@ fn run_fit(tag: &str, iotas: (f64, f64)) -> Option<Run> {
     let tmp = tempdir(tag);
     let (ir, data) = write_fixture(tmp.path(), &camdlc);
 
-    let draws = write_draws(tmp.path(), iotas);
+    let draws = draws(tmp.path());
     let (fit_toml, out_root) = write_fit_toml(tmp.path(), &ir, &data, &draws);
     let out = Command::new(&bin)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--seed", "1", "--progress", "none"])
+               "--seed", seed, "--progress", "none"])
         .output().expect("spawn camdl fit run");
 
     Some(Run {
@@ -567,4 +576,56 @@ fn healthy_fit_keeps_every_chain() {
     chains.dedup();
     assert_eq!(chains, vec![0, 1],
         "both chains must contribute draws; got {chains:?}");
+}
+
+/// gh#663. A chain refused at its start is recorded in `diagnostics.json`,
+/// and `fit summary` — the artifact a reader opens after the run, which a
+/// wrapper discarding stderr cannot hide — says so: how many chains ran of how
+/// many, which were refused, and each refusal's log-likelihood breakdown,
+/// which is what separates "the observation term is impossible here" from "the
+/// prior is too vague".
+///
+/// Getting exactly one of two chains refused needs a draw in which one chain
+/// finds the one scoreable row within its ten attempts and the other does not.
+/// Nine impossible rows beside one healthy one make a chain's refusal a
+/// 0.9^10 ≈ 0.35 event; the seed below is one where exactly one chain is
+/// refused, and the test asserts that rather than assuming it.
+#[test]
+fn fit_summary_reports_a_chain_refused_at_its_start() {
+    let rows = |dir: &Path| {
+        let mut draws = String::from("beta\tgamma\tiota\n");
+        for k in 0..10 {
+            let iota = if k == 0 { 0.2 } else { 0.0 };
+            draws.push_str(&format!("0.30\t0.10\t{iota}\n"));
+        }
+        let p = dir.join("starts.tsv");
+        std::fs::write(&p, draws).unwrap();
+        p
+    };
+    let Some(run) = run_fit_seeded("summary", rows, "3") else { return };
+    assert!(run.ok, "one surviving chain is a usable fit.\nstderr:\n{}", run.stderr);
+    let bad = bad_init_entries(&run.out_root);
+    assert_eq!(bad.len(), 1,
+        "the fixture needs exactly one refused chain under this seed; got {bad:#?}. \
+         If the draw changed, pick a seed under which one chain is refused.\n\
+         stderr:\n{}", run.stderr);
+    let refused = bad[0]["chain_id"].as_u64().unwrap();
+
+    let stage_dir = cas_stage_leaf(&run.out_root.join("fits"), "pgas")
+        .expect("committed `pgas` method leaf");
+    let out = Command::new(camdl_bin().unwrap())
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        // The fit directory: `fits/<fit>/<method>/<seed>` is the leaf.
+        .args(["fit", "summary"]).arg(stage_dir.parent().unwrap().parent().unwrap())
+        .arg("--no-color")
+        .output().expect("spawn camdl fit summary");
+    let summary = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "fit summary failed: {}",
+        String::from_utf8_lossy(&out.stderr));
+    assert!(summary.contains(&format!("1 of 2 chains ran — refused at start: {refused}")),
+        "the summary must lead with the refusal, not read as a normal 1-chain \
+         run:\n{summary}");
+    assert!(summary.contains(&format!("chain {refused}:"))
+            && summary.contains("observation -inf"),
+        "and carry the refusal's log-likelihood breakdown:\n{summary}");
 }

@@ -1275,6 +1275,23 @@ impl Formatter {
         format!("  {}{}\n", lead, parts.join(" · "))
     }
 
+    /// One line per chain refused at its start, each carrying the refusal's
+    /// own reason — for PGAS the log-likelihood breakdown (transition,
+    /// observation, ivp, prior), which says which term was impossible. Empty
+    /// when nothing was refused.
+    fn refused_chains_lines(&self, refused: &RefusedChains) -> String {
+        let mut s = String::new();
+        if let Some(e) = &refused.unreadable {
+            s.push_str(&format!("  {}\n", self.warn(&format!(
+                "diagnostics.json could not be read, so refused chains are not \
+                 listed: {e}"))));
+        }
+        for (chain, reason) in &refused.records {
+            s.push_str(&format!("  {} chain {chain}: {reason}\n", self.warn("refused")));
+        }
+        s
+    }
+
     /// Where the chains began — the rule as written and whether it spread
     /// them — under every leaf's identity line, so the reader of an R̂ (or an
     /// Â) knows what it can and cannot say. A leaf written before the fields
@@ -1311,10 +1328,14 @@ impl Formatter {
     ) -> StageBlock {
         let mut s = String::new();
 
+        let refused = RefusedChains::load(Path::new(stage_dir));
         s.push_str(&self.identity_line(
             lead, stage, "if2",
-            &[format!("{} chains", state.n_chains)],
+            &[refused
+                .ran_of(state.n_chains, state.n_good_chains)
+                .unwrap_or_else(|| format!("{} chains", state.n_chains))],
         ));
+        s.push_str(&self.refused_chains_lines(&refused));
         s.push_str(&self.seeded_from_line(state.chain_init_source.as_deref(), state.chain_starts_kind));
         s.push('\n');
 
@@ -1688,12 +1709,19 @@ impl Formatter {
         // Identity. With an active chain selection `diag.n_chains` is already
         // the RETAINED count (recomputed), so name the subset and what was
         // dropped rather than printing a total that is no longer the total.
-        let mut extra = vec![match subset {
-            Some(info) => format!(
+        let state = FitState::load(&stage_dir.to_string_lossy()).ok();
+        // gh#663: a chain refused at its start is named here, from its durable
+        // record, rather than folded into a chain count that reads as a normal
+        // run.
+        let refused = RefusedChains::load(stage_dir);
+        let ran_of = state.as_ref().and_then(|st| refused.ran_of(st.n_chains, st.n_good_chains));
+        let mut extra = vec![match (subset, &ran_of) {
+            (Some(info), _) => format!(
                 "{} of {} chains (excluded {})",
                 info.kept.len(), info.n_total, info.excluded_csv()
             ),
-            None => format!("{} chains", diag.n_chains),
+            (None, Some(text)) => text.clone(),
+            (None, None) => format!("{} chains", diag.n_chains),
         }];
         extra.push(format!("{} draws", diag.n_samples));
         if facts.n_chains_with_paths > 0 {
@@ -1703,7 +1731,7 @@ impl Formatter {
             extra.push(format!("MAP loglik {:.1}", ll));
         }
         s.push_str(&self.identity_line(lead, stage, method, &extra));
-        let state = FitState::load(&stage_dir.to_string_lossy()).ok();
+        s.push_str(&self.refused_chains_lines(&refused));
         s.push_str(&self.seeded_from_line(
             state.as_ref().and_then(|st| st.chain_init_source.as_deref()),
             state.as_ref().and_then(|st| st.chain_starts_kind),
@@ -3557,9 +3585,94 @@ fn dump_params_only(
     Ok(out)
 }
 
+/// The chains a stage refused at their start, read from the `bad_init`
+/// records in the stage's `diagnostics.json` (gh#607, gh#663) — the durable
+/// record, which does not depend on anything having captured stderr.
+struct RefusedChains {
+    /// `(1-based chain id, reason)`, in chain order.
+    records: Vec<(usize, String)>,
+    /// Set when `diagnostics.json` exists but does not parse, so the summary
+    /// says it could not look rather than implying nothing was refused.
+    unreadable: Option<String>,
+}
+
+impl RefusedChains {
+    fn load(stage_dir: &Path) -> Self {
+        use sim::inference::diagnostic::{Diagnostic, DiagnosticKind};
+        let path = stage_dir.join("diagnostics.json");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return RefusedChains { records: Vec::new(), unreadable: None };
+        };
+        match serde_json::from_str::<Vec<Diagnostic>>(&raw) {
+            Ok(diags) => {
+                let mut records: Vec<(usize, String)> = diags
+                    .into_iter()
+                    .filter_map(|d| match d.kind {
+                        DiagnosticKind::BadInit { chain_id, reason, .. } => Some((chain_id, reason)),
+                        _ => None,
+                    })
+                    .collect();
+                records.sort_by_key(|(id, _)| *id);
+                RefusedChains { records, unreadable: None }
+            }
+            Err(e) => RefusedChains {
+                records: Vec::new(),
+                unreadable: Some(format!("{}: {e}", path.display())),
+            },
+        }
+    }
+
+    /// `"6 of 8 chains ran — refused at start: 3, 5"`, or `None` when every
+    /// chain ran. The count that ran is `fit_state.toml`'s `n_good_chains`
+    /// when the sampler recorded it, else the total less the refusal records;
+    /// if the two sources disagree — a count with no record behind it — the
+    /// line says so rather than choosing one.
+    fn ran_of(&self, n_chains: usize, n_good_chains: Option<usize>) -> Option<String> {
+        let n_refused = self.records.len();
+        let ran = n_good_chains.unwrap_or(n_chains.saturating_sub(n_refused));
+        if ran >= n_chains && n_refused == 0 {
+            return None;
+        }
+        let ids: Vec<String> = self.records.iter().map(|(id, _)| id.to_string()).collect();
+        let mut text = format!("{ran} of {n_chains} chains ran");
+        if !ids.is_empty() {
+            text.push_str(&format!(" — refused at start: {}", ids.join(", ")));
+        }
+        if ran + n_refused != n_chains {
+            text.push_str(&format!(
+                " ({} chain(s) not accounted for by a refusal record in diagnostics.json)",
+                n_chains.abs_diff(ran + n_refused)
+            ));
+        }
+        Some(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#663: the chain-count text for a stage that refused chains. Nothing
+    /// refused reads as the plain count (`None`); a refusal names the ids; a
+    /// `n_good_chains` with no refusal record behind it says so rather than
+    /// silently picking one source.
+    #[test]
+    fn refused_chains_ran_of() {
+        let none = RefusedChains { records: Vec::new(), unreadable: None };
+        assert_eq!(none.ran_of(8, None), None);
+        let two = RefusedChains {
+            records: vec![(3, "a".into()), (5, "b".into())],
+            unreadable: None,
+        };
+        assert_eq!(two.ran_of(8, Some(6)).as_deref(),
+            Some("6 of 8 chains ran — refused at start: 3, 5"));
+        // IF2 records no `n_good_chains`; the records alone give the count.
+        assert_eq!(two.ran_of(8, None).as_deref(),
+            Some("6 of 8 chains ran — refused at start: 3, 5"));
+        let s = none.ran_of(8, Some(6)).unwrap();
+        assert!(s.starts_with("6 of 8 chains ran")
+            && s.contains("2 chain(s) not accounted for"), "{s}");
+    }
     use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
     use crate::fit::loglik::LoglikType;
     use crate::fit::method_result::PosteriorDiagnostics;
