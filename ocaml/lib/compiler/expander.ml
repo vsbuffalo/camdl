@@ -10803,7 +10803,7 @@ let collect_own_fields (sd : scenario_decl) : resolved_scen =
   }
 
 (** Resolve parent chain for one scenario. DFS with visiting set for
-    cycle detection (E25x) and depth counter for code-smell cap (E25z).
+    cycle detection (E353) and depth counter for code-smell cap (E355).
     Returns the fully-merged resolved_scen (expressions still unresolved). *)
 let resolve_parents ctx (decl_map : (string * scenario_decl) list) (own : resolved_scen)
     : resolved_scen =
@@ -10814,7 +10814,7 @@ let resolve_parents ctx (decl_map : (string * scenario_decl) list) (own : resolv
     | Some parent_name ->
       if List.mem parent_name visiting then begin
         let chain = (scen.rs_name :: visiting |> List.rev) @ [parent_name] in
-        Diagnostics.error ctx.diags ~code:"E25x" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E353" ~loc:Diagnostics.no_loc
           ~message:(Printf.sprintf "scenario extends cycle: %s"
                       (String.concat " → " chain))
           ~hint:"remove one of the `extends` in the cycle."
@@ -10822,7 +10822,7 @@ let resolve_parents ctx (decl_map : (string * scenario_decl) list) (own : resolv
         { scen with rs_parent = None }   (* stop descent after error *)
       end
       else if depth >= max_depth then begin
-        Diagnostics.error ctx.diags ~code:"E25z" ~loc:Diagnostics.no_loc
+        Diagnostics.error ctx.diags ~code:"E355" ~loc:Diagnostics.no_loc
           ~message:(Printf.sprintf
             "scenario '%s' extends chain exceeds %d — refactor, or submit a \
              feature request for multi-parent composition"
@@ -10841,7 +10841,7 @@ let resolve_parents ctx (decl_map : (string * scenario_decl) list) (own : resolv
             | Some s -> Printf.sprintf "Did you mean '%s'?" s
             | None -> "No scenario by that name is defined in this model."
           in
-          Diagnostics.error ctx.diags ~code:"E25y" ~loc:Diagnostics.no_loc
+          Diagnostics.error ctx.diags ~code:"E354" ~loc:Diagnostics.no_loc
             ~message:(Printf.sprintf "scenario '%s' extends unknown scenario '%s'"
                         scen.rs_name parent_name)
             ~hint:hint

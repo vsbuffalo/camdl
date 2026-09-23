@@ -4653,10 +4653,10 @@ declared list, so the surprise is observable rather than silent. :::
 
 **Diagnostics:**
 
-- **E25x** — cycle in `extends` chain (includes the full chain in the message).
-- **E25y** — unknown parent scenario (suggests the closest name by edit
+- **E353** — cycle in `extends` chain (includes the full chain in the message).
+- **E354** — unknown parent scenario (suggests the closest name by edit
   distance).
-- **E25z** — chain depth > 5; treat as a code smell and factor common ancestors,
+- **E355** — chain depth > 5; treat as a code smell and factor common ancestors,
   or request multi-parent composition as a future feature.
 - **W310** — append-dedup of parent's enable/disable/compose changed the
   resolved list (see callout above).

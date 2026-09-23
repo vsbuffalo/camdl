@@ -316,6 +316,61 @@ let codes_in_source (txt : string) : string list =
   done;
   !acc
 
+(* gh#920: the scanner above only sees a quoted literal that already has the
+   valid shape, so a code-shaped literal that does not — a placeholder such
+   as "E25x" — was skipped silently: neither "emitted without a catalog
+   row" nor "catalog row without an emit site", just invisible. Collect
+   those here so the catalog test can reject them.
+
+   Two shapes are flagged:
+   - any `~code:"…"` argument whose literal is not UPPER + three digits
+     (every Diagnostics emit helper takes the code as `~code`);
+   - any quoted 4-char literal that begins UPPER DIGIT and continues with
+     two alphanumerics that are not both digits ("E25x", "W1ab"), which
+     catches the bare-literal emit sites passed to Dimcheck/Validate/Lint.
+   The second rule requires a digit in position two so ordinary capitalised
+   words in quotes ("Bref", "Uses") are not mistaken for codes. *)
+let invalid_codes_in_source (txt : string) : string list =
+  let n = String.length txt in
+  let is_upper c = c >= 'A' && c <= 'Z' in
+  let is_digit c = c >= '0' && c <= '9' in
+  let is_alnum c = is_upper c || is_digit c || (c >= 'a' && c <= 'z') in
+  let valid s =
+    String.length s = 4 && is_upper s.[0]
+    && is_digit s.[1] && is_digit s.[2] && is_digit s.[3]
+  in
+  let acc = ref [] in
+  (* Rule 1: `~code:"<literal>"`. *)
+  let prefix = "~code:\"" in
+  let pl = String.length prefix in
+  let i = ref 0 in
+  while !i + pl <= n do
+    if String.sub txt !i pl = prefix then begin
+      match String.index_from_opt txt (!i + pl) '"' with
+      | Some j ->
+        let lit = String.sub txt (!i + pl) (j - !i - pl) in
+        if not (valid lit) then acc := lit :: !acc;
+        i := j + 1
+      | None -> i := n
+    end else incr i
+  done;
+  (* Rule 2: a bare quoted literal shaped like a code but not one. *)
+  let i = ref 0 in
+  while !i + 5 < n do
+    if txt.[!i] = '"'
+       && is_upper txt.[!i + 1]
+       && is_digit txt.[!i + 2]
+       && is_alnum txt.[!i + 3]
+       && is_alnum txt.[!i + 4]
+       && txt.[!i + 5] = '"'
+    then begin
+      let lit = String.sub txt (!i + 1) 4 in
+      if not (valid lit) then acc := lit :: !acc;
+      i := !i + 6
+    end else incr i
+  done;
+  List.sort_uniq String.compare !acc
+
 let rec source_files_under dir : string list =
   if not (Sys.file_exists dir && Sys.is_directory dir) then []
   else
@@ -408,6 +463,20 @@ let code_in_range (code : string) (p, lo, hi) =
       n >= lo && n <= hi)
 
 let test_catalog_consistency () =
+  (* gh#920: a code-shaped literal the scanner cannot classify is a failure,
+     not a skip — otherwise it walks past both directions below. *)
+  let invalid =
+    source_files_under (root_path "ocaml/lib")
+    |> List.concat_map (fun f ->
+         invalid_codes_in_source (read_file f)
+         |> List.map (fun c ->
+              Printf.sprintf "%s: %S" (Filename.basename f) c))
+  in
+  if invalid <> [] then
+    Alcotest.failf
+      "not a valid diagnostic code (must be an uppercase letter + 3 digits, \
+       and catalogued in docs/dev/warning-catalog.md):\n  %s"
+      (String.concat "\n  " invalid);
   let emitted = emitted_codes () in
   let (singles, ranges) = parse_catalog () in
   let covered code =
@@ -440,6 +509,20 @@ let test_catalog_consistency () =
     true (SS.cardinal emitted > 50);
   Alcotest.(check bool) "parsed a non-trivial number of catalog codes"
     true (SS.cardinal singles + List.length ranges > 20)
+
+(* The scanner's own contract, on synthetic input: placeholders are caught
+   in both emit shapes; valid codes and capitalised words are not. "E2x"
+   is reachable only by the `~code:` rule and "W1ab" only by the
+   bare-literal rule, so each rule is exercised on its own. *)
+let test_invalid_code_scanner () =
+  let got = invalid_codes_in_source
+      {|Diagnostics.error d ~code:"E25x" ~loc;
+        Diagnostics.error d ~code:"E250" ~loc;
+        Diagnostics.warning d ~code:"E2x" ~loc;
+        Dimcheck.report "W1ab" msg; Lint.emit "L402" msg;
+        let kind = "Bref" in let x = "Uses" in ()|} in
+  Alcotest.(check (list string)) "only the placeholders are flagged"
+    ["E25x"; "E2x"; "W1ab"] got
 
 (* ── Piece 5: check ↔ compile parity (gh#170) ────────────────────────────────
 
@@ -646,6 +729,8 @@ let () =
     ];
     "catalog", [
       Alcotest.test_case "emit sites ↔ warning-catalog.md" `Quick test_catalog_consistency;
+      Alcotest.test_case "scanner flags code-shaped non-codes (gh#920)"
+        `Quick test_invalid_code_scanner;
     ];
     "check-compile-parity", [
       Alcotest.test_case "dangling obs (E507) rejected by check AND compile"

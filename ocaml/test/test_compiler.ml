@@ -3051,8 +3051,8 @@ let test_extends_three_level_chain () =
   (* 0.1 × 2 × 3 = 0.6 *)
   Alcotest.(check (float 1e-9)) "three-level chain" 0.6 (List.assoc "x" c.preset_params)
 
-let test_extends_e25x_cycle () =
-  compile_expect_error_code ~code:"E25x" ~contains:"cycle"
+let test_extends_e353_cycle () =
+  compile_expect_error_code ~code:"E353" ~contains:"cycle"
     (extends_boilerplate ^ {|
     scenarios {
       a { extends = b }
@@ -3060,8 +3060,8 @@ let test_extends_e25x_cycle () =
     }
   |})
 
-let test_extends_e25y_unknown_with_suggestion () =
-  compile_expect_error_code ~code:"E25y" ~contains:"baseline"
+let test_extends_e354_unknown_with_suggestion () =
+  compile_expect_error_code ~code:"E354" ~contains:"baseline"
     (extends_boilerplate ^ {|
     scenarios {
       foo { extends = baselime }
@@ -3101,8 +3101,8 @@ let test_extends_child_references_parent_value () =
   Alcotest.(check (float 1e-9)) "parent-first resolution"
     0.6 (List.assoc "x" w.preset_params)
 
-let test_extends_e25z_depth_exceeds () =
-  compile_expect_error_code ~code:"E25z" ~contains:"chain"
+let test_extends_e355_depth_exceeds () =
+  compile_expect_error_code ~code:"E355" ~contains:"chain"
     (extends_boilerplate ^ {|
     scenarios {
       s1 {}
@@ -14089,9 +14089,9 @@ let () =
       Alcotest.test_case "three-level chain a -> b -> c"             `Quick test_extends_three_level_chain;
       Alcotest.test_case "scale interacts with parent's set"         `Quick test_extends_scale_interaction;
       Alcotest.test_case "child references parent's resolved value"  `Quick test_extends_child_references_parent_value;
-      Alcotest.test_case "E25x cycle detected with chain in message" `Quick test_extends_e25x_cycle;
-      Alcotest.test_case "E25y unknown parent + edit-distance hint"  `Quick test_extends_e25y_unknown_with_suggestion;
-      Alcotest.test_case "E25z chain depth > 5 errors"               `Quick test_extends_e25z_depth_exceeds;
+      Alcotest.test_case "E353 cycle detected with chain in message" `Quick test_extends_e353_cycle;
+      Alcotest.test_case "E354 unknown parent + edit-distance hint"  `Quick test_extends_e354_unknown_with_suggestion;
+      Alcotest.test_case "E355 chain depth > 5 errors"               `Quick test_extends_e355_depth_exceeds;
       (* gh#115 — scenario field name validation *)
       Alcotest.test_case "E267 scenario enable typo"   `Quick test_scenario_enable_unknown_intervention_is_e267;
       Alcotest.test_case "E267 scenario disable typo"  `Quick test_scenario_disable_unknown_intervention_is_e267;
