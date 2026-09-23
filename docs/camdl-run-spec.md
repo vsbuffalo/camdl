@@ -1901,6 +1901,15 @@ also written into the leaf under `obs/<obs-hash>-<obs-seed>/<stream>.tsv`
 alongside an `obs.json`, so they are reachable with `camdl cat <id> --stream
 <name>` without keeping the loose files.
 
+These writers — `--obs`, `--obs-dir`, the store's `obs/` subtree, `batch run`'s
+`[obs]`, and a generated quantity that reduces `observations.<stream>` — draw
+every stream from the model alone, with no data columns. So a stream whose
+likelihood reads a data column is refused by name before any cell runs,
+including a ratio stream's `n` that `--design-from` writes from the model: a
+missing column would otherwise be drawn as `0` (gh#829). A model with such a
+stream emits none of its streams this way; `--design-from` draws only the
+streams the fit binds.
+
 The observation RNG is seeded independently of the process RNG, so adding
 `--obs` does not change the trajectory.
 ---

@@ -234,6 +234,23 @@ const REAL_SHAPED_PARAMS: &[&str] = &[
     "--param", "psi=0.3", "--param", "k=20",
 ];
 
+/// The compiled real-shaped model without its two streams whose likelihood
+/// reads a data column — `survey` (`tested`) and `kivu_share`
+/// (`cases_split`). `simulate --obs-dir` draws every stream with no data
+/// columns and refuses such a stream by name (gh#829), so the round trips of
+/// the streams it can write run on the model without them.
+fn without_data_column_streams(ir: &Path) -> PathBuf {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ir).unwrap()).unwrap();
+    let obs = v["model"]["observations"].as_array_mut().expect("observations");
+    let before = obs.len();
+    obs.retain(|o| !matches!(o["name"].as_str(), Some("survey") | Some("kivu_share")));
+    assert_eq!(obs.len(), before - 2, "the fixture declares both streams");
+    let out = ir.with_file_name("surveillance_model_only.ir.json");
+    std::fs::write(&out, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    out
+}
+
 /// Write the real-shaped model's declared dataset into `out_dir`.
 fn emit_real_shaped(camdl: &Path, ir: &Path, out_dir: &Path) {
     let mut args = vec![
@@ -270,7 +287,7 @@ fn reload(camdl: &Path, ir: &Path, out_dir: &Path, streams: &[&str]) -> std::pro
 fn the_real_shaped_windowed_and_instant_streams_round_trip() {
     let camdl = camdl_bin();
     let tmp = tempdir("real_shaped");
-    let ir = compile_real_shaped(&tmp);
+    let ir = without_data_column_streams(&compile_real_shaped(&tmp));
     let out_dir = tmp.join("o");
     emit_real_shaped(&camdl, &ir, &out_dir);
 
@@ -303,7 +320,7 @@ fn the_real_shaped_windowed_and_instant_streams_round_trip() {
 fn the_real_shaped_stratified_family_round_trips() {
     let camdl = camdl_bin();
     let tmp = tempdir("real_shaped_family");
-    let ir = compile_real_shaped(&tmp);
+    let ir = without_data_column_streams(&compile_real_shaped(&tmp));
     let out_dir = tmp.join("o");
     emit_real_shaped(&camdl, &ir, &out_dir);
 

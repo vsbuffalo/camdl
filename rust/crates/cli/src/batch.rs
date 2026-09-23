@@ -543,6 +543,18 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
                    observations {{}} block — nothing to sample.");
         std::process::exit(1);
     }
+    // gh#829: the `obs/` subtree draws every stream with no data columns, so
+    // a stream whose likelihood reads one is refused before any cell runs.
+    if obs_enabled {
+        for o in &batch_model.observations {
+            if let Err(e) = crate::obs_emit::check_data_columns_supplied(
+                o, crate::obs_emit::ColumnSupply::Nothing,
+            ) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let model_stem = crate::hashing::path_stem_slug(&ir_path_resolved);
 
@@ -1915,6 +1927,12 @@ fn write_obs_into_cas(
     let run_start = crate::run_start_of(traj, model);
     let mut plans = Vec::with_capacity(model.observations.len());
     for obs_ir in &model.observations {
+        // gh#829: the draws below pass no data columns. Both callers refuse
+        // such a stream before any cell runs; this keeps the writer honest
+        // for any caller that does not.
+        crate::obs_emit::check_data_columns_supplied(
+            obs_ir, crate::obs_emit::ColumnSupply::Nothing,
+        )?;
         // Must use the SAME horizon the write loop below uses — a preflight that
         // validates a different set of times than gets written is worse than no
         // preflight (gh#561 + gh#589).

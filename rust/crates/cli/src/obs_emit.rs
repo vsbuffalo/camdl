@@ -357,13 +357,10 @@ fn bound_temporal_format(
 ///
 /// Three refusals:
 ///
-/// - a stream whose likelihood reads a data column — a binomial denominator
-///   `n = tested`, a person-time offset. There is no data file to read it from
-///   when the data is what is being generated, and writing `0` would assert an
-///   observation the run never made (gh#829): a synthetic file claiming zero
-///   positives out of zero tests is scored as a real observation when it is
-///   fitted back. The exception is the column [`model_denominator_column`]
-///   names: a ratio stream's `n`, which the model generates.
+/// - a stream whose likelihood reads a data column
+///   ([`check_data_columns_supplied`], gh#829). The exception is the column
+///   [`model_denominator_column`] names: a ratio stream's `n`, which the model
+///   generates.
 /// - a stratified (long-form) stream. Its family's leaves share one `source`
 ///   and one long-form file with `: dim` columns; one file per leaf, with no
 ///   dim column, is a shape the loader would not route.
@@ -372,22 +369,7 @@ fn bound_temporal_format(
 ///   unread.
 fn check_streams_round_trip(streams: &[&ObservationModel]) -> Result<(), String> {
     for obs in streams {
-        let aux = crate::pfilter::stream_aux_columns(obs);
-        if !aux.is_empty() && model_denominator_column(obs).is_none() {
-            return Err(format!(
-                "observation stream '{}': its likelihood reads the data column(s) {} — \
-                 values a data file supplies and the model has no term to generate. A \
-                 simulated dataset has no file to read them from, and writing 0 would \
-                 assert an observation the run never made (gh#829), which is then scored \
-                 as real when the file is fitted back.\n  \
-                 Fix: leave this stream out of the design (bind only the streams whose \
-                 likelihood reads the model alone), or wait on gh#829, which lands the \
-                 covariate-conditioned draw. (A `binomial` `n` over a ratio of flows is \
-                 the one column the model does generate, and is written from it.)",
-                obs.name,
-                aux.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", "),
-            ));
-        }
+        check_data_columns_supplied(obs, ColumnSupply::ModelDenominator)?;
         if crate::pfilter::is_long_form_stream(obs) {
             return Err(format!(
                 "observation stream '{}' is stratified: it declares `: dim` column(s), so \
@@ -411,6 +393,72 @@ fn check_streams_round_trip(streams: &[&ObservationModel]) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+/// Which of a likelihood's data columns an observation writer can fill when
+/// there is no data file to read them from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColumnSupply {
+    /// None. The writer draws every stream from the model alone and hands the
+    /// sampler an empty aux slice: `simulate --obs` / `--obs-dir`, the store's
+    /// per-leaf `obs/` subtree (`simulate` and `batch run`'s `[obs]`), and a
+    /// generated quantity that reduces `observations.<stream>`.
+    Nothing,
+    /// The design-preserving emitter ([`simulate_dataset`]): it also writes a
+    /// ratio stream's `n` from the model's denominator flow
+    /// ([`model_denominator_column`]), and no other column.
+    ModelDenominator,
+}
+
+/// Refuse, by name, a stream whose likelihood reads a data column the writer
+/// cannot supply — a binomial denominator `n = tested`, a person-time offset.
+/// When the data is what is being generated there is no file to read such a
+/// column from, and the sampler resolves a missing column to 0: a synthetic
+/// file claiming zero positives out of zero tests, which is then scored as a
+/// real observation when it is fitted back (gh#829). Every writer that draws
+/// observations calls this before it simulates, so the refusal reads the same
+/// wherever it fires.
+pub(crate) fn check_data_columns_supplied(
+    obs: &ObservationModel,
+    supply: ColumnSupply,
+) -> Result<(), String> {
+    let aux = crate::pfilter::stream_aux_columns(obs);
+    if aux.is_empty() {
+        return Ok(());
+    }
+    let ratio_n = model_denominator_column(obs).is_some();
+    if supply == ColumnSupply::ModelDenominator && ratio_n {
+        return Ok(());
+    }
+    let fix = match (supply, ratio_n) {
+        (ColumnSupply::Nothing, true) => {
+            "Fix: this column is a `binomial` `n` over a ratio of flows — the one data \
+             column the model generates — and `camdl simulate --design-from <fit.toml>` \
+             (or a `[synthetic]` fit) writes it from the model. This writer draws every \
+             stream with no data columns at all."
+        }
+        (ColumnSupply::Nothing, false) => {
+            "Fix: generate this model's trajectory without synthetic observations (the \
+             trajectory does not depend on them). No simulate path draws a stream \
+             conditioned on a covariate that only the data supplies."
+        }
+        (ColumnSupply::ModelDenominator, _) => {
+            "Fix: leave this stream out of the design (bind only the streams whose \
+             likelihood reads the model alone). No simulate path draws a stream \
+             conditioned on a covariate that only the data supplies. (A `binomial` `n` \
+             over a ratio of flows is the one column the model does generate, and is \
+             written from it.)"
+        }
+    };
+    Err(format!(
+        "observation stream '{}': its likelihood reads the data column(s) {} — values a \
+         data file supplies and the model has no term to generate. A simulated dataset \
+         has no file to read them from, and writing 0 would assert an observation the \
+         run never made (gh#829), which is then scored as real when the file is fitted \
+         back.\n  {fix}",
+        obs.name,
+        aux.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", "),
+    ))
 }
 
 /// The one data column the emitter can write from the model: a `binomial` /

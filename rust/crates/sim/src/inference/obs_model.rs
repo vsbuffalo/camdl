@@ -749,9 +749,11 @@ pub fn compile_obs_sample_pf(
         // CALLER's to supply. `fit predict` forwards the OBSERVED aux at each obs
         // time, so the posterior-predictive draws `y_rep ~ binomial(n_observed,
         // p̂)` — the exogenous survey sample size carried forward. Data-free
-        // emitters (`simulate --obs`, synthetic generation) pass `&[]`; a
-        // likelihood that references an unavailable aux column then evaluates its
-        // denominator to 0 and draws 0, the honest data-free behaviour.
+        // emitters (`simulate --obs`, the store's `obs/` subtree, synthetic
+        // generation) have no such column: a likelihood referencing a missing
+        // aux column evaluates it to 0 and draws 0, which a caller must never
+        // write as data. They refuse such a stream before sampling
+        // (`obs_emit::check_data_columns_supplied`, gh#829).
         sample_obs_resolved(&resolved, t, projected, aux, &params, &compiled, &int_s, &real_s, rng)
     }))
 }

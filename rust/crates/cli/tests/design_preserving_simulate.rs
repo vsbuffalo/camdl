@@ -614,6 +614,120 @@ fn design_from_refuses_a_covariate_stream_by_name_and_writes_nothing() {
         "nothing is written for a stream that cannot be drawn honestly");
 }
 
+/// Every `.tsv` under `root`, recursively.
+fn tsv_files_under(root: &Path) -> Vec<PathBuf> {
+    let mut written: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(es) = std::fs::read_dir(&d) {
+            for e in es.flatten() {
+                let p = e.path();
+                if p.is_dir() { stack.push(p); }
+                else if p.extension().map(|x| x == "tsv").unwrap_or(false) {
+                    written.push(p);
+                }
+            }
+        }
+    }
+    written
+}
+
+/// gh#829 on the plain writers. `simulate --obs-dir`, `--obs-only-dir` and
+/// `--obs` draw every stream from the model alone, with no data columns, so a
+/// likelihood reading `tested` resolved it to 0 and wrote a file of zeros with
+/// exit 0 — the reported defect. Each is refused by name before anything is
+/// written, neither the mirror file nor the store's `obs/` subtree.
+#[test]
+fn plain_simulate_obs_refuses_a_covariate_stream_by_name_and_writes_nothing() {
+    if camdlc().is_none() { return; }
+    for flag in ["--obs-dir", "--obs-only-dir", "--obs"] {
+        let tmp = tempdir("plain_covariate");
+        let ir = compile(tmp.path(), "survey", COVARIATE_MODEL);
+        let truth = truth_toml(tmp.path());
+        let store = tmp.path().join("results");
+        let target = if flag == "--obs" {
+            tmp.path().join("synth.tsv")
+        } else {
+            tmp.path().join("synth")
+        };
+        let output = run(&[
+            "simulate", ir.to_str().unwrap(),
+            "--params", truth.to_str().unwrap(),
+            flag, target.to_str().unwrap(),
+            "--output-dir", store.to_str().unwrap(),
+            "--backend", "chain_binomial", "--dt", "1", "--seed", "11",
+        ]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(),
+            "{flag}: a covariate stream must be refused, not written as zeros:\n{stderr}");
+        assert!(stderr.contains("'survey'") && stderr.contains("`tested`")
+                && stderr.contains("gh#829"),
+            "{flag}: the refusal names the stream, the column and the issue:\n{stderr}");
+        assert!(!target.exists() || tsv_files_under(&target).is_empty(),
+            "{flag}: no observation file is written for a stream that cannot be drawn");
+        let in_store: Vec<PathBuf> = tsv_files_under(&store).into_iter()
+            .filter(|p| p.components().any(|c| c.as_os_str() == "obs"))
+            .collect();
+        assert!(in_store.is_empty(),
+            "{flag}: nor an obs/ subtree in the store: {in_store:?}");
+    }
+}
+
+/// gh#829 through a generated quantity. A quantity that reduces
+/// `observations.survey` reduces the same draws `--obs` would emit, so it drew
+/// `tested` as 0 and reported a quantity over zeros. It is refused by name.
+#[test]
+fn a_quantity_over_a_covariate_stream_is_refused_by_name() {
+    if camdlc().is_none() { return; }
+    let tmp = tempdir("quantity_covariate");
+    let src = COVARIATE_MODEL.replace(
+        "init {", "quantities { last_positives = final(observations.survey) }\ninit {");
+    let ir = compile(tmp.path(), "survey", &src);
+    let truth = truth_toml(tmp.path());
+    let qdir = tmp.path().join("q");
+    let output = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--quantities-out", qdir.to_str().unwrap(),
+        "--output-dir", tmp.path().join("results").to_str().unwrap(),
+        "--backend", "chain_binomial", "--dt", "1", "--seed", "11",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(),
+        "a quantity over a covariate stream must be refused:\n{stderr}");
+    assert!(stderr.contains("'survey'") && stderr.contains("`tested`")
+            && stderr.contains("gh#829"),
+        "the refusal names the stream, the column and the issue:\n{stderr}");
+}
+
+/// gh#829 on `batch run`'s `[obs]` subtree, the other writer that draws with no
+/// data columns. It is refused before any cell runs, so no leaf carries an
+/// `obs/` file of zeros.
+#[test]
+fn batch_obs_refuses_a_covariate_stream_by_name_and_writes_nothing() {
+    if camdlc().is_none() { return; }
+    let tmp = tempdir("batch_covariate");
+    let ir = compile(tmp.path(), "survey", COVARIATE_MODEL);
+    let truth = truth_toml(tmp.path());
+    let store = tmp.path().join("results");
+    let manifest = tmp.path().join("batch.toml");
+    std::fs::write(&manifest, format!(
+        "[config]\nmodel = \"{}\"\nparams = \"{}\"\noutput_dir = \"{}\"\n\
+         seeds = {{ list = [1, 2] }}\n\n[obs]\nenabled = true\n",
+        ir.display(), truth.display(), store.display())).unwrap();
+    let output = run(&["batch", "run", manifest.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(),
+        "batch [obs] on a covariate stream must be refused:\n{stderr}");
+    assert!(stderr.contains("'survey'") && stderr.contains("`tested`")
+            && stderr.contains("gh#829"),
+        "the refusal names the stream, the column and the issue:\n{stderr}");
+    let in_store: Vec<PathBuf> = tsv_files_under(&store).into_iter()
+        .filter(|p| p.components().any(|c| c.as_os_str() == "obs"))
+        .collect();
+    assert!(in_store.is_empty(), "no obs/ subtree of zeros is written: {in_store:?}");
+}
+
 /// The same refusal on the `[synthetic]` path, which reaches it through the
 /// declared design rather than a bound one. Before this it drew the covariate
 /// as 0 from an empty aux slice — the gh#829 shape, on the very workflow that

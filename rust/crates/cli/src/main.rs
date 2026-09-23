@@ -1375,6 +1375,22 @@ fn run_simulate(a: &args::SimulateArgs) {
             eprintln!("error: --obs/--obs-dir requested but model has no observations blocks");
             std::process::exit(1);
         }
+        // gh#829: both the mirror file and the store's per-leaf `obs/` subtree
+        // draw every stream with no data columns, so a stream whose likelihood
+        // reads one is refused here — before a cell runs, so nothing is written.
+        // `--design-from` is not this writer: it draws only the streams the fit
+        // binds, writes a ratio stream's `n` from the model, and runs this same
+        // check over exactly those streams (`design_from_bound_streams`).
+        if a.design_from.is_none() {
+            for o in &model_check.observations {
+                if let Err(e) = crate::obs_emit::check_data_columns_supplied(
+                    o, crate::obs_emit::ColumnSupply::Nothing,
+                ) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         // gh#561: the combined --obs/--obs-dir writers cache one obs-time axis
         // for the whole grid (`obs_times_cache`, filled at run_idx == 0) and
         // the wide writer hard-codes one row count per cell — so scenarios with
@@ -2279,6 +2295,13 @@ fn materialize_obs_for_quantities(
     // must reduce over the series `--obs` would emit under the same flags.
     emit: Option<&crate::emit_every::EmitEvery>,
 ) -> Result<sim::quantity::ObsSeriesSet, String> {
+    // gh#829: the draws below carry no data columns, so a quantity over a
+    // stream whose likelihood reads one would reduce a series of zeros.
+    for obs_ir in model.observations.iter().filter(|o| referenced.contains(&o.name.as_str())) {
+        crate::obs_emit::check_data_columns_supplied(
+            obs_ir, crate::obs_emit::ColumnSupply::Nothing,
+        )?;
+    }
     let mut obs_rng = sim::rng::StatefulRng::new(obs_seed);
     let mut out: std::collections::HashMap<String, (Vec<f64>, Vec<f64>)> =
         std::collections::HashMap::new();
