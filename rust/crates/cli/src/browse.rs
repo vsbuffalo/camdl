@@ -1637,9 +1637,10 @@ fn print_fits_json(fits: &[FitEntry]) {
                     "seed": s.seed,
                     "n_chains": s.n_chains,
                     "best_loglik": s.best_loglik,
-                    // The loglik class is a property of the method (gh#280), so
-                    // a PGAS leaf reads `complete_data` even though it carries
-                    // no scalar `best_loglik`.
+                    // The loglik class is a property of the method (gh#280): a
+                    // PGAS leaf's `best_loglik` is the complete-data loglik of
+                    // its best sweep, and `complete_data` says so, so it is not
+                    // read as a marginal likelihood comparable to IF2's.
                     "loglik_type": crate::fit::loglik::LoglikType::from(s.method).tag(),
                     // Printed exactly as recorded: the 1-based chain number,
                     // naming a `chain_N/` directory on the leaf (gh#912).

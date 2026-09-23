@@ -1746,11 +1746,20 @@ fit-level provenance, `methods_declared` (the algorithms that ran on this
 problem), and `methods` — one entry per method leaf:
 
 ```json
-{"method":"pgas","method_hash":"34f379b8…","run_id":"9e1c…",
- "path":"results/fits/pgas-9a53c2c4/pgas-34f379b8/seed_1-06cbd6b3",
- "backend":"chain_binomial","seed":1,"n_chains":4,
- "best_loglik":null,"loglik_type":"complete_data","best_chain":null}
+{"method":"pgas","method_hash":"0727792d…","run_id":"b99e1710…",
+ "path":"./results/fits/pgas-50e0eb11/pgas-0727792d/seed_1-06cbd6b3",
+ "backend":"chain_binomial","seed":1,"n_chains":2,
+ "best_loglik":-35405.944659607965,"loglik_type":"complete_data","best_chain":1}
 ```
+
+This is a completed two-chain PGAS leaf. `best_loglik` and `best_chain` are the
+leaf's `run.json` `inputs.best_loglik` / `inputs.best_chain`, printed as
+recorded: `best_chain` is the 1-based chain number (a `chain_N/` directory), and
+`best_loglik` is the value `loglik_type` names — for PGAS the highest
+complete-data log-likelihood of any sweep, not a marginal likelihood, so it does
+not compare with an IF2 or `pfilter` row. Either field is `null` only when the
+method recorded none (`best_chain` for `pfilter`, which runs replicates rather
+than competing chains; `best_loglik` when the value was not finite).
 
 `method` alone does not identify a leaf. One segment can hold several leaves of
 the same algorithm — the same problem fitted at two `sweeps` settings, say —
