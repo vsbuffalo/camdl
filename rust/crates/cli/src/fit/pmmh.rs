@@ -116,8 +116,10 @@ pub fn run_stage(
     // The PMMH prefer-PGAS-for-long-series caveat banner is emitted by the
     // dispatch chokepoint (`methods::emit_status_banner`), driven by the
     // registry `status_note` so it can't drift from `camdl fit methods`.
-    let collector = DiagnosticCollector::new("pmmh");
+    // gh#909: this runner serves `pmmh` and `mh` + `ode`; every label it
+    // prints or records is the method that ran, never the runner's name.
     let stage_name = method.algorithm.method_name();
+    let collector = DiagnosticCollector::new(stage_name);
     let estimate = &fit.estimate;
 
     let n_chains = pmmh_opts.n_chains;
@@ -221,7 +223,7 @@ pub fn run_stage(
     // draws from (`chain_starts::draw_chain_starts`), under the resolved
     // `starts` rule.
     let drawn = super::runner::draw_chain_starts_for(&config, estimate, starts, n_chains, seed)
-        .map_err(|e| format!("pmmh: {e}"))?;
+        .map_err(|e| format!("{stage_name}: {e}"))?;
     let chain_starts: Vec<Vec<f64>> = drawn.to_param_vecs(&config.estimated_params, &base);
 
     let ll_mean: f64;
@@ -298,7 +300,7 @@ pub fn run_stage(
     if !force && !resume {
         let state_path = stage_dir.join("fit_state.toml");
         if state_path.exists() {
-            eprintln!("\x1b[33mpmmh results already exist in {}. Use --force to re-run or --resume to continue.\x1b[0m",
+            eprintln!("\x1b[33m{stage_name} results already exist in {}. Use --force to re-run or --resume to continue.\x1b[0m",
                 stage_dir.display());
             return Ok(());
         }
@@ -393,8 +395,10 @@ pub fn run_stage(
         vec![None; n_chains]
     };
 
-    eprintln!("\npmmh: {} chains × {} steps × {} particles, burn_in={}, thin={}, adapt={}",
-        n_chains, n_steps, n_particles, burn_in, thin, adapt);
+    // The ODE path runs no particle filter, so it has no particle count.
+    let particles = if is_ode_mh { String::new() } else { format!(" × {n_particles} particles") };
+    eprintln!("\n{stage_name}: {n_chains} chains × {n_steps} steps{particles}, \
+               burn_in={burn_in}, thin={thin}, adapt={adapt}");
     eprintln!("  proposal_sd (transformed): [{}]",
         config.estimated_params.iter().zip(&proposal_sd)
             .map(|(p, &sd)| format!("{}={:.4}", p.name, sd))
@@ -1098,12 +1102,8 @@ pub fn run_stage(
     let diag_path = stage_dir.join("diagnostics.json");
     let _ = collector.write_json(&diag_path.to_string_lossy());
 
-    let wall_secs = elapsed.as_secs_f64();
-    let total_pf_calls = n_chains * n_steps;
-    eprintln!("\npmmh complete in {:.1}s ({} PF evaluations, {:.1}ms/eval): {}/",
-        wall_secs, total_pf_calls,
-        wall_secs * 1000.0 / total_pf_calls as f64 * n_chains as f64,
-        stage_dir.display());
+    eprintln!("\n{}", completion_line(
+        stage_name, is_ode_mh, elapsed.as_secs_f64(), n_chains, n_steps, stage_dir));
     eprintln!("  MAP loglik: {:.1} (chain {})", map_result.map_loglik, map_chain + 1);
 
     Ok(())
@@ -1182,4 +1182,49 @@ fn write_summary(
         .map_err(|e| format!("json error: {}", e))?;
     std::fs::write(&path, contents)
         .map_err(|e| format!("cannot write {}: {}", path.display(), e))
+}
+
+/// The run's closing stderr line: which method ran, how long it took, and how
+/// many likelihood evaluations that was (gh#909). This runner serves both
+/// `pmmh` and `mh` + `ode`, so the method is `stage_name`, never a literal,
+/// and the evaluations are named by what computed them: a particle filter's
+/// estimate for PMMH, the deterministic ODE marginal likelihood for `mh`.
+/// The per-evaluation time is wall time per evaluation within one chain, the
+/// chains running in parallel.
+fn completion_line(
+    stage_name: &str,
+    is_ode_mh: bool,
+    wall_secs: f64,
+    n_chains: usize,
+    n_steps: usize,
+    stage_dir: &Path,
+) -> String {
+    let total_evals = n_chains * n_steps;
+    let what = if is_ode_mh { "ODE likelihood evaluations" } else { "PF evaluations" };
+    format!("{stage_name} complete in {:.1}s ({} {what}, {:.1}ms/eval): {}/",
+        wall_secs, total_evals,
+        wall_secs * 1000.0 / total_evals as f64 * n_chains as f64,
+        stage_dir.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gh#909: an `mh` + `ode` run is named `mh`, and counts likelihood
+    /// evaluations, not particle-filter ones: there is no filter on that
+    /// path. The PMMH line is the negative control: it still says what it
+    /// did.
+    #[test]
+    fn completion_line_names_the_method_and_its_evaluations() {
+        let dir = Path::new("out/mh-1");
+        let mh = completion_line("mh", true, 0.3, 1, 3000, dir);
+        assert!(mh.starts_with("mh complete in 0.3s"), "{mh}");
+        assert!(!mh.contains("pmmh") && !mh.contains("PF"), "{mh}");
+        assert!(mh.contains("3000 ODE likelihood evaluations"), "{mh}");
+
+        let pmmh = completion_line("pmmh", false, 2.0, 2, 500, dir);
+        assert!(pmmh.starts_with("pmmh complete in 2.0s"), "{pmmh}");
+        assert!(pmmh.contains("1000 PF evaluations"), "{pmmh}");
+    }
 }

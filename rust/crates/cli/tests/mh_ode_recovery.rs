@@ -152,7 +152,7 @@ fn beta_samples(trace: &Path, burn_in: usize) -> Vec<f64> {
 /// `mh`+`ode` fit from START_BETA, and return (posterior beta mean, out dir,
 /// tmp). The tmp guard must be kept alive by the caller. Returns `None` when the
 /// release binary / camdlc is missing (so the test skips).
-fn recover_beta(tag: &str, projected: &str) -> Option<(f64, PathBuf, TempDir)> {
+fn recover_beta(tag: &str, projected: &str) -> Option<(f64, PathBuf, TempDir, String)> {
     recover_beta_integ(tag, projected, "")
 }
 
@@ -160,7 +160,11 @@ fn recover_beta(tag: &str, projected: &str) -> Option<(f64, PathBuf, TempDir)> {
 /// (e.g. `integrator = rk45 { atol = 1e-8  rtol = 1e-6 }`). The clause is honored
 /// for BOTH the synthetic data-gen and the fit (`compute_ode_loglik` reads the
 /// model's declared integrator), so this drives rk45 through the whole fit path.
-fn recover_beta_integ(tag: &str, projected: &str, integ: &str) -> Option<(f64, PathBuf, TempDir)> {
+fn recover_beta_integ(
+    tag: &str,
+    projected: &str,
+    integ: &str,
+) -> Option<(f64, PathBuf, TempDir, String)> {
     let bin = camdl_bin();
     if !bin.exists() || camdlc().is_none() {
         eprintln!("skip: release camdl / camdlc.exe missing (run `make build`)");
@@ -209,11 +213,12 @@ iterations = 1500
 burn_in = {burn_in}
 "#, out = out.display(), ir = ir.display(), data = data.display(), burn_in = BURN_IN)).unwrap();
 
-    let status = Command::new(&bin)
+    let run = Command::new(&bin)
         .args(["fit", "run"]).arg(&fit_toml)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .status().unwrap();
-    assert!(status.success(), "mh+ode `fit run` must succeed (exit 0)");
+        .output().unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(run.status.success(), "mh+ode `fit run` must succeed (exit 0):\n{stderr}");
 
     let traces = find_traces(&out);
     assert!(!traces.is_empty(), "no chain trace.tsv produced under {}", out.display());
@@ -221,12 +226,12 @@ burn_in = {burn_in}
     assert!(betas.len() >= 100,
         "too few post-burn-in beta samples ({}) — the mh chains didn't run", betas.len());
     let mean = betas.iter().sum::<f64>() / betas.len() as f64;
-    Some((mean, out, tmp))
+    Some((mean, out, tmp, stderr))
 }
 
 #[test]
 fn mh_ode_recovers_known_beta() {
-    let Some((mean, out, _tmp)) = recover_beta("recovery", "prevalence(I)") else { return };
+    let Some((mean, out, _tmp, stderr)) = recover_beta("recovery", "prevalence(I)") else { return };
 
     assert!(mean.is_finite() && (0.05..=5.0).contains(&mean),
         "posterior beta mean {mean} not finite/in-bounds");
@@ -263,6 +268,26 @@ fn mh_ode_recovers_known_beta() {
         "mh_summary.json must name `mh`, not the runner it shares:\n{text}");
     assert!(v.get("stage").is_none(),
         "and must not carry the old `stage` key (gh#901):\n{text}");
+
+    // gh#909: the lines a user reads name `mh` too. The runner printed
+    // "pmmh complete in … (N PF evaluations …)" on a path that runs no
+    // particle filter, and its opening line, error prefixes and
+    // `diagnostics.json` entries said `pmmh` as well.
+    let done = stderr.lines().find(|l| l.contains(" complete in "))
+        .unwrap_or_else(|| panic!("no completion line on stderr:\n{stderr}"));
+    assert!(done.starts_with("mh complete in ") && done.contains("ODE likelihood evaluations")
+            && !done.contains("PF"),
+        "the completion line must name mh and its ODE evaluations: {done}");
+    assert!(!stderr.lines().any(|l| l.starts_with("pmmh")),
+        "no stderr line of an mh run may name pmmh:\n{stderr}");
+    for diag in find_named(&out, "diagnostics.json") {
+        let raw = std::fs::read_to_string(&diag).unwrap();
+        let entries: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        for e in entries.as_array().into_iter().flatten() {
+            assert_eq!(e["method"], serde_json::json!("mh"),
+                "diagnostics.json entries name the method that ran: {e}");
+        }
+    }
 }
 
 /// gh#166 Phase B (B7): the same recovery, but the observation projects
@@ -273,7 +298,7 @@ fn mh_ode_recovers_known_beta() {
 /// shape (sum per-interval flows, fold, score) still works.
 #[test]
 fn mh_ode_recovers_known_beta_from_incidence() {
-    let Some((mean, _out, _tmp)) = recover_beta("incidence", "incidence(infection)") else { return };
+    let Some((mean, _out, _tmp, _)) = recover_beta("incidence", "incidence(infection)") else { return };
 
     assert!(mean.is_finite() && (0.05..=5.0).contains(&mean),
         "incidence posterior beta mean {mean} not finite/in-bounds");
@@ -290,7 +315,7 @@ fn mh_ode_recovers_known_beta_from_incidence() {
 /// reads `model.simulation.integrator`), not just in forward `simulate`.
 #[test]
 fn mh_ode_recovers_known_beta_rk45() {
-    let Some((mean, _out, _tmp)) = recover_beta_integ(
+    let Some((mean, _out, _tmp, _)) = recover_beta_integ(
         "recovery_rk45",
         "prevalence(I)",
         "integrator = rk45 { atol = 1e-8  rtol = 1e-6 }",
