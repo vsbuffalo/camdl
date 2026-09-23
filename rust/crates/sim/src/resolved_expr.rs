@@ -118,6 +118,43 @@ pub fn references_state(expr: &ResolvedExpr) -> bool {
     }
 }
 
+/// The local index of the first real (ODE) compartment `expr` reads — directly
+/// (`RealPop`, the real members of a `MixedPopSum`) or through a hoisted
+/// binding body in `bindings` (`ctx.model.resolved.bindings`) — or `None` if it
+/// reads no real state. The real-state sibling of [`references_state`].
+///
+/// gh#681: the observation value path evaluates projections against a real
+/// state that is never written, so this is what refuses such a projection.
+/// The match is exhaustive on purpose: a new variant must be classified here.
+pub fn first_real_state_read(expr: &ResolvedExpr, bindings: &[ResolvedExpr]) -> Option<usize> {
+    let read = |e: &ResolvedExpr| first_real_state_read(e, bindings);
+    match expr {
+        ResolvedExpr::RealPop(local) => Some(*local),
+        ResolvedExpr::MixedPopSum { real_indices, .. } => real_indices.first().copied(),
+        ResolvedExpr::BinOp { left, right, .. } => read(left).or_else(|| read(right)),
+        ResolvedExpr::UnOp { arg, .. } => read(arg),
+        ResolvedExpr::Cond { pred, then_, else_ } =>
+            read(pred).or_else(|| read(then_)).or_else(|| read(else_)),
+        ResolvedExpr::TableLookup { index, .. } => read(index),
+        ResolvedExpr::UncheckedDim { inner } => read(inner),
+        ResolvedExpr::Reduce(terms) => terms.iter().find_map(read),
+        // Bindings are topologically ordered (a body references only earlier
+        // slots), so this recursion terminates.
+        ResolvedExpr::BindingRef(slot) => bindings.get(*slot).and_then(read),
+        // Per-eval bindings are param/table-only by construction (gh#284).
+        ResolvedExpr::PerEvalRef(_)
+        | ResolvedExpr::Const(_)
+        | ResolvedExpr::Param(_)
+        | ResolvedExpr::IntPop(_)
+        | ResolvedExpr::IntPopSum(_)
+        | ResolvedExpr::Time
+        | ResolvedExpr::Dt
+        | ResolvedExpr::TimeFunc(_)
+        | ResolvedExpr::Projected
+        | ResolvedExpr::ObsColumnRef(_) => None,
+    }
+}
+
 /// gh#284: the LICM per-eval staging contract, enforced in Rust as well as in
 /// the OCaml pass (`licm.ml is_invariant`). The body of per-eval binding `slot`
 /// is staged ONCE per θ-stable span (`stage_per_eval`, at `t_start` against a

@@ -300,6 +300,22 @@ impl StreamProjection {
                 let resolved = resolve_expr(expr, &ctx).map_err(|e| format!(
                     "observation '{}': cannot resolve state-snapshot expression: {:?}",
                     obs_name, e))?;
+                // gh#681: the value path (`MultiStreamObsModel`, the ODE
+                // scorer, `simulate --obs`) evaluates this against a real
+                // state that is never written, so a real compartment would
+                // read as zero. Refuse until real state is threaded through.
+                if let Some(local) = crate::resolved_expr::first_real_state_read(
+                    &resolved, &compiled.resolved.bindings,
+                ) {
+                    let name = &compiled.model.compartments
+                        [compiled.real_local_to_global[local]].name;
+                    return Err(format!(
+                        "observation '{}': its projection reads the real-valued \
+                         (ODE) compartment '{}', which observation scoring and \
+                         emission do not yet support — it would be read as zero \
+                         (gh#681). Observe integer compartments or flows only.",
+                        obs_name, name));
+                }
                 Ok(StreamProjection::Expr(resolved))
             }
             P::FlowRatio { numerator, denominator } => {
@@ -452,6 +468,82 @@ fn resolve_projection_state_grad(
     // defect as the `rate_state_grad` sibling in `resolve_comp_grad_map`.
     out.sort_by_key(|(local, _)| *local);
     Ok(out)
+}
+
+#[cfg(test)]
+mod real_state_projection_tests {
+    use super::StreamProjection;
+    use crate::compiled_model::CompiledModel;
+    use ir::expr::{BinOp, Expr};
+    use ir::observation::Projection;
+
+    /// `sir_reservoir`: integer S, I, R plus a real (ODE) reservoir `W`.
+    /// `extra_bindings` are appended to the model's hoisted bindings.
+    fn sir_reservoir(extra_bindings: Vec<ir::model::Binding>) -> CompiledModel {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../ocaml/golden/sir_reservoir.ir.json");
+        let mut model: ir::Model =
+            ir::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                p.value = p.value.with_value(0.5);
+            }
+        }
+        model.bindings.extend(extra_bindings);
+        CompiledModel::new(model).unwrap()
+    }
+
+    fn refusal(compiled: &CompiledModel, expr: Expr) -> String {
+        match StreamProjection::from_ir(&Projection::DerivedExpr(expr), compiled, "env") {
+            Ok(_) => panic!("a projection reading real state must be refused (gh#681)"),
+            Err(e) => e,
+        }
+    }
+
+    /// gh#681: the value path scores a `DerivedExpr` projection against a
+    /// real state that is never written (always zero), so `I + W` is scored
+    /// as `I`. Until the real state is threaded through, building the
+    /// projection must refuse, naming the stream and the real compartment.
+    #[test]
+    fn derived_expr_reading_real_compartment_is_refused() {
+        let compiled = sir_reservoir(vec![]);
+
+        // `projected = I + W` — the issue's reproduction (a mixed pop_sum).
+        let err = refusal(&compiled, Expr::pop_sum(vec!["I".into(), "W".into()]));
+        assert!(err.contains("'env'") && err.contains("'W'") && err.contains("gh#681"),
+            "the refusal must name the stream, the real compartment and the issue: {err}");
+
+        // A bare real compartment inside arithmetic.
+        let err = refusal(&compiled, Expr::bin_op(BinOp::Mul, Expr::const_(2.0), Expr::pop("W")));
+        assert!(err.contains("'W'"), "{err}");
+    }
+
+    /// gh#681: the same zero is reached through a hoisted binding whose body
+    /// reads the real compartment.
+    #[test]
+    fn derived_expr_reading_real_state_through_a_binding_is_refused() {
+        let compiled = sir_reservoir(vec![ir::model::Binding {
+            name: "W_obs".into(),
+            expr: Expr::pop("W"),
+        }]);
+        let err = refusal(&compiled, Expr::binding_ref("W_obs"));
+        assert!(err.contains("'W'") && err.contains("gh#681"), "{err}");
+    }
+
+    /// Integer-only projections, including through an integer-only binding
+    /// (`N = S + I + R`), are unaffected.
+    #[test]
+    fn derived_expr_over_integer_state_is_accepted() {
+        let compiled = sir_reservoir(vec![]);
+        for expr in [
+            Expr::pop_sum(vec!["S".into(), "I".into()]),
+            Expr::bin_op(BinOp::Div, Expr::pop("I"), Expr::binding_ref("N")),
+        ] {
+            StreamProjection::from_ir(&Projection::DerivedExpr(expr), &compiled, "env")
+                .expect("an integer-only projection must still build");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1411,8 +1503,9 @@ pub struct MultiStreamObsModel {
     streams: Vec<Stream>,
     obs_times: Vec<f64>,
     compiled: Arc<CompiledModel>,
-    /// Zero real state; likelihood eval never reads real compartments and
-    /// `RealState` has no interior mutability.
+    /// Zero real state, never written. Sound only because
+    /// [`StreamProjection::from_ir`] refuses a projection that reads a real
+    /// compartment (gh#681); `RealState` has no interior mutability.
     real_s: RealState,
     /// One entry per `acc` bin, in dense order = the `ParticleState.acc`
     /// layout (multi-cadence Phase 2a). A `FlowSum` stream owns one bin; a
