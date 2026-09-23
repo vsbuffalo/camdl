@@ -208,12 +208,18 @@ fn sensitivity_derivs(
     // reuse it for columns `p > 0` instead of re-walking each derivative expression
     // `d` times. Reused across transitions (one amortized allocation).
     //
-    // Byte-identical to the pre-hoist loop: column 0 keeps the exact original
-    // evaluation order (J_θ then J_x), so the shared binding cache is populated in
-    // the same order and to the same values; columns p>0 previously re-called
-    // `eval_deriv_entry` and hit the warm cache, returning exactly the `jx[k]` we
-    // stashed. Evaluating all J_x *before* J_θ would reorder cache population and
-    // perturb a binding by ~1 ULP (verified — hence the column-0 interleave).
+    // Byte-identical to the pre-hoist loop. `ctx` is fixed for the whole call, so
+    // `eval_deriv_entry` is a pure function of its entry here: the value stashed in
+    // `jx[k]` during column 0 is exactly what columns p>0 would get by re-evaluating
+    // it. (The binding cache is a pure memo keyed on slot and generation, so it
+    // returns the same number whichever expression reaches a slot first — it is not
+    // order-sensitive; `tests/gate_binding_cache_ab.rs` pins that.)
+    //
+    // What *is* order-sensitive is the accumulation into `total`: it starts at J_θ
+    // and adds the J_x·S terms left to right. Hoisting all of J_x ahead of J_θ would
+    // rebuild the sum as (Σ_j J_x·S) + J_θ, and floating-point addition is not
+    // associative, so the result moves by ~1 ULP (observed). Keep every column's sum
+    // in the original J_θ-first order.
     let mut jx: Vec<f64> = Vec::new();
     for (tr_idx, stoich) in model.transition_stoich.iter().enumerate() {
         let rate_grad = &model.resolved.rate_grads_indexed[tr_idx];            // param-keyed ∂rate/∂θ
