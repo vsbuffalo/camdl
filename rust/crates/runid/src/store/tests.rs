@@ -1091,21 +1091,30 @@ fn mode_b_clear_window_is_not_quarantined() {
     struct DisarmOnDrop;
     impl Drop for DisarmOnDrop {
         fn drop(&mut self) {
-            *super::CLEAR_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            super::clear_clear_gap_hook();
         }
     }
     let _disarm = DisarmOnDrop;
+
+    // The directory the hook actually fired for, so the test can prove the
+    // window it exercised was its own leaf's (gh#793).
+    let fired_for: Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(None));
 
     {
         let store_h = Arc::clone(&store);
         let leaf_h = leaf.clone();
         let fired_h = Arc::clone(&fired);
+        let fired_for_h = Arc::clone(&fired_for);
         let refused_h = Arc::clone(&intruder_refused);
-        let mut guard = super::CLEAR_GAP_HOOK.lock().unwrap();
-        *guard = Some(Arc::new(move |_dir: &std::path::Path| {
+        // Leaf-scoped (gh#793): every other test's `claim_streaming` also
+        // reaches the clear window, and an unscoped hook fired there first,
+        // sending the intruder at this leaf before the winner had started.
+        super::install_clear_gap_hook(&leaf, Arc::new(move |dir: &std::path::Path| {
             if fired_h.swap(true, Ordering::SeqCst) {
                 return; // fire only on the first claim's clear window
             }
+            *fired_for_h.lock().unwrap() = Some(dir.to_path_buf());
             let leaf2 = leaf_h.clone();
             let store2 = Arc::clone(&store_h);
             let refused2 = Arc::clone(&refused_h);
@@ -1136,7 +1145,14 @@ fn mode_b_clear_window_is_not_quarantined() {
     // code its dir is quarantined mid-write → the write fails `Io(NotFound)`.
     let winner = store.claim_streaming(&leaf, record(id(0xaa)));
 
-    *super::CLEAR_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    super::clear_clear_gap_hook();
+
+    assert_eq!(
+        fired_for.lock().unwrap().as_deref(),
+        Some(leaf.as_path()),
+        "the clear-gap hook must fire for this test's own leaf, inside the \
+         winner's claim — anything else means the window was not exercised"
+    );
 
     let claim = winner.expect("winner's claim must succeed — its leaf was quarantined out from under it (Io NotFound)");
     claim
@@ -1154,6 +1170,49 @@ fn mode_b_clear_window_is_not_quarantined() {
         matches!(store.lookup(&leaf, &LeafIdentity::new(id(0xaa))), Lookup::Hit(_)),
         "the winner's Completed leaf must be intact, not clobbered/quarantined"
     );
+    cleanup(&root);
+}
+
+/// gh#793: `CLEAR_GAP_HOOK` fires from every `claim_streaming`, and the store
+/// tests claim their own leaves in parallel without taking any hook lock. An
+/// unscoped hook fired in one of those first, spending
+/// `mode_b_clear_window_is_not_quarantined`'s fire-once slot and launching its
+/// intruder before its winner had started — the winner then lost the leaf and
+/// the test went red on unrelated branches. The registration is leaf-scoped;
+/// this pins that.
+#[test]
+fn an_installed_clear_gap_hook_does_not_fire_for_another_leaf() {
+    let _serial = super::RECLAIM_HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_root("cleargapscope");
+    let store = FsCasStore::new(&root);
+    let armed = root.join("fits").join("fit-aaaaaaaa").join("armed-bbbbbbbb");
+    let other = root.join("fits").join("fit-aaaaaaaa").join("other-cccccccc");
+
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let fired2 = fired.clone();
+        super::install_clear_gap_hook(
+            &armed,
+            std::sync::Arc::new(move |_dir: &std::path::Path| {
+                fired2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+    }
+
+    // Claiming the OTHER leaf passes the clear window but must not reach the hook.
+    let c = store.claim_streaming(&other, record(id(0xaa))).unwrap();
+    c.finalize(record(id(0xaa))).unwrap();
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0,
+        "a clear-gap hook armed for another leaf must not fire here — an \
+         unscoped hook steals the installer's fire and races its leaf");
+
+    // ...and the armed leaf still fires, so the guard is a scope, not an off switch.
+    let c = store.claim_streaming(&armed, record(id(0xaa))).unwrap();
+    c.finalize(record(id(0xaa))).unwrap();
+    assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1,
+        "the hook must still fire for the leaf it was armed for");
+
+    super::clear_clear_gap_hook();
     cleanup(&root);
 }
 

@@ -1378,6 +1378,17 @@ fn reclaim_preacquire_hook(lock: &Path) {
 /// assert it does NOT quarantine the actively-held leaf (the `Lookup::Miss`
 /// false-orphan race). `None` for every test that does not opt in.
 ///
+/// Registered **against the single leaf the installing test drives**, and
+/// fired only for that leaf (gh#793). Every `claim_streaming` in the process
+/// reaches this point — about twenty store tests claim leaves of their own,
+/// in parallel, without taking any hook lock. An unscoped hook fired on one of
+/// those first: it burned the installer's fire-once slot and launched the
+/// intruder against the installer's leaf *before* its winner had started, so
+/// the intruder reclaimed the dead lock, finalized, and the winner then got
+/// `AlreadyCompleted` — a red on branches that never touched this crate. Same
+/// mechanism as `AUGMENT_GAP_HOOK` (gh#753). Install with
+/// [`install_clear_gap_hook`], never by assigning to the static.
+///
 /// Held behind an `Arc` (not a `Box` like the reclaim hook) and invoked with
 /// the mutex *released*: the closure drives a concurrent claimant whose own
 /// `claim_streaming` may re-enter `clear_gap_hook`, so holding the mutex across
@@ -1387,14 +1398,33 @@ fn reclaim_preacquire_hook(lock: &Path) {
 type ClearGapHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 
 #[cfg(test)]
-static CLEAR_GAP_HOOK: std::sync::Mutex<Option<ClearGapHook>> = std::sync::Mutex::new(None);
+static CLEAR_GAP_HOOK: std::sync::Mutex<Option<(PathBuf, ClearGapHook)>> =
+    std::sync::Mutex::new(None);
+
+/// TEST-ONLY: arm [`CLEAR_GAP_HOOK`] for `leaf` only. Callers must hold
+/// [`RECLAIM_HOOK_TEST_LOCK`] for the duration of the test, which keeps two
+/// installing tests from overwriting each other's registration.
+#[cfg(test)]
+fn install_clear_gap_hook(leaf: &Path, hook: ClearGapHook) {
+    *CLEAR_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((leaf.to_path_buf(), hook));
+}
+
+/// TEST-ONLY: disarm [`CLEAR_GAP_HOOK`].
+#[cfg(test)]
+fn clear_clear_gap_hook() {
+    *CLEAR_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 #[cfg(test)]
 fn clear_gap_hook(dir: &Path) {
-    let hook = CLEAR_GAP_HOOK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let hook = {
+        let guard = CLEAR_GAP_HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some((registered, h)) if registered.as_path() == dir => Some(h.clone()),
+            _ => None,
+        }
+    };
     if let Some(h) = hook {
         h(dir);
     }
