@@ -11277,6 +11277,60 @@ let test_where_fitted_threshold_rejected () =
      init { S[a]=99 I[a]=1 S[b]=100 S[c]=100 }\n\
      simulate { from = 0 'days to = 10 'days }\n"
 
+(* gh#239: E217 never ran over `sum(... where ...)` predicates. A parameter
+   name in the predicate is treated as a literal level name by [eval_guard],
+   matches no level, and silently drops the terms it was meant to select: here
+   every patch's coupling sum kept only the `q == a` term, with no diagnostic.
+   W202 stays silent because the sum is non-empty. *)
+let gh239_src ~where_ =
+  Printf.sprintf
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     dimensions { patch = [a, b, c] }\n\
+     stratify(by = patch)\n\
+     parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+     let N[p in patch] = S[p] + I[p] + R[p]\n\
+     transitions {\n\
+     infection[p in patch] : S[p] --> I[p] @ beta * S[p] * sum(q in patch where %s, I[q] / N[q])\n\
+     recovery[p in patch] : I[p] --> R[p] @ gamma * I[p]\n\
+     }\n\
+     init { S[a]=99 I[a]=1 S[b]=100 S[c]=100 }\n\
+     simulate { from = 0 'days to = 10 'days }\n" where_
+
+let test_gh239_parameter_in_sum_predicate_is_e217 () =
+  compile_expect_error_code ~code:"E217" ~contains:"'beta', which is a parameter"
+    (gh239_src ~where_:"q == beta or q == a")
+
+let test_gh239_compartment_in_sum_predicate_is_e217 () =
+  compile_expect_error_code ~code:"E217" ~contains:"'S', which is a compartment"
+    (gh239_src ~where_:"q != S")
+
+(* The same predicate inside a `let` body — a surface [check_guards] never
+   walked either. *)
+let test_gh239_parameter_in_let_sum_predicate_is_e217 () =
+  compile_expect_error_code ~code:"E217" ~contains:"'beta', which is a parameter"
+    "time_unit = 'days\n\
+     compartments { S, I, R }\n\
+     dimensions { patch = [a, b, c] }\n\
+     stratify(by = patch)\n\
+     parameters { beta : rate in [0,2]  gamma : rate in [0,1] }\n\
+     let N[p in patch] = S[p] + I[p] + R[p]\n\
+     let foi[p in patch] = sum(q in patch where q == beta, I[q] / N[q])\n\
+     transitions {\n\
+     infection[p in patch] : S[p] --> I[p] @ beta * S[p] * foi[p]\n\
+     recovery[p in patch] : I[p] --> R[p] @ gamma * I[p]\n\
+     }\n\
+     init { S[a]=99 I[a]=1 S[b]=100 S[c]=100 }\n\
+     simulate { from = 0 'days to = 10 'days }\n"
+
+(* Loop variables, enclosing binders and dimension levels stay legal. *)
+let test_gh239_legal_sum_predicates_stay_clean () =
+  List.iter (fun where_ ->
+    match Compiler.compile ~name:"gh239_clean" (gh239_src ~where_) with
+    | Ok _ -> ()
+    | Error e -> Alcotest.failf "`where %s` must compile: %s" where_ e)
+    ["q != p"; "q == a or q == b"; "q != p and q != c"]
+
 let where_empty_src =
   "time_unit = 'days\n\
    compartments { S, I, R }\n\
@@ -13585,6 +13639,14 @@ let () =
         `Quick test_where_boundary_excludes_equal;
       Alcotest.test_case "fitted kernel: gradient flows through the where-Reduce to G/rho"
         `Quick test_where_fitted_kernel_gradient;
+      Alcotest.test_case "E217: a parameter in a sum predicate (gh#239)"
+        `Quick test_gh239_parameter_in_sum_predicate_is_e217;
+      Alcotest.test_case "E217: a compartment in a sum predicate (gh#239)"
+        `Quick test_gh239_compartment_in_sum_predicate_is_e217;
+      Alcotest.test_case "E217: a parameter in a let's sum predicate (gh#239)"
+        `Quick test_gh239_parameter_in_let_sum_predicate_is_e217;
+      Alcotest.test_case "loop vars / binders / levels in a sum predicate stay clean (gh#239)"
+        `Quick test_gh239_legal_sum_predicates_stay_clean;
     ];
     "recursive_let_gh492", [
       Alcotest.test_case "a self-recursive let terminates with E201"

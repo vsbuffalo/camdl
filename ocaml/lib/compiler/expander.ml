@@ -4804,7 +4804,8 @@ let expand_transition_name ctx tname : string list option =
     a dimension level value, or an unknown name — but NOT a parameter or
     compartment name (which cannot be meaningfully compared at compile time).
     Emits E217 for each bad identifier found. *)
-let check_guard_compile_time ?(loc = Diagnostics.no_loc) ctx decl_name loop_vars guard =
+let check_guard_compile_time ?(loc = Diagnostics.no_loc)
+    ?(advice = "use it in the rate expression instead") ctx decl_name loop_vars guard =
   let all_dim_levels = List.concat_map snd ctx.dim_registry in
   let param_names = List.filter_map (function
     | PScalar  p -> Some p.pname
@@ -4817,16 +4818,14 @@ let check_guard_compile_time ?(loc = Diagnostics.no_loc) ctx decl_name loop_vars
       Diagnostics.error ctx.diags
         ~code:"E217" ~loc
         ~message:(Printf.sprintf
-          "%s: where guard references '%s', which is a parameter; \
-           use it in the rate expression instead"
-          decl_name ident) ()
+          "%s: where guard references '%s', which is a parameter; %s"
+          decl_name ident advice) ()
     else if List.mem ident comp_names then
       Diagnostics.error ctx.diags
         ~code:"E217" ~loc
         ~message:(Printf.sprintf
-          "%s: where guard references '%s', which is a compartment; \
-           use it in the rate expression instead"
-          decl_name ident) ()
+          "%s: where guard references '%s', which is a compartment; %s"
+          decl_name ident advice) ()
   in
   let rec walk = function
     | GEq (a, b) | GNeq (a, b) -> check_ident a; check_ident b
@@ -10188,6 +10187,18 @@ let check_no_shadowing ctx =
       else if not (expr_mentions v b
                    || (match g with Some g -> guard_mentions v g | None -> false))
       then report_unused ~loc:sum_loc decl v d;
+      (* E217 over the sum's `where` predicate (gh#239). [check_guards] walks
+         only declaration guards; without this, a parameter or compartment
+         name here is read by [eval_guard] as a literal level name, matches
+         nothing, and silently drops the terms it was meant to select. *)
+      Option.iter
+        (check_guard_compile_time ctx ~loc:(diag_loc_of_ast_ctx ctx sum_loc)
+           ~advice:"a sum predicate selects levels at compile time, so it \
+                    can compare the sum variable only to other binders and \
+                    dimension levels; move the value into the sum body"
+           (Printf.sprintf "%s, sum(%s in %s where …)" decl v d)
+           (v :: bound))
+        g;
       walk decl (v :: bound) b
     | ECond (p, t, f) -> walk decl bound p; walk decl bound t; walk decl bound f
     | EFuncCall (_, args) -> List.iter (fun (_, e) -> walk decl bound e) args
