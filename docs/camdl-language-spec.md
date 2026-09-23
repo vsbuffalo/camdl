@@ -3004,10 +3004,13 @@ A `where` predicate on an aggregation sum prunes the domain, exactly as it does
 in a rate expression: `sum(p in patch where p != north, incidence(infection[p]))`
 pools only the surviving levels.
 
-A **bare, un-indexed** `incidence(infection)` over a stratified family on an
-un-indexed observation stream is rejected (`E280`) precisely so this aggregation
-decision is never made silently; the diagnostic prints the explicit forms
-above, naming the family's actual dimensions. Where you *do* fully index, prefer **named** indexing
+A **bare, un-indexed** `incidence(infection)` over a stratified family is
+rejected (`E280`) precisely so this aggregation decision is never made
+silently; the diagnostic prints the explicit forms above, naming the family's
+actual dimensions. This holds on an **indexed** stream too: inside
+`cases[p in patch] { … }` a bare `incidence(infection)` would score every row
+against the pooled total, so E280 names the stream's own binder as the fix
+(`incidence(infection[p])`). Where you *do* fully index, prefer **named** indexing
 (`infection[patch = north, age = child]`) over **positional**
 (`infection[north, child]`): named binding is order-independent and survives a
 later reordering of the dimension declarations, whereas positional binding
@@ -5870,7 +5873,7 @@ compartment list and index bindings.
 
 ```camdl
 # DSL (UNSTRATIFIED `infection` only — see §12.1: a bare, un-indexed
-# incidence() over a STRATIFIED family on an un-indexed stream is E280):
+# incidence() over a STRATIFIED family is E280, on any stream):
 incidence(infection)
 
 # IR:

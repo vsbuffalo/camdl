@@ -5754,8 +5754,10 @@ schedules, only the Interval streams scheduled at the current union index are
 zeroed. A **hole** in the data (an `NA` cell) contributes no likelihood term but
 still resets, because the grid time is present.
 
-**A bare `incidence()` over a stratified family on an un-indexed stream is a
-hard error, not a silent sum** (E280):
+**A bare `incidence()` over a stratified family is a hard error, not a silent
+sum** (E280) — on an un-indexed stream, and on an indexed one, where it would
+score every row against the pooled total and the hint names the stream's binder
+(`incidence(infection[p])`):
 
 ```
 $ camdlc check strat_probe.camdl        # projected = incidence(infection)

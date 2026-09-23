@@ -6166,6 +6166,79 @@ let test_incidence_unindexed_cross_strata_is_rejected () =
   |} in
   compile_expect_error_code ~code:"E280" ~contains:"sum" src
 
+(* gh#677. The same bare family on an INDEXED stream compiled clean and scored
+   every row against the pooled total: `weekly_cases_child` and
+   `weekly_cases_adult` both lowered to
+   `CumulativeFlowSum [infection_child; infection_adult]`. E280 was skipped
+   because it was conditioned on the stream being un-indexed. The fix the hint
+   names is the stream's own binder. *)
+let test_gh677_indexed_stream_bare_family_is_rejected () =
+  let src = stratified_age_seir_with_obs {|
+    observations {
+      weekly_cases[a in age] {
+        columns       { time : time, age : dim, weekly_cases : count }
+        covers        = closing_at(time, 7 'days)
+        projected     = incidence(infection)
+        weekly_cases ~ neg_binomial(mean = projected, r = k)
+      }
+    }
+  |} in
+  compile_expect_error_code ~code:"E280"
+    ~contains:"projected = incidence(infection[a])" src
+
+(* A family stratified over MORE dimensions than the stream is indexed by: the
+   per-row form indexes the shared axis by the stream's binder and sums the
+   rest. The hint's form must compile — checked below. *)
+let gh677_two_dim_src projected = Printf.sprintf {|
+    time_unit = 'days
+    compartments { S, I }
+    dimensions { age = [child, adult]  patch = [north, south] }
+    stratify(by = age)
+    stratify(by = patch)
+    parameters { beta : rate  rho : probability }
+    transitions {
+      infection[a in age, p in patch] : S[a,p] --> I[a,p] @ beta * S[a,p]
+    }
+    observations {
+      cases[p in patch] {
+        columns   { time : time, patch : dim, cases : count }
+        covers    = closing_at(time, 1 'days)
+        projected = %s
+        cases ~ poisson(rate = rho * projected)
+      }
+    }
+    init { S[a in age, p in patch] = 100 }
+    simulate { from = 0 'days  to = 10 'days }
+  |} projected
+
+let test_gh677_partially_indexed_stream_hint_sums_the_rest () =
+  compile_expect_error_code ~code:"E280"
+    ~contains:"projected = sum(a in age, incidence(infection[a, p]))"
+    (gh677_two_dim_src "incidence(infection)")
+
+let test_gh677_hinted_forms_compile () =
+  (* Per-row form: each patch row reads its own patch, summed over age. *)
+  (match Compiler.compile ~name:"gh677_row"
+           (gh677_two_dim_src "sum(a in age, incidence(infection[a, p]))") with
+   | Error e -> Alcotest.failf "the per-row form E280 prints must compile: %s" e
+   | Ok m ->
+     let proj name =
+       (List.find (fun (o : Ir.observation_model) -> o.Ir.name = name)
+          m.Ir.observations).Ir.projection in
+     (match proj "cases_north", proj "cases_south" with
+      | Ir.CumulativeFlowSum n, Ir.CumulativeFlowSum s ->
+        Alcotest.(check (list string)) "north row reads north only"
+          ["infection_child_north"; "infection_adult_north"] n;
+        Alcotest.(check (list string)) "south row reads south only"
+          ["infection_child_south"; "infection_adult_south"] s
+      | _ -> Alcotest.fail "expected a CumulativeFlowSum per row"));
+  (* Pooled form: the explicit spelling of what the bare name used to mean. *)
+  match Compiler.compile ~name:"gh677_pooled"
+          (gh677_two_dim_src
+             "sum(a in age, sum(q in patch, incidence(infection[a, q])))") with
+  | Error e -> Alcotest.failf "the pooled form E280 prints must compile: %s" e
+  | Ok _ -> ()
+
 (* ── gh#478: prevalence() must get the same gates incidence() has ────────────
    The cross-strata aggregation gate and the reference check were both wired for
    the transition side only, so on an IDENTICAL model `incidence(infection)` was
@@ -7098,13 +7171,12 @@ let test_gh669_prevalence_several_compartments_still_sums () =
        Alcotest.(check (list string)) "sums both compartments" ["R"; "D"] names
      | _ -> Alcotest.fail "expected a DerivedExpr PopSum over R and D")
 
-(* Negative control: a bare, un-indexed `incidence(tr)` naming a STRATIFIED
-   family under an INDEXED stream still lowers to `CumulativeFlowSum` over the
-   family's cells. This pins the lowering only. That it assigns the same pooled
-   total to every row of an indexed stream is a separate defect (gh#478 /
-   2026-07-27 stratum provenance) and this test must not be read as endorsing
-   it. *)
-let test_gh669_bare_incidence_on_family_still_flow_sums () =
+(* A bare, un-indexed `incidence(tr)` naming a STRATIFIED family under an
+   INDEXED stream reaches the single-positional arm and is expanded as a family
+   — so it is diagnosed by the aggregation rule (E280, gh#677), not mistaken
+   for a missing or extra argument (E250 / E203). Before gh#677 this compiled
+   to `CumulativeFlowSum` over the family's cells on every row. *)
+let test_gh669_bare_incidence_on_family_reaches_the_aggregation_rule () =
   let src = {|
     time_unit = 'days
     compartments { S, I }
@@ -7123,14 +7195,8 @@ let test_gh669_bare_incidence_on_family_still_flow_sums () =
     init { S[a in age] = 100 }
     simulate { from = 0 'days  to = 10 'days }
   |} in
-  match Compiler.compile ~name:"gh669_bare_family" src with
-  | Error e -> Alcotest.failf "bare incidence on a family must still lower: %s" e
-  | Ok m ->
-    (match (List.hd m.Ir.observations).Ir.projection with
-     | Ir.CumulativeFlowSum names ->
-       Alcotest.(check (list string)) "pools the family's cells"
-         ["infection_child"; "infection_adult"] names
-     | _ -> Alcotest.fail "expected CumulativeFlowSum over the age cells")
+  compile_expect_error_code ~code:"E280"
+    ~contains:"would be scored against the sum of all 2 strata" src
 
 (* ── Projection dispatch: every argument shape must lower, or diagnose ──────
    `prevalence(...)` / `incidence(...)` dispatch on the SHAPE of their argument
@@ -14018,6 +14084,9 @@ let () =
       Alcotest.test_case "prevalence(E[e1]) picks single stratum"        `Quick test_prevalence_fully_indexed_stratified;
       Alcotest.test_case "prevalence(I) unstratified is unchanged"       `Quick test_prevalence_unstratified;
       Alcotest.test_case "E280: bare incidence(infection) on stratified model rejected" `Quick test_incidence_unindexed_cross_strata_is_rejected;
+      Alcotest.test_case "E280: bare family on an indexed stream rejected (gh#677)" `Quick test_gh677_indexed_stream_bare_family_is_rejected;
+      Alcotest.test_case "E280: partially indexed stream hint sums the rest (gh#677)" `Quick test_gh677_partially_indexed_stream_hint_sums_the_rest;
+      Alcotest.test_case "E280's indexed-stream hint forms compile (gh#677)" `Quick test_gh677_hinted_forms_compile;
       Alcotest.test_case "E287: partial prevalence index caught at compile (gh#478/#494)" `Quick test_prevalence_partial_index_is_rejected_at_compile;
       Alcotest.test_case "the projection error names no mangled compartment (gh#494)" `Quick test_gh494_projection_error_does_not_name_a_mangled_compartment;
       Alcotest.test_case "the projection error is located at the index (gh#494)" `Quick test_gh494_projection_error_is_located_at_the_index;
@@ -14066,7 +14135,7 @@ let () =
       Alcotest.test_case "gh#669: incidence() rejects a keyword argument" `Quick test_gh669_incidence_keyword_argument_is_rejected;
       Alcotest.test_case "gh#669: no diagnostic names the '?' sentinel" `Quick test_gh669_no_argument_diagnostic_does_not_name_the_sentinel;
       Alcotest.test_case "gh#669: prevalence(R, D) still sums" `Quick test_gh669_prevalence_several_compartments_still_sums;
-      Alcotest.test_case "gh#669: bare incidence on a family still flow-sums" `Quick test_gh669_bare_incidence_on_family_still_flow_sums;
+      Alcotest.test_case "gh#669: bare incidence on a family reaches E280" `Quick test_gh669_bare_incidence_on_family_reaches_the_aggregation_rule;
       Alcotest.test_case "nested sum over 2 dims → flow sum (E280 pooled form)" `Quick test_incidence_nested_sum_over_two_dims_compiles_to_flow_sum;
       Alcotest.test_case "aggregation sum honours its where guard" `Quick test_incidence_sum_honours_where_guard;
       Alcotest.test_case "E263: unknown dimension in a reduction (gh#488)" `Quick test_unknown_dimension_in_sum_is_rejected;

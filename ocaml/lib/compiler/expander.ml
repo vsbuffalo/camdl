@@ -8367,21 +8367,77 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
        family has >1 member; CumulativeFlow for the single/unstratified case.
        An unknown name falls through to CumulativeFlow so post-expansion
        Validate emits the clean E507 (unknown transition). *)
-    let incidence_projection base =
+    let incidence_projection ?(loc = od_loc) base =
       match expand_transition_name ctx base with
       | None         -> Ir.CumulativeFlow base
       | Some []      -> Ir.CumulativeFlow base
       | Some [single] -> Ir.CumulativeFlow single
       | Some many    ->
-        (* Cross-strata aggregation gate (§5.2). A bare, un-indexed incidence
-           projection over a STRATIFIED transition family on an UN-INDEXED
-           stream would silently sum all strata and apply reporting uniformly.
-           That decision must be explicit. (When the stream is itself indexed
-           — `cases[p in patch]` — each cell resolves through the `EIndex`
-           branch, never here; the explicit `sum(p in dim, ...)` forms parse as
-           ESum and resolve through `ProjDerived`, also never here. So this
-           fires precisely on the silent case.) *)
-        if od.oindices = [] then begin
+        (* Cross-strata aggregation rule (§5.2). A bare incidence projection
+           over a STRATIFIED transition family sums all its strata, and that
+           decision must be explicit — whether or not the stream is indexed.
+           An indexed stream does not route a bare family through the
+           `EIndex` branch: only `incidence(tr[p])` does. So on
+           `cases[p in patch] { projected = incidence(infection) }` every row
+           reaches this arm and would be scored against the pooled total
+           (gh#677). The explicit `sum(p in dim, ...)` forms parse as ESum and
+           resolve through `ProjDerived`, never here. *)
+        if od.oindices <> [] then begin
+          (* The family's own binders, in declared order. *)
+          let fam = match List.find_opt (fun tr -> tr.trname = base)
+                            ctx.transitions with
+            | Some tr -> List.filter_map
+                           (function IBind (v, d) -> Some (v, d) | _ -> None)
+                           tr.trindices
+            | None -> [] in
+          let stream = List.filter_map (function
+              | IBind (v, d) | IConsec (v, _, d) -> Some (v, d)
+              | IComp _ -> None) od.oindices in
+          let stream_vars = List.map fst stream in
+          (* A sum variable may not reuse a stream binder's name (E283). *)
+          let rec fresh v = if List.mem v stream_vars then fresh (v ^ "2") else v in
+          (* Each family axis is either indexed by the stream's binder over the
+             same dimension, or summed under a fresh variable. *)
+          let render axes =
+            let idx = String.concat ", " (List.map (fun (v, _, _) -> v) axes) in
+            List.fold_right
+              (fun (v, d, summed) inner ->
+                 if summed then Printf.sprintf "sum(%s in %s, %s)" v d inner
+                 else inner)
+              axes (Printf.sprintf "incidence(%s[%s])" base idx) in
+          let per_row = render (List.map (fun (fv, d) ->
+              match List.find_opt (fun (_, sd) -> sd = d) stream with
+              | Some (sv, _) -> (sv, d, false)
+              | None -> (fresh fv, d, true)) fam) in
+          let pooled = render (List.map (fun (fv, d) -> (fresh fv, d, true)) fam) in
+          let shared = List.exists (fun (_, d) ->
+              List.exists (fun (_, sd) -> sd = d) stream) fam in
+          Diagnostics.error ctx.diags
+            ~code:"E280"
+            ~loc
+            ~message:(Printf.sprintf
+              "observation '%s' is indexed by %s, but `incidence(%s)` names no \
+               stratum of '%s' — every row would be scored against the sum of \
+               all %d strata"
+              od.oname
+              (String.concat ", " (List.map snd stream))
+              base base (List.length many))
+            ~hint:(if shared then Printf.sprintf
+              "index the family by the stream's binder, so each row reads its \
+               own stratum:\n\
+              \      projected = %s\n\
+              \  if every row really is compared to the pooled total, write \
+                 the sum out:\n\
+              \      projected = %s"
+              per_row pooled
+            else Printf.sprintf
+              "the stream is indexed by no dimension of '%s', so no binder can \
+               pick a stratum; if every row really is compared to the pooled \
+               total, write the sum out:\n\
+              \      projected = %s"
+              base pooled)
+            ()
+        end else begin
           (* Build the suggested forms from the transition's OWN binders, so the
              hint names the real dimensions rather than a `<dim>` placeholder.
              `incidence(...)` is head-position sugar, not an expression function
@@ -8796,7 +8852,8 @@ let expand_observations ctx ~(transitions : Ir.transition list) =
                      (`mean = rho * projected`)"
               ()) args;
         (match positional with
-         | [ EIdent (n, _) ]    -> incidence_projection n
+         | [ EIdent (n, l) ]    ->
+           incidence_projection ~loc:(diag_loc_of_ast_ctx ctx l) n
          | [ EIndex (n, idxs, _) ] ->
            let idxs = resolve_index_order ctx ~loc:od_loc
                         ~what:(Printf.sprintf "transition '%s'" n)
