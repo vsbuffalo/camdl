@@ -685,6 +685,53 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
     );
 }
 
+/// gh#587: a swept fit records each segment's own `[fixed]` values in its
+/// `fit.meta.json`, not the base config's.
+///
+/// A sweep over a `[fixed]` parameter writes one fit segment per sweep point;
+/// the segment's identity already differs by the swept value. The sidecar was
+/// built once from the base config and written unchanged into every segment,
+/// so each recorded the base value — which `simulate --draws … --fit <segment>`
+/// then used to backfill the fixed parameters (`resolve_fixed_for_backfill`).
+#[test]
+fn a_swept_fit_records_each_segments_own_fixed_values() {
+    let camdl = camdl_bin();
+    let Some(camdlc) = camdlc_bin() else { return };
+
+    let tmp = tempdir("xpt_sweep_fixed");
+    let (ir, data) = build_fixture(&camdlc, tmp.path());
+    let output_dir = tmp.path().join("out");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir); // N0 = 1000
+
+    let status = Command::new(&camdl)
+        .arg("fit").arg("run").arg(&fit_toml)
+        .arg("--sweep").arg("N0=500,2000")
+        .status()
+        .expect("camdl fit run must invoke");
+    assert!(status.success(), "camdl fit run --sweep failed");
+
+    let mut recorded: Vec<f64> = std::fs::read_dir(output_dir.join("fits"))
+        .unwrap()
+        .flatten()
+        .map(|seg| {
+            let side: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(seg.path().join("fit.meta.json")).unwrap(),
+            )
+            .unwrap();
+            side["fixed"]["N0"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("no fixed.N0 in {}: {side}", seg.path().display()))
+        })
+        .collect();
+    recorded.sort_by(f64::total_cmp);
+    assert_eq!(
+        recorded,
+        vec![500.0, 2000.0],
+        "each sweep segment's fit.meta.json must record the N0 that segment \
+         held fixed (the base config says 1000)"
+    );
+}
+
 /// Extract every line from fenced code blocks matching
 /// `^\s*<fit_dir>/<rel>` and return `<rel>` (with `<seed>` → `1`
 /// substituted, brace-lists expanded, glob/range patterns dropped).

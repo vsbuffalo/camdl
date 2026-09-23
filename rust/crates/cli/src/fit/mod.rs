@@ -1012,10 +1012,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // estimated/fixed/data_hashes/model_identity). Derived provenance,
                 // never identity-bearing (the priors are already hashed into the
                 // FitDigest); written once per segment, even on a cached rerun.
+                //
+                // gh#587: `fixed` is this segment's, not the base config's. A
+                // sweep point overrides `[fixed]` values and gets a segment of
+                // its own, so the base sidecar recorded a value the segment
+                // never held — and `simulate --draws … --fit <segment>`
+                // backfills fixed parameters from exactly this map.
+                let mut seg_sidecar = fit_sidecar.clone();
+                seg_sidecar.fixed = sweep_config.fixed
+                    .resolve().unwrap_or_default().into_iter().collect();
                 if let Err(e) = crate::run_meta::write_fit_sidecar(
                     seg,
                     std::path::Path::new(&fit_path),
-                    &fit_sidecar,
+                    &seg_sidecar,
                 ) {
                     eprintln!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e);
                 }
