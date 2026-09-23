@@ -866,6 +866,24 @@ impl std::fmt::Display for MethodResultError {
 impl std::error::Error for MethodResultError {}
 
 impl MethodResult {
+    /// Whether [`MethodResult::load_from`] has a variant for this algorithm.
+    ///
+    /// `pfilter` does not: it evaluates a likelihood at fixed θ with
+    /// replicates rather than fitting, and writes no `fit_state.toml`. A
+    /// caller choosing *which* leaf of a segment to summarize must skip such a
+    /// leaf rather than pick it and fail — otherwise its mere presence drops
+    /// the whole fit from `fit table` (gh#590). The match is exhaustive so a
+    /// new algorithm must decide here; `has_result_agrees_with_load_from`
+    /// pins it against `load_from`'s arms.
+    pub fn has_result(algo: crate::run_meta::FitAlgorithm) -> bool {
+        use crate::run_meta::FitAlgorithm as A;
+        match algo {
+            A::If2 | A::Pgas | A::Pmmh | A::Mh | A::Nuts
+            | A::NlSbplx | A::NlBobyqa | A::NlLbfgs => true,
+            A::Pfilter => false,
+        }
+    }
+
     /// Dispatch on `method` and load the matching variant. Errors on
     /// unknown methods rather than silently producing a generic shape.
     pub fn load_from(stage_dir: &Path, method: &str) -> Result<Self, MethodResultError> {
@@ -2038,6 +2056,25 @@ mod tests {
         // And it dispatches through the public entry point on the "nuts" tag.
         let via = MethodResult::load_from(dir, "nuts").unwrap();
         assert!(matches!(via, MethodResult::Nuts(_)));
+    }
+
+    /// gh#590: `has_result` and `load_from` must agree on every algorithm —
+    /// `true` exactly where `load_from` has an arm (so an empty leaf fails
+    /// with a load error, not `UnknownMethod`), `false` exactly where it
+    /// answers `UnknownMethod`.
+    #[test]
+    fn has_result_agrees_with_load_from() {
+        use crate::run_meta::FitAlgorithm as A;
+        let tmp = tempdir("has_result");
+        for algo in [A::If2, A::Pgas, A::Pmmh, A::Mh, A::Nuts, A::Pfilter,
+                     A::NlSbplx, A::NlBobyqa, A::NlLbfgs] {
+            let unknown = matches!(
+                MethodResult::load_from(tmp.path(), algo.as_str()),
+                Err(MethodResultError::UnknownMethod { .. })
+            );
+            assert_eq!(MethodResult::has_result(algo), !unknown,
+                "has_result({}) disagrees with load_from", algo.as_str());
+        }
     }
 
     #[test]

@@ -400,17 +400,24 @@ impl MethodView {
 /// completed run. Picks Real over Synthetic, lowest `fit_seed`, then
 /// lex-first stage_dir — same priority as
 /// `fit_summary::resolve_if2_stage_dirs`.
+///
+/// Only a leaf whose method has a [`MethodResult`] shape is a candidate
+/// (gh#590). A `pfilter` leaf has none; picking it made the row builder fail
+/// with `UnknownMethod`, and the whole fit vanished from `fit table` because
+/// one of its leaves could not be a row. Such a leaf is skipped, and the row
+/// comes from the next declared method that has a result.
 fn pick_terminal_stage<'a>(
     view: &FitView,
     nodes: &'a [StageNode],
 ) -> Option<&'a StageNode> {
+    let has_result = |n: &&StageNode| MethodResult::has_result(n.stage.method);
     for stage_name in view.methods_declared.iter().rev() {
-        if let Some(node) = best_node_for_stage(stage_name, nodes) {
+        if let Some(node) = best_node_for_stage(stage_name, nodes).filter(has_result) {
             return Some(node);
         }
     }
     // Falls back to whatever the walker found in lex order.
-    nodes.first()
+    nodes.iter().find(has_result)
 }
 
 fn best_node_for_stage<'a>(stage_name: &str, nodes: &'a [StageNode]) -> Option<&'a StageNode> {

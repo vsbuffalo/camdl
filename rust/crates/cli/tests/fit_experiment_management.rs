@@ -606,6 +606,85 @@ fn summary_table_row_equals_table_first_row() {
     );
 }
 
+/// gh#590: a `pfilter` leaf beside another method's leaf must not remove the
+/// fit from `fit table`, nor blank `fit summary`'s `table_row`.
+///
+/// `pfilter` has no `MethodResult` shape. The row builder used to pick the
+/// terminal stage by declared order alone, so a segment whose last leaf was a
+/// `pfilter` chose it, failed to load it (`UnknownMethod`), and the whole fit
+/// went to the error list — absent from the survey view, reading as "never
+/// ran". The row must instead be built from the stage that has a result.
+#[test]
+fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
+    let camdl = camdl_bin();
+    let Some(camdlc) = camdlc_bin() else { return };
+
+    let tmp = tempdir("xpt_pfilter");
+    let (ir, data) = build_fixture(&camdlc, tmp.path());
+    let output_dir = tmp.path().join("out");
+
+    // Same problem, two methods → one fit segment with an if2 leaf and a
+    // pfilter leaf (the fit level hashes the problem, not the method).
+    let if2_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
+    let if2_body = std::fs::read_to_string(&if2_toml).unwrap();
+    let method_at = if2_body.find("[method]").unwrap();
+    // Same file stem as the if2 config: the segment directory is named
+    // `<stem>-<fit h8>`, so a different stem would open a second segment.
+    let pf_dir = tmp.path().join("pf");
+    std::fs::create_dir_all(&pf_dir).unwrap();
+    let pfilter_toml = pf_dir.join("fit.toml");
+    std::fs::write(
+        &pfilter_toml,
+        format!(
+            "{}[method]\nalgorithm = \"pfilter\"\nbackend   = \"chain_binomial\"\n\
+             particles = 50\nreplicates = 2\n",
+            &if2_body[..method_at]
+        ),
+    )
+    .unwrap();
+
+    let fit_dir = exec_fit_run_v2(&camdl, &if2_toml, &output_dir);
+    let status = Command::new(&camdl)
+        .arg("fit").arg("run").arg(&pfilter_toml)
+        .status()
+        .expect("camdl fit run must invoke");
+    assert!(status.success(), "camdl fit run (pfilter) failed");
+
+    // Precondition: both leaves really are in the one segment, or the test
+    // would pass without exercising the mixed segment.
+    let fits_root = output_dir.join("fits");
+    let segments: Vec<_> = std::fs::read_dir(&fits_root).unwrap().flatten().collect();
+    assert_eq!(segments.len(), 1, "both methods must share one fit segment");
+    assert!(cas_stage_leaf(&fit_dir, "if2").is_some(), "no if2 leaf in {}", fit_dir.display());
+    assert!(cas_stage_leaf(&fit_dir, "pfilter").is_some(), "no pfilter leaf in {}", fit_dir.display());
+
+    let output = Command::new(&camdl)
+        .arg("fit").arg("table").arg(&fits_root)
+        .arg("--format").arg("json")
+        .output()
+        .expect("camdl fit table must invoke");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "camdl fit table failed: stderr={stderr}");
+    let table: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("fit table JSON: {e}\nstdout={}", String::from_utf8_lossy(&output.stdout)));
+    let rows = table["rows"].as_array().expect("rows array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the fit with a pfilter leaf must appear in `fit table`; got {} rows. \
+         doc={table} stderr={stderr}",
+        rows.len()
+    );
+    assert_eq!(rows[0]["method"].as_str(), Some("if2"),
+        "the row is built from the stage that has a result: {}", rows[0]);
+
+    let summary = exec_fit_summary_json(&camdl, &fit_dir);
+    assert!(
+        summary.get("table_row").is_some_and(|r| r.is_object()),
+        "fit summary's `table_row` must not be blank: {summary}"
+    );
+}
+
 /// Extract every line from fenced code blocks matching
 /// `^\s*<fit_dir>/<rel>` and return `<rel>` (with `<seed>` → `1`
 /// substituted, brace-lists expanded, glob/range patterns dropped).
