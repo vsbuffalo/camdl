@@ -319,13 +319,14 @@ bounds (the prior's support and the search box are the same interval).
 
 **Precedence:** a `fit.toml` `[estimate].prior` overrides the model's `~`
 declaration, with a warning naming both (see
-[How `fit.toml` relates to the model](#how-fittoml-relates-to-the-model)); if
-neither is present, a Bayesian method falls back to flat **with a warning** —
-camdl refuses _silent_ implicit-flat priors, because the prior shows up in the
-posterior. The explicit `{ flat = {} }` is how you say "flat here, on purpose"
-without the warning. A flat prior is not a distribution the chains can be drawn
-from, so a parameter left flat also moves the default `starts` from `from_prior`
-to `uniform_unconstrained`.
+[How `fit.toml` relates to the model](#how-fittoml-relates-to-the-model)). If
+neither is present, `fit run` with a Bayesian method **refuses to start**,
+naming each parameter with no prior — camdl never falls back to a flat prior
+silently, because the prior shows up in the posterior. (`profile`'s per-cell
+PMMH is the one exception: it falls back to flat with a warning.) The explicit
+`{ flat = {} }` is how you say "flat here, on purpose". A flat prior is not a
+distribution the chains can be drawn from, so a parameter left flat also moves
+the default `starts` from `from_prior` to `uniform_unconstrained`.
 
 ## Method algorithms
 
