@@ -100,6 +100,36 @@ fn run(bin: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn camdl")
 }
 
+/// gh#574. `--stdout` streams the trajectory and returned before the
+/// quantities writer ran, so `--stdout --quantities-out qdir` wrote nothing to
+/// `qdir`, exit 0. The two outputs cannot collide — one is stdout, the other a
+/// directory — so both are honoured.
+#[test]
+fn simulate_stdout_still_writes_the_quantities_sidecar() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = write_model(tmp.path());
+    let qdir = tmp.path().join("q");
+    let out = run(
+        &bin,
+        &[
+            "simulate", model.to_str().unwrap(),
+            "--scenario", "baseline", "--seed", "1",
+            "--output-dir", tmp.path().join("results").to_str().unwrap(),
+            "--stdout",
+            "--quantities-out", qdir.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.lines().any(|l| l.starts_with("t\t")),
+        "the trajectory still streams to stdout:\n{stdout}");
+    assert!(qdir.join("quantities.json").exists(),
+        "--quantities-out must write its manifest under --stdout too");
+    assert!(qdir.join("quantities").join("prevalence.tsv").exists(),
+        "and its tables");
+}
+
 #[test]
 fn simulate_point_run_writes_quantities_sidecar() {
     let bin = skip_if_missing();

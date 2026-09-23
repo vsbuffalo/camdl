@@ -2001,8 +2001,13 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // `--stdout`: stream the trajectory to stdout and stop. No leaf was
     // committed (skip_cas), so there is no store, no ensemble, and no banner —
-    // just the TSV, ready to pipe.
+    // just the TSV, ready to pipe. `--quantities-out` is a directory, not the
+    // store, so it is still written, before the stream: a quantity that fails
+    // to render then exits with nothing on stdout (gh#574).
     if a.stdout {
+        if let Some(q) = &sink.quant {
+            write_quantities_sidecar(q);
+        }
         if let Some(ref bytes) = combined_traj {
             use std::io::Write;
             if let Err(e) = std::io::stdout().write_all(bytes) {
@@ -2060,79 +2065,7 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // ── Write generated quantities (regenerated sidecar, NOT in the CAS leaf) ─
     if let Some(q) = &sink.quant {
-        if !q.by_scenario.is_empty() {
-            // One design cell per scenario, each banded over ITS OWN draws. The
-            // `scenario` column is emitted iff the run has a scenario axis: with
-            // no `--scenario` there is exactly one cell and no coordinate to
-            // report, and labelling it would name a world the run did not
-            // simulate (proposal §2.4, §3.3).
-            let mut stacked = crate::quantity_output::StackedQuantities::new(q.mode);
-            for (scenario, acc) in &q.by_scenario {
-                let coords = crate::quantity_output::DesignCoords {
-                    scenario: q.scenario_axis.then_some(scenario.as_str()),
-                    sweep: &[],
-                };
-                stacked
-                    // `simulate` has no fit behind it, so there is no
-                    // conditioned/replay distinction to tag (gh#722) and the
-                    // manifest is byte-identical.
-                    .push_group(&q.quantities, coords, &acc.draws, &acc.times, None, None, &q.calendar)
-                    .unwrap_or_else(|e| {
-                        eprintln!("error rendering quantities: {}", e);
-                        std::process::exit(1);
-                    });
-            }
-            let rendered = stacked.finish(&q.calendar).unwrap_or_else(|e| {
-                eprintln!("error rendering quantities: {}", e);
-                std::process::exit(1);
-            });
-            // gh#715 partitions a non-finite quantity out of the render rather
-            // than raising it, so that `fit predict` can keep the rest of its
-            // artifact and record the failure. `simulate` has no such record to
-            // write into, so here it stays what it has always been: an error,
-            // named, with nothing written.
-            if !rendered.failures.is_empty() {
-                for f in &rendered.failures {
-                    eprintln!("error: quantity '{}': {}", f.name, f.reason());
-                }
-                std::process::exit(1);
-            }
-            let (outs, manifest) = (rendered.files, rendered.manifest);
-            std::fs::create_dir_all(&q.out_dir).unwrap_or_else(|e| {
-                eprintln!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e);
-                std::process::exit(1);
-            });
-            // The vocabulary's content digest keys the artifact (proposal
-            // 2026-08-19): the model's own block keeps writing `quantities/`,
-            // a supplied one writes `quantities-<key8>/`. Two vocabularies over
-            // one run are two tables, not one overwritten twice.
-            let sub_dir = crate::quantities_file::quantities_dir_name(q.vocabulary.as_ref());
-            for (name, content) in &outs {
-                match crate::fit::predict::write_tsv(&q.out_dir, &sub_dir, name, content) {
-                    Ok(p) => eprintln!("quantities: wrote {}", p.display()),
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            let manifest = match crate::quantities_file::stamp_provenance(
-                &manifest, q.vocabulary.as_ref())
-            {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let manifest_path = q.out_dir.join(
-                crate::quantities_file::quantities_manifest_name(q.vocabulary.as_ref()));
-            std::fs::write(&manifest_path, &manifest).unwrap_or_else(|e| {
-                eprintln!("error: cannot write {}: {}", manifest_path.display(), e);
-                std::process::exit(1);
-            });
-            eprintln!("quantities: wrote {}", manifest_path.display());
-        }
+        write_quantities_sidecar(q);
     }
 
     // ── Event-log mirror + realize hint (Layer 1 → Layer 2) ─────────────────
@@ -2177,6 +2110,85 @@ fn run_simulate(a: &args::SimulateArgs) {
                  (enable one with a scenario or --enable); nothing to mirror"
             ),
         }
+    }
+}
+
+/// Write `simulate --quantities-out`'s sidecar: the rendered tables plus the
+/// `quantities.json` manifest. Regenerated, never part of the CAS leaf, so it
+/// is written whether or not the run stored one — `--stdout` included (gh#574).
+fn write_quantities_sidecar(q: &SimQuantities) {
+    if !q.by_scenario.is_empty() {
+        // One design cell per scenario, each banded over ITS OWN draws. The
+        // `scenario` column is emitted iff the run has a scenario axis: with
+        // no `--scenario` there is exactly one cell and no coordinate to
+        // report, and labelling it would name a world the run did not
+        // simulate (proposal §2.4, §3.3).
+        let mut stacked = crate::quantity_output::StackedQuantities::new(q.mode);
+        for (scenario, acc) in &q.by_scenario {
+            let coords = crate::quantity_output::DesignCoords {
+                scenario: q.scenario_axis.then_some(scenario.as_str()),
+                sweep: &[],
+            };
+            stacked
+                // `simulate` has no fit behind it, so there is no
+                // conditioned/replay distinction to tag (gh#722) and the
+                // manifest is byte-identical.
+                .push_group(&q.quantities, coords, &acc.draws, &acc.times, None, None, &q.calendar)
+                .unwrap_or_else(|e| {
+                    eprintln!("error rendering quantities: {}", e);
+                    std::process::exit(1);
+                });
+        }
+        let rendered = stacked.finish(&q.calendar).unwrap_or_else(|e| {
+            eprintln!("error rendering quantities: {}", e);
+            std::process::exit(1);
+        });
+        // gh#715 partitions a non-finite quantity out of the render rather
+        // than raising it, so that `fit predict` can keep the rest of its
+        // artifact and record the failure. `simulate` has no such record to
+        // write into, so here it stays what it has always been: an error,
+        // named, with nothing written.
+        if !rendered.failures.is_empty() {
+            for f in &rendered.failures {
+                eprintln!("error: quantity '{}': {}", f.name, f.reason());
+            }
+            std::process::exit(1);
+        }
+        let (outs, manifest) = (rendered.files, rendered.manifest);
+        std::fs::create_dir_all(&q.out_dir).unwrap_or_else(|e| {
+            eprintln!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e);
+            std::process::exit(1);
+        });
+        // The vocabulary's content digest keys the artifact (proposal
+        // 2026-08-19): the model's own block keeps writing `quantities/`,
+        // a supplied one writes `quantities-<key8>/`. Two vocabularies over
+        // one run are two tables, not one overwritten twice.
+        let sub_dir = crate::quantities_file::quantities_dir_name(q.vocabulary.as_ref());
+        for (name, content) in &outs {
+            match crate::fit::predict::write_tsv(&q.out_dir, &sub_dir, name, content) {
+                Ok(p) => eprintln!("quantities: wrote {}", p.display()),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        let manifest = match crate::quantities_file::stamp_provenance(
+            &manifest, q.vocabulary.as_ref())
+        {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let manifest_path = q.out_dir.join(
+            crate::quantities_file::quantities_manifest_name(q.vocabulary.as_ref()));
+        std::fs::write(&manifest_path, &manifest).unwrap_or_else(|e| {
+            eprintln!("error: cannot write {}: {}", manifest_path.display(), e);
+            std::process::exit(1);
+        });
+        eprintln!("quantities: wrote {}", manifest_path.display());
     }
 }
 
