@@ -2043,6 +2043,28 @@ fn copy_resume_carryover(base: &std::path::Path, new_leaf: &std::path::Path) -> 
 // fit-level config archive for `fit table` config_diff is reworked in M3.3
 // alongside the fit-level outputs' CAS relocation.
 
+/// Content hash of each observation stream the problem binds, over the
+/// RESOLVED stream set (`effective_observations`, gh#771), so the single-file
+/// `[data] file = "..."` shorthand hashes the streams it binds. With no model
+/// in scope the shorthand cannot be expanded and the map is empty.
+fn resolved_data_hashes(
+    problem: &config_v2::Problem,
+    model: Option<&ir::Model>,
+) -> std::collections::HashMap<String, String> {
+    let model_obs_names: Vec<String> = model
+        .map(|m| m.observations.iter().map(|o| o.name.clone()).collect())
+        .unwrap_or_default();
+    problem
+        .data.as_ref()
+        .and_then(|d| d.effective_observations(&model_obs_names).ok())
+        .map(|obs| obs.into_iter()
+            .filter_map(|(name, path)| {
+                crate::hashing::file_hash(&path).map(|h| (name, h))
+            })
+            .collect())
+        .unwrap_or_default()
+}
+
 /// Build the fit-level provenance sidecar for a fit.toml. Fields that require
 /// I/O (model IR, data files, fit.toml bytes) are read here and digested.
 /// Silent fallbacks (empty strings / empty maps) cover the read-error case so a
@@ -2080,18 +2102,7 @@ fn build_fit_sidecar(
     // reports such a fit as unchecked instead of comparing its digests.
     // With no model in scope (`fit where`) the shorthand cannot be expanded,
     // and `effective_observations` errors — the map stays empty, as before.
-    let model_obs_names: Vec<String> = model
-        .map(|m| m.observations.iter().map(|o| o.name.clone()).collect())
-        .unwrap_or_default();
-    let data_hashes: std::collections::HashMap<String, String> = problem
-        .data.as_ref()
-        .and_then(|d| d.effective_observations(&model_obs_names).ok())
-        .map(|obs| obs.into_iter()
-            .filter_map(|(name, path)| {
-                crate::hashing::file_hash(&path).map(|h| (name, h))
-            })
-            .collect())
-        .unwrap_or_default();
+    let data_hashes = resolved_data_hashes(problem, model);
     let estimated: Vec<String> = problem.estimate.keys().cloned().collect();
     let fixed: std::collections::HashMap<String, f64> = problem.fixed
         .resolve().unwrap_or_default().into_iter().collect();
@@ -2162,102 +2173,113 @@ fn build_fit_sidecar(
     }
 }
 
-fn format_prior(p: &Option<config_v2::EstimatePriorSpec>) -> String {
-    match p {
-        None => "(none)".to_string(),
-        Some(spec) => crate::fit::config_diff::format_prior(spec),
+/// One side of `camdl fit diff`: what a config resolves to outside its text.
+/// `model_identity` is `Err` with the reason when the model does not load
+/// (a `.camdl` needs `camdlc`), so the caller can say it did not compare the
+/// models rather than report them equal.
+struct DiffSide {
+    model_identity: Result<String, String>,
+    data_hashes: std::collections::HashMap<String, String>,
+}
+
+impl DiffSide {
+    fn resolve(config: &config_v2::FitConfig) -> Self {
+        let problem = &config.problem;
+        let model_src = problem.compiled_ir.as_deref().unwrap_or(&problem.model.camdl);
+        match crate::util::load_model(model_src) {
+            Ok((model, ir_json)) => DiffSide {
+                model_identity: Ok(crate::resolve::model_identity_from_ir(&ir_json)),
+                data_hashes: resolved_data_hashes(problem, Some(&model)),
+            },
+            Err(e) => DiffSide {
+                model_identity: Err(e),
+                data_hashes: resolved_data_hashes(problem, None),
+            },
+        }
     }
 }
 
-/// `camdl fit where FIT.toml [--seed N]`
-///
+/// `camdl fit diff A.toml B.toml`
 pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs) {
     use config_v2::FitConfig;
 
     let a_path = args.a.to_string_lossy().into_owned();
     let b_path = args.b.to_string_lossy().into_owned();
-    let (a, a_method) = FitConfig::load(&a_path).map(|c| (c.problem, c.inference.method))
-        .unwrap_or_else(|e| {
-            eprintln!("error loading {}: {}", a_path, e);
-            std::process::exit(1);
-        });
-    let (b, b_method) = FitConfig::load(&b_path).map(|c| (c.problem, c.inference.method))
-        .unwrap_or_else(|e| {
-            eprintln!("error loading {}: {}", b_path, e);
-            std::process::exit(1);
-        });
+    let load = |path: &str| FitConfig::load(path).unwrap_or_else(|e| {
+        eprintln!("error loading {}: {}", path, e);
+        std::process::exit(1);
+    });
+    let a_cfg = load(&a_path);
+    let b_cfg = load(&b_path);
+
+    // gh#595: the problem half is the typed `ConfigDiff` `fit table` uses, not
+    // a comparison of its own. The model and data are resolved here the way a
+    // run resolves them (`build_fit_sidecar`): the compiled model's identity
+    // and each resolved stream's content hash.
+    let a_side = DiffSide::resolve(&a_cfg);
+    let b_side = DiffSide::resolve(&b_cfg);
+    let unresolved = a_side.model_identity.is_err() || b_side.model_identity.is_err();
+    // A side whose model did not load is reported below, not compared: equal
+    // placeholders keep `model_changed` from asserting a change it cannot know.
+    let identity = |side: &DiffSide| match (&side.model_identity, unresolved) {
+        (Ok(id), false) => id.clone(),
+        _ => String::new(),
+    };
+    let (a_id, b_id) = (identity(&a_side), identity(&b_side));
+    let diff = config_diff::ConfigDiff::compare_resolved(
+        &b_cfg,
+        &a_cfg,
+        &config_diff::ResolvedInputs { model_identity: &b_id, data_hashes: &b_side.data_hashes },
+        &config_diff::ResolvedInputs { model_identity: &a_id, data_hashes: &a_side.data_hashes },
+    );
 
     println!("diff: {} → {}", a_path, b_path);
     println!();
 
-    // Parameter changes
-    let a_est: std::collections::BTreeSet<&str> = a.estimate.keys().map(|s| s.as_str()).collect();
-    let b_est: std::collections::BTreeSet<&str> = b.estimate.keys().map(|s| s.as_str()).collect();
-    let a_fixed = a.fixed.resolve().unwrap_or_default();
-    let b_fixed = b.fixed.resolve().unwrap_or_default();
-    let a_fix_keys: std::collections::BTreeSet<&str> = a_fixed.keys().map(|s| s.as_str()).collect();
-    let b_fix_keys: std::collections::BTreeSet<&str> = b_fixed.keys().map(|s| s.as_str()).collect();
+    println!("Model:");
+    let (a_model, b_model) = (&a_cfg.problem.model.camdl, &b_cfg.problem.model.camdl);
+    if unresolved {
+        for (path, side) in [(&a_path, &a_side), (&b_path, &b_side)] {
+            if let Err(e) = &side.model_identity {
+                println!("  not compared — the model of {path} did not load: {e}");
+            }
+        }
+        if a_model != b_model {
+            println!("  {a_model} → {b_model}");
+        }
+    } else if diff.model_changed {
+        if a_model == b_model {
+            println!("  {a_model}: compiled model differs");
+        } else {
+            println!("  {a_model} → {b_model} (compiled model differs)");
+        }
+    } else if a_model != b_model {
+        println!("  {a_model} → {b_model} (same compiled model)");
+    } else {
+        println!("  (no model changes)");
+    }
 
-    let mut param_changes = false;
-    // Moved from estimate → fixed
-    for name in a_est.difference(&b_est) {
-        if b_fix_keys.contains(name) {
-            println!("  {}: [estimate] → [fixed] = {}", name, b_fixed.get(*name).unwrap());
-            param_changes = true;
-        }
+    println!("Data:");
+    let dh = &diff.data_hashes;
+    for name in &dh.added { println!("  {name}: (added)"); }
+    for name in &dh.removed { println!("  {name}: (removed)"); }
+    for name in &dh.modified { println!("  {name}: content differs"); }
+    if dh.added.is_empty() && dh.removed.is_empty() && dh.modified.is_empty() {
+        println!("  (no data changes)");
     }
-    // Moved from fixed → estimate
-    for name in b_est.difference(&a_est) {
-        if a_fix_keys.contains(name) {
-            println!("  {}: [fixed] = {} → [estimate]", name, a_fixed.get(*name).unwrap());
-            param_changes = true;
-        }
-    }
-    // Fixed value changed
-    for name in a_fix_keys.intersection(&b_fix_keys) {
-        let va = a_fixed.get(*name).unwrap();
-        let vb = b_fixed.get(*name).unwrap();
-        if (va - vb).abs() > 1e-15 {
-            println!("  {}: [fixed] {} → {}", name, va, vb);
-            param_changes = true;
-        }
-    }
-    // Bounds changed (Option-aware after bounds became optional in
-    // [estimate.X]: a present↔omit transition is a real change because
-    // omit means "fall back to model file's parameters block bounds").
-    for name in a_est.intersection(&b_est) {
-        let ab = a.estimate[*name].bounds;
-        let bb = b.estimate[*name].bounds;
-        let render = |o: Option<(f64, f64)>| match o {
-            Some((lo, hi)) => format!("[{}, {}]", lo, hi),
-            None => "(from model)".to_string(),
-        };
-        let differ = match (ab, bb) {
-            (None, None) => false,
-            (Some(a), Some(b)) => (a.0 - b.0).abs() > 1e-15 || (a.1 - b.1).abs() > 1e-15,
-            _ => true,
-        };
-        if differ {
-            println!("  {}: bounds {} → {}", name, render(ab), render(bb));
-            param_changes = true;
-        }
-    }
-    // Prior changes
-    for name in a_est.intersection(&b_est) {
-        let ap = &a.estimate[*name].prior;
-        let bp = &b.estimate[*name].prior;
-        let ap_str = format_prior(ap);
-        let bp_str = format_prior(bp);
-        if ap_str != bp_str {
-            println!("  {}: prior {} → {}", name, ap_str, bp_str);
-            param_changes = true;
-        }
-    }
-    if !param_changes {
+
+    println!("Parameters:");
+    let fixed = |cfg: &FitConfig| cfg.problem.fixed.resolve().unwrap_or_default()
+        .into_iter().collect::<std::collections::BTreeMap<String, f64>>();
+    let lines = diff.problem_lines(&fixed(&a_cfg), &fixed(&b_cfg));
+    if lines.is_empty() {
         println!("  (no parameter changes)");
     }
+    for line in lines {
+        println!("  {line}");
+    }
 
-    // Method changes
+    let (a_method, b_method) = (a_cfg.inference.method, b_cfg.inference.method);
     println!();
     println!("Method:");
     match (&a_method, &b_method) {

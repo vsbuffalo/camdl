@@ -3993,6 +3993,11 @@ rather than as a text diff:
 $ camdl fit diff fits/01_mle.toml fits/02_posterior.toml
 diff: fits/01_mle.toml → fits/02_posterior.toml
 
+Model:
+  (no model changes)
+Data:
+  (no data changes)
+Parameters:
   beta: prior (none) → log_normal(mu=-1, sigma=0.5)
   gamma: prior (none) → log_normal(mu=-2, sigma=0.5)
 
@@ -5607,16 +5612,30 @@ is required), so this is a config-to-config diff, not a text diff.
 $ camdl fit diff fit_a.toml fit_b.toml
 diff: fit_a.toml → fit_b.toml
 
+Model:
+  /work/sir.camdl → /work/sir_waning.camdl (compiled model differs)
+Data:
+  cases: content differs
+Parameters:
   beta: [estimate] → [fixed] = 0.31
+  omega: [estimate] (added)
   sigma: [fixed] = 0.2 → [estimate]
+  gamma: [fixed] = 0.3 (removed)
+  N0: [fixed] 10000 → 20000
 
 Method:
   chains: 1 → 4
 ```
 
-Parameter-side coverage is complete: estimate↔fixed moves, changed fixed values,
-changed bounds (including the omit↔explicit transition, which is meaningful
-because omitting means "fall back to the model file"), and changed priors.
+The model is compared by its compiled identity, the same one a fit records, so
+two paths to the same model read `(same compiled model)`; a `.camdl` source is
+compiled with `camdlc` to get it, and a model that does not load is reported as
+not compared rather than as unchanged. Data is compared by the content hash of
+each stream the config binds. Parameter-side coverage: parameters entering or
+leaving `[estimate]` and `[fixed]` (paired as a move when one does both),
+changed fixed values, changed bounds (including the omit↔explicit transition,
+which is meaningful because omitting means "fall back to the model file"), and
+changed priors.
 
 Method-side coverage is every key the `[method]` serializes to, one line per
 changed key in key order, with nested tables flattened to dotted paths
@@ -5628,6 +5647,11 @@ reads `null`. A file with no `[method]` against one with reads
 $ camdl fit diff if2_a.toml if2_c.toml     # particles 1000→2000, cooling 0.70→0.95
 diff: if2_a.toml → if2_c.toml
 
+Model:
+  (no model changes)
+Data:
+  (no data changes)
+Parameters:
   (no parameter changes)
 
 Method:
@@ -5635,8 +5659,8 @@ Method:
   particles: 1000 → 2000
 ```
 
-The same per-key delta is what `fit table --format json` reports under
-`config_diff_from_baseline` (`ConfigDiff` in
+Both halves are a rendering of the same typed diff `fit table --format json`
+reports under `config_diff_from_baseline` (`ConfigDiff` in
 `rust/crates/cli/src/fit/config_diff.rs`).
 
 ### 13.3 `camdl fit new`

@@ -46,6 +46,8 @@ pub struct ConfigDiff {
     pub fixed_added: Vec<String>,
     /// Parameters that left `[fixed]`.
     pub fixed_removed: Vec<String>,
+    /// Parameters in `[fixed]` on both sides whose value differs.
+    pub fixed_changed: Vec<FixedValueChange>,
     /// Parameters whose `[estimate.<name>].bounds` tuple changed.
     pub bounds_changed: Vec<BoundsChange>,
     /// Parameters whose declared `prior` differs (after canonical
@@ -57,6 +59,13 @@ pub struct ConfigDiff {
     /// Method-level diff: one `[method]` per file, so a change is either the
     /// table appearing / disappearing or a per-key settings change.
     pub method_changed: MethodChanged,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FixedValueChange {
+    pub param: String,
+    pub from: f64,
+    pub to: f64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -127,6 +136,7 @@ impl ConfigDiff {
             estimate_removed: Vec::new(),
             fixed_added: Vec::new(),
             fixed_removed: Vec::new(),
+            fixed_changed: Vec::new(),
             bounds_changed: Vec::new(),
             priors_changed: Vec::new(),
             data_hashes: DataHashesDiff::default(),
@@ -148,6 +158,33 @@ impl ConfigDiff {
         baseline: &FitConfig,
         this_meta: &FitView,
         baseline_meta: &FitView,
+    ) -> Self {
+        let mut diff = Self::compare_resolved(
+            this,
+            baseline,
+            &ResolvedInputs {
+                model_identity: &this_meta.model_identity,
+                data_hashes: &this_meta.data_hashes,
+            },
+            &ResolvedInputs {
+                model_identity: &baseline_meta.model_identity,
+                data_hashes: &baseline_meta.data_hashes,
+            },
+        );
+        diff.baseline_hash = Some(baseline_meta_hash(baseline_meta));
+        diff
+    }
+
+    /// [`compare`](Self::compare) for two configs that have not necessarily
+    /// been run: the model identity and data hashes each side resolves to
+    /// are supplied directly rather than read off a stored fit's view. `camdl
+    /// fit diff` compares two `fit.toml` files this way. `baseline_hash` is
+    /// `None` — there is no baseline fit.
+    pub fn compare_resolved(
+        this: &FitConfig,
+        baseline: &FitConfig,
+        this_inputs: &ResolvedInputs<'_>,
+        baseline_inputs: &ResolvedInputs<'_>,
     ) -> Self {
         let this_est: BTreeSet<&str> =
             this.problem.estimate.keys().map(|s| s.as_str()).collect();
@@ -176,6 +213,21 @@ impl ConfigDiff {
         let fixed_removed: Vec<String> = base_fix_keys
             .difference(&this_fix_keys)
             .map(|s| s.to_string())
+            .collect();
+
+        let fixed_changed: Vec<FixedValueChange> = this_fix_keys
+            .intersection(&base_fix_keys)
+            .filter_map(|name| {
+                let (from, to) = (base_fix[*name], this_fix[*name]);
+                // Exact comparison, like `bounds_changed`: any difference in
+                // a fixed value is a different problem. `!=` alone, not a
+                // tolerance, and NaN (not expressible in TOML) aside.
+                (from != to).then(|| FixedValueChange {
+                    param: (*name).to_string(),
+                    from,
+                    to,
+                })
+            })
             .collect();
 
         let mut bounds_changed = Vec::new();
@@ -216,24 +268,90 @@ impl ConfigDiff {
         }
 
         let data_hashes =
-            diff_data_hashes(&this_meta.data_hashes, &baseline_meta.data_hashes);
+            diff_data_hashes(this_inputs.data_hashes, baseline_inputs.data_hashes);
         let method_changed = diff_methods(
             this.inference.method.as_ref(),
             baseline.inference.method.as_ref(),
         );
 
         ConfigDiff {
-            baseline_hash: Some(baseline_meta_hash(baseline_meta)),
-            model_changed: this_meta.model_identity != baseline_meta.model_identity,
+            baseline_hash: None,
+            model_changed: this_inputs.model_identity != baseline_inputs.model_identity,
             estimate_added,
             estimate_removed,
             fixed_added,
             fixed_removed,
+            fixed_changed,
             bounds_changed,
             priors_changed,
             data_hashes,
             method_changed,
         }
+    }
+}
+
+/// What a config resolves to outside its own text: the compiled model's
+/// identity and each observation stream's content hash. A stored fit carries
+/// these on its [`FitView`]; a config that has not been run has them computed
+/// by the caller.
+pub struct ResolvedInputs<'a> {
+    pub model_identity: &'a str,
+    pub data_hashes: &'a std::collections::HashMap<String, String>,
+}
+
+impl ConfigDiff {
+    /// The problem-side half of the diff (everything but `[method]`) as text
+    /// lines, for `camdl fit diff`. `self` is `this` against `baseline`, read
+    /// as `baseline → this`; the fixed maps supply the values the diff's
+    /// key lists name. Empty when the two problems are the same.
+    pub fn problem_lines(
+        &self,
+        baseline_fixed: &BTreeMap<String, f64>,
+        this_fixed: &BTreeMap<String, f64>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        let has = |v: &[String], n: &str| v.iter().any(|x| x == n);
+        for name in &self.estimate_removed {
+            match this_fixed.get(name) {
+                Some(v) if has(&self.fixed_added, name) =>
+                    out.push(format!("{name}: [estimate] → [fixed] = {v}")),
+                _ => out.push(format!("{name}: [estimate] (removed)")),
+            }
+        }
+        for name in &self.estimate_added {
+            match baseline_fixed.get(name) {
+                Some(v) if has(&self.fixed_removed, name) =>
+                    out.push(format!("{name}: [fixed] = {v} → [estimate]")),
+                _ => out.push(format!("{name}: [estimate] (added)")),
+            }
+        }
+        for name in &self.fixed_removed {
+            if !has(&self.estimate_added, name) {
+                let v = baseline_fixed.get(name).map(|v| v.to_string()).unwrap_or_default();
+                out.push(format!("{name}: [fixed] = {v} (removed)"));
+            }
+        }
+        for name in &self.fixed_added {
+            if !has(&self.estimate_removed, name) {
+                let v = this_fixed.get(name).map(|v| v.to_string()).unwrap_or_default();
+                out.push(format!("{name}: [fixed] = {v} (added)"));
+            }
+        }
+        for c in &self.fixed_changed {
+            out.push(format!("{}: [fixed] {} → {}", c.param, c.from, c.to));
+        }
+        let bounds = |o: Option<(f64, f64)>| match o {
+            Some((lo, hi)) => format!("[{lo}, {hi}]"),
+            None => "(from model)".to_string(),
+        };
+        for c in &self.bounds_changed {
+            out.push(format!("{}: bounds {} → {}", c.param, bounds(c.from), bounds(c.to)));
+        }
+        let prior = |o: &Option<String>| o.clone().unwrap_or_else(|| "(none)".to_string());
+        for c in &self.priors_changed {
+            out.push(format!("{}: prior {} → {}", c.param, prior(&c.from), prior(&c.to)));
+        }
+        out
     }
 }
 
@@ -652,6 +770,24 @@ mod tests {
         assert_eq!(diff.data_hashes.added, vec!["hospital".to_string()]);
         assert_eq!(diff.data_hashes.removed, vec!["deaths".to_string()]);
         assert_eq!(diff.data_hashes.modified, vec!["cases".to_string()]);
+    }
+
+    /// gh#595: a `[fixed]` value that changes is a different problem, and
+    /// the diff says so. Before `fixed_changed` the typed diff recorded only
+    /// keys entering or leaving `[fixed]`, so `fit table` reported two
+    /// configs differing in `N0` alone as identical.
+    #[test]
+    fn detects_fixed_value_change() {
+        let baseline = parse(BASELINE_TOML);
+        let variant = parse(&BASELINE_TOML.replace("N0 = 1000.0", "N0 = 2000.0"));
+        let diff = ConfigDiff::compare(&variant, &baseline, &fitmeta("m"), &fitmeta("m"));
+        assert_eq!(
+            diff.fixed_changed,
+            vec![FixedValueChange { param: "N0".into(), from: 1000.0, to: 2000.0 }]
+        );
+        assert!(diff.fixed_added.is_empty() && diff.fixed_removed.is_empty());
+        let same = ConfigDiff::compare(&baseline, &baseline, &fitmeta("m"), &fitmeta("m"));
+        assert!(same.fixed_changed.is_empty());
     }
 
     /// Identity diff serializes deterministically — empty vectors and
