@@ -849,6 +849,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             &fit_estimate,
             &model,
         );
+    // gh#369: a `--fit` prior that displaces a model `~` prior, said once
+    // before the grid (as `fit run` does). Over every `[estimate]` entry,
+    // not only the non-focal set: the override holds wherever a prior is read.
+    let prior_overrides = crate::fit::priors_precedence::prior_overrides(
+        &fit_estimate.keys().cloned().collect::<Vec<_>>(), &fit_estimate, &model);
+    if let Some(w) =
+        crate::fit::priors_precedence::format_prior_override_warning(&prior_overrides)
+    {
+        eprint!("{}", w);
+    }
     if matches!(profile_algo, ProfileAlgo::Pmmh) && !a.suppress_warnings {
         if let Some(w) = crate::fit::priors_precedence::format_flat_fallback_warning(
             &resolved_priors, a.fit.is_some(),
@@ -1295,7 +1305,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 .map(|(n, _)| n.clone()).collect(),
             resolved_priors: resolved_priors_kv.iter()
                 .map(|(n, s)| crate::run_meta::ResolvedPriorEntry {
-                    param: n.clone(), source: s.clone() })
+                    param: n.clone(), source: s.clone(),
+                    overridden_model_prior: prior_overrides.iter()
+                        .find(|o| &o.param == n).map(|o| o.model.clone()) })
                 .collect(),
             ..Default::default()
         };

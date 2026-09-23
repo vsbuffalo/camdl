@@ -162,6 +162,82 @@ pub fn resolve_priors_with_precedence(
     }).collect()
 }
 
+/// A parameter whose fit-toml prior displaced a prior the model declares
+/// with `~` (gh#369). Both priors are rendered in the canonical
+/// `family(arg=value, ...)` form of [`crate::fit::config_diff::format_prior`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorOverride {
+    pub param:    String,
+    /// The fit toml's `[estimate.<param>].prior` — the one used.
+    pub fit_toml: String,
+    /// The model's `~` prior — declared, and not used.
+    pub model:    String,
+}
+
+/// The model's `~` prior for `name`, rendered, or `None` when the model
+/// declares none. A hierarchical prior shows its family and the names of
+/// its expression-valued arguments.
+pub fn model_prior_text(name: &str, model: &ir::Model) -> Option<String> {
+    use crate::fit::config_v2::EstimatePriorSpec;
+    let p = model.parameters.iter().find(|p| p.name == name)?;
+    if let Some(pd) = p.prior_dist() {
+        return Some(crate::fit::config_diff::format_prior(
+            &EstimatePriorSpec::Dist(pd.clone())));
+    }
+    p.hierarchical().map(|h| format!(
+        "{}({}) (hierarchical)",
+        h.kind,
+        h.args.keys().map(|k| format!("{k}=…")).collect::<Vec<_>>().join(", ")))
+}
+
+/// Every estimated parameter in `names` whose prior resolved from the fit
+/// toml while the model also declares one — the cases where the fit toml
+/// silently wins (gh#369). Uses [`resolve_prior`]'s own source, so the
+/// report agrees with the precedence the samplers and chain starts use; a
+/// fit-toml prior that fell through (a bounds-uniform with no bounds) is
+/// not an override.
+pub fn prior_overrides(
+    names:    &[String],
+    estimate: &IndexMap<String, EstimateSpecV2>,
+    model:    &ir::Model,
+) -> Vec<PriorOverride> {
+    names.iter().filter_map(|name| {
+        let source = PriorSource::from_runner_source(resolve_prior(name, estimate, model).1);
+        if !matches!(source, PriorSource::FitToml | PriorSource::FlatExplicit) {
+            return None;
+        }
+        let spec = estimate.get(name)?.prior.as_ref()?;
+        Some(PriorOverride {
+            param:    name.clone(),
+            fit_toml: crate::fit::config_diff::format_prior(spec),
+            model:    model_prior_text(name, model)?,
+        })
+    }).collect()
+}
+
+/// The warning for [`prior_overrides`]; `None` when there are none. The
+/// first line is stable (tests match on it).
+pub fn format_prior_override_warning(overrides: &[PriorOverride]) -> Option<String> {
+    if overrides.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "warning: fit.toml prior overrides the model's `~` prior for: ");
+    s.push_str(&overrides.iter().map(|o| o.param.as_str()).collect::<Vec<_>>().join(", "));
+    s.push('\n');
+    for o in overrides {
+        s.push_str(&format!("  {}:\n", o.param));
+        s.push_str(&format!("    fit.toml [estimate.{}] prior = {}  (used)\n", o.param, o.fit_toml));
+        s.push_str(&format!("    model `~` prior                = {}  (ignored)\n", o.model));
+    }
+    s.push_str(
+        "  The model is the definition every fit shares; a fit.toml prior is a\n  \
+         per-experiment override. If this override is not deliberate, delete\n  \
+         `prior` from [estimate.<param>]; if it should apply to every fit, move\n  \
+         it into the model's `~` declaration.\n");
+    Some(s)
+}
+
 /// Format the user-facing warning that fires when any resolved prior
 /// ended up as `Prior::Flat`. Returns `None` if no parameters fell
 /// through (no warning needed).
@@ -444,5 +520,55 @@ mod tests {
         );
         assert!(format_flat_fallback_warning(&resolved, false).is_none(),
             "no warning when every parameter resolves to a non-flat prior");
+    }
+
+    /// gh#369: an override is a fit-toml prior on a parameter the model also
+    /// gives a `~` prior — and only that. `beta` (both) is one; `gamma`
+    /// (model only) and `delta` (fit toml only) are not.
+    #[test]
+    fn prior_overrides_names_only_params_with_both_priors() {
+        let model = mk_model(vec![
+            mk_param("beta",  Some(PriorDist::LogNormal(LogNormalPrior { mu: -1.0, sigma: 0.5 }))),
+            mk_param("gamma", Some(PriorDist::Beta(BetaPrior { alpha: 2.0, beta: 5.0 }))),
+            mk_param("delta", None),
+        ]);
+        let mut estimate: IndexMap<String, EstimateSpecV2> = IndexMap::new();
+        estimate.insert("beta".into(), mk_estimate_spec(Some(
+            PriorDist::Normal(NormalPrior { mean: 0.3, sd: 0.1 }))));
+        estimate.insert("gamma".into(), mk_estimate_spec(None));
+        estimate.insert("delta".into(), mk_estimate_spec(Some(
+            PriorDist::Normal(NormalPrior { mean: 0.0, sd: 1.0 }))));
+        let names: Vec<String> = estimate.keys().cloned().collect();
+
+        let overrides = prior_overrides(&names, &estimate, &model);
+        assert_eq!(overrides, vec![PriorOverride {
+            param:    "beta".into(),
+            fit_toml: "normal(mean=0.3, sd=0.1)".into(),
+            model:    "log_normal(mu=-1, sigma=0.5)".into(),
+        }]);
+        let w = format_prior_override_warning(&overrides).unwrap();
+        assert!(w.starts_with("warning: fit.toml prior overrides the model's `~` prior for: beta\n"),
+            "got:\n{w}");
+        assert!(w.contains("normal(mean=0.3, sd=0.1)  (used)"), "got:\n{w}");
+        assert!(w.contains("log_normal(mu=-1, sigma=0.5)  (ignored)"), "got:\n{w}");
+        assert!(format_prior_override_warning(&[]).is_none());
+    }
+
+    /// gh#369: an explicit `prior = { flat = {} }` over a model prior is an
+    /// override too — the flat prior is what the sampler scores against.
+    #[test]
+    fn explicit_flat_over_a_model_prior_is_an_override() {
+        let model = mk_model(vec![
+            mk_param("beta", Some(PriorDist::LogNormal(LogNormalPrior { mu: -1.0, sigma: 0.5 }))),
+        ]);
+        let mut estimate: IndexMap<String, EstimateSpecV2> = IndexMap::new();
+        let mut spec = mk_estimate_spec(None);
+        spec.prior = Some(crate::fit::config_v2::EstimatePriorSpec::Flat {
+            flat: Default::default(),
+        });
+        estimate.insert("beta".into(), spec);
+        let overrides = prior_overrides(&["beta".to_string()], &estimate, &model);
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].fit_toml, "flat()");
     }
 }

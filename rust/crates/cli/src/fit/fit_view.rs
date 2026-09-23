@@ -309,6 +309,7 @@ mod tests {
             resolved_priors: vec![crate::run_meta::ResolvedPriorEntry {
                 param: "beta".into(),
                 source: "model_ir".into(),
+                overridden_model_prior: None,
             }],
             parameters_provenance: std::collections::BTreeMap::new(),
             schema: None,

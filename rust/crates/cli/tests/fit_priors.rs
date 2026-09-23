@@ -93,6 +93,10 @@ fn write_fixture(dir: &Path, kind: TildeMode) -> (PathBuf, PathBuf) {
             "~ log_normal(mu = -1.0, sigma = 0.3)".to_string(),
             "~ log_normal(mu = -1.5, sigma = 0.3)".to_string(),
         ),
+        TildeMode::GammaOnBeta => (
+            "~ gamma(shape = 2, rate = 5)".to_string(),
+            "~ log_normal(mu = -1.2, sigma = 0.5)".to_string(),
+        ),
     };
     let src = format!(r#"
 time_unit = 'days
@@ -153,6 +157,10 @@ enum TildeMode {
     /// A different set of `~` log_normal parameters; same families.
     /// Used for the hash-invalidation test.
     Variant,
+    /// `beta ~ gamma(shape = 2, rate = 5)`, `gamma` as in `Default` — a
+    /// model prior on `beta` that a fit-toml `log_normal` visibly differs
+    /// from (gh#369).
+    GammaOnBeta,
 }
 
 /// Variants on the fit TOML's `[estimate]` block. Same `[method]`
@@ -255,6 +263,9 @@ fn read_resolved_priors(fit_dir: &Path) -> Vec<serde_json::Value> {
         .cloned()
         .unwrap_or_else(|| panic!("resolved_priors array missing in fit.meta.json: {}", v))
 }
+
+/// gh#369: the one-line prefix of the prior-override warning.
+const OVERRIDE_WARNING: &str = "fit.toml prior overrides the model's `~` prior";
 
 fn run_fit(bin: &Path, fit_toml: &Path) -> std::process::Output {
     Command::new(bin)
@@ -693,4 +704,67 @@ fn declaring_the_unit_interval_explicitly_changes_nothing() {
         "`in [0, 1]` is documented as redundant, so the transform row must be \
          identical with and without it (gh#763).\n  implicit: {}\n  explicit: {}",
         rows[0].1, rows[1].1);
+}
+
+/// gh#369: a fit.toml `[estimate.beta].prior` for a parameter the model
+/// already gives a `~` prior wins silently no more — `fit run` warns once,
+/// naming the parameter, both priors, and which one is used. `gamma` has a
+/// model prior and no fit-toml prior, so it is not named.
+#[test]
+fn fit_run_warns_when_fit_toml_prior_overrides_model_prior() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("override");
+    let (ir, data) = write_fixture(tmp.path(), TildeMode::GammaOnBeta);
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, FitTomlMode::BetaOnly, "override");
+
+    let out = run_fit(&bin, &fit_toml);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fit run must succeed; stderr=\n{}", stderr);
+
+    let lines: Vec<&str> = stderr.lines().collect();
+    let hits: Vec<usize> = lines.iter().enumerate()
+        .filter(|(_, l)| l.contains(OVERRIDE_WARNING))
+        .map(|(i, _)| i).collect();
+    assert_eq!(hits.len(), 1,
+        "the override warning must fire exactly once per fit; stderr=\n{}", stderr);
+    let block = lines[hits[0]..(hits[0] + 4).min(lines.len())].join("\n");
+    assert!(block.contains("beta"), "warning must name `beta`; got:\n{}", block);
+    assert!(block.contains("log_normal(mu=-0.3, sigma=0.5)"),
+        "warning must show the fit.toml prior; got:\n{}", block);
+    assert!(block.contains("gamma(shape=2, rate=5)"),
+        "warning must show the model prior; got:\n{}", block);
+    assert!(block.contains("used") && block.contains("ignored"),
+        "warning must say which prior is used; got:\n{}", block);
+    assert!(!block.contains("gamma:"),
+        "`gamma` has no fit-toml prior and must not be named; got:\n{}", block);
+
+    // Recorded after the fact: the sidecar's `resolved_priors` entry for
+    // `beta` carries the model prior the fit.toml displaced.
+    let fit_dir = find_fit_dir(&tmp.path().join("results"));
+    let resolved = read_resolved_priors(&fit_dir);
+    let entry = |param: &str| resolved.iter()
+        .find(|e| e.get("param").and_then(|p| p.as_str()) == Some(param))
+        .unwrap_or_else(|| panic!("param {} in resolved_priors", param)).clone();
+    assert_eq!(entry("beta").get("overridden_model_prior").and_then(|v| v.as_str()),
+        Some("gamma(shape=2, rate=5)"), "beta entry: {}", entry("beta"));
+    assert!(entry("gamma").get("overridden_model_prior").is_none(),
+        "gamma entry: {}", entry("gamma"));
+}
+
+/// gh#369 negative: a fit.toml prior for a parameter with no model `~`
+/// prior overrides nothing, so no warning.
+#[test]
+fn fit_run_no_override_warning_when_model_has_no_prior() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("no_override");
+    let (ir, data) = write_fixture(tmp.path(), TildeMode::None);
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, FitTomlMode::BothPriors, "no_override");
+
+    let out = run_fit(&bin, &fit_toml);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fit run must succeed; stderr=\n{}", stderr);
+    assert!(!stderr.contains(OVERRIDE_WARNING),
+        "no model prior → nothing overridden → no warning; stderr=\n{}", stderr);
 }

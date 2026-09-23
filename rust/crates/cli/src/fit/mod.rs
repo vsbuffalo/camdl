@@ -482,6 +482,15 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     });
+    // gh#369: a fit.toml prior that displaces a model `~` prior is said once,
+    // here, before the grid — a property of the config, not of a cell/chain.
+    let estimated_names: Vec<String> = config.problem.estimate.keys().cloned().collect();
+    if let Some(w) = crate::fit::priors_precedence::format_prior_override_warning(
+        &crate::fit::priors_precedence::prior_overrides(
+            &estimated_names, &config.problem.estimate, &model),
+    ) {
+        eprint!("{}", w);
+    }
     // `nl-lbfgs` is the one method whose objective needs a gradient of this
     // model. Ask the gradient capability gate now, before a leaf is claimed, so
     // a model it refuses costs a message rather than a half-run stage.
@@ -2120,6 +2129,9 @@ fn build_fit_sidecar(
     let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> = match model {
         Some(model) if any_bayesian => {
             let names: Vec<String> = problem.estimate.keys().cloned().collect();
+            let overrides = crate::fit::priors_precedence::prior_overrides(
+                &names, &problem.estimate, model,
+            );
             crate::fit::priors_precedence::resolve_priors_with_precedence(
                 &names, &problem.estimate, model,
             )
@@ -2134,9 +2146,13 @@ fn build_fit_sidecar(
                     // see the contract was broken.
                     crate::fit::priors_precedence::PriorSource::FlatFallback => "flat_fallback",
                 };
+                // gh#369: the model prior the fit toml displaced, if any.
+                let overridden_model_prior = overrides.iter()
+                    .find(|o| o.param == r.param).map(|o| o.model.clone());
                 crate::run_meta::ResolvedPriorEntry {
                     param:  r.param,
                     source: source.to_string(),
+                    overridden_model_prior,
                 }
             })
             .collect()

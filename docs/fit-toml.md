@@ -318,12 +318,14 @@ those sources. `truncated_normal`'s `lower`/`upper` must equal the parameter's
 bounds (the prior's support and the search box are the same interval).
 
 **Precedence:** a `fit.toml` `[estimate].prior` overrides the model's `~`
-declaration; if neither is present, a Bayesian method falls back to flat **with
-a warning** — camdl refuses _silent_ implicit-flat priors, because the prior
-shows up in the posterior. The explicit `{ flat = {} }` is how you say "flat
-here, on purpose" without the warning. A flat prior is not a distribution the
-chains can be drawn from, so a parameter left flat also moves the default
-`starts` from `from_prior` to `uniform_unconstrained`.
+declaration, with a warning naming both (see
+[How `fit.toml` relates to the model](#how-fittoml-relates-to-the-model)); if
+neither is present, a Bayesian method falls back to flat **with a warning** —
+camdl refuses _silent_ implicit-flat priors, because the prior shows up in the
+posterior. The explicit `{ flat = {} }` is how you say "flat here, on purpose"
+without the warning. A flat prior is not a distribution the chains can be drawn
+from, so a parameter left flat also moves the default `starts` from `from_prior`
+to `uniform_unconstrained`.
 
 ## Method algorithms
 
@@ -379,7 +381,14 @@ The model file is the source of truth for what _can_ be estimated; the
 `fit.toml` chooses and configures. Specifically:
 
 - **Bounds** default to the model's declared range; `fit.toml` can only narrow.
-- **Priors** default to the model's `~` declarations; `fit.toml` overrides.
+- **Priors** default to the model's `~` declarations; `fit.toml` overrides. An
+  override is never silent: when a parameter has both, `fit run`, `profile` and
+  `simulate --draws prior` print one warning before any work, naming the
+  parameter, both priors, and that the `fit.toml` one is used. A Bayesian fit
+  also records the displaced model prior in `fit.meta.json`
+  (`resolved_priors[].overridden_model_prior`). If the override is not
+  deliberate, delete the `prior`; if it should hold for every fit, move it into
+  the model.
 - **Transforms** default to the parameter's declared type; `fit.toml` overrides.
 
 So the minimal `fit.toml` for a model that already declares bounds and priors is

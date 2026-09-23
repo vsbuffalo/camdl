@@ -3967,6 +3967,13 @@ fn generate_prior_draws(
     // estimated param in declaration order.
     let names: Vec<String> = config.estimate.keys().cloned().collect();
     let resolved = resolve_priors_with_precedence(&names, &config.estimate, model);
+    // gh#369: the draws come from the fit.toml prior where it displaces a
+    // model `~` prior; say so once, before any draw.
+    if let Some(w) = fit::priors_precedence::format_prior_override_warning(
+        &fit::priors_precedence::prior_overrides(&names, &config.estimate, model),
+    ) {
+        eprint!("{}", w);
+    }
 
     // Identify params with no usable prior in either source. The two
     // flat cases are both unusable for sampling — there's no finite

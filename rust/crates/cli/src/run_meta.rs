@@ -232,6 +232,12 @@ pub struct ResolvedPriorEntry {
     /// `"fit_toml" | "model_ir" | "flat_fallback"` — see
     /// `profile_priors::PriorSource`.
     pub source: String,
+    /// The model's `~` prior (canonical `family(arg=value, ...)` form) when
+    /// the fit toml's prior displaced it (gh#369), so an override is visible
+    /// after the fact and not only in the run's stderr. Absent when the model
+    /// declares no prior or the fit toml supplies none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overridden_model_prior: Option<String>,
 }
 
 // ── Parameter-value provenance into `run.json` (gh#83/gh#85 step 9) ─────────
@@ -1230,8 +1236,10 @@ mod tests {
         let sidecar = FitSidecar {
             estimated: vec!["beta".into(), "gamma".into()],
             resolved_priors: vec![
-                ResolvedPriorEntry { param: "beta".into(), source: "model_ir".into() },
-                ResolvedPriorEntry { param: "gamma".into(), source: "fit_toml".into() },
+                ResolvedPriorEntry { param: "beta".into(), source: "model_ir".into(),
+                    overridden_model_prior: None },
+                ResolvedPriorEntry { param: "gamma".into(), source: "fit_toml".into(),
+                    overridden_model_prior: Some("gamma(shape=2, rate=5)".into()) },
             ],
             ..Default::default()
         };
@@ -1249,6 +1257,11 @@ mod tests {
             "beta prior source must survive the sidecar round trip");
         assert_eq!(source("gamma"), Some("fit_toml"),
             "gamma prior source must survive the sidecar round trip");
+        let overridden = |p: &str| view.resolved_priors.iter()
+            .find(|e| e.param == p).and_then(|e| e.overridden_model_prior.as_deref());
+        assert_eq!(overridden("gamma"), Some("gamma(shape=2, rate=5)"),
+            "gh#369: the displaced model prior must survive the round trip");
+        assert_eq!(overridden("beta"), None);
 
         std::fs::remove_dir_all(&tmp).ok();
     }
