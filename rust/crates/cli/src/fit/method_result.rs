@@ -2026,14 +2026,14 @@ mod tests {
         )
         .unwrap();
         // draws.tsv exactly as `write_nuts_draws` emits it (chain/draw key cols
-        // + estimated params). 4 rows across 2 chains.
+        // + estimated params + the fixed `N0`). 4 rows across 2 chains.
         std::fs::write(
             dir.join("draws.tsv"),
-            "chain\tdraw\tbeta\tgamma\n\
-             0\t0\t2.0\t0.5\n\
-             0\t1\t2.2\t0.4\n\
-             1\t0\t1.9\t0.6\n\
-             1\t1\t2.1\t0.5\n",
+            "chain\tdraw\tbeta\tgamma\tN0\n\
+             0\t0\t2.0\t0.5\t1000\n\
+             0\t1\t2.2\t0.4\t1000\n\
+             1\t0\t1.9\t0.6\t1000\n\
+             1\t1\t2.1\t0.5\t1000\n",
         )
         .unwrap();
         // fit_state.toml supplies the MAP loglik (best-draw marginal loglik).
@@ -2052,6 +2052,8 @@ mod tests {
         assert!((r.map_loglik - (-3804.9)).abs() < 1e-9);
         // posterior_mean averages the draws.tsv beta column.
         assert!((r.posterior_mean["beta"] - (2.0 + 2.2 + 1.9 + 2.1) / 4.0).abs() < 1e-9);
+        // A fixed column is carried for replay, not summarised as a posterior.
+        assert!(!r.posterior_mean.contains_key("N0"));
 
         // And it dispatches through the public entry point on the "nuts" tag.
         let via = MethodResult::load_from(dir, "nuts").unwrap();

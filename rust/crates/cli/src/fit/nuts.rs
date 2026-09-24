@@ -416,6 +416,7 @@ pub fn run_stage(
     write_nuts_draws(
         stage_dir,
         &config.estimated_params,
+        &config.fixed_draw_columns()?,
         ordered.iter().map(|c| (c.chain_id, &c.samples)),
     )?;
 
@@ -520,12 +521,14 @@ fn write_nuts_summary(
 }
 
 /// Write the combined `draws.tsv` (post-warmup posterior draws, all chains).
-/// Leading `chain` `draw` key columns match the PGAS/PMMH layout; the shared
-/// draws loader keys on the estimated-param columns by name. nuts emits only
-/// the estimated params (it writes no trajectories to join fixed params to).
+/// Leading `chain` `draw` key columns match the PGAS/PMMH layout, then every
+/// model parameter: the estimated ones, then `fixed` as constant columns — the
+/// same complete-parameter shape PGAS/PMMH write, so `fit predict` and every
+/// other draws reader can replay a nuts fit (gh#932).
 fn write_nuts_draws<'a>(
     dir: &Path,
     estimated_params: &[sim::inference::types::EstimatedParam],
+    fixed: &[(String, f64)],
     chains: impl Iterator<Item = (usize, &'a Vec<Vec<f64>>)>,
 ) -> Result<(), String> {
     use std::io::Write;
@@ -533,11 +536,19 @@ fn write_nuts_draws<'a>(
     let mut f = std::io::BufWriter::new(
         std::fs::File::create(&path).map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
     );
-    let names: Vec<&str> = estimated_params.iter().map(|s| s.name.as_str()).collect();
+    let names: Vec<&str> = estimated_params
+        .iter()
+        .map(|s| s.name.as_str())
+        .chain(fixed.iter().map(|(n, _)| n.as_str()))
+        .collect();
     writeln!(f, "chain\tdraw\t{}", names.join("\t")).unwrap();
     for (chain_id, draws) in chains {
         for (draw_idx, row) in draws.iter().enumerate() {
-            let vals: Vec<String> = row.iter().map(|v| format!("{:.17e}", v)).collect();
+            let vals: Vec<String> = row
+                .iter()
+                .chain(fixed.iter().map(|(_, v)| v))
+                .map(|v| format!("{:.17e}", v))
+                .collect();
             writeln!(f, "{}\t{}\t{}", chain_id, draw_idx, vals.join("\t")).unwrap();
         }
     }

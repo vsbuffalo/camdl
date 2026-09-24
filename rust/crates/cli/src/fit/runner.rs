@@ -153,6 +153,27 @@ pub struct ChainResults {
 }
 
 impl FitRunConfig {
+    /// The fixed columns of `draws.tsv`: every model parameter the fit does not
+    /// estimate, in declaration order, with the value the fit held it at
+    /// (`[fixed]` over the model default). `draws.tsv` carries every parameter
+    /// so a reader never has to default one (gh#932).
+    pub fn fixed_draw_columns(&self) -> Result<Vec<(String, f64)>, String> {
+        self.model
+            .parameters
+            .iter()
+            .filter(|p| !self.estimated_params.iter().any(|e| e.name == p.name))
+            .map(|p| {
+                self.compiled
+                    .param_index
+                    .get(p.name.as_str())
+                    .map(|&idx| (p.name.clone(), self.base_params[idx]))
+                    .ok_or_else(|| {
+                        format!("internal: parameter `{}` has no slot in the compiled model", p.name)
+                    })
+            })
+            .collect()
+    }
+
     /// Build from a problem. `algorithm` is the method that will run on it,
     /// for the observation-alignment check (gh#189) — `None` skips that
     /// check, for callers that build a config with no method in hand.
