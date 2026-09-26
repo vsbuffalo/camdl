@@ -330,15 +330,15 @@ the default `starts` from `from_prior` to `uniform_unconstrained`.
 
 ## Method algorithms
 
-| `algorithm`              | backend          | role                                              | key fields                                                                            |
-| ------------------------ | ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50) |
-| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `tempering`, `max_tree_depth`)  |
-| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                   |
-| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                             |
-| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                    |
-| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`)                  |
-| `nuts`                   | `ode`            | gradient NUTS (forward sensitivities) → posterior | `chains`, `warmup`, `samples` (+ `max_tree_depth`, `target_accept`, `dense_mass`)     |
+| `algorithm`              | backend          | role                                              | key fields                                                                                     |
+| ------------------------ | ---------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50)          |
+| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `tempering`, `max_tree_depth`)           |
+| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                            |
+| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                                      |
+| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                             |
+| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`, `burnin_dt`)              |
+| `nuts`                   | `ode`            | gradient NUTS (forward sensitivities) → posterior | `chains`, `warmup`, `samples` (+ `max_tree_depth`, `target_accept`, `dense_mass`, `burnin_dt`) |
 
 The `ode`-backend Bayesian samplers (`mh`, `nuts`) fit the **deterministic
 marginal likelihood** `p(y | θ, ODE skeleton)` rather than the stochastic
@@ -361,6 +361,54 @@ samples = 500 # posterior draws kept per chain
 
 Common to every method: `starts` (above), and the `dt_check` sub-table where the
 method runs a dt-convergence audit.
+
+### Coarse warm-up step (`burnin_dt`, `mh`/`nuts` on `ode`)
+
+A model often starts well before its first observation so that the transient
+settles — years of warm-up before a few months of data. Nothing in that span is
+scored, yet by default it is integrated at the fine `dt`, and for a long warm-up
+it dominates the cost of each likelihood evaluation. `burnin_dt` integrates the
+unscored span `[t_start, first observation)` with a larger fixed RK4 step and
+switches back to `dt` at the first observation:
+
+```toml
+[config]
+dt = 1.0
+
+[method]
+algorithm = "mh" # or "nuts"
+backend = "ode"
+chains = 4
+iterations = 20000
+burnin_dt = 7.0 # coarse RK4 step on the unscored warm-up only
+```
+
+Under `nuts` the parameter sensitivities are integrated on the same coarse grid
+as the state, so the gradient stays the gradient of the likelihood actually
+evaluated. On the Garki `ctl_bb` mosquito model (`mh`, `dt = 1`) `burnin_dt = 7`
+cut the per-evaluation cost 3.5× with a negligible change in log-likelihood. The
+coarse step does change the warm-up trajectory, so check that the fitted
+posterior agrees with a run at `burnin_dt` unset before relying on it.
+
+It is off by default; `burnin_dt = dt` is also off. A fit is refused, naming
+`burnin_dt`, when:
+
+- the fit has an **incidence** stream — the flow accumulated into the first
+  scored period is computed from the warm-up, so coarsening could bias a scored
+  datum. Only prevalence (state-at-a-time) streams are supported;
+- `burnin_dt < dt` — a coarse step must be larger than `dt`;
+- the first observation is at or before `t_start` — there is no warm-up to
+  coarsen;
+- the model has a `balance {}` or `events {}` block — both act every substep, so
+  a coarse step would change what they do;
+- the integrator is `rk45` — an adaptive step has no fixed size to coarsen; use
+  `rk4`;
+- a recurring intervention would fire twice within one coarse step.
+
+`burnin_dt` is part of the fit's identity: two runs that differ only in it get
+distinct run ids and never share a cached posterior. The other methods do not
+take it — the particle methods (`if2`, `pgas`, `pmmh`) simulate the warm-up
+stochastically, and the NLopt optimizers integrate at `dt` throughout.
 
 ### Tempering (PGAS)
 

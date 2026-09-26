@@ -2641,13 +2641,13 @@ restarting mid-schedule is statistically incoherent.
 adaptive-proposal machinery with the particle-filter likelihood swapped for the
 deterministic ODE evaluation, so it carries neither `particles` nor `rho`.
 
-| key           | default | meaning                                                                                                                             |
-| ------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `burn_in`     | `5000`  | Must be `< iterations`.                                                                                                             |
-| `thin`        | `10`    |                                                                                                                                     |
-| `adapt`       | `true`  |                                                                                                                                     |
-| `adapt_start` | `300`   |                                                                                                                                     |
-| `burnin_dt`   | none    | Coarse RK4 step for the unscored warm-up `[t_start, first_obs)`. Must be `> dt`; prevalence-scored streams only. Identity-defining. |
+| key           | default | meaning                                                                                                                                                                           |
+| ------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `burn_in`     | `5000`  | Must be `< iterations`.                                                                                                                                                           |
+| `thin`        | `10`    |                                                                                                                                                                                   |
+| `adapt`       | `true`  |                                                                                                                                                                                   |
+| `adapt_start` | `300`   |                                                                                                                                                                                   |
+| `burnin_dt`   | none    | Coarse RK4 step for the unscored warm-up `[t_start, first_obs)`. `< dt` is refused and `= dt` is off; prevalence-scored streams, `rk4`, no `balance`/`events`. Identity-defining. |
 
 **`nuts`** — `chains` required.
 
