@@ -393,3 +393,23 @@ fn zinb_out_of_range_pi_draws_zero_and_counts() {
         assert!(nan_counter() > before, "pi = {pi} must increment obs_sample_nan");
     }
 }
+
+/// gh#925 sibling: a Binomial `p` outside `[0, 1]` has no defined draw — the
+/// value path scores it `-inf`. Pre-fix the sampler clamped it, so `p = 1.3`
+/// drew all `n` and `p = -0.3` drew 0, neither counted.
+#[test]
+fn binomial_out_of_range_p_draws_zero_and_counts() {
+    let lik = || Likelihood::Binomial(BinomialLikelihood {
+        n: const_expr(100.0),
+        p: Diffable::new(projected()),
+    });
+    // Non-vacuity control: p = 1 is in the domain and draws all 100.
+    assert_eq!(draw_one(lik(), 1.0, 42), 100.0, "p = 1 must draw n");
+
+    for p in [1.3, 1.0 + f64::EPSILON, -0.3] {
+        let before = nan_counter();
+        let y = draw_one(lik(), p, 42);
+        assert_eq!(y, 0.0, "p = {p} must draw 0, got {y}");
+        assert!(nan_counter() > before, "p = {p} must increment obs_sample_nan");
+    }
+}
