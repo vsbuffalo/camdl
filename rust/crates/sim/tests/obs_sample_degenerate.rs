@@ -350,3 +350,23 @@ fn normal_non_positive_sd_draws_zero_and_counts() {
         assert!(nan_counter() > before, "sd = {sd} must increment obs_sample_nan");
     }
 }
+
+/// gh#925: a Bernoulli `p` outside `[0, 1]` is out of the likelihood's domain
+/// — the value path scores it `-inf` — so it has no defined draw either.
+/// Pre-fix the sampler clamped it, so `p = 1.3` always drew 1 and `p = -0.3`
+/// always drew 0, silently. Same contract as a NaN argument: draw 0 and count
+/// it.
+#[test]
+fn bernoulli_out_of_range_p_draws_zero_and_counts() {
+    let lik = || Likelihood::Bernoulli(BernoulliLikelihood { p: Diffable::new(projected()) });
+    // Non-vacuity control: p = 1 is in the domain and always draws 1.
+    assert_eq!(draw_one(lik(), 1.0, 42), 1.0, "p = 1 must draw 1");
+
+    for p in [1.3, 1.0 + f64::EPSILON, -0.3] {
+        let before = nan_counter();
+        let y = draw_one(lik(), p, 42);
+        assert_eq!(y, 0.0, "p = {p} must draw 0, got {y}");
+        assert!(nan_counter() > before, "p = {p} must increment obs_sample_nan");
+    }
+}
+
