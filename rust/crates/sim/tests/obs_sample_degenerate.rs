@@ -442,3 +442,35 @@ fn beta_binomial_non_positive_shape_draws_zero_and_counts() {
         }
     }
 }
+
+/// gh#925 sibling: `beta_logpdf` scores a mean outside `(0, 1)` or a
+/// non-positive concentration as `-inf` (either Beta shape `mean·φ`,
+/// `(1 − mean)·φ` is then non-positive), so the sampler has no defined draw.
+/// Pre-fix it floored the shapes at `LOG_PROB_FLOOR` and drew a proportion
+/// pinned at 0 or 1, uncounted.
+#[test]
+fn beta_invalid_shape_draws_zero_and_counts() {
+    let lik = |mean: Expr, conc: Expr| Likelihood::Beta(BetaLikelihood {
+        mean: Diffable::new(mean),
+        concentration: Diffable::new(conc),
+    });
+    // Non-vacuity control: Beta(mean 0.5, φ 10) draws strictly inside (0, 1).
+    let y = draw_one(lik(projected(), const_expr(10.0)), 0.5, 42);
+    assert!(y > 0.0 && y < 1.0, "mean 0.5 must draw inside (0, 1), got {y}");
+
+    let cases = [
+        ("mean", 1.3), ("mean", 1.0), ("mean", 0.0), ("mean", -0.3),
+        ("concentration", 0.0), ("concentration", -1.0),
+    ];
+    for (which, v) in cases {
+        let l = if which == "mean" {
+            lik(projected(), const_expr(10.0))
+        } else {
+            lik(const_expr(0.5), projected())
+        };
+        let before = nan_counter();
+        let y = draw_one(l, v, 42);
+        assert_eq!(y, 0.0, "{which} = {v} must draw 0, got {y}");
+        assert!(nan_counter() > before, "{which} = {v} must increment obs_sample_nan");
+    }
+}

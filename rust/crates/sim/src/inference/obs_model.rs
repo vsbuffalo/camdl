@@ -943,9 +943,17 @@ pub(crate) fn sample_obs_resolved(
             // BetaBinomial p-draw) — the continuous proportion, not a count.
             let m = eval_resolved(mean, &ctx(projected));
             let c = eval_resolved(concentration, &ctx(projected));
-            if obs_args_nan(&[m, c]) { return 0.0; }
-            let a = (m * c).max(LOG_PROB_FLOOR);
-            let b = ((1.0 - m) * c).max(LOG_PROB_FLOOR);
+            // gh#925 sibling: the shapes `beta_logpdf` computes, with its
+            // domain test — a non-positive shape (a mean outside (0, 1), a
+            // non-positive concentration) scores `-inf` there, so it takes the
+            // NaN-argument contract (draw 0, counted) rather than being
+            // floored into a proportion pinned at 0 or 1. The floor below then
+            // only touches a valid sub-1e-300 shape.
+            let (a, b) = (m * c, (1.0 - m) * c);
+            let (a, b) = if a > 0.0 && b > 0.0 { (a, b) } else { (f64::NAN, f64::NAN) };
+            if obs_args_nan(&[m, c, a, b]) { return 0.0; }
+            let a = a.max(LOG_PROB_FLOOR);
+            let b = b.max(LOG_PROB_FLOOR);
             use rand_distr::{Distribution, Gamma};
             let inner = rng.inner_mut();
             let ga = Gamma::new(a, 1.0).map(|d| d.sample(inner)).unwrap_or(1.0);
