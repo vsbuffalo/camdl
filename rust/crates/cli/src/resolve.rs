@@ -62,10 +62,13 @@ pub struct TrajectoryCtx<'a> {
     /// Resolved base parameter values (name → value) + table-file digests.
     pub base_params: &'a HashMap<String, f64>,
     pub table_digests: Vec<DataDigest>,
-    /// Resolved scenario delta.
+    /// Resolved scenario delta — the *effective* one, compose-walked
+    /// (`params_resolver::resolve_preset_delta` for a preset).
     pub enable: &'a [String],
     pub disable: &'a [String],
     pub scen_params: &'a HashMap<String, f64>,
+    /// `scale` factors in application order (gh#573).
+    pub scen_scale: &'a [(String, f64)],
     /// Readable labels (provenance).
     pub param_label: &'a str,
     pub scenario_label: &'a str,
@@ -161,6 +164,7 @@ fn resolve_scenario(
     enable: &[String],
     disable: &[String],
     patch: &HashMap<String, f64>,
+    scale: &[(String, f64)],
 ) -> Result<ResolvedScenario, ResolveError> {
     let enabled = enable.iter().cloned().map(InterventionId).collect();
     let disabled = disable.iter().cloned().map(InterventionId).collect();
@@ -168,7 +172,14 @@ fn resolve_scenario(
     for (k, v) in patch {
         p.insert(ParamId(k.clone()), finite(*v)?);
     }
-    Ok(ResolvedScenario { enabled, disabled, patch: p })
+    // Group by parameter, keeping each parameter's factors in application
+    // order: factors on different parameters commute, factors on the same one
+    // are applied in sequence (see `ResolvedScenario::scale`).
+    let mut sc: BTreeMap<ParamId, Vec<FiniteF64>> = BTreeMap::new();
+    for (k, f) in scale {
+        sc.entry(ParamId(k.clone())).or_default().push(finite(*f)?);
+    }
+    Ok(ResolvedScenario { enabled, disabled, patch: p, scale: sc })
 }
 
 /// The readable config label: `{backend}-dt{dt}` (e.g. `chain_binomial-dt1`).
@@ -202,7 +213,7 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
         init_state: ctx.init_state.clone(),
     };
     let params = resolve_params(ctx.base_params, ctx.table_digests.clone())?;
-    let scenario = resolve_scenario(ctx.enable, ctx.disable, ctx.scen_params)?;
+    let scenario = resolve_scenario(ctx.enable, ctx.disable, ctx.scen_params, ctx.scen_scale)?;
     let seed = Seed { process_seed: ctx.process_seed, base_seed: ctx.base_seed };
 
     // Each level hashes a disjoint slice of the input; the union is the whole

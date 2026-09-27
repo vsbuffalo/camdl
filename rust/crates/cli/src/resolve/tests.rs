@@ -86,6 +86,7 @@ fn ctx<'a>(
         enable: &[],
         disable: &[],
         scen_params: params_empty(),
+        scen_scale: &[],
         param_label: "base",
         scenario_label: "baseline",
         base_seed,
@@ -324,6 +325,7 @@ struct SimInputs {
     enable: Vec<String>,
     disable: Vec<String>,
     scen_params: HashMap<String, f64>,
+    scen_scale: Vec<(String, f64)>,
     param_label: String,
     scenario_label: String,
     base_seed: u64,
@@ -348,6 +350,7 @@ impl SimInputs {
             enable: vec![],
             disable: vec![],
             scen_params: HashMap::new(),
+            scen_scale: vec![],
             param_label: "base".into(),
             scenario_label: "baseline".into(),
             base_seed: 1,
@@ -375,6 +378,7 @@ impl SimInputs {
             enable: &self.enable,
             disable: &self.disable,
             scen_params: &self.scen_params,
+            scen_scale: &self.scen_scale,
             param_label: &self.param_label,
             scenario_label: &self.scenario_label,
             base_seed: self.base_seed,
@@ -401,6 +405,9 @@ fn differential_semantic_inputs_rekey_the_run_id() {
         ("scenario_enable",  Box::new(|i| i.enable = vec!["vacc".into()])),
         ("scenario_disable", Box::new(|i| i.disable = vec!["aging".into()])),
         ("scen_param",       Box::new(|i| { i.scen_params.insert("beta".into(), 0.7); })),
+        // gh#573: `scale` multiplies the resolved value, so it is as semantic
+        // as a `set`.
+        ("scen_scale",       Box::new(|i| i.scen_scale = vec![("beta".into(), 0.5)])),
         ("process_seed",     Box::new(|i| i.process_seed = 2)),
         ("no_flows",         Box::new(|i| i.no_flows = true)),
         ("columns",          Box::new(|i| { i.columns.insert("S".into()); })),
@@ -695,7 +702,14 @@ fn cas_identity_pins() {
         // half through `Problem::load` and hash nothing that changed; `sim`
         // and `sim_ensemble` hash no fit config at all. That the other five
         // stay is the claim this pin checks.
-        ("sim", "3db7bf9105cb8bb4c8b6efc44fdcb289fea7ad0d628bd139a0475aee334a5f84"),
+        //
+        // gh#573 then moved `sim` ALONE: `ResolvedScenario` schema_version
+        // 1 -> 2 gained `scale`, so the scenario level hashes the effective
+        // delta. Only `sim` hashes a `ResolvedScenario` here; `survey` keys its
+        // scenario by name (beside the model digest, which covers every
+        // preset), and this fixture's `sim_ensemble` folds fixed cell ids. A
+        // real ensemble re-keys through its cells' `run_id`s.
+        ("sim", "07ba298d4cb90f6a3d3c371a44d26ddfaf82e1b09ffcb3646efd470f870f067e"),
         ("fit", "80339677a112da2a743896246da06ee9a80002d0bf0b481fbb88e6afe089966c"),
         ("pfilter", "487a1ac8fafaa7548b078657be2fc7d1b5ec17ccfb177ff10b992b8a03e161b3"),
         ("survey", "ef89bb787175271fbec810a494a3a7b7cde2ef909cff60633d638b66ea1b0ab0"),

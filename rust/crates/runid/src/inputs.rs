@@ -194,14 +194,31 @@ pub struct ResolvedParams {
     pub tables: Vec<DataDigest>,
 }
 
-/// Resolved scenario delta (the `scenario` level): sorted id-sets + a
-/// canonical patch. The empty delta hashes to its **real** `scen_h8`;
-/// `baseline` is the display label only, never a literal zero hash.
+/// Resolved scenario delta (the `scenario` level): sorted id-sets, a
+/// canonical `set` patch, and the `scale` factors. The empty delta hashes to
+/// its **real** `scen_h8`; `baseline` is the display label only, never a
+/// literal zero hash.
+///
+/// The delta is the scenario's *effective* one — every field inherited
+/// through `compose` included — as resolved by the same authority the value
+/// resolver applies (`params_resolver::resolve_preset_delta` in the CLI).
+///
+/// `schema_version = 2` (gh#573): added `scale`. Before it, two presets
+/// differing only in `scale` (or only in what they `compose`) hashed to one
+/// `scen_h8` while producing different trajectories. The field contributes
+/// bytes when empty too, so every sim leaf re-keys — deliberate, versioned
+/// turnover.
 #[derive(Debug, Clone, PartialEq, RunInput)]
+#[run_input(schema_version = 2)]
 pub struct ResolvedScenario {
     pub enabled: BTreeSet<InterventionId>,
     pub disabled: BTreeSet<InterventionId>,
     pub patch: BTreeMap<ParamId, FiniteF64>,
+    /// Multiplicative factors per parameter, in application order. A list,
+    /// not a product: the resolver multiplies the value by each factor in
+    /// turn, and `(v·a)·b` need not equal `v·(a·b)` bit-for-bit, so the
+    /// factor sequence — not its product — is what determines the result.
+    pub scale: BTreeMap<ParamId, Vec<FiniteF64>>,
 }
 
 /// Resolved simulation config (the `config` level).

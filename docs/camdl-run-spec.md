@@ -781,9 +781,11 @@ version. **config** is backend, `dt`, `t_start`, `t_end`, the output schedule,
 `allow_degenerate_rates`, and the trajectory column view (`--no-flows`,
 `--columns`); `--output-every` is not here because it is lowered into the output
 schedule upstream. **params** is the resolved base name→value map plus the
-digests of any `--table` files. **scenario** is the enabled and disabled
-intervention sets plus the parameter patch. **seed** is the resolved
-`process_seed` and the base `--seed`.
+digests of any `--table` files. **scenario** is the scenario's effective delta —
+the enabled and disabled intervention sets, the parameter patch (`set`), and the
+`scale` factors, each including whatever the scenario inherits through `compose`
+— so two presets that differ only in `scale` or only in what they compose cannot
+share a `run_id`. **seed** is the resolved `process_seed` and the base `--seed`.
 
 Segment labels: the model label is the model file's slugged stem; the config
 label is `{backend}-dt{dt}`; the params label is `base` when no per-cell
@@ -794,9 +796,9 @@ is `seed_{N}` with the base seed verbatim, unpadded.
 
 Because a level hash is a structural digest of typed values rather than of a
 string, the empty scenario is a **constant**: a scenario with no overrides, no
-enables and no disables always hashes to the same value, so `baseline-33233b72`
-identifies the unmodified baseline in every project. `seed_1-06cbd6b3` and
-`base-...` are constants in the same way.
+scale factors, no enables and no disables always hashes to the same value, so
+`baseline-037ee3b0` identifies the unmodified baseline in every project.
+`seed_1-06cbd6b3` and `base-...` are constants in the same way.
 
 A **multi-cell** `simulate` (`--replicates`, `--seeds`, several `--scenario`, or
 `--draws`) writes the N per-cell `sim` leaves _and_ one `sim_ensemble` leaf
@@ -1349,7 +1351,7 @@ results/sims/
   sir_basic-cd37d79d/                 # model:    IR digest + ir_version + engine
     chain_binomial-dt1-9fe90ef5/      # config:   backend, dt, schedule, output view
       base-b912ced1/                  # params:   resolved base values (+ table digests)
-        baseline-33233b72/            # scenario: the (here empty) delta
+        baseline-037ee3b0/            # scenario: the (here empty) delta
           seed_7-d0aef62a/            # seed:     the resolved process_seed
             traj.tsv
             run.json
@@ -1391,7 +1393,7 @@ camdl simulate seir_vaccine.camdl --params params.toml --seed 42
 ```
 
 ```
-   stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/baseline-33233b72/seed_42-dd2fb524
+   stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/baseline-037ee3b0/seed_42-dd2fb524
           camdl cat 18bd7a09b098c20c22fd478abd331b5475d213c57f5505ead75088f35a523c27
 ```
 
@@ -1702,7 +1704,7 @@ camdl list --format json           # machine-readable; see the caveat below
 
 # Full metadata for one run (short-hash prefix resolves git-style)
 camdl show 18bd7a09
-camdl show ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/baseline-33233b72/seed_42-dd2fb524
+camdl show ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/baseline-037ee3b0/seed_42-dd2fb524
 
 # Emit the trajectory, or a named stream from the leaf
 camdl cat 18bd7a09
