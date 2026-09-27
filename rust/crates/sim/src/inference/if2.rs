@@ -21,8 +21,11 @@
 //!     resample (Θ, X) jointly
 //! ```
 //!
-//! Two properties of that order are load-bearing and were each once
-//! wrong. The perturbation precedes the process step, so one Θ^P_n drives
+//! Three properties are load-bearing and were each once wrong. Θ^{m-1}_j
+//! is the j-th particle of iteration m-1's final swarm, carried forward
+//! whole — not the swarm mean broadcast to every particle, which discards
+//! the swarm's covariance (its memory of a likelihood ridge's direction)
+//! and any separation between modes (gh#646). The perturbation precedes the process step, so one Θ^P_n drives
 //! both the simulation and the measurement density (gh#365). And x₀ is
 //! drawn per particle from *that particle's* t=0-perturbed θ, not once
 //! from the swarm mean — without it a parameter reaching the model only
@@ -316,8 +319,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     let schedule = timeline.schedule;
     let scheduled = timeline.effects;
 
-    // Mutable copy of params — updated each iteration with the filter mean.
-    // Start from `base_params` for non-estimated slots, then overwrite each
+    // The declared start. Start from `base_params` for non-estimated slots, then overwrite each
     // estimated slot with that `EstimatedParam`'s `.initial`. For
     // single-start fits `.initial == base_params[idx]` so this is a no-op;
     // for scout with per-chain random starts (or any caller that supplies
@@ -326,10 +328,10 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     // — chains supposedly starting from 64 random points all started from
     // the same `base_params` and only diverged via their per-chain RNG on
     // the first perturbation. See docs/dev/incidents/2026-04-18-if2-ignored-per-chain-initial.md.
-    let mut current_params = base_params.to_vec();
+    let mut start_params = base_params.to_vec();
     for spec in if2_params {
-        if spec.index < current_params.len() {
-            current_params[spec.index] = spec.initial;
+        if spec.index < start_params.len() {
+            start_params[spec.index] = spec.initial;
         }
     }
 
@@ -358,11 +360,20 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     let mut ess_history: Vec<f64> = Vec::with_capacity(config.n_iterations * n_obs);
 
     // Pre-allocate particle state, params, RNGs, and scratch buffers once.
-    // Re-initialized from current_params at the start of each iteration.
+    // States are re-drawn from each particle's θ at the start of every
+    // iteration; the parameter swarm is not re-initialized.
     let mut states: Vec<ParticleState> = (0..n)
         .map(|_| ParticleState::new(n_int, n_tr, n_acc))
         .collect();
-    let mut particle_params: Vec<Vec<f64>> = vec![vec![0.0; base_params.len()]; n];
+    // Θ^0_j = the declared start for every particle j. From here on each
+    // particle carries its OWN θ across iterations: iteration m perturbs
+    // Θ^{m-1}_j, the j-th particle of iteration m-1's final (resampled) swarm —
+    // Ionides et al. (2015) Algorithm 1, and pomp's `mif2`, which carries the
+    // full `paramMatrix` between iterations and uses the swarm mean only for
+    // `traces`/`coef`. The swarm's spread is its memory of a likelihood ridge's
+    // direction and of separate modes; resetting every particle to the swarm
+    // mean each iteration destroys both (gh#646).
+    let mut particle_params: Vec<Vec<f64>> = vec![start_params.clone(); n];
     let mut scratches: Vec<P::Scratch> = (0..n)
         .map(|_| process.new_scratch())
         .collect();
@@ -373,11 +384,6 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     let mut params_buf: Vec<Vec<f64>> = vec![vec![0.0; base_params.len()]; n];
 
     for iter in 0..config.n_iterations {
-
-        // Re-initialize per-particle parameter vectors from current estimate
-        for pp in &mut particle_params {
-            pp.copy_from_slice(&current_params);
-        }
 
         // IM1 fix (2026-04-19 inference review): per-particle RNG
         // streams via ChaCha8's stream counter. iter in the top
@@ -686,8 +692,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             log_weights.fill(0.0);
         }
 
-        // Compute parameter means across particles → next iteration's starting point
-        let mut param_means = current_params.clone();
+        // Swarm mean: this iteration's point estimate (trace + MLE). It is a
+        // summary only — the next iteration starts from the swarm itself.
+        let mut param_means = start_params.clone();
         for spec in if2_params {
             let mean: f64 = particle_params.iter()
                 .map(|pp| pp[spec.index])
@@ -733,8 +740,6 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 iter, n_skipped_obs, n_obs);
         }
 
-        // Feed filter mean back as next iteration's starting params
-        current_params = param_means;
     }
 
     let last_iter = iterations.last().expect("n_iterations ≥ 1 enforced at FitConfigV2::validate");
