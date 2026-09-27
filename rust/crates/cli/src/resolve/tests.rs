@@ -81,7 +81,7 @@ fn ctx<'a>(
         allow_degenerate_rates: false,
         no_flows: false,
         columns: columns_empty(),
-        base_params: params,
+        params,
         table_digests: vec![],
         enable: &[],
         disable: &[],
@@ -373,7 +373,7 @@ impl SimInputs {
             allow_degenerate_rates: self.allow_degenerate_rates,
             no_flows: self.no_flows,
             columns: &self.columns,
-            base_params: &self.base_params,
+            params: &self.base_params,
             table_digests: vec![],
             enable: &self.enable,
             disable: &self.disable,
@@ -566,6 +566,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         draw_idx: 0,
         sim_run_id: ContentHash::from_bytes([9; 32]),
         traj_digest: ContentHash::from_bytes([10; 32]),
+        params_level: ContentHash::from_bytes([11; 32]),
     }];
     let ens = resolve_sim_ensemble(&EnsembleCtx {
         model,
@@ -574,7 +575,6 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         stem: "sir",
         backend: ForwardBackend::ChainBinomial,
         dt: 1.0,
-        base_params: &params,
         cells: &cells,
     })
     .expect("sim_ensemble");
@@ -715,11 +715,19 @@ fn cas_identity_pins() {
         // model's `stratum` / `covers` unconditionally rather than only when
         // non-default. The SV header and `SimulationConfig` are folded into
         // every kind's `model` level, so no kind can stay.
+        //
+        // gh#583 (item C) then moved `sim_ensemble` ALONE: its `params` level
+        // is now the set of its cells' own `params` level hashes rather than a
+        // base parameter map rebuilt beside them. The other five kinds hash no
+        // ensemble level. (A real `sim` leaf also re-keys where its resolved
+        // values differ from the old base map — a scenario that sets values, a
+        // draw shadowed by `--param`, a batch cell over model defaults — but
+        // this fixture hands `resolve_trajectory` its params directly.)
         ("sim", "4d378bf80f18768cad7d968ca547d05db64f9cc382deb62054507c6044811bf9"),
         ("fit", "b054cfcd2c5080ebde21f3a6016307e716cbb273018726dcf1708ef7f3488142"),
         ("pfilter", "e1994c64f4b2eea615d031e5bfe239d8c506f9c0471c94336df5c94ab9fc575a"),
         ("survey", "3a56923c978abaa4bb73f7b6b8a940bca6c47c9f51d127071fee3191fe1045cb"),
-        ("sim_ensemble", "9c3842edc16c6eff848b528dfc1ce7a18fafad7db1f2f1a1480010996ac630aa"),
+        ("sim_ensemble", "c7cdd710a9f4d92c2b10751737fc56098209f27de97934f302cc55f45d932c1a"),
         ("profile", "38359dc3df9ab8544384ddc5210eb7ab3a7e6cd50fc1af7c49c8f2141a0b819a"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not

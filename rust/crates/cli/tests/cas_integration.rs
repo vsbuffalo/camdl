@@ -902,8 +902,13 @@ output_dir = "{out}"
 seeds = {{ n = 1 }}
 parallel = 1
 
+# An ad-hoc scenario that leaves `beta` alone. sir_basic's `baseline` PRESET
+# sets beta = 0.3 at the scenario tier, above the sweep's, so under it the
+# three points are one computation (see
+# `batch_sweep_shadowed_by_a_preset_is_one_leaf`).
 [[scenario]]
-name = "baseline"
+name = "plain"
+params = {{ gamma = 0.1 }}
 
 [sweep]
 beta = [0.2, 0.3, 0.4]
@@ -953,6 +958,52 @@ beta = [0.2, 0.3, 0.4]
     assert!(stdout.contains("beta=0.2"), "list should show beta=0.2: {}", stdout);
     assert!(stdout.contains("beta=0.3"), "list should show beta=0.3: {}", stdout);
     assert!(stdout.contains("beta=0.4"), "list should show beta=0.4: {}", stdout);
+}
+
+/// gh#583: a cell's `params` level is the parameter values the engine RAN.
+/// sir_basic's `baseline` preset sets beta = 0.3 at the scenario tier, which
+/// sits above the sweep's, so all three sweep points simulate beta = 0.3 with
+/// the same seed: one computation. The identity used to key the requested
+/// (discarded) sweep values, so the store held three leaves of identical bytes
+/// labelled beta = 0.2 / 0.3 / 0.4. It is one leaf, labelled with the value
+/// that ran. (That the sweep is voided without a word is gh#572.)
+#[test]
+fn batch_sweep_shadowed_by_a_preset_is_one_leaf() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let output = tmp.path().join("output");
+    let params_path = tmp.path().join("params.toml");
+    std::fs::write(&params_path, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
+    let batch_path = tmp.path().join("batch.toml");
+    std::fs::write(&batch_path, format!(r#"
+[config]
+model = "{model}"
+params = "{params}"
+output_dir = "{out}"
+seeds = {{ n = 1 }}
+parallel = 1
+
+[[scenario]]
+name = "baseline"
+
+[sweep]
+beta = [0.2, 0.3, 0.4]
+"#,
+        model = golden_sir_basic().display(),
+        params = params_path.display(),
+        out = output.display(),
+    )).unwrap();
+    let st = Command::new(&bin)
+        .args(["batch", "run", &batch_path.to_string_lossy()])
+        .status().expect("spawn");
+    assert!(st.success(), "batch sweep should succeed");
+
+    let run_dirs: Vec<_> = walkdir(&output.join("sims")).into_iter()
+        .filter(|p| p.join("run.json").exists()).collect();
+    assert_eq!(run_dirs.len(), 1,
+        "three sweep points the preset overrides are one computation: {run_dirs:?}");
+    assert_eq!(level_label(&read_meta(&run_dirs[0]), "params"), "beta=0.3",
+        "the params label names the beta that ran");
 }
 
 #[test]
