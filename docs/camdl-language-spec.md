@@ -5137,7 +5137,8 @@ revision.
 
 In a fit, an `algorithm = "if2"` stage derives its perturbation scale from each
 parameter's declared `bounds` — there is no per-parameter `rw_sd` knob on the
-stage. Cooling is pomp's cf50 convention (halfway-SD fraction); see
+stage. Cooling follows pomp's `cooling.fraction.50`: the SD reaches `cooling` of its
+initial value after `cooling_target_iters` iterations (default 50); see
 `docs/methods/cooling.md`.
 
 **Regimes (scout / refine / validate)**: the scout → refine → validate ladder is
