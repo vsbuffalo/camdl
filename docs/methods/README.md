@@ -18,9 +18,8 @@ Scope:
 
 Current notes:
 
-- [`cooling.md`](cooling.md) — IF2 cooling schedule; pomp cf50 convention; scout
-  vs refine design intent; worked empirical iter-by-iter table on the he2010
-  model.
+- [`cooling.md`](cooling.md) — IF2 cooling schedule: the formula, its relation
+  to pomp's `cooling.fraction.50`, and worked numbers.
 - [`particle-methods.md`](particle-methods.md) — the four particle- method
   implementations (bootstrap PF, IF2's parameter-augmented loop, CSMC-AS for
   PGAS, correlated PF for correlated-MH PMMH); algorithm equations, file:line,

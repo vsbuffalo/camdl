@@ -657,9 +657,10 @@ cooling = 0.05
 starts = { from_mle = "@scout" }
 ```
 
-Cooling is pomp's `cooling.fraction.50` (cf50) convention: the parameter is the
-halfway-point SD fraction, the end-of-stage SD is its square. Formula, worked
-example, and empirical iter-by-iter table: `docs/methods/cooling.md`.
+Cooling follows pomp's `cooling.fraction.50`: the perturbation SD reaches
+`cooling × rw_sd` after `cooling_target_iters` iterations (default 50, pomp's
+fixed value) and keeps shrinking geometrically after that. Formula and worked
+numbers: `docs/methods/cooling.md`.
 
 ### Initial-state parameters (`perturb_only_at_t0`)
 
