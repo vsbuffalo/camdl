@@ -36,6 +36,11 @@ use runid::{run_id, ArtifactKind, ContentHash, FiniteF64, LevelId, ResolveError}
 pub struct ResolvedTrajectory {
     pub levels: Vec<LevelId>,
     pub run_id: ContentHash,
+    /// The readable summary written to the leaf's `run.json.inputs` (never
+    /// hashed): the parameter values, scenario and seed the levels were
+    /// hashed from, built from the same [`TrajectoryCtx`] in the same call, so
+    /// what `camdl show` prints is what the `run_id` names (gh#583 item I).
+    pub display_inputs: serde_json::Value,
 }
 
 /// Inputs to [`resolve_trajectory`], all already resolved by the caller. The
@@ -230,7 +235,15 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::Sim, &level_hashes);
 
-    Ok(ResolvedTrajectory { levels, run_id: rid })
+    let display_inputs = serde_json::json!({
+        "params": ctx.params.iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect::<BTreeMap<String, f64>>(),
+        "scenario": ctx.scenario_label,
+        "process_seed": ctx.process_seed,
+    });
+
+    Ok(ResolvedTrajectory { levels, run_id: rid, display_inputs })
 }
 
 // ─── The resolved-writer seam (gh#241 PR D) ──────────────────────────────────

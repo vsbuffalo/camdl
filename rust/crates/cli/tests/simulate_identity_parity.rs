@@ -290,6 +290,58 @@ fn param_that_shadows_a_draw_splits_the_cas_leaves() {
         "the shadowed leaf's params label must carry the β it ran: {labels:?}");
 }
 
+/// gh#583 item I. A `Sim` leaf's `run.json.inputs` was `null`, so `camdl show`
+/// printed no parameter values for a simulation — while the params path label
+/// collapses a long vector to `draws` on the stated grounds that "the full
+/// drawn values live in `run.json`". The leaf now records the resolved values
+/// its `params` level hashed (here: the draw's γ and N0, and the `--param` β
+/// that won over the draw's), and `camdl show` prints them.
+#[test]
+fn sim_leaf_records_the_parameters_it_ran() {
+    let bin = camdl_bin();
+    let Some(cc) = camdlc() else {
+        eprintln!("skip: camdlc.exe missing (run `make build`)");
+        return;
+    };
+    if !bin.exists() {
+        eprintln!("skip: release camdl missing (run `make build`)");
+        return;
+    }
+    let tmp = tempdir("inputs");
+    let ir = compile(tmp.path(), &cc, SIR_ODE, "sir");
+    let draws = tmp.path().join("d.tsv");
+    std::fs::write(&draws, "beta\tgamma\tN0\n0.3\t0.1\t10000\n").unwrap();
+    let out = tmp.path().join("out");
+    let st = Command::new(&bin)
+        .args(["simulate"]).arg(&ir)
+        .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--draws"]).arg(&draws)
+        .args(["--param", "beta=0.6", "--output-dir"]).arg(&out)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    assert!(st.status.success(), "simulate: {}", String::from_utf8_lossy(&st.stderr));
+
+    let leaves = sim_leaves(&out);
+    assert_eq!(leaves.len(), 1);
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(leaves[0].join("run.json")).unwrap())
+            .unwrap();
+    let params = &record["inputs"]["params"];
+    assert_eq!(params["beta"], 0.6, "the --param β that ran, not the draw's: {record}");
+    assert_eq!(params["gamma"], 0.1, "the draw's γ: {record}");
+    assert_eq!(params["N0"], 10000.0, "the draw's N0: {record}");
+
+    let run_id = record["run_id"].as_str().unwrap().to_string();
+    let show = Command::new(&bin)
+        .args(["show", &run_id, "--root"]).arg(&out)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("NO_COLOR", "1")
+        .output().unwrap();
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(show.status.success(), "show: {}", String::from_utf8_lossy(&show.stderr));
+    assert!(text.lines().any(|l| l.trim_start().starts_with("beta") && l.contains("0.6")),
+        "`camdl show` prints the leaf's parameter values: {text}");
+}
+
 const SIR_DATED: &str = r#"
 time_unit = 'days
 origin = date("2020-01-01")
