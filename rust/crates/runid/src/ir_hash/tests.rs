@@ -22,7 +22,8 @@ use ir::table::{OobPolicy, Table, TableSource};
 use ir::time_func::{Sinusoidal, TimeFuncKind, TimeFunction};
 use ir::transition::{DrawMethod, StoichiometryEntry, Transition, TransitionMetadata};
 
-use crate::hash::ContentAddressed;
+use super::{hash_anchor_opt, hash_integrator};
+use crate::hash::{CanonicalHasher, ContentAddressed};
 
 /// A broad, representative SIR-with-seasonality model that exercises a wide
 /// slice of the IR tree: integer + real compartments, a transition with a
@@ -282,7 +283,12 @@ fn model_golden_hash() {
     // deliberate, version-bumped re-key (the init block's order is now part of
     // model identity, because the runtime evaluates entries in an order derived
     // from it).
-    const GOLDEN: &str = "355822419daf10b5013519aec6fb1fd86ba8453607c1524f57da697d1321bdaf";
+    // SV=3 (gh#583): the integrator, the anchored horizons, and an observation
+    // model's `stratum` / `covers` are hashed unconditionally — the representative
+    // model's default `Rk4` and absent anchor now contribute a variant tag and a
+    // presence byte where they contributed nothing, and the SV header bumps 2→3.
+    // A deliberate, version-bumped re-key of every model-bearing leaf.
+    const GOLDEN: &str = "940a9dd6b594941aad07fdfb73e16c4cd63dd7f90a24c875c2c50e7bfd25c642";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -843,10 +849,8 @@ fn init_condition_order_changes_the_model_hash() {
 // `compartment_dims_map_order_invariant` above, over a still-hashed map.)
 
 /// gh#166: the chosen integrator is part of the model's content identity (it
-/// changes the numerics), so it must flow into the run-id — but the `Rk4`
-/// default must be hash-invisible so pre-gh#166 run-ids are unchanged (the
-/// GOLDEN pin above is the proof of that, since `representative_model()` is
-/// `Rk4`).
+/// changes the numerics), so it must flow into the run-id — every variant and
+/// every tolerance, the default included.
 #[test]
 fn integrator_choice_changes_run_id() {
     let with = |i: Integrator| {
@@ -858,20 +862,44 @@ fn integrator_choice_changes_run_id() {
     let rk45_default = with(Integrator::Rk45 { atol: None, rtol: None });
     let rk45_a = with(Integrator::Rk45 { atol: Some(1e-8), rtol: Some(1e-6) });
     let rk45_b = with(Integrator::Rk45 { atol: Some(1e-10), rtol: Some(1e-6) });
+    let rk45_atol_only = with(Integrator::Rk45 { atol: Some(1e-8), rtol: None });
+    let rk45_rtol_only = with(Integrator::Rk45 { atol: None, rtol: Some(1e-8) });
 
-    // Explicit Rk4 == the default model (Rk4 is hash-invisible / omitted).
-    assert_eq!(rk4, representative_model().content_hash(), "default rk4 must not move the run-id");
-    // rk4 vs rk45, and tolerance variations, all hash distinctly.
     assert_ne!(rk4, rk45_default, "rk4 vs rk45 must hash distinctly");
     assert_ne!(rk45_default, rk45_a, "rk45 default-tols vs explicit tols must differ");
     assert_ne!(rk45_a, rk45_b, "a different atol must change the run-id");
+    assert_ne!(rk45_atol_only, rk45_rtol_only,
+        "the same value as atol and as rtol must hash distinctly");
+}
+
+/// gh#583: the integrator and the anchors are hashed as VALUES, not only when
+/// non-default or present. `Rk4` writes a variant tag and an absent anchor a
+/// presence byte, so a model's digest is a function of the value, never of
+/// whether it happens to be the default. Pinned at the encoding level because
+/// at the level of whole-model hashes "writes nothing" and "writes a constant"
+/// are indistinguishable by comparison alone.
+#[test]
+fn defaults_are_not_hash_invisible() {
+    let nothing = CanonicalHasher::new().finalize();
+    let rk4 = {
+        let mut h = CanonicalHasher::new();
+        hash_integrator(&mut h, &Integrator::Rk4);
+        h.finalize()
+    };
+    assert_ne!(rk4, nothing, "Rk4 must contribute bytes to the model hash");
+    let absent_anchor = {
+        let mut h = CanonicalHasher::new();
+        hash_anchor_opt(&mut h, &None);
+        h.finalize()
+    };
+    assert_ne!(absent_anchor, nothing,
+        "an absent anchor must contribute a presence byte to the model hash");
 }
 
 /// gh#616: an anchored horizon is model identity — two models whose horizons
 /// anchor differently produce different trajectories from the same data, so they
-/// must not share a content address. `None` (the whole pre-gh#616 corpus, and
-/// every model after the resolver substitutes) contributes NOTHING, which is
-/// what `model_golden_hash` above proves: the pin did not move at the 0.32 bump.
+/// must not share a content address. `None` (every model after the resolver
+/// substitutes) hashes as an absent value, distinct from every anchor.
 #[test]
 fn t_end_anchor_changes_run_id() {
     use ir::anchor::{AnchoredTime, ObsAnchor};
@@ -886,8 +914,6 @@ fn t_end_anchor_changes_run_id() {
     let last_plus_28 = with(Some(AnchoredTime { anchor: ObsAnchor::Last, offset: 28.0 }));
     let last_plus_56 = with(Some(AnchoredTime { anchor: ObsAnchor::Last, offset: 56.0 }));
 
-    assert_eq!(none, representative_model().content_hash(),
-        "an unanchored model must keep its pre-gh#616 run-id");
     assert_ne!(none, bare_last, "an anchored horizon must re-key");
     assert_ne!(bare_last, bare_first, "first_obs vs last_obs must hash distinctly");
     assert_ne!(bare_last, last_plus_28, "an offset must re-key");
@@ -904,8 +930,6 @@ fn preset_t_end_anchor_changes_run_id() {
         m.content_hash()
     };
     let none = with(None);
-    assert_eq!(none, representative_model().content_hash(),
-        "an unanchored preset must keep its pre-gh#616 run-id");
     assert_ne!(none, with(Some(AnchoredTime::bare(ObsAnchor::Last))),
         "an anchored preset horizon must re-key");
     assert_ne!(with(Some(AnchoredTime::bare(ObsAnchor::Last))),
@@ -953,26 +977,28 @@ fn projection_variant_hashes_are_pinned() {
     // absolute hexes moved once at SV=2 (2026-07-16, gradients out of identity:
     // the per-type `header` folds the SV, so bumping it re-keys every ir hash),
     // a deliberate, version-bumped re-key; the *relative* ordering/injectivity of
-    // the variants is unchanged.
+    // the variants is unchanged. They moved again at SV=3 (gh#583: every field
+    // hashed unconditionally), for the same header reason — no projection's own
+    // encoding changed.
     assert_eq!(
         hex(Projection::CumulativeFlow("x".into())),
-        "e2d143527737965155c5b9ab7d36dc38ec6af37d2ce4279fcbbc2b84ca9c46ca"
+        "c80a15d67e04b64fa2df334fd27984a7c651b6d4fc3a9f9b08413d0fc3689bee"
     );
     assert_eq!(
         hex(Projection::CurrentPop("x".into())),
-        "f0d6fc200544318ad4724b41335177b069b91ff2765caae38d61a38479b12a02"
+        "fedc999cc552acafa51d10ff43153b91dc9ecdea96211b67a9fd05a8c2c619cf"
     );
     assert_eq!(
         hex(Projection::CurrentPopSum(vec!["x".into()])),
-        "bb7ede75805e3a90522a4511f66ff9bfeb106934f57e46639764643986852206"
+        "424190d6afaf6648a3572720d6a4f5f41dbec0ed4e8d51c80df13496e15a7a19"
     );
     assert_eq!(
         hex(Projection::DerivedExpr(Expr::const_(1.0))),
-        "e726f60975126a21179c87f7a7bd77853a76fedce0541374fb2a80334347c06c"
+        "36ca3af511367e0c5d572c2281586001052539c939691adfcf33f425054470c0"
     );
     assert_eq!(
         hex(Projection::CumulativeFlowSum(vec!["x".into()])),
-        "df05acb4d865d837590a535138e7be26546f019da197fb68d7d92603c020f09a"
+        "ff6941eff3cd63e23aff57e77d393aed0554502ffda8d2275b0f3801e5770b29"
     );
     // Proposal 2026-09-09 (proportion of flows over a window): appended at 5.
     // The five pins above are unchanged by the addition — that is the
@@ -982,7 +1008,7 @@ fn projection_variant_hashes_are_pinned() {
             numerator: vec!["x".into()],
             denominator: vec!["x".into(), "y".into()],
         }),
-        "f1e516ab6e3f2a0272a1e0e0a517c437ce6ce3bf59dc7433527b6ab372ff462d"
+        "f1eb9493b6932227dec2e61de33f74faa286c163ffe031dcdb6e052c827f7032"
     );
     // The two sides are hashed in order, so swapping them is a different
     // projection — `a / (a + b)` and `(a + b) / a` must not share a run_id.

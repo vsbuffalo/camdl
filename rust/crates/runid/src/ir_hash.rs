@@ -79,7 +79,17 @@ use crate::hash::{CanonicalHasher, ContentAddressed};
 /// every model hash — a deliberate, version-bumped re-key, pinned by the golden
 /// hash + the gradient-inert tests. See
 /// `docs/dev/proposals/2026-07-16-gradient-maps-out-of-run-identity.md`.
-const SV: u16 = 2;
+///
+/// `SV = 3` (gh#583): every field is hashed unconditionally. The integrator,
+/// the observation-anchored horizons (`simulation.t_end_anchor`,
+/// `preset.t_end_anchor`), an observation model's `stratum` and its `covers`
+/// had each been folded in only when non-default or present, so a model's
+/// digest was a function of *whether* a value was the default rather than of
+/// the value — the exception that let `--integrator` go missing from the run
+/// identity unnoticed on a code read. They now write their value (a variant
+/// tag, an `Option` presence byte, a length prefix) like every other field.
+/// Re-keys every model-bearing leaf.
+const SV: u16 = 3;
 
 /// Write the per-type domain-separation header: tag + schema version.
 fn header(h: &mut CanonicalHasher, tag: &str) {
@@ -716,26 +726,11 @@ impl ContentAddressed for ObservationModel {
         columns.hash_into(h);
         h.write_str(scored);
         emit_schedule.hash_into(h);
-        // `stratum` is hashed ONLY when non-empty: an empty stratum (every
-        // model without a stratified observation header) writes nothing, so
-        // existing run_ids are byte-identical. A non-empty stratum exists only
-        // on new stratified-obs leaves (no stored run_ids yet) and is
-        // load-bearing — it routes file rows to this leaf — so it must enter
-        // the hash. (`Vec::hash_into` would write a `len=0` prefix even when
-        // empty, churning every existing id; guard against that.)
-        if !stratum.is_empty() {
-            stratum.hash_into(h);
-        }
-        // `covers` (gh#833) changes WHAT THE LIKELIHOOD SCORES — the same file
-        // read as daily windows and as week-ending windows gives different
-        // numbers — so two fits differing only in it must not share an
-        // address. Hashed only when declared, for the same reason `stratum`
-        // is: an undeclared stream writes nothing, so run_ids stored before
-        // the declaration existed stay valid. Once the declaration is
-        // required this guard becomes dead and goes.
-        if let Some(c) = covers {
-            c.hash_into(h);
-        }
+        // `stratum` routes file rows to this leaf and `covers` (gh#833) changes
+        // what the likelihood scores, so both are identity — hashed as values,
+        // empty and absent included (SV = 3).
+        stratum.hash_into(h);
+        covers.hash_into(h);
         projection.hash_into(h);
         // projection_state_grad (∂projection/∂compartment, gh#275 §1h) is the
         // compiler-derived WrtPop gradient of a DerivedExpr projection — pure
@@ -1256,33 +1251,41 @@ impl ContentAddressed for SimulationConfig {
         h.write_str(time_semantics);
         hash_opt_f64(h, dt);
         rng_seed.hash_into(h);
-        // gh#166: hash the integrator ONLY when non-default (Rk45 + its
-        // tolerances, tagged so atol/rtol can't collide), so a default-Rk4 model
-        // keeps its pre-gh#166 run-id (no cache churn) while rk45 / explicit
-        // tolerances — which produce different trajectories — get a distinct
-        // content address.
-        if let ir::model::Integrator::Rk45 { atol, rtol } = integrator {
-            h.write_str("rk45");
-            if let Some(a) = atol { h.write_str("atol"); h.write_f64_bits(*a); }
-            if let Some(r) = rtol { h.write_str("rtol"); h.write_f64_bits(*r); }
-        }
-        // gh#616: same "only when present" idiom — an unanchored model keeps its
-        // pre-gh#616 run-id (no cache churn), while two anchored horizons that
-        // differ in anchor or offset get distinct content addresses. The sim
-        // path resolves and CLEARS this before the model is hashed, so what it
-        // guards is the paths that hash an as-compiled model (fit sidecar,
-        // model-level provenance).
+        // gh#166: the integrator changes the trajectory, so it is identity —
+        // its variant and tolerances, always, the default included (SV = 3).
+        hash_integrator(h, integrator);
+        // gh#616: an anchored horizon is identity. The sim path resolves and
+        // CLEARS it before the model is hashed, so what it guards is the
+        // paths that hash an as-compiled model (fit sidecar, model-level
+        // provenance).
         hash_anchor_opt(h, t_end_anchor);
     }
 }
 
-/// Hash an optional observation anchor, contributing NOTHING when absent so an
-/// unanchored model's digest is byte-identical to its pre-gh#616 value.
+/// Hash the ODE integrator choice: a variant tag, then (for `Rk45`) each
+/// tolerance as an `Option` — so `Rk4`, `Rk45` at runtime defaults, and each
+/// explicit tolerance hash distinctly and none of them hashes as nothing.
+fn hash_integrator(h: &mut CanonicalHasher, i: &ir::model::Integrator) {
+    match i {
+        ir::model::Integrator::Rk4 => h.write_u8(0),
+        ir::model::Integrator::Rk45 { atol, rtol } => {
+            h.write_u8(1);
+            hash_opt_f64(h, atol);
+            hash_opt_f64(h, rtol);
+        }
+    }
+}
+
+/// Hash an optional observation anchor: a presence byte, then the anchor and
+/// its offset.
 fn hash_anchor_opt(h: &mut CanonicalHasher, a: &Option<ir::anchor::AnchoredTime>) {
-    if let Some(a) = a {
-        h.write_str("t_end_anchor");
-        h.write_str(a.anchor.as_str());
-        h.write_f64_bits(a.offset);
+    match a {
+        None => h.write_u8(0),
+        Some(a) => {
+            h.write_u8(1);
+            h.write_str(a.anchor.as_str());
+            h.write_f64_bits(a.offset);
+        }
     }
 }
 
