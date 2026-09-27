@@ -2399,29 +2399,6 @@ fn load_params_single_row_tsv(path: &str) -> Result<HashMap<String, f64>, String
     }
     Ok(out)
 }
-/// Load a TOML params file and apply values to the model's parameters.
-///
-/// **Used only by the simulate CAS-identity path** (`build_simulate_cas_sink`)
-/// for partial parameter resolution: it deliberately holds back the scenario
-/// half so the base params and the scenario delta hash into separate identity
-/// levels (the `params` vs `scenario` levels). Every other subcommand routes
-/// through `params_resolver::resolve_parameters` instead.
-///
-/// Validates the resulting `model.parameters` after applying — if the
-/// supplied file leaves any *resolved* parameter with a non-finite
-/// value or out-of-bounds value, returns an error. Params still at
-/// `value = None` (i.e. waiting on the scenario half) are skipped by
-/// `validate_parameter_values`.
-pub fn apply_params_file(model: &mut ir::Model, path: &str) -> Result<(), String> {
-    let vals = load_params_toml(path)?;
-    for p in &mut model.parameters {
-        if let Some(&v) = vals.get(&p.name) {
-            p.value = p.value.with_value(v);
-        }
-    }
-    validate_parameter_values(model)?;
-    Ok(())
-}
 
 /// Validate that every parameter with a declared `bounds` carries a value
 /// within those bounds, and that every parameter value is finite (no NaN,
@@ -2806,11 +2783,8 @@ pub struct CellInitState {
 /// Expand `--param-vec PREFIX=FILE` entries into concrete `(PREFIX_key, val)`
 /// pairs, validating each name against the model's parameter set.
 ///
-/// Shared by the run path (`resolve_run_model`) and the identity path
-/// (`build_simulate_cas_sink`) so the hashed params cannot diverge from the
-/// executed ones — the 2026-08-23 audit found the identity path never read
-/// `set_vec_entries` at all, so two runs with different vec files shared one
-/// `run_id` and the second was served the first's trajectory.
+/// Called only from [`resolve_run_parameters`], the one parameter resolution
+/// both the engine and the run identity take.
 pub fn resolve_param_vec_entries(
     model: &ir::Model,
     set_vec_entries: &[(String, String)],
@@ -3210,13 +3184,17 @@ impl Default for SimRun {
     }
 }
 
-/// Resolve a `SimRun` to a compiled model + parameter vector, applying the
-/// full scenario / --params / --param-vec / --param / --table precedence
-/// pipeline (docs/camdl-run-spec.md §1.3). Shared by the count-trajectory
-/// path ([`run_simulation`]) and the lineage path
-/// ([`run_simulation_lineage`]) so both see byte-identical parameter
-/// resolution.
-pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), String> {
+/// The model a simulate cell starts from, before its horizon, its start time
+/// and its parameter values are resolved: the IR at `run.ir_path`, with the
+/// run's observation anchors substituted and its `--integrator` applied.
+///
+/// The one load both sides of a run take: [`resolve_run_model`] builds the
+/// model that RUNS from it, and `build_simulate_cas_sink` builds the model the
+/// run identity HASHES from it. They were two independent loads, each applying
+/// its own list of overrides, and every override one of them forgot was a
+/// `run_id` that described a different computation from the one stored under
+/// it (`--integrator`, `--param-vec`, the gh#616 anchors — gh#583 item C).
+pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
     // Load IR source (handles .camdl compilation via camdlc). This is the forward
     // simulation path — it never reads the state-Jacobian, so compile lean
     // (`needs_state_grad = false`, gh#439 A2).
@@ -3229,16 +3207,110 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
         .map_err(|e| format!("IR load error from {}: {}", ir_path_resolved, e))?;
     // gh#616: substitute the run's observation anchors FIRST — before the
     // scenario horizon (which reads a preset's `t_end`, NaN until substituted),
-    // before the `--to` override, and before validate/compile. The window comes
-    // from the run rather than being re-derived here, so this model and the CAS
-    // `base_model` (substituted at its own load in `build_simulate_cas_sink`)
-    // are the same model by construction: the digest cannot describe a
-    // different horizon or forcing fork from the one that runs.
+    // before the `--to` override, and before validate/compile.
     if let Some(w) = run.obs_anchors {
         crate::obs_anchor::substitute(&mut model, w)?;
     }
     // gh#166: CLI `--integrator` override (method only), before validate/compile.
     apply_integrator_override(&mut model, run.integrator);
+    Ok(model)
+}
+
+/// Resolve one cell's parameter values through the resolver's tier chain
+/// (model default < `--params` < draw/sweep point < scenario < `--param` /
+/// `--param-vec`, spec §1.3), over `model` as [`load_run_model`] returns it.
+///
+/// The one resolution both sides of a run take: [`resolve_run_model`] runs the
+/// values it returns, and `CasSink::cell_resolve` hashes them into the cell's
+/// `params` level. The identity used to rebuild the parameter map in a walk of
+/// its own — `--params`, then `--param-vec`, then `--param`, then the draw row
+/// on top — which put a draw/sweep value ABOVE `--param` where the resolver
+/// puts it below, so `--draws d.tsv` and `--draws d.tsv --param beta=0.6` hashed
+/// to one `run_id` while simulating different β (gh#583).
+pub fn resolve_run_parameters(
+    model: &ir::Model,
+    run: &SimRun,
+) -> Result<crate::params_resolver::ResolvedParameters, String> {
+    // ── Expand --param-vec PREFIX=FILE entries into (NAME, VALUE) pairs ──
+    //
+    // `--param-vec` is a vector-stratification convenience for `--param`:
+    // `--param-vec beta=params.tsv` reads `(key, val)` rows and sets
+    // `beta_<key> = val`. The resolver doesn't know about `--param-vec`
+    // directly; instead, we expand it into the equivalent fixed-cli pairs
+    // and append BEFORE `run.overrides`, so that explicit `--param NAME=VAL`
+    // still wins under the resolver's last-wins semantics for tier 5
+    // (`fixed_cli`). `--param-vec` is the bulk-set sibling of `--param` and
+    // shares its precedence, so a scenario cannot override it.
+    let mut fixed_cli: Vec<(String, f64)> =
+        resolve_param_vec_entries(model, &run.set_vec_entries)?;
+    // `run.overrides` is a HashMap; collect into a deterministic
+    // (alphabetical-by-name) Vec so the resolver's provenance is
+    // reproducible run-to-run.
+    let mut override_vec: Vec<(String, f64)> = run.overrides.iter()
+        .map(|(k, &v)| (k.clone(), v))
+        .collect();
+    override_vec.sort_by(|a, b| a.0.cmp(&b.0));
+    fixed_cli.extend(override_vec);
+
+    // Draw row / sweep point overrides feed the resolver's draw/sweep tier
+    // (below scenario, spec §1.3) — kept SEPARATE from `fixed_cli` so a
+    // scenario `set`/`scale` wins over them while genuine `--param` does
+    // not. Sorted for reproducible provenance.
+    let mut point_overrides: Vec<(String, f64)> = run.point_overrides.iter()
+        .map(|(k, &v)| (k.clone(), v))
+        .collect();
+    point_overrides.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // `simulate` and `lineage` are non-inference subcommands. The
+    // `fit_toml_*` slots are empty; the resolver's [estimate] kick-out
+    // logic is a no-op. All value precedence flows through
+    // params_resolver, which is the sole writer of
+    // `model.parameters[i].value` on the simulate/lineage path.
+    let fixed_files: Vec<std::path::PathBuf> = run.params_files.iter()
+        .map(std::path::PathBuf::from).collect();
+    let table_files: std::collections::HashMap<String, std::path::PathBuf> = run.table_files.iter()
+        .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v))).collect();
+    let ftf: indexmap::IndexMap<String, f64> = indexmap::IndexMap::new();
+    let fte: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+
+    crate::params_resolver::resolve_parameters(
+        crate::params_resolver::ParameterInputs {
+            model,
+            scenario: run.scenario_name.as_deref(),
+            adhoc_enable: &run.adhoc_enable,
+            adhoc_disable: &run.adhoc_disable,
+            scenario_inline_name: run.scenario_inline_name.as_deref(),
+            scenario_inline_set: &run.scenario_inline_set,
+            scenario_inline_scale: &run.scenario_inline_scale,
+            point_overrides: &point_overrides,
+            fixed_cli: &fixed_cli,
+            fixed_files: &fixed_files,
+            fit_toml_fixed: &ftf,
+            fit_toml_estimate: &fte,
+            table_files: &table_files,
+        }
+    ).map_err(|e| e.to_string())
+}
+
+/// The parameter values a resolved model carries: every parameter that
+/// resolved to a value, by name. What a cell's `params` level hashes and what
+/// its `run.json` records.
+pub fn resolved_parameter_values(model: &ir::Model) -> std::collections::BTreeMap<String, f64> {
+    model.parameters.iter()
+        .filter_map(|p| p.value.resolved_value().map(|v| (p.name.clone(), v)))
+        .collect()
+}
+
+/// Resolve a `SimRun` to a compiled model + parameter vector, applying the
+/// full scenario / --params / --param-vec / --param / --table precedence
+/// pipeline (docs/camdl-run-spec.md §1.3). Shared by the count-trajectory
+/// path ([`run_simulation`]) and the lineage path
+/// ([`run_simulation_lineage`]) so both see byte-identical parameter
+/// resolution.
+pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), String> {
+    // The shared load (anchors + `--integrator`), so this model and the CAS
+    // `base_model` are one load by construction (gh#583 item C).
+    let mut model = load_run_model(run)?;
     // gh#561: a named scenario may declare its own horizon (`scenarios { x {
     // simulate { to = … } } }`). Applying it HERE — onto `simulation.t_end`,
     // before validate/compile — is the whole of the runtime change: `t_end` is
@@ -3287,76 +3359,7 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
         msg
     })?;
 
-    // ── Expand --param-vec PREFIX=FILE entries into (NAME, VALUE) pairs ──
-    //
-    // `--param-vec` is a vector-stratification convenience for `--param`:
-    // `--param-vec beta=params.tsv` reads `(key, val)` rows and sets
-    // `beta_<key> = val`. The resolver doesn't know about `--param-vec`
-    // directly; instead, we expand it into the equivalent fixed-cli pairs
-    // and append BEFORE `run.overrides`, so that explicit `--param NAME=VAL`
-    // still wins under the resolver's last-wins semantics for tier 5
-    // (`fixed_cli`).
-    //
-    // **Deviation from the legacy precedence**: previously `--param-vec`
-    // sat between `--params` (tier-3-equivalent) and scenario (tier 4),
-    // meaning scenarios could override `--param-vec` values. Under the
-    // resolver this becomes tier 5 alongside `--param`, so scenarios
-    // **cannot** override `--param-vec` any more. This is a small
-    // behaviour change. No integration test pinned the old order
-    // (verified via `rg 'param.vec' rust/crates/cli/tests` — no hits),
-    // and the principled mapping is that `--param-vec` is the
-    // bulk-set sibling of `--param` and should share its precedence.
-    let mut fixed_cli: Vec<(String, f64)> =
-        resolve_param_vec_entries(&model, &run.set_vec_entries)?;
-    // `run.overrides` is a HashMap; collect into a deterministic
-    // (alphabetical-by-name) Vec so the resolver's provenance is
-    // reproducible run-to-run.
-    let mut override_vec: Vec<(String, f64)> = run.overrides.iter()
-        .map(|(k, &v)| (k.clone(), v))
-        .collect();
-    override_vec.sort_by(|a, b| a.0.cmp(&b.0));
-    fixed_cli.extend(override_vec);
-
-    // Draw row / sweep point overrides feed the resolver's draw/sweep tier
-    // (below scenario, spec §1.3) — kept SEPARATE from `fixed_cli` so a
-    // scenario `set`/`scale` wins over them while genuine `--param` does
-    // not. Sorted for reproducible provenance.
-    let mut point_overrides: Vec<(String, f64)> = run.point_overrides.iter()
-        .map(|(k, &v)| (k.clone(), v))
-        .collect();
-    point_overrides.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // ── Build resolver inputs ───────────────────────────────────────────
-    //
-    // `simulate` and `lineage` are non-inference subcommands. The
-    // `fit_toml_*` slots are empty; the resolver's [estimate] kick-out
-    // logic is a no-op. All value precedence flows through
-    // params_resolver, which is now the sole writer of
-    // `model.parameters[i].value` on the simulate/lineage path.
-    let fixed_files: Vec<std::path::PathBuf> = run.params_files.iter()
-        .map(std::path::PathBuf::from).collect();
-    let table_files: std::collections::HashMap<String, std::path::PathBuf> = run.table_files.iter()
-        .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v))).collect();
-    let ftf: indexmap::IndexMap<String, f64> = indexmap::IndexMap::new();
-    let fte: indexmap::IndexSet<String> = indexmap::IndexSet::new();
-
-    let resolved = crate::params_resolver::resolve_parameters(
-        crate::params_resolver::ParameterInputs {
-            model: &model,
-            scenario: run.scenario_name.as_deref(),
-            adhoc_enable: &run.adhoc_enable,
-            adhoc_disable: &run.adhoc_disable,
-            scenario_inline_name: run.scenario_inline_name.as_deref(),
-            scenario_inline_set: &run.scenario_inline_set,
-            scenario_inline_scale: &run.scenario_inline_scale,
-            point_overrides: &point_overrides,
-            fixed_cli: &fixed_cli,
-            fixed_files: &fixed_files,
-            fit_toml_fixed: &ftf,
-            fit_toml_estimate: &fte,
-            table_files: &table_files,
-        }
-    ).map_err(|e| e.to_string())?;
+    let resolved = resolve_run_parameters(&model, run)?;
 
     crate::params_resolver::print_warnings(&resolved);
 

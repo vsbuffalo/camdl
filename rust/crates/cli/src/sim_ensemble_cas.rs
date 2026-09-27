@@ -11,9 +11,10 @@
 //! the combined bytes:
 //!   - **model** — the pure model IR digest (constant across cells).
 //!   - **config** — backend + dt (shared by every cell).
-//!   - **params** — the resolved base parameter map (the values shared across
-//!     cells before any per-draw override; the per-draw deltas ride in `grid`
-//!     via each cell's `Sim` run_id).
+//!   - **params** — the set of the cells' own `params` level hashes (sorted,
+//!     deduplicated): which resolved parameter vectors the ensemble ran. Read
+//!     off the cells' identities rather than rebuilt beside them, so it cannot
+//!     describe different values from the ones the cells hashed (gh#583).
 //!   - **grid** — a digest over the SORTED cell list. Each cell contributes
 //!     `(scenario_label, process_seed, draw_idx, sim_run_id)`; the `sim_run_id`
 //!     already encodes that cell's model/config/params/scenario/seed, so a
@@ -48,6 +49,8 @@ pub struct EnsembleCell {
     /// SHA-256 of the cell's `traj.tsv` — the `deps` edge's consumed-artifact
     /// digest (which upstream file the combined TSV was built from).
     pub traj_digest: ContentHash,
+    /// The cell's `params` level hash (its resolved parameter values).
+    pub params_level: ContentHash,
 }
 
 /// A fully-resolved ensemble leaf: the four factored levels (in path order) and
@@ -66,8 +69,6 @@ pub struct EnsembleCtx<'a> {
     pub stem: &'a str,
     pub backend: crate::args::types::ForwardBackend,
     pub dt: f64,
-    /// Resolved base parameter map (name → value), shared across cells.
-    pub base_params: &'a std::collections::HashMap<String, f64>,
     /// The full set of cells the run expands to.
     pub cells: &'a [EnsembleCell],
 }
@@ -103,16 +104,14 @@ struct EnsembleGridLevel<'a> {
 }
 
 pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, String> {
-    // params level — the resolved base map, sorted + finiteness-gated (a
-    // non-finite would null-collapse and collide distinct values).
-    let mut params_sorted: Vec<(&str, f64)> =
-        ctx.base_params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    params_sorted.sort_by(|a, b| a.0.cmp(b.0));
-    // The `params` level is the sorted (name, value) list itself — a sequence
-    // with no field set to forget, so it takes no wrapper struct (and wrapping
-    // it would re-key: an object is not an array). `canonical_config_hash`
-    // gates finiteness on the raw values, which `json!` would already have
-    // collapsed for a NaN.
+    // params level — the distinct `params` level hashes of the cells, sorted:
+    // the parameter vectors the ensemble ran, as the cells themselves hashed
+    // them. A sequence with no field set to forget, so it takes no wrapper
+    // struct.
+    let mut params_levels: Vec<String> =
+        ctx.cells.iter().map(|c| c.params_level.to_hex()).collect();
+    params_levels.sort();
+    params_levels.dedup();
 
     // grid level — the sorted cell list + the explicit cell count. Each cell is
     // (scenario, seed, draw, sim_run_id); sorting is order-independent. The
@@ -146,7 +145,7 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
     let levels = vec![
         level("model", ctx.stem, structural_level_hash(&model_digest)),
         level("config", &config_label, canonical_config_hash(&config_level, &[])?),
-        level("params", "base", canonical_config_hash(&params_sorted, &[])?),
+        level("params", "base", canonical_config_hash(&params_levels, &[])?),
         level("grid", &grid_label, canonical_config_hash(&grid_level, &[])?),
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
@@ -180,6 +179,7 @@ mod tests {
             draw_idx: draw,
             sim_run_id: ContentHash::from_bytes([rid; 32]),
             traj_digest: ContentHash::from_bytes([rid ^ 0xff; 32]),
+            params_level: ContentHash::from_bytes([rid ^ 0x0f; 32]),
         }
     }
 

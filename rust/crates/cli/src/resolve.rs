@@ -59,8 +59,10 @@ pub struct TrajectoryCtx<'a> {
     /// here — it is lowered into `output` (the schedule) upstream.
     pub no_flows: bool,
     pub columns: &'a std::collections::BTreeSet<String>,
-    /// Resolved base parameter values (name → value) + table-file digests.
-    pub base_params: &'a HashMap<String, f64>,
+    /// The cell's resolved parameter values (name → value) — every tier
+    /// applied, as `util::resolve_run_parameters` hands them to the engine —
+    /// plus the table-file digests.
+    pub params: &'a HashMap<String, f64>,
     pub table_digests: Vec<DataDigest>,
     /// Resolved scenario delta — the *effective* one, compose-walked
     /// (`params_resolver::resolve_preset_delta` for a preset).
@@ -212,7 +214,7 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
         columns: ctx.columns.clone(),
         init_state: ctx.init_state.clone(),
     };
-    let params = resolve_params(ctx.base_params, ctx.table_digests.clone())?;
+    let params = resolve_params(ctx.params, ctx.table_digests.clone())?;
     let scenario = resolve_scenario(ctx.enable, ctx.disable, ctx.scen_params, ctx.scen_scale)?;
     let seed = Seed { process_seed: ctx.process_seed, base_seed: ctx.base_seed };
 

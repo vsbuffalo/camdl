@@ -237,3 +237,119 @@ fn param_vec_values_split_the_cas_leaves() {
     assert_eq!(sim_leaves(&out).len(), 2,
         "two different --param-vec files must land in two distinct CAS leaves");
 }
+
+/// gh#583 (item C, the params half). The identity rebuilt a cell's parameter
+/// map in a walk of its own — `--params`, `--param-vec`, `--param`, then the
+/// draw row layered on top — while the engine resolves them through the
+/// resolver, where a draw/sweep point sits BELOW `--param`. So a draws file
+/// with a `beta` column, run once plain and once with `--param beta=…`, hashed
+/// both to one `run_id` (the draw's β won in the identity) while simulating
+/// two different β (the `--param` won in the run): the second run died with
+/// DivergentRecompute, and before S1 it would have been served the first's
+/// trajectory. Identity now hashes the values the resolver hands the engine.
+#[test]
+fn param_that_shadows_a_draw_splits_the_cas_leaves() {
+    let bin = camdl_bin();
+    let Some(cc) = camdlc() else {
+        eprintln!("skip: camdlc.exe missing (run `make build`)");
+        return;
+    };
+    if !bin.exists() {
+        eprintln!("skip: release camdl missing (run `make build`)");
+        return;
+    }
+    let tmp = tempdir("drawshadow");
+    let ir = compile(tmp.path(), &cc, SIR_ODE, "sir");
+    let draws = tmp.path().join("d.tsv");
+    std::fs::write(&draws, "beta\tgamma\tN0\n0.3\t0.1\t10000\n").unwrap();
+    let out = tmp.path().join("out");
+
+    for (tag, extra) in [("plain", None), ("shadowed", Some("beta=0.6"))] {
+        let mut cmd = Command::new(&bin);
+        cmd.args(["simulate"]).arg(&ir)
+            .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--draws"]).arg(&draws)
+            .args(["--output-dir"]).arg(&out)
+            .arg("-o").arg(tmp.path().join(format!("traj_{tag}.tsv")))
+            .env("CAMDL_SKIP_VERSION_CHECK", "1");
+        if let Some(p) = extra { cmd.args(["--param", p]); }
+        let st = cmd.output().unwrap();
+        assert!(st.status.success(),
+            "simulate --draws ({tag}) must succeed (a DivergentRecompute here \
+             means the identity hashed a parameter value the run did not use): {}",
+            String::from_utf8_lossy(&st.stderr));
+    }
+    let leaves = sim_leaves(&out);
+    assert_eq!(leaves.len(), 2,
+        "a draw and the same draw under `--param beta=0.6` simulate different β, \
+         so they must land in two distinct CAS leaves");
+    // The params path label names the values the cell ran: the shadowed leaf
+    // must say β = 0.6, not the draw's 0.3.
+    let labels: Vec<String> = leaves.iter()
+        .map(|l| l.to_string_lossy().into_owned()).collect();
+    assert!(labels.iter().any(|l| l.contains("beta_0.6")),
+        "the shadowed leaf's params label must carry the β it ran: {labels:?}");
+}
+
+const SIR_DEFAULTED: &str = r#"
+time_unit = 'days
+compartments { S, I, R }
+let gamma : rate = 0.1
+parameters {
+  beta : rate  in [0.001, 5.0]
+  N0   : count in [100, 10000]
+}
+transitions {
+  infection : S --> I @ beta * S * I / N0
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days  to = 10 'days }
+"#;
+
+/// gh#583 (the batch half). `batch run` hashed its params file's raw entries
+/// as the cell's parameters, `simulate` hashed the model defaults overlaid by
+/// the same file — two walks, neither the resolver's. On a model with a
+/// defaulted parameter the same cell (same model, params file, seed) got two
+/// `params` levels, so `simulate` and `batch run` each re-simulated what the
+/// other had stored. Both now hash the resolved values of the cell's own
+/// `SimRun`, so they meet on one leaf.
+#[test]
+fn simulate_and_batch_share_a_leaf_over_a_defaulted_parameter() {
+    let bin = camdl_bin();
+    let Some(cc) = camdlc() else {
+        eprintln!("skip: camdlc.exe missing (run `make build`)");
+        return;
+    };
+    if !bin.exists() {
+        eprintln!("skip: release camdl missing (run `make build`)");
+        return;
+    }
+    let tmp = tempdir("batchdefault");
+    let ir = compile(tmp.path(), &cc, SIR_DEFAULTED, "m");
+    let params = tmp.path().join("p.toml");
+    std::fs::write(&params, "beta = 0.3\nN0 = 1000\n").unwrap();
+    let out = tmp.path().join("store");
+
+    let st = Command::new(&bin)
+        .args(["simulate"]).arg(&ir)
+        .args(["--params"]).arg(&params)
+        .args(["--seed", "3", "--output-dir"]).arg(&out)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    assert!(st.status.success(), "simulate: {}", String::from_utf8_lossy(&st.stderr));
+
+    let manifest = tmp.path().join("b.toml");
+    std::fs::write(&manifest, format!(
+        "[config]\nmodel = \"{}\"\nparams = \"{}\"\noutput_dir = \"{}\"\nseeds = {{ list = [3] }}\n",
+        ir.display(), params.display(), out.display(),
+    )).unwrap();
+    let st = Command::new(&bin)
+        .args(["batch", "run"]).arg(&manifest)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().unwrap();
+    assert!(st.status.success(), "batch run: {}", String::from_utf8_lossy(&st.stderr));
+
+    let leaves = sim_leaves(&out);
+    assert_eq!(leaves.len(), 1,
+        "simulate and batch run of one cell must resolve to one leaf; got {leaves:?}");
+}

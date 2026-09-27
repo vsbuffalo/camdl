@@ -514,6 +514,10 @@ pub(crate) struct RunEntry {
     pub(crate) scenario: String,
     pub(crate) process_seed: u64,
     pub(crate) draw_idx: usize,
+    /// The cell's `params` level hash — the identity of the parameter values
+    /// it ran. The ensemble's `params` level is the set of these (see
+    /// `sim_ensemble_cas`). `None` only if identity resolution failed.
+    pub(crate) params_level: Option<runid::ContentHash>,
 }
 
 // ─── The manifest's model ───────────────────────────────────────────────
@@ -545,6 +549,67 @@ fn load_manifest_model(model_path: &str, output_every: Option<f64>) -> Result<Ma
     let ir_json = std::fs::read_to_string(&ir_path)
         .map_err(|e| format!("cannot read {}: {}", ir_path, e))?;
     Ok(ManifestModel { ir_path, ir_json, _compiled: compiled, _every: every })
+}
+
+/// The `SimulateJob` a batch manifest runs: its model IR and params file,
+/// and none of the CLI-only knobs (`--to`, `--init-state`, anchors,
+/// `--integrator`, `--param`, `--param-vec`, `--table`). The one constructor
+/// `batch run`, the `[design.*]` path, and the dry-run / `batch status`
+/// predictions share, so a prediction builds each cell's `SimRun` from the job
+/// the run would build (`engine::build_cell_sim_run`).
+#[allow(clippy::too_many_arguments)]
+fn batch_job(
+    ir_path: &str,
+    params_file: Option<&str>,
+    backend: crate::args::types::ForwardBackend,
+    dt: f64,
+    source: crate::sim_job::ParamSource,
+    scenarios: Vec<crate::sim_job::ScenarioRef>,
+    seeds: &[u64],
+    parallel: usize,
+) -> crate::sim_job::SimulateJob {
+    crate::sim_job::SimulateJob {
+        model: ir_path.to_string(),
+        params_files: params_file.map(|p| vec![p.to_string()]).unwrap_or_default(),
+        backend,
+        dt,
+        integrator: None, // batch uses the model's declared integrator (no CLI override)
+        source,
+        scenarios,
+        // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
+        t_end_override: None,
+        // Nor forecast-row boundaries: batch records the model's own schedule.
+        required_output_times: Vec::new(),
+        // gh#641: nor an `init_state` key, for the same reason.
+        init_state: None,
+        // gh#616: `batch run` has no data-binding surface, so an anchored
+        // model is refused at `CompiledModel::new` rather than resolved.
+        obs_anchors: None,
+        // Batch seeds are always explicit (range / count / list).
+        seeds: crate::sim_job::Seeds::Explicit(seeds.to_vec()),
+        cli_overrides: Vec::new(),
+        set_vec_entries: Vec::new(),
+        table_files: Vec::new(),
+        // batch keeps its CAS-per-cell obs ensemble (CasSink), not the
+        // combined-file ObsOutput modes — leave None here.
+        obs: crate::sim_job::ObsOutput::None,
+        parallel,
+    }
+}
+
+/// The job a dry-run / `batch status` prediction resolves cells against: the
+/// per-cell inputs of [`batch_job`], with no grid (`predict_cells` walks the
+/// grid itself).
+fn batch_probe_job(
+    ir_path: &str,
+    params_file: Option<&str>,
+    backend: crate::args::types::ForwardBackend,
+    dt: f64,
+) -> crate::sim_job::SimulateJob {
+    batch_job(
+        ir_path, params_file, backend, dt,
+        crate::sim_job::ParamSource::Point { replicates: 1 }, Vec::new(), &[], 1,
+    )
 }
 
 // ─── cmd_batch_run ──────────────────────────────────────────────────────
@@ -716,7 +781,6 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
             &model_path,
             model_stem.as_deref(),
             &output_dir,
-            &base_params,
             &params_file_opt,
             backend,
             dt,
@@ -744,7 +808,7 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
 
     if a.dry_run {
         print_batch_dry_run(
-            &model_path, &batch_model, model_stem.as_deref(),
+            &model_path, &ir_path_resolved, &batch_model, model_stem.as_deref(),
             backend, dt, &output_dir, parallel,
             &resolved_scenarios, &sweep_points, &seeds, &base_params,
             exp.config.params.as_deref(), &runs_dir, a.allow_degenerate_rates,
@@ -843,7 +907,7 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
     //
     // Scenario routing: a resolved preset → `ScenarioRef::Named` (the
     // params_resolver preset path); an ad-hoc patch → `ScenarioRef::Inline`.
-    use crate::sim_job::{ParamSource, ScenarioRef, Seeds, SimulateJob};
+    use crate::sim_job::{ParamSource, ScenarioRef};
     let job_scenarios: Vec<ScenarioRef> = resolved_scenarios.iter().map(|r| {
         match &r.route {
             Some(preset_name) => ScenarioRef::Named(preset_name.clone()),
@@ -870,43 +934,16 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
         ParamSource::Point { replicates: 1 }
     };
 
-    let job = SimulateJob {
-        model: ir_path_resolved.clone(),
-        params_files: params_file_opt.as_ref().map(|p| vec![p.clone()]).unwrap_or_default(),
-        backend,
-        dt,
-        integrator: None, // batch uses the model's declared integrator (no CLI override)
-        source,
-        scenarios: job_scenarios,
-        // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
-        t_end_override: None,
-        // Nor forecast-row boundaries: batch records the model's own schedule.
-        required_output_times: Vec::new(),
-        // gh#641: nor an `init_state` key, for the same reason.
-        init_state: None,
-        // gh#616: `batch run` has no data-binding surface, so an anchored
-        // model is refused at `CompiledModel::new` rather than resolved.
-        obs_anchors: None,
-        // Batch seeds are always explicit (range / count / list).
-        seeds: Seeds::Explicit(seeds.clone()),
-        cli_overrides: Vec::new(),
-        set_vec_entries: Vec::new(),
-        table_files: Vec::new(),
-        // batch keeps its CAS-per-cell obs ensemble (CasSink), not the
-        // combined-file ObsOutput modes — leave None here.
-        obs: crate::sim_job::ObsOutput::None,
-        parallel,
-    };
+    let job = batch_job(
+        &ir_path_resolved, params_file_opt.as_deref(), backend, dt, source, job_scenarios,
+        &seeds, parallel,
+    );
 
     let mut sink = CasSink {
         resolved_scenarios: resolved_scenarios.clone(),
         model_path: model_path.clone(),
         model_stem: model_stem.clone(),
         base_model: batch_model.clone(),
-        base_params: base_params.clone(),
-        // Batch TOML has no `--table` mechanism (its `[config]` carries no
-        // table field); embedded tables ride the whole-IR model digest.
-        table_files: HashMap::new(),
         backend,
         dt,
         allow_degenerate_rates: a.allow_degenerate_rates,
@@ -963,18 +1000,17 @@ pub(crate) struct CasSink {
     pub(crate) model_stem: Option<String>,
     /// The **base** model — its whole-IR digest is the (constant-across-cells)
     /// model level. Never `cell.model` (which has scenario + sweep applied).
+    /// Loaded through the same seam the engine loads from
+    /// (`util::load_run_model` for `simulate`; `load_manifest_model` for
+    /// `batch`, whose cells carry no anchors and no `--integrator`), and it is
+    /// also the model each cell's parameter values are resolved over.
+    ///
+    /// There is deliberately no base parameter map here. A cell's `params`
+    /// level is resolved from the cell's own `SimRun` — the object the engine
+    /// runs — through `util::resolve_run_parameters`, the resolver call the
+    /// engine makes (gh#583). A parallel map rebuilt beside it put a draw/sweep
+    /// value above `--param` where the resolver puts it below.
     pub(crate) base_model: ir::Model,
-    /// Resolved base parameter values; per cell, the sweep point is layered on
-    /// top into the `params` level (a resolved value, not the scenario delta).
-    pub(crate) base_params: HashMap<String, f64>,
-    /// External `--table NAME=PATH` overrides (name → file path). The table
-    /// reference in the IR is identity-inert on its own; the file's *content*
-    /// is what enters the run_id, so each resolve reads the bytes and folds
-    /// their digest into the `params` level (`ResolvedParams.tables`). Empty
-    /// for batch (its TOML has no `--table` mechanism); populated by
-    /// `simulate --table`. An edit to a `--table` file re-keys the run, so a
-    /// changed `matrix.tsv` cannot serve a stale cached trajectory.
-    pub(crate) table_files: HashMap<String, String>,
     pub(crate) backend: crate::args::types::ForwardBackend,
     pub(crate) dt: f64,
     pub(crate) allow_degenerate_rates: bool,
@@ -1058,14 +1094,17 @@ impl CasSink {
     /// Mirrors `profile_cas::data_digests`: sort by name, `digest_bytes` per
     /// file (= `ContentHash::from_hex(sha256_hex(bytes))`). Empty `table_files`
     /// → empty vec, identical to the no-`--table` path (so a plain `simulate`
-    /// is unaffected).
-    fn table_digests(&self) -> Result<Vec<runid::inputs::DataDigest>, String> {
-        let mut names: Vec<&String> = self.table_files.keys().collect();
+    /// is unaffected). Read from the cell's `SimRun::table_files` — the map the
+    /// resolver loads the tables from when the cell runs.
+    fn table_digests(
+        table_files: &HashMap<String, String>,
+    ) -> Result<Vec<runid::inputs::DataDigest>, String> {
+        let mut names: Vec<&String> = table_files.keys().collect();
         names.sort();
         names
             .iter()
             .map(|name| {
-                let path = &self.table_files[*name];
+                let path = &table_files[*name];
                 let bytes = std::fs::read(path)
                     .map_err(|e| format!("cannot read --table file '{}' ({}): {}", name, path, e))?;
                 Ok(runid::inputs::DataDigest(runid::ContentHash::digest_bytes(&bytes)))
@@ -1077,10 +1116,12 @@ impl CasSink {
     ///
     /// The model level is the **base** model digest (constant across the
     /// sweep — never `cell.model`, which has scenario + sweep applied). The
-    /// sweep point goes into the `params` level (base params ∪ sweep, a
-    /// resolved value — not the scenario delta, not the model hash). The
-    /// named scenario's enable/disable/params is the `scenario` level.
-    /// `process_seed` is engine-resolved (batch seeds are explicit).
+    /// `params` level is the cell's RESOLVED parameter values — every tier
+    /// (model default, `--params`, draw/sweep point, scenario, `--param`,
+    /// `--param-vec`) applied in the resolver's order by the resolver itself,
+    /// over the cell's own `SimRun`, exactly as the engine resolves them when
+    /// it runs the cell. The named scenario's enable/disable/params is the
+    /// `scenario` level. `process_seed` is engine-resolved.
     fn cell_resolve(
         &self,
         spec: &crate::engine::CellSpec,
@@ -1090,13 +1131,19 @@ impl CasSink {
             .find(|s| s.name == name || s.route.as_deref() == Some(name))
             .ok_or_else(|| format!("cell scenario '{}' not among resolved batch scenarios", name))?;
 
-        let mut params = self.base_params.clone();
-        for (k, v) in &spec.point_overrides {
-            params.insert(k.clone(), *v);
-        }
+        let params: HashMap<String, f64> = crate::util::resolved_parameter_values(
+            &crate::util::resolve_run_parameters(&self.base_model, &spec.sim_run)?.model,
+        ).into_iter().collect();
 
         let scenario_label = if resolved.name.is_empty() { "baseline" } else { resolved.name.as_str() };
-        let param_label = params_path_label(&spec.point_overrides);
+        // The label names the point's parameters at the values the cell RAN
+        // (resolved), not the values the point asked for: a `--param` or a
+        // scenario that shadows a draw column must not leave the path
+        // advertising the draw's value.
+        let ran_point: indexmap::IndexMap<String, f64> = spec.point_overrides.keys()
+            .filter_map(|k| params.get(k).map(|v| (k.clone(), *v)))
+            .collect();
+        let param_label = params_path_label(&ran_point);
 
         let ctx = crate::resolve::TrajectoryCtx {
             model: &self.base_model,
@@ -1131,8 +1178,8 @@ impl CasSink {
             allow_degenerate_rates: self.allow_degenerate_rates,
             no_flows: self.output_cols.no_flows,
             columns: &self.output_cols.allow,
-            base_params: &params,
-            table_digests: self.table_digests()?,
+            params: &params,
+            table_digests: Self::table_digests(&spec.sim_run.table_files)?,
             enable: &resolved.enable,
             disable: &resolved.disable,
             scen_params: &resolved.params,
@@ -1171,7 +1218,6 @@ impl CasSink {
         resolved_scenarios: &[ResolvedEntry],
         base_model: &ir::Model,
         model_stem: Option<&str>,
-        base_params: &HashMap<String, f64>,
         backend: crate::args::types::ForwardBackend,
         dt: f64,
         allow_degenerate_rates: bool,
@@ -1184,8 +1230,6 @@ impl CasSink {
             model_path: String::new(),
             model_stem: model_stem.map(|s| s.to_string()),
             base_model: base_model.clone(),
-            base_params: base_params.clone(),
-            table_files: HashMap::new(),
             backend,
             dt,
             allow_degenerate_rates,
@@ -1213,14 +1257,19 @@ impl CasSink {
     /// `points` is the expanded `[sweep]`/`[design]` grid (one null point for an
     /// empty sweep). Scenario routing matches the engine job: a resolved preset
     /// → `ScenarioRef::Named`, an ad-hoc patch → `Inline`; the sweep point is
-    /// the cell's `point_overrides`. A cell whose identity fails to resolve is
-    /// counted as a miss (it surfaces as an error on the real run path).
+    /// the cell's `point_overrides`. Each cell's `SimRun` is built from `job` by
+    /// `engine::build_cell_sim_run` — the constructor the engine uses — so the
+    /// predicted identity reads the inputs the run would. A cell whose identity
+    /// fails to resolve is counted as a miss (it surfaces as an error on the
+    /// real run path).
     fn predict_cells(
         &self,
+        job: &crate::sim_job::SimulateJob,
         points: &[indexmap::IndexMap<String, f64>],
         seeds: &[u64],
     ) -> Vec<CellPrediction> {
         let store = runid::FsCasStore::new(self.root());
+        let table_files: HashMap<String, String> = job.table_files.iter().cloned().collect();
         let mut out =
             Vec::with_capacity(points.len() * self.resolved_scenarios.len() * seeds.len());
         for (point_idx, point_overrides) in points.iter().enumerate() {
@@ -1235,6 +1284,9 @@ impl CasSink {
                     },
                 };
                 for &seed in seeds {
+                    let sim_run = crate::engine::build_cell_sim_run(
+                        job, &scenario, point_overrides, &table_files, seed, point_idx, 0,
+                    );
                     let spec = crate::engine::CellSpec {
                         run_idx: 0,
                         point_idx,
@@ -1242,7 +1294,7 @@ impl CasSink {
                         point_overrides: point_overrides.clone(),
                         process_seed: seed,
                         obs_seed: seed ^ crate::util::SEED_MIX_OBS,
-                        sim_run: crate::util::SimRun::default(),
+                        sim_run,
                     };
                     match self.cell_resolve(&spec) {
                         Ok((rt, dir, rel)) => {
@@ -1414,7 +1466,7 @@ impl crate::engine::RunSink for CasSink {
         // A cache hit still contributes to a multi-cell ensemble's deps, so
         // recover the leaf's run_id (from the resolve) and its traj.tsv digest
         // (from the existing leaf's run.json, recorded at first commit).
-        let (rel, run_id, traj_digest) = match self.cell_resolve(spec) {
+        let (rel, run_id, traj_digest, params_level) = match self.cell_resolve(spec) {
             Ok((rt, dir, rel)) => {
                 let digest = read_traj_digest(&dir);
                 // Keep an explicit `--label` current even on a pure cache-hit
@@ -1422,9 +1474,9 @@ impl crate::engine::RunSink for CasSink {
                 if let Some(ref label) = self.label {
                     let _ = ensure_provenance_label(&dir, label);
                 }
-                (rel, Some(rt.run_id), digest)
+                (rel, Some(rt.run_id), digest, params_level_hash(&rt))
             }
-            Err(_) => (String::new(), None, None),
+            Err(_) => (String::new(), None, None, None),
         };
         let name = spec.scenario.name().to_string();
         self.counter += 1;
@@ -1436,6 +1488,7 @@ impl crate::engine::RunSink for CasSink {
             scenario: name,
             process_seed: spec.process_seed,
             draw_idx: spec.point_idx,
+            params_level,
         });
     }
 
@@ -1642,9 +1695,15 @@ impl crate::engine::RunSink for CasSink {
             scenario: name,
             process_seed: spec.process_seed,
             draw_idx: spec.point_idx,
+            params_level: params_level_hash(&rt),
         });
         Ok(())
     }
+}
+
+/// The hash of a resolved cell's `params` level.
+fn params_level_hash(rt: &crate::resolve::ResolvedTrajectory) -> Option<runid::ContentHash> {
+    rt.levels.iter().find(|l| l.name == "params").map(|l| l.hash)
 }
 
 /// Read a committed leaf's `traj.tsv` SHA-256 from its `run.json` artifact
@@ -1709,7 +1768,6 @@ fn run_design_experiment(
     model_path: &str,
     model_stem: Option<&str>,
     output_dir: &str,
-    base_params: &HashMap<String, f64>,
     params_file_opt: &Option<String>,
     backend: crate::args::types::ForwardBackend,
     dt: f64,
@@ -1721,7 +1779,7 @@ fn run_design_experiment(
     parallel: usize,
     seeds: &[u64],
 ) {
-    use crate::sim_job::{ParamSource, ScenarioRef, Seeds, SimulateJob};
+    use crate::sim_job::{ParamSource, ScenarioRef};
 
     // The CAS store root is the canonical output root: design sim leaves share
     // the `<output>/sims/` tree with normal `batch`/`simulate` cells so an
@@ -1822,8 +1880,9 @@ fn run_design_experiment(
         if dry_run {
             print_design_dry_run(
                 design_name, &points, resolved_scenarios, batch_model,
-                model_stem, base_params, backend, dt, allow_degenerate_rates,
-                output_cols, &runs_dir, seeds, force,
+                model_stem,
+                &batch_probe_job(ir_path, params_file_opt.as_deref(), backend, dt),
+                backend, dt, allow_degenerate_rates, output_cols, &runs_dir, seeds, force,
             );
             continue;
         }
@@ -1833,38 +1892,16 @@ fn run_design_experiment(
             std::process::exit(1);
         });
 
-        let job = SimulateJob {
-            model: ir_path.to_string(),
-            params_files: params_file_opt.as_ref().map(|p| vec![p.clone()]).unwrap_or_default(),
-            backend,
-            dt,
-            integrator: None,
-            source: ParamSource::Sweep { points, replicates: 1 },
-            scenarios: job_scenarios.clone(),
-        // gh#626: batch TOML has no `to` key (deliberate; CLI-only override).
-        t_end_override: None,
-        // Nor forecast-row boundaries: batch records the model's own schedule.
-        required_output_times: Vec::new(),
-        // gh#641: nor an `init_state` key, for the same reason.
-        init_state: None,
-        // gh#616: `batch run` has no data-binding surface, so an anchored
-        // model is refused at `CompiledModel::new` rather than resolved.
-        obs_anchors: None,
-            seeds: Seeds::Explicit(seeds.to_vec()),
-            cli_overrides: Vec::new(),
-            set_vec_entries: Vec::new(),
-            table_files: Vec::new(),
-            obs: crate::sim_job::ObsOutput::None,
-            parallel,
-        };
+        let job = batch_job(
+            ir_path, params_file_opt.as_deref(), backend, dt,
+            ParamSource::Sweep { points, replicates: 1 }, job_scenarios.clone(), seeds, parallel,
+        );
 
         let mut sink = CasSink {
             resolved_scenarios: resolved_scenarios.to_vec(),
             model_path: model_path.to_string(),
             model_stem: model_stem.map(|s| s.to_string()),
             base_model: batch_model.clone(),
-            base_params: base_params.clone(),
-            table_files: HashMap::new(),
             backend,
             dt,
             allow_degenerate_rates,
@@ -1909,7 +1946,7 @@ fn print_design_dry_run(
     resolved_scenarios: &[ResolvedEntry],
     batch_model: &ir::Model,
     model_stem: Option<&str>,
-    base_params: &HashMap<String, f64>,
+    job: &crate::sim_job::SimulateJob,
     backend: crate::args::types::ForwardBackend,
     dt: f64,
     allow_degenerate_rates: bool,
@@ -1919,10 +1956,10 @@ fn print_design_dry_run(
     force: bool,
 ) {
     let probe = CasSink::probe(
-        resolved_scenarios, batch_model, model_stem, base_params,
+        resolved_scenarios, batch_model, model_stem,
         backend, dt, allow_degenerate_rates, output_cols, runs_dir, force,
     );
-    let predictions = probe.predict_cells(points, seeds);
+    let predictions = probe.predict_cells(job, points, seeds);
     let hits = predictions.iter().filter(|c| c.hit).count();
     let misses = predictions.len() - hits;
 
@@ -2178,10 +2215,6 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
     });
     let ir_json = &loaded.ir_json;
 
-    let base_params: HashMap<String, f64> = exp.config.params.as_ref()
-        .and_then(|p| load_params_toml(p).ok())
-        .unwrap_or_default();
-
     // Parse the model and resolve every `[[scenario]]` against its presets, so
     // the prediction resolves each cell's identity exactly as the run path
     // does (CLI review #3). A parse/resolution failure means the model itself
@@ -2229,10 +2262,13 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
         .collect();
 
     let probe = CasSink::probe(
-        &resolved_scenarios, &batch_model, model_stem.as_deref(), &base_params,
+        &resolved_scenarios, &batch_model, model_stem.as_deref(),
         exp.config.backend, exp.config.dt, false, &output_cols, &runs_dir, false,
     );
-    let predictions = probe.predict_cells(&points, &seeds);
+    let job = batch_probe_job(
+        &loaded.ir_path, exp.config.params.as_deref(), exp.config.backend, exp.config.dt,
+    );
+    let predictions = probe.predict_cells(&job, &points, &seeds);
     let live_hits = predictions.iter().filter(|c| c.hit).count();
     println!("  Completed:  {}/{} leaves present", live_hits, predictions.len());
 
@@ -2266,6 +2302,7 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
 #[allow(clippy::too_many_arguments)]
 fn print_batch_dry_run(
     model_path: &str,
+    ir_path: &str,
     batch_model: &ir::Model,
     model_stem: Option<&str>,
     backend: crate::args::types::ForwardBackend,
@@ -2293,10 +2330,11 @@ fn print_batch_dry_run(
             .collect()
     };
     let probe = CasSink::probe(
-        scenarios, batch_model, model_stem, base_params,
+        scenarios, batch_model, model_stem,
         backend, dt, allow_degenerate_rates, output_cols, runs_dir, force,
     );
-    let predictions = probe.predict_cells(&points, seeds);
+    let job = batch_probe_job(ir_path, params_file, backend, dt);
+    let predictions = probe.predict_cells(&job, &points, seeds);
 
     eprintln!("camdl batch run (dry run)");
     eprintln!();
@@ -2653,7 +2691,14 @@ mod tests {
             tables: vec![],
             interventions: vec![],
             observations: vec![],
-            parameters: vec![],
+            // One parameter with a default, so a draw/sweep point on `mu`
+            // resolves (the resolver refuses a point on an unknown name).
+            parameters: vec![ir::parameter::Parameter {
+                name: "mu".into(),
+                value: ir::parameter::ParamValue::Fixed { value: 0.5 },
+                param_kind: None,
+                param_dim: None,
+            }],
             bindings: vec![],
             per_eval_bindings: vec![],
             initial_conditions: InitialConditions::default(),
@@ -2679,10 +2724,10 @@ mod tests {
         }
     }
 
-    /// A `CasSink` whose only non-default identity input is the `--table` map,
-    /// so a run_id difference between two such sinks is attributable to the
-    /// table content alone.
-    fn sink_with_tables(runs_dir: &str, table_files: HashMap<String, String>) -> CasSink {
+    /// A `CasSink` over `tiny_model` with default identity inputs. What varies
+    /// between cells is the cell's own `SimRun` (its `--table` map, its point),
+    /// which is where `cell_resolve` reads them from.
+    fn sink(runs_dir: &str) -> CasSink {
         CasSink {
             resolved_scenarios: vec![ResolvedEntry {
                 name: "baseline".to_string(),
@@ -2696,8 +2741,6 @@ mod tests {
             model_path: "model.ir.json".to_string(),
             model_stem: Some("sir".to_string()),
             base_model: tiny_model(),
-            base_params: HashMap::new(),
-            table_files,
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             allow_degenerate_rates: false,
@@ -2716,7 +2759,7 @@ mod tests {
         }
     }
 
-    fn baseline_spec() -> crate::engine::CellSpec {
+    fn baseline_spec(table_files: HashMap<String, String>) -> crate::engine::CellSpec {
         crate::engine::CellSpec {
             run_idx: 0,
             point_idx: 0,
@@ -2729,7 +2772,7 @@ mod tests {
             point_overrides: indexmap::IndexMap::new(),
             process_seed: 1,
             obs_seed: 1 ^ crate::util::SEED_MIX_OBS,
-            sim_run: crate::util::SimRun::default(),
+            sim_run: crate::util::SimRun { table_files, ..crate::util::SimRun::default() },
         }
     }
 
@@ -2753,23 +2796,21 @@ mod tests {
         std::fs::write(&path_b, b"9.9\t8.8\n7.7\t6.6\n").unwrap(); // different content
         std::fs::write(&path_c, b"1.0\t2.0\n3.0\t4.0\n").unwrap(); // same content as A
 
-        let spec = baseline_spec();
-
         let mk = |p: &std::path::Path| {
             let mut tf = HashMap::new();
             tf.insert("contact".to_string(), p.to_str().unwrap().to_string());
-            sink_with_tables(runs_dir, tf)
+            baseline_spec(tf)
         };
 
-        let (rt_a, _, _) = mk(&path_a).cell_resolve(&spec).unwrap();
-        let (rt_b, _, _) = mk(&path_b).cell_resolve(&spec).unwrap();
-        let (rt_c, _, _) = mk(&path_c).cell_resolve(&spec).unwrap();
+        let (rt_a, _, _) = sink(runs_dir).cell_resolve(&mk(&path_a)).unwrap();
+        let (rt_b, _, _) = sink(runs_dir).cell_resolve(&mk(&path_b)).unwrap();
+        let (rt_c, _, _) = sink(runs_dir).cell_resolve(&mk(&path_c)).unwrap();
 
         // Negative control: with NO --table, the run_id is yet another value,
         // and it must differ from the with-table run_ids (so the table digest
         // is genuinely folded in, not silently dropped).
-        let (rt_none, _, _) = sink_with_tables(runs_dir, HashMap::new())
-            .cell_resolve(&spec)
+        let (rt_none, _, _) = sink(runs_dir)
+            .cell_resolve(&baseline_spec(HashMap::new()))
             .unwrap();
 
         assert_ne!(
@@ -2808,11 +2849,59 @@ mod tests {
                 disable: vec![],
                 params: indexmap::IndexMap::new(),
             },
-            point_overrides: overrides,
+            point_overrides: overrides.clone(),
             process_seed: 1,
             obs_seed: 1 ^ crate::util::SEED_MIX_OBS,
-            sim_run: crate::util::SimRun::default(),
+            sim_run: crate::util::SimRun {
+                point_overrides: overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                ..crate::util::SimRun::default()
+            },
         }
+    }
+
+    /// gh#583 item C's guard. `SimRun` is everything the engine runs a cell
+    /// from, so every field of it must reach the cell's identity or say why it
+    /// does not. The destructure is exhaustive: a new `SimRun` field does not
+    /// compile here until someone classifies it — the decision whose absence
+    /// let `--integrator` and `--param-vec` run without being hashed.
+    #[test]
+    fn every_simrun_field_has_an_identity_route() {
+        let crate::util::SimRun {
+            // model level: `base_model` is `util::load_run_model` of this path.
+            ir_path: _,
+            // model level: substituted and applied inside `load_run_model`.
+            obs_anchors: _,
+            integrator: _,
+            // params level: resolved by `util::resolve_run_parameters`, the
+            // engine's own resolver call (tiers 3, 5, 3.5, 5, and 4).
+            params_files: _,
+            overrides: _,
+            point_overrides: _,
+            set_vec_entries: _,
+            scenario_name: _,
+            scenario_inline_set: _,
+            scenario_inline_scale: _,
+            // params level: each file's content digest (`table_digests`).
+            table_files: _,
+            // scenario level: the `ResolvedEntry` enable / disable delta.
+            adhoc_enable: _,
+            adhoc_disable: _,
+            // provenance: the scenario label only; its values are above.
+            scenario_inline_name: _,
+            // config level: `SimConfig::t_end` via `ResolvedEntry::t_end`.
+            t_end_override: _,
+            // config level: `SimConfig::t_start` and the `init_state` digest.
+            init_state: _,
+            // config level: the job's backend and dt, which
+            // `engine::build_cell_sim_run` copies onto every cell.
+            backend: _,
+            dt: _,
+            // seed level: `CellSpec::process_seed`, the value copied here.
+            seed: _,
+            // refused on the CAS-writing path (`build_simulate_cas_sink`):
+            // it changes the trajectory and has no identity route yet.
+            required_output_times: _,
+        } = crate::util::SimRun::default();
     }
 
     /// gh#241 PR E2 — THE dedupe proof. A `[design.*]` cell and a normal
@@ -2843,11 +2932,11 @@ mod tests {
         // Both paths build the same `CasSink` shape (same base model, root,
         // backend, dt, no tables) — only the spec's point override differs.
         let (rt_design, dir_design, rel_design) =
-            sink_with_tables(runs_dir, HashMap::new()).cell_resolve(&design_spec).unwrap();
+            sink(runs_dir).cell_resolve(&design_spec).unwrap();
         let (rt_sweep, dir_sweep, rel_sweep) =
-            sink_with_tables(runs_dir, HashMap::new()).cell_resolve(&sweep_spec).unwrap();
+            sink(runs_dir).cell_resolve(&sweep_spec).unwrap();
         let (rt_other, _, _) =
-            sink_with_tables(runs_dir, HashMap::new()).cell_resolve(&other_spec).unwrap();
+            sink(runs_dir).cell_resolve(&other_spec).unwrap();
 
         assert_eq!(
             rt_design.run_id, rt_sweep.run_id,

@@ -2493,11 +2493,11 @@ impl engine::RunSink for SimSink {
 /// byte-identical to the leaf `batch run` writes for the same logical cell.
 ///
 /// The identity inputs mirror batch exactly:
-///   - `base_model` is the **raw** parsed IR (params NOT applied), so the
-///     model level digest is constant across the grid and carries no param
-///     values — those live in the `params` level.
-///   - `base_params` is the resolved base parameter map (`--params` ∪
-///     `--param`), the same resolved values the `params` level hashes.
+///   - `base_model` is the model as `util::load_run_model` loads it for the
+///     engine (observation anchors substituted, `--integrator` applied; params
+///     NOT applied), so the model level digest is constant across the grid
+///     and carries no param values — those live in the `params` level, which
+///     `CasSink::cell_resolve` resolves per cell from the cell's own `SimRun`.
 ///   - `resolved_scenarios` carry the hash-relevant enable/disable/params
 ///     delta (a model preset's own fields, or the CLI ad-hoc patch).
 #[allow(clippy::too_many_arguments)]
@@ -2540,69 +2540,22 @@ fn build_simulate_cas_sink(
                 .to_string(),
         );
     }
-    // Parse the raw IR (envelope-aware) — params NOT applied (batch parity).
-    // `run.ir_path` is already the compiled IR, so this short-circuits; the
-    // forward CAS-sink path never reads the state-Jacobian either
-    // (`needs_state_grad = false`, gh#439 A2).
-    let (ir_path_resolved, _tmp) = util::resolve_ir_path(&run.ir_path, false)?;
-    let src = std::fs::read_to_string(&ir_path_resolved)
-        .map_err(|e| format!("cannot read {}: {}", ir_path_resolved, e))?;
-    let mut base_model: ir::Model = ir::from_str(&src)
-        .map_err(|e| format!("IR load error from {}: {}", ir_path_resolved, e))?;
-
-    // gh#616: substitute the run's observation anchors into the model that is
-    // HASHED, with the same window `resolve_run_model` uses on the model that is
-    // RUN. This is what puts the resolution into run identity: `Model::hash_into`
-    // walks `simulation`, `presets` and `time_functions`, so a data vintage that
-    // moves `last_obs` moves the resolved `t_end` and the resolved forcing knots,
-    // and the two vintages cannot share a `run_id`.
+    // The model the engine starts every cell from — the one load
+    // `resolve_run_model` also takes (`util::load_run_model`), so the model
+    // that is HASHED and the model that RUNS cannot diverge (gh#583 item C).
+    // Anchor substitution (gh#616) and `--integrator` (audit 2026-08-23 #1)
+    // happen there, once, for both. Params are NOT applied: the `params` level
+    // is resolved per cell, from the cell's own `SimRun`, by the resolver call
+    // the engine makes.
     //
-    // NOTE for the deferred `value_at`-under-simulate work (F23): that argument
-    // does NOT extend to quantity anchors. `Model::hash_into` deliberately
-    // EXCLUDES `quantities` (and `contrasts`) so reporting can never re-key a
-    // run — so resolving a `value_at(…, last_obs)` here would change no hashed
-    // field, and two vintages would share a `run_id` while reporting different
-    // numbers. Whoever lands F23 must key the resolved anchor EXPLICITLY; no
-    // model field will do it for them.
-    if let Some(w) = run.obs_anchors {
-        crate::obs_anchor::substitute(&mut base_model, w)?;
-    }
-    // Audit 2026-08-23 #1: apply `--integrator` to the model that is HASHED,
-    // exactly as `resolve_run_model` applies it to the model that is RUN. The
-    // identity path never applied it, so an rk45 run and an rk4 run of the
-    // same model shared one `run_id` — and post-S1 the second would die with
-    // DivergentRecompute instead of getting its own leaf. Same argument as
-    // the gh#616 anchor substitution above: the two loads must agree by
-    // construction.
-    util::apply_integrator_override(&mut base_model, run.integrator);
-
-    // Resolved base params: model defaults overlaid by --params, then
-    // --param-vec, then --param (matching `resolve_run_model`'s tier-5
-    // last-wins order: vec entries expand before `run.overrides`, so an
-    // explicit `--param NAME=VAL` still wins), filtered to the params that
-    // resolved to a value (a param that relies on the scenario half is
-    // supplied there, not here — mirrors prepare_cas_ctx).
-    let mut params_model = base_model.clone();
-    for path in &run.params_files {
-        util::apply_params_file(&mut params_model, path)?;
-    }
-    // Audit 2026-08-23 #2: `--param-vec` values were absent from the hashed
-    // params — the identity path never read `set_vec_entries`. Shared
-    // expansion with the run path so the two cannot diverge.
-    for (k, v) in util::resolve_param_vec_entries(&params_model, &run.set_vec_entries)? {
-        if let Some(p) = params_model.parameters.iter_mut().find(|p| p.name == k) {
-            p.value = p.value.with_value(v);
-        }
-    }
-    for (k, v) in &run.overrides {
-        if let Some(p) = params_model.parameters.iter_mut().find(|p| &p.name == k) {
-            p.value = p.value.with_value(*v);
-        }
-    }
-    util::validate_parameter_values(&params_model)?;
-    let base_params: HashMap<String, f64> = params_model.parameters.iter()
-        .filter_map(|p| p.value.resolved_value().map(|v| (p.name.clone(), v)))
-        .collect();
+    // NOTE for the deferred `value_at`-under-simulate work (F23): the anchor
+    // argument does NOT extend to quantity anchors. `Model::hash_into`
+    // deliberately EXCLUDES `quantities` (and `contrasts`) so reporting can
+    // never re-key a run — so resolving a `value_at(…, last_obs)` here would
+    // change no hashed field, and two vintages would share a `run_id` while
+    // reporting different numbers. Whoever lands F23 must key the resolved
+    // anchor EXPLICITLY; no model field will do it for them.
+    let base_model = util::load_run_model(run)?;
 
     // Resolve each simulate scenario into the hash-relevant delta. A name
     // matching a model preset reads its effective delta via
@@ -2657,11 +2610,6 @@ fn build_simulate_cas_sink(
         model_path: display_path.to_string(),
         model_stem,
         base_model,
-        base_params,
-        // External `--table NAME=PATH` overrides: the model IR carries only the
-        // table *reference*; the file content is read at run time, so its bytes
-        // must enter the run_id (folded into the params level by `cell_resolve`).
-        table_files: run.table_files.clone(),
         backend: run.backend,
         dt: run.dt,
         allow_degenerate_rates,
@@ -2714,6 +2662,7 @@ fn write_sim_ensemble(
                 draw_idx: r.draw_idx,
                 sim_run_id: r.run_id?,
                 traj_digest: r.traj_digest?,
+                params_level: r.params_level?,
             })
         })
         .collect();
@@ -2731,7 +2680,6 @@ fn write_sim_ensemble(
         stem: cas.model_stem.as_deref().unwrap_or("model"),
         backend: cas.backend,
         dt: cas.dt,
-        base_params: &cas.base_params,
         cells: &cells,
     };
     let resolved = match crate::sim_ensemble_cas::resolve_sim_ensemble(&ctx) {
