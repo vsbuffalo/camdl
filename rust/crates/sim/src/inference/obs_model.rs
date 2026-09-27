@@ -16,7 +16,7 @@ use crate::inference::obs_loglik::{
     negbin_logpmf, zi_negbin_logpmf, zi_negbin_logpmf_grad, discretized_normal_logpmf_tol,
     poisson_logpmf, DEFAULT_TOL,
     negbin_logpmf_grad, discretized_normal_logpmf_grad, poisson_logpmf_grad,
-    beta_binomial_logpmf_grad, beta_logpdf, beta_logpdf_grad,
+    beta_binomial_logpmf_grad, beta_logpdf, beta_logpdf_grad, is_probability,
 };
 use crate::inference::obs_attempt::NegInfCause;
 use crate::inference::types::LOG_PROB_FLOOR;
@@ -382,13 +382,15 @@ pub(crate) fn explain_likelihood_neg_inf(
             }
         }
         ResolvedLikelihood::Bernoulli { p, .. } => {
-            // A NaN `p` is the family's only `-inf` route (gh#874): past that
-            // guard `p` is clamped into `[0, 1]` and floored at
-            // `LOG_PROB_FLOOR` before the log, so every finite `p` scores
-            // finitely, however far out of range it started.
+            // The family's two `-inf` routes: a NaN `p` (gh#874) and a `p`
+            // outside `[0, 1]` (gh#925). Past them the probability is floored
+            // at `LOG_PROB_FLOOR` before the log, so every in-domain `p`
+            // scores finitely.
             let p_val = eval_resolved(p, &ctx(projected));
             if p_val.is_nan() {
                 nan("p")
+            } else if !is_probability(p_val) {
+                domain("p", p_val)
             } else {
                 NegInfCause::Unclassified
             }
@@ -531,17 +533,18 @@ pub(crate) fn eval_likelihood_resolved_grad(
         ResolvedLikelihood::Bernoulli { p, p_grad, .. } => {
             // log L = log(p)         if observed > 0.5
             //       = log(1 - p)     otherwise
-            // Outside [0,1] the clamp in `bernoulli_logpmf` fires,
-            // so the in-domain gradient is exact only when 0 < p < 1.
+            // At the endpoints the value is floored at `LOG_PROB_FLOOR`, so
+            // the gradient below is exact only when 0 < p < 1.
             let p_val = eval_resolved(p, &ctx);
-            // gh#874: the zero gradient of the value function's `-inf`, as
-            // every `*_logpmf_grad` in `obs_loglik.rs` returns for a NaN
-            // argument. A NaN `observed` is false for `> 0.5` and would
-            // otherwise take the `1 - p` branch and accumulate a finite
-            // gradient at a point the value function rejects; a NaN `p_val`
-            // already falls out of the range test below, and is named here so
+            // gh#874, gh#925: the zero gradient of the value function's
+            // `-inf`, as every `*_logpmf_grad` in `obs_loglik.rs` returns for
+            // an invalid argument. A NaN `observed` is false for `> 0.5` and
+            // would otherwise take the `1 - p` branch and accumulate a finite
+            // gradient at a point the value function rejects; a NaN or
+            // out-of-range `p_val` already falls out of the range test below,
+            // and is named here with the value function's own domain test so
             // the two guards read together.
-            if observed.is_nan() || p_val.is_nan() { return; }
+            if observed.is_nan() || !is_probability(p_val) { return; }
             if p_val > 0.0 && p_val < 1.0 {
                 let d_log = if observed > 0.5 { 1.0 / p_val } else { -1.0 / (1.0 - p_val) };
                 for (i, &model_idx) in estimated_to_model.iter().enumerate() {
@@ -675,10 +678,10 @@ pub(crate) fn dlogp_dprojected(
         ResolvedLikelihood::Bernoulli { p, p_proj, .. } => {
             let p_val = eval_resolved(p, &ctx);
             // Same guard, same reason as the parameter-gradient arm in
-            // `eval_likelihood_resolved_grad` (gh#874): the caller sums the two
-            // factors, so a NaN observation must contribute zero to both or the
-            // sum disagrees with the value function that rejected it.
-            if observed.is_nan() || p_val.is_nan() { return 0.0; }
+            // `eval_likelihood_resolved_grad` (gh#874, gh#925): the caller sums
+            // the two factors, so a rejected term must contribute zero to both
+            // or the sum disagrees with the value function that rejected it.
+            if observed.is_nan() || !is_probability(p_val) { return 0.0; }
             if p_val > 0.0 && p_val < 1.0 {
                 let d_log = if observed > 0.5 { 1.0 / p_val } else { -1.0 / (1.0 - p_val) };
                 d_log * eval_proj_grad(p_proj, &ctx)
@@ -924,11 +927,13 @@ pub(crate) fn sample_obs_resolved(
             ga / (ga + gb)
         }
         ResolvedLikelihood::Bernoulli { p, .. } => {
-            // Clamp before sampling — an out-of-range p would
-            // otherwise always-1 (p > 1) or always-0 (p < 0).
-            let p_raw = eval_resolved(p, &ctx(projected));
-            if obs_args_nan(&[p_raw]) { return 0.0; }
-            let p_val = p_raw.clamp(0.0, 1.0);
+            // gh#925: a `p` outside `[0, 1]` is out of the domain — the value
+            // path scores it `-inf` — so it has no defined draw either; route
+            // it through the NaN-argument contract (draw 0, counted) rather
+            // than clamping it into an always-1 or always-0 draw.
+            let p_val = eval_resolved(p, &ctx(projected));
+            let p_val = if is_probability(p_val) { p_val } else { f64::NAN };
+            if obs_args_nan(&[p_val]) { return 0.0; }
             if rng.uniform() < p_val { 1.0 } else { 0.0 }
         }
         ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi, .. } => {
@@ -1012,31 +1017,29 @@ mod tests {
     use crate::inference::obs_loglik::bernoulli_logpmf;
     use crate::resolved_expr::{ResolvedExpr, ResolvedDerivEntry};
 
+    /// gh#925: a `p` outside `[0, 1]` is out of the domain and scores `-inf`.
+    /// The density used to clamp it, so `p = 1.5` scored exactly as `p = 1`
+    /// (log-probability 0, the supremum) and `p = -0.3` as `p = 0` — a
+    /// mis-specified projection (a rate where a probability was meant, a
+    /// missing `/ N`) fitted on a plausible likelihood. Rejecting it also
+    /// keeps the older guarantee the clamp was there for: no out-of-range `p`
+    /// can produce a positive log-probability
+    /// (`docs/dev/reviews/2026-04-30-correctness.md` C1).
     #[test]
-    fn bernoulli_logpmf_clamps_p_above_one() {
-        // p_val = 1.5 must produce log(1.0) = 0.0, not log(1.5) ≈ 0.405.
-        // The unclamped version was a critical bug: a positive log-prob
-        // inflates SMC weights for any particle that sampled an
-        // out-of-range p (e.g. PGAS proposals before the posterior
-        // concentrates).
-        let log_p = bernoulli_logpmf(1.0, 1.5);
-        assert!(log_p <= 0.0, "log-prob must be ≤ 0, got {}", log_p);
-        // Specifically, p=1 with observation=1 → log(1) = 0.
-        assert!(log_p.abs() < 1e-12, "expected 0.0, got {}", log_p);
-    }
-
-    #[test]
-    fn bernoulli_logpmf_clamps_p_below_zero() {
-        // p_val = -0.3 must produce log(1.0) = 0.0 for observation=0,
-        // not log(1.3) ≈ 0.262.
-        let log_p = bernoulli_logpmf(0.0, -0.3);
-        assert!(log_p <= 0.0, "log-prob must be ≤ 0, got {}", log_p);
-        assert!(log_p.abs() < 1e-12, "expected 0.0, got {}", log_p);
-
-        // Observation = 1 with p = -0.3 → log(0) → LOG_PROB_FLOOR.ln().
-        let log_p_obs1 = bernoulli_logpmf(1.0, -0.3);
-        assert!(log_p_obs1 <= LOG_PROB_FLOOR.ln() + 1e-12,
-            "p<0 with obs=1 must floor: got {}", log_p_obs1);
+    fn bernoulli_logpmf_rejects_an_out_of_range_p_instead_of_clamping_it() {
+        // Both endpoints are in the domain: the outcome each makes certain
+        // scores exactly 0.
+        assert_eq!(bernoulli_logpmf(1.0, 1.0), 0.0, "p = 1, observed = 1");
+        assert_eq!(bernoulli_logpmf(0.0, 0.0), 0.0, "p = 0, observed = 0");
+        // The smallest excursions a double can make count too: no tolerance.
+        for p in [1.5, 1.0 + f64::EPSILON, -0.3, -f64::MIN_POSITIVE,
+                  f64::INFINITY, f64::NEG_INFINITY] {
+            for observed in [0.0, 1.0] {
+                let log_p = bernoulli_logpmf(observed, p);
+                assert_eq!(log_p, f64::NEG_INFINITY,
+                    "p = {p}, observed = {observed} must score -inf, got {log_p}");
+            }
+        }
     }
 
     #[test]
@@ -1192,6 +1195,72 @@ mod tests {
         let (v, _, _, cause) = normal_arms(f64::NAN, 13.0);
         assert_eq!(v, f64::NEG_INFINITY, "a NaN sd must score -inf, got {v}");
         assert!(matches!(cause, NegInfCause::ArgumentNaN { ref arg } if arg == "sd"), "{cause:?}");
+    }
+
+    // ── gh#925: a probability outside [0, 1] is out of domain, not clamped ──
+
+    /// `(value, ∂/∂θ, ∂/∂projected, −∞ cause)` for `likelihood` at `observed`,
+    /// through the four dispatch functions a fit calls.
+    fn likelihood_arms(
+        likelihood: &ResolvedLikelihood, observed: f64,
+    ) -> (f64, f64, f64, NegInfCause) {
+        let compiled = compiled_bernoulli_fixture();
+        let int_s = IntState::from_vec(vec![0; compiled.int_local_to_global.len()]);
+        let real_s = RealState::new(compiled.real_local_to_global.len());
+        let params = vec![0.0; compiled.param_index.len()];
+        let value = eval_likelihood_resolved(
+            likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        let mut grad = vec![0.0];
+        eval_likelihood_resolved_grad(
+            likelihood, 0.0, 0.0, observed, &[], &params, &compiled,
+            &int_s, &real_s, &[0], &mut grad,
+        );
+        let d_proj = dlogp_dprojected(
+            likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        let cause = explain_likelihood_neg_inf(
+            likelihood, 0.0, 0.0, observed, &[], &params, &compiled, &int_s, &real_s,
+        );
+        (value, grad[0], d_proj, cause)
+    }
+
+    /// `Bernoulli(p)` with `∂p/∂θ = ∂p/∂projected = 1`.
+    fn bernoulli_likelihood(p: f64) -> ResolvedLikelihood {
+        ResolvedLikelihood::Bernoulli {
+            p: ResolvedExpr::Const(p),
+            p_grad: vec![(0, ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0)))],
+            p_proj: Some(ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0))),
+        }
+    }
+
+    /// gh#925: all four arms agree that an out-of-range `p` is impossible —
+    /// `-inf`, the zero gradient of `-inf` on both gradient arms, and the
+    /// classifier names `p` as out of domain (it reported `Unclassified`, the
+    /// clamp having left the family no finite-`p` route to `-inf`).
+    #[test]
+    fn bernoulli_arms_reject_an_out_of_range_p() {
+        // Non-vacuity control: p = 0.5 scores ln 0.5 with d/dp = 1/p = 2.
+        let (v, d_theta, d_proj, _) = likelihood_arms(&bernoulli_likelihood(0.5), 1.0);
+        assert!((v - 0.5_f64.ln()).abs() < 1e-12, "p = 0.5 must score ln 0.5, got {v}");
+        assert!((d_theta - 2.0).abs() < 1e-12 && (d_proj - 2.0).abs() < 1e-12,
+            "p = 0.5 must carry d/dp = 2, got {d_theta}, {d_proj}");
+
+        for p in [1.3, 1.0 + f64::EPSILON, -0.3, -f64::MIN_POSITIVE] {
+            for observed in [0.0, 1.0] {
+                let (v, d_theta, d_proj, cause) =
+                    likelihood_arms(&bernoulli_likelihood(p), observed);
+                assert_eq!(v, f64::NEG_INFINITY,
+                    "p = {p}, observed = {observed} must score -inf, got {v}");
+                assert_eq!((d_theta, d_proj), (0.0, 0.0),
+                    "p = {p}, observed = {observed} must carry the zero gradient, \
+                     got {d_theta}, {d_proj}");
+                assert!(matches!(cause,
+                        NegInfCause::ArgumentOutOfDomain { ref arg, value }
+                        if arg == "p" && value == p),
+                    "p = {p} must be classified as p out of domain, got {cause:?}");
+            }
+        }
     }
 
     // ── gh#877: a NaN observation under a Binomial is not an observed zero ──
