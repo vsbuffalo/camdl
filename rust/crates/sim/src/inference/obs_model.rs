@@ -165,6 +165,17 @@ pub(crate) fn eval_likelihood_resolved(
             let p_val = eval_resolved(p, &ctx(projected));
             let k = observed.round().max(0.0) as u64;
             let n_int = n_val.round().max(0.0) as u64;
+            // gh#925 sibling: `binom_logpmf` scores `p >= 1` as `p = 1` and
+            // `p <= 0` as `p = 0`, so `p = 1.3` with `k = n` scored 0. For the
+            // observation family an out-of-range `p` is out of the domain.
+            // Checked here rather than in `binom_logpmf`, which the initial-
+            // condition Binomial law also calls: refusing there is a separate
+            // decision (gh#934). After the zero-trials row, which scores
+            // exactly 0 whatever `p` is (gh#812) — `binom_logpmf` orders its
+            // own NaN check the same way, and a NaN `p` gets `-inf` from both.
+            if n_int != 0 && !is_probability(p_val) {
+                return f64::NEG_INFINITY;
+            }
             crate::inference::obs_loglik::binom_logpmf(k, n_int, p_val)
         }
         ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
@@ -333,6 +344,9 @@ pub(crate) fn explain_likelihood_neg_inf(
                 NegInfCause::ZeroTrialsPositiveCount
             } else if p_val.is_nan() {
                 nan("p")
+            } else if n_int != 0 && !is_probability(p_val) {
+                // gh#925 sibling: the value arm's domain check, same position.
+                domain("p", p_val)
             } else if k > n_int {
                 NegInfCause::CountExceedsTrials
             } else if (p_val <= 0.0 && k != 0) || (p_val >= 1.0 && k != n_int) {
@@ -891,9 +905,13 @@ pub(crate) fn sample_obs_resolved(
         }
         ResolvedLikelihood::Binomial { n, p, .. } => {
             let n_val = eval_resolved(n, &ctx(projected));
+            // gh#925 sibling: a `p` outside `[0, 1]` has no defined draw (the
+            // value arm scores it `-inf`), so it takes the NaN-argument
+            // contract rather than being clamped into all-`n` or none.
             let p_val = eval_resolved(p, &ctx(projected));
+            let p_val = if is_probability(p_val) { p_val } else { f64::NAN };
             if obs_args_nan(&[n_val, p_val]) { return 0.0; }
-            rng.binomial(n_val.round().max(0.0) as u64, p_val.clamp(0.0, 1.0)) as f64
+            rng.binomial(n_val.round().max(0.0) as u64, p_val) as f64
         }
         ResolvedLikelihood::BetaBinomial { n, alpha, beta, .. } => {
             // Draw BetaBinomial(n, alpha, beta): p ~ Beta(alpha, beta),
@@ -1317,6 +1335,41 @@ mod tests {
                         NegInfCause::ArgumentOutOfDomain { ref arg, value }
                         if arg == "pi" && value == pi),
                     "pi = {pi}, observed = {observed} must be classified as pi out of \
+                     domain, got {cause:?}");
+            }
+        }
+    }
+
+    /// gh#925 sibling: the Binomial observation family treated `p >= 1` as
+    /// `p = 1` and `p <= 0` as `p = 0` (`binom_logpmf`'s endpoint branches),
+    /// so `p = 1.3` with `k = n` scored log-probability 0 and `p = -0.3` with
+    /// `k = 0` likewise; with any other count it was `-inf` but classified as
+    /// the *observation* being outside the support. An out-of-range `p` is
+    /// the model's argument out of its domain: `-inf` whatever the count, the
+    /// zero gradient, and the classifier names `p`.
+    #[test]
+    fn binomial_arms_reject_an_out_of_range_p() {
+        // Controls: the in-domain endpoints keep their limiting values, and a
+        // zero-trials row scores exactly 0 whatever `p` is (gh#812) — the
+        // domain check sits after that row, as the NaN check does.
+        assert_eq!(likelihood_arms(&binomial_likelihood(10.0, 1.0), 10.0).0, 0.0);
+        assert_eq!(likelihood_arms(&binomial_likelihood(10.0, 0.0), 0.0).0, 0.0);
+        assert_eq!(likelihood_arms(&binomial_likelihood(0.0, 1.3), 0.0).0, 0.0,
+            "n = 0 has one possible outcome and scores exactly 0");
+
+        for p in [1.3, 1.0 + f64::EPSILON, -0.3, -f64::MIN_POSITIVE] {
+            for observed in [10.0, 3.0, 0.0] {
+                let (v, d_theta, d_proj, cause) =
+                    likelihood_arms(&binomial_likelihood(10.0, p), observed);
+                assert_eq!(v, f64::NEG_INFINITY,
+                    "p = {p}, observed = {observed} must score -inf, got {v}");
+                assert_eq!((d_theta, d_proj), (0.0, 0.0),
+                    "p = {p}, observed = {observed} must carry the zero gradient, \
+                     got {d_theta}, {d_proj}");
+                assert!(matches!(cause,
+                        NegInfCause::ArgumentOutOfDomain { ref arg, value }
+                        if arg == "p" && value == p),
+                    "p = {p}, observed = {observed} must be classified as p out of \
                      domain, got {cause:?}");
             }
         }
