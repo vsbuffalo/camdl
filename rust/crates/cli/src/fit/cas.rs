@@ -418,8 +418,12 @@ fn build_holdout_digests(problem: &Problem) -> Result<Vec<DataDigest>, String> {
 
 /// The fit-wide config blob hash: the whole problem half (include-by-default
 /// — so `ic_free`/`holdout`/`[config]`/priors can't be silently dropped) with
-/// the one provenance slice normalized out:
+/// the provenance slices normalized out ([`FIT_PROVENANCE_KEYS`]):
 ///   - `output_dir` — pure write-location provenance.
+///   - `provenance` — the `[provenance]` note (`derived_from`, `reason`):
+///     free text for the reader. No runner, likelihood or stored artifact
+///     reads it, so rewording it must not re-address and re-run the fit
+///     (gh#583 item F).
 ///
 /// `[method]` and `fit_seeds` are not in the problem at all — the method
 /// level owns the first and the seed level the second — so a second method on
@@ -427,8 +431,14 @@ fn build_holdout_digests(problem: &Problem) -> Result<Vec<DataDigest>, String> {
 /// stay (a rename is a harmless over-invalidate; their *content* rides in
 /// `FitDigest.model`/`.data`).
 fn fit_config_blob_hash(problem: &Problem) -> Result<ContentHash, String> {
-    Ok(canonical_config_hash(problem, &["output_dir"])?.into_inner())
+    Ok(canonical_config_hash(problem, FIT_PROVENANCE_KEYS)?.into_inner())
 }
+
+/// The top-level fit.toml keys that are provenance, not identity. The fit
+/// level ([`fit_config_blob_hash`]) subtracts all of them; the config lookup
+/// ([`config_identity_hash`]) subtracts the `[provenance]` note, so a config
+/// whose note was reworded finds the fit the store already holds for it.
+const FIT_PROVENANCE_KEYS: &[&str] = &["output_dir", "provenance"];
 
 /// The config-MEANING hash: what a `fit.toml` handle is looked up by (gh#653).
 ///
@@ -450,11 +460,13 @@ fn fit_config_blob_hash(problem: &Problem) -> Result<ContentHash, String> {
 ///
 /// Every field is included, including the `[method]` table
 /// [`fit_config_blob_hash`] never sees: a lookup asks about the whole config,
-/// so a changed particle count must not resolve to the old run.
+/// so a changed particle count must not resolve to the old run. The one
+/// exception is the `[provenance]` note, which the store does not key on
+/// either: a lookup that did would orphan a stored fit whenever its note was
+/// reworded — the gh#653 failure, by another edit (gh#583 item F).
 pub fn config_identity_hash(config: &FitConfig) -> Result<String, String> {
     ensure_finite(config)?;
-    let v = serde_json::to_value(config)
-        .map_err(|e| format!("cannot serialize fit config for hashing: {}", e))?;
+    let v = serialize_minus(config, &["provenance"])?;
     Ok(digest_value(&serde_json::json!({ "config": v })).to_hex())
 }
 

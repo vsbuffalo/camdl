@@ -143,7 +143,9 @@ pub struct Problem {
     /// See docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
     pub ic_free: Option<bool>,
 
-    /// Optional lineage metadata (not used by the runner).
+    /// Optional lineage metadata for the reader (not used by the runner).
+    /// Not identity: normalized out of the fit level and the config lookup
+    /// (`fit::cas::FIT_PROVENANCE_KEYS`, gh#583 item F).
     pub provenance: Option<FitProvenance>,
 
     /// Runtime-only: the path to the model **already compiled to IR**

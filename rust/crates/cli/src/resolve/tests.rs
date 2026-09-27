@@ -723,8 +723,13 @@ fn cas_identity_pins() {
         // values differ from the old base map — a scenario that sets values, a
         // draw shadowed by `--param`, a batch cell over model defaults — but
         // this fixture hands `resolve_trajectory` its params directly.)
+        //
+        // gh#583 (item F) then moved `fit` ALONE: the fit level's canonical
+        // config JSON drops the `[provenance]` key, which it had serialized as
+        // `null` even when absent — so every fit re-keys, noted or not. No
+        // other kind hashes the fit config blob.
         ("sim", "4d378bf80f18768cad7d968ca547d05db64f9cc382deb62054507c6044811bf9"),
-        ("fit", "b054cfcd2c5080ebde21f3a6016307e716cbb273018726dcf1708ef7f3488142"),
+        ("fit", "a2e975020b0d34ec5c4c08126c4b9b0fe54db631badc96ca6bdf59c1a57de01b"),
         ("pfilter", "e1994c64f4b2eea615d031e5bfe239d8c506f9c0471c94336df5c94ab9fc575a"),
         ("survey", "3a56923c978abaa4bb73f7b6b8a940bca6c47c9f51d127071fee3191fe1045cb"),
         ("sim_ensemble", "c7cdd710a9f4d92c2b10751737fc56098209f27de97934f302cc55f45d932c1a"),
