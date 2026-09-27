@@ -9,7 +9,6 @@ use crate::fit::pf_noise;
 use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{self, FitRunConfig, StageConvergence};
 use crate::cas::iso8601_utc;
-use rayon::prelude::*;
 use sim::inference::{
     if2::EstimatedParam,
     pmmh::{run_pmmh, Prior, PMMHConfig, PMMHResult, PMMHResumeState},
@@ -429,11 +428,11 @@ pub fn run_stage(
     // so a 6-chain run with one bound-pathological survey_top_k init still
     // gives 5 chains of inference). A `Err` is a structural failure
     // (gh#224): the model/config cannot run, so the whole fit aborts rather
-    // than reporting a degenerate posterior — `collect` short-circuits on
-    // the first such error.
-    let results: Vec<(usize, PMMHResult)> = (0..n_chains)
-        .into_par_iter()
-        .map(|chain_id| -> Result<Option<(usize, PMMHResult)>, String> {
+    // than reporting a degenerate posterior — no further chain starts after
+    // the first such error. At most one chain per worker, so a started chain
+    // is never displaced by another (gh#821, `chain_fanout`).
+    let results: Vec<(usize, PMMHResult)> =
+        super::chain_fanout::try_run_chains(n_chains, |chain_id| -> Result<Option<(usize, PMMHResult)>, String> {
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
             // gh#887: the start this chain runs from — the draw, or a redraw
             // the init-eval guard below accepted after refusing earlier ones.
@@ -766,7 +765,7 @@ pub fn run_stage(
             ).map_err(|e| format!("chain {} failed with structural error: {}", chain_id + 1, e))?;
 
             // Final metric (MAP ll + acceptance) on the bar; the driver clears
-            // it after the par_iter (`Task::finish` consumes, so it can't run
+            // it after the fan-out (`Task::finish` consumes, so it can't run
             // on the borrowed Task here). The `acceptance rates:` report below
             // carries the per-chain summary.
             task.set(crate::progress::mcmc(result.map_loglik, result.acceptance_rate));
@@ -778,8 +777,7 @@ pub fn run_stage(
             }
 
             Ok(Some((chain_id, result)))
-        })
-        .collect::<Result<Vec<Option<(usize, PMMHResult)>>, String>>()?
+        })?
         .into_iter()
         .flatten()
         .collect();
