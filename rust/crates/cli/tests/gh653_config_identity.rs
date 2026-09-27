@@ -216,3 +216,88 @@ fn a_reflowed_config_still_finds_its_completed_fit() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// `ORIGINAL`'s fit, with a `[provenance]` note.
+fn with_note(reason: &str) -> String {
+    format!(r#"output_dir = "results"
+
+[model]
+camdl = "model.camdl"
+
+[data.observations]
+weekly_cases = "weekly_cases.tsv"
+
+[estimate]
+beta  = {{ bounds = [0.05, 1.0], start = 0.4 }}
+gamma = {{ bounds = [0.01, 0.5], start = 0.15 }}
+
+[fixed]
+N0  = 10000
+I0  = 10
+rho = 0.5
+k   = 10.0
+
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 150
+iterations = 15
+cooling = 0.7
+
+[provenance]
+derived_from = "scout.toml"
+reason = "{reason}"
+"#)
+}
+
+/// Every committed fit-stage leaf (a `run.json`) under `<dir>/results/fits`.
+fn fit_leaves(dir: &Path) -> Vec<PathBuf> {
+    let mut leaves = Vec::new();
+    let mut stack = vec![dir.join("results").join("fits")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.join("run.json").exists() { leaves.push(p) } else { stack.push(p) }
+            }
+        }
+    }
+    leaves
+}
+
+/// gh#583 item F. `[provenance]` is a note to the reader — where a config came
+/// from and why — and nothing reads it but the reader: no runner, no
+/// likelihood, no stored artifact is a function of it. It was hashed into the
+/// fit level, so rewording `reason` gave the fit a new address and re-ran it
+/// (three reasons, three fits). It is now normalized out of the fit identity
+/// and of the config lookup alike, so a reworded note is a cache hit and the
+/// reworded config still finds the fit.
+#[test]
+fn a_provenance_note_is_not_fit_identity() {
+    let bin = binary();
+    assert!(bin.exists(), "release camdl binary missing: {}", bin.display());
+    let tmp = std::env::temp_dir().join(format!("camdl_gh583f_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
+
+    std::fs::write(tmp.join("a.toml"), with_note("first scout")).unwrap();
+    let out = run(&bin, &tmp, &["fit", "run", "a.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run: {}", String::from_utf8_lossy(&out.stderr));
+    let theta = resolve_theta(&bin, &tmp).expect("the config it was run from resolves");
+
+    std::fs::write(tmp.join("a.toml"), with_note("reworded: rho pinned pending review"))
+        .unwrap();
+    let out = run(&bin, &tmp, &["fit", "run", "a.toml", "--seed", "1"]);
+    assert!(out.status.success(), "fit run: {}", String::from_utf8_lossy(&out.stderr));
+    let leaves = fit_leaves(&tmp);
+    assert_eq!(leaves.len(), 1,
+        "a reworded provenance note must be a cache hit, not a second fit: {leaves:?}");
+    assert_eq!(resolve_theta(&bin, &tmp).expect("the reworded config resolves"), theta,
+        "and it resolves to the same fit");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
