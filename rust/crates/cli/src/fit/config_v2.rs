@@ -1385,8 +1385,9 @@ impl Method {
     /// Hashable subset of the method that defines its statistical
     /// identity: the algorithm's fields plus `starts`. For PGAS / PMMH this
     /// *omits* the extension dimension (`sweeps` / `iterations`
-    /// respectively), so `--resume` can extend a chain by changing only that
-    /// field without invalidating the stored `resume_state.bin`. Every other
+    /// respectively), which the method level folds separately as its target
+    /// length — so `cas::resume_guard`, which zeroes that length, lets
+    /// `--resume` extend a chain by changing only that field. Every other
     /// field is identity-defining: changing chains, particles, burn_in, thin,
     /// or starts requires a fresh run.
     ///
@@ -1395,11 +1396,9 @@ impl Method {
     /// middle of a different schedule is statistically incoherent.
     /// PFilter is single-pass; nothing to extend.
     ///
-    /// Returned as `serde_json::Value` so `provenance::fit_stage_hash`
-    /// can hash it via `serde_json::to_vec` (the same canonical form
-    /// it used pre-split for the whole stage). Stable across
-    /// recompiles because `serde_json` sorts object keys lexically
-    /// when serializing maps.
+    /// Returned as `serde_json::Value` for `cas::stage_config_hash` to digest;
+    /// stable across recompiles because `serde_json` sorts object keys
+    /// lexically when serializing maps.
     pub fn identity_payload(&self) -> serde_json::Value {
         // SUBTRACTIVE, not enumerated: serialize the whole method and remove
         // only the keys that must not be hashed. The four sampler arms used
@@ -1428,9 +1427,6 @@ impl Method {
         // names, so those two spellings disagreed across variants. `starts`
         // is always concrete here: `resolve_starts` runs before any identity
         // is taken, and `stage_config_hash` refuses an unresolved method.
-        // Returned as `serde_json::Value` so
-        // `provenance::fit_stage_hash` can hash it via `serde_json::to_vec`,
-        // stable across recompiles (serde_json sorts object keys).
         match self.algorithm {
             Algorithm::PGAS { .. } => self.payload_minus(&["sweeps", "n_trajectories"]),
             Algorithm::PMMH { .. } | Algorithm::Mh { .. } => self.payload_minus(&["iterations"]),

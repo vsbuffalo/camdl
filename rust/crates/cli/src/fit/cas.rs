@@ -582,6 +582,43 @@ fn resolved_obs_alignment(algorithm: &Algorithm, problem: &Problem) -> ResolvedO
 /// level's label is the algorithm's name — there is no order among methods
 /// and nothing for an ordinal to encode.
 pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> {
+    let levels = fit_stage_levels(ctx, ctx.method.algorithm.cas_target_length())?;
+    let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
+    let rid = run_id(ArtifactKind::FitStage, &level_hashes);
+
+    Ok(ResolvedFitStage { levels, run_id: rid })
+}
+
+/// The `--resume` compatibility key of a PGAS / PMMH / MH method leaf: its
+/// run identity with the extension dimension taken out.
+///
+/// A resumed run extends a chain — more sweeps or iterations — so it lands in
+/// a leaf of its own (the target length, and a dep on the base, are in its
+/// `run_id`), yet it continues the base's chain state, which is only sound if
+/// every OTHER input is the one the base ran under. This is exactly that
+/// question asked of the CAS identity: the same levels [`resolve_fit_stage`]
+/// hashes, with the target length zeroed. The runner records it in each
+/// chain's `resume_state.bin` and a resume refuses a state whose key differs.
+///
+/// Pass `ctx.deps` WITHOUT the `--resume` base's dep: the base's own key was
+/// taken without it, and a chained resume's base carried a different one.
+///
+/// A second, hand-listed hash of "the same statistical problem" held this
+/// job before; it missed the whole of `[config]` (`dt` among it), the
+/// scenario, `ic_free`, the holdout, `n_trajectories` and the resolved
+/// observation alignment, so a chain fitted at one `dt` resumed silently at
+/// another (gh#583 item G).
+pub fn resume_guard(ctx: &FitStageCtx) -> Result<String, String> {
+    let levels = fit_stage_levels(ctx, 0)?;
+    let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
+    Ok(run_id(ArtifactKind::FitStage, &level_hashes).to_hex())
+}
+
+/// The three factored levels of a fit-method leaf (fit / method / seed), with
+/// the method level's target length given. The one level builder
+/// [`resolve_fit_stage`] (the run's address) and [`resume_guard`] (its
+/// extension-free key) share.
+fn fit_stage_levels(ctx: &FitStageCtx, target_length: u64) -> Result<Vec<LevelId>, String> {
     let fit = fit_level_digest(
         ctx.model,
         ctx.ir_version,
@@ -596,7 +633,7 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
         // `FitDigest.data`); there is no fit-level `--obs`/`--flow`.
         obs_block: String::new(),
         flow_indices: Vec::new(),
-        target_length: ctx.method.algorithm.cas_target_length(),
+        target_length,
         // gh#189: the resolved (not requested) obs alignment, keyed per method.
         obs_alignment: resolved_obs_alignment(&ctx.method.algorithm, ctx.problem),
     };
@@ -606,15 +643,11 @@ pub fn resolve_fit_stage(ctx: &FitStageCtx) -> Result<ResolvedFitStage, String> 
     // leaf via FitDigest); the seed level hashes the resolved fit RNG seed.
     let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
 
-    let levels = vec![
+    Ok(vec![
         level("fit", ctx.fit_stem, structural_level_hash(&fit)),
         level("method", ctx.method.algorithm.method_name(), structural_level_hash(&stage_level)),
         level("seed", &format!("seed_{}", ctx.seed), structural_level_hash(&seed)),
-    ];
-    let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
-    let rid = run_id(ArtifactKind::FitStage, &level_hashes);
-
-    Ok(ResolvedFitStage { levels, run_id: rid })
+    ])
 }
 
 /// The lineage dep for a `from_mle` source: the leaf's `fit_state.toml` —

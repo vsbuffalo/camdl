@@ -290,6 +290,10 @@ pub fn run_stage(
     seed: u64,
     force: bool,
     resume: bool,
+    // The leaf's resume-compatibility key (`cas::resume_guard`): recorded in
+    // each chain's `resume_state.bin`, and checked against the base's under
+    // `--resume`.
+    resume_guard: &str,
     starts: &super::chain_starts::ResolvedStarts,
     // The stage's liveness/progress heartbeat, owned by the runner so that
     // every method has one and every exit leaves a terminal record (gh#900).
@@ -443,17 +447,10 @@ pub fn run_stage(
         }
     }
 
-    // Compute config hash — identifies the statistical problem.
-    // Changes to model/data/priors/bounds/particles/dt invalidate resume state.
-    // Uses provenance::fit_stage_hash (model + observations + estimate +
-    // fixed + method + seed).
-    let fixed_resolved = fit.fixed.resolve()?;
-    let data_spec = fit.data_spec()?;
-    let config_hash = super::provenance::fit_stage_hash(
-        &config.model_ir_json, &data_spec.observations,
-        &fit.estimate, &fixed_resolved, &fit.simplex_groups,
-        method, seed,
-    )?;
+    // The resume key: this leaf's CAS identity less its extension dimension
+    // (`cas::resume_guard`), so resume accepts a chain state exactly when
+    // every input but the sweep count is the one the base ran under.
+    let config_hash = resume_guard.to_string();
 
     // Load resume states if --resume
     let resume_states: Vec<Option<ChainResumeState>> = if resume {
