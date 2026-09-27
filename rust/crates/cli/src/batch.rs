@@ -394,9 +394,12 @@ pub struct ScenarioEntry {
 ///   - `None` → ad-hoc patch (`scenario_name = None`) using the inline
 ///     enable/disable/params.
 ///
-/// `enable`/`disable`/`params` are the *hash-relevant* delta — for a
-/// preset they are read off the preset (mirroring `prepare_cas_ctx`) so
-/// the CAS path stays consistent with the single-run `--cas` layout.
+/// `enable`/`disable`/`params`/`scale` are the *hash-relevant* delta. For a
+/// preset they are its **effective** delta — every field inherited through
+/// `compose` included — read from [`crate::params_resolver::resolve_preset_delta`],
+/// the same authority the value resolver applies on the preset route, so the
+/// run identity cannot disagree with what runs (gh#573). For an ad-hoc patch
+/// they are the patch itself, which is also what runs.
 #[derive(Debug, Clone)]
 pub struct ResolvedEntry {
     pub name: String,
@@ -404,6 +407,9 @@ pub struct ResolvedEntry {
     pub enable: Vec<String>,
     pub disable: Vec<String>,
     pub params: HashMap<String, f64>,
+    /// `scale` factors in application order. Always empty for an ad-hoc
+    /// patch: an inline `[[scenario]]` has no `scale` spelling.
+    pub scale: Vec<(String, f64)>,
     /// The scenario's own simulation horizon (`scenarios { x { simulate { to
     /// = … } } }`), when it declares one — otherwise the cell inherits
     /// `model.simulation.t_end` (gh#561).
@@ -414,6 +420,27 @@ pub struct ResolvedEntry {
     /// always `None`, because a horizon is a model-file declaration and there
     /// is no CLI spelling for one.
     pub t_end: Option<f64>,
+}
+
+impl ResolvedEntry {
+    /// The entry for the model preset `name`, routed through the preset
+    /// branch of the value resolver. The hashed delta comes from
+    /// [`crate::params_resolver::resolve_preset_delta`] — the authority that
+    /// branch applies — and `t_end` is supplied by the caller, because
+    /// `simulate --to` may override the preset's composed horizon.
+    pub fn from_preset(model: &ir::Model, name: &str, t_end: Option<f64>) -> Result<Self, String> {
+        let delta = crate::params_resolver::resolve_preset_delta(model, name)
+            .map_err(|e| e.to_string())?;
+        Ok(ResolvedEntry {
+            name: name.to_string(),
+            route: Some(name.to_string()),
+            enable: delta.enable,
+            disable: delta.disable,
+            params: delta.params.into_iter().collect(),
+            scale: delta.scale,
+            t_end,
+        })
+    }
 }
 
 /// Resolve every `[[scenario]]` entry against the model's preset names
@@ -441,24 +468,11 @@ fn resolve_batch_scenarios(
             };
             match resolve_scenario_ref(&sref, &preset_names)? {
                 ResolvedScenario::Preset { name } => {
-                    // Hash-relevant delta = the preset's own
-                    // enable/disable/params, matching prepare_cas_ctx
-                    // so batch and single-run --cas agree on layout.
-                    let preset = model.presets.iter()
-                        .find(|p| p.name == name)
-                        .expect("resolve_scenario_ref confirmed preset exists");
                     // Composed, via the single horizon authority — see the twin
                     // site in `main.rs` (gh#561).
                     let t_end = crate::params_resolver::composed_preset_t_end(model, &name)
                         .map_err(|e| e.to_string())?;
-                    Ok(ResolvedEntry {
-                        name,
-                        route: Some(preset.name.clone()),
-                        enable: preset.enable.clone(),
-                        disable: preset.disable.clone(),
-                        params: preset.params.clone(),
-                        t_end,
-                    })
+                    ResolvedEntry::from_preset(model, &name, t_end)
                 }
                 ResolvedScenario::Adhoc { name, enable, disable, params } => {
                     Ok(ResolvedEntry {
@@ -467,6 +481,7 @@ fn resolve_batch_scenarios(
                         enable,
                         disable,
                         params: params.into_iter().collect(),
+                        scale: Vec::new(),
                         // An ad-hoc patch has no horizon: `simulate { to }` is
                         // a model-file declaration with no CLI spelling.
                         t_end: None,
@@ -1121,6 +1136,7 @@ impl CasSink {
             enable: &resolved.enable,
             disable: &resolved.disable,
             scen_params: &resolved.params,
+            scen_scale: &resolved.scale,
             param_label: &param_label,
             scenario_label,
             base_seed: spec.process_seed,
@@ -2300,7 +2316,9 @@ fn print_batch_dry_run(
             Some(_) => "[model preset]",
             None => "[ad-hoc]",
         };
-        let marker = if sc.enable.is_empty() && sc.disable.is_empty() && sc.params.is_empty() {
+        let marker = if sc.enable.is_empty() && sc.disable.is_empty() && sc.params.is_empty()
+            && sc.scale.is_empty()
+        {
             "(no patch — baseline identity)".to_string()
         } else {
             let mut parts = Vec::new();
@@ -2311,6 +2329,10 @@ fn print_batch_dry_run(
                 ks.sort();
                 let kv: Vec<String> = ks.iter().map(|k| format!("{}={}", k, sc.params[*k])).collect();
                 parts.push(format!("set={{{}}}", kv.join(", ")));
+            }
+            if !sc.scale.is_empty() {
+                let kv: Vec<String> = sc.scale.iter().map(|(k, f)| format!("{k}={f}")).collect();
+                parts.push(format!("scale={{{}}}", kv.join(", ")));
             }
             parts.join(" ")
         };
@@ -2668,6 +2690,7 @@ mod tests {
                 enable: vec![],
                 disable: vec![],
                 params: HashMap::new(),
+                scale: Vec::new(),
                 t_end: None,
             }],
             model_path: "model.ir.json".to_string(),

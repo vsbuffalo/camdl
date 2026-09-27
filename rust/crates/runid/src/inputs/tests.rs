@@ -49,6 +49,7 @@ fn golden_fixtures() -> Vec<(&'static str, ContentHash)> {
         enabled: [InterventionId("vacc".into())].into_iter().collect(),
         disabled: BTreeSet::new(),
         patch: BTreeMap::new(),
+        scale: [(ParamId("beta".into()), vec![fid(2)])].into_iter().collect(),
     };
     let seed = Seed { process_seed: 42, base_seed: 7 };
     let fit = FitDigest {
@@ -105,10 +106,13 @@ fn canonical_encoding_is_pinned() {
         // unchanged key changed; the key follows. `run_id(Sim)` moves with it.
         ("SimConfig", "d5c50fdd5a253a0130617c6dc04be72895833567fc31f7ef078877ef92524000"),
         ("ResolvedParams", "3cae27d97f964a1a6e654228dcf0ced7407f2937792ea7b2c20b724628d1ec10"),
-        ("ResolvedScenario", "bdc6a70dd99429b0adc3646f4f089279a69b6101ece3ab5bb3ebf31b7a32c0ca"),
+        // gh#573: `ResolvedScenario` schema_version 1 -> 2 — added `scale`
+        // (the fixture now carries one factor, so the encoding of a non-empty
+        // scale is pinned too). `run_id(Sim)` moves with it.
+        ("ResolvedScenario", "ff4394e51bd629ed88ae4ed859a84acd4753183fddf39112e1e088b6026ed098"),
         ("FitDigest", "a87aad94ad68c799fd558a872ebeb7de8507c3da867c6553ad198af38882d7e7"),
         ("StageConfig", "f6eb2654d2393f1365ba8610b3a80a5a5772e752b54179dc208f82b995f067df"),
-        ("run_id(Sim)", "741daad2df1f8641ee03b4a03adbc659cf46b0bed950d60c4a71e8854afad2da"),
+        ("run_id(Sim)", "54093e502e4b5bcafed3d24360b1ea0750ab1749ab8d47cef286342490cf9bfb"),
         ("run_id(FitStage)", "882fceab6e6120667091cc2f4c02a8a035645e46f4d81b86643ea591ee101836"),
     ];
     let actual = golden_fixtures();
@@ -274,6 +278,7 @@ fn trajectory_input_display_is_provenance() {
         enabled: BTreeSet::new(),
         disabled: BTreeSet::new(),
         patch: BTreeMap::new(),
+        scale: BTreeMap::new(),
     };
     let seed = Seed { process_seed: 1, base_seed: 1 };
 

@@ -532,6 +532,71 @@ pub fn composed_preset_scale(
     Ok(out)
 }
 
+/// Everything a named preset changes about a run's inputs, after walking its
+/// `compose` chain: the intervention filter lists, the `set` values, and the
+/// `scale` factors. The horizon is resolved separately
+/// ([`composed_preset_t_end`]) because it keys the `config` level, not the
+/// `scenario` level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresetDelta {
+    /// Composed `enable` list: each composed sub-preset's, then the parent's.
+    pub enable: Vec<String>,
+    /// Composed `disable` list, same order as `enable`.
+    pub disable: Vec<String>,
+    /// Composed `set` values ([`resolve_preset_params`]; parent wins).
+    pub params: IndexMap<String, f64>,
+    /// Composed `scale` factors in application order
+    /// ([`composed_preset_scale`]). Not deduplicated: a key scaled by a
+    /// composed sub-preset *and* the parent is multiplied twice.
+    pub scale: Vec<(String, f64)>,
+}
+
+/// Resolve a named preset to its effective [`PresetDelta`].
+///
+/// The single authority for "what does scenario X change," read by both the
+/// value resolver ([`resolve_parameters`], which applies the delta) and the
+/// run identity (`batch::ResolvedEntry::from_preset`, which hashes it). The
+/// two reading one function is what makes it impossible for a preset to
+/// change the trajectory without changing the `run_id` (gh#573: the identity
+/// used to read the preset's own literal fields, missing `scale` and every
+/// field inherited through `compose`).
+pub fn resolve_preset_delta(
+    model: &ir::Model,
+    preset_name: &str,
+) -> Result<PresetDelta, ResolveError> {
+    let available = || -> Vec<String> {
+        model.presets.iter().map(|p| p.name.clone()).collect()
+    };
+    let preset = model.presets.iter()
+        .find(|p| p.name == preset_name)
+        .ok_or_else(|| ResolveError::ScenarioNotFound {
+            name: preset_name.to_string(),
+            available: available(),
+        })?;
+    let mut enable: Vec<String> = Vec::new();
+    let mut disable: Vec<String> = Vec::new();
+    for sc_name in &preset.compose {
+        let sub = model.presets.iter().find(|p| p.name == *sc_name)
+            .ok_or_else(|| ResolveError::ScenarioNotFound {
+                name: sc_name.clone(),
+                available: available(),
+            })?;
+        if !sub.compose.is_empty() {
+            return Err(ResolveError::NestedCompose { name: sc_name.clone() });
+        }
+        enable.extend(sub.enable.iter().cloned());
+        disable.extend(sub.disable.iter().cloned());
+    }
+    enable.extend(preset.enable.iter().cloned());
+    disable.extend(preset.disable.iter().cloned());
+    Ok(PresetDelta {
+        enable,
+        disable,
+        params: resolve_preset_params(model, preset_name)?,
+        scale: composed_preset_scale(model, preset_name)?,
+    })
+}
+
 /// The simulation horizon a named scenario declares (`scenarios { x { simulate
 /// { to = … } } }`), walking its `compose` chain — or `None` when neither the
 /// preset nor anything it composes declares one, in which case the cell runs to
@@ -710,42 +775,14 @@ pub fn resolve_parameters<'a>(
         (Vec<String>, Vec<String>, Vec<(String, f64)>, Vec<(String, f64)>,
          Option<String>) =
         if let Some(name) = scenario_name.as_deref() {
-            let preset = model.presets.iter().find(|p| p.name == name)
-                .ok_or_else(|| ResolveError::ScenarioNotFound {
-                    name: name.to_string(),
-                    available: model.presets.iter().map(|p| p.name.clone()).collect(),
-                })?
-                .clone();
-            let mut composed_enable: Vec<String> = Vec::new();
-            let mut composed_disable: Vec<String> = Vec::new();
-            for sc_name in &preset.compose {
-                let sub = model.presets.iter().find(|p| p.name == *sc_name)
-                    .ok_or_else(|| ResolveError::ScenarioNotFound {
-                        name: sc_name.clone(),
-                        available: model.presets.iter().map(|p| p.name.clone()).collect(),
-                    })?;
-                if !sub.compose.is_empty() {
-                    return Err(ResolveError::NestedCompose { name: sc_name.clone() });
-                }
-                composed_enable.extend(sub.enable.clone());
-                composed_disable.extend(sub.disable.clone());
-            }
-            composed_enable.extend(preset.enable.clone());
-            composed_disable.extend(preset.disable.clone());
-            // Scale walks the same `compose` chain via the shared authority, so
-            // the value applied here and the collision guards' footprint
-            // (`composed_preset_scale`) can never disagree about which params a
-            // composed scenario scales.
-            let composed_scale: Vec<(String, f64)> = composed_preset_scale(&model, name)?;
-            // gh#36: the params compose-walk is shared with the fit
-            // `[fixed] from_scenario` path via `resolve_preset_params`.
-            // Returns a deduped (parent-wins) map; applying it below is
-            // equivalent to the old last-write-wins Vec since there are no
-            // duplicate keys to re-trigger.
-            let composed_params: Vec<(String, f64)> =
-                resolve_preset_params(&model, name)?.into_iter().collect();
-            (composed_enable, composed_disable, composed_params, composed_scale,
-             Some(name.to_string()))
+            // The whole composed delta comes from the one authority the run
+            // identity also reads (gh#573), so what is applied here and what
+            // is hashed cannot disagree. `params` is the deduped (parent-wins)
+            // map shared with the fit `[fixed] from_scenario` path (gh#36);
+            // `scale` is the same list the collision guards' footprint reads.
+            let delta = resolve_preset_delta(&model, name)?;
+            (delta.enable, delta.disable, delta.params.into_iter().collect(),
+             delta.scale, Some(name.to_string()))
         } else {
             // Ad-hoc path: enable/disable always drive the filter; an
             // INLINE scenario's `set`/`scale` resolve at the SAME tier 4 as

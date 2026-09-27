@@ -2605,8 +2605,9 @@ fn build_simulate_cas_sink(
         .collect();
 
     // Resolve each simulate scenario into the hash-relevant delta. A name
-    // matching a model preset reads the preset's own enable/disable/params
-    // (preset route); the no-scenario case is the CLI ad-hoc baseline.
+    // matching a model preset reads its effective delta via
+    // `ResolvedEntry::from_preset` (preset route); the no-scenario case is the
+    // CLI ad-hoc baseline.
     let resolved_scenarios: Vec<crate::batch::ResolvedEntry> = if scenario_names.is_empty() {
         vec![crate::batch::ResolvedEntry {
             name: "baseline".to_string(),
@@ -2614,6 +2615,7 @@ fn build_simulate_cas_sink(
             enable: run.adhoc_enable.clone(),
             disable: run.adhoc_disable.clone(),
             params: HashMap::new(),
+            scale: Vec::new(),
             // The implicit baseline is the model as written — its horizon —
             // unless `--to` overrides it (gh#626): the override is what the
             // cell RUNS, so it is what the cell is KEYED on.
@@ -2621,30 +2623,25 @@ fn build_simulate_cas_sink(
         }]
     } else {
         scenario_names.iter().map(|name| {
-            let preset = base_model.presets.iter().find(|p| &p.name == name)
-                .ok_or_else(|| {
-                    let available: Vec<&str> = base_model.presets.iter()
-                        .map(|p| p.name.as_str()).collect();
-                    format!("scenario '{}' not found. Available: {}", name,
-                        if available.is_empty() { "(none)".into() } else { available.join(", ") })
-                })?;
-            Ok(crate::batch::ResolvedEntry {
-                name: name.clone(),
-                route: Some(preset.name.clone()),
-                enable: preset.enable.clone(),
-                disable: preset.disable.clone(),
-                params: preset.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                // Composed, via the single horizon authority — NOT `preset.t_end`,
-                // which misses a horizon inherited through `compose = [...]` and
-                // would then key the cell on a window it does not run (gh#561).
-                // `--to` (gh#626) wins when present — the up-front conflict rule
-                // has already refused any scenario horizon it would discard.
-                t_end: match run.t_end_override {
-                    Some(v) => Some(v),
-                    None => crate::params_resolver::composed_preset_t_end(&base_model, name)
-                        .map_err(|e| e.to_string())?,
-                },
-            })
+            if !base_model.presets.iter().any(|p| &p.name == name) {
+                let available: Vec<&str> = base_model.presets.iter()
+                    .map(|p| p.name.as_str()).collect();
+                return Err(format!("scenario '{}' not found. Available: {}", name,
+                    if available.is_empty() { "(none)".into() } else { available.join(", ") }));
+            }
+            // Composed, via the single horizon authority — NOT `preset.t_end`,
+            // which misses a horizon inherited through `compose = [...]` and
+            // would then key the cell on a window it does not run (gh#561).
+            // `--to` (gh#626) wins when present — the up-front conflict rule
+            // has already refused any scenario horizon it would discard.
+            let t_end = match run.t_end_override {
+                Some(v) => Some(v),
+                None => crate::params_resolver::composed_preset_t_end(&base_model, name)
+                    .map_err(|e| e.to_string())?,
+            };
+            // The effective (compose-walked, scale-bearing) delta, from the
+            // authority the preset route applies (gh#573).
+            crate::batch::ResolvedEntry::from_preset(&base_model, name, t_end)
         }).collect::<Result<Vec<_>, String>>()?
     };
 
