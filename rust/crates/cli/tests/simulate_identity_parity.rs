@@ -290,6 +290,97 @@ fn param_that_shadows_a_draw_splits_the_cas_leaves() {
         "the shadowed leaf's params label must carry the β it ran: {labels:?}");
 }
 
+const SIR_DATED: &str = r#"
+time_unit = 'days
+origin = date("2020-01-01")
+compartments { S, I, R }
+parameters {
+  beta  : rate  in [0.001, 5.0]
+  gamma : rate  in [0.01, 1.0]
+  N0    : count in [100, 10000]
+}
+transitions {
+  infection : S --> I @ beta * S * I / N0
+  recovery  : I --> R @ gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days  to = 10 'days }
+"#;
+
+/// Every committed `SimEnsemble` leaf under `<out>/ensembles`.
+fn ensemble_leaves(out: &Path) -> Vec<PathBuf> {
+    let mut leaves = Vec::new();
+    let mut stack = vec![out.join("ensembles")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.join("run.json").exists() { leaves.push(p) } else { stack.push(p) }
+            }
+        }
+    }
+    leaves
+}
+
+/// gh#583 item B. `--dates` adds `date` columns to the combined TSV, and the
+/// multi-cell ensemble was stored from that same buffer — but `--dates` is in
+/// none of the ensemble's identity levels. So whichever run landed first
+/// decided the stored bytes: a `--dates` run stored a dated ensemble that a
+/// plain run was then served, and the other order died in DivergentRecompute
+/// (a warning, and no ensemble). `--dates` is presentation: the ensemble is
+/// stored date-free, like the `Sim` leaves, and only the `-o` mirror is dated.
+#[test]
+fn dates_reach_the_mirror_and_not_the_stored_ensemble() {
+    let bin = camdl_bin();
+    let Some(cc) = camdlc() else {
+        eprintln!("skip: camdlc.exe missing (run `make build`)");
+        return;
+    };
+    if !bin.exists() {
+        eprintln!("skip: release camdl missing (run `make build`)");
+        return;
+    }
+    let tmp = tempdir("dates");
+    let ir = compile(tmp.path(), &cc, SIR_DATED, "sird");
+    let out = tmp.path().join("out");
+    let run = |tag: &str, dates: bool| {
+        let mut cmd = Command::new(&bin);
+        cmd.args(["simulate"]).arg(&ir)
+            .args(["--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
+                   "--seeds", "1,2", "--output-dir"]).arg(&out)
+            .arg("-o").arg(tmp.path().join(format!("{tag}.tsv")))
+            .env("CAMDL_SKIP_VERSION_CHECK", "1");
+        if dates { cmd.arg("--dates"); }
+        let o = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert!(o.status.success(), "simulate ({tag}): {stderr}");
+        stderr
+    };
+    let header = |p: &Path| -> String {
+        std::fs::read_to_string(p).unwrap().lines().nth(1).unwrap_or("").to_string()
+    };
+
+    // `--dates` first: the run that decides the stored bytes.
+    run("dated", true);
+    assert!(header(&tmp.path().join("dated.tsv")).split('\t').any(|c| c == "date"),
+        "the -o mirror of a --dates run carries the date column");
+    let ens = ensemble_leaves(&out);
+    assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
+    let stored = header(&ens[0].join("ensemble.tsv"));
+    assert!(!stored.split('\t').any(|c| c == "date"),
+        "the stored ensemble must be date-free — `--dates` is in no identity \
+         level, so a plain run would be served these bytes: {stored}");
+
+    // The plain run resolves the same ensemble identity and agrees with it.
+    let stderr = run("plain", false);
+    assert!(!stderr.contains("divergent recompute"),
+        "a plain rerun must agree with the stored ensemble: {stderr}");
+    assert_eq!(std::fs::read(tmp.path().join("plain.tsv")).unwrap(),
+               std::fs::read(ens[0].join("ensemble.tsv")).unwrap(),
+        "without --dates, the -o mirror and the stored ensemble are the same bytes");
+}
+
 const SIR_DEFAULTED: &str = r#"
 time_unit = 'days
 compartments { S, I, R }

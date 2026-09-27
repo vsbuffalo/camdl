@@ -1873,8 +1873,14 @@ fn run_simulate(a: &args::SimulateArgs) {
 
     // The combined-obs / wide-format mirror sink. Its ObsOutput is derived
     // from `job.obs` (run-spec §3.1.1, single source of truth).
+    // gh#583 item B: under `--dates` the mirror carries date columns the
+    // ensemble must not — `--dates` is presentation, in no identity level, so
+    // the stored ensemble is rendered date-free (as the `Sim` leaves are) and
+    // the mirror alone is dated. Without `--dates` the two are one buffer.
+    let undated_out: Option<Vec<u8>> = (a.dates && traj_out.is_some()).then(Vec::new);
     let stream = StreamSink {
         traj_out,
+        undated_out,
         traj_header_written: false,
         output_cols: output_cols.clone(),
         dates: a.dates,
@@ -1998,6 +2004,8 @@ fn run_simulate(a: &args::SimulateArgs) {
     // leaves/ensemble are the system of record; this buffer is the mirror —
     // written to `-o PATH`, or to stdout under `--stdout` (the store opt-out).
     let combined_traj: Option<Vec<u8>> = sink.stream.traj_out.take();
+    // The date-free rendering, present only under `--dates` (gh#583 B).
+    let undated_traj: Option<Vec<u8>> = sink.stream.undated_out.take();
 
     // `--stdout`: stream the trajectory to stdout and stop. No leaf was
     // committed (skip_cas), so there is no store, no ensemble, and no banner —
@@ -2042,11 +2050,13 @@ fn run_simulate(a: &args::SimulateArgs) {
     // A multi-cell run (total_runs > 1) keeps its N per-cell `Sim` leaves AND
     // additionally writes the combined wide-format TSV as a content-addressed
     // ensemble that REFERENCES them (deps). The ensemble's artifact bytes are
-    // the same `combined_traj` buffer the `-o` mirror uses, so `cat <ensemble>`
-    // == the `-o` combined TSV. A single-run simulate writes NO ensemble (the
-    // one leaf is the whole thing).
+    // the same rows the `-o` mirror holds, so `cat <ensemble>` == the `-o`
+    // combined TSV — except under `--dates`, which is presentation and in no
+    // identity level, so its date columns stay in the mirror and out of the
+    // store (gh#583 item B). A single-run simulate writes NO ensemble (the one
+    // leaf is the whole thing).
     if total_runs > 1 && !suppress_trajectory {
-        if let Some(ref bytes) = combined_traj {
+        if let Some(bytes) = undated_traj.as_ref().or(combined_traj.as_ref()) {
             // The post-bar pause the user sees is this: writing + fsyncing the
             // combined wide-format TSV as the ensemble leaf. Announce it so a
             // multi-MB ensemble doesn't look like a hang.
@@ -2813,6 +2823,11 @@ struct StreamSink {
     /// byte-identical by construction. Never streamed to stdout (Item C — the
     /// CAS leaf/ensemble are the system of record).
     traj_out: Option<Vec<u8>>,
+    /// The same rows without date columns, kept only under `--dates` (else
+    /// `None`, and `traj_out` is already date-free). The `SimEnsemble` artifact
+    /// is stored from this buffer: `--dates` is in no identity level, so bytes
+    /// it changes cannot be stored under the ensemble's `run_id` (gh#583 B).
+    undated_out: Option<Vec<u8>>,
     traj_header_written: bool,
     /// gh#156: the resolved `--no-flows` / `--columns` filter for this mirror's
     /// trajectory columns — the same selection the CAS leaf renderer uses.
@@ -2840,6 +2855,60 @@ struct StreamSink {
     n_draws: usize,
 }
 
+/// One cell's rows of the combined wide-format trajectory TSV, renderable with
+/// or without the calendar-date columns — so the dated `-o` mirror and the
+/// date-free `SimEnsemble` artifact are two renderings of the same rows, never
+/// two writers (gh#583 item B).
+struct WideTrajBlock<'a> {
+    traj: &'a sim::Trajectory,
+    cols: &'a util::TrajColumns,
+    time_unit: &'a str,
+    /// The first cell writes the version line and the column header.
+    write_header: bool,
+    run_idx: usize,
+    draw_idx: usize,
+    total_runs: usize,
+    n_scenarios: usize,
+    n_draws: usize,
+    scenario_label: &'a str,
+}
+
+impl WideTrajBlock<'_> {
+    /// Append this cell's rows to `out`, with date columns rendered from
+    /// `date_origin` when it is `Some`.
+    fn write(&self, out: &mut Vec<u8>, date_origin: Option<&str>) -> Result<(), String> {
+        use std::io::Write;
+        let e = |e: std::io::Error| e.to_string();
+        if self.write_header {
+            writeln!(out, "# {}", version::VERSION).map_err(e)?;
+            if self.total_runs > 1 { write!(out, "replicate\t").map_err(e)?; }
+            if self.n_scenarios > 1 { write!(out, "scenario\t").map_err(e)?; }
+            if self.n_draws > 1 { write!(out, "draw\t").map_err(e)?; }
+            // `t t_start t_stop [date date_start date_stop]`: the instant
+            // the states are read at and the period the flows cover
+            // (gh#833), the same cells the leaf's `traj.tsv` carries.
+            write!(out, "{}", util::TRAJ_TIME_HEADER).map_err(e)?;
+            if date_origin.is_some() {
+                write!(out, "{}", util::TRAJ_DATE_HEADER).map_err(e)?;
+            }
+            self.cols.write_header(out).map_err(e)?;
+            writeln!(out).map_err(e)?;
+        }
+        for (snap, period) in self.traj.snapshots.iter().zip(self.traj.flow_periods()) {
+            if self.total_runs > 1 { write!(out, "{}\t", self.run_idx + 1).map_err(e)?; }
+            if self.n_scenarios > 1 { write!(out, "{}\t", self.scenario_label).map_err(e)?; }
+            if self.n_draws > 1 { write!(out, "{}\t", self.draw_idx + 1).map_err(e)?; }
+            util::write_traj_time_cells(out, snap.t, period).map_err(e)?;
+            if let Some(o) = date_origin {
+                util::write_traj_date_cells(out, o, self.time_unit, snap.t, period)?;
+            }
+            self.cols.write_row(out, snap).map_err(e)?;
+            writeln!(out).map_err(e)?;
+        }
+        Ok(())
+    }
+}
+
 impl engine::RunSink for StreamSink {
     fn on_start(&mut self, grid: &engine::Grid) {
         self.total_runs = grid.total_runs;
@@ -2848,7 +2917,6 @@ impl engine::RunSink for StreamSink {
     }
 
     fn merge_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
-        use std::io::Write;
         let traj = &cell.traj;
         let model = &cell.model;
         let run_idx = cell.spec.run_idx;
@@ -2891,34 +2959,17 @@ impl engine::RunSink for StreamSink {
                 None
             };
 
-            if !self.traj_header_written {
-                writeln!(out, "# {}", version::VERSION).map_err(|e| e.to_string())?;
-                if total_runs > 1 { write!(out, "replicate\t").map_err(|e| e.to_string())?; }
-                if n_scenarios > 1 { write!(out, "scenario\t").map_err(|e| e.to_string())?; }
-                if n_draws > 1 { write!(out, "draw\t").map_err(|e| e.to_string())?; }
-                // `t t_start t_stop [date date_start date_stop]`: the instant
-                // the states are read at and the period the flows cover
-                // (gh#833), the same cells the leaf's `traj.tsv` carries.
-                write!(out, "{}", util::TRAJ_TIME_HEADER).map_err(|e| e.to_string())?;
-                if date_origin.is_some() {
-                    write!(out, "{}", util::TRAJ_DATE_HEADER).map_err(|e| e.to_string())?;
-                }
-                cols.write_header(out).map_err(|e| e.to_string())?;
-                writeln!(out).map_err(|e| e.to_string())?;
-                self.traj_header_written = true;
+            let block = WideTrajBlock {
+                traj, cols: &cols, time_unit: &model.time_unit,
+                write_header: !self.traj_header_written,
+                run_idx, draw_idx, total_runs, n_scenarios, n_draws,
+                scenario_label: &scenario_label,
+            };
+            block.write(out, date_origin)?;
+            if let Some(ref mut undated) = self.undated_out {
+                block.write(undated, None)?;
             }
-
-            for (snap, period) in traj.snapshots.iter().zip(traj.flow_periods()) {
-                if total_runs > 1 { write!(out, "{}\t", run_idx + 1).map_err(|e| e.to_string())?; }
-                if n_scenarios > 1 { write!(out, "{}\t", scenario_label).map_err(|e| e.to_string())?; }
-                if n_draws > 1 { write!(out, "{}\t", draw_idx + 1).map_err(|e| e.to_string())?; }
-                util::write_traj_time_cells(out, snap.t, period).map_err(|e| e.to_string())?;
-                if let Some(o) = date_origin {
-                    util::write_traj_date_cells(out, o, &model.time_unit, snap.t, period)?;
-                }
-                cols.write_row(out, snap).map_err(|e| e.to_string())?;
-                writeln!(out).map_err(|e| e.to_string())?;
-            }
+            self.traj_header_written = true;
         }
 
         // ── Observation sampling ────────────────────────────────────────────
