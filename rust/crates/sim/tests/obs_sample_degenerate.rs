@@ -474,3 +474,33 @@ fn beta_invalid_shape_draws_zero_and_counts() {
         assert!(nan_counter() > before, "{which} = {v} must increment obs_sample_nan");
     }
 }
+
+/// gh#925 sibling: `negbin_logpmf` scores a non-positive dispersion as `-inf`
+/// (for a positive mean), so the sampler has no defined draw. Pre-fix
+/// `draw_neg_binomial` returned 0 for it silently, indistinguishable from a
+/// genuine zero count. It must be counted like any undefined argument. The
+/// zero-inflated family draws its base through the same helper.
+#[test]
+fn neg_binomial_non_positive_dispersion_draws_zero_and_counts() {
+    let zinb = || Likelihood::ZeroInflatedNegBinomial(ZeroInflatedNegBinomialLikelihood {
+        mean: Diffable::new(const_expr(50.0)),
+        dispersion: Diffable::new(projected()),
+        pi: Diffable::new(const_expr(0.0)),
+    });
+    // Non-vacuity control: NB(50, k = 10) draws near 50, not 0.
+    let y = draw_one(neg_binomial(const_expr(50.0), projected()), 10.0, 42);
+    assert!(y > 0.0, "NB(50, 10) must draw a positive count, got {y}");
+
+    for k in [0.0, -1.0] {
+        for (label, lik) in [
+            ("neg_binomial", neg_binomial(const_expr(50.0), projected())),
+            ("zero_inflated", zinb()),
+        ] {
+            let before = nan_counter();
+            let y = draw_one(lik, k, 42);
+            assert_eq!(y, 0.0, "{label}: dispersion = {k} must draw 0, got {y}");
+            assert!(nan_counter() > before,
+                "{label}: dispersion = {k} must increment obs_sample_nan");
+        }
+    }
+}

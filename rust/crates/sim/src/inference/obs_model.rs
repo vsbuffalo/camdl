@@ -836,8 +836,9 @@ fn obs_args_nan(vals: &[f64]) -> bool {
 /// `g ~ Gamma(k, mean/k)`, `y ~ Poisson(g)`. Total over degenerate inputs
 /// (gh#619) — callers guard NaN via [`obs_args_nan`] first:
 ///
-/// - `mean <= 0` or `dispersion <= 0`: mass at zero → 0 (pre-existing
-///   behaviour);
+/// - `mean <= 0`: mass at zero → 0;
+/// - otherwise `dispersion <= 0`: out of the domain → 0, counted as an
+///   undefined argument (`obs_sample_nan`);
 /// - `mean/k` under- or overflows even though both are positive (e.g. the
 ///   smallest subnormal mean over k = 500, or k = inf): the Gamma mixing
 ///   density is degenerate and `Gamma::new` rejects the scale — previously
@@ -845,7 +846,16 @@ fn obs_args_nan(vals: &[f64]) -> bool {
 ///   `k → ∞` limit is `Poisson(mean)`, the same fallback `rng::neg_binomial`
 ///   documents for its degenerate-shape regime, counted the same way.
 fn draw_neg_binomial(mean: f64, dispersion: f64, rng: &mut StatefulRng) -> f64 {
-    if mean <= 0.0 || dispersion <= 0.0 {
+    // In `negbin_logpmf`'s order: a non-positive mean is a point mass at zero
+    // (a valid draw of 0) whatever the dispersion; past it, a non-positive
+    // dispersion is out of the domain (`-inf`), so it has no defined draw and
+    // takes the NaN-argument contract — counted, not a silent zero (gh#925
+    // sibling).
+    if mean <= 0.0 {
+        return 0.0;
+    }
+    if dispersion <= 0.0 {
+        crate::eval_stats::inc_obs_sample_nan();
         return 0.0;
     }
     let scale = mean / dispersion;
