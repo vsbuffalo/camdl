@@ -25,9 +25,12 @@
 //! directly (the anti-vacuity guards below) so "the chain completed" or "the
 //! chain failed" cannot be explained by some other site.
 //!
-//! - Structural: `∂rate/∂N0 = ghost`, a parameter that does not exist.
-//!   `eval_expr` resolves names at evaluation time on this path, so it returns
-//!   `SimError::UnknownParameter("ghost")` — structural.
+//! - Structural: `∂rate/∂N0 = projected`, the observation-projection leaf,
+//!   which has no value outside an observation likelihood. Every name in it
+//!   resolves, so `CompiledModel::new` builds the model (gh#938 name-checks
+//!   initial-state expressions at build, which is why an undeclared parameter
+//!   is no longer an injection this test can use); evaluating it on the
+//!   initial-state path returns `SimError::Validation` — structural, at every θ.
 //! - Recoverable: `∂rate/∂N0 = sqrt(−1)`, which `eval_expr` reports as
 //!   `SimError::NumericalCollapse { SqrtNegative }` — not structural.
 //!
@@ -165,14 +168,26 @@ fn death_model(d_rate_d_n0: Expr) -> Arc<CompiledModel> {
     Arc::new(CompiledModel::new(model).expect("fixture model must compile"))
 }
 
-/// `ghost` — a parameter the model does not declare.
+/// `projected` — a leaf that only an observation likelihood can evaluate.
+/// Name-clean, so the model builds; on the initial-state path `eval_expr` has
+/// no projected value and returns `SimError::Validation` at every θ.
 fn structural_grad() -> Expr {
-    Expr::param("ghost")
+    projected()
 }
 
-/// `if |mu − MU0| < PINHOLE then 1 else ghost` — clean at the start point,
+fn projected() -> Expr {
+    Expr::Projected(ir::expr::ProjectedExpr { projected: () })
+}
+
+/// The structural error both structural fixtures raise — the verbatim
+/// `SimError` the chain must terminate with.
+fn is_injected_structural(e: &SimError) -> bool {
+    matches!(e, SimError::Validation(m) if m.contains("Projected expression used outside"))
+}
+
+/// `if |mu − MU0| < PINHOLE then 1 else projected` — clean at the start point,
 /// structural everywhere else. `eval_expr` evaluates `Cond` lazily, so the
-/// `ghost` branch is only resolved off the pinhole. This drives the structural
+/// `projected` branch is only evaluated off the pinhole. This drives the structural
 /// failure out of a *leapfrog* evaluation inside `nuts_step`, not out of the
 /// closure's first call at the current point — the two are separate checks in
 /// `run_pgas`.
@@ -189,7 +204,7 @@ fn structural_off_start_grad() -> Expr {
                 Expr::const_(PINHOLE),
             )),
             then: Box::new(Expr::const_(1.0)),
-            else_: Box::new(Expr::param("ghost")),
+            else_: Box::new(projected()),
         },
     })
 }
@@ -352,10 +367,7 @@ fn harness_structural_error_is_gradient_only_and_structural() {
     let compiled = death_model(structural_grad());
     let err = assert_error_is_gradient_only(&compiled);
     assert!(err.is_structural(), "fixture must produce a STRUCTURAL error; got {err}");
-    assert!(
-        matches!(&err, SimError::UnknownParameter(p) if p == "ghost"),
-        "expected UnknownParameter(ghost), got {err}"
-    );
+    assert!(is_injected_structural(&err), "expected the projected-leaf Validation, got {err}");
 }
 
 #[test]
@@ -383,7 +395,7 @@ fn structural_error_in_nuts_gradient_terminates_the_chain() {
             result.sweeps.iter().map(|s| s.params[MU_IDX]).collect::<Vec<_>>(),
         ),
         Err(e) => assert!(
-            matches!(&e, SimError::UnknownParameter(p) if p == "ghost"),
+            is_injected_structural(&e),
             "the underlying structural error must propagate verbatim, got {e}"
         ),
     }
@@ -407,7 +419,7 @@ fn structural_error_at_a_leapfrog_point_terminates_the_chain() {
     moved[MU_IDX] = MU0 + 1e-3;
     let err = compiled
         .initial_state_logpdf_grad(&traj.initial_counts, &[], &moved)
-        .expect_err("off the pinhole the gradient must hit the ghost parameter");
+        .expect_err("off the pinhole the gradient must hit the projected leaf");
     assert!(err.is_structural(), "expected a structural error off the pinhole, got {err}");
 
     match run(&compiled, "gh475-structural-leapfrog") {
@@ -418,7 +430,7 @@ fn structural_error_at_a_leapfrog_point_terminates_the_chain() {
             result.sweeps.iter().map(|s| s.params[MU_IDX]).collect::<Vec<_>>(),
         ),
         Err(e) => assert!(
-            matches!(&e, SimError::UnknownParameter(p) if p == "ghost"),
+            is_injected_structural(&e),
             "the underlying structural error must propagate verbatim, got {e}"
         ),
     }

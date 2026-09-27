@@ -499,6 +499,61 @@ fn eval_table_expr(
     }
 }
 
+/// gh#938: name-check every expression the initial-state seam evaluates at run
+/// time, so a built model cannot fail a name lookup there.
+///
+/// The seam (`initial_state_mean` / `_draw` / `_logpdf` / `_logpdf_grad`,
+/// `initial_state_continuous`, `ic_grad_seed`) evaluates with the name-keyed
+/// `propensity::eval_expr` rather than a stored `ResolvedExpr`, because it needs
+/// that evaluator's typed errors (a `sqrt` of a negative is a
+/// `NumericalCollapse`, not a NaN the infallible `eval_resolved` would hand to
+/// the gradient). So the resolved forms are built here only to be checked, and
+/// dropped: `resolve_expr` and `eval_expr` consult the same name indices, so an
+/// expression that resolves here cannot raise an unknown-name error there.
+///
+/// Covered: every `init {}` expression ([`InitSpec::exprs`], which includes each
+/// law argument); each law argument's emitted `∂arg/∂θ` map, keys and
+/// expressions both, through the shared `resolve_grad_map` (an unknown key was
+/// otherwise skipped at run time — a silently dropped gradient component, the
+/// gh#128 class); and every `ic_grad` entry, compartment key included. Whether an
+/// `ic_grad` compartment is a *real* one stays a run-time refusal in
+/// `ic_grad_seed`: that is a gradient-path capability limit, not a malformed
+/// name, and must not stop gradient-free methods from running the model.
+///
+/// [`InitSpec::exprs`]: ir::model::InitSpec::exprs
+fn check_initial_state_names(model: &Model, ctx: &ResolveCtx<'_>) -> Result<(), SimError> {
+    use ir::deriv::Differentiable;
+    use ir::model::InitSpec;
+
+    for (name, spec) in &model.initial_conditions {
+        let at = |what: &str, e: SimError| {
+            SimError::Validation(format!("initial condition '{name}' {what}: {e}"))
+        };
+        for e in spec.exprs() {
+            resolve_expr(e, ctx).map_err(|e| at("expression", e))?;
+        }
+        let diffables = match spec {
+            InitSpec::Deterministic(_) => vec![],
+            InitSpec::Count(l) => l.diffables(),
+            InitSpec::Real(l) => l.diffables(),
+        };
+        for (arg, d) in diffables {
+            crate::resolved_expr::resolve_grad_map(&d.grad, ctx)
+                .map_err(|e| at(&format!("∂{arg}/∂θ"), e))?;
+        }
+    }
+    for (comp, grad) in &model.ic_grad {
+        let at = |e: SimError| {
+            SimError::Validation(format!("ic_grad entry for initial condition '{comp}': {e}"))
+        };
+        if !ctx.comp_index.contains_key(comp.as_str()) {
+            return Err(at(SimError::UnknownCompartment(comp.clone())));
+        }
+        crate::resolved_expr::resolve_grad_map(grad, ctx).map_err(at)?;
+    }
+    Ok(())
+}
+
 /// Resolve a forcing scalar coefficient `Expr` into a live `ResolvedExpr`,
 /// preserving the historical coefficient grammar whitelist that
 /// `eval_table_expr` enforces: only `Const`, `Param`, `BinOp`, `UnOp`, and
@@ -1965,6 +2020,8 @@ impl CompiledModel {
                 ))
             })?;
 
+        check_initial_state_names(&model, &resolve_ctx)?;
+
         let has_init_law = model.initial_conditions.iter().any(|(_, s)| s.is_law());
 
         // The correlated PF's init-noise layout, fixed once here so it cannot
@@ -2436,7 +2493,12 @@ impl CompiledModel {
                     return Ok(());
                 }
                 for (pname, entry) in &d.grad {
-                    let Some(j) = self.param_index.get(pname.as_str()).copied() else { continue };
+                    // Every key is a declared parameter: `check_initial_state_names`
+                    // refused any other at build (gh#938). Skipping one would drop
+                    // a gradient component silently.
+                    let j = self.param_index.get(pname.as_str()).copied().expect(
+                        "initial-state gradient key validated by CompiledModel::new (gh#938)",
+                    );
                     match entry {
                         ir::deriv::DerivEntry::Grad(e) => {
                             grad[j] += dlogp_darg * crate::propensity::eval_expr(e, &ctx)?;
