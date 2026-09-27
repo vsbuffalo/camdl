@@ -89,6 +89,12 @@ simulate { from = 0 'days  to = 6 'days }
 }
 
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, sweeps: usize, chains: usize) -> PathBuf {
+    write_fit_toml_dt(dir, ir, data, sweeps, chains, "1.0")
+}
+
+fn write_fit_toml_dt(
+    dir: &Path, ir: &Path, data: &Path, sweeps: usize, chains: usize, dt: &str,
+) -> PathBuf {
     let toml = format!(r#"
 output_dir = "{out}"
 [model]
@@ -96,7 +102,7 @@ camdl = "{ir}"
 [data.observations]
 cases = "{data}"
 [config]
-dt = 1.0
+dt = {dt}
 [estimate]
 beta  = {{ bounds = [0.01, 5.0],  prior = {{ log_normal = {{ mu = -0.3, sigma = 0.5 }} }}, start = 0.8 }}
 gamma = {{ bounds = [0.01, 1.0],  prior = {{ log_normal = {{ mu = -1.2, sigma = 0.5 }} }}, start = 0.3 }}
@@ -116,7 +122,7 @@ burn_in = 2
         ir   = ir.display(),
         data = data.display(),
     );
-    let p = dir.join(format!("fit_{}_{}.toml", sweeps, chains));
+    let p = dir.join(format!("fit_{}_{}_dt{}.toml", sweeps, chains, dt));
     std::fs::write(&p, toml).unwrap();
     p
 }
@@ -354,6 +360,41 @@ fn pgas_resume_rejects_when_identity_field_changes() {
     assert!(!r2.status.success(), "resume with changed chains must reject");
     assert!(stderr.contains("config hash mismatch") || stderr.contains("no resume state"),
         "expected config-hash-mismatch error: got {}", stderr);
+}
+
+/// gh#583 item G. The resume guard was a second, hand-listed hash of "the
+/// same statistical problem" (`fit_stage_hash`) that covered the model, the
+/// data bytes, `[estimate]`, `[fixed]` and the method — and nothing in
+/// `[config]`. A chain fitted at `dt = 1` therefore resumed at `dt = 0.5`: a
+/// different likelihood, continued as if it were the same chain, into a leaf
+/// whose address (correctly) said `dt = 0.5`. The guard is now the CAS stage
+/// identity less its extension dimension, so every input the leaf is keyed on
+/// but the sweep count must match.
+#[test]
+fn pgas_resume_rejects_a_changed_dt() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("dt");
+    let (ir, data) = write_fixture(tmp.path());
+    let out = tmp.path().join("results");
+
+    let base = write_fit_toml_dt(tmp.path(), &ir, &data, 8, 1, "1.0");
+    let r1 = Command::new(&bin)
+        .arg("fit").arg("run").arg(&base).arg("--seed").arg("1")
+        .output().expect("spawn");
+    assert!(r1.status.success(), "first PGAS run failed: {}", String::from_utf8_lossy(&r1.stderr));
+    let (base_id, _, _) = post_leaf(&out, &[]);
+
+    let resumed = write_fit_toml_dt(tmp.path(), &ir, &data, 16, 1, "0.5");
+    let r2 = Command::new(&bin)
+        .arg("fit").arg("run").arg(&resumed)
+        .arg("--seed").arg("1").arg("--resume").arg(&base_id)
+        .output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&r2.stderr);
+    assert!(!r2.status.success(),
+        "resuming a dt = 1 chain at dt = 0.5 must be refused: {stderr}");
+    assert!(stderr.contains("config hash mismatch"),
+        "refused by the resume guard: {stderr}");
 }
 
 /// gh#280: PGAS reports a complete-data loglik, so its live progress feed must

@@ -976,6 +976,9 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         // `--resume` base.
         let mut deps: Vec<runid::inputs::ArtifactRef> =
             resolved_starts.source.iter().map(|s| s.dep.clone()).collect();
+        // The resume key is taken over these deps only — without the resume
+        // base's, which the base's own key never saw (`cas::resume_guard`).
+        let starts_deps = deps.clone();
 
         // gh#147 (M3.2): --resume <base ref> reads a prior leaf read-only; the
         // resumed run writes a distinct leaf keyed on the new target_length
@@ -1009,6 +1012,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
             eprintln!("error: fit-method identity: {}", e);
             std::process::exit(1);
         });
+        // gh#583 item G: the `--resume` key is this identity less its
+        // extension dimension — the same levels, not a second hand-listed hash.
+        let resume_guard = cas::resume_guard(&cas::FitStageCtx { deps: starts_deps, ..ctx })
+            .unwrap_or_else(|e| {
+                eprintln!("error: fit-method resume key: {}", e);
+                std::process::exit(1);
+            });
         let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitStage, &resolved.levels);
         // gh#147 (M3.2): write the fit-level sidecar once per fit segment
         // (`cas_path`'s grandparent: `.../fits/{stem}-{h8}/`). Done before the
@@ -1484,6 +1494,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     pgas_opts,
                     seed, force,
                     a.resume.is_some(),
+                    &resume_guard,
                     &resolved_starts,
                     &heartbeat,
                 ).unwrap_or_else(|e| {
@@ -1504,6 +1515,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     pmmh_opts,
                     seed, force,
                     a.resume.is_some(),
+                    &resume_guard,
                     &resolved_starts,
                     // PMMH's dt-check is the PF-based one wired on the IF2 path.
                     /* dt_check_opt */ None,
@@ -1540,6 +1552,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     pmmh_opts,
                     seed, force,
                     a.resume.is_some(),
+                    &resume_guard,
                     &resolved_starts,
                     Some(mh_dt_check),
                     &heartbeat,

@@ -102,6 +102,9 @@ pub fn run_stage(
     seed: u64,
     force: bool,
     resume: bool,
+    // The leaf's resume-compatibility key (`cas::resume_guard`); see
+    // `pgas::run_stage`.
+    resume_guard: &str,
     starts: &super::chain_starts::ResolvedStarts,
     // Post-fit deterministic ODE dt-check config (gh#52, gh#227). `Some` only on
     // the `mh` (ODE) dispatch; PMMH passes `None` (its dt-check is PF-based and
@@ -332,16 +335,10 @@ pub fn run_stage(
 
     let dt = config.if2_config.dt;
 
-    // Compute config hash — identifies the statistical problem; resume only
-    // succeeds when the (model + observations + estimate + fixed + method +
-    // seed) tuple is unchanged.
-    let fixed_resolved = fit.fixed.resolve()?;
-    let data_spec = fit.data_spec()?;
-    let config_hash = super::provenance::fit_stage_hash(
-        &config.model_ir_json, &data_spec.observations,
-        &fit.estimate, &fixed_resolved, &fit.simplex_groups,
-        method, seed,
-    )?;
+    // The resume key: this leaf's CAS identity less its extension dimension
+    // (`cas::resume_guard`), so resume accepts a chain state exactly when
+    // every input but the iteration count is the one the base ran under.
+    let config_hash = resume_guard.to_string();
 
     // Load resume states if --resume
     let resume_states: Vec<Option<PMMHResumeState>> = if resume {
