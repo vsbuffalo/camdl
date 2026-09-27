@@ -709,12 +709,18 @@ fn cas_identity_pins() {
         // scenario by name (beside the model digest, which covers every
         // preset), and this fixture's `sim_ensemble` folds fixed cell ids. A
         // real ensemble re-keys through its cells' `run_id`s.
-        ("sim", "07ba298d4cb90f6a3d3c371a44d26ddfaf82e1b09ffcb3646efd470f870f067e"),
-        ("fit", "80339677a112da2a743896246da06ee9a80002d0bf0b481fbb88e6afe089966c"),
-        ("pfilter", "487a1ac8fafaa7548b078657be2fc7d1b5ec17ccfb177ff10b992b8a03e161b3"),
-        ("survey", "ef89bb787175271fbec810a494a3a7b7cde2ef909cff60633d638b66ea1b0ab0"),
-        ("sim_ensemble", "b597c66aa6dac403d222637af80ddf09b715e1b38a23848459b562101aee12c9"),
-        ("profile", "8bf027c81176a94448ed2fd463c20abb92d4c8c7e48244a383582005c583a554"),
+        //
+        // gh#583 then moved ALL SIX: the `ir` hash policy went to SV = 3, which
+        // hashes the integrator, the anchored horizons and an observation
+        // model's `stratum` / `covers` unconditionally rather than only when
+        // non-default. The SV header and `SimulationConfig` are folded into
+        // every kind's `model` level, so no kind can stay.
+        ("sim", "4d378bf80f18768cad7d968ca547d05db64f9cc382deb62054507c6044811bf9"),
+        ("fit", "b054cfcd2c5080ebde21f3a6016307e716cbb273018726dcf1708ef7f3488142"),
+        ("pfilter", "e1994c64f4b2eea615d031e5bfe239d8c506f9c0471c94336df5c94ab9fc575a"),
+        ("survey", "3a56923c978abaa4bb73f7b6b8a940bca6c47c9f51d127071fee3191fe1045cb"),
+        ("sim_ensemble", "9c3842edc16c6eff848b528dfc1ce7a18fafad7db1f2f1a1480010996ac630aa"),
+        ("profile", "38359dc3df9ab8544384ddc5210eb7ab3a7e6cd50fc1af7c49c8f2141a0b819a"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
