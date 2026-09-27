@@ -370,3 +370,26 @@ fn bernoulli_out_of_range_p_draws_zero_and_counts() {
     }
 }
 
+/// gh#925: the zero-inflation probability `pi` outside `[0, 1]` likewise has
+/// no defined draw. Pre-fix `pi = 1.3` was clamped to "always a structural
+/// zero" and `pi = -0.3` to "never zero-inflated" (the NegBinomial base drew
+/// as if `pi` were 0), neither counted.
+#[test]
+fn zinb_out_of_range_pi_draws_zero_and_counts() {
+    let lik = || Likelihood::ZeroInflatedNegBinomial(ZeroInflatedNegBinomialLikelihood {
+        mean: Diffable::new(const_expr(50.0)),
+        dispersion: Diffable::new(const_expr(500.0)),
+        pi: Diffable::new(projected()),
+    });
+    // Non-vacuity control: pi = 0 is the plain NegBinomial(50, 500), which
+    // draws near its mean, not the zero the refusal draws.
+    let y = draw_one(lik(), 0.0, 42);
+    assert!(y > 0.0, "pi = 0 must draw from NegBinomial(50, 500), got {y}");
+
+    for pi in [1.3, 1.0 + f64::EPSILON, -0.3] {
+        let before = nan_counter();
+        let y = draw_one(lik(), pi, 42);
+        assert_eq!(y, 0.0, "pi = {pi} must draw 0, got {y}");
+        assert!(nan_counter() > before, "pi = {pi} must increment obs_sample_nan");
+    }
+}

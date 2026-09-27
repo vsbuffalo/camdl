@@ -286,11 +286,13 @@ pub(crate) fn explain_likelihood_neg_inf(
             } else if d.is_nan() {
                 nan("dispersion")
             } else if p.is_nan() {
-                // `f64::clamp` returns NaN for NaN, and every `pi > 0` /
-                // `pi < 1` comparison below it is then false, so the mixture
-                // falls through to `-inf`. It is a model argument, not data.
+                // A model argument, not data: `zi_negbin_logpmf` rejects it
+                // with the out-of-range `pi` below.
                 nan("pi")
-            } else if observed.round() != 0.0 && p.clamp(0.0, 1.0) >= 1.0 {
+            } else if !is_probability(p) {
+                // gh#925: not a mixture weight, whatever the observation.
+                domain("pi", p)
+            } else if observed.round() != 0.0 && p >= 1.0 {
                 // All mass at zero: a positive count is impossible.
                 domain("pi", p)
             } else if m <= 0.0 && observed.round() != 0.0 {
@@ -939,10 +941,14 @@ pub(crate) fn sample_obs_resolved(
         ResolvedLikelihood::ZeroInflatedNegBinomial { mean, dispersion, pi, .. } => {
             // With prob pi draw a structural zero; otherwise draw from the
             // NegBinomial base (Gamma-Poisson mixture, mirroring the NB arm).
-            let pi_raw = eval_resolved(pi, &ctx(projected));
-            if obs_args_nan(&[pi_raw]) { return 0.0; }
-            let p = pi_raw.clamp(0.0, 1.0);
-            if rng.uniform() < p { return 0.0; }
+            // gh#925: a `pi` outside `[0, 1]` is out of the domain — the value
+            // path scores it `-inf` — so it takes the NaN-argument contract
+            // (draw 0, counted) rather than being clamped into "always a
+            // structural zero" or "never zero-inflated".
+            let pi_val = eval_resolved(pi, &ctx(projected));
+            let pi_val = if is_probability(pi_val) { pi_val } else { f64::NAN };
+            if obs_args_nan(&[pi_val]) { return 0.0; }
+            if rng.uniform() < pi_val { return 0.0; }
             let m = eval_resolved(mean, &ctx(projected));
             let k = eval_resolved(dispersion, &ctx(projected));
             if obs_args_nan(&[m, k]) { return 0.0; }
@@ -1259,6 +1265,59 @@ mod tests {
                         NegInfCause::ArgumentOutOfDomain { ref arg, value }
                         if arg == "p" && value == p),
                     "p = {p} must be classified as p out of domain, got {cause:?}");
+            }
+        }
+    }
+
+    /// `ZeroInflatedNegBinomial(mean = 5, r = 2, pi)` with
+    /// `∂pi/∂θ = ∂pi/∂projected = 1` and constant `mean`, `r`, so both
+    /// gradient arms are exactly `d(log L)/d(pi)`.
+    fn zinb_likelihood(pi: f64) -> ResolvedLikelihood {
+        ResolvedLikelihood::ZeroInflatedNegBinomial {
+            mean: ResolvedExpr::Const(5.0),
+            mean_grad: vec![],
+            mean_proj: None,
+            dispersion: ResolvedExpr::Const(2.0),
+            dispersion_grad: vec![],
+            dispersion_proj: None,
+            pi: ResolvedExpr::Const(pi),
+            pi_grad: vec![(0, ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0)))],
+            pi_proj: Some(ResolvedDerivEntry::Grad(ResolvedExpr::Const(1.0))),
+        }
+    }
+
+    /// gh#925: the zero-inflated NegBinomial clamped `pi` into `[0, 1]`, so
+    /// `pi = 1.3` scored an observed zero exactly as `pi = 1` (log-probability
+    /// 0) and `pi = -0.3` scored as the plain NegBinomial; the gradient arms
+    /// then differentiated at the clamped value, handing a nonzero `d/d(pi)`
+    /// to the sampler at a point that is not a distribution. All four arms
+    /// must reject it, the classifier naming `pi` whatever the observation.
+    #[test]
+    fn zinb_arms_reject_an_out_of_range_pi() {
+        // Non-vacuity control: pi = 0.3 at an observed zero scores finitely
+        // with a nonzero pi-gradient, and both endpoints are in the domain.
+        let (v, d_theta, d_proj, _) = likelihood_arms(&zinb_likelihood(0.3), 0.0);
+        assert!(v.is_finite() && d_theta != 0.0 && d_proj != 0.0,
+            "pi = 0.3 must score finitely with a pi-gradient, got {v}, {d_theta}, {d_proj}");
+        assert_eq!(likelihood_arms(&zinb_likelihood(1.0), 0.0).0, 0.0,
+            "pi = 1 puts all mass at zero: an observed zero scores exactly 0");
+        assert!(likelihood_arms(&zinb_likelihood(0.0), 3.0).0.is_finite(),
+            "pi = 0 is the plain NegBinomial");
+
+        for pi in [1.3, 1.0 + f64::EPSILON, -0.3, -f64::MIN_POSITIVE] {
+            for observed in [0.0, 3.0] {
+                let (v, d_theta, d_proj, cause) =
+                    likelihood_arms(&zinb_likelihood(pi), observed);
+                assert_eq!(v, f64::NEG_INFINITY,
+                    "pi = {pi}, observed = {observed} must score -inf, got {v}");
+                assert_eq!((d_theta, d_proj), (0.0, 0.0),
+                    "pi = {pi}, observed = {observed} must carry the zero gradient, \
+                     got {d_theta}, {d_proj}");
+                assert!(matches!(cause,
+                        NegInfCause::ArgumentOutOfDomain { ref arg, value }
+                        if arg == "pi" && value == pi),
+                    "pi = {pi}, observed = {observed} must be classified as pi out of \
+                     domain, got {cause:?}");
             }
         }
     }

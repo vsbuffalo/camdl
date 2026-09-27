@@ -232,18 +232,20 @@ fn log_add_exp(la: f64, lb: f64) -> f64 {
 ///   `P(Y = 0)   = pi + (1 - pi)·f_NB(0)`
 ///   `P(Y = j>0) = (1 - pi)·f_NB(j)`
 /// where `f_NB(·; mu, k)` is [`negbin_logpmf`]'s distribution. `pi = 0` recovers
-/// the plain NegBinomial exactly. `pi` is clamped to `[0, 1]` so a numerical
-/// excursion (e.g. an MH proposal stepping slightly out of range before the
-/// chain concentrates) cannot produce a NaN log-probability.
+/// the plain NegBinomial exactly. A `pi` outside `[0, 1]` (see
+/// [`is_probability`]) is not a mixture weight: it is a domain violation and
+/// returns `NEG_INFINITY` (gh#925), rather than being clamped to a boundary
+/// the model did not ask for.
 pub fn zi_negbin_logpmf(y: f64, mu: f64, k: f64, pi: f64) -> f64 {
     // The mixture cannot inherit the base's rejection: at `y = 0` it computes
     // `log_add_exp(ln pi, ln(1-pi) + base)`, and a `-inf` base leaves the
     // finite `ln pi` — a plausible score for an invalid parameter. So the
     // domain check belongs HERE as well as in the base, not only in it.
-    // (`pi.clamp` below does NOT screen a NaN: `f64::clamp` returns NaN for
-    // NaN. The `pi > 0.0` / `pi < 1.0` comparisons below are what reject it.)
     if y.is_nan() || mu.is_nan() || k.is_nan() { return f64::NEG_INFINITY; }
-    let pi = pi.clamp(0.0, 1.0);
+    // gh#925: `pi = 1.3` was clamped to 1 and scored an observed zero at
+    // log-probability 0; `pi = -0.3` scored as the plain NegBinomial. A NaN
+    // `pi` is not a probability either, so this is also its rejection.
+    if !is_probability(pi) { return f64::NEG_INFINITY; }
     let base = negbin_logpmf(y, mu, k); // log f_NB(y)
     if y.round() == 0.0 {
         let log_pi = if pi > 0.0 { pi.ln() } else { f64::NEG_INFINITY };
@@ -310,14 +312,17 @@ pub fn zi_negbin_logpmf_grad(y: f64, mu: f64, k: f64, pi: f64) -> (f64, f64, f64
     if mu <= 0.0 || k <= 0.0 {
         return (0.0, 0.0, 0.0);
     }
-    // A NaN pi survives `clamp` and fails every comparison below, which would
-    // send a NaN d/d(pi) into the accumulator at a point the value function
-    // scores -inf; the gradient of that constant floor is zero (gh#645, as in
-    // `normal_logpdf_grad`).
-    if pi.is_nan() {
+    // A `pi` outside `[0, 1]`, NaN included, is where the value function
+    // scores -inf, and the gradient of that constant floor is zero (gh#645,
+    // as in `normal_logpdf_grad`; gh#925). Past this guard `pi` is a
+    // probability. Without it a NaN fails every comparison below and sends a
+    // NaN d/d(pi) into the accumulator, and an out-of-range `pi` was clamped
+    // and differentiated at the boundary — `d/d(pi) = (1 - f0)` at `pi = 1.3`
+    // with an observed zero, a nonzero push at a point that is not a
+    // distribution.
+    if !is_probability(pi) {
         return (0.0, 0.0, 0.0);
     }
-    let pi = pi.clamp(0.0, 1.0);
     // Round only — no clamp to zero — so the branch below matches the value
     // function's `y.round() == 0.0` test: a negative y goes down the
     // positive-count branch on both sides (where the NB base's internal clamp
