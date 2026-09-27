@@ -409,6 +409,14 @@ fn show_sim_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
     println!("{}", "scenario".bright_black()); println!("  {}", leaf.level_label("scenario"));
     println!("{}", "seed".bright_black()); println!("  {}", leaf.seed());
     println!("{}", "config".bright_black()); println!("  {}", leaf.level_label("config"));
+    // The resolved parameter values the `params` level hashed (recorded in
+    // `run.json.inputs`, display-only — gh#583 item I).
+    if let Some(params) = rec.inputs.get("params").and_then(|v| v.as_object()) {
+        println!("{}", "params".bright_black());
+        for (name, value) in params {
+            println!("  {:<16} {}", name, value);
+        }
+    }
     println!("{}", "run_id".bright_black()); println!("  {}", rec.run_id.to_hex().dimmed());
     println!("{}", "levels".bright_black());
     for lvl in &rec.levels {

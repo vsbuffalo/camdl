@@ -1345,7 +1345,8 @@ struct CellPrediction {
 /// single path component past NAME_MAX (gh#169), so it collapses to a short
 /// `draws` tag. Identity is the level's content hash, never this label (see
 /// `resolve.rs`: label and hash are separate inputs to `level()`), so the
-/// collapse is lossless — the full drawn values live in `run.json`.
+/// collapse is lossless — the full resolved values live in the leaf's
+/// `run.json.inputs.params` (`ResolvedTrajectory::display_inputs`).
 fn params_path_label(overrides: &indexmap::IndexMap<String, f64>) -> String {
     if overrides.is_empty() {
         return "base".to_string();
@@ -1413,7 +1414,7 @@ impl crate::engine::RunSink for CasSink {
                     kind: runid::ArtifactKind::Sim,
                     levels: rt.levels.clone(),
                     run_id: rt.run_id,
-                    display_inputs: serde_json::Value::Null,
+                    display_inputs: rt.display_inputs.clone(),
                 };
                 let policy = if self.force {
                     crate::resolve::WritePolicy::Force
@@ -1546,7 +1547,9 @@ impl crate::engine::RunSink for CasSink {
             kind: runid::ArtifactKind::Sim,
             levels: rt.levels.clone(),
             run_id: rt.run_id,
-            display_inputs: serde_json::Value::Null,
+            // The resolved parameter values the params level hashed (and the
+            // scenario and seed), so `camdl show` can say what this leaf ran.
+            display_inputs: rt.display_inputs.clone(),
         };
         let mut meta = crate::resolve::RecordMeta::new(
             ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone())
