@@ -7,7 +7,7 @@ use crate::{
     intervention::apply_events_at,
     lineage::{DemeId, TransitionId, TransitionObserver},
     ode_integrator::rk4_step,
-    propensity::{eval_propensities, EvalCtx},
+    propensity::{eval_propensities, guard_propensity, EvalCtx},
     resolved_expr::eval_resolved,
     schedule::{Cursor, Schedule, StopReason, MIN_STEP_EPS},
     simulate::Simulate,
@@ -70,48 +70,13 @@ impl Simulate for GillespieSim {
 /// recompute.)
 #[inline]
 fn eval_one(tr_idx: usize, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
-    let mut p = eval_resolved(&ctx.model.resolved.rates[tr_idx], ctx);
-    // item 17: kept in lockstep with `eval_propensities` — a non-finite
-    // propensity is never a usable rate, and the sparse and full paths must not
-    // disagree (gh#208). NaN is the strict-mode sentinel of a degenerate op
-    // (Div0 / Pow / Sqrt-neg / Log≤0), possibly a table-OOB (attributed first);
-    // ±inf is an overflow (e.g. `exp` of a state-dependent argument that grows
-    // as the epidemic progresses) that escaped the per-op guards — left on the
-    // old `is_nan()` guard, a +inf here would set `lambda_total = +inf` and
-    // force a burst of spurious zero-time firings until the periodic full
-    // recompute finally errored. Under --allow-degenerate-rates all coerce to a
-    // 0 rate; by default a typed hard error.
-    if !p.is_finite() {
-        // A NaN may be the sentinel an out-of-range table lookup left on the
-        // thread-local — surface the named, actionable error if so. take()
-        // clears it; ±inf leaves no record, so this is None and falls through.
-        if let Some((table_idx, index, len)) = crate::resolved_expr::take_table_oob() {
-            let table_name = ctx.model.model.tables[table_idx].name.clone();
-            return Err(SimError::TableLookup(format!(
-                "table '{table_name}': index {index} out of bounds [0, {len}) \
-                 while evaluating rate of transition '{}' at t={} \
-                 (the index is computed from model state/parameters; widen the \
-                 table or fix the index expression)",
-                ctx.model.model.transitions[tr_idx].name, ctx.t
-            )));
-        }
-        if crate::eval_stats::allow_degenerate_rates() {
-            p = 0.0;
-        } else {
-            return Err(SimError::NumericalCollapse {
-                kind: crate::error::CollapseKind::DivByZero,
-                t: ctx.t,
-            });
-        }
-    }
-    if p < 0.0 {
-        return Err(SimError::NegativePropensity {
-            transition: ctx.model.model.transitions[tr_idx].name.clone(),
-            value: p,
-            t: ctx.t,
-        });
-    }
-    Ok(p)
+    let p = eval_resolved(&ctx.model.resolved.rates[tr_idx], ctx);
+    // item 17: the shared rate guard keeps the sparse and full paths in lockstep
+    // (gh#208). Left on the old `is_nan()` guard, a +inf here (e.g. `exp` of a
+    // state-dependent argument that grows as the epidemic progresses) would set
+    // `lambda_total = +inf` and force a burst of spurious zero-time firings until
+    // the periodic full recompute finally errored.
+    guard_propensity(p, tr_idx, ctx.model, ctx.t)
 }
 
 pub fn run_gillespie(

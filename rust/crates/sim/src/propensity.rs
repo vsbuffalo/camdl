@@ -499,6 +499,72 @@ pub fn eval_forcing(kind: &CompiledTimeFuncKind, t: f64, ctx: &EvalCtx<'_>) -> f
     }
 }
 
+/// The post-evaluation guard every backend applies to a raw transition rate
+/// `p` (transition `tr_idx`, evaluated at time `t`) before using it as a
+/// propensity. One definition, so the backends cannot disagree about which
+/// rates are usable (gh#208, gh#692).
+///
+/// - A non-finite `p` is never a usable rate. NaN is the strict-mode sentinel a
+///   degenerate sub-expression leaves (Div0 / Pow-NaN / Sqrt-neg / Log≤0),
+///   possibly from an out-of-range table lookup, which is attributed first as a
+///   named `SimError::TableLookup` (the caller clears the thread-local record
+///   before evaluating, where attribution matters). ±inf is an overflow (e.g.
+///   `exp`) that escaped the per-op guards. Under `--allow-degenerate-rates` it
+///   is coerced to a 0 rate; otherwise `SimError::NumericalCollapse`.
+/// - A negative `p` means the rate expression has left the region the model
+///   defines: `SimError::NegativePropensity`, naming the transition.
+///
+/// The accept branch is a single comparison pair; the refusal work lives in the
+/// out-of-line [`refuse_propensity`] so the hot path stays small.
+#[inline]
+pub(crate) fn guard_propensity(
+    p: f64,
+    tr_idx: usize,
+    model: &CompiledModel,
+    t: f64,
+) -> Result<f64, SimError> {
+    if p.is_finite() && p >= 0.0 {
+        return Ok(p);
+    }
+    refuse_propensity(p, tr_idx, model, t)
+}
+
+#[cold]
+#[inline(never)]
+fn refuse_propensity(
+    p: f64,
+    tr_idx: usize,
+    model: &CompiledModel,
+    t: f64,
+) -> Result<f64, SimError> {
+    let name = &model.model.transitions[tr_idx].name;
+    let p = if p.is_finite() {
+        p
+    } else {
+        if let Some((table_idx, index, len)) = crate::resolved_expr::take_table_oob() {
+            let table_name = &model.model.tables[table_idx].name;
+            return Err(SimError::TableLookup(format!(
+                "table '{table_name}': index {index} out of bounds [0, {len}) \
+                 while evaluating rate of transition '{name}' at t={t} \
+                 (the index is computed from model state/parameters; widen the \
+                 table or fix the index expression)"
+            )));
+        }
+        if allow_degenerate_rates() {
+            0.0
+        } else {
+            return Err(SimError::NumericalCollapse {
+                kind: CollapseKind::DivByZero, // generic; eval_stats counter has the specific kind
+                t,
+            });
+        }
+    };
+    if p < 0.0 {
+        return Err(SimError::NegativePropensity { transition: name.clone(), value: p, t });
+    }
+    Ok(p)
+}
+
 /// Evaluate all propensities into `out` (cleared and refilled in-place).
 /// No allocation if `out` is already the right size.
 ///
@@ -567,47 +633,15 @@ pub fn eval_propensities(
                 st.scratch.reserve(need - st.scratch.len());
             }
             out.clear();
-            for (i, tr) in model.model.transitions.iter().enumerate() {
+            for i in 0..model.model.transitions.len() {
                 // gh#127 (#12): clear the table-OOB record before EACH rate (see
                 // the default path below for the full rationale).
                 crate::resolved_expr::clear_table_oob();
-                let mut p = flat_eval::eval_flat(vm, &vm.rates[i], &ctx, &mut st.scratch, &mut st.cache);
-                // item 17: a non-finite resolved propensity is never a usable
-                // rate. NaN is the strict-mode sentinel a degenerate sub-expr
-                // leaves (Div0 / Pow-NaN / Sqrt-neg / Log≤0), possibly a
-                // table-OOB (attributed first). ±inf is an overflow (e.g. exp)
-                // that escaped the per-op guards — a −inf used to be pushed as
-                // a NegativePropensity and a +inf used silently as a rate. Under
-                // --allow-degenerate-rates all coerce to a 0 rate (byte-
-                // identical to the default path below); by default a hard error.
-                if !p.is_finite() {
-                    if let Some((table_idx, index, len)) = crate::resolved_expr::take_table_oob() {
-                        let table_name = model.model.tables[table_idx].name.clone();
-                        return Err(SimError::TableLookup(format!(
-                            "table '{table_name}': index {index} out of bounds [0, {len}) \
-                             while evaluating rate of transition '{}' at t={t} \
-                             (the index is computed from model state/parameters; widen the \
-                             table or fix the index expression)",
-                            tr.name
-                        )));
-                    }
-                    if allow_degenerate_rates() {
-                        p = 0.0;
-                    } else {
-                        return Err(SimError::NumericalCollapse {
-                            kind: crate::error::CollapseKind::DivByZero,
-                            t,
-                        });
-                    }
-                }
-                if p < 0.0 {
-                    return Err(SimError::NegativePropensity {
-                        transition: tr.name.clone(),
-                        value: p,
-                        t,
-                    });
-                }
-                out.push(p);
+                let p = flat_eval::eval_flat(vm, &vm.rates[i], &ctx, &mut st.scratch, &mut st.cache);
+                // item 17: the shared rate guard (non-finite → table-OOB /
+                // degenerate; negative → NegativePropensity), byte-identical to
+                // the default path below.
+                out.push(guard_propensity(p, i, model, t)?);
             }
             Ok(())
         });
@@ -630,62 +664,22 @@ pub fn eval_propensities(
         // selected (so the rate is finite) cannot be mis-attributed to a later
         // rate's NaN from an unrelated cause.
         crate::resolved_expr::clear_table_oob();
-        let mut p = if unresolved {
+        let p = if unresolved {
             // String-keyed evaluator. Errors (NumericalCollapse) propagate
             // directly; in the non-degenerate case it returns the same
-            // value as eval_resolved, so the is_finite/negative guards below
-            // and the resulting trajectory are unchanged.
+            // value as eval_resolved, so the guard below and the resulting
+            // trajectory are unchanged.
             eval_expr(&tr.rate, &ctx)?
         } else {
             eval_resolved(&model.resolved.rates[i], &ctx)
         };
         // gh#audit-C6 / S1 + item 17. eval_resolved is infallible and signals a
-        // degenerate rate out-of-band by a non-finite return: NaN under hard-
-        // fail mode for a domain error (Div-by-zero, Pow → NaN, Sqrt of
-        // negative, Log of non-positive), or ±inf for an overflow (e.g. exp)
-        // that escaped the per-op guards. Neither is a usable rate — a −inf
-        // used to be reported as a NegativePropensity and a +inf used silently
-        // as a rate. Convert to a typed error so the inference layer's per-
-        // particle recovery (PF: line 188+) can decide whether to kill the
-        // particle (recoverable) or propagate (forward-sim CLI).
-        if !p.is_finite() {
-            // gh#127 (#12): a NaN here may be the sentinel an out-of-range table
-            // lookup left behind (the infallible fast evaluator records the
-            // offending lookup on a thread-local and returns NaN rather than
-            // panicking). If so, surface the NAMED, actionable error (table +
-            // index + valid range) instead of the generic NumericalCollapse —
-            // a controlled per-particle error in inference, a clear diagnostic
-            // in forward sim. Take() clears the record either way.
-            if let Some((table_idx, index, len)) = crate::resolved_expr::take_table_oob() {
-                let table_name = model.model.tables[table_idx].name.clone();
-                return Err(SimError::TableLookup(format!(
-                    "table '{table_name}': index {index} out of bounds [0, {len}) \
-                     while evaluating rate of transition '{}' at t={t} \
-                     (the index is computed from model state/parameters; widen the \
-                     table or fix the index expression)",
-                    tr.name
-                )));
-            }
-            // --allow-degenerate-rates coerces a degenerate/overflowing rate to
-            // 0 (its documented "rate legitimately undefined" escape hatch);
-            // otherwise a typed hard error.
-            if allow_degenerate_rates() {
-                p = 0.0;
-            } else {
-                return Err(SimError::NumericalCollapse {
-                    kind: crate::error::CollapseKind::DivByZero, // generic; eval_stats counter has the specific kind
-                    t,
-                });
-            }
-        }
-        if p < 0.0 {
-            return Err(SimError::NegativePropensity {
-                transition: tr.name.clone(),
-                value: p,
-                t,
-            });
-        }
-        out.push(p);
+        // degenerate rate out-of-band by a non-finite return (NaN for a domain
+        // error, ±inf for an overflow). The shared guard converts that, and a
+        // negative rate, to a typed error so the inference layer's per-particle
+        // recovery can decide whether to kill the particle (recoverable) or
+        // propagate (forward-sim CLI).
+        out.push(guard_propensity(p, i, model, t)?);
     }
     Ok(())
 }
