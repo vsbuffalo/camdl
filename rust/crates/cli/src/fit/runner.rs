@@ -6,7 +6,6 @@
 
 use crate::fit::loglik_eval;
 use crate::params_resolver::resolved_bounds;
-use rayon::prelude::*;
 use sim::{
     compiled_model::CompiledModel,
     inference::{
@@ -828,10 +827,9 @@ pub fn preflight_spread_starts(
         return Ok(drawn);
     }
     let n_particles = config.if2_config.n_particles;
+    // One chain's pre-flight per worker at a time (gh#821, `chain_fanout`).
     let outcomes: Vec<Result<(Option<super::chain_starts::ChainStart>, Vec<RejectedStart>, bool), String>> =
-        (0..n_chains)
-            .into_par_iter()
-            .map(|chain_id| {
+        super::chain_fanout::run_chains(n_chains, |chain_id| {
                 let mut current = drawn.starts[chain_id].clone();
                 let mut rejected = Vec::new();
                 let mut attempt = 0usize;
@@ -879,8 +877,7 @@ pub fn preflight_spread_starts(
                         }
                     }
                 }
-            })
-            .collect();
+            });
     let mut accepted = Vec::with_capacity(n_chains);
     let mut rejected = Vec::new();
     let mut refused = Vec::new();
@@ -2102,7 +2099,7 @@ fn run_one_chain(
         if let Ok(mut w) = cell.try_borrow_mut() { let _ = w.flush(); }
     }
 
-    // Final metric on the bar; the driver clears it after the par_iter
+    // Final metric on the bar; the driver clears it after the fan-out
     // (`Task::finish` consumes, so it can't be called on the borrowed Task
     // here). The post-loop `eprintln!("best chain: …")` carries the summary.
     if let Some(t) = task {
@@ -2138,9 +2135,9 @@ pub fn run_chains_with_per_chain_params(
     // Preflight transform report
     print_preflight(config, per_chain_params, collector);
 
-    let results: Vec<(usize, IF2Result)> = (0..config.n_chains)
-        .into_par_iter()
-        .filter_map(|chain_id| {
+    // At most one chain per worker, so a started chain is never displaced by
+    // another (gh#821, `chain_fanout`).
+    let results: Vec<(usize, IF2Result)> = super::chain_fanout::run_chains(config.n_chains, |chain_id| {
             let per_chain = per_chain_params.map(|pcp| &pcp[chain_id][..]);
             match run_one_chain(
                 chain_id, config, per_chain, Some(&bars[chain_id]), stage_dir, heartbeat,
@@ -2208,6 +2205,8 @@ pub fn run_chains_with_per_chain_params(
                 ),
             }
         })
+        .into_iter()
+        .flatten()
         .collect();
 
     // Clear all chain bars now that the parallel phase is done (`Task::finish`

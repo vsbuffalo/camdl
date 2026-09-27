@@ -90,6 +90,7 @@ pub mod dt_check;
 pub mod init;
 pub mod starts;         // the `starts` rule: where a method's chains begin
 pub mod chain_starts;
+pub mod chain_fanout;   // gh#821: run chains so each started chain keeps advancing
 pub mod loglik_eval;
 pub mod methods;
 #[cfg(feature = "ode")]

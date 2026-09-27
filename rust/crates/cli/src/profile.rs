@@ -1954,13 +1954,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             eval_job(ji);
         }
     };
+    // One worker loop per pool thread, placed by `broadcast` in that thread's
+    // private queue (gh#821, `fit::chain_fanout`). Spawned as ordinary scope
+    // jobs, a not-yet-started loop could be stolen by a worker blocked inside
+    // an IF2 run's particle `par_iter`, which would then drain the whole queue
+    // on top of the run it had not finished.
     let run_sweep = || {
-        let n_workers = rayon::current_num_threads().max(1);
-        rayon::scope(|s| {
-            for _ in 0..n_workers {
-                s.spawn(|_| worker());
-            }
-        });
+        rayon::broadcast(|_| worker());
     };
     match &prof_pool {
         Some(pool) => pool.install(run_sweep),

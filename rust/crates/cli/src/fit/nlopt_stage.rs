@@ -15,7 +15,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use rayon::prelude::*;
 use sim::inference::deterministic::{
     optimize_det, NloptAlgorithm, OptResult, OptStatus,
 };
@@ -154,9 +153,8 @@ pub fn run_stage(
     let dt = ode_step_dt(&arc_config);
 
     let t0 = std::time::Instant::now();
-    let mut chain_outcomes: Vec<(usize, ChainOutcome)> = (0..n_chains)
-        .into_par_iter()
-        .map(|chain_idx| {
+    // At most one chain per worker (gh#821, `chain_fanout`).
+    let mut chain_outcomes: Vec<(usize, ChainOutcome)> = super::chain_fanout::run_chains(n_chains, |chain_idx| {
             let outcome = run_one_chain(
                 algorithm,
                 knobs,
@@ -170,8 +168,7 @@ pub fn run_stage(
                 heartbeat,
             );
             (chain_idx, outcome)
-        })
-        .collect();
+        });
     chain_outcomes.sort_by_key(|(i, _)| *i);
     let elapsed = t0.elapsed();
 

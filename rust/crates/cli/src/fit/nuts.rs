@@ -158,7 +158,6 @@ pub fn run_stage(
     // reduce order-independently (max-loglik chain + summed divergences), so run
     // them in parallel across the rayon pool — the same pattern PGAS/PMMH/IF2 use.
     // Parallelism does not change results: each chain's seed and draws are fixed.
-    use rayon::prelude::*;
     struct ChainOut {
         chain_id: usize,
         n_divergent: usize,
@@ -173,9 +172,9 @@ pub fn run_stage(
         samples: Vec<Vec<f64>>,
         status: String,
     }
-    let chain_outs: Vec<ChainOut> = (0..opts.n_chains)
-        .into_par_iter()
-        .map(|chain_id| -> Result<ChainOut, String> {
+    // At most one chain per worker (gh#821, `chain_fanout`); the first
+    // structural error stops further chains from starting.
+    let chain_outs: Vec<ChainOut> = super::chain_fanout::try_run_chains(opts.n_chains, |chain_id| -> Result<ChainOut, String> {
             // 1-based on disk, as pgas/pmmh/if2 write it. `chain_starts.tsv`,
             // the `fit summary` chain table, the `bad_init` records and the
             // stderr lines all number chains from one (gh#781), so the
@@ -333,8 +332,7 @@ pub fn run_stage(
                 samples: result.samples,
                 status,
             })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+        })?;
 
     // Report per-chain status in deterministic chain order (completion order is
     // nondeterministic under parallelism).

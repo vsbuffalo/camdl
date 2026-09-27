@@ -652,20 +652,20 @@ pub fn run_stage(
     };
 
     // Run chains in parallel (each chain is independent: own seed, own
-    // trajectory, own RNG). Same pattern as PMMH.
+    // trajectory, own RNG), at most one per worker so a started chain is never
+    // displaced by another (gh#821, `chain_fanout`). Same pattern as PMMH.
     //
     // Each chain yields `Ok(Some(result))`, or `Ok(None)` when `run_pgas`
     // refuses its start with `NonFiniteChainStart` (gh#607) — skipped with a
     // `BadInit` diagnostic and omitted from every downstream number
     // (draws.tsv, R̂/ESS, the MAP `fit_state`), surviving chains continue. An
     // `Err` is a structural failure: the model/config cannot run, so the whole
-    // fit aborts rather than reporting a partial posterior — `collect`
-    // short-circuits on the first such error. Mirrors PMMH (`pmmh.rs`) and IF2
-    // (`runner.rs`), which do the same for `PFDegenerate`.
-    use rayon::prelude::*;
-    let all_results: Vec<Result<Option<(usize, Vec<PGASSweep>, Vec<f64>)>, String>> = (0..n_chains)
-        .into_par_iter()
-        .map(|chain_id| {
+    // fit aborts rather than reporting a partial posterior — the first such
+    // error in chain order is propagated once every chain has returned.
+    // Mirrors PMMH (`pmmh.rs`) and IF2 (`runner.rs`), which do the same for
+    // `PFDegenerate`.
+    let all_results: Vec<Result<Option<(usize, Vec<PGASSweep>, Vec<f64>)>, String>> =
+        super::chain_fanout::run_chains(n_chains, |chain_id| {
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
             let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
             let task = &bars[chain_id];
@@ -1257,8 +1257,7 @@ pub fn run_stage(
             // which is the honest report for a fit that died.
             heartbeat.chain(chain_id, io::progress::ChainState::Completed);
             Ok(Some((chain_id, result.sweeps, result.acceptance_rates)))
-        })
-        .collect();
+        });
 
     // Clear all chain bars now that the parallel phase is done (`Task::finish`
     // consumes, so it can't run on the per-chain borrow inside the loop). Done
