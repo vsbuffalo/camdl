@@ -554,6 +554,33 @@ fn check_initial_state_names(model: &Model, ctx: &ResolveCtx<'_>) -> Result<(), 
     Ok(())
 }
 
+/// gh#938 sibling: name-check each `#[lineage]` transition's parent-pool
+/// weights — the compartment key and the weight expression — at build.
+///
+/// The lineage event recorder (`lineage/event_log.rs`) evaluates the weights
+/// with the name-keyed `propensity::eval_expr` at each lineage event, so without
+/// this a wrong name surfaced mid-simulation, and only on a run that records
+/// lineage. As in [`check_initial_state_names`], the resolved form is checked
+/// and dropped: `resolve_expr` and `eval_expr` read the same name indices.
+fn check_lineage_weight_names(model: &Model, ctx: &ResolveCtx<'_>) -> Result<(), SimError> {
+    for tr in &model.transitions {
+        let Some(lineage) = &tr.lineage else { continue };
+        for (comp, weight) in &lineage.parent_pool_weights {
+            let at = |e: SimError| {
+                SimError::Validation(format!(
+                    "transition '{}' lineage parent-pool weight for '{comp}': {e}",
+                    tr.name
+                ))
+            };
+            if !ctx.comp_index.contains_key(comp.as_str()) {
+                return Err(at(SimError::UnknownCompartment(comp.clone())));
+            }
+            resolve_expr(weight, ctx).map_err(at)?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a forcing scalar coefficient `Expr` into a live `ResolvedExpr`,
 /// preserving the historical coefficient grammar whitelist that
 /// `eval_table_expr` enforces: only `Const`, `Param`, `BinOp`, `UnOp`, and
@@ -2021,6 +2048,7 @@ impl CompiledModel {
             })?;
 
         check_initial_state_names(&model, &resolve_ctx)?;
+        check_lineage_weight_names(&model, &resolve_ctx)?;
 
         let has_init_law = model.initial_conditions.iter().any(|(_, s)| s.is_law());
 
