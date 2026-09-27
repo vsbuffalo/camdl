@@ -4289,6 +4289,16 @@ pub fn run_pgas(
             if has_gradients {
                 let rung_traj = &rungs[rung].trajectory;
 
+                // gh#475: `nuts_step` takes a plain `(f64, Vec<f64>)` target, so a
+                // failed gradient evaluation can only be scored inside the closure.
+                // A θ-dependent failure is a −∞ point the sampler rejects (the
+                // gh#82 verdict, via `SimError::is_structural`). A structural one
+                // fires at every θ: scoring it −∞ would leave NUTS on a flat −∞
+                // surface and the chain exiting 0 with a frozen posterior. It is
+                // recorded here and propagated out of `run_pgas` below.
+                let structural_failure: std::cell::RefCell<Option<SimError>> =
+                    std::cell::RefCell::new(None);
+
                 let log_prob_and_grad = |z: &[f64]| -> (f64, Vec<f64>) {
                     let mut params = rungs[rung].params.clone();
                     for (i, spec) in if2_params.iter().enumerate() {
@@ -4302,7 +4312,14 @@ pub fn run_pgas(
                         &estimated_to_model,
                     ) {
                         Ok(r) => r,
-                        Err(_) => return (f64::NEG_INFINITY, vec![0.0; d]),
+                        Err(e) if e.is_structural() => {
+                            structural_failure.borrow_mut().get_or_insert(e);
+                            return (f64::NEG_INFINITY, vec![0.0; d]);
+                        }
+                        Err(e) => {
+                            log::debug!("pgas: NUTS gradient evaluation failed at a θ; scoring −∞: {e}");
+                            return (f64::NEG_INFINITY, vec![0.0; d]);
+                        }
                     };
 
                     // Temper: scale LL by β
@@ -4332,6 +4349,9 @@ pub fn run_pgas(
                 };
 
                 let (init_log_p, init_grad) = log_prob_and_grad(&rungs[rung].transformed);
+                if let Some(e) = structural_failure.borrow_mut().take() {
+                    return Err(e);
+                }
 
                 let nuts_config = super::nuts::NUTSConfig {
                     max_tree_depth: config.max_tree_depth,
@@ -4343,6 +4363,9 @@ pub fn run_pgas(
                     &rungs[rung].transformed, init_log_p, &init_grad,
                     &nuts_config, &log_prob_and_grad, &mut rng,
                 );
+                if let Some(e) = structural_failure.borrow_mut().take() {
+                    return Err(e);
+                }
 
                 if result.accepted {
                     rungs[rung].transformed.copy_from_slice(&result.params);
