@@ -918,8 +918,14 @@ pub(crate) fn sample_obs_resolved(
             // then k ~ Binomial(n, p). Uses the inner RNG directly for
             // the Beta draw (Gamma(a,1)/(Gamma(a,1)+Gamma(b,1))).
             let n_val = eval_resolved(n, &ctx(projected));
-            let alpha_raw = eval_resolved(alpha, &ctx(projected));
-            let beta_raw  = eval_resolved(beta,  &ctx(projected));
+            // gh#925 sibling: a non-positive shape is outside the domain —
+            // `beta_binomial_logpmf` scores `alpha <= 0` / `beta <= 0` as
+            // `-inf` — so it takes the NaN-argument contract (draw 0, counted)
+            // rather than being floored into a point mass at 0 or `n`. The
+            // floor below then only touches a valid sub-1e-300 shape.
+            let positive_or_nan = |v: f64| if v > 0.0 { v } else { f64::NAN };
+            let alpha_raw = positive_or_nan(eval_resolved(alpha, &ctx(projected)));
+            let beta_raw  = positive_or_nan(eval_resolved(beta,  &ctx(projected)));
             if obs_args_nan(&[n_val, alpha_raw, beta_raw]) { return 0.0; }
             let alpha_val = alpha_raw.max(LOG_PROB_FLOOR);
             let beta_val  = beta_raw.max(LOG_PROB_FLOOR);

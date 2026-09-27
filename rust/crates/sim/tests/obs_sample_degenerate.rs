@@ -413,3 +413,32 @@ fn binomial_out_of_range_p_draws_zero_and_counts() {
         assert!(nan_counter() > before, "p = {p} must increment obs_sample_nan");
     }
 }
+
+/// gh#925 sibling: a non-positive BetaBinomial shape is outside the domain —
+/// `beta_binomial_logpmf` returns `-inf` for `alpha <= 0` or `beta <= 0` —
+/// so it has no defined draw. Pre-fix the sampler floored each shape at
+/// `LOG_PROB_FLOOR` and drew from `Beta(1e-300, ·)`: a point mass at 0 or at
+/// `n`, uncounted.
+#[test]
+fn beta_binomial_non_positive_shape_draws_zero_and_counts() {
+    let lik = |alpha: Expr, beta: Expr| Likelihood::BetaBinomial(BetaBinomialLikelihood {
+        n: const_expr(100.0),
+        alpha: Diffable::new(alpha),
+        beta: Diffable::new(beta),
+    });
+    // Non-vacuity control: Beta(2, 2) mixing draws near n/2, not 0.
+    let y = draw_one(lik(projected(), const_expr(2.0)), 2.0, 42);
+    assert!(y > 0.0, "alpha = beta = 2 must draw from the BetaBinomial, got {y}");
+
+    for shape in [0.0, -1.0] {
+        for (which, l) in [
+            ("beta", lik(const_expr(2.0), projected())),
+            ("alpha", lik(projected(), const_expr(2.0))),
+        ] {
+            let before = nan_counter();
+            let y = draw_one(l, shape, 42);
+            assert_eq!(y, 0.0, "{which} = {shape} must draw 0, got {y}");
+            assert!(nan_counter() > before, "{which} = {shape} must increment obs_sample_nan");
+        }
+    }
+}
