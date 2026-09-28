@@ -464,6 +464,7 @@ fn gate_licm_pgas_loglik_byte_identical() {
         let (ll, grad) = complete_data_loglik_grad(
             compiled, &traj, params, &no_obs, dt, &obs_model, n_params, &rate_grads, &no_map,
             &estimated_to_model,
+            sim::inference::pgas::InverseTemperature::COLD,
         )
         .unwrap();
         (comps.transition, ll, grad)

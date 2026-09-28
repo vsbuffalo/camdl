@@ -217,6 +217,7 @@ fn exact_shortened_substep_gradient_matches_fd() {
     // Analytic gradient on the shortened-substep trajectory.
     let (ll, grad) = complete_data_loglik_grad(
         &compiled, &traj, &params, &no_obs, dt, &obs_model, n_params, &rate_grads_for_run, &no_map, &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     assert!(ll.is_finite(), "LL must be finite");
 

@@ -81,6 +81,7 @@ fn test_gradient_vs_finite_differences_sir() {
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
 
     eprintln!("  log-likelihood: {:.4}", ll);
@@ -198,6 +199,7 @@ fn test_gradient_vs_finite_differences_spatial_bindings() {
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     eprintln!("  log-likelihood: {:.4}", ll);
     assert!(ll.is_finite(), "LL must be finite");
@@ -323,6 +325,7 @@ fn test_gradient_vs_finite_differences_meanfield_coupling() {
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     assert!(ll.is_finite(), "complete-data LL must be finite");
 
@@ -452,6 +455,7 @@ fn test_nuts_target_gradient_on_z_scale() {
             &compiled, &trajectory, &params, &observations, dt,
             &obs_model, d_nuts, &rate_grads_for_run_nuts, &oas,
             &estimated_to_model_nuts,
+            sim::inference::pgas::InverseTemperature::COLD,
         ).unwrap_or((f64::NEG_INFINITY, vec![0.0; d_nuts]));
 
         let mut log_p = ll;
@@ -635,6 +639,7 @@ fn test_gradient_vs_finite_differences_seasonal() {
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     assert!(ll.is_finite(), "seasonal complete-data LL must be finite");
     eprintln!("  log-likelihood: {:.4}", ll);
@@ -743,6 +748,7 @@ fn test_gradient_vs_finite_differences_lagged_forcing() {
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, n_params, &rate_grads_for_run, &oas,
         &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     assert!(ll.is_finite(), "lagged complete-data LL must be finite");
     eprintln!("  log-likelihood: {:.4}", ll);

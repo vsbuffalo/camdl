@@ -17,7 +17,7 @@ use crate::resolved_expr::{eval_resolved, eval_emitted_grad, eval_deriv_entry, R
 use crate::state::{IntState, RealState};
 use crate::inference::obs_loglik::{binom_logpmf, digamma, gamma_multiplier_log_density};
 use crate::inference::numerics::BINOM_PROB_EPS;
-use crate::inference::pgas::{PGASTrajectory, OVERDISP_SIGMA_SQ_FLOOR};
+use crate::inference::pgas::{InverseTemperature, PGASTrajectory, OVERDISP_SIGMA_SQ_FLOOR};
 use crate::inference::particle_filter::Observation;
 
 /// Build a run-specific rate-gradient table re-keyed to estimated-param indices.
@@ -444,6 +444,14 @@ fn gamma_density_value_and_grad_substep(
 /// `estimated_to_model[i]` is the model-param index of the i-th estimated
 /// parameter (the inverse of `model_to_estimated` used to build
 /// `rate_grads_for_run`). Required by terms 3 and 4.
+///
+/// `obs_weight` is the rung's inverse temperature `β` (gh#551): term 4, value
+/// and gradient both, is multiplied by it, so the pair returned is the tempered
+/// rung's energy `log p(x | θ) + β · log p(y | x, θ)` and its exact gradient —
+/// the same target the MH θ-move and `csmc_as` use. Terms 1–3 are process
+/// density and are never tempered. The multiply sits inside the one fold, in
+/// the fold's own order, so at [`InverseTemperature::COLD`] the result is
+/// bit-identical to the untempered sum.
 pub fn complete_data_loglik_grad(
     model: &CompiledModel,
     trajectory: &PGASTrajectory,
@@ -455,6 +463,7 @@ pub fn complete_data_loglik_grad(
     rate_grads_for_run: &[ResolvedGradMap],
     obs_at_substep: &super::pgas::ObsAtSubstep,
     estimated_to_model: &[usize],
+    obs_weight: InverseTemperature,
 ) -> Result<(f64, Vec<f64>), SimError> {
     debug_assert_eq!(estimated_to_model.len(), d,
         "estimated_to_model length {} must match d={}", estimated_to_model.len(), d);
@@ -553,7 +562,9 @@ pub fn complete_data_loglik_grad(
             // into the per-stream `acc` BEFORE scoring — EXACTLY mirroring the
             // value path. Both the loglik and its gradient read `acc`.
             obs_model.fold_into_acc(&cum_flows, &mut acc);
-            log_p += obs_model.log_likelihood_from_flows_and_counts(
+            // gh#551: the observation term, value and gradient, at the rung's β.
+            let beta = obs_weight.get();
+            log_p += beta * obs_model.log_likelihood_from_flows_and_counts(
                 &acc, &rec.counts_after, obs_idx, params);
 
             // Per-distribution gradient helpers in `obs_loglik.rs` give
@@ -563,7 +574,7 @@ pub fn complete_data_loglik_grad(
             let obs_grad = obs_model.log_likelihood_grad_from_flows_and_counts(
                 &acc, &rec.counts_after, obs_idx, params, estimated_to_model,
             );
-            for i in 0..d { grad[i] += obs_grad[i]; }
+            for i in 0..d { grad[i] += beta * obs_grad[i]; }
 
             // `cum_flows` blanket-zeroed (unchanged); the per-stream `acc` bins
             // per-stream (mirrors value path's reset_due_acc).

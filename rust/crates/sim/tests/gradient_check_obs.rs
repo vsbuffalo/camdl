@@ -372,6 +372,7 @@ fn obs_mean_for_likelihood(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fd_check(
     compiled: &Arc<CompiledModel>,
     trajectory: &sim::inference::pgas::PGASTrajectory,
@@ -384,6 +385,38 @@ fn fd_check(
     dt: f64,
     rel_tol: f64,
     name: &str,
+) {
+    fd_check_at(
+        compiled, trajectory, observations, obs_model, params, param_names,
+        estimated_indices, params_to_check, dt, rel_tol, name,
+        sim::inference::pgas::InverseTemperature::COLD,
+    );
+}
+
+/// The tempered energy a rung at inverse temperature `beta` integrates
+/// (gh#551): process density at full weight, observation density times `beta`,
+/// built from the VALUE path's components — independent of the gradient fn.
+fn tempered_energy(c: &sim::inference::pgas::LogLikComponents, beta: f64) -> f64 {
+    c.initial_state + c.transition + beta * c.observation
+}
+
+/// `fd_check` at an arbitrary rung temperature: the gradient fn's energy must
+/// equal the value path's `process + β·obs`, and its gradient must match a
+/// central difference of that same tempered energy.
+#[allow(clippy::too_many_arguments)]
+fn fd_check_at(
+    compiled: &Arc<CompiledModel>,
+    trajectory: &sim::inference::pgas::PGASTrajectory,
+    observations: &[Observation],
+    obs_model: &MultiStreamObsModel,
+    params: &[f64],
+    param_names: &[String],
+    estimated_indices: &[usize],
+    params_to_check: &[usize],
+    dt: f64,
+    rel_tol: f64,
+    name: &str,
+    beta: sim::inference::pgas::InverseTemperature,
 ) {
     let d = estimated_indices.len();
     let n_model_params = compiled.model.parameters.len();
@@ -403,9 +436,20 @@ fn fd_check(
         obs_model,
         d, &rate_grads_for_run, &oas,
         &estimated_to_model,
+        beta,
     ).unwrap();
     assert!(ll.is_finite(), "[{}] log-likelihood must be finite, got {}", name, ll);
     eprintln!("[{}] LL = {:.4}", name, ll);
+    let value_path = tempered_energy(
+        &complete_data_loglik(compiled, trajectory, params, observations, dt, obs_model, &oas)
+            .unwrap(),
+        beta.get(),
+    );
+    assert!(
+        (ll - value_path).abs() <= 1e-9 * value_path.abs().max(1.0),
+        "[{name}] gradient fn energy {ll} != value path process + β·obs {value_path} (β = {})",
+        beta.get(),
+    );
 
     for &est_idx in params_to_check {
         let model_idx = estimated_indices[est_idx];
@@ -417,14 +461,14 @@ fn fd_check(
         p_plus[model_idx] += eps;
         p_minus[model_idx] -= eps;
 
-        let ll_plus = complete_data_loglik(
+        let ll_plus = tempered_energy(&complete_data_loglik(
             compiled, trajectory, &p_plus, observations, dt,
             obs_model, &oas,
-        ).unwrap().total;
-        let ll_minus = complete_data_loglik(
+        ).unwrap(), beta.get());
+        let ll_minus = tempered_energy(&complete_data_loglik(
             compiled, trajectory, &p_minus, observations, dt,
             obs_model, &oas,
-        ).unwrap().total;
+        ).unwrap(), beta.get());
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
 
         let analytic = grad[est_idx];
@@ -512,6 +556,56 @@ fn gh76_negbin_obs_grad_matches_fd() {
         &[rho_idx, k_idx, p_detect_idx, beta_idx],
         dt, 1e-4,
         "gh76_negbin_obs",
+    );
+}
+
+/// gh#551: a tempered PGAS rung's NUTS energy is
+/// `log p(x | θ) + β · log p(y | x, θ)`. The same fixture as
+/// `gh76_negbin_obs_grad_matches_fd`, at `β = 0.3`: the gradient fn must return
+/// exactly the value path's tempered energy, and a gradient that matches its
+/// central difference — for observation parameters (`rho`, `k`, `p_detect`,
+/// whose whole gradient is scaled by β) and for a rate parameter (`beta`, whose
+/// transition gradient must NOT be scaled while its observation part is).
+#[test]
+fn gh551_tempered_energy_and_gradient_match_fd() {
+    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
+    set_param_defaults(&mut model, &[
+        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
+        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
+        ("N0", 10000.0), ("I0", 10.0),
+    ]);
+    model.simulation.t_end = 60.0;
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+    let (params, param_names) = build_params_and_names(&compiled);
+
+    let t_start = compiled.model.simulation.t_start;
+    let t_end = compiled.model.simulation.t_end;
+    let dt = 1.0;
+    let mut rng = StatefulRng::new(42);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+    let n_substeps = trajectory.substeps.len();
+    let (substep_idx, obs_times) = obs_substep_indices_regular(
+        t_start, dt, n_substeps, 14.0, 14.0, t_end,
+    );
+    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
+    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
+    let observations: Vec<Observation> = obs_times.iter()
+        .map(|&t| Observation { time: t, value: 0.0 }).collect();
+
+    let n_params = compiled.param_index.len();
+    let estimated_indices: Vec<usize> = (0..n_params).collect();
+    let to_check = [
+        compiled.param_index["rho"],
+        compiled.param_index["k"],
+        compiled.param_index["p_detect"],
+        compiled.param_index["beta"],
+    ];
+    fd_check_at(
+        &compiled, &trajectory, &observations, &obs_model,
+        &params, &param_names, &estimated_indices, &to_check,
+        dt, 1e-4,
+        "gh551_tempered_negbin_obs",
+        sim::inference::pgas::InverseTemperature::new(0.3).unwrap(),
     );
 }
 
@@ -1163,6 +1257,7 @@ fn gh180_parametric_projection_grad_matches_fd() {
     let (_ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, d, &rate_grads_for_run, &oas, &estimated_indices,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     let qgam_est = estimated_indices.iter().position(|&i| i == qgam_idx).unwrap();
     eprintln!("[gh180_parametric_projection] d(ll)/d(qgam) = {:.6e} (analytic)", grad[qgam_est]);

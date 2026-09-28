@@ -85,6 +85,7 @@ fn fd_check(
         compiled, trajectory, params, observations, dt,
         obs_model, d, &rate_grads_for_run, &oas,
         &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     assert!(ll.is_finite(), "[{}] log-likelihood must be finite, got {}", name, ll);
     eprintln!("[{}] LL = {:.4}", name, ll);
@@ -384,11 +385,12 @@ fn run_spine_oracle(sigma_se: f64, seed: u64, dt: f64) {
     let (energy, _grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, d, &rate_grads, &oas, &estimated_indices,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
 
     assert_eq!(
         energy.to_bits(), value.to_bits(),
-        "spine oracle (gh#197): complete_data_loglik_grad(θ).0 = {energy} must equal \
+        "spine oracle (gh#197): complete_data_loglik_grad(θ, sim::inference::pgas::InverseTemperature::COLD).0 = {energy} must equal \
          complete_data_loglik(θ).total = {value} f64-exact — the NUTS energy must be \
          the true target. gap = {:.6} nats (= omitted Σ gamma log-density)",
         value - energy,
@@ -522,6 +524,7 @@ fn spine_oracle_deterministic_inflow_not_poisson_scored() {
     let (energy, _grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, 1.0,
         &obs_model, d, &rate_grads, &oas, &estimated_indices,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
 
     assert_eq!(
@@ -578,6 +581,7 @@ fn spine_oracle_two_overdispersed_multi_gamma_bit_exact() {
     let (energy, _grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, 1.0,
         &obs_model, d, &rate_grads, &oas, &estimated_indices,
+        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
 
     assert_eq!(

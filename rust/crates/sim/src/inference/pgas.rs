@@ -1965,9 +1965,9 @@ pub fn complete_data_loglik(
 /// PMMH about the very same θ. Every per-particle-recoverable variant is
 /// non-structural (pinned by `recoverable_errors_are_never_structural` in
 /// `error.rs`), so the issue's acceptance criteria hold a fortiori.
-fn theta_proposal_score(outcome: Result<LogLikComponents, SimError>) -> Result<f64, SimError> {
+fn theta_proposal_score(outcome: Result<LogLikComponents, SimError>) -> Result<RungLik, SimError> {
     match outcome {
-        Ok(components) => Ok(components.total),
+        Ok(components) => Ok(RungLik::from_components(&components)),
         Err(e) if e.is_structural() => Err(e),
         Err(e) => {
             // Not silent: the `NonFiniteParameter` diagnostic itself promises
@@ -1975,8 +1975,74 @@ fn theta_proposal_score(outcome: Result<LogLikComponents, SimError>) -> Result<f
             // thousands of these warnings …", so the rejections have to be
             // observable somewhere.
             log::debug!("pgas: rejecting proposed θ — likelihood evaluation failed: {e}");
-            Ok(f64::NEG_INFINITY)
+            Ok(RungLik::ZERO_DENSITY)
         }
+    }
+}
+
+/// One rung's complete-data log-likelihood, split the way its tempered target
+/// needs it (gh#551).
+///
+/// Rung `k` targets `p(θ) · p(x | θ) · p(y | x, θ)^{β_k}` (see
+/// [`InverseTemperature`]). Its moves consume three different functions of the
+/// same evaluation, and keeping the split here is what lets them agree:
+///
+/// - the θ-move consumes [`Self::log_target`] — process at full weight,
+///   observation at `β`;
+/// - the replica-exchange swap consumes [`Self::observation`] alone, because
+///   the prior and process terms of the two exchanged states are identical on
+///   both sides of the swap and cancel;
+/// - the sweep trace and resume state report [`Self::total`], the untempered
+///   `log p(y, x | θ)`, whose meaning does not depend on the ladder.
+///
+/// `observation` is β-free, so a state carries its split with it when the swap
+/// moves it to a rung with a different β.
+#[derive(Clone, Copy, Debug)]
+struct RungLik {
+    /// `log p(y, x | θ)`, untempered — exactly `LogLikComponents::total`.
+    total: f64,
+    /// `log p(x₀ | θ) + Σ log p(x_s | x_{s−1}, θ)` — initial-state and
+    /// transition density (gamma multipliers included), never tempered.
+    process: f64,
+    /// `log p(y | x, θ)` — the only term `β` touches.
+    observation: f64,
+}
+
+impl RungLik {
+    /// What a θ proposal whose evaluation failed scores: zero density, so the
+    /// Metropolis ratio rejects it (gh#82).
+    const ZERO_DENSITY: Self = Self {
+        total: f64::NEG_INFINITY,
+        process: f64::NEG_INFINITY,
+        observation: f64::NEG_INFINITY,
+    };
+
+    /// Split an evaluation. A non-finite total is carried into all three
+    /// fields: `complete_data_loglik` stops at the first `−∞` term and leaves
+    /// the later components partial, so a finite-looking `observation` beside a
+    /// `−∞` total is an unfinished sum, not a measurement. Carrying the total
+    /// keeps a zero-density state at zero density under every consumer.
+    fn from_components(c: &LogLikComponents) -> Self {
+        if c.total.is_finite() {
+            Self {
+                total: c.total,
+                // Same association as `complete_data_loglik`'s
+                // `initial_state_ll + transition_ll + observation_ll`, so
+                // `process + observation` reproduces `total` bitwise.
+                process: c.initial_state + c.transition,
+                observation: c.observation,
+            }
+        } else {
+            Self { total: c.total, process: c.total, observation: c.total }
+        }
+    }
+
+    /// `log p(x | θ) + β · log p(y | x, θ)` — the rung's log target less the
+    /// prior. At `β = 1` this equals [`Self::total`] bitwise (see
+    /// [`Self::from_components`]), which is what keeps the default single-rung
+    /// θ-move unchanged.
+    fn log_target(&self, beta: InverseTemperature) -> f64 {
+        self.process + beta.get() * self.observation
     }
 }
 
@@ -3735,7 +3801,8 @@ mod swap_log_alpha_tests {
 struct RungState {
     params: Vec<f64>,
     transformed: Vec<f64>,
-    ll: f64,
+    /// The rung's current (θ, X) evaluated, split for its tempered target.
+    lik: RungLik,
     trajectory: PGASTrajectory,
     nuts_mass: super::nuts::MassMatrix,
     nuts_step_size: f64,
@@ -3893,7 +3960,7 @@ pub fn run_pgas(
     // Extract resume adaptation state (consumed separately from trajectory/params)
     let resume_nuts = resume_from.as_ref().map(|s| (
         s.mass_matrix.clone(), s.nuts_step_size,
-        s.log_proposal_sd.clone(), s.total_accepted.clone(), s.current_ll,
+        s.log_proposal_sd.clone(), s.total_accepted.clone(),
     ));
 
     if let Some(state) = resume_from {
@@ -4183,11 +4250,12 @@ pub fn run_pgas(
     // Vec<RungNUTSState> and handling back-compat with legacy
     // single-rung resume files. Not done here; when a tempered fit
     // hits the pain point the schema upgrade is straightforward.
+    let resumed = resume_nuts.is_some();
     let (nuts_mass_init, nuts_step_size_init, log_proposal_sd_restored,
-         total_accepted_init, current_ll_restored) = if let Some((mass, ss, lpsd, ta, ll)) = resume_nuts {
-        (mass, ss, lpsd, ta, Some(ll))
+         total_accepted_init) = if let Some((mass, ss, lpsd, ta)) = resume_nuts {
+        (mass, ss, lpsd, ta)
     } else {
-        (super::nuts::MassMatrix::identity(d), 0.1, log_proposal_sd, vec![0usize; d], None)
+        (super::nuts::MassMatrix::identity(d), 0.1, log_proposal_sd, vec![0usize; d])
     };
 
     // Per-rung state: rung 0 is cold (β=1), higher indices are hotter.
@@ -4196,7 +4264,7 @@ pub fn run_pgas(
         RungState {
             params: current_params.clone(),
             transformed: current_transformed.clone(),
-            ll: current_ll,
+            lik: RungLik::from_components(&current_components),
             trajectory: trajectory.clone(),
             nuts_mass: if r == 0 { nuts_mass_init.clone() } else { super::nuts::MassMatrix::identity(d) },
             nuts_step_size: step_size,
@@ -4212,15 +4280,17 @@ pub fn run_pgas(
 
     let mut sweeps = Vec::new();
 
-    // Override cold rung LL if we have a resumed value
-    if let Some(ll) = current_ll_restored {
-        rungs[0].ll = ll;
-    }
+    // gh#551: no override from the resume state's saved `current_ll`. A rung's
+    // likelihood is now the split its tempered target needs (`RungLik`), and a
+    // saved scalar cannot restore a split. `current_components` above is
+    // `complete_data_loglik` at the restored (θ, X) — θ rebuilt from the saved
+    // z exactly as every accepted move sets it — normally the same evaluation that
+    // produced the saved value.
 
     // Im18: make the heated-rung re-warmup visible in logs.
     // Check the restored NUTS tuple rather than `resume_from` (the
     // latter is partially moved into earlier bindings).
-    if current_ll_restored.is_some() && n_rungs > 1 {
+    if resumed && n_rungs > 1 {
         log::info!(
             "pgas resume: restored cold rung NUTS state; heated rungs \
              (β<1) re-warm from defaults each resume. Long-running \
@@ -4331,17 +4401,17 @@ pub fn run_pgas(
                     config.ancestor_sampling, betas[rung],
                 )?;
                 rungs[rung].trajectory = new_traj;
-                rungs[rung].ll = complete_data_loglik(
+                rungs[rung].lik = RungLik::from_components(&complete_data_loglik(
                     model, &rungs[rung].trajectory, &rungs[rung].params, observations,
                     config.dt, obs_model, &obs_at_substep,
-                )?.total;
+                )?);
             }
             if warmup_sweep % 10 == 0 {
                 eprintln!("  trajectory warm-up {}/{}: cold LL={:.1}",
-                    warmup_sweep, config.trajectory_warmup, rungs[0].ll);
+                    warmup_sweep, config.trajectory_warmup, rungs[0].lik.total);
             }
         }
-        eprintln!("  trajectory warm-up complete: cold LL={:.1}", rungs[0].ll);
+        eprintln!("  trajectory warm-up complete: cold LL={:.1}", rungs[0].lik.total);
     }
 
     for sweep in start_sweep..config.n_sweeps {
@@ -4365,7 +4435,9 @@ pub fn run_pgas(
                 .collect();
 
             // ── Step 1: Update θ | X, y ──
-            // For heated rungs (β < 1), scale LL and its gradient by β.
+            // For heated rungs (β < 1), the observation log-density and its
+            // gradient are scaled by β; process density, prior and Jacobian
+            // are not (gh#551).
             // Prior and Jacobian are untempered.
             if has_gradients {
                 let rung_traj = &rungs[rung].trajectory;
@@ -4390,7 +4462,7 @@ pub fn run_pgas(
                         model, rung_traj, &params, observations,
                         config.dt, obs_model,
                         d, &rate_grads_for_run, &obs_at_substep,
-                        &estimated_to_model,
+                        &estimated_to_model, beta,
                     ) {
                         Ok(r) => r,
                         Err(e) if e.is_structural() => {
@@ -4403,16 +4475,21 @@ pub fn run_pgas(
                         }
                     };
 
-                    // Temper: scale LL by β
-                    let mut log_p = beta.get() * ll;
+                    // gh#551: `ll` is already the rung's tempered energy
+                    // log p(x|θ) + β·log p(y|x,θ) — β enters inside
+                    // `complete_data_loglik_grad`, on the observation term's
+                    // value and gradient only, so NUTS and the MH branch below
+                    // target the same law. Not rescaled here.
+                    let mut log_p = ll;
                     let mut grad_z = vec![0.0; d];
 
                     for i in 0..d {
                         let theta = params[if2_params[i].index];
                         let dtheta_dz = if2_params[i].transform_deriv(z[i]);
 
-                        // LL gradient: chain rule θ → z, scaled by β
-                        grad_z[i] += beta.get() * ll_grad_theta[i] * dtheta_dz;
+                        // LL gradient: chain rule θ → z (β already applied to the
+                        // observation part only)
+                        grad_z[i] += ll_grad_theta[i] * dtheta_dz;
 
                         // Prior: untempered
                         let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(
@@ -4557,7 +4634,8 @@ pub fn run_pgas(
                 }
             } else {
                 // MH-within-Gibbs: one-at-a-time random walk proposals
-                // For heated rungs, scale LL by β in the MH ratio.
+                // For heated rungs, the observation term is scaled by β in the
+                // MH ratio (gh#551).
                 for i in 0..d {
                     let spec = &if2_params[i];
                     let z_old = rungs[rung].transformed[i];
@@ -4571,7 +4649,7 @@ pub fn run_pgas(
                     // proposal (−∞ ⇒ non-finite log α ⇒ the guard below
                     // rejects), not a dead chain. Only a structural failure
                     // still propagates — see `theta_proposal_score`.
-                    let proposed_ll = theta_proposal_score(complete_data_loglik(
+                    let proposed = theta_proposal_score(complete_data_loglik(
                         model, &rungs[rung].trajectory, &proposed_params, observations,
                         config.dt, obs_model, &obs_at_substep,
                     ))?;
@@ -4583,8 +4661,12 @@ pub fn run_pgas(
                     let proposed_log_jac_i = spec.log_jacobian(z_new);
                     let current_log_jac_i = spec.log_jacobian(z_old);
 
-                    // Temper: scale LL difference by β, prior + Jacobian untempered
-                    let log_alpha = beta.get() * (proposed_ll - rungs[rung].ll)
+                    // gh#551: the rung's target is p(θ)·p(x|θ)·p(y|x,θ)^β, so the
+                    // likelihood part of the ratio is
+                    //   [process' + β·obs'] − [process + β·obs]
+                    // (`RungLik::log_target`); prior and Jacobian untempered. At
+                    // β = 1 each `log_target` IS the complete-data total, bitwise.
+                    let log_alpha = (proposed.log_target(beta) - rungs[rung].lik.log_target(beta))
                                   + (proposed_log_prior_i - current_log_prior_i)
                                   + (proposed_log_jac_i - current_log_jac_i);
 
@@ -4606,7 +4688,7 @@ pub fn run_pgas(
                     if crate::inference::mh_accept(log_alpha, rng.uniform().ln()) {
                         rungs[rung].params[spec.index] = theta_new;
                         rungs[rung].transformed[i] = z_new;
-                        rungs[rung].ll = proposed_ll;
+                        rungs[rung].lik = proposed;
                         rung_accepted[rung][i] = true;
                         rungs[rung].total_accepted[i] += 1;
                     }
@@ -4659,7 +4741,7 @@ pub fn run_pgas(
                 model, &rungs[rung].trajectory, &rungs[rung].params, observations,
                 config.dt, obs_model, &obs_at_substep,
             )?;
-            rungs[rung].ll = ll_components.total;
+            rungs[rung].lik = RungLik::from_components(&ll_components);
 
             rung_csmc_diag.push(csmc_diag);
 
@@ -4698,7 +4780,7 @@ pub fn run_pgas(
                             prior.log_density(theta, spec.to_transformed(theta))
                         })
                         .sum();
-                    (rung.ll + rung_log_prior).is_finite()
+                    (rung.lik.total + rung_log_prior).is_finite()
                 });
                 if !any_rung_finite {
                     return Err(SimError::NonFiniteChainStart {
@@ -4714,7 +4796,7 @@ pub fn run_pgas(
                     });
                 }
                 eprintln!("  chain recovered from a non-finite start on its first \
-                           trajectory update (complete-data ll: {:.1})", rungs[0].ll);
+                           trajectory update (complete-data ll: {:.1})", rungs[0].lik.total);
             }
         }
 
@@ -4732,7 +4814,7 @@ pub fn run_pgas(
                 // accepted when the HOTTER rung holds the better state — which
                 // is the whole purpose of the ladder.
                 let log_alpha = swap_log_alpha(
-                    betas[i].get(), betas[j].get(), rungs[i].ll, rungs[j].ll);
+                    betas[i].get(), betas[j].get(), rungs[i].lik.total, rungs[j].lik.total);
 
                 // Not routed through `mh_accept`, deliberately — but for a
                 // narrower reason than an earlier version of this comment
@@ -4827,7 +4909,7 @@ pub fn run_pgas(
         let sweep_result = PGASSweep {
             sweep,
             params: rungs[0].params.clone(),
-            log_complete_data_ll: rungs[0].ll,
+            log_complete_data_ll: rungs[0].lik.total,
             accepted: rung_accepted[0].clone(),
             csmc_diag: rung_csmc_diag[0].clone(),
             proposal_sds: cold_proposal_sd,
@@ -4863,7 +4945,7 @@ pub fn run_pgas(
         nuts_step_size: rungs[0].nuts_step_size,
         log_proposal_sd: rungs[0].log_proposal_sd.clone(),
         total_accepted: rungs[0].total_accepted.clone(),
-        current_ll: rungs[0].ll,
+        current_ll: rungs[0].lik.total,
     };
 
     // gh#audit-C7 / M18. Compute swap acceptance rates as a final
@@ -5277,11 +5359,14 @@ mod theta_proposal_score_tests {
     #[test]
     fn a_successful_evaluation_passes_its_total_through() {
         let score = theta_proposal_score(Ok(components(-12.5))).expect("Ok must not error");
-        assert_eq!(score, -12.5);
+        assert_eq!(score.total, -12.5);
+        // gh#551: at β = 1 the tempered target IS the total, bitwise.
+        assert_eq!(score.log_target(InverseTemperature::COLD), -12.5);
         // Including the ordinary "this θ is ruled out" outcome, which
         // `complete_data_loglik` already reports as Ok(−∞).
         let score = theta_proposal_score(Ok(components(f64::NEG_INFINITY))).unwrap();
-        assert_eq!(score, f64::NEG_INFINITY);
+        assert_eq!(score.total, f64::NEG_INFINITY);
+        assert_eq!(score.log_target(InverseTemperature::new(0.3).unwrap()), f64::NEG_INFINITY);
     }
 
     /// The gh#82 fix: every θ-dependent failure becomes a rejected proposal.
@@ -5308,8 +5393,12 @@ mod theta_proposal_score_tests {
             let score = theta_proposal_score(Err(err))
                 .unwrap_or_else(|e| panic!("{shown} must reject the proposal, not propagate: {e}"));
             assert_eq!(
-                score, f64::NEG_INFINITY,
+                score.total, f64::NEG_INFINITY,
                 "a rejected proposal scores −∞ so log α is non-finite: {shown}",
+            );
+            assert_eq!(
+                score.log_target(InverseTemperature::new(0.3).unwrap()), f64::NEG_INFINITY,
+                "and −∞ on every rung, not only the cold one: {shown}",
             );
         }
     }
@@ -5338,6 +5427,71 @@ mod theta_proposal_score_tests {
                 "a structural error must propagate out of run_pgas, got Ok({:?}) for {shown}",
                 out.ok(),
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod rung_lik_tests {
+    //! gh#551. The split a tempered rung's moves consume.
+    use super::*;
+
+    fn components(initial_state: f64, transition: f64, observation: f64) -> LogLikComponents {
+        LogLikComponents {
+            // The association `complete_data_loglik` uses.
+            total: initial_state + transition + observation,
+            transition, observation, initial_state,
+            observation_per_stream: Vec::new(),
+        }
+    }
+
+    /// The default single-rung chain must not move: at β = 1 the θ-move's
+    /// target is the complete-data total, to the bit, for values whose sum
+    /// is not exactly representable (so a reassociation would show).
+    #[test]
+    fn cold_target_is_the_total_bitwise() {
+        for (a, b, c) in [(-1.25, -3.7, -8.1), (-0.1, -0.2, -0.3), (-1e-17, -123.456, -7.0e3)] {
+            let lik = RungLik::from_components(&components(a, b, c));
+            assert_eq!(lik.log_target(InverseTemperature::COLD).to_bits(), lik.total.to_bits());
+        }
+    }
+
+    /// Below β = 1 only the observation term is scaled.
+    #[test]
+    fn hot_target_tempers_the_observation_only() {
+        let lik = RungLik::from_components(&components(-2.0, -5.0, -10.0));
+        assert_eq!(lik.log_target(InverseTemperature::new(0.25).unwrap()), -7.0 + 0.25 * -10.0);
+        assert_eq!(lik.observation, -10.0);
+        assert_eq!(lik.total, -17.0);
+    }
+
+    /// `complete_data_loglik` stops at the first `−∞` and leaves the later
+    /// components partial. A finite partial observation sum beside a `−∞`
+    /// total must not reach the swap or the θ-move as if it were a
+    /// measurement: a zero-density state stays at zero density everywhere.
+    #[test]
+    fn a_zero_density_state_is_zero_density_under_every_consumer() {
+        let partial = LogLikComponents {
+            total: f64::NEG_INFINITY,
+            transition: f64::NEG_INFINITY,
+            observation: -4.0, // partial: the walk stopped before finishing it
+            initial_state: 0.0,
+            observation_per_stream: Vec::new(),
+        };
+        let lik = RungLik::from_components(&partial);
+        assert_eq!(lik.observation, f64::NEG_INFINITY);
+        for beta in [1.0, 0.5, 0.1] {
+            assert_eq!(lik.log_target(InverseTemperature::new(beta).unwrap()), f64::NEG_INFINITY);
+        }
+    }
+
+    #[test]
+    fn a_ladder_entry_outside_zero_one_is_refused() {
+        for bad in [0.0, -0.5, 1.0 + 1e-12, f64::NAN, f64::INFINITY] {
+            assert!(InverseTemperature::new(bad).is_err(), "{bad} must be refused");
+        }
+        for good in [1.0, 0.5, 1e-9] {
+            assert_eq!(InverseTemperature::new(good).unwrap().get(), good);
         }
     }
 }
