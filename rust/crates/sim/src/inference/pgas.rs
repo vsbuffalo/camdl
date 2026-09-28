@@ -1012,6 +1012,51 @@ impl CSMCDiagnostics {
     }
 }
 
+/// The inverse temperature `β ∈ (0, 1]` of one parallel-tempering rung: the
+/// power its **observation** density is raised to (gh#551).
+///
+/// Rung `k` targets
+///
+/// ```text
+///   π_k(θ, x) ∝ p(θ) · p(x | θ) · p(y | x, θ)^{β_k}
+/// ```
+///
+/// — prior and process density (initial state + transitions) at full weight,
+/// only the measurement model flattened. The trajectory on a hot rung stays a
+/// path the model can produce; only the data's pull on it is weakened. Every
+/// move a rung makes (the θ-block, the CSMC-AS trajectory refresh, the
+/// replica-exchange swap) must target this one distribution, and each of them
+/// takes this type rather than a bare `f64` so the three cannot be handed
+/// different things — and so `β` cannot be swapped with the `dt: f64` that sits
+/// beside it in the same signatures.
+///
+/// [`Self::COLD`] (`β = 1`) is the untempered posterior. Multiplying by it is
+/// exact in IEEE arithmetic (`1.0 * x == x` bitwise, including `±∞` and NaN),
+/// which is what keeps the default single-rung chain bit-identical to an
+/// untempered implementation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InverseTemperature(f64);
+
+impl InverseTemperature {
+    /// `β = 1`: the cold rung, whose draws are the posterior.
+    pub const COLD: Self = Self(1.0);
+
+    /// Parse a ladder entry. `β` must lie in `(0, 1]`: `β = 0` would drop the
+    /// data entirely (the rung samples the prior predictive), `β > 1` sharpens
+    /// rather than flattens, and NaN is not a temperature.
+    pub fn new(beta: f64) -> Result<Self, String> {
+        if beta > 0.0 && beta <= 1.0 {
+            Ok(Self(beta))
+        } else {
+            Err(format!("tempering β values must be in (0, 1], got {beta}"))
+        }
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 /// Decomposed complete-data log-likelihood components.
 #[derive(Clone, Debug)]
 pub struct LogLikComponents {
@@ -2387,6 +2432,17 @@ pub fn reference_baseline(
 /// for the approximation error caused by the truncation" (§6.2, p. 2166,
 /// describing precisely this pairing, at their stated `O(NTℓ + T²)` cost).
 ///
+/// # On a tempered rung
+///
+/// The rung's target is `γ_T = Π f_θ · Π g_θ^β` (see [`InverseTemperature`]):
+/// every observation factor `g_θ` above is `g_θ^β`, and nothing else changes.
+/// So each observation term of the walk below is charged as
+/// `β · (log g(·(Δ)) − log g(ref))`, the same β the filter weights in
+/// [`csmc_as`] carry — the Eq.-(17) proposal weight `w^j_{s-1}` is one of those
+/// filter weights, so proposal and correction describe the same target. The
+/// transition and gamma-multiplier terms are process density and stay at full
+/// weight. At `β = 1` the multiply is exact and the ratio is unchanged.
+///
 /// The proposal here is the *independence* kernel `q(· | i) = ρ̂(·)`, the
 /// normalized Eq.-(17) weights `csmc_as` already computes (screened by
 /// [`SpliceGuard`]). Writing `w̃^j_full = w̃^j_prop · S_j` with
@@ -2437,6 +2493,7 @@ pub fn splice_log_ratio(
     offset: &[i64],
     cum_seed: &[u64],
     acc_seed: &[u64],
+    beta: InverseTemperature,
 ) -> Result<f64, SimError> {
     // Keeping the current ancestry is the identity move: every term is its own
     // baseline. Short-circuit it exactly, without arithmetic.
@@ -2528,7 +2585,8 @@ pub fn splice_log_ratio(
             if !ll.is_finite() {
                 return Ok(f64::NEG_INFINITY);
             }
-            total += ll - baseline.obs_ll[t];
+            // gh#551: the observation factor is `g^β` on a tempered rung.
+            total += beta.get() * (ll - baseline.obs_ll[t]);
             cum_flows.fill(0);
             obs_model.reset_due_acc(obs_idx, &mut acc);
         }
@@ -2650,6 +2708,19 @@ pub(crate) fn draw_free_particle_initial_state(
 /// Run one CSMC-AS sweep: draw X' ~ p(X | θ, y) conditioned on
 /// the reference trajectory.
 ///
+/// On a tempered rung (`beta < 1`) the conditional drawn from is
+/// `π_β(X | θ, y) ∝ p(X | θ) · p(y | X, θ)^β` (gh#551, see
+/// [`InverseTemperature`]): free particles still propagate from the model's own
+/// transition law, and every observation weight — the filter weights, and
+/// through them the Eq.-(17) ancestor weights and the final draw, and the
+/// observation terms of the ancestor-sampling suffix ratio — is the observation
+/// log-density times `beta`. The initial-state law and the transition
+/// densities are process terms and stay at full weight. This is the ordinary
+/// conditional SMC on a state-space model whose potential is `g^β`; particle
+/// Gibbs needs potentials, not normalized densities, so the kernel's
+/// invariance argument (Andrieu, Doucet & Holenstein 2010, Thm 5; Lindsten,
+/// Jordan & Schön 2014, Thm 1) applies unchanged.
+///
 /// Returns a new trajectory + diagnostics.
 pub fn csmc_as(
     model: &CompiledModel,
@@ -2678,6 +2749,9 @@ pub fn csmc_as(
     // what separates "AS is contributing to renewal" from "renewal comes from
     // the filter alone" on a real fit.
     ancestor_sampling: bool,
+    // gh#551: the power on the observation density — this rung's inverse
+    // temperature; `InverseTemperature::COLD` for an untempered sweep.
+    beta: InverseTemperature,
 ) -> Result<(PGASTrajectory, CSMCDiagnostics), SimError> {
     let t_start = model.model.simulation.t_start;
     let n_substeps = reference.substeps.len();
@@ -3078,6 +3152,7 @@ pub fn csmc_as(
                     &offset_of(&prev_counts_for_ancestor[proposed]),
                     &prev_cum_flows_for_ancestor[proposed],
                     &prev_acc_for_ancestor[proposed],
+                    beta,
                 )?;
                 // The current ancestry's own suffix ratio. Exactly zero — and
                 // free — until some earlier splice this sweep has already
@@ -3088,6 +3163,7 @@ pub fn csmc_as(
                     &offset_of(&prev_counts[j_ref]),
                     &cum_flows[j_ref],
                     &acc[j_ref],
+                    beta,
                 )?;
                 let accept = if log_s_prop == f64::NEG_INFINITY {
                     n_as_refused_inadmissible += 1;
@@ -3178,7 +3254,9 @@ pub fn csmc_as(
                     // slot is particle-local, so the parallel fold/score/reset is
                     // byte-identical to the serial loop (gh#209 CRN property).
                     obs_model.fold_into_acc(cflows, a);
-                    *lw = obs_model.log_likelihood_from_flows_and_counts(
+                    // gh#551: the rung's potential is `g^β` — the observation
+                    // log-density times β. Exact at β = 1.
+                    *lw = beta.get() * obs_model.log_likelihood_from_flows_and_counts(
                         a, cnt, obs_idx, params);
                     // `cum_flows` blanket-zeroed; the per-stream `acc` bins
                     // per-stream — only Interval streams scheduled at THIS union
@@ -4079,13 +4157,16 @@ pub fn run_pgas(
 
     // ── Parallel tempering setup ──
     let n_rungs = config.tempering.len().max(1);
-    let betas: Vec<f64> = if config.tempering.is_empty() { vec![1.0] } else { config.tempering.clone() };
-    assert!((betas[0] - 1.0).abs() < 1e-12, "first tempering rung must be β=1.0 (cold chain)");
-    for &b in &betas {
-        assert!(b > 0.0 && b <= 1.0, "tempering β values must be in (0, 1], got {}", b);
-    }
+    let betas: Vec<InverseTemperature> = if config.tempering.is_empty() {
+        vec![InverseTemperature::COLD]
+    } else {
+        config.tempering.iter()
+            .map(|&b| InverseTemperature::new(b).unwrap_or_else(|e| panic!("{e}")))
+            .collect()
+    };
+    assert!((betas[0].get() - 1.0).abs() < 1e-12, "first tempering rung must be β=1.0 (cold chain)");
     if n_rungs > 1 {
-        eprintln!("  parallel tempering: {} rungs, β = {:?}", n_rungs, betas);
+        eprintln!("  parallel tempering: {} rungs, β = {:?}", n_rungs, config.tempering);
     }
 
     // NUTS state — restored from resume or initialized fresh.
@@ -4247,7 +4328,7 @@ pub fn run_pgas(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
                     csmc_seed, &obs_at_substep, firing, config.binomial,
-                    config.ancestor_sampling,
+                    config.ancestor_sampling, betas[rung],
                 )?;
                 rungs[rung].trajectory = new_traj;
                 rungs[rung].ll = complete_data_loglik(
@@ -4323,7 +4404,7 @@ pub fn run_pgas(
                     };
 
                     // Temper: scale LL by β
-                    let mut log_p = beta * ll;
+                    let mut log_p = beta.get() * ll;
                     let mut grad_z = vec![0.0; d];
 
                     for i in 0..d {
@@ -4331,7 +4412,7 @@ pub fn run_pgas(
                         let dtheta_dz = if2_params[i].transform_deriv(z[i]);
 
                         // LL gradient: chain rule θ → z, scaled by β
-                        grad_z[i] += beta * ll_grad_theta[i] * dtheta_dz;
+                        grad_z[i] += beta.get() * ll_grad_theta[i] * dtheta_dz;
 
                         // Prior: untempered
                         let (prior_val, prior_grad_z) = prior_log_density_and_grad_z(
@@ -4503,7 +4584,7 @@ pub fn run_pgas(
                     let current_log_jac_i = spec.log_jacobian(z_old);
 
                     // Temper: scale LL difference by β, prior + Jacobian untempered
-                    let log_alpha = beta * (proposed_ll - rungs[rung].ll)
+                    let log_alpha = beta.get() * (proposed_ll - rungs[rung].ll)
                                   + (proposed_log_prior_i - current_log_prior_i)
                                   + (proposed_log_jac_i - current_log_jac_i);
 
@@ -4541,7 +4622,10 @@ pub fn run_pgas(
             }
 
             // ── Step 2: Update X | θ, y via CSMC-AS ──
-            // CSMC always runs at β=1 — the trajectory must match the data.
+            // At this rung's β (gh#551): the conditional drawn from is
+            // p(X | θ) · p(y | X, θ)^β, the same target the θ-move uses. The
+            // process density is untempered, so a hot rung's trajectory is still
+            // a path the model can produce — only the data's pull is weakened.
             // Multiple CSMC sweeps per NUTS step improve trajectory convergence
             // on long time series where ancestor sampling is the bottleneck.
             let mut csmc_diag = CSMCDiagnostics {
@@ -4564,7 +4648,7 @@ pub fn run_pgas(
                     model, &rungs[rung].params, observations, &rungs[rung].trajectory,
                     config.n_particles, config.dt, obs_model,
                     csmc_seed, &obs_at_substep, firing, config.binomial,
-                    config.ancestor_sampling,
+                    config.ancestor_sampling, betas[rung],
                 )?;
                 rungs[rung].trajectory = new_trajectory;
                 csmc_diag = diag;
@@ -4648,7 +4732,7 @@ pub fn run_pgas(
                 // accepted when the HOTTER rung holds the better state — which
                 // is the whole purpose of the ladder.
                 let log_alpha = swap_log_alpha(
-                    betas[i], betas[j], rungs[i].ll, rungs[j].ll);
+                    betas[i].get(), betas[j].get(), rungs[i].ll, rungs[j].ll);
 
                 // Not routed through `mh_accept`, deliberately — but for a
                 // narrower reason than an earlier version of this comment
@@ -4720,7 +4804,7 @@ pub fn run_pgas(
                         swap_accepted[i] as f64 / swap_proposed[i] as f64
                     } else { 0.0 };
                     eprintln!("    B={:.2} <-> B={:.2}: {:.1}%",
-                        betas[i], betas[i + 1], rate * 100.0);
+                        betas[i].get(), betas[i + 1].get(), rate * 100.0);
                 }
             }
         }

@@ -222,6 +222,7 @@ fn the_interval_accumulator_resync_does_not_move_a_prevalence_only_trajectory() 
                 EffectFiring::default(),
                 sim::rng::BinomialAlgorithm::Btpe,
                 true,
+                sim::inference::pgas::InverseTemperature::COLD,
             )
             .expect("csmc_as");
             accepted += diag.n_as_accepted;
