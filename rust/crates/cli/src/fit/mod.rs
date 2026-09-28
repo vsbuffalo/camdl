@@ -277,7 +277,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // identity, and a malformed value should fail before a run_id is computed
     // from it, not after the claim.
     if let Some(t) = &a.tempering {
-        if t.is_empty() || (t[0] - 1.0).abs() > 1e-9 {
+        if t.is_empty() || (t[0] - 1.0).abs() > sim::inference::pgas::COLD_RUNG_TOLERANCE {
             eprintln!("error: --tempering must start with β=1.0 (cold chain). \
                        Got: {:?}", t);
             std::process::exit(1);

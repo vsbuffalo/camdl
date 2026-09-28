@@ -230,7 +230,9 @@ impl PgasStageOpts {
                 dense_mass, use_nuts, ancestor_sampling, binomial,
                 ..
             } => {
-                if tempering.is_empty() || (tempering[0] - 1.0).abs() > 1e-9 {
+                if tempering.is_empty()
+                    || (tempering[0] - 1.0).abs() > sim::inference::pgas::COLD_RUNG_TOLERANCE
+                {
                     return Err(format!(
                         "stage tempering ladder must start with β=1.0 \
                          (cold chain). Got: {:?}", tempering));

@@ -1060,7 +1060,33 @@ impl InverseTemperature {
     pub fn get(self) -> f64 {
         self.0
     }
+
+    /// Parse a whole tempering ladder. An empty ladder is the single cold
+    /// rung. The first entry must be within [`COLD_RUNG_TOLERANCE`] of 1 and is
+    /// then **snapped to [`Self::COLD`]**, so the rung whose draws are reported
+    /// is exactly the posterior on every path — a ladder written as
+    /// `0.9999999999` would otherwise temper the reported rung by that value.
+    /// Every other entry goes through [`Self::new`].
+    pub fn parse_ladder(ladder: &[f64]) -> Result<Vec<Self>, String> {
+        let Some((&first, rest)) = ladder.split_first() else {
+            return Ok(vec![Self::COLD]);
+        };
+        if (first - 1.0).abs() > COLD_RUNG_TOLERANCE {
+            return Err(format!(
+                "first tempering rung must be β=1.0 (cold chain), got {first}"
+            ));
+        }
+        std::iter::once(Ok(Self::COLD))
+            .chain(rest.iter().map(|&b| Self::new(b)))
+            .collect()
+    }
 }
+
+/// How far the first entry of a tempering ladder may sit from 1 and still be
+/// read as the cold rung (and snapped to exactly `β = 1` by
+/// [`InverseTemperature::parse_ladder`]). The one definition the CLI's ladder
+/// validation and `run_pgas` both use.
+pub const COLD_RUNG_TOLERANCE: f64 = 1e-9;
 
 /// Decomposed complete-data log-likelihood components.
 #[derive(Clone, Debug)]
@@ -4241,14 +4267,9 @@ pub fn run_pgas(
 
     // ── Parallel tempering setup ──
     let n_rungs = config.tempering.len().max(1);
-    let betas: Vec<InverseTemperature> = if config.tempering.is_empty() {
-        vec![InverseTemperature::COLD]
-    } else {
-        config.tempering.iter()
-            .map(|&b| InverseTemperature::new(b).unwrap_or_else(|e| panic!("{e}")))
-            .collect()
-    };
-    assert!((betas[0].get() - 1.0).abs() < 1e-12, "first tempering rung must be β=1.0 (cold chain)");
+    // The first rung is snapped to exactly β = 1 (see `parse_ladder`).
+    let betas: Vec<InverseTemperature> = InverseTemperature::parse_ladder(&config.tempering)
+        .unwrap_or_else(|e| panic!("{e}"));
     if n_rungs > 1 {
         eprintln!("  parallel tempering: {} rungs, β = {:?}", n_rungs, config.tempering);
     }
@@ -5511,6 +5532,19 @@ mod rung_lik_tests {
         for beta in [1.0, 0.5, 0.1] {
             assert_eq!(lik.log_target(InverseTemperature::new(beta).unwrap()), f64::NEG_INFINITY);
         }
+    }
+
+    /// The reported rung is exactly β = 1 whenever the ladder is accepted.
+    #[test]
+    fn the_first_rung_is_snapped_to_cold() {
+        let ladder = InverseTemperature::parse_ladder(&[1.0 - 1e-10, 0.5]).unwrap();
+        assert_eq!(ladder[0], InverseTemperature::COLD);
+        assert_eq!(ladder[0].get().to_bits(), 1.0f64.to_bits());
+        assert_eq!(ladder[1].get(), 0.5);
+        assert_eq!(InverseTemperature::parse_ladder(&[]).unwrap(), vec![InverseTemperature::COLD]);
+        assert!(InverseTemperature::parse_ladder(&[1.0 - 1e-8, 0.5]).is_err());
+        assert!(InverseTemperature::parse_ladder(&[0.5]).is_err());
+        assert!(InverseTemperature::parse_ladder(&[1.0, 0.0]).is_err());
     }
 
     #[test]
