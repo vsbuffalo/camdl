@@ -1585,7 +1585,8 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // free-forward production runs exactly once, byte-identical to the no-sweep
     // path. A swept value rides in the SAME draw/sweep tier as a draw (it
     // OVERRIDES the swept parameter in each draw row), so the resolver applies it
-    // below the scenario tier — a scenario still wins over a sweep.
+    // below the scenario tier. A scenario touching a swept parameter is refused
+    // (3d); on the parameters it does touch, the scenario's tier applies.
     let sweep_points: Vec<Vec<(String, f64)>> = expand_predict_sweep(&args.sweep);
     let swept_params: std::collections::BTreeSet<String> =
         args.sweep.iter().map(|s| s.name.clone()).collect();
@@ -1620,36 +1621,30 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     }
 
     // 3d. A scenario and a sweep on the SAME parameter is a hard error: the
-    // scenario PINS the parameter (winning over the draw/sweep tier) while the
-    // sweep VARIES it — applying both at once is contradictory (the scenario would
-    // silently override every sweep cell, collapsing the grid). The two guards
-    // (this one and the engine's explicit-`--draws` guard) share one footprint
-    // (`scenario_param_footprint`) so they cannot disagree. Runs BEFORE any
+    // scenario's `set` would override (its `scale` rescale) every sweep value,
+    // so the grid would not vary that parameter (gh#572). Worded by the same
+    // formatter as the engine's guard, over the same footprint
+    // (`scenario_param_footprint`), so the commands cannot disagree. Checked
+    // here rather than by the engine because predict folds the sweep into the
+    // draw rows, which the engine sees as generated draws. Runs BEFORE any
     // simulation.
     if !swept_params.is_empty() {
+        let varied = crate::params_resolver::coordinate_values(
+            sweep_points.iter().flat_map(|cell| cell.iter().map(|(k, v)| (k.as_str(), *v))),
+        );
+        let mut refusals: Vec<String> = Vec::new();
         for sref in &scenario_refs {
-            let footprint = crate::params_resolver::scenario_param_footprint(&model, sref)?;
-            let mut clash: Vec<&str> = footprint
-                .iter()
-                .map(|k| k.as_str())
-                .filter(|k| swept_params.contains(*k))
-                .collect();
-            if !clash.is_empty() {
-                clash.sort();
-                clash.dedup();
-                let param_list = clash.join(", ");
-                let swept_list: Vec<&str> = swept_params.iter().map(|s| s.as_str()).collect();
-                return Err(format!(
-                    "scenario '{scen}' pins parameter(s) [{param_list}] that --sweep \
-                     also varies (sweep over [{swept}]). A scenario sets/scales these \
-                     parameters and wins over the sweep, so pinning them via the \
-                     scenario and varying them via --sweep at once is contradictory.\n  \
-                     Fix: drop [{param_list}] from one side — pin the parameter via the \
-                     scenario, OR vary it via --sweep, not both.",
-                    scen = sref.name(),
-                    swept = swept_list.join(", "),
-                ));
+            if let Some(msg) = crate::params_resolver::scenario_coordinate_collision(
+                &model,
+                sref,
+                crate::params_resolver::UserCoordinate::Sweep,
+                &varied,
+            )? {
+                refusals.push(msg);
             }
+        }
+        if !refusals.is_empty() {
+            return Err(refusals.join("\n\nerror: "));
         }
     }
 
@@ -2230,7 +2225,8 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                     // supplies every other parameter). The swept value lands in the
                     // SAME draw/sweep tier as the draw (`point_overrides`), so the
                     // resolver applies the scenario's `set`/`scale`/`enable`/`disable`
-                    // ON TOP — exactly once — and a scenario still wins over the sweep.
+                    // ON TOP — exactly once. 3d refused any scenario touching a swept
+                    // parameter, so the two never meet on one parameter.
                     // No per-draw folding of `set`/`scale` (that would double-apply).
                     let rows: Vec<IndexMap<String, f64>> = ff_draws
                         .iter()
@@ -2251,10 +2247,10 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                         backend: posterior.backend,
                         dt,
                         integrator: None,
-                        // Generated posterior draws (not a user-authored file), so a
-                        // scenario simply wins over a draw/sweep column — no collision
-                        // error (the scenario×sweep guard above already rejected a
-                        // same-parameter clash).
+                        // Generated posterior draws (not a user-authored file), so
+                        // the engine's collision guard does not check them: a scenario
+                        // over posterior draws is the counterfactual predict runs. The
+                        // swept columns folded into these rows were checked by 3d.
                         source: crate::sim_job::ParamSource::Draws {
                             rows,
                             replicates: 1,
