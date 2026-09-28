@@ -157,6 +157,7 @@ fn sweep(f: &Fixture, seed: u64) -> (PGASTrajectory, sim::inference::pgas::CSMCD
         EffectFiring::default(),
         sim::rng::BinomialAlgorithm::Btpe,
         true,
+        sim::inference::pgas::InverseTemperature::COLD,
     )
     .expect("csmc_as")
 }

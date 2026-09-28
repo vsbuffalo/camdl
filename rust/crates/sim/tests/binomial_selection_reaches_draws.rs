@@ -165,6 +165,7 @@ fn selected_sampler_reaches_csmc_free_particles() {
             EffectFiring::default(),
             algo,
             true,
+            sim::inference::pgas::InverseTemperature::COLD,
         )
         .expect("csmc_as");
         traj

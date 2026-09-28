@@ -275,6 +275,7 @@ fn check_ratio_matches_complete_data_loglik(kind: Kind, label: &str) {
     let got = splice_log_ratio(
         &f.compiled, &f.reference, &f.params, &f.obs_model, &f.obs_at_substep, None,
         &baseline, s, &offset, &cum_seed, &acc_seed,
+        sim::inference::pgas::InverseTemperature::COLD,
     )
     .expect("splice_log_ratio");
 
@@ -330,6 +331,7 @@ fn an_off_support_offset_is_refused_by_both() {
     let got = splice_log_ratio(
         &f.compiled, &f.reference, &f.params, &f.obs_model, &f.obs_at_substep, None,
         &baseline, s, &offset, &cum_seed, &acc_seed,
+        sim::inference::pgas::InverseTemperature::COLD,
     )
     .expect("splice_log_ratio");
     assert_eq!(
@@ -431,6 +433,7 @@ fn a_differing_accumulator_seed_is_not_a_free_splice() {
     let unchanged = splice_log_ratio(
         &f.compiled, &f.reference, &f.params, &f.obs_model, &f.obs_at_substep, None,
         &baseline, s, &offset, &cum_seed, &acc_seed,
+        sim::inference::pgas::InverseTemperature::COLD,
     )
     .expect("splice_log_ratio");
     assert_eq!(
@@ -442,6 +445,7 @@ fn a_differing_accumulator_seed_is_not_a_free_splice() {
     let got = splice_log_ratio(
         &f.compiled, &f.reference, &f.params, &f.obs_model, &f.obs_at_substep, None,
         &baseline, s, &offset, &perturbed, &acc_seed,
+        sim::inference::pgas::InverseTemperature::COLD,
     )
     .expect("splice_log_ratio");
 

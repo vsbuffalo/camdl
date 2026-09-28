@@ -51,9 +51,11 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, complete_data_loglik, csmc_as, EffectFiring, ObsAtSubstep,
-    PGASTrajectory, SubstepRecord,
+    build_obs_at_substep, complete_data_loglik, csmc_as, EffectFiring, InverseTemperature,
+    ObsAtSubstep, PGASTrajectory, SubstepRecord,
 };
+
+const COLD: InverseTemperature = InverseTemperature::COLD;
 use sim::rng::StatefulRng;
 
 const DT: f64 = 1.0;
@@ -244,14 +246,20 @@ fn enumerate_paths(initial: &[i64], n_substeps: usize) -> Vec<PGASTrajectory> {
     out
 }
 
-/// The exact smoothing target over the enumerated support: `π(X) ∝ p(X, y)`,
-/// read from the same `complete_data_loglik` the θ-move conditions on.
-fn exact_target(f: &Fixture) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>, usize>) {
+/// The exact smoothing target over the enumerated support: `π_β(X) ∝ p(X | θ) ·
+/// p(y | X, θ)^β`, read from the same `complete_data_loglik` the θ-move
+/// conditions on. At `β = 1` this is `p(X, y)`; below it, the tempered rung's
+/// conditional (gh#551) — process density at full weight, observation density
+/// raised to `β`.
+fn exact_target(
+    f: &Fixture,
+    beta: f64,
+) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>, usize>) {
     let all = enumerate_paths(&f.initial_counts, f.n_substeps);
     let mut paths = Vec::new();
     let mut logp = Vec::new();
     for traj in all {
-        let ll = complete_data_loglik(
+        let c = complete_data_loglik(
             &f.compiled,
             &traj,
             &f.params,
@@ -260,8 +268,12 @@ fn exact_target(f: &Fixture) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>
             &f.obs_model,
             &f.obs_at_substep,
         )
-        .expect("complete_data_loglik")
-        .total;
+        .expect("complete_data_loglik");
+        let ll = if c.total.is_finite() {
+            c.initial_state + c.transition + beta * c.observation
+        } else {
+            c.total
+        };
         if ll.is_finite() {
             paths.push(traj);
             logp.push(ll);
@@ -367,7 +379,7 @@ fn the_scored_density_is_the_producers_own_law() {
 
 #[test]
 fn one_sweep_leaves_the_smoothing_target_invariant() {
-    check_invariance(&DENSE, N_SUBSTEPS, true, "dense (observation on every substep)");
+    check_invariance(&DENSE, N_SUBSTEPS, true, "dense (observation on every substep)", COLD);
 }
 
 /// The same question on a schedule with UNOBSERVED substeps, where the weights
@@ -375,7 +387,28 @@ fn one_sweep_leaves_the_smoothing_target_invariant() {
 /// never reaches that branch, so without this case the skip is unexercised.
 #[test]
 fn one_sweep_is_invariant_when_some_substeps_skip_resampling() {
-    check_invariance(&SPARSE, N_SUBSTEPS, true, "sparse (some substeps skip resampling)");
+    check_invariance(&SPARSE, N_SUBSTEPS, true, "sparse (some substeps skip resampling)", COLD);
+}
+
+/// gh#551: the same invariance on a TEMPERED rung. At `β < 1` the sweep must
+/// leave `π_β(X | θ, y) ∝ p(X | θ) · p(y | X, θ)^β` invariant — observation
+/// density tempered, process density not. That is a statement about every
+/// place `csmc_as` scores an observation at once: the filter weights, the
+/// Eq.-(17) ancestor weights built from them, the final draw, and the
+/// observation terms of the ancestor-sampling suffix ratio. A sweep that
+/// tempered some of those and not others would target neither `π_1` nor
+/// `π_β`, and fails here.
+///
+/// `β = 0.15` is chosen for power against the subtler of the two halves.
+/// Measured at M = 200 000: filter weights left untempered fails at any β
+/// tried (`z_agg = 74` already at `β = 0.4`); the suffix ratio alone left
+/// untempered moves only the ancestor-sampling acceptance, and gave
+/// `z_agg = 3.9` at `β = 0.4` — under the bar — but `8.1` at `β = 0.15`,
+/// where the correct kernel gives `−0.85`.
+#[test]
+fn one_sweep_leaves_the_tempered_smoothing_target_invariant() {
+    let beta = InverseTemperature::new(0.15).unwrap();
+    check_invariance(&DENSE, N_SUBSTEPS, true, "dense, tempered at β = 0.4", beta);
 }
 
 fn check_invariance(
@@ -383,9 +416,10 @@ fn check_invariance(
     n_substeps: usize,
     expect_splices: bool,
     label: &str,
+    beta: InverseTemperature,
 ) {
     let f = fixture_with(schedule, n_substeps);
-    let (paths, pi, index) = exact_target(&f);
+    let (paths, pi, index) = exact_target(&f, beta.get());
 
     // Non-vacuity (3): a target concentrated on one path passes for free.
     let ess = 1.0 / pi.iter().map(|p| p * p).sum::<f64>();
@@ -421,6 +455,7 @@ fn check_invariance(
             EffectFiring::default(),
             sim::rng::BinomialAlgorithm::Btpe,
             true,
+            beta,
         )
         .expect("csmc_as");
         n_proposed += diag.n_as_proposed;
@@ -514,5 +549,5 @@ fn check_invariance(
 /// the exactly-enumerated counterexample in the gh#718 review.
 #[test]
 fn one_sweep_is_invariant_with_no_resampling_step_at_all() {
-    check_invariance(&TRAP, TRAP_SUBSTEPS, false, "trap (no substep ever draws an ancestry)");
+    check_invariance(&TRAP, TRAP_SUBSTEPS, false, "trap (no substep ever draws an ancestry)", COLD);
 }
