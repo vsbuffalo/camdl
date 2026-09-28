@@ -421,6 +421,22 @@ tempering = [
 ] # first entry MUST be 1.0 (cold chain); only the cold rung samples
 ```
 
+Each rung `k` samples a flattened version of the posterior in which only the
+**observation** density is tempered:
+
+```
+π_k(θ, x) ∝ p(θ) · p(x | θ) · p(y | x, θ)^β_k
+```
+
+The prior and the process density (initial state and transitions) stay at full
+weight, so a hot rung's latent trajectory is still one the model can produce —
+only the data's pull on it, and on θ, is weakened. Every move a rung makes
+targets this law: the θ update (MH or NUTS), the particle-Gibbs trajectory
+refresh, and the swap between adjacent rungs, whose acceptance ratio uses the
+observation log-likelihood alone. The cold rung (`β = 1`) is the posterior, and
+its draws are the only ones reported; the ladder changes how well the cold chain
+mixes, never what it converges to.
+
 Add intermediate β values when the tempering swap rate is low (see the
 diagnostics table in `camdl docs workflow`).
 
