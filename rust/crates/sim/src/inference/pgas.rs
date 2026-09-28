@@ -66,8 +66,13 @@ pub struct PGASConfig {
     /// (cold chain). Default: `[1.0]` (no tempering, single rung).
     /// Example: `[1.0, 0.7, 0.4, 0.15]` runs 4 temperature rungs.
     /// Only the cold (β=1) rung contributes posterior samples and trace output.
-    /// Heated rungs explore a flatter likelihood surface (LL scaled by β)
-    /// and exchange with adjacent rungs via Metropolis swap proposals.
+    /// Rung `k` targets `p(θ) · p(x | θ) · p(y | x, θ)^{β_k}` (gh#551): only
+    /// the observation density is tempered; prior and process density
+    /// (initial state + transitions) stay at full weight, so a heated rung's
+    /// trajectory is still a path the model can produce while the data's pull
+    /// on it and on θ is weakened. Rungs exchange states with adjacent rungs
+    /// via Metropolis swap proposals whose ratio uses the observation
+    /// log-likelihood only.
     pub tempering: Vec<f64>,
     /// Maximum NUTS tree depth. Default: 10.
     pub max_tree_depth: usize,
@@ -3614,22 +3619,34 @@ pub(crate) fn prior_log_density_and_grad_z(
 // ═══════════════════════════════════════════════════════════════════
 
 /// Log Metropolis acceptance ratio for a replica-exchange swap between rung `i`
-/// (inverse temperature `beta_i`, currently holding a state with untempered
-/// log-likelihood `ll_i`) and rung `j`.
+/// (inverse temperature `beta_i`, currently holding a state whose untempered
+/// **observation** log-likelihood is `ll_i`) and rung `j`.
 ///
 /// # Derivation
 ///
-/// Rung `k` targets `π_k(x) ∝ L(x)^{β_k} · p(x)`. The proposal exchanges the two
-/// rungs' states and is its own reverse, so the Hastings ratio is 1 and the
-/// acceptance ratio is just the ratio of joint target densities:
+/// Rung `k` targets observation-only tempering (gh#551, see
+/// [`InverseTemperature`]): writing a rung's state as `s = (θ, x)`,
 ///
 /// ```text
-/// log(now)   = β_i·ℓ_i + β_j·ℓ_j + log p(x_i) + log p(x_j)
-/// log(after) = β_i·ℓ_j + β_j·ℓ_i + log p(x_j) + log p(x_i)
+/// π_k(s) ∝ p(θ) · p(x | θ) · p(y | x, θ)^{β_k}  =  q(s) · e^{β_k·ℓ(s)}
 /// ```
 ///
-/// The prior terms are identical — the same two states appear either way, only
-/// assigned to different rungs — so they cancel, leaving
+/// with `q(s) = p(θ)·p(x | θ)` (prior and process density, untempered) and
+/// `ℓ(s) = log p(y | x, θ)`. The proposal exchanges the two rungs' states and
+/// is its own reverse, so the Hastings ratio is 1 and the acceptance ratio is
+/// just the ratio of joint target densities:
+///
+/// ```text
+/// log(now)   = β_i·ℓ_i + β_j·ℓ_j + log q(s_i) + log q(s_j)
+/// log(after) = β_i·ℓ_j + β_j·ℓ_i + log q(s_j) + log q(s_i)
+/// ```
+///
+/// The `q` terms are identical — the same two states appear either way, only
+/// assigned to different rungs — so they cancel, leaving the observation
+/// log-likelihoods alone. That is why the caller passes
+/// `RungLik::observation` and not the complete-data total: the process density
+/// is in `q`, and feeding it through `ℓ` would weight it by `(β_i − β_j)` when
+/// it must cancel. What remains is
 ///
 /// ```text
 /// log α = (β_i − β_j)(ℓ_j − ℓ_i)
@@ -4736,7 +4753,9 @@ pub fn run_pgas(
                 csmc_diag = diag;
             }
 
-            // Recompute complete-data LL at β=1 (untempered, for swap proposals)
+            // Recompute the complete-data LL at the rung's new (θ, X), split
+            // for the tempered target: the θ-move reads process + β·obs, the
+            // swap reads obs, the trace reads the untempered total (gh#551).
             let ll_components = complete_data_loglik(
                 model, &rungs[rung].trajectory, &rungs[rung].params, observations,
                 config.dt, obs_model, &obs_at_substep,
@@ -4768,6 +4787,9 @@ pub fn run_pgas(
         // from a `−∞` cold rung to a finite hot rung has `log α =
         // (β_i − β_j)(ℓ_j − (−∞)) = +∞` and is accepted with certainty
         // (`swap_log_alpha`), so the ladder can still pull the cold rung out.
+        // (ℓ there is the rung's observation term, which `RungLik` sets to
+        // `−∞` whenever the rung's total is non-finite — so this holds whether
+        // the zero came from the observation or the process density.)
         // With the default single rung this reduces to "the cold rung".
         if let Some((log_posterior, transition, observation, ivp, log_prior)) =
             start_at_zero_density
@@ -4813,8 +4835,14 @@ pub fn run_pgas(
                 // that the sign is the sign of (ℓ_j − ℓ_i), so a swap is
                 // accepted when the HOTTER rung holds the better state — which
                 // is the whole purpose of the ladder.
+                //
+                // gh#551: ℓ is the OBSERVATION log-likelihood. Each rung targets
+                // p(θ)·p(x|θ)·p(y|x,θ)^β, so prior and process density are
+                // common to both sides of the exchange and cancel; only the
+                // tempered factor survives.
                 let log_alpha = swap_log_alpha(
-                    betas[i].get(), betas[j].get(), rungs[i].lik.total, rungs[j].lik.total);
+                    betas[i].get(), betas[j].get(),
+                    rungs[i].lik.observation, rungs[j].lik.observation);
 
                 // Not routed through `mh_accept`, deliberately — but for a
                 // narrower reason than an earlier version of this comment
