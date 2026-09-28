@@ -3,7 +3,7 @@ use crate::{
     compiled_model::CompiledModel,
     config::{OdeConfig, SimConfig},
     error::SimError,
-    propensity::{eval_propensities, EvalCtx},
+    propensity::{eval_propensities, guard_propensity, EvalCtx},
     resolved_expr::{eval_deriv_entry, eval_emitted_grad, eval_resolved},
     schedule::{Cursor, Schedule, MIN_STEP_EPS},
     simulate::Simulate,
@@ -59,6 +59,18 @@ impl Simulate for OdeSim {
     fn name(&self) -> &'static str { "ode" }
 }
 
+/// Whether an ODE stage state lies inside the model's support: no compartment —
+/// integer or real — is negative. This is the same region the integrators
+/// enforce on every accepted state (`rk4_step` and `dopri5_try_step` clamp both
+/// the integer and the real compartments to `≥ 0`), so it is exactly the set of
+/// states a trajectory can actually occupy. Only rates evaluated inside it are
+/// held to [`guard_propensity`] (gh#692); an overshooting RK stage outside it is
+/// integrator-internal. A NaN compartment is NOT negative, so it counts as in
+/// support: a rate it poisons is refused as non-finite rather than waved through.
+fn stage_in_support(int_vals: &[f64], real_vals: &[f64]) -> bool {
+    !int_vals.iter().chain(real_vals).any(|&x| x < 0.0)
+}
+
 /// Evaluate ODE derivatives at the current (int_vals, real_vals) state.
 ///
 /// RM8 in 2026-04-19 engine review: integer compartments are read at
@@ -112,10 +124,29 @@ fn ode_derivs(
     let _cache = crate::resolved_expr::CacheScope::enter(model.resolved.bindings.len());
 
     // Integer compartment derivatives from transition stoichiometry × rate.
+    //
+    // gh#692: a rate evaluated at a state inside the model's support passes the
+    // same guard chain-binomial and Gillespie apply (`guard_propensity`): a
+    // negative or non-finite rate there is refused with the same typed error,
+    // never integrated as a negative / NaN flow. A Runge–Kutta STAGE state may
+    // overshoot below zero even when the accepted step does not (RK4's stage 4 on
+    // `dx/dt = −μx` is negative once μ·dt ≳ 1.6, while the step's stability
+    // polynomial stays positive; DOPRI5 trial steps the controller would reject
+    // do the same). A negative rate at such a stage is the analytic continuation
+    // the integrator relies on, not a rate that left the model's support, so it is
+    // not guarded — see [`stage_in_support`]. This is the single rate-evaluation
+    // site for every ODE path — fixed RK4 (incl. coarse `burnin_dt`), the
+    // forward-sensitivity RK4 step (whose `sensitivity_derivs` runs only after
+    // these value stages succeed, at the same stage states), and adaptive DOPRI5.
+    // The table-OOB record is cleared before each rate so a NaN is attributed to
+    // the rate that produced it (as in `eval_propensities`).
+    let guarded = stage_in_support(int_vals, real_vals);
     let n_tr = model.model.transitions.len();
     let mut propensities = Vec::with_capacity(n_tr);
     for i in 0..n_tr {
-        propensities.push(eval_resolved(&model.resolved.rates[i], &ctx));
+        crate::resolved_expr::clear_table_oob();
+        let p = eval_resolved(&model.resolved.rates[i], &ctx);
+        propensities.push(if guarded { guard_propensity(p, i, model, t)? } else { p });
     }
 
     // Augmented flow derivative: dc_i/dt = propensity_i (per transition). Reuses
@@ -1834,5 +1865,111 @@ mod tests {
             without[0].to_bits(),
             "carrying S must not change the compartment trajectory bit-for-bit"
         );
+    }
+
+    /// gh#692: every ODE integration path refuses a negative propensity with the
+    /// same typed error chain-binomial and Gillespie raise
+    /// (`SimError::NegativePropensity`), instead of integrating it as a negative
+    /// flow. `pure_death`'s rate is `mu·N`; at `mu = -0.1` it is negative from the
+    /// first stage (`N0 > 0`). Exercised at the stepper level — the value-only
+    /// RK4 step, the forward-sensitivity RK4 step (ODE NUTS), and the whole-run
+    /// drivers: fixed RK4, coarse burn-in RK4, and adaptive DOPRI5 (`rk45`) — so
+    /// no driver reaches a trajectory around the guard.
+    #[test]
+    fn every_ode_path_refuses_a_negative_propensity() {
+        fn assert_negative_propensity(res: Result<(), SimError>, path: &str) {
+            match res {
+                Err(SimError::NegativePropensity { transition, value, .. }) => {
+                    assert_eq!(transition, "death", "{path}: names the transition");
+                    assert!(value < 0.0, "{path}: carries the negative value, got {value}");
+                }
+                other => panic!("{path}: expected NegativePropensity, got {other:?}"),
+            }
+        }
+        let cm = compiled_pure_death();
+        let params = [-0.1];
+        let nf = cm.model.transitions.len();
+
+        // Value-only RK4 step (forward simulate, mh / nlopt / survey likelihood).
+        let (mut int, mut real, mut flow) = (vec![1000.0], Vec::<f64>::new(), vec![0.0; nf]);
+        let res =
+            rk4_step(&cm, &mut int, &mut real, Some(&mut flow), &params, 0.0, 0.1, None, None, &[]);
+        assert_negative_propensity(res, "rk4 value step");
+
+        // Forward-sensitivity RK4 step (ODE NUTS gradient path).
+        let pmi = [0usize];
+        let (mut int, mut real, mut flow) = (vec![1000.0], Vec::<f64>::new(), vec![0.0; nf]);
+        let mut sens = Sens { state: vec![0.0; 1], flow: vec![0.0; nf] };
+        let res = rk4_step(
+            &cm, &mut int, &mut real, Some(&mut flow), &params, 0.0, 0.1, None,
+            Some(&mut sens), &pmi,
+        );
+        assert_negative_propensity(res, "rk4 sensitivity step");
+
+        // Whole-run drivers: fixed RK4, coarse burn-in RK4, adaptive DOPRI5.
+        let cfg = OdeConfig { t_start: 0.0, t_end: 20.0, dt: 0.1 };
+        assert_negative_propensity(
+            run_ode(&cm, &params, &cfg, None, None).map(|_| ()),
+            "run_ode rk4",
+        );
+        let coarse = Some(CoarseBurnin { burnin_dt: 1.0, cond_from: 10.0 });
+        assert_negative_propensity(
+            run_ode(&cm, &params, &cfg, None, coarse).map(|_| ()),
+            "run_ode rk4 coarse burn-in",
+        );
+        let mut rk45 = (*cm.model).clone();
+        rk45.simulation.integrator = ir::model::Integrator::Rk45 { atol: None, rtol: None };
+        let rk45 = CompiledModel::new(rk45).unwrap();
+        assert_negative_propensity(
+            run_ode(&rk45, &params, &cfg, None, None).map(|_| ()),
+            "run_ode rk45",
+        );
+    }
+
+    /// gh#692 support boundary. The guard applies to rates evaluated at a state
+    /// inside support (no negative compartment), not to an RK stage that
+    /// overshoots below zero.
+    ///
+    /// Overshoot, accepted: `pure_death` (`dN/dt = −μN`) at μ·dt = 2. RK4's
+    /// stage-4 state is `N·(1 + z + z²/2 + z³/4)` with `z = −2`, i.e. `−N`, so
+    /// the rate `μ·N` is negative at that stage — yet the accepted step is
+    /// `N·R(−2) = N/3 > 0`. The step must be taken, not refused.
+    ///
+    /// Negative at a valid state, refused: rate `(beta − c)·N` with `c > beta`,
+    /// negative at the (non-negative) initial state.
+    #[test]
+    fn ode_guard_holds_at_valid_states_not_at_overshooting_stages() {
+        let cm = compiled_pure_death();
+        let nf = cm.model.transitions.len();
+
+        // μ·dt = 2: one RK4 step from N = 1000 lands on 1000/3.
+        let (mut int, mut real, mut flow) = (vec![1000.0], Vec::<f64>::new(), vec![0.0; nf]);
+        rk4_step(&cm, &mut int, &mut real, Some(&mut flow), &[2.0], 0.0, 1.0, None, None, &[])
+            .expect("an overshooting RK4 stage is not a model-support violation");
+        assert!(
+            (int[0] - 1000.0 / 3.0).abs() < 1e-9,
+            "RK4 step at μ·dt = 2 is N·R(−2) = N/3, got {}",
+            int[0]
+        );
+        // Whole-run: the same regime over many steps completes.
+        let cfg = OdeConfig { t_start: 0.0, t_end: 20.0, dt: 1.0 };
+        run_ode(&cm, &[2.0], &cfg, None, None)
+            .expect("μ·dt = 2 integrates without error on fixed RK4");
+
+        // (beta − c)·N with beta = 0.1, c = 0.5: negative at the initial state.
+        let mut model = load_golden("pure_death");
+        model.transitions[0].rate = Expr::bin_op(
+            ir::expr::BinOp::Mul,
+            Expr::bin_op(ir::expr::BinOp::Sub, Expr::param("mu"), Expr::const_(0.5)),
+            Expr::pop("N"),
+        );
+        let cm = CompiledModel::new(model).unwrap();
+        match run_ode(&cm, &[0.1], &OdeConfig { t_start: 0.0, t_end: 20.0, dt: 0.1 }, None, None) {
+            Err(SimError::NegativePropensity { transition, value, .. }) => {
+                assert_eq!(transition, "death");
+                assert!(value < 0.0, "carries the negative rate, got {value}");
+            }
+            other => panic!("(beta − c)·N < 0 at a valid state must refuse, got {other:?}"),
+        }
     }
 }
