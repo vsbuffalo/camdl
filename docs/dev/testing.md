@@ -138,22 +138,23 @@ concentrated in: `compiled_model.rs`, `hashing.rs`, `inference/prequential.rs`,
 `rust/crates/sim/tests/*.rs`. Integration tests that import `sim` as a library
 (not shell out). Fast — each file compiles once and runs quickly. Highlights:
 
-| File                                               | What it tests                                                                                                                      |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `cubic_spline.rs`                                  | `CubicSpline` vs `scipy.interpolate.CubicSpline(bc_type='natural')` — 12 reference points                                          |
-| `interpolation.rs`                                 | Linear + constant interp vs `np.interp` + `interp1d(kind="previous")`                                                              |
-| `gillespie_determinism.rs`                         | Same seed → byte-identical trajectory (CRN)                                                                                        |
-| `gillespie_invariants.rs`                          | Mass conservation, no-event dynamics, etc.                                                                                         |
-| `chain_binomial_invariants.rs`                     | Same invariants for the chain-binomial backend                                                                                     |
-| `ode.rs`                                           | RK4 backend correctness                                                                                                            |
-| `particle_filter.rs`                               | Bootstrap filter log-likelihood consistency                                                                                        |
-| `if2.rs`                                           | IF2 convergence sanity                                                                                                             |
-| `pmmh.rs` / `pgas_resume.rs` / `pgas_tempering.rs` | PMMH / PGAS                                                                                                                        |
-| `obs_level_params.rs`                              | Observation-model parameter plumbing                                                                                               |
-| `interventions.rs`                                 | Intervention timing + state effects                                                                                                |
-| `periodic_forcing.rs`                              | Periodic bin lookup                                                                                                                |
-| `expr_eval.rs`                                     | Pure expression evaluator                                                                                                          |
-| `smoke_all_golden.rs`                              | Every `.ir.json` in `ocaml/golden/` compiles + simulates under every backend — catches crate-level API drift but NOT dynamics bugs |
+| File                                               | What it tests                                                                                                                                                                  |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cubic_spline.rs`                                  | `CubicSpline` vs `scipy.interpolate.CubicSpline(bc_type='natural')` — 12 reference points                                                                                      |
+| `interpolation.rs`                                 | Linear + constant interp vs `np.interp` + `interp1d(kind="previous")`                                                                                                          |
+| `gillespie_determinism.rs`                         | Same seed → byte-identical trajectory (CRN)                                                                                                                                    |
+| `gillespie_invariants.rs`                          | Mass conservation, no-event dynamics, etc.                                                                                                                                     |
+| `chain_binomial_invariants.rs`                     | Same invariants for the chain-binomial backend                                                                                                                                 |
+| `ode.rs`                                           | RK4 backend correctness                                                                                                                                                        |
+| `particle_filter.rs`                               | Bootstrap filter log-likelihood consistency                                                                                                                                    |
+| `if2.rs`                                           | IF2 convergence sanity                                                                                                                                                         |
+| `pmmh.rs` / `pgas_resume.rs` / `pgas_tempering.rs` | PMMH / PGAS                                                                                                                                                                    |
+| `pgas_tempering_exact.rs`                          | Tempered PGAS (off by default, so no default-path test reaches it): the cold rung's θ-marginal matches an exactly enumerated posterior under two ladders, MH and NUTS (gh#551) |
+| `obs_level_params.rs`                              | Observation-model parameter plumbing                                                                                                                                           |
+| `interventions.rs`                                 | Intervention timing + state effects                                                                                                                                            |
+| `periodic_forcing.rs`                              | Periodic bin lookup                                                                                                                                                            |
+| `expr_eval.rs`                                     | Pure expression evaluator                                                                                                                                                      |
+| `smoke_all_golden.rs`                              | Every `.ir.json` in `ocaml/golden/` compiles + simulates under every backend — catches crate-level API drift but NOT dynamics bugs                                             |
 
 ### L5 — Rust integration (CLI shell-out)
 

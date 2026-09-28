@@ -7,7 +7,7 @@
 | Scope      | `pgas` stages with a `tempering` ladder longer than one rung. **Default PGAS is unaffected.** |
 | Issue      | gh#550                                                                                        |
 | Introduced | `163c80d7`, 2026-04-09                                                                        |
-| Status     | **Fixed** — sign corrected and pinned by tests in the same push; §4b open                     |
+| Status     | **Fixed** — sign corrected and pinned by tests in the same push; §4b resolved by gh#551       |
 
 ---
 
@@ -180,6 +180,18 @@ derivation, and every artefact in the tree agrees with every other. Code review
 saw internal consistency and had nothing to catch.
 
 ### 4b. The rungs may not target what the swap assumes (FLAGGED, not confirmed)
+
+**Resolution (gh#551).** Confirmed, and decided as observation-only tempering:
+rung `k` targets `π_k(θ, x) ∝ p(θ) · p(x | θ) · p(y | x, θ)^{β_k}`. `csmc_as`
+now weights particles by the observation density to the power `β` (filter
+weights, and the observation terms of the ancestor-sampling suffix ratio); the
+θ-move tempers only the observation term, in MH and in the NUTS energy and
+gradient; and the swap ratio is `(β_i − β_j)(ℓ_j − ℓ_i)` with `ℓ` the
+observation log-likelihood, the prior and process density cancelling across the
+exchange. The §7.3 exact-posterior test is `pgas_tempering_exact.rs`; on the
+code as it stood before gh#551 it put the cold-rung mean of the rate parameter
+14–22 Monte Carlo standard errors from the exact posterior under every ladder
+tried. The analysis below is preserved as written.
 
 The swap ratio is derived from each rung targeting `π_k ∝ L^{β_k}·p`. Checking
 whether they actually do:
