@@ -279,3 +279,43 @@ fn test_four_rungs_runs() {
         assert!((0.0..=1.0).contains(&rate), "acceptance rate {} out of [0,1]", rate);
     }
 }
+
+/// gh#551: a first rung within `COLD_RUNG_TOLERANCE` of 1 is accepted by
+/// `run_pgas` (which used to panic below 1 − 1e-12 while the CLI accepted
+/// 1 − 1e-9) and samples the same chain, to the bit, as one written `1.0`.
+/// This end-to-end check cannot by itself tell a snapped rung from one left at
+/// `1 − 1e-10` — a perturbation that small rarely flips an accept decision in
+/// 80 sweeps — so the snap itself is pinned by the unit test
+/// `rung_lik_tests::the_first_rung_is_snapped_to_cold`.
+#[test]
+fn test_near_one_first_rung_is_exactly_cold() {
+    let run = |ladder: Vec<f64>| {
+        let (compiled, base_params) = pure_death_model();
+        let config = PGASConfig {
+            binomial: sim::rng::BinomialAlgorithm::Btpe,
+            ancestor_sampling: true,
+            n_particles: 20,
+            n_sweeps: 80,
+            burn_in: 10,
+            thin: 1,
+            dt: 1.0,
+            use_nuts: false,
+            dense_mass: false,
+            max_tree_depth: 10, tempering: ladder,
+            trajectory_warmup: 0, csmc_sweeps_per_nuts: 1, step_policy: sim::schedule::StepPolicy::Snap,
+        };
+        run_pgas(
+            &compiled, &[mu_param()], &[Prior::Fixed(sim::inference::prior::Density::Flat)],
+            &base_params, &config, &observations(), &obs_model(&compiled), 2468, None, None,
+            "hash".into(),
+        ).unwrap()
+    };
+    let exact = run(vec![1.0, 0.5]);
+    let near = run(vec![1.0 - 1e-10, 0.5]);
+    assert_eq!(exact.sweeps.len(), near.sweeps.len());
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    for (a, b) in exact.sweeps.iter().zip(&near.sweeps) {
+        assert_eq!(bits(&a.params), bits(&b.params), "sweep {}", a.sweep);
+        assert_eq!(a.log_complete_data_ll.to_bits(), b.log_complete_data_ll.to_bits());
+    }
+}
