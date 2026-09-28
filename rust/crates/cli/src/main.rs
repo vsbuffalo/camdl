@@ -1701,45 +1701,10 @@ fn run_simulate(a: &args::SimulateArgs) {
         eprintln!("{} = {} runs", parts.join(" × "), total_runs);
     }
 
-    // ── Dry run ─────────────────────────────────────────────────────────────
-    if dry_run {
-        print_dry_run(
-            &ir_path, &ir_path_compiled, base_sim_run.backend, dt, seed,
-            &base_sim_run.params_files, &base_sim_run.overrides,
-            &scenario_list, &seeds, &draws_path,
-            n_draws, replicates, total_runs,
-            &obs_path, &obs_dir, &obs_only,
-        );
-        return;
-    }
-
-    // ── `--design-from`: simulate on a fit's own observation design ─────────
-    //
-    // gh#831. The rows come from the bound data rather than from the model's
-    // `emit_schedule`, so this leaves the store-backed trajectory pipeline
-    // below entirely: what it produces is a dataset, not a run. The flag
-    // conflicts (args/mod.rs) with every knob that pipeline owns, so nothing
-    // a user passed is silently dropped here.
-    if let Some(ref design_toml) = a.design_from {
-        let Some(ref dir) = obs_dir else {
-            eprintln!(
-                "error: --design-from writes one file per observation stream, so it \
-                 needs a directory: pass --obs-only-dir DIR (dataset only) or \
-                 --obs-dir DIR."
-            );
-            std::process::exit(1);
-        };
-        if let Err(e) = simulate_on_bound_design(
-            design_toml, &base_sim_run, &draws, draws_path.is_some(),
-            std::path::Path::new(dir), dt,
-        ) {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     // ── Build the SimulateJob and route through the unified engine ──────────
+    //
+    // Built before the dry-run branch so a dry run refuses what the run would
+    // (a scenario touching a `--draws <file>` column, gh#572).
     //
     // `simulate` and `batch run` converge on `engine::run_job` (run-spec
     // §3.1). The wide-format trajectory + combined-obs output shape lives
@@ -1828,6 +1793,48 @@ fn run_simulate(a: &args::SimulateArgs) {
         // the batch path's concern.
         parallel: 1,
     };
+
+    // ── Dry run ─────────────────────────────────────────────────────────────
+    if dry_run {
+        engine::check_scenario_coordinate_collision(&job).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+        print_dry_run(
+            &ir_path, &ir_path_compiled, base_sim_run.backend, dt, seed,
+            &base_sim_run.params_files, &base_sim_run.overrides,
+            &scenario_list, &seeds, &draws_path,
+            n_draws, replicates, total_runs,
+            &obs_path, &obs_dir, &obs_only,
+        );
+        return;
+    }
+
+    // ── `--design-from`: simulate on a fit's own observation design ─────────
+    //
+    // gh#831. The rows come from the bound data rather than from the model's
+    // `emit_schedule`, so this leaves the store-backed trajectory pipeline
+    // below entirely: what it produces is a dataset, not a run. The flag
+    // conflicts (args/mod.rs) with every knob that pipeline owns, so nothing
+    // a user passed is silently dropped here.
+    if let Some(ref design_toml) = a.design_from {
+        let Some(ref dir) = obs_dir else {
+            eprintln!(
+                "error: --design-from writes one file per observation stream, so it \
+                 needs a directory: pass --obs-only-dir DIR (dataset only) or \
+                 --obs-dir DIR."
+            );
+            std::process::exit(1);
+        };
+        if let Err(e) = simulate_on_bound_design(
+            design_toml, &base_sim_run, &draws, draws_path.is_some(),
+            std::path::Path::new(dir), dt,
+        ) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // ── Build the per-cell CAS sink (the system of record) ──────────────────
     //

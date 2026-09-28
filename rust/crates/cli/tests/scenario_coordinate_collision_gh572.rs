@@ -300,6 +300,33 @@ fn draws_file_column_the_scenario_sets_is_refused_with_the_shared_diagnostic() {
 }
 
 #[test]
+fn simulate_dry_run_refuses_a_draws_file_column_the_scenario_sets() {
+    // The dry run plans the same cells the run would, so it refuses the same
+    // collision — before printing a plan.
+    let fx = Fixture::new("pin_mu");
+    std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
+    let out = fx.camdl(&[
+        "simulate", "m.camdl", "--draws", "mydraws.tsv", "--scenario", "pin_mu",
+        "--backend", "ode", "--output-dir", "out", "-o", "traj.tsv", "--dry-run",
+    ]);
+    assert_refused(
+        &out,
+        "simulate --dry-run × draws file × pin_mu",
+        &[
+            "error: parameter `mu` is controlled by both the draws file `mydraws.tsv` and \
+             scenario `pin_mu`",
+            "Fix: drop the `mu` column from the draws file, or use a scenario that does not \
+             touch it.",
+        ],
+    );
+    assert!(
+        !stderr(&out).contains("(dry run)"),
+        "the refusal comes before the plan is printed; stderr:\n{}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn draws_file_column_the_scenario_scales_is_refused() {
     let fx = Fixture::new("half_mu");
     std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
