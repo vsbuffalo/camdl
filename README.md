@@ -8,11 +8,11 @@
 
 camdl is a small domain-specific language (DSL), simulation runtime, and
 statistical inference stack for compartmental infectious disease models. The
-goal of camdl is to make writing compartmental models easy --- the mechanics of
-a model are expressed in the camdl DSL just as you'd write the math on a
+goal of camdl is to make writing compartmental models easy — the mechanics of a
+model are expressed in the camdl DSL just as you'd write the math on a
 whiteboard. Inspired by Stan, camdl supports multiple runtime backends (ODE,
 chain-binomial, Gillespie) and inference methods (iterated filtering, Particle
-Marginal Metropolis--Hastings, Particle Gibbs with Ancestral Sampling).
+Marginal Metropolis–Hastings, Particle Gibbs with Ancestral Sampling).
 
 Each model is written in terms of compartments, transitions, rates,
 observations, and fitting configuration. Each model is then run through a
@@ -20,19 +20,19 @@ compiler that runs extensive checks and validations, catching modeling mistakes
 like unit and dimensional mismatches before the model is even run. The camdl
 compiler also optimizes the model using tricks like loop-invariant code motion
 and binding caches so that it will run faster during simulations and inference.
-All of this happens under the hood, automatically --- the researcher does not
-need to run these extra steps themselves. As scientific computational workflows
-are increasingly done by coding agents, camdl is explicitly forward-looking: the
+All of this happens under the hood, automatically — the researcher does not need
+to run these extra steps themselves. As scientific computational workflows are
+increasingly done by coding agents, camdl is explicitly forward-looking: the
 compiler helps ensure the model agents write is sound, and camdl has doc-tested
 documentation integrated into command-line tooling for maximal discoverability
 of never-stale info for agents fitting models with camdl.
 
 In a well-posed infectious disease model, the observation process is part of the
-model itself --- in camdl, the link between input data and the model's latent
+model itself — in camdl, the link between input data and the model's latent
 process is linked declaratively in an `observations { }` block, which supports
 multiple observation streams (e.g. time-series age-stratified incidence, _and_
 environmental surveillance). The mapping between input data and the observation
-likelihood is declarative --- camdl automatically takes care of everything else.
+likelihood is declarative — camdl automatically takes care of everything else.
 
 A central design goal of camdl is to make fitting multiple model variants and
 model comparisons easy and reproducible. Every camdl run is fully provenanced
@@ -84,12 +84,11 @@ descriptions are automatically stored alongside the model and surface in
 downstream commands like `camdl fit summary` to remind users what's what, as
 well as can be used in automatic plotting, etc.
 
-The dimensions in camdl are real types --- `rate` is `time⁻¹`, `S`, `I` are
-counts --- which ensures models are valid at their core. These parameter types
-also allow camdl's inference stack to automatically transform variables to the
-appropriate scale, e.g. probabilities are fit on a logit scale, rates on a
-log-scale, etc. After drafting a model like this, users/agents can optionally
-type-check it:
+The dimensions in camdl are real types — `rate` is `time⁻¹`, `S`, `I` are counts
+— which ensures models are valid at their core. These parameter types also allow
+camdl's inference stack to automatically transform variables to the appropriate
+scale, e.g. probabilities are fit on a logit scale, rates on a log-scale, etc.
+After drafting a model like this, users/agents can optionally type-check it:
 
 ```bash
 camdl check sir.camdl  # compiles + dimension-checks

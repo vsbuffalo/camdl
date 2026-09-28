@@ -145,7 +145,8 @@ deterministic grid) or `[design.*]` (space-filling), mutually exclusive.
 `fit run --sweep NAME=SPEC` varies a `[fixed]` parameter, where SPEC is
 `V1,V2,…` | `lin(min,max,n)` | `log10(min,max,n)`; sweeping a parameter that is
 in `[estimate]`, or not in `[fixed]`, is an error. On the simulate side, sweeps
-compose with scenarios and seeds by Cartesian product.
+compose with scenarios and seeds by Cartesian product, provided the scenario
+does not touch a swept parameter (that is refused; see §3.6).
 
 **Draws and sweeps are different operations.** A sweep is a deterministic grid
 the user designed; draws are samples from a distribution (posterior, prior, or
@@ -153,8 +154,9 @@ uniform over bounds). They have different provenance and different downstream
 semantics, so they are separate variants of a sum type — `ParamSource::Point`,
 `::Sweep`, `::Draws` — never conflated. `ParamSource::Draws` further records
 whether the rows came from a user-authored file, because a scenario that patches
-a parameter the file also supplies is a hard error for an explicit file (two
-pinnings of θ, ambiguous intent) and a silent scenario win for generated draws.
+a parameter the file also supplies is refused for an explicit file (the scenario
+would override that column in every draw), while over generated draws it is the
+intended counterfactual and the scenario's value applies.
 
 **Provenance is structural.** Every stored run carries a `run.json` recording
 its identity, its inputs, its lineage, its file manifest, and the column schema
@@ -1051,16 +1053,21 @@ Which front end produces which variant:
 | `Draws`  | `simulate --draws …` (all four sources of §3.4)                           |
 
 `explicit_file` is what distinguishes a user-authored draws file from generated
-draws, and the distinction has teeth: if a scenario sets a parameter that a
-`--draws <file.tsv>` also provides as a column, that is a hard error naming the
-parameter, the scenario, and the file — the user pinned θ two ways and the
-intent is ambiguous. For generated draws the scenario simply wins. The check is
-`engine::check_explicit_draws_scenario_collision`.
+draws, and the distinction has teeth. A scenario whose `set` or `scale` touches
+a parameter that a user-authored coordinate varies — a `Sweep` point set, or a
+`--draws <file.tsv>` column — is refused before any cell runs, naming every
+colliding parameter, both sources, and the fix (the diagnostic is shown in
+§3.6). Over generated draws the same overlap is allowed: a scenario applied to
+prior, uniform, or posterior draws is the counterfactual those runs exist for.
+The check is `engine::check_scenario_coordinate_collision`, reached from
+`engine::run_job` and from the batch job constructor (so `batch run --dry-run`
+and `batch status` refuse it too); `fit predict --sweep` words its own check
+with the same formatter.
 
-Note that a sweep point loses to a scenario `set`/`scale` for the same reason a
-generated draw does (see the resolution order in §1.3): both are *automated*
-M-layer variation, whereas a scenario is a deliberate counterfactual and
-`--param` is the user's explicit assertion about this run.
+This is collision policy, not precedence. The resolution order of §1.3 still
+places a scenario above a draw row or sweep point, and that order is what
+decides distinct parameters and generated draws. It never silently discards
+values the user listed.
 
 ### 3.3 Sweep specification
 
@@ -1258,10 +1265,26 @@ single implicit baseline is used. This is not a "default scenario" — it is the
 absence of any scenario patch, and it hashes to the real digest of the empty
 delta rather than to a literal zero.
 
-Because a preset resolves at a higher precedence tier than a sweep point or a
-generated draw (§1.3), a preset whose `set` block mentions a swept parameter
-silently wins over the sweep. Choose preset names and sweep axes so they do not
-overlap.
+A scenario whose `set` or `scale` touches a swept parameter — directly, or
+through a preset it composes — is refused before any cell runs, by `batch run`,
+`batch run --dry-run`, and `batch status` alike. Precedence alone (§1.3) would
+let the scenario override every sweep value, so the sweep would not vary that
+parameter:
+
+```
+error: parameter `beta` is controlled by both the sweep and scenario `baseline`
+  sweep:     beta = [0.2, 0.3, 0.4]
+  scenario:  set beta = 0.3
+The scenario would override every sweep value, so this sweep would not vary `beta`.
+Fix: remove `beta` from the sweep, or use a scenario that does not touch it.
+```
+
+A `scale` on a swept parameter is refused the same way ("The scenario would
+rescale every sweep point of `beta`; composing a sweep with a scenario that
+scales the same parameter is not supported"), and a value that arrives through
+`compose` is reported with the name of the composed preset it came from. A `[design.*]` block's
+points run as a sweep and are checked the same way. A scenario on parameters the
+sweep does not touch composes with it by Cartesian product as usual.
 
 ### 3.7 From a job to a path: run identity
 
@@ -1488,8 +1511,9 @@ exit 1 with a one-line message.
 **Precedence of parameter sources (last wins).** Model defaults → `--params`
 files in order → draw row or sweep point → scenario `set`/`scale` (preset or
 inline) → `--param`. A scenario that `set`s a parameter therefore overrides a
-value coming from `--draws` or from a batch `[sweep]`; only `--param` beats a
-scenario. See §5.4.
+value coming from generated `--draws`; only `--param` beats a scenario. A
+scenario touching a parameter that a `--draws <file>` column or a batch
+`[sweep]` varies is refused rather than resolved (§3.2). See §5.4.
 
 ### 4.3 Parameter and Model Inputs
 
@@ -1992,15 +2016,16 @@ warning: prior for 'gamma' placed 16.7% mass outside declared bounds (1 rejected
 generated 5 prior draws from model IR (7 sampled + 0 fixed params)
 ```
 
-Combining an explicit draws **file** with a scenario that pins the same
-parameters is a hard error — the intent is ambiguous:
+Combining an explicit draws **file** with a scenario that sets or scales one of
+its columns is refused, because the scenario would override that column in every
+draw:
 
 ```
-error: scenario 'baseline' sets parameter(s) [I0, N0, beta, gamma, kappa, rho, take] that the --draws file
-'draws_uniform.tsv' also provides as column(s). A draws file pins these parameters per draw, so applying a
-scenario that also sets them is ambiguous.
-  Fix: drop the column(s) [I0, N0, beta, gamma, kappa, rho, take] from the draws file, or use a scenario that
-  does not touch them.
+error: parameter `mu` is controlled by both the draws file `draws.tsv` and scenario `pin_mu`
+  draws file:  mu = [0.3, 0.4]
+  scenario:    set mu = 0.3
+The scenario would override the file's `mu` in every draw, so that column would have no effect.
+Fix: drop the `mu` column from the draws file, or use a scenario that does not touch it.
 ```
 
 The same collision with **generated** draws (`--draws prior|uniform|posterior`)
@@ -2116,13 +2141,14 @@ camdl simulate sir_basic.camdl --scenario baseline --draws uniform -n 3 --backen
 
 produces three leaves with three distinct `run_id`s and three **byte-identical**
 trajectories. Dropping `--scenario baseline` gives three different trajectories.
-The same holds for a batch `[sweep]` whose parameters the effective scenario
-pins.
 
-Practical rule: when sweeping or drawing a parameter, the scenario in force must
-not `set` it. Check with `camdl batch run --dry-run`, which prints each
-scenario's resolved `set={…}` next to the sweep grid, or compare two cells'
-`traj.tsv`.
+For user-authored coordinates this cannot happen: a batch `[sweep]`, a
+`[design.*]` block, or a `--draws <file>` whose parameters the effective
+scenario sets or scales is refused before any cell runs (§3.2, §3.6). Generated
+draws stay allowed, because a scenario over them is the intended counterfactual,
+so for them the rule remains practical: when drawing a parameter, the scenario
+in force must not `set` it unless discarding the draws for that parameter is
+what you mean. Compare two cells' `traj.tsv` to check.
 
 ### 5.5 Batch TOML Reference
 
