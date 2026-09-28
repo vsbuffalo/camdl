@@ -58,6 +58,15 @@
 //! modifiable, so a scenario `set`/`scale` (a counterfactual on M)
 //! overrides it. A `--fixed` value is the user's *explicit assertion*
 //! about a specific run and overrides everything, scenario included.
+//!
+//! Precedence orders values; it does not grant permission. A scenario
+//! that touches a parameter a *user-authored* coordinate varies — a
+//! sweep point set or a `--draws <file>` — is refused before the
+//! resolver runs ([`scenario_coordinate_collision`], gh#572): tier 4
+//! would discard every value the user listed. So tier 4 over tier 3.5
+//! is reached only for distinct parameters and for generated draws
+//! (`--draws posterior|prior|uniform`), where a scenario over the
+//! draws is the intended counterfactual.
 //! Inline and named scenarios resolve at the SAME tier 4 — an inline
 //! scenario is a preset with no model lookup — so the two are
 //! indistinguishable to a parameter's final value (only the
@@ -681,9 +690,9 @@ pub fn effective_horizon(
 /// keys for an ad-hoc patch.
 ///
 /// Single source of truth for "which parameters does scenario X pin/scale",
-/// shared by the engine's explicit-`--draws` collision guard
-/// ([`crate::engine`]) and `fit predict`'s scenario×sweep collision guard, so
-/// the two guards can never disagree about a scenario's footprint. A `Named`
+/// read by [`scenario_coordinate_collision`] — behind both the engine's
+/// sweep / draws-file guard and `fit predict`'s `--sweep` guard — so no two
+/// commands can disagree about a scenario's footprint. A `Named`
 /// reference that is not a model preset (e.g. the implicit `baseline`) touches
 /// nothing → an empty set (no collision possible).
 pub fn scenario_param_footprint(
@@ -722,6 +731,212 @@ pub fn scenario_param_footprint(
         }
     }
     Ok(keys)
+}
+
+// ─── Scenario × user-authored coordinate collisions ───────────────────────────
+
+/// One thing a scenario does to one parameter, and the preset that does it
+/// (the scenario itself, or the composed sub-preset the value came from).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScenarioParamAction {
+    Set { value: f64, preset: String },
+    Scale { factor: f64, preset: String },
+}
+
+/// How `scenario` touches `param`, for a diagnostic. Which parameters collide
+/// is decided by [`scenario_param_footprint`]; this only labels them. A `set`
+/// reports the composed effective value ([`resolve_preset_params`]) attributed
+/// to the last preset in the compose chain that sets it; a `scale` reports
+/// every preset in the chain that scales it (a factor applied twice is listed
+/// twice, as [`composed_preset_scale`] applies it).
+fn scenario_param_actions(
+    model: &ir::Model,
+    scenario: &crate::sim_job::ScenarioRef,
+    param: &str,
+) -> Result<Vec<ScenarioParamAction>, String> {
+    use crate::sim_job::ScenarioRef;
+    match scenario {
+        ScenarioRef::Inline { name, params, .. } => Ok(params
+            .get(param)
+            .map(|&value| ScenarioParamAction::Set { value, preset: name.clone() })
+            .into_iter()
+            .collect()),
+        ScenarioRef::Named(name) => {
+            let Some(parent) = model.presets.iter().find(|p| p.name == *name) else {
+                return Ok(Vec::new());
+            };
+            // Application order: composed sub-presets, then the parent. The
+            // lookups cannot fail here — the footprint that flagged `param`
+            // already resolved this chain — so a missing sub-preset is skipped.
+            let chain: Vec<&ir::model::Preset> = parent
+                .compose
+                .iter()
+                .filter_map(|c| model.presets.iter().find(|p| p.name == *c))
+                .chain(std::iter::once(parent))
+                .collect();
+            let mut out = Vec::new();
+            if let Some(&value) =
+                resolve_preset_params(model, name).map_err(|e| e.to_string())?.get(param)
+            {
+                let preset = chain
+                    .iter()
+                    .rev()
+                    .find(|p| p.params.contains_key(param))
+                    .map_or_else(|| name.clone(), |p| p.name.clone());
+                out.push(ScenarioParamAction::Set { value, preset });
+            }
+            for p in &chain {
+                if let Some(&factor) = p.scale.get(param) {
+                    out.push(ScenarioParamAction::Scale { factor, preset: p.name.clone() });
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// The user-authored coordinate a scenario is checked against: the values a
+/// user wrote down, per parameter, which a scenario touching the same
+/// parameter would override or rescale in every cell.
+///
+/// Generated draws (`--draws prior|uniform|posterior`) are deliberately not a
+/// variant: a scenario over generated draws is the counterfactual those
+/// commands exist to run.
+#[derive(Debug, Clone, Copy)]
+pub enum UserCoordinate<'a> {
+    /// A `[sweep]` / `--sweep` grid (also a `[design.*]` block, whose points
+    /// the batch front end runs as a sweep).
+    Sweep,
+    /// A `--draws <file.tsv>` the user authored.
+    DrawsFile(&'a std::path::Path),
+}
+
+/// The distinct values each parameter takes across a coordinate's points, in
+/// first-seen order — the `varied` input of [`scenario_coordinate_collision`].
+pub fn coordinate_values<'a>(
+    points: impl IntoIterator<Item = (&'a str, f64)>,
+) -> IndexMap<String, Vec<f64>> {
+    let mut out: IndexMap<String, Vec<f64>> = IndexMap::new();
+    for (k, v) in points {
+        let vals = out.entry(k.to_string()).or_default();
+        if !vals.iter().any(|x| x.to_bits() == v.to_bits()) {
+            vals.push(v);
+        }
+    }
+    out
+}
+
+/// Refuse a scenario that touches a parameter a user-authored coordinate
+/// varies. `Ok(None)` when the two are disjoint; `Ok(Some(message))` names
+/// every colliding parameter, both sources, why the combination is refused,
+/// and how to fix it.
+///
+/// This is collision policy, not precedence. The resolver's tiers still order
+/// a scenario above a draw/sweep value, and that order is what applies to
+/// *distinct* parameters and to generated draws. On the same parameter, a
+/// `set` would override every value the user listed (the coordinate would not
+/// vary it), and a `scale` would rescale every one; both are refused
+/// (proposal 2026-06-27 §4, gh#572). The one formatter behind the engine's
+/// guard ([`crate::engine::check_scenario_coordinate_collision`]) and
+/// `fit predict`'s `--sweep` guard, so every command words it the same way.
+pub fn scenario_coordinate_collision(
+    model: &ir::Model,
+    scenario: &crate::sim_job::ScenarioRef,
+    coordinate: UserCoordinate<'_>,
+    varied: &IndexMap<String, Vec<f64>>,
+) -> Result<Option<String>, String> {
+    let footprint = scenario_param_footprint(model, scenario)?;
+    let clash: Vec<&str> = varied
+        .keys()
+        .map(|k| k.as_str())
+        .filter(|k| footprint.contains(*k))
+        .collect();
+    if clash.is_empty() {
+        return Ok(None);
+    }
+
+    let quoted = |ps: &[&str]| ps.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+    let (source, label) = match coordinate {
+        UserCoordinate::Sweep => ("the sweep".to_string(), "sweep:"),
+        UserCoordinate::DrawsFile(path) => {
+            (format!("the draws file `{}`", path.display()), "draws file:")
+        }
+    };
+    let scen = scenario.name();
+    let mut msg = if clash.len() == 1 {
+        format!("parameter {} is controlled by both {source} and scenario `{scen}`", quoted(&clash))
+    } else {
+        format!("parameters {} are controlled by both {source} and scenario `{scen}`", quoted(&clash))
+    };
+
+    const SHOWN: usize = 6;
+    let width = label.len().max("scenario:".len()) + 2;
+    let mut why: Vec<String> = Vec::new();
+    for &param in &clash {
+        let vals = &varied[param];
+        let mut shown: Vec<String> = vals.iter().take(SHOWN).map(|v| v.to_string()).collect();
+        if vals.len() > SHOWN {
+            shown.push(format!("… ({} distinct values)", vals.len()));
+        }
+        msg.push_str(&format!("\n  {label:<width$}{param} = [{}]", shown.join(", ")));
+
+        let actions = scenario_param_actions(model, scenario, param)?;
+        let mut sets = false;
+        for a in &actions {
+            let (text, preset) = match a {
+                ScenarioParamAction::Set { value, preset } => {
+                    sets = true;
+                    (format!("set {param} = {value}"), preset)
+                }
+                ScenarioParamAction::Scale { factor, preset } => {
+                    (format!("scale {param} \u{d7} {factor}"), preset)
+                }
+            };
+            let from = if preset.as_str() != scen {
+                format!("    (from composed preset `{preset}`)")
+            } else {
+                String::new()
+            };
+            msg.push_str(&format!("\n  {:<width$}{text}{from}", "scenario:"));
+        }
+        why.push(match (coordinate, sets) {
+            (UserCoordinate::Sweep, true) => format!(
+                "The scenario would override every sweep value, so this sweep would \
+                 not vary `{param}`."
+            ),
+            (UserCoordinate::Sweep, false) => format!(
+                "The scenario would rescale every sweep point of `{param}`; composing a \
+                 sweep with a scenario that scales the same parameter is not supported."
+            ),
+            (UserCoordinate::DrawsFile(_), true) => format!(
+                "The scenario would override the file's `{param}` in every draw, so that \
+                 column would have no effect."
+            ),
+            (UserCoordinate::DrawsFile(_), false) => format!(
+                "The scenario would rescale the file's `{param}` in every draw; composing \
+                 a draws file with a scenario that scales the same parameter is not \
+                 supported."
+            ),
+        });
+    }
+    for w in why {
+        msg.push('\n');
+        msg.push_str(&w);
+    }
+    let them = if clash.len() == 1 { "it" } else { "them" };
+    msg.push_str(&match coordinate {
+        UserCoordinate::Sweep => format!(
+            "\nFix: remove {} from the sweep, or use a scenario that does not touch {them}.",
+            quoted(&clash)
+        ),
+        UserCoordinate::DrawsFile(_) => format!(
+            "\nFix: drop the {} column{} from the draws file, or use a scenario that does \
+             not touch {them}.",
+            quoted(&clash),
+            if clash.len() == 1 { "" } else { "s" },
+        ),
+    });
+    Ok(Some(msg))
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────

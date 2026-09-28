@@ -181,12 +181,13 @@ pub enum ParamSource {
         replicates: usize,
         /// `Some(path)` iff the draws came from a USER-AUTHORED FILE
         /// (`--draws <file.tsv>`); `None` for generated draws
-        /// (`--draws posterior/prior/uniform`). A scenario that sets a
-        /// parameter the file's columns also provide is a hard error (the
-        /// user pinned θ via a file AND via a scenario — ambiguous intent),
-        /// whereas for generated draws the scenario simply wins (spec
-        /// §1.3). The path is carried so the collision diagnostic can name
-        /// the file.
+        /// (`--draws posterior/prior/uniform`). A scenario that sets or
+        /// scales a parameter the file's columns also provide is refused
+        /// (`engine::check_scenario_coordinate_collision`, gh#572): it would
+        /// override that column in every draw. Generated draws are not
+        /// checked — a scenario over them is the intended counterfactual, and
+        /// the scenario tier applies (spec §1.3). The path is carried so the
+        /// diagnostic can name the file.
         explicit_file: Option<PathBuf>,
     },
 }
