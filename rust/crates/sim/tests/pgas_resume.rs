@@ -44,7 +44,6 @@ fn test_resume_state_bincode_roundtrip() {
         nuts_step_size: 0.0234,
         log_proposal_sd: vec![-5.0, -6.0, -3.0],
         total_accepted: vec![2200, 1800, 2500],
-        current_ll: -131456.78,
     };
 
     // Serialize
@@ -67,7 +66,6 @@ fn test_resume_state_bincode_roundtrip() {
     assert!((decoded.nuts_step_size - 0.0234).abs() < 1e-10);
     assert_eq!(decoded.log_proposal_sd, vec![-5.0, -6.0, -3.0]);
     assert_eq!(decoded.total_accepted, vec![2200, 1800, 2500]);
-    assert!((decoded.current_ll - (-131456.78)).abs() < 1e-6);
 
     // Verify mass matrix round-trips (dense)
     match &decoded.mass_matrix {
@@ -90,7 +88,6 @@ fn test_resume_state_diagonal_mass_roundtrip() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0],
         total_accepted: vec![50],
-        current_ll: -100.0,
     };
 
     let encoded = bincode::serialize(&state).unwrap();
@@ -165,7 +162,6 @@ fn test_resume_hash_mismatch_detection() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0],
         total_accepted: vec![500],
-        current_ll: -100.0,
     };
 
     let current_hash = "different_hash_xyz789";
@@ -205,7 +201,6 @@ fn test_resume_state_large_trajectory() {
         nuts_step_size: 0.015,
         log_proposal_sd: vec![-4.0; 4],
         total_accepted: vec![4500; 4],
-        current_ll: -135000.0,
     };
 
     let encoded = bincode::serialize(&state).unwrap();
@@ -256,7 +251,6 @@ fn test_resume_trace_file_safety() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0],
         total_accepted: vec![50],
-        current_ll: -1000.0,
     };
     let encoded = bincode::serialize(&state).unwrap();
     std::fs::write(&resume_path, &encoded).unwrap();
@@ -313,7 +307,6 @@ fn test_resume_param_names_roundtrip() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0; 3],
         total_accepted: vec![50; 3],
-        current_ll: -1000.0,
     };
 
     let encoded = bincode::serialize(&state).unwrap();
@@ -340,7 +333,6 @@ fn test_resume_reorder_z_by_name() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0; 3],
         total_accepted: vec![50; 3],
-        current_ll: -1000.0,
     };
 
     // Build name→z lookup (same logic as run_pgas resume path)
@@ -375,7 +367,6 @@ fn test_resume_param_names_mismatch_detected() {
         nuts_step_size: 0.1,
         log_proposal_sd: vec![-3.0; 3],
         total_accepted: vec![50; 3],
-        current_ll: -1000.0,
     };
 
     // Build name→z lookup

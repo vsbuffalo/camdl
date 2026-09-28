@@ -1245,8 +1245,6 @@ pub struct ChainResumeState {
     pub log_proposal_sd: Vec<f64>,
     /// Running acceptance counts per parameter.
     pub total_accepted: Vec<usize>,
-    /// Current complete-data log-likelihood.
-    pub current_ll: f64,
     /// Estimated parameter names in the same order as `transformed`.
     /// Used to match z-values to the correct parameters on resume,
     /// since HashMap iteration order is non-deterministic.
@@ -4318,12 +4316,10 @@ pub fn run_pgas(
 
     let mut sweeps = Vec::new();
 
-    // gh#551: no override from the resume state's saved `current_ll`. A rung's
-    // likelihood is now the split its tempered target needs (`RungLik`), and a
-    // saved scalar cannot restore a split. `current_components` above is
-    // `complete_data_loglik` at the restored (θ, X) — θ rebuilt from the saved
-    // z exactly as every accepted move sets it — normally the same evaluation that
-    // produced the saved value.
+    // On resume the rungs' likelihood is `current_components` above:
+    // `complete_data_loglik` at the restored (θ, X). The resume state carries
+    // no saved likelihood — a rung needs the split its tempered target reads
+    // (`RungLik`), which is recomputed, never restored (gh#551).
 
     // Im18: make the heated-rung re-warmup visible in logs.
     // Check the restored NUTS tuple rather than `resume_from` (the
@@ -4994,7 +4990,6 @@ pub fn run_pgas(
         nuts_step_size: rungs[0].nuts_step_size,
         log_proposal_sd: rungs[0].log_proposal_sd.clone(),
         total_accepted: rungs[0].total_accepted.clone(),
-        current_ll: rungs[0].lik.total,
     };
 
     // gh#audit-C7 / M18. Compute swap acceptance rates as a final
