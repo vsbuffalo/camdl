@@ -903,9 +903,8 @@ seeds = {{ n = 1 }}
 parallel = 1
 
 # An ad-hoc scenario that leaves `beta` alone. sir_basic's `baseline` PRESET
-# sets beta = 0.3 at the scenario tier, above the sweep's, so under it the
-# three points are one computation (see
-# `batch_sweep_shadowed_by_a_preset_is_one_leaf`).
+# sets beta, so a beta sweep under it is refused (see
+# `batch_sweep_under_a_preset_setting_the_swept_param_is_refused`).
 [[scenario]]
 name = "plain"
 params = {{ gamma = 0.1 }}
@@ -960,15 +959,18 @@ beta = [0.2, 0.3, 0.4]
     assert!(stdout.contains("beta=0.4"), "list should show beta=0.4: {}", stdout);
 }
 
-/// gh#583: a cell's `params` level is the parameter values the engine RAN.
-/// sir_basic's `baseline` preset sets beta = 0.3 at the scenario tier, which
-/// sits above the sweep's, so all three sweep points simulate beta = 0.3 with
-/// the same seed: one computation. The identity used to key the requested
-/// (discarded) sweep values, so the store held three leaves of identical bytes
-/// labelled beta = 0.2 / 0.3 / 0.4. It is one leaf, labelled with the value
-/// that ran. (That the sweep is voided without a word is gh#572.)
+/// gh#572: sir_basic's `baseline` preset sets beta = 0.3, so a beta sweep
+/// under it would run beta = 0.3 at every point — before gh#572 the store held
+/// one leaf for three requested sweep values. That manifest is now refused
+/// before any cell runs, naming the parameter, both sources, and the fix.
+///
+/// The identity invariant this test used to pin (gh#583: a cell's `params`
+/// level is the values the engine ran, so shadowed cells are one leaf) is now
+/// reachable only through generated draws, and is pinned there:
+/// `scenario_coordinate_collision_gh572.rs`
+/// `generated_draws_under_a_scenario_are_allowed_and_key_the_values_that_ran`.
 #[test]
-fn batch_sweep_shadowed_by_a_preset_is_one_leaf() {
+fn batch_sweep_under_a_preset_setting_the_swept_param_is_refused() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
@@ -993,17 +995,23 @@ beta = [0.2, 0.3, 0.4]
         params = params_path.display(),
         out = output.display(),
     )).unwrap();
-    let st = Command::new(&bin)
+    let out = Command::new(&bin)
         .args(["batch", "run", &batch_path.to_string_lossy()])
-        .status().expect("spawn");
-    assert!(st.success(), "batch sweep should succeed");
-
-    let run_dirs: Vec<_> = walkdir(&output.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(run_dirs.len(), 1,
-        "three sweep points the preset overrides are one computation: {run_dirs:?}");
-    assert_eq!(level_label(&read_meta(&run_dirs[0]), "params"), "beta=0.3",
-        "the params label names the beta that ran");
+        .output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a preset-shadowed sweep must be refused; stderr:\n{stderr}");
+    for line in [
+        "error: parameter `beta` is controlled by both the sweep and scenario `baseline`",
+        "  sweep:     beta = [0.2, 0.3, 0.4]",
+        "  scenario:  set beta = 0.3",
+        "Fix: remove `beta` from the sweep",
+    ] {
+        assert!(stderr.contains(line), "diagnostic lacks {line:?}; stderr:\n{stderr}");
+    }
+    assert!(
+        walkdir(&output).into_iter().all(|p| !p.join("run.json").exists()),
+        "a refused sweep writes no leaf"
+    );
 }
 
 #[test]
@@ -1025,7 +1033,8 @@ seeds = {{ n = 1 }}
 parallel = 1
 
 [[scenario]]
-name = "baseline"
+name = "plain"
+params = {{ gamma = 0.1 }}
 
 [sweep]
 beta = [0.2, 0.3, 0.4]

@@ -200,7 +200,7 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
 /// merge phase is always in-order. Per-cell seeds are order-independent
 /// (see [`process_seed_for`]), so parallelism never perturbs trajectories.
 pub fn run_job(job: &SimulateJob, sink: &mut dyn RunSink) -> Result<(), String> {
-    check_explicit_draws_scenario_collision(job)?;
+    check_scenario_coordinate_collision(job)?;
     let (specs, grid) = plan_grid(job);
     sink.on_start(&grid);
 
@@ -344,64 +344,49 @@ fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
     }
 }
 
-/// Hard-error when a USER-AUTHORED draws file collides with a scenario on a
-/// parameter both touch (spec §1.3 / the run-spec's "draws and sweeps are
-/// different operations" rule).
+/// Refuse a job whose scenario touches a parameter that a user-authored
+/// coordinate varies — a `[sweep]` / design point set (`ParamSource::Sweep`)
+/// or a `--draws <file.tsv>` — before any cell runs (proposal 2026-06-27 §4,
+/// gh#572).
 ///
-/// A `--draws <file.tsv>` pins θ per draw from columns the user authored. A
-/// scenario that ALSO sets/scales one of those parameters is ambiguous: the
-/// user asserted the value two ways. Rather than silently letting the scenario
-/// win (correct for *generated* draws, where the file is not authoritative),
-/// this names the parameter, the scenario, and the file, and tells the user how
-/// to fix it. Generated draws (`posterior`/`prior`/`uniform`) and sweeps do
-/// NOT error — `explicit_file` is `false` there, and the scenario just wins.
-fn check_explicit_draws_scenario_collision(job: &SimulateJob) -> Result<(), String> {
+/// Precedence would let the scenario win: its `set` overrides, and its
+/// `scale` rescales, the swept or file value in every cell. That order is
+/// right for *distinct* parameters and for generated draws; on a parameter
+/// the user listed values for, it would silently discard them (a sweep that
+/// does not vary, a draws column with no effect). So a same-parameter overlap
+/// is refused, `set` and `scale` alike. Generated draws
+/// (`--draws posterior|prior|uniform`, `explicit_file: None`) are not checked:
+/// a scenario over generated draws is the counterfactual those runs exist for.
+///
+/// Called by [`run_job`], the one execution entry point, and by the batch job
+/// constructor, so `batch run --dry-run` and `batch status` — which plan cells
+/// without executing — refuse the same manifests `batch run` does.
+pub fn check_scenario_coordinate_collision(job: &SimulateJob) -> Result<(), String> {
+    use crate::params_resolver::{coordinate_values, scenario_coordinate_collision, UserCoordinate};
     use crate::sim_job::ParamSource;
-    // Only an explicit user file triggers the collision check.
-    let ParamSource::Draws { rows, explicit_file: Some(file_path), .. } = &job.source else {
-        return Ok(());
+    let (coordinate, points) = match &job.source {
+        ParamSource::Sweep { points, .. } => (UserCoordinate::Sweep, points),
+        ParamSource::Draws { rows, explicit_file: Some(path), .. } => {
+            (UserCoordinate::DrawsFile(path), rows)
+        }
+        ParamSource::Draws { explicit_file: None, .. } | ParamSource::Point { .. } => {
+            return Ok(());
+        }
     };
-    // The set of parameters the draws FILE provides (union across rows — a
-    // ragged file still flags any column that appears).
-    let mut file_cols: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for row in rows {
-        for k in row.keys() {
-            file_cols.insert(k.as_str());
-        }
-    }
-    if file_cols.is_empty() {
+    let varied =
+        coordinate_values(points.iter().flat_map(|p| p.iter().map(|(k, v)| (k.as_str(), *v))));
+    if varied.is_empty() {
         return Ok(());
     }
-
-    // A scenario's parameter footprint = its `set` ∪ `scale` ∪ composed-preset
-    // keys (the shared `scenario_param_footprint`, also driving `fit predict`'s
-    // scenario×sweep guard — so the two never disagree). The model is loaded
-    // once, now that there is a draws file to check against.
-    let scenarios = effective_scenarios(job);
+    // Loaded once, now that there is a coordinate to check against.
     let (model, _) = crate::util::load_model(&job.model)?;
-    for scenario in &scenarios {
-        let scen_keys = crate::params_resolver::scenario_param_footprint(&model, scenario)?;
-        let mut collisions: Vec<&str> = scen_keys.iter()
-            .map(|k| k.as_str())
-            .filter(|k| file_cols.contains(k))
-            .collect();
-        if !collisions.is_empty() {
-            collisions.sort();
-            collisions.dedup();
-            let param_list = collisions.join(", ");
-            return Err(format!(
-                "scenario '{scen_name}' sets parameter(s) [{param_list}] that the \
-                 --draws file '{file}' also provides as column(s). A draws file pins \
-                 these parameters per draw, so applying a scenario that also sets them \
-                 is ambiguous.\n  \
-                 Fix: drop the column(s) [{param_list}] from the draws file, or use a \
-                 scenario that does not touch them.",
-                scen_name = scenario.name(),
-                file = file_path.display(),
-            ));
+    let mut refusals: Vec<String> = Vec::new();
+    for scenario in &effective_scenarios(job) {
+        if let Some(msg) = scenario_coordinate_collision(&model, scenario, coordinate, &varied)? {
+            refusals.push(msg);
         }
     }
-    Ok(())
+    if refusals.is_empty() { Ok(()) } else { Err(refusals.join("\n\nerror: ")) }
 }
 
 /// Build the per-cell [`SimRun`], routing each M-layer input to the tier

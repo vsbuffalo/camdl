@@ -1773,8 +1773,9 @@ fn run_simulate(a: &args::SimulateArgs) {
             .collect();
         // A user-authored draws FILE (not the generated `uniform`/`prior`/
         // `posterior` sources). Carried as `Some(path)` so a scenario ×
-        // draws-file column collision is a hard error naming the file (vs.
-        // generated draws, where the scenario simply wins).
+        // draws-file column collision is refused naming the file (gh#572);
+        // generated draws are not checked (a scenario over them is the
+        // intended counterfactual).
         let explicit_file = match src.as_str() {
             "uniform" | "prior" | "posterior" => None,
             _ => Some(std::path::PathBuf::from(src)),

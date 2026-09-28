@@ -557,6 +557,13 @@ fn load_manifest_model(model_path: &str, output_every: Option<f64>) -> Result<Ma
 /// `batch run`, the `[design.*]` path, and the dry-run / `batch status`
 /// predictions share, so a prediction builds each cell's `SimRun` from the job
 /// the run would build (`engine::build_cell_sim_run`).
+///
+/// Refuses a scenario that touches a swept parameter
+/// ([`crate::engine::check_scenario_coordinate_collision`], gh#572). The check
+/// lives here as well as in `engine::run_job` because the dry-run and status
+/// commands plan cells without calling `run_job`; every batch command obtains
+/// its job from this constructor, so none can plan a grid `batch run` would
+/// refuse.
 #[allow(clippy::too_many_arguments)]
 fn batch_job(
     ir_path: &str,
@@ -567,8 +574,8 @@ fn batch_job(
     scenarios: Vec<crate::sim_job::ScenarioRef>,
     seeds: &[u64],
     parallel: usize,
-) -> crate::sim_job::SimulateJob {
-    crate::sim_job::SimulateJob {
+) -> Result<crate::sim_job::SimulateJob, String> {
+    let job = crate::sim_job::SimulateJob {
         model: ir_path.to_string(),
         params_files: params_file.map(|p| vec![p.to_string()]).unwrap_or_default(),
         backend,
@@ -594,22 +601,46 @@ fn batch_job(
         // combined-file ObsOutput modes — leave None here.
         obs: crate::sim_job::ObsOutput::None,
         parallel,
-    }
+    };
+    crate::engine::check_scenario_coordinate_collision(&job)?;
+    Ok(job)
 }
 
-/// The job a dry-run / `batch status` prediction resolves cells against: the
-/// per-cell inputs of [`batch_job`], with no grid (`predict_cells` walks the
-/// grid itself).
-fn batch_probe_job(
-    ir_path: &str,
-    params_file: Option<&str>,
-    backend: crate::args::types::ForwardBackend,
-    dt: f64,
-) -> crate::sim_job::SimulateJob {
-    batch_job(
-        ir_path, params_file, backend, dt,
-        crate::sim_job::ParamSource::Point { replicates: 1 }, Vec::new(), &[], 1,
-    )
+/// The engine's scenario references for a manifest's resolved scenarios: a
+/// resolved preset → `ScenarioRef::Named` (the params_resolver preset path);
+/// an ad-hoc patch → `ScenarioRef::Inline`.
+fn scenario_refs(resolved: &[ResolvedEntry]) -> Vec<crate::sim_job::ScenarioRef> {
+    use crate::sim_job::ScenarioRef;
+    resolved.iter().map(|r| match &r.route {
+        Some(preset_name) => ScenarioRef::Named(preset_name.clone()),
+        None => ScenarioRef::Inline {
+            name: r.name.clone(),
+            enable: r.enable.clone(),
+            disable: r.disable.clone(),
+            params: r.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        },
+    }).collect()
+}
+
+/// The parameter source for a manifest's `[sweep]`: a non-empty sweep → a
+/// `Sweep` over its expanded points; an empty one → `Point` (the single null
+/// point). Batch replicates ride on the explicit `seeds` list, so the engine
+/// uses that length (not `replicates`) for the rep count.
+fn sweep_source(
+    sweep: &HashMap<String, SweepSpec>,
+    points: &[HashMap<String, f64>],
+) -> crate::sim_job::ParamSource {
+    use crate::sim_job::ParamSource;
+    if sweep.is_empty() {
+        ParamSource::Point { replicates: 1 }
+    } else {
+        ParamSource::Sweep {
+            points: points.iter()
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                .collect(),
+            replicates: 1,
+        }
+    }
 }
 
 // ─── cmd_batch_run ──────────────────────────────────────────────────────
@@ -806,13 +837,32 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
     // is exact for both the sweep and no-sweep cases.
     let total = sweep_points.len() * resolved_scenarios.len() * seeds.len();
 
+    // ── Build the SimulateJob (before the dry-run branch) ────────────────────
+    //
+    // `batch run` is a thin TOML front-end over `engine::run_job` — the
+    // SAME engine `camdl simulate` uses (run-spec §3.1). The per-cell seed
+    // arithmetic and SimRun construction are shared; the CAS-tree output
+    // shape lives in `CasSink`, which resolves each cell's identity via
+    // `resolve::resolve_trajectory` so the on-disk layout / content-hashes
+    // match the `simulate` path exactly. Built before the dry-run branch so a
+    // dry run refuses what the run would refuse (a scenario touching a swept
+    // parameter, gh#572) and predicts cells from the same job.
+    let job = batch_job(
+        &ir_path_resolved, params_file_opt.as_deref(), backend, dt,
+        sweep_source(&exp.sweep, &sweep_points), scenario_refs(&resolved_scenarios),
+        &seeds, parallel,
+    ).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
+
     if a.dry_run {
         print_batch_dry_run(
-            &model_path, &ir_path_resolved, &batch_model, model_stem.as_deref(),
+            &model_path, &batch_model, model_stem.as_deref(),
             backend, dt, &output_dir, parallel,
             &resolved_scenarios, &sweep_points, &seeds, &base_params,
             exp.config.params.as_deref(), &runs_dir, a.allow_degenerate_rates,
-            &output_cols, a.force,
+            &output_cols, a.force, &job,
         );
         return;
     }
@@ -895,49 +945,6 @@ pub fn cmd_batch_run(a: &crate::args::BatchArgs) {
     // `grid.parallel > 1`; running `run_job` inside `pool.install(...)` makes
     // that par_iter use the scoped pool. See `build_parallel_pool`.
     let pool = build_parallel_pool(parallel);
-
-    // ── Build the SimulateJob and route through the unified engine ──────────
-    //
-    // `batch run` is a thin TOML front-end over `engine::run_job` — the
-    // SAME engine `camdl simulate` uses (run-spec §3.1). The per-cell seed
-    // arithmetic and SimRun construction are shared; the CAS-tree output
-    // shape lives in `CasSink`, which resolves each cell's identity via
-    // `resolve::resolve_trajectory` so the on-disk layout / content-hashes
-    // match the `simulate` path exactly.
-    //
-    // Scenario routing: a resolved preset → `ScenarioRef::Named` (the
-    // params_resolver preset path); an ad-hoc patch → `ScenarioRef::Inline`.
-    use crate::sim_job::{ParamSource, ScenarioRef};
-    let job_scenarios: Vec<ScenarioRef> = resolved_scenarios.iter().map(|r| {
-        match &r.route {
-            Some(preset_name) => ScenarioRef::Named(preset_name.clone()),
-            None => ScenarioRef::Inline {
-                name: r.name.clone(),
-                enable: r.enable.clone(),
-                disable: r.disable.clone(),
-                params: r.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            },
-        }
-    }).collect();
-
-    // ParamSource: a non-empty [sweep] → Sweep over the expanded points; an
-    // empty sweep → Point (the single null point). Batch base params come
-    // from the params file (M layer); sweep points override per cell.
-    let source = if has_sweep {
-        let points: Vec<indexmap::IndexMap<String, f64>> = sweep_points.iter()
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
-            .collect();
-        // Batch replicates ride on the explicit `seeds` list, so the engine
-        // uses that length (not `replicates`) for the rep count.
-        ParamSource::Sweep { points, replicates: 1 }
-    } else {
-        ParamSource::Point { replicates: 1 }
-    };
-
-    let job = batch_job(
-        &ir_path_resolved, params_file_opt.as_deref(), backend, dt, source, job_scenarios,
-        &seeds, parallel,
-    );
 
     let mut sink = CasSink {
         resolved_scenarios: resolved_scenarios.clone(),
@@ -1782,26 +1789,15 @@ fn run_design_experiment(
     parallel: usize,
     seeds: &[u64],
 ) {
-    use crate::sim_job::{ParamSource, ScenarioRef};
+    use crate::sim_job::ParamSource;
 
     // The CAS store root is the canonical output root: design sim leaves share
     // the `<output>/sims/` tree with normal `batch`/`simulate` cells so an
     // identical cell dedupes to the same leaf (same run_id, same path).
     let runs_dir = format!("{}/sims", output_dir);
 
-    // Scenario routing for the engine job — identical to the normal flow: a
-    // resolved preset → `ScenarioRef::Named`; an ad-hoc patch → `Inline`.
-    let job_scenarios: Vec<ScenarioRef> = resolved_scenarios.iter().map(|r| {
-        match &r.route {
-            Some(preset_name) => ScenarioRef::Named(preset_name.clone()),
-            None => ScenarioRef::Inline {
-                name: r.name.clone(),
-                enable: r.enable.clone(),
-                disable: r.disable.clone(),
-                params: r.params.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            },
-        }
-    }).collect();
+    // Scenario routing for the engine job — identical to the normal flow.
+    let job_scenarios = scenario_refs(resolved_scenarios);
 
     // Sort design names for deterministic output.
     let mut design_names: Vec<&String> = designs.keys().collect();
@@ -1829,6 +1825,23 @@ fn run_design_experiment(
         let design_result = generate_design(&params, block.n, &block.method);
         let n_points = design_result.points.len();
         eprintln!("  Generated {} parameter points", n_points);
+
+        // The design points ARE sweep points: each is a name→value override
+        // map of the same shape `expand_sweep` produces, run through the SAME
+        // `SimulateJob` + `CasSink` the normal flow uses. Built (and checked
+        // for scenario collisions, gh#572) before any design metadata is
+        // written, so a refused design — dry run or not — leaves nothing behind.
+        let points: Vec<indexmap::IndexMap<String, f64>> = design_result.points.iter()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .collect();
+        let job = batch_job(
+            ir_path, params_file_opt.as_deref(), backend, dt,
+            ParamSource::Sweep { points: points.clone(), replicates: 1 },
+            job_scenarios.clone(), seeds, parallel,
+        ).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
 
         // ── Experiment-side metadata (preserved exactly) ──────────────────
         let design_dir = format!("{}/designs/{}", output_dir, design_name);
@@ -1866,15 +1879,6 @@ fn run_design_experiment(
             let _ = std::fs::write(&priors_path, txt);
         }
 
-        // ── Run the block's points as a sweep over the unified engine ─────
-        //
-        // The design points ARE sweep points: each is a name→value override
-        // map of the same shape `expand_sweep` produces. Build a `ParamSource::
-        // Sweep` and the SAME `SimulateJob` + `CasSink` the normal flow uses.
-        let points: Vec<indexmap::IndexMap<String, f64>> = design_result.points.iter()
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
-            .collect();
-
         let total = points.len() * resolved_scenarios.len() * seeds.len();
 
         // Dry-run: resolve every cell's real CAS identity and count
@@ -1884,7 +1888,7 @@ fn run_design_experiment(
             print_design_dry_run(
                 design_name, &points, resolved_scenarios, batch_model,
                 model_stem,
-                &batch_probe_job(ir_path, params_file_opt.as_deref(), backend, dt),
+                &job,
                 backend, dt, allow_degenerate_rates, output_cols, &runs_dir, seeds, force,
             );
             continue;
@@ -1894,11 +1898,6 @@ fn run_design_experiment(
             eprintln!("error: cannot create runs dir {}: {}", runs_dir, e);
             std::process::exit(1);
         });
-
-        let job = batch_job(
-            ir_path, params_file_opt.as_deref(), backend, dt,
-            ParamSource::Sweep { points, replicates: 1 }, job_scenarios.clone(), seeds, parallel,
-        );
 
         let mut sink = CasSink {
             resolved_scenarios: resolved_scenarios.to_vec(),
@@ -2259,7 +2258,8 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
 
     let model_stem = crate::hashing::path_stem_slug(&exp.config.model);
     let runs_dir = format!("{}/sims", output_dir);
-    let points: Vec<indexmap::IndexMap<String, f64>> = expand_sweep(&exp.sweep)
+    let sweep_points = expand_sweep(&exp.sweep);
+    let points: Vec<indexmap::IndexMap<String, f64>> = sweep_points
         .iter()
         .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
         .collect();
@@ -2268,9 +2268,16 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
         &resolved_scenarios, &batch_model, model_stem.as_deref(),
         exp.config.backend, exp.config.dt, false, &output_cols, &runs_dir, false,
     );
-    let job = batch_probe_job(
+    // The job `batch run` would execute: a manifest `batch run` refuses (a
+    // scenario touching a swept parameter, gh#572) is refused here too.
+    let job = batch_job(
         &loaded.ir_path, exp.config.params.as_deref(), exp.config.backend, exp.config.dt,
-    );
+        sweep_source(&exp.sweep, &sweep_points), scenario_refs(&resolved_scenarios),
+        &seeds, 1,
+    ).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    });
     let predictions = probe.predict_cells(&job, &points, &seeds);
     let live_hits = predictions.iter().filter(|c| c.hit).count();
     println!("  Completed:  {}/{} leaves present", live_hits, predictions.len());
@@ -2305,7 +2312,6 @@ pub fn cmd_batch_status(a: &crate::args::BatchStatusArgs) {
 #[allow(clippy::too_many_arguments)]
 fn print_batch_dry_run(
     model_path: &str,
-    ir_path: &str,
     batch_model: &ir::Model,
     model_stem: Option<&str>,
     backend: crate::args::types::ForwardBackend,
@@ -2321,6 +2327,7 @@ fn print_batch_dry_run(
     allow_degenerate_rates: bool,
     output_cols: &crate::util::OutputColumns,
     force: bool,
+    job: &crate::sim_job::SimulateJob,
 ) {
     // Resolve every cell's real CAS identity + hit/miss exactly as the run path
     // would (`CasSink::cell_resolve` + `store.lookup`). `expand_sweep` returns
@@ -2336,8 +2343,7 @@ fn print_batch_dry_run(
         scenarios, batch_model, model_stem,
         backend, dt, allow_degenerate_rates, output_cols, runs_dir, force,
     );
-    let job = batch_probe_job(ir_path, params_file, backend, dt);
-    let predictions = probe.predict_cells(&job, &points, seeds);
+    let predictions = probe.predict_cells(job, &points, seeds);
 
     eprintln!("camdl batch run (dry run)");
     eprintln!();
