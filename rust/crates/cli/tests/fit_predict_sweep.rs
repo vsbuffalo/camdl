@@ -344,6 +344,12 @@ fn fit_predict_sweep_same_param_as_scenario_is_a_hard_error() {
         stderr.contains("sweep"),
         "the error names the sweep; got: {stderr}"
     );
+    // gh#572: worded by the formatter the engine's guard uses.
+    assert!(
+        stderr.contains("parameter `rho` is controlled by both the sweep and scenario `low_rho`")
+            && stderr.contains("Fix: remove `rho` from the sweep"),
+        "the error uses the shared scenario-collision diagnostic; got: {stderr}"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
