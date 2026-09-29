@@ -1225,7 +1225,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         break;
     }
 
-    let base_sim_run = util::SimRun {
+    let mut base_sim_run = util::SimRun {
         // The already-compiled IR: every engine cell loads this directly, so
         // `resolve_ir_path` short-circuits (no per-cell camdlc).
         ir_path: ir_path_compiled.clone(),
@@ -1234,6 +1234,8 @@ fn run_simulate(a: &args::SimulateArgs) {
         // Draw/sweep + inline-scenario tiers are assigned per cell by
         // `engine::build_cell_sim_run`; the base run carries none.
         point_overrides: std::collections::HashMap::new(),
+        // Set below only by `--draws prior --fit` (the config's [fixed]).
+        fit_fixed: indexmap::IndexMap::new(),
         set_vec_entries,
         table_files,
         scenario_name: None, // set per-scenario in the loop
@@ -1575,19 +1577,21 @@ fn run_simulate(a: &args::SimulateArgs) {
                         eprintln!("error loading model for --draws prior: {}", e);
                         std::process::exit(1);
                     });
-                    generate_prior_draws(fit_path, n, seed, &draws_model).unwrap_or_else(|e| {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    })
+                    let (rows, fixed) = generate_prior_draws(fit_path, n, seed, &draws_model)
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        });
+                    // gh#949: the config's [fixed] block resolves at its own
+                    // tier (below --params and the scenario), not in the rows.
+                    base_sim_run.fit_fixed = fixed;
+                    rows
                 }
                 None => {
-                    // Use priors embedded in the model IR. Scenarios that
-                    // set parameter values fill in "default values" for
-                    // params without priors, matching the simulation runtime
-                    // semantics.
-                    let scenarios: Vec<&str> = scenario_names.iter()
-                        .map(|s| s.as_str()).collect();
-                    generate_prior_draws_from_ir(&ir_path_compiled, n, seed, &scenarios).unwrap_or_else(|e| {
+                    // Priors embedded in the model IR. The rows carry only the
+                    // sampled parameters; every other parameter resolves per
+                    // cell, against that cell's own scenario (gh#949).
+                    generate_prior_draws_from_ir(&ir_path_compiled, n, seed).unwrap_or_else(|e| {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
                     })
@@ -1675,20 +1679,6 @@ fn run_simulate(a: &args::SimulateArgs) {
         vec![HashMap::new()]
     };
     let n_draws = draws.len();
-
-    // ── Persist sampled draws (gh#157) ──────────────────────────────────────
-    // `--draws-out PATH` materializes the sampled θ-per-draw as a TSV the
-    // `--draws PATH` loader reads back (one row per draw, one column per
-    // parameter). Opt-in only: absent the flag nothing is written, so the
-    // content-addressed store leaves are untouched.
-    if let Some(ref out) = a.draws_out {
-        let out = out.to_string_lossy().into_owned();
-        if let Err(e) = write_draws_tsv(&out, &draws) {
-            eprintln!("error writing --draws-out {}: {}", out, e);
-            std::process::exit(1);
-        }
-        eprintln!("draws.tsv: wrote {} draws to {}", n_draws, out);
-    }
 
     let n_scenarios = scenario_list.len();
     let total_runs = n_draws * replicates * n_scenarios;
@@ -1785,6 +1775,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         obs_anchors,
         seeds: job_seeds,
         cli_overrides: base_sim_run.overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        fit_fixed: base_sim_run.fit_fixed.clone(),
         set_vec_entries: base_sim_run.set_vec_entries.clone(),
         table_files: base_sim_run.table_files.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         obs: obs_mode,
@@ -1793,6 +1784,36 @@ fn run_simulate(a: &args::SimulateArgs) {
         // the batch path's concern.
         parallel: 1,
     };
+
+    // ── Pre-flight: every generated-draws cell has a value for every parameter
+    //
+    // gh#949. Generated `prior` / `uniform` rows carry only the parameters the
+    // measure varies; the rest resolve per cell through the ordinary tiers.
+    // A parameter that no tier supplies in some arm would otherwise surface
+    // mid-grid, after the other arms ran — so every arm is resolved once here
+    // and the run is refused before anything is written, naming the arm.
+    if let Some(measure) = draws_path.as_deref().and_then(GeneratedMeasure::from_source) {
+        if let Err(e) = refuse_unresolvable_generated_cells(
+            &job, measure, !scenario_names.is_empty(), fit_path_for_draws.is_some(),
+        ) {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // ── Persist sampled draws (gh#157) ──────────────────────────────────────
+    // `--draws-out PATH` materializes the sampled θ-per-draw as a TSV the
+    // `--draws PATH` loader reads back (one row per draw, one column per
+    // parameter the draw source carries). Opt-in only: absent the flag nothing
+    // is written, so the content-addressed store leaves are untouched.
+    if let Some(ref out) = a.draws_out {
+        let out = out.to_string_lossy().into_owned();
+        if let Err(e) = write_draws_tsv(&out, &draws) {
+            eprintln!("error writing --draws-out {}: {}", out, e);
+            std::process::exit(1);
+        }
+        eprintln!("draws.tsv: wrote {} draws to {}", n_draws, out);
+    }
 
     // ── Dry run ─────────────────────────────────────────────────────────────
     if dry_run {
@@ -3856,7 +3877,123 @@ fn read_comp(snap: &sim::Snapshot, loc: &CompLoc) -> f64 {
     }
 }
 
-/// Generate N uniform random draws from model parameter bounds.
+/// A generated draw source whose rows carry only the parameters it varies
+/// (gh#949), so the remaining parameters must resolve from another tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedMeasure {
+    /// `--draws prior`: rows carry the parameters that have a prior.
+    Prior,
+    /// `--draws uniform`: rows carry the parameters with declared bounds.
+    Uniform,
+}
+
+impl GeneratedMeasure {
+    fn from_source(source: &str) -> Option<Self> {
+        match source {
+            "prior" => Some(GeneratedMeasure::Prior),
+            "uniform" => Some(GeneratedMeasure::Uniform),
+            _ => None,
+        }
+    }
+}
+
+/// Refuse a generated-draws job in which some arm leaves a parameter with no
+/// value (gh#949).
+///
+/// Each scenario is resolved once, at the first draw row, through the same
+/// `build_cell_sim_run` + resolver the engine runs every cell with. The rows
+/// of one generated source all carry the same columns, so the first row is
+/// representative for "is every parameter set". The same pass surfaces any
+/// other refusal the resolver would raise for that arm (an unknown scenario, a
+/// `--params` value outside its bounds) before a cell runs.
+fn refuse_unresolvable_generated_cells(
+    job: &crate::sim_job::SimulateJob,
+    measure: GeneratedMeasure,
+    named_scenarios: bool,
+    fit_given: bool,
+) -> Result<(), String> {
+    use crate::params_resolver::ResolveError;
+    use crate::util::RunParamError;
+    let points = job.source.param_points();
+    let Some(first) = points.first() else { return Ok(()) };
+    let table_files: HashMap<String, String> = job.table_files.iter().cloned().collect();
+    let mut model: Option<ir::Model> = None;
+    let mut refusals: Vec<String> = Vec::new();
+    for scenario in &engine::effective_scenarios(job) {
+        let run = engine::build_cell_sim_run(
+            job, scenario, first, &table_files, job.seeds.base(), 0, 0,
+        );
+        let base = match &model {
+            Some(m) => m,
+            None => model.insert(util::load_run_model(&run)?),
+        };
+        let arm = named_scenarios.then(|| scenario.name().to_string());
+        match util::resolve_run_parameters_typed(base, &run) {
+            Ok(_) => {}
+            Err(RunParamError::Resolve(ResolveError::UnsetRequired { name })) => {
+                refusals.push(unset_generated_parameter_message(
+                    &name, measure, arm.as_deref(), fit_given,
+                ));
+            }
+            // Already names the scenario.
+            Err(e @ RunParamError::Resolve(ResolveError::ScenarioNotFound { .. })) => {
+                refusals.push(e.to_string());
+            }
+            Err(e) => refusals.push(match arm {
+                Some(arm) => format!("scenario '{arm}': {e}"),
+                None => e.to_string(),
+            }),
+        }
+    }
+    if refusals.is_empty() { Ok(()) } else { Err(refusals.join("\n\nerror: ")) }
+}
+
+/// The refusal for a parameter a generated draw source does not vary and no
+/// tier sets, in one arm (`arm = None` for a run with no `--scenario`).
+fn unset_generated_parameter_message(
+    name: &str,
+    measure: GeneratedMeasure,
+    arm: Option<&str>,
+    fit_given: bool,
+) -> String {
+    let (lacks, varies, own_fix) = match measure {
+        GeneratedMeasure::Prior => (
+            "no prior",
+            "--draws prior samples only the parameters that have a prior",
+            if fit_given {
+                format!("give '{name}' a prior in the fit config's [estimate] or a \
+                         value in its [fixed]")
+            } else {
+                "add `~ prior(...)` to the model, supply `--fit FIT.toml`".to_string()
+            },
+        ),
+        GeneratedMeasure::Uniform => (
+            "no bounds",
+            "--draws uniform draws only the parameters with declared bounds",
+            format!("declare `in [lo, hi]` on '{name}' in the model"),
+        ),
+    };
+    let (where_, scenario_fix) = match arm {
+        Some(arm) => (format!(" for scenario '{arm}'"), format!("set it in scenario '{arm}'")),
+        None => (String::new(), "set it in a scenario (`--scenario NAME`)".to_string()),
+    };
+    format!(
+        "parameter '{name}' has {lacks} and no default value, and nothing sets it{where_}.\n  \
+         {varies}; every other parameter takes its value from the model default, \
+         --params FILE, the scenario, or --param NAME=VALUE.\n  \
+         Fix options: {own_fix}, set it with --params FILE or --param {name}=VALUE, \
+         or {scenario_fix}."
+    )
+}
+
+/// Generate N uniform random draws over the model's declared parameter bounds.
+///
+/// Each row carries only the parameters the measure varies — those with
+/// declared bounds (gh#949). Every other parameter is left out of the row and
+/// resolves per cell through the ordinary tiers (model default → `--params` →
+/// scenario → `--param`); writing it into the row would put its model default
+/// at the draw tier, above `--params`. `run_simulate` refuses up front a cell
+/// in which such a parameter gets no value from any tier.
 fn generate_uniform_draws(
     ir_path: &str,
     n: usize,
@@ -3865,34 +4002,26 @@ fn generate_uniform_draws(
     let (model, _) = util::load_model(ir_path)?;
     let mut rng = sim::rng::StatefulRng::new(seed ^ SEED_MIX_UNIFORM);
 
+    // Declared bounds only, deliberately — NOT
+    // `params_resolver::resolved_bounds` (gh#763). This sweep varies what the
+    // modeller gave a range; enrolling every `probability` in the sweep
+    // because its type carries [0, 1] would silently change what
+    // `--draws uniform` means for existing models.
+    let bounded: Vec<(&str, f64, f64)> = model.parameters.iter()
+        .filter_map(|p| p.bounds().map(|(lo, hi)| (p.name.as_str(), lo, hi)))
+        .collect();
+
     let mut draws = Vec::with_capacity(n);
     for _ in 0..n {
-        let mut row = HashMap::new();
-        for p in &model.parameters {
-            // Declared bounds only, deliberately — NOT
-            // `params_resolver::resolved_bounds` (gh#763). This sweep varies
-            // what the modeller gave a range and holds everything else at its
-            // default; enrolling every `probability` in the sweep because its
-            // type carries [0, 1] would silently change what `--draws uniform`
-            // means for existing models.
-            let val = if let Some((lo, hi)) = p.bounds() {
-                lo + (hi - lo) * rng.uniform()
-            } else if let Some(v) = p.value.resolved_value() {
-                // No bounds — use the default value (constant)
-                v
-            } else {
-                return Err(format!(
-                    "parameter '{}' has no bounds and no default value.\n  \
-                     --draws uniform requires bounds on all parameters.",
-                    p.name
-                ));
-            };
-            row.insert(p.name.clone(), val);
-        }
+        let row: HashMap<String, f64> = bounded.iter()
+            .map(|&(name, lo, hi)| (name.to_string(), lo + (hi - lo) * rng.uniform()))
+            .collect();
         draws.push(row);
     }
-    eprintln!("generated {} uniform draws from parameter bounds ({} params)",
-        n, model.parameters.len());
+    eprintln!("generated {} uniform draws over {} bounded parameter(s); {} other \
+               parameter(s) resolve per cell from the model default, --params, the \
+               scenario or --param",
+        n, bounded.len(), model.parameters.len() - bounded.len());
     Ok(draws)
 }
 
@@ -3953,12 +4082,18 @@ fn wrap_fit_load_error(fit_path: &str, err: String) -> String {
         err, fit_path)
 }
 
+///
+/// Returns the draw rows — the `[estimate]` parameters only — and, separately,
+/// the config's resolved `[fixed]` block. The fixed values are not written
+/// into the rows (gh#949): a row resolves at the draw tier, above `--params`,
+/// while `[fixed]` belongs at the `fit.toml [fixed]` tier below it. The
+/// caller routes them there via `SimRun::fit_fixed`.
 fn generate_prior_draws(
     fit_path: &str,
     n: usize,
     seed: u64,
     model: &ir::Model,
-) -> Result<Vec<HashMap<String, f64>>, String> {
+) -> Result<(Vec<HashMap<String, f64>>, indexmap::IndexMap<String, f64>), String> {
     use fit::config_v2::{EstimatePriorSpec, Problem};
     use crate::fit::priors_precedence::{
         resolve_priors_with_precedence, PriorSource,
@@ -4077,9 +4212,6 @@ fn generate_prior_draws(
             };
             row.insert(name.clone(), clamped);
         }
-        for (name, val) in &fixed {
-            row.insert(name.clone(), *val);
-        }
         draws.push(row);
     }
 
@@ -4093,115 +4225,51 @@ fn generate_prior_draws(
         "generated {} prior draws from {} ({} estimated [{} fit-toml + {} model-IR] + {} fixed params)",
         n, fit_path, config.estimate.len(), n_fit_toml, n_model_ir, fixed.len()
     );
-    Ok(draws)
+    Ok((draws, fixed))
 }
 
 /// Generate N draws from priors embedded in the model IR.
 ///
-/// Each parameter must be "covered" by one of:
-///   - a prior (sampled from)
-///   - a concrete value in the IR (held constant)
-///   - a scenario preset that sets its value (held constant)
-///
-/// Selected scenarios are applied to the model before the coverage check, so
-/// a workflow like "prior on beta/gamma, N0 pinned by --scenario baseline"
-/// works. Parameters with none of the above produce an error with actionable
-/// fix options.
+/// Each row carries only the parameters that have a prior (gh#949). A
+/// parameter without one is left out of the row and resolves per cell through
+/// the ordinary tiers — model default → `--params` → the cell's own scenario →
+/// `--param`. Writing it into the row would put it at the draw tier, above
+/// `--params`, and (when filled from the listed scenarios) would hand one
+/// arm's scenario value to every other arm. `run_simulate` refuses up front a
+/// cell in which such a parameter gets no value from any tier.
 fn generate_prior_draws_from_ir(
     ir_path: &str,
     n: usize,
     seed: u64,
-    scenarios: &[&str],
 ) -> Result<Vec<HashMap<String, f64>>, String> {
-    // NOTE: this helper takes a LIST of scenarios applied in order,
-    // distinct from the unified resolver's single-scenario semantics.
-    // The legacy contract (`--draws prior --scenarios a,b,c` layers a→b→c)
-    // is preserved here rather than routed through `params_resolver`,
-    // which today supports only one named scenario (with the model's
-    // declared `compose` list). Migrating this helper to the resolver
-    // would either require a multi-scenario API on the resolver or a
-    // refactor of the calling CLI to require a single scenario; both
-    // are out of scope for the 2026-05-25 CLI UX rev 2 migration.
-    // Documented exception, see
-    // `docs/dev/notes/2026-05-25-cli-ux-impl-questions.md`.
-    let (mut model, _) = util::load_model(ir_path)?;
+    let (model, _) = util::load_model(ir_path)?;
 
-    // Apply each selected scenario's params to the model. Later scenarios
-    // override earlier ones for the same parameter.
-    for name in scenarios {
-        let preset = model.presets.iter().find(|p| p.name == *name).cloned()
-            .ok_or_else(|| {
-                let available: Vec<&str> = model.presets.iter().map(|p| p.name.as_str()).collect();
-                format!("scenario '{}' not found in model. Available: {}",
-                    name,
-                    if available.is_empty() { "(none)".into() } else { available.join(", ") })
-            })?;
-        for (k, v) in &preset.params {
-            if let Some(p) = model.parameters.iter_mut().find(|p| p.name == *k) {
-                p.value = p.value.with_value(*v);
-            }
-        }
-    }
-
-    // Bounds + finite-value check after scenario application but before
-    // prior sampling. Each per-draw prior sample is independently
-    // bounds-checked by `sample_with_bounds`; this pass catches the
-    // *fixed* (scenario- or model-default-pinned) values that the prior
-    // sampler will leave alone (gh#31).
-    util::validate_parameter_values(&model)?;
-
-    // Check all params have either a prior or a (scenario-resolved) value.
-    let missing: Vec<&str> = model.parameters.iter()
-        .filter(|p| p.prior_dist().is_none() && p.value.resolved_value().is_none())
-        .map(|p| p.name.as_str())
-        .collect();
-    if !missing.is_empty() {
-        let scen_hint = if scenarios.is_empty() {
-            " supply `--scenario NAME` if a scenario pins these values,".to_string()
-        } else {
-            String::new()
-        };
-        return Err(format!(
-            "parameter{} {} no prior and no default value.\n  \
-             Fix options: add `~ prior(...)` to the model,{}\n  \
-             supply `--fit FIT.toml`, or use `--draws uniform` for space-filling exploration.",
-            if missing.len() > 1 { "s" } else { "" },
-            missing.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(", "),
-            scen_hint,
-        ));
-    }
+    // The sampled parameters, in declaration order — the RNG consumption
+    // order, so a given seed yields the same values it always has.
+    let with_prior: Vec<(&ir::parameter::Parameter, &ir::parameter::PriorDist)> =
+        model.parameters.iter()
+            .filter_map(|p| p.prior_dist().map(|pd| (p, pd)))
+            .collect();
 
     let mut rng = sim::rng::StatefulRng::new(seed ^ SEED_MIX_PRIOR);
     let mut draws = Vec::with_capacity(n);
-    let mut n_sampled = 0;
-    let mut n_fixed = 0;
     // Per-parameter rejection counts for bounds-truncation diagnostics.
     let mut reject_counts: HashMap<&str, u64> = HashMap::new();
 
-    for i in 0..n {
+    for _ in 0..n {
         let mut row = HashMap::new();
-        for p in &model.parameters {
-            let value = match p.prior_dist() {
-                Some(pd) => {
-                    if i == 0 { n_sampled += 1; }
-                    // Truncate to the range the parameter is valid on, which
-                    // includes the one its type carries (gh#763) — otherwise
-                    // this emits a `probability` outside [0, 1] that every
-                    // downstream command then rejects. A no-op unless the
-                    // prior actually places mass outside that range.
-                    let bounds = crate::params_resolver::resolved_bounds(p);
-                    let (v, rejected) = sample_with_bounds(pd, bounds, &mut rng, &p.name)?;
-                    if rejected > 0 {
-                        *reject_counts.entry(p.name.as_str()).or_insert(0) += rejected;
-                    }
-                    v
-                }
-                None => {
-                    if i == 0 { n_fixed += 1; }
-                    p.value.resolved_value().expect("missing check above guarantees value exists")
-                }
-            };
-            row.insert(p.name.clone(), value);
+        for &(p, pd) in &with_prior {
+            // Truncate to the range the parameter is valid on, which includes
+            // the one its type carries (gh#763) — otherwise this emits a
+            // `probability` outside [0, 1] that every downstream command then
+            // rejects. A no-op unless the prior actually places mass outside
+            // that range.
+            let bounds = crate::params_resolver::resolved_bounds(p);
+            let (v, rejected) = sample_with_bounds(pd, bounds, &mut rng, &p.name)?;
+            if rejected > 0 {
+                *reject_counts.entry(p.name.as_str()).or_insert(0) += rejected;
+            }
+            row.insert(p.name.clone(), v);
         }
         draws.push(row);
     }
@@ -4224,8 +4292,10 @@ fn generate_prior_draws_from_ir(
         }
     }
 
-    eprintln!("generated {} prior draws from model IR ({} sampled + {} fixed params)",
-        n, n_sampled, n_fixed);
+    eprintln!("generated {} prior draws from model IR ({} sampled params; {} other \
+               parameter(s) resolve per cell from the model default, --params, the \
+               scenario or --param)",
+        n, with_prior.len(), model.parameters.len() - with_prior.len());
     Ok(draws)
 }
 
@@ -4863,7 +4933,7 @@ mod tests {
         // should get 5 prior samples for each of the N draws.
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
-        let draws = generate_prior_draws_from_ir(&path, 7, 42, &[]).unwrap();
+        let draws = generate_prior_draws_from_ir(&path, 7, 42).unwrap();
         assert_eq!(draws.len(), 7, "should produce N draws");
         for row in &draws {
             for name in ["beta", "gamma", "rho", "N0", "I0"] {
@@ -4877,7 +4947,7 @@ mod tests {
         }
 
         // Same seed → identical draws (reproducibility)
-        let draws2 = generate_prior_draws_from_ir(&path, 7, 42, &[]).unwrap();
+        let draws2 = generate_prior_draws_from_ir(&path, 7, 42).unwrap();
         for (a, b) in draws.iter().zip(draws2.iter()) {
             for (k, va) in a {
                 assert_eq!(va, &b[k], "seed={} {} should be reproducible", 42, k);
@@ -4886,15 +4956,18 @@ mod tests {
     }
 
     #[test]
-    fn prior_draws_from_ir_errors_when_no_prior() {
-        // sir_basic has no priors and no preset-applied values on params.
-        // Expect a clear error naming the missing parameters.
+    fn prior_draws_from_ir_rows_carry_only_prior_parameters() {
+        // gh#949: sir_basic declares no priors, so every row is empty — the
+        // generator samples nothing and leaves every parameter to the per-cell
+        // tiers. Whether each cell then has a value is `run_simulate`'s
+        // pre-flight refusal (pinned at CLI level in
+        // tests/generated_draws_varying_only_gh949.rs), not the generator's.
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let path = format!("{}/../../../ocaml/golden/sir_basic.ir.json", manifest);
-        let err = generate_prior_draws_from_ir(&path, 3, 1, &[]).unwrap_err();
-        assert!(err.contains("no prior and no default"), "got: {}", err);
-        assert!(err.contains("beta"), "error should name 'beta': {}", err);
-        assert!(err.contains("~ prior(...)"), "error should hint at prior syntax: {}", err);
+        let draws = generate_prior_draws_from_ir(&path, 3, 1).unwrap();
+        assert_eq!(draws.len(), 3, "the draw count is the -n asked for");
+        assert!(draws.iter().all(|row| row.is_empty()),
+            "no parameter has a prior, so no row may carry one: {:?}", draws);
     }
 
     /// Write a minimal IR JSON string to a tempfile and return its path.
@@ -4950,7 +5023,7 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.01, 2.0]",
             r#"{ "log_normal": { "mu": -1.0, "sigma": 0.5 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let draws = generate_prior_draws_from_ir(&path, 100, 42, &[]).unwrap();
+        let draws = generate_prior_draws_from_ir(&path, 100, 42).unwrap();
         assert_eq!(draws.len(), 100);
         for row in &draws {
             let v = row["beta"];
@@ -4966,7 +5039,7 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.01, 2.0]",
             r#"{ "log_normal": { "mu": 5.0, "sigma": 0.1 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let err = generate_prior_draws_from_ir(&path, 1, 42, &[]).unwrap_err();
+        let err = generate_prior_draws_from_ir(&path, 1, 42).unwrap_err();
         assert!(err.contains("beta"), "error should name 'beta': {}", err);
         assert!(err.contains("[0.01, 2]") || err.contains("[0.01, 2.0]"),
             "error should cite bounds: {}", err);
@@ -4982,7 +5055,7 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.0, 1.0]",
             r#"{ "normal": { "mean": 0.0, "sd": 1.0 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let draws = generate_prior_draws_from_ir(&path, 50, 42, &[]).unwrap();
+        let draws = generate_prior_draws_from_ir(&path, 50, 42).unwrap();
         for row in &draws {
             let v = row["beta"];
             assert!((0.0..=1.0).contains(&v),
@@ -4991,10 +5064,9 @@ mod tests {
     }
 
     #[test]
-    fn prior_draws_scenario_pins_missing_param() {
-        // beta has a prior; N0 has no prior and no default — but a scenario
-        // called 'baseline' sets N0. With --scenario baseline, the draws
-        // should succeed (sampled beta + fixed N0).
+    fn prior_draws_omit_a_scenario_pinned_param() {
+        // beta has a prior; N0 has no prior and no default, and a scenario
+        // called 'baseline' sets N0.
         // gh#audit-C8: wrap in IR envelope.
         let json = r#"{
           "ir_version": "__IR_VERSION__",
@@ -5031,29 +5103,16 @@ mod tests {
         }"#;
         let (_dir, path) = write_ir_fixture(json);
 
-        // Without scenario: errors naming N0
-        let err = generate_prior_draws_from_ir(&path, 3, 42, &[]).unwrap_err();
-        assert!(err.contains("N0"), "should name 'N0': {}", err);
-        assert!(err.contains("--scenario"), "hint should mention --scenario: {}", err);
-
-        // With scenario: succeeds, N0 is pinned to 1000
-        let draws = generate_prior_draws_from_ir(&path, 5, 42, &["baseline"]).unwrap();
+        // gh#949: the row carries the sampled `beta` and never `N0`. N0 is
+        // the scenario's to set, per cell — a row value would sit at the draw
+        // tier and hand one arm's scenario value to every other arm.
+        let draws = generate_prior_draws_from_ir(&path, 5, 42).unwrap();
         assert_eq!(draws.len(), 5);
         for row in &draws {
-            assert_eq!(row["N0"], 1000.0, "scenario should pin N0");
+            assert!(!row.contains_key("N0"), "N0 has no prior; the row must omit it: {:?}", row);
             let b = row["beta"];
             assert!((0.01..=2.0).contains(&b), "beta out of bounds: {}", b);
         }
-    }
-
-    #[test]
-    fn prior_draws_unknown_scenario_errors() {
-        let ir = ir_with_prior("beta", "[0.01, 2.0]",
-            r#"{ "log_normal": { "mu": -1.0, "sigma": 0.5 } }"#, "");
-        let (_dir, path) = write_ir_fixture(&ir);
-        let err = generate_prior_draws_from_ir(&path, 3, 42, &["nonesuch"]).unwrap_err();
-        assert!(err.contains("scenario 'nonesuch' not found"),
-            "error should name the bad scenario: {}", err);
     }
 
     /// Large-batch summary statistics from sample_from_prior_raw.
@@ -5176,8 +5235,8 @@ mod tests {
         let ir = ir_with_prior("beta", "[0.01, 10.0]",
             r#"{ "log_normal": { "mu": 0.0, "sigma": 1.0 } }"#, "");
         let (_dir, path) = write_ir_fixture(&ir);
-        let a = generate_prior_draws_from_ir(&path, 5, 42, &[]).unwrap();
-        let b = generate_prior_draws_from_ir(&path, 5, 137, &[]).unwrap();
+        let a = generate_prior_draws_from_ir(&path, 5, 42).unwrap();
+        let b = generate_prior_draws_from_ir(&path, 5, 137).unwrap();
         // At least one row must differ — the probability of two independent
         // 5-draw sequences from a continuous prior being bit-identical is
         // vanishingly small (and would indicate a seeding bug).
@@ -5247,6 +5306,34 @@ cooling = 0.7
         p.to_string_lossy().into_owned()
     }
 
+    /// gh#949: a fit config's `[fixed]` values come back separately and never
+    /// in a draw row — a row resolves at the draw tier, above `--params`,
+    /// while `[fixed]` belongs at the `fit.toml [fixed]` tier below it.
+    #[test]
+    fn prior_draws_with_fit_toml_return_fixed_outside_the_rows() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let ir_path = format!("{}/../../../ocaml/golden/sir_priors.ir.json", manifest);
+        let (model, _) = util::load_model(&ir_path).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let estimate = "\
+beta  = { bounds = [0.01, 2.0] }
+gamma = { bounds = [0.05, 1.0] }
+";
+        let fit_path = write_fit_toml_for_prior_draws(
+            dir.path(), &ir_path, estimate, "I0 = 10.0\nN0 = 5000.0");
+        let (draws, fixed) = generate_prior_draws(&fit_path, 4, 42, &model).unwrap();
+        assert_eq!(draws.len(), 4);
+        for row in &draws {
+            let mut cols: Vec<&str> = row.keys().map(|k| k.as_str()).collect();
+            cols.sort();
+            assert_eq!(cols, vec!["beta", "gamma"],
+                "a row carries the [estimate] parameters only");
+        }
+        assert_eq!(fixed.get("I0"), Some(&10.0));
+        assert_eq!(fixed.get("N0"), Some(&5000.0));
+        assert_eq!(fixed.len(), 2);
+    }
+
     /// gh#86 RED test 1: fit.toml lists every estimated param but
     /// supplies NO `prior = { ... }` blocks. The model IR (sir_priors
     /// golden) has `~ <dist>` declarations for every param. After the
@@ -5273,7 +5360,7 @@ I0    = { bounds = [1, 1000] }
         let fit_path = write_fit_toml_for_prior_draws(
             dir.path(), &ir_path, estimate, "");
 
-        let draws = generate_prior_draws(&fit_path, 7, 42, &model)
+        let (draws, _fixed) = generate_prior_draws(&fit_path, 7, 42, &model)
             .expect("after gh#86: should fall back to IR priors");
         assert_eq!(draws.len(), 7);
         for row in &draws {
@@ -5339,7 +5426,7 @@ I0    = { bounds = [1, 1000] }
             dir.path(), &ir_path, estimate, "");
 
         // Loads and draws — the wrapper's hint never enters this path.
-        let draws = generate_prior_draws(&fit_path, 3, 7, &model)
+        let (draws, _fixed) = generate_prior_draws(&fit_path, 3, 7, &model)
             .expect("well-formed fit-config must load");
         assert_eq!(draws.len(), 3);
     }
@@ -5447,7 +5534,7 @@ beta = { bounds = [-1000.0, 1000.0], \
         // has E[X] = exp(mu + sigma^2/2) ≈ exp(5.00005) ≈ 148.42 and
         // SD ≈ E[X] * sigma ≈ 1.48. With N=200 the SE on the mean is
         // ~0.1, so a tolerance of 1.0 is well outside chance.
-        let draws = generate_prior_draws(&fit_path, 200, 42, &model)
+        let (draws, _fixed) = generate_prior_draws(&fit_path, 200, 42, &model)
             .expect("fit-toml prior should sample successfully");
         let mean: f64 = draws.iter().map(|r| r["beta"]).sum::<f64>()
             / (draws.len() as f64);

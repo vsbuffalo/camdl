@@ -2280,6 +2280,9 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
                         obs_anchors: resolved_obs_anchors,
                         seeds: crate::sim_job::Seeds::Single(seed),
                         cli_overrides: vec![],
+                        // The posterior rows carry the fit's [fixed] columns
+                        // themselves; no separate tier-2 block.
+                        fit_fixed: indexmap::IndexMap::new(),
                         set_vec_entries: vec![],
                         table_files: vec![],
                         obs: crate::sim_job::ObsOutput::None,
