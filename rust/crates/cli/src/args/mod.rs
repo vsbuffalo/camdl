@@ -385,7 +385,10 @@ pub struct SimulateArgs {
 
     /// Parameter draw source: path to a params TSV, "uniform", "prior", or
     /// "posterior". "posterior" reads a completed fit's canonical post-warm-up
-    /// draws cloud — requires `--fit <fit results dir>`.
+    /// draws cloud — requires `--fit <fit results dir>`. "prior" samples the
+    /// parameters with a prior and "uniform" the ones with declared bounds;
+    /// every other parameter comes from the model default, `--params`, the
+    /// scenario or `--param`.
     #[arg(long)]
     pub draws: Option<String>,
 
@@ -409,8 +412,9 @@ pub struct SimulateArgs {
     pub n_draws: Option<usize>,
 
     /// Write the sampled per-draw parameter vectors to this TSV (gh#157).
-    /// One row per draw, one column per parameter — the same column-per-
-    /// param format `--draws PATH` reads back, so the file round-trips.
+    /// One row per draw, one column per parameter the draw source carries —
+    /// for `--draws prior|uniform`, only the sampled parameters (gh#949) —
+    /// in the column-per-param format `--draws PATH` reads back.
     /// Only written when given; the content-addressed store leaves are
     /// unaffected.
     #[arg(long, value_name = "PATH", requires = "draws")]

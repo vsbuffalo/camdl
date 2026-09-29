@@ -98,6 +98,11 @@ wins:
 5.  --param / --fixed        (the user's explicit assertion; highest)
 ```
 
+A generated draw row (`--draws prior|uniform`) carries only the parameters its
+measure varies — the parameters with a prior, or the bounded parameters a
+uniform sweep draws. Every other parameter resolves per cell through tiers 1–5,
+so `--params` and each cell's own scenario reach it (gh#949).
+
 The structural distinction between 3.5 and 5: a draw or sweep value is
 _automated_ M-layer variation and is counterfactual-modifiable, so a scenario
 patch (tier 4) overrides it. A `--param`/`--fixed` value is the user's explicit
@@ -1142,10 +1147,11 @@ model's own declared priors; a parameter with no usable prior in either tier is
 a hard error naming the remediation. Do **not** describe this source as
 requiring a fit config.
 
-`--draws uniform` samples `lo + (hi - lo)·U` per parameter from the model's
-bounds, falling back to a parameter's resolved default when it declares no
-bounds, and erroring when it has neither. This is space-filling exploration for
-model debugging, not a prior.
+`--draws uniform` samples `lo + (hi - lo)·U` for each parameter that declares
+`in [lo, hi]` bounds. A parameter without bounds is not drawn: it resolves per
+cell from the model default, `--params`, the scenario, or `--param`, and the run
+is refused up front if none of them sets it. This is space-filling exploration
+for model debugging, not a prior.
 
 `--draws posterior --fit <fit results dir>` reads the draws the fit's sampler
 (PGAS / PMMH / MH / NUTS) wrote — the method leaf's `draws.tsv`, which is
@@ -2000,12 +2006,15 @@ camdl batch status batches/scenario_comparison.toml
 `--draws prior` (a `fit.toml` supplying priors) and for `--draws <file>` (a
 `[fixed]` block backfilling columns the file omits).
 
-`--draws prior` on a model with no declared priors names the gap and the fixes:
+`--draws prior` samples only the parameters that declare a prior. A parameter
+with no prior that nothing else sets — no model default, `--params`, scenario,
+or `--param` — is refused before any cell runs, naming the scenario that leaves
+it unset:
 
 ```
-error: parameters 'beta', 'sigma', 'gamma', 'omega', 'vacc_frac', 'N0', 'I0' no prior and no default value.
-  Fix options: add `~ prior(...)` to the model, supply `--scenario NAME` if a scenario pins these values,
-  supply `--fit FIT.toml`, or use `--draws uniform` for space-filling exploration.
+error: parameter 'c' has no prior and no default value, and nothing sets it for scenario 'other'.
+  --draws prior samples only the parameters that have a prior; every other parameter takes its value from the model default, --params FILE, the scenario, or --param NAME=VALUE.
+  Fix options: add `~ prior(...)` to the model, supply `--fit FIT.toml`, set it with --params FILE or --param c=VALUE, or set it in scenario 'other'.
 ```
 
 A prior whose mass falls partly outside the declared bounds is rejection-sampled
@@ -2013,7 +2022,7 @@ and reported:
 
 ```
 warning: prior for 'gamma' placed 16.7% mass outside declared bounds (1 rejected / 5 accepted). Consider widening bounds or tightening the prior.
-generated 5 prior draws from model IR (7 sampled + 0 fixed params)
+generated 5 prior draws from model IR (7 sampled params; 0 other parameter(s) resolve per cell from the model default, --params, the scenario or --param)
 ```
 
 Combining an explicit draws **file** with a scenario that sets or scales one of
@@ -5212,22 +5221,20 @@ camdl simulate models/sir.camdl --draws prior --fit fits/02_fix_beta.toml \
 `-n` is **required** for `--draws prior` and `--draws uniform`; omitting it is a
 hard error (`error: --draws prior requires -n N`).
 
-**Model-only form: every parameter needs a prior _or_ a value.** A parameter
-with neither is a hard error naming all of them at once:
+**Model-only form: every parameter needs a prior _or_ a value in every
+scenario.** The draws carry only the parameters with a prior; every other
+parameter resolves per cell from the model default, `--params`, that cell's
+scenario, or `--param`. `--scenario a,b` is two sets of cells, as on every other
+`simulate` path, and each resolves against its own scenario — a value one
+scenario sets never reaches the other. A parameter left unset in some scenario
+is refused before any cell runs, naming the scenario:
 
 ```
-$ camdl simulate seir_observations.camdl --draws prior -n 3
-error: parameters 'beta', 'sigma', 'gamma', 'rho', 'k', 'p_detect', 'N0', 'I0' no prior and no default value.
-  Fix options: add `~ prior(...)` to the model, supply `--scenario NAME` if a scenario pins these values,
-  supply `--fit FIT.toml`, or use `--draws uniform` for space-filling exploration.
+$ camdl simulate v2.camdl --draws prior -n 3 --scenario half,other
+error: parameter 'c' has no prior and no default value, and nothing sets it for scenario 'other'.
+  --draws prior samples only the parameters that have a prior; every other parameter takes its value from the model default, --params FILE, the scenario, or --param NAME=VALUE.
+  Fix options: add `~ prior(...)` to the model, supply `--fit FIT.toml`, set it with --params FILE or --param c=VALUE, or set it in scenario 'other'.
 ```
-
-A `--scenario` satisfies the requirement for the parameters it pins, so
-`--draws prior --scenario baseline` samples the parameters that declare a prior
-and holds the scenario's `set = { … }` values fixed. When several `--scenario`
-names are given on the model-only prior path they are **layered** in order
-(later wins) rather than run as separate cells — this differs from every other
-`simulate` path, where `--scenario a,b` is two cells.
 
 **`--fit` form: every estimated parameter needs a proper prior.** Flat is
 refused, because there is no finite distribution to sample:
@@ -5245,14 +5252,16 @@ An explicit `prior = { flat = {} }` is rejected here too, with an added note
 explaining why (improper uniform, infinite support).
 
 **Recording the draws.** `--draws-out <PATH>` writes the sampled vectors as a
-TSV with one row per draw and one column per parameter — including the
-parameters held fixed, so the file round-trips through `--draws <PATH>`:
+TSV with one row per draw and one column per _sampled_ parameter. Parameters the
+measure does not vary have no column, so the file depends only on the measure
+and the seed — not on `--params` or the scenario order — and it round-trips
+through `--draws <PATH>` given the same `--params` and scenarios:
 
 ```
-$ camdl simulate seir_observations.camdl --draws uniform -n 3 --draws-out u.tsv
-$ head -2 u.tsv
-I0	N0	beta	gamma	k	p_detect	rho	sigma
-2.29285758020031290e3	7.34369783379929606e5	4.42244622597675330e-1	…
+$ camdl simulate v2.camdl --draws prior -n 3 --params b0.toml --draws-out p.tsv
+$ head -2 p.tsv
+beta	gamma
+2.90465033202471634e-1	1.63870215243367284e-1
 ```
 
 Prior draws are rejection-sampled against each parameter's declared bounds; the
@@ -5515,9 +5524,9 @@ sources `fit_toml`, `model_ir`, `flat_explicit`, `flat_fallback`.
 | `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs` | No — deterministic MLE                                                               |
 | `pfilter`                           | No — likelihood evaluation only                                                      |
 
-`--draws prior` needs a proper prior on every _sampled_ parameter; parameters
-with a concrete value (model default, `--scenario`, or fit `[fixed]`) are held
-constant instead (§11.1).
+`--draws prior` needs a proper prior on every _sampled_ parameter; every other
+parameter is left out of the draws and resolves per cell from the model default,
+the fit's `[fixed]`, `--params`, the scenario, or `--param` (§11.1).
 
 ### 12.3 Supported distributions
 

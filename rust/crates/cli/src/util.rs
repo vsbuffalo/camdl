@@ -2685,6 +2685,13 @@ pub struct SimRun {
     /// which sits BELOW scenario (spec §1.3) — so a scenario `set`/`scale`
     /// overrides a draw/sweep value, while genuine `--param` still wins.
     pub point_overrides: HashMap<String, f64>,
+    /// A fit config's `[fixed]` block, when `simulate --draws prior --fit
+    /// FIT.toml` samples from that config's priors (gh#949). Routed into the
+    /// resolver's `fit.toml [fixed]` tier (tier 2, spec §1.3) — below
+    /// `--params`, the scenario and `--param` — rather than written into each
+    /// draw row, where the draw/sweep tier would let it override `--params`.
+    /// Empty everywhere else.
+    pub fit_fixed: indexmap::IndexMap<String, f64>,
     pub set_vec_entries: Vec<(String, String)>,
     pub table_files: HashMap<String, String>,
     pub scenario_name: Option<String>,
@@ -3164,6 +3171,7 @@ impl Default for SimRun {
             params_files: Vec::new(),
             overrides: HashMap::new(),
             point_overrides: HashMap::new(),
+            fit_fixed: indexmap::IndexMap::new(),
             set_vec_entries: Vec::new(),
             table_files: HashMap::new(),
             scenario_name: None,
@@ -3231,6 +3239,34 @@ pub fn resolve_run_parameters(
     model: &ir::Model,
     run: &SimRun,
 ) -> Result<crate::params_resolver::ResolvedParameters, String> {
+    resolve_run_parameters_typed(model, run).map_err(|e| e.to_string())
+}
+
+/// Why [`resolve_run_parameters_typed`] refused: a `--param-vec` file that
+/// did not expand, or the resolver's own typed refusal. Displays exactly as
+/// the underlying message, so the `String` wrapper is unchanged.
+#[derive(Debug)]
+pub enum RunParamError {
+    ParamVec(String),
+    Resolve(crate::params_resolver::ResolveError),
+}
+
+impl std::fmt::Display for RunParamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunParamError::ParamVec(msg) => f.write_str(msg),
+            RunParamError::Resolve(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// [`resolve_run_parameters`] with a typed error, for a caller that must tell
+/// an unset parameter apart from every other refusal (the generated-draws
+/// pre-flight, gh#949).
+pub fn resolve_run_parameters_typed(
+    model: &ir::Model,
+    run: &SimRun,
+) -> Result<crate::params_resolver::ResolvedParameters, RunParamError> {
     // ── Expand --param-vec PREFIX=FILE entries into (NAME, VALUE) pairs ──
     //
     // `--param-vec` is a vector-stratification convenience for `--param`:
@@ -3242,7 +3278,8 @@ pub fn resolve_run_parameters(
     // (`fixed_cli`). `--param-vec` is the bulk-set sibling of `--param` and
     // shares its precedence, so a scenario cannot override it.
     let mut fixed_cli: Vec<(String, f64)> =
-        resolve_param_vec_entries(model, &run.set_vec_entries)?;
+        resolve_param_vec_entries(model, &run.set_vec_entries)
+            .map_err(RunParamError::ParamVec)?;
     // `run.overrides` is a HashMap; collect into a deterministic
     // (alphabetical-by-name) Vec so the resolver's provenance is
     // reproducible run-to-run.
@@ -3261,16 +3298,16 @@ pub fn resolve_run_parameters(
         .collect();
     point_overrides.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // `simulate` and `lineage` are non-inference subcommands. The
-    // `fit_toml_*` slots are empty; the resolver's [estimate] kick-out
-    // logic is a no-op. All value precedence flows through
+    // `simulate` and `lineage` are non-inference subcommands.
+    // `fit_toml_estimate` is empty, so the resolver's [estimate] kick-out
+    // logic is a no-op; `fit_toml_fixed` carries a `--draws prior --fit`
+    // config's `[fixed]` block (empty otherwise). All value precedence flows through
     // params_resolver, which is the sole writer of
     // `model.parameters[i].value` on the simulate/lineage path.
     let fixed_files: Vec<std::path::PathBuf> = run.params_files.iter()
         .map(std::path::PathBuf::from).collect();
     let table_files: std::collections::HashMap<String, std::path::PathBuf> = run.table_files.iter()
         .map(|(k, v)| (k.clone(), std::path::PathBuf::from(v))).collect();
-    let ftf: indexmap::IndexMap<String, f64> = indexmap::IndexMap::new();
     let fte: indexmap::IndexSet<String> = indexmap::IndexSet::new();
 
     crate::params_resolver::resolve_parameters(
@@ -3285,11 +3322,11 @@ pub fn resolve_run_parameters(
             point_overrides: &point_overrides,
             fixed_cli: &fixed_cli,
             fixed_files: &fixed_files,
-            fit_toml_fixed: &ftf,
+            fit_toml_fixed: &run.fit_fixed,
             fit_toml_estimate: &fte,
             table_files: &table_files,
         }
-    ).map_err(|e| e.to_string())
+    ).map_err(RunParamError::Resolve)
 }
 
 /// The parameter values a resolved model carries: every parameter that

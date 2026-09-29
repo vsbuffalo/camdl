@@ -336,7 +336,7 @@ fn effective_replicates(job: &SimulateJob) -> usize {
 /// The scenario list, with the empty case expanded to a single implicit
 /// baseline (`ScenarioRef::Named("baseline")` resolves to the identity
 /// patch via `resolve_scenario_ref`'s baseline exemption).
-fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
+pub(crate) fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
     if job.scenarios.is_empty() {
         vec![ScenarioRef::Named("baseline".to_string())]
     } else {
@@ -467,6 +467,7 @@ pub fn build_cell_sim_run(
         params_files: job.params_files.clone(),
         overrides,
         point_overrides: point_overrides_map,
+        fit_fixed: job.fit_fixed.clone(),
         set_vec_entries: job.set_vec_entries.clone(),
         table_files: table_files.clone(),
         scenario_name,

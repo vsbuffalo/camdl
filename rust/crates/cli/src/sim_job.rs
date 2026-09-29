@@ -98,6 +98,10 @@ pub struct SimulateJob {
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell
     /// (M layer, highest precedence). Empty for batch.
     pub cli_overrides: Vec<(String, f64)>,
+    /// A `--draws prior --fit FIT.toml` config's `[fixed]` block, copied to
+    /// every cell's `SimRun::fit_fixed` and resolved at the `fit.toml [fixed]`
+    /// tier (gh#949). Empty for every other source and for batch.
+    pub fit_fixed: IndexMap<String, f64>,
     /// `--param-vec PREFIX=FILE` entries (CLI only).
     pub set_vec_entries: Vec<(String, String)>,
     /// `--table NAME=FILE` entries (CLI only).

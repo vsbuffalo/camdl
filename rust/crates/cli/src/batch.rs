@@ -595,6 +595,8 @@ fn batch_job(
         // Batch seeds are always explicit (range / count / list).
         seeds: crate::sim_job::Seeds::Explicit(seeds.to_vec()),
         cli_overrides: Vec::new(),
+        // Nor a fit config to sample priors from.
+        fit_fixed: indexmap::IndexMap::new(),
         set_vec_entries: Vec::new(),
         table_files: Vec::new(),
         // batch keeps its CAS-per-cell obs ensemble (CasSink), not the
@@ -2886,6 +2888,7 @@ mod tests {
             params_files: _,
             overrides: _,
             point_overrides: _,
+            fit_fixed: _,
             set_vec_entries: _,
             scenario_name: _,
             scenario_inline_set: _,
