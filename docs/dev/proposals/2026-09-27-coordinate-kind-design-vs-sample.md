@@ -487,14 +487,18 @@ fitted      1         0.12         posterior  200      …     …    …    …
 distancing  1         0.12         posterior  200      …     …    …    …
 ```
 
-**After Stage 7** (the sweep moves onto the grid) the bytes are identical to the
-Stage 4 output: rows stay design-major by explicit rendering order. The summary
-records the design's imposition on the posterior: `"design_shadows": ["gamma"]`,
-and `measure` reads `"posterior"` with
+**After Stage 7** (the sweep moves onto the grid) the bytes are identical to
+those of Stage 7's parent commit: rows stay design-major by explicit rendering
+order. **After the commit that follows Stage 7's A/B**, predict's summary
+records the design's imposition on the posterior: `"varying"` lists the fit's
+estimated parameters, `"design_shadows": ["gamma"]`, and `measure` reads
+`"posterior"` with
 `"measure_note": "posterior of the other parameters with gamma imposed by the
 design"`;
-one stderr note says the same. `--sweep beta=… --scenario distancing` is refused
-before any artifact is written (§14, Stage 7), naming "the sweep".
+one stderr note says the same. Stage 4 does not emit these three fields for
+predict, because predict's sweep is not yet a design axis there.
+`--sweep beta=… --scenario distancing` is refused before any artifact is written
+(§14, Stage 7), naming "the sweep".
 
 ### W7 — Contrasts: how many infections does an intervention avert?
 
@@ -555,13 +559,16 @@ process  50       …    …    …    …    …
 `--seeds 1,2,3` is the same with explicit seeds.
 
 Under `--backend ode` the solver draws no randomness, so replicates repeat one
-trajectory. A pure-state quantity (`peak_I`, `final_R`) then renders in point
-mode — one `value` — with `"over": []`, rather than `n_draws = 50` and
-`q05 = q95`. A quantity that reads `observations.<stream>` still varies across
-replicates, because each replicate's observation draw uses its own seed
-(`main.rs:2447-2460`), and stays banded with `"over": ["replicate"]`. Mode is
-therefore decided per quantity (§10). Nothing collides: there are no parameter
-coordinates.
+trajectory. A pure-state quantity (`peak_I`, `final_R`) then has 50
+bit-identical realizations in its group and renders in point mode — one `value`
+— with `"over": []`, rather than `n_draws = 50` and `q05 = q95`. A quantity that
+reads `observations.<stream>` still varies across replicates, because each
+replicate's observation draw uses its own seed (`main.rs:2447-2460`), so its
+realizations differ and it stays banded with `"over": ["replicate"]`. The same
+data rule covers `--init-state FILE` under ODE: replicate `i` restores row `i`
+of the state file (`engine.rs:452-455`), so realizations differ and the quantity
+bands. Mode is decided per quantity and per group from the realizations
+themselves (§10). Nothing collides: there are no parameter coordinates.
 
 ### W9 — A hand-authored grid passed the old way
 
@@ -685,9 +692,15 @@ camdl simulate sir.camdl --draws-file post.tsv -n 200 --quantities-out q
 
 The first command writes `post.tsv` (varying columns only) and `post.tsv.json`.
 The second reads both: `-n 200` subsamples the file strided across all rows
-(today `-n` is ignored for a file, so a raw 60k-row `draws.tsv` replays every
-row — the gh#630 hazard); `band` is `posterior`; the summary's `n_samples` is
-200 and `measure_source` names the original fit and records
+through the same `subsample_draws` as `--draws posterior`, and the seed index of
+each kept row is its position in the subsample (0…199), as for
+`--draws
+posterior`. Without `-n` every row runs, at the row index as seed index
+— there is no default cap, so `--draws-file` keeps today's `--draws FILE` seeds
+exactly; a file above 1000 rows prints a warning suggesting `-n` (today `-n` is
+ignored for a file, so a raw 60k-row `draws.tsv` replays every row silently —
+the gh#630 hazard). `band` is `posterior`; the summary's `n_samples` is 200 and
+`measure_source` names the original fit and records
 `"subsample": {"from": 1000, "stride": 5}`. If `sir.camdl` has changed since the
 export, the IR hash in the sidecar differs and a warning says so; parameters the
 file does not carry are listed in `"from_outside_file": [...]` with where their
@@ -907,6 +920,21 @@ scenario that sets every varying column leaves nothing to pool over the sample).
 | `UniformBounds` | parameters with declared bounds (the ones actually drawn)           |
 | `Asserted`      | the sidecar's list if present, else the file's non-constant columns |
 
+For a posterior, the estimated set is `fit.meta.json`'s `estimated` list. That
+field is `#[serde(default)]` (`run_meta.rs:637-638`, verified), so an older or
+hand-built fit can carry an empty list; `varying` then falls back to the draws'
+non-constant columns, and the summary records `"varying_from": "columns"` rather
+than `"estimated"`. The name mapping: the existing chain-subset diagnostics
+already join `estimated` to `draws.tsv` columns by exact name
+(`chain_selection.rs:295-306`), which holds for scalar parameters. Whether an
+indexed family appears in `estimated` as its flattened columns (`beta_1`,
+`beta_2`, the `draws.tsv` convention) or as the family name (`beta`) was not
+verified here. The rule adopted covers both: an `estimated` entry matches the
+column of the same name, and a family name with no column of its own matches
+every flattened column `<family>_<index>`; an `estimated` entry matching no
+column is an error naming it. Stage 2 pins the rule with a test on an indexed
+model.
+
 ### 7.3 Design coordinates never enter the process seed
 
 ```rust
@@ -928,7 +956,11 @@ index). Consequences, job by job:
 
 - `--draws posterior|prior|uniform` and `--draws-file`: sample index = today's
   `point_idx`; every trajectory is unchanged. `--draws-file FILE` has exactly
-  the seeds of today's `--draws FILE`.
+  the seeds of today's `--draws FILE`: it has no default row cap, so without
+  `-n` every row runs at its row index. With `-n`, the file is subsampled and
+  the seed index is the row's position in the subsample, as for
+  `--draws
+  posterior` today.
 - `--sweep` and `--sweep-file` are new; they have no runs to preserve. Every
   design point uses `seed_index = 0`, so inserting or removing a point leaves
   the other points' trajectories unchanged.
@@ -1074,7 +1106,14 @@ zipped (non-Cartesian) design is a `--sweep-file`. The `explicit_file` field
 
 The `SimEnsemble` grid level folds the axis kind for design jobs so that
 `--sweep-file X` and `--draws-file X` cannot produce one ensemble `run_id` over
-different bytes (the two write different combined-file columns, §9.2).
+different bytes (the two write different combined-file columns, §9.2). The fold
+is an optional field of `EnsembleGridLevel` (`sim_ensemble_cas.rs:101`, built at
+`:132`), serialized only when present
+(`skip_serializing_if = "Option::is_none"`) and set only for jobs with a design
+axis. Every job that exists today has none, so no existing ensemble grid hash
+changes; Stage 5 tests both halves — a `--draws uniform` ensemble's grid-level
+hash equals its value on the parent commit, and a `--sweep-file X` and a
+`--draws-file X` ensemble over the same file have different grid-level hashes.
 
 ## 8. Collision policy keys on the coordinate kind
 
@@ -1102,10 +1141,16 @@ The footprint of each overriding source is intersected with the plan:
   case names the reparameterization route (W10).
 - **Against varying sample columns** — allowed; each hit is returned as an
   `Imposition { param, by: Scenario(name) | FixedCli, action: Set | Scale }`,
-  which `run_job` prints (one note per `set`, W3 wording) and the quantity
-  accumulators copy into `summary.impositions`.
+  which the front end prints (W3 wording) and the quantity accumulators copy
+  into `summary.impositions`.
 - **Design names against varying sample columns** — allowed; returned as design
-  shadows (§6.2), printed once, and copied into `summary.design_shadows`.
+  shadows (§6.2), printed, and copied into `summary.design_shadows`.
+
+Notes are printed **once per (source, column) per invocation**, never per cell
+and never per `run_job` call. The guard returns the list; the verb's front end
+deduplicates it and prints before the first cell runs. This matters for
+`fit predict`, which calls `run_job` once per design slice (Stage 7), and would
+otherwise repeat each note per slice.
 
 Because `fit predict --sweep` builds a plan with a design axis after Stage 7,
 the engine's guard covers it; predict nevertheless keeps an explicit pre-flight
@@ -1125,19 +1170,19 @@ This section is normative. It applies to `simulate --quantities-out`,
 Columns appear in this order; each group is present only when its condition
 holds.
 
-| #  | Column(s)                             | Present when                                                                      |
-| -- | ------------------------------------- | --------------------------------------------------------------------------------- |
-| 1  | `scenario`                            | `simulate`: any `--scenario` given; `fit predict`: always                         |
-| 2  | `point_id`                            | the job has a design axis                                                         |
-| 3  | `sweep:<param>` …                     | the job has a design axis; one per design name, sorted                            |
-| 4  | `time`                                | the quantity is a series                                                          |
-| 5  | `<dims>` …                            | the quantity is stratified                                                        |
-| 6  | `band`                                | banded mode; one of `posterior \| prior \| uniform_bounds \| asserted \| process` |
-| 7  | `n_draws`                             | banded mode                                                                       |
-| 8  | `rhat`, `ess`                         | banded mode with a chain partition (`fit predict`)                                |
-| 9  | `n_value`, `n_censored`, `p_censored` | banded mode, censorable scalar                                                    |
-| 10 | `q05 q25 q50 q75 q95`                 | banded mode                                                                       |
-| 10 | `value`                               | point mode                                                                        |
+| #  | Column(s)                             | Present when                                                                                |
+| -- | ------------------------------------- | ------------------------------------------------------------------------------------------- |
+| 1  | `scenario`                            | `simulate`: any `--scenario` given; `fit predict`: always                                   |
+| 2  | `point_id`                            | the job has a design axis                                                                   |
+| 3  | `sweep:<param>` …                     | the job has a design axis; one per design name, sorted                                      |
+| 4  | `time`                                | the quantity is a series                                                                    |
+| 5  | `<dims>` …                            | the quantity is stratified                                                                  |
+| 6  | `band`                                | banded mode; per row: `posterior \| prior \| uniform_bounds \| asserted \| process \| none` |
+| 7  | `n_draws`                             | banded mode                                                                                 |
+| 8  | `rhat`, `ess`                         | banded mode with a chain partition (`fit predict`)                                          |
+| 9  | `n_value`, `n_censored`, `p_censored` | banded mode, censorable scalar                                                              |
+| 10 | `q05 q25 q50 q75 q95`                 | banded mode                                                                                 |
+| 10 | `value`                               | point mode                                                                                  |
 
 Examples: point, design, no scenario — `point_id  sweep:beta  value`; banded,
 scenario, sample — `scenario  band  n_draws  q05 … q95`; banded, scenario,
@@ -1145,13 +1190,17 @@ design, sample, chains —
 `scenario  point_id  sweep:gamma  band  n_draws  rhat
 ess  q05 … q95`.
 
-`band` names the measure when the sample axis is reduced, else `process`. It is
-constant within a file. `sweep:<param>` values are written with Rust's shortest
-round-trip `f64` formatting (`{}`), never through `quantile::fmt_value` (6
-decimals), so a coordinate joins exactly against the grid that produced it. An
-indexed parameter flattens as it does elsewhere in camdl (`beta_1`, no
-brackets); the manifest's `sweep` object additionally records
-`{"family": "beta", "index": [1]}` for such entries.
+`band` is set **per row**, from what varied in that row's group (§10): the
+measure name when the group's parameter vectors differ, `process` when only the
+stochastic realizations differ, `none` for a group whose realizations are
+bit-identical in a file that bands because other groups vary. It is not constant
+within a file: in a posterior run, an arm whose scenario sets every varying
+column reads `process` beside arms that read `posterior`. `sweep:<param>` values
+are written with Rust's shortest round-trip `f64` formatting (`{}`), never
+through `quantile::fmt_value` (6 decimals), so a coordinate joins exactly
+against the grid that produced it. An indexed parameter flattens as it does
+elsewhere in camdl (`beta_1`, no brackets); the manifest's `sweep` object
+additionally records `{"family": "beta", "index": [1]}` for such entries.
 
 Readers: the colon in `sweep:beta` requires backticks in R's `readr::read_tsv`
 (`` df$`sweep:beta` ``) and becomes `sweep.beta` under `read.delim`; polars and
@@ -1198,7 +1247,7 @@ Every entry of `quantities.json` carries:
 
 | Field                   | Type                             | Req.                            | Meaning                                                                                                                                                                      |
 | ----------------------- | -------------------------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `over`                  | array of `"sample"\|"replicate"` | yes                             | band axes reduced in this group; `[]` in point mode                                                                                                                          |
+| `over`                  | array of `"sample"\|"replicate"` | yes                             | band axes that actually varied in this group (§10); `[]` in point mode                                                                                                       |
 | `measure`               | string                           | when `over` is non-empty        | `posterior \| prior \| uniform_bounds \| asserted \| process`                                                                                                                |
 | `measure_note`          | string                           | no                              | e.g. "posterior of the other parameters with gamma imposed by the design"                                                                                                    |
 | `measure_source`        | object                           | when `measure` is not `process` | `{"kind":"fit","handle","run_id","method"}`, `{"kind":"model_ir","ir_hash"}`, `{"kind":"fit_toml","path_sha256"}`, `{"kind":"file","sha256"}`, plus `subsample` when strided |
@@ -1225,26 +1274,43 @@ from the cell. At render each group is one `StackedQuantities::push_group` whose
 already renders `sweep:<param>` columns (`quantity_output.rs:227-243`) and a
 manifest `sweep` object (`:480-491`); it gains `point_id`.
 
-Mode is decided **per quantity**, from what its band would actually reduce:
+Point versus band is decided **by the data, per group**, not inferred from the
+backend or the quantity's source. A static rule cannot be right: whether
+replicates differ depends on the backend, on whether the quantity reads the
+observation draw (`references_observations`, `sim/src/quantity.rs:252`, is a
+property of the whole evaluator, not of one quantity), on `--init-state FILE`
+(which restores a different state row per replicate under any backend,
+`engine.rs:452-455`), and on whether a scenario sets every varying column. The
+realizations themselves settle all four.
 
-```rust
-fn quantity_mode(plan: &ParamPlan, reps: usize, backend: ForwardBackend, q: &Quantity) -> Mode {
-    let sample_reduced = matches!(plan.sample(), SampleAxis::Draws { rows, .. } if rows.len() > 1);
-    let replicate_reduced = reps > 1
-        && (backend != ForwardBackend::Ode || q.references_observations());
-    if sample_reduced || replicate_reduced { Mode::Banded } else { Mode::Point }
-}
-```
+For each quantity and each group, after all cells are merged:
 
-`StackedQuantities` takes a mode per quantity rather than one for the render
-(each quantity is its own file with its own header). Two consequences, both
-intended: `--replicates N` under ODE renders pure-state quantities as points
-(W8), and a one-row sample (`--draws uniform -n 1`, a one-row `--draws-file`)
-renders as a point rather than a zero-width band. The second reverses a pin from
-`2026-08-11` §7.5 ("`--draws <file>` with one row stays banded"); that pin
-guarded against a _cell-count_ predicate that counted scenarios, and the rule
-above counts only what one group reduces, so the reason for the pin is kept
-while its output changes. The test is rewritten accordingly.
+- the group is **constant** when every realization is bit-identical (compared on
+  the `f64` bit patterns, a censored value equal only to a censored value);
+- the group's **attribution** is `sample` when the effective parameter vectors
+  of its cells differ (after impositions), else `process` when the realizations
+  differ, else none.
+
+A quantity renders in **point mode** when every one of its groups is constant;
+its constant groups are collapsed to one realization _before_
+`render_quantities` is called, whose point mode refuses more than one
+(`quantity_output.rs:351`, verified). Otherwise the quantity renders in **banded
+mode** for all its groups, because one file has one header; each row's `band` is
+the group's attribution (the measure name for `sample`, `process`, or `none` for
+a constant group in a banded file), and `summary.over` lists what actually
+varied in that group. `StackedQuantities` therefore takes a mode per quantity
+rather than one for the render.
+
+Consequences, all intended: `--replicates N` under ODE renders pure-state
+quantities as points and observation quantities as bands (W8); a one-row sample
+(`--draws uniform -n 1`, a one-row `--draws-file`) renders as a point rather
+than a zero-width band; and in a posterior run where one arm's scenario sets
+every varying column, that arm's rows read `band = process` while the other arms
+read `posterior`. The second reverses a pin from `2026-08-11` §7.5
+("`--draws <file>` with one row stays banded"); that pin guarded against a
+_cell-count_ predicate that counted scenarios, and the rule above counts only
+what one group reduces, so the reason for the pin is kept while its output
+changes. The test is rewritten accordingly.
 
 ## 11. Why this does not reintroduce the caller-supplied key
 
@@ -1336,8 +1402,11 @@ names. `--fit requires --draws` (`main.rs:1168`) accepts `--draws-file`.
 `--draws-file FILE` reads `FILE.json` when present: it carries the measure
 through (a posterior stays `posterior`), warns when `ir_hash` differs from the
 current model, and records in `summary` which parameters came from outside the
-file and from where. `-n` subsamples a `--draws-file`, strided across all rows
-with the same default cap as `--draws posterior` (gh#630).
+file and from where. `-n` subsamples a `--draws-file` only when given, strided
+across all rows through `subsample_draws`; the seed index is then the position
+in the subsample. There is no default cap — a cap would change which rows and
+seeds today's `--draws FILE` runs — so a file above 1000 rows prints a warning
+suggesting `-n` instead (gh#630).
 
 ## 13. What changes for users, and what does not re-key
 
@@ -1350,10 +1419,10 @@ with the same default cap as `--draws posterior` (gh#630).
 | 5  | `batch run [design.NAME]` × colliding scenario                       | refused as "the sweep"                      | refused as "the design `NAME`"                                                                  |
 | 6  | Scenario, `--param` or design value setting a varying sampled column | runs silently                               | runs; note on stderr; recorded in `summary`                                                     |
 | 7  | Banded quantity files (`simulate` and `fit predict`)                 | no statement of what the band is over       | `band` column; `point_id` on design rows; exact `sweep:` values; manifest `mode`/`summary`      |
-| 8  | `fit predict --sweep` after the grid move                            | —                                           | byte-identical to the output after the schema commit                                            |
-| 9  | `--replicates N` under ODE; one-row samples                          | zero-width band                             | point mode for pure-state quantities                                                            |
+| 8  | `fit predict --sweep` after the grid move                            | —                                           | byte-identical to Stage 7's parent commit                                                       |
+| 9  | Groups whose realizations are all bit-identical                      | zero-width band                             | point mode when every group of the quantity is constant (§10)                                   |
 | 10 | `--design-from` with a file                                          | `--draws FILE`                              | `--draws-file` or `--sweep-file`; writes `truths.tsv`, `design_from.json`                       |
-| 11 | `--draws-file` with `-n`                                             | (`-n` ignored for `--draws FILE`)           | strided subsample                                                                               |
+| 11 | `--draws-file` with `-n`; large files without `-n`                   | (`-n` ignored for `--draws FILE`)           | strided subsample with `-n`; every row without it, plus a warning above 1000 rows               |
 
 **Run identity.** Every `sim` `run_id` folds the engine version, including the
 git hash (`version.rs:12-15`; `ModelDigest::from_model`,
@@ -1362,8 +1431,12 @@ and "`run_id` unchanged" cannot be a test. The claim this proposal makes is **no
 re-key beyond the existing per-build engine-version fold**: for every job that
 exists today, the `params`, `scenario`, `seed` and `config` level hashes, the
 store path segments below the model level, and the trajectory bytes are
-unchanged. The new flags are new keys: `--sweep` and `--sweep-file` runs have no
-predecessors, and a `--sweep-file` ensemble folds its axis kind (§7.6).
+unchanged. The baseline is `main` **after gh#949**, not `ebe845a0`: gh#949 stops
+generated rows from carrying parameters the measure does not sample, which by
+itself changes resolved values (and so `params` level hashes) for
+`--params X --draws uniform|prior`, and that change is gh#949's, not this
+proposal's. The new flags are new keys: `--sweep` and `--sweep-file` runs have
+no predecessors, and a `--sweep-file` ensemble folds its axis kind (§7.6).
 
 **IR and goldens are unaffected.** All changes are in `rust/crates/cli` and
 docs. No `ir/VERSION` bump, no `ocaml/` change, no golden regeneration.
@@ -1408,12 +1481,18 @@ and design shadows returned and printed; the `--event-log` path routed through
 the guard; every `SimRun` site classified (§7.4). _Tests:_ the existing
 design-block test (`tests/scenario_coordinate_collision_gh572.rs:235-264`)
 updated to assert "the design `NAME`"; `--draws uniform --scenario pinned` exits
-0 with the W3 note naming `beta`; the same with a scenario over a non-varying
-column prints nothing; `--draws uniform --param beta=0.5` exits 0 and records an
-imposition `"by": "--param"` (the `--param`-on-design refusal is tested in Stage
-5, when `simulate` first has a design axis). Mutation check: make the guard
-treat design names as sample columns and confirm the batch refusal test goes
-red.
+0 with the W3 note naming `beta`; a scenario over a column that rows carry but
+the measure does not vary prints nothing and records nothing — tested with
+posterior draws from a fit whose `[fixed]` block pins `N0` (the posterior
+`draws.tsv` carries the `N0` column, constant) under a scenario setting `N0`,
+and with a `--draws FILE` whose `N0` column is constant (the Stage 1 interim
+refusal applies to scenario footprints over file columns, so this case uses
+`--param N0=…` instead); a posterior over an indexed family pins the §7.2
+`estimated`-to-column mapping; `--draws uniform --param beta=0.5` exits 0 and
+records an imposition `"by": "--param"` (the `--param`-on-design refusal is
+tested in Stage 5, when `simulate` first has a design axis). Mutation check:
+make the guard treat design names as sample columns and confirm the batch
+refusal test goes red.
 
 **Stage 3 — provenance sidecar (D-D).** `--draws-out` writes varying columns and
 `FILE.json`; the sidecar reader (used by `--draws FILE` until Stage 5 renames
@@ -1422,12 +1501,18 @@ it); `-n` subsamples a file. _Tests:_
 p.tsv`, then reading `p.tsv` back yields
 `measure: posterior` with the fit's handle; a sidecar whose `ir_hash` differs
 prints the warning; `-n 7` on a 100-row file picks rows strided across the whole
-file through the same `subsample_draws` as `--draws posterior`, never a prefix.
+file through the same `subsample_draws` as `--draws posterior`, never a prefix,
+with seed index = position in the subsample; and a 250-row file read without
+`-n` runs all 250 rows with trajectory bytes identical to the parent commit (no
+default cap), printing no warning, while a 1500-row file prints the `-n`
+warning.
 
 **Stage 4 — output schema (D-C), its own commit, before Stage 7.** `band`
 column, `point_id` on design rows, exact `sweep:` formatting, manifest `mode`,
 `summary` always present, `partition_columns`, `measure_source`, `n_samples`
-null when absent; `parameter_points.tsv` at round-trip precision. This
+null when absent; `parameter_points.tsv` at round-trip precision. For
+`fit predict`, Stage 4 does not emit `varying`, `design_shadows` or
+`measure_note`: predict's sweep is not a design axis until Stage 7. This
 **intentionally changes `fit predict` output**, and lands before the grid move
 so Stage 7's byte-identity gate is against this schema. Contrasts note and
 `report.json` record under `--sweep` (W7). _Tests:_ the predict header pin in
@@ -1455,13 +1540,25 @@ to `--draws-file`: `tests/simulate_identity_parity.rs:270`, `:317`,
 refusal verbatim, including both replacement flags; `--draws prio` gives the
 typo message; `--sweep beta=0.15,0.3,0.6 --backend ode --dt 0.1` gives rows
 `0 0.15 70`, `1 0.3 304`, `2 0.6 536`; `--sweep-file` with the same three rows
-gives byte-identical files; adding a fourth point leaves the first three points'
-trajectory bytes unchanged (CRN); `--draws-file f.tsv` trajectories equal Stage
-4's `--draws f.tsv` trajectories byte for byte; the W12 `--param` refusal;
-`--sweep-file` duplicate rows refused naming both lines; ODE `--replicates 4`
-renders `peak_I` in point mode while an observation quantity is banded. Mutation
-check: key `by_partition` on the scenario alone and confirm the three-row
-assertion fails on the row count, not the header.
+gives byte-identical files; common random numbers, with
+`--backend
+chain_binomial --replicates 3`: every design point's cells carry the
+same three `process_seed`s, and inserting a new point at the front and,
+separately, in the middle of the sweep leaves every other point's trajectory
+bytes identical; `--draws-file f.tsv` trajectories equal the parent commit's
+`--draws f.tsv` trajectories byte for byte, for a 5-row file and for a 250-row
+file (above `--draws posterior`'s default cap of 200, so a cap would show); the
+ensemble axis-kind fold (§7.6) leaves a `--draws uniform` ensemble's grid-level
+hash unchanged and separates `--sweep-file X` from `--draws-file X`; imposition
+notes print once per (scenario, column) for a two-scenario, three-point run; the
+W12 `--param` refusal; `--sweep-file` duplicate rows refused naming both lines;
+ODE `--replicates 4` renders `peak_I` in point mode while an observation
+quantity is banded; an ODE `--init-state FILE --replicates 4` bands `peak_I`
+(rows differ); in a `--draws uniform` run with scenarios `baseline,pinned` where
+`beta` is the only varying column, the `pinned` rows read `band = process` and
+the `baseline` rows `uniform_bounds`. Mutation check: key `by_partition` on the
+scenario alone and confirm the three-row assertion fails on the row count, not
+the header.
 
 **Stage 6 — `--design-from` on the new axes.** Accept every source; priors from
 the design `fit.toml`; write `truths.tsv` and `design_from.json`. Dataset files
@@ -1473,18 +1570,36 @@ byte-identical. _Test:_ `--sweep-file truths.tsv` writes one `ds_NN/` per row,
 predict's name checks; the pre-flight guard call stays before the free-forward
 closure; rows rendered design-major explicitly; to bound memory, one `run_job`
 per design point (a design slice) rather than one for the whole grid, since
-`run_job` holds every cell's result until the merge phase (`engine.rs:232-247`);
-the per-cell conditioned decision is a function of `PartitionKey` (conditioned
-iff the scenario is the conditioned arm and the design is `Unit`), replacing the
-per-sink `conditioned` / `chain_of_point` fields (`predict.rs:2196-2218`);
-`FreeForwardCell` and `assemble_predictive` keyed by `PartitionKey`. _Tests:_
-byte-identity A/B against Stage 4 output of every predict artifact (predictive
-TSVs, quantities TSVs, manifests, contrasts, `report.json`) for
-`--sweep k=… --scenario a,b` with and without a conditioned fit;
+`run_job` holds every cell's result until the merge phase (`engine.rs:232-247`).
+A slice is **one global plan filtered by design index** — `plan_grid` over the
+whole plan, then the cells whose `DesignCoord::Point { idx }` equals the slice —
+never a per-point sub-plan, so every cell keeps its global design index and
+partition keys from different slices cannot collide; the per-cell conditioned
+decision is a function of `PartitionKey` (conditioned iff the scenario is the
+conditioned arm and the design is `Unit`), replacing the per-sink `conditioned`
+/ `chain_of_point` fields (`predict.rs:2196-2218`); `FreeForwardCell` and
+`assemble_predictive` keyed by `PartitionKey`. _Tests:_ byte-identity A/B
+against **Stage 7's parent commit** (post-Stage 6) of every predict artifact
+(predictive TSVs, quantities TSVs, manifests, contrasts, `report.json`) for
+`--sweep k=… --scenario a,b` with and without a conditioned fit. These files
+carry no version string or timestamp, so they are compared unmasked:
+`report.json` holds only `schema` and `failures` (`fit/failures.rs:97-100`,
+verified), the quantities manifest holds `schema`, `calendar` and `quantities`
+plus, under `--quantities`, a `vocabulary` object of file path and sha256
+(`quantity_output.rs:511-515`, `quantities_file.rs:66-71`, verified), and
+neither `predict.rs`, `quantity_output.rs` nor `contrasts.rs` references
+`version::` or a clock (verified by search); the A/B runs both builds from the
+same working directory so the vocabulary path is equal. A unit test runs two
+design points of one global plan as two slices through one sink and one
+`FreeForwardCell` map and asserts two groups with distinct partition keys (a
+per-slice plan would give both `design: Some(0)` and merge them);
 `--sweep beta=… --scenario distancing` exits non-zero with **no** artifact
 written; a unit test that the conditioned decision is true only for the un-swept
 `fitted` group. Mutation check: key the sink on scenario alone and confirm the
-four-group assertion fails.
+four-group assertion fails. **After the A/B passes**, a separate commit adds
+predict's `varying`, `design_shadows` and `measure_note` to the manifest and the
+design-shadow stderr note (W6); it is an intended output change, tested by
+asserting `"design_shadows": ["gamma"]` for `--sweep gamma=…`.
 
 **Stage 8 — error text.** `ValueSource::{Sample, DesignPoint}`;
 `UnknownParameter` names the column and the file; `NonFiniteValue` names the
@@ -1535,19 +1650,25 @@ leaves.
 **D-C — The output schema is fixed before predict's bytes are frozen.** A
 `point_id` on every design-bearing row (the file's, else the 0-based index), so
 rows join without float matching; design coordinates written round-trip exact; a
-constant `band` column naming what every band is over; and a manifest that
-describes itself (`mode`, `summary` always, `partition_columns`,
+`band` column naming, per row, what that group's band is over; and a manifest
+that describes itself (`mode`, `summary` always, `partition_columns`,
 `measure_source` with a fit handle and hash rather than a path, `n_samples` null
 when absent, `n_samples_used` where rows can drop). This changes `fit predict`
 output, so it lands as its own commit (Stage 4) before the grid move, whose
-byte-identity gate is then against the new schema.
+byte-identity gate is then against its parent commit, already on the new schema.
+Point versus band is decided from the realizations of each group (§10), not from
+the backend or the quantity's source, so `summary.over` reports what actually
+varied.
 
 **D-D — Draws files carry their provenance.** `--draws-out` writes a sidecar
 recording measure, source, IR hash, version, varying columns and subsampling;
 `--draws-file` reads it, so an exported posterior stays a posterior, a stale
 export against a changed model is flagged, and parameters from outside the file
-are named. `-n` subsamples a `--draws-file`, closing the gh#630 path by which a
-raw posterior replays every row.
+are named. `-n` subsamples a `--draws-file` when given (seed index = position in
+the subsample), closing the gh#630 path by which a raw posterior replays every
+row unasked. There is no default cap: a cap would change the rows and seeds of
+today's `--draws FILE` runs and break D-B's promise that `--draws-file` keeps
+them exactly; a file above 1000 rows warns instead.
 
 **D-E — Duplicate design rows are refused only in `--sweep-file`.** In a
 hand-written file a duplicate is almost always an error, so it is refused with
@@ -1565,9 +1686,11 @@ keeps it from being captioned as a credible interval. Per-point rows are one
 `--draws-out` / `--sweep-file` round trip away (W3).
 
 **`fit predict`'s sweep moves onto the grid (Stage 7), gated on byte identity
-against Stage 4.** It puts predict's partition coordinate in the cell and lets
-one guard and one grouping derivation serve both verbs, removing rejection
-reason 2.
+against its parent commit.** Slices are one global plan filtered by design
+index, so partition keys stay global; predict's design shadows and `varying` are
+added in the commit after the A/B passes. It puts predict's partition coordinate
+in the cell and lets one guard and one grouping derivation serve both verbs,
+removing rejection reason 2.
 
 **Impositions are allowed and recorded, not refused.** A scenario, `--param` or
 design value that sets a varying sampled column is an intervention on that
