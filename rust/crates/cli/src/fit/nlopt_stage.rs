@@ -620,9 +620,13 @@ fn score_with_gradient(
                     "the ODE gradient is not finite at {}: log-likelihood {value}, \
                      gradient {gradient:?}. The deterministic likelihood has no \
                      usable derivative there, so `nl-lbfgs` has no direction to \
-                     search in. Narrow the `[estimate]` bounds to exclude the \
-                     region, start elsewhere, or use the derivative-free \
-                     `algorithm = \"nl-sbplx\"`.",
+                     search in. If the gradient is non-finite at every starting \
+                     point, the cause is usually in the model rather than the \
+                     parameters: a rate whose derivative is singular where a \
+                     compartment is exactly zero (e.g. `X ^ a` with 0 < a < 1 \
+                     and X starting at 0). Otherwise, narrow the `[estimate]` \
+                     bounds to exclude the region or start elsewhere. The \
+                     derivative-free `algorithm = \"nl-sbplx\"` needs no gradient.",
                     at()
                 ))
             }

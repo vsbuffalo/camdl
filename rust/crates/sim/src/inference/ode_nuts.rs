@@ -271,6 +271,20 @@ pub fn run_ode_nuts_with_progress(
                 .to_string(),
         ));
     }
+    // A finite posterior with a non-finite gradient (gh#952): the first leapfrog
+    // step of every trajectory starts from this gradient, so the chain could
+    // never leave the initial values and every transition would be divergent.
+    if let Some(i) = grad.iter().position(|g| !g.is_finite()) {
+        return Err(SimError::Validation(format!(
+            "run_ode_nuts: the posterior is finite at the initial parameters but its \
+             gradient is not finite (∂/∂{} = {}), so NUTS cannot take a step. A common \
+             cause is a rate whose derivative is singular where a compartment is exactly \
+             zero — e.g. `X ^ a` with 0 < a < 1 and X starting at 0, whose derivative in \
+             X is infinite there. Start that compartment above zero, or use a \
+             gradient-free method.",
+            estimated[i].name, grad[i]
+        )));
+    }
 
     let mut rng = StatefulRng::new(config.seed);
 
@@ -672,5 +686,75 @@ mod tests {
             (beta_mean(&diag) - true_beta).abs() < 0.15,
             "diagonal-metric fit must recover beta (got {:.3})", beta_mean(&diag),
         );
+    }
+
+    /// gh#952: a finite posterior with a non-finite gradient at the starting point
+    /// is refused, not sampled. A NaN gradient there poisons the first leapfrog
+    /// step of every trajectory, so the chain cannot leave its initial values and
+    /// would end with every transition divergent. A state derivative of `1/E` is
+    /// hand-installed on `infection`: `E(0) = 0`, so the state Jacobian — and
+    /// through it every sensitivity — is NaN while the loglik stays finite.
+    #[test]
+    fn non_finite_initial_gradient_is_refused() {
+        let (clean, params) = compiled(0.9);
+        let mut model = (*clean.model).clone();
+        let infection = model.transitions.iter_mut().find(|t| t.name == "infection").unwrap();
+        infection.rate_state_grad.0.insert(
+            "E".to_string(),
+            DerivEntry::Grad(Expr::bin_op(ir::expr::BinOp::Div, Expr::const_(1.0), Expr::pop("E"))),
+        );
+        let cm = Arc::new(CompiledModel::new(model).unwrap());
+
+        let dt = 1.0;
+        let obs_times: Vec<f64> = (1..=8).map(|w| (w * 7) as f64).collect();
+        let om = cm.model.observations[0].clone();
+        let projection = StreamProjection::from_ir(&om.projection, &cm, &om.name).unwrap();
+        let spec = StreamSpec {
+            times: StreamTimes::contiguous_for(&projection, cm.model.simulation.t_start, obs_times.clone()).unwrap(),
+            projection,
+            ir_model: om,
+            observations: dense_cells(vec![10.0; obs_times.len()]),
+            aux: vec![],
+        };
+        let obs_model = MultiStreamObsModel::new(
+            BoundObs::bind(cm.model.simulation.t_start, vec![spec]).unwrap().0, cm.clone(),
+        ).unwrap();
+
+        let beta_idx = cm.param_index["beta"];
+        let estimated = vec![EstimatedParam {
+            name: "beta".to_string(),
+            index: beta_idx,
+            initial: 0.9,
+            rw_sd: 0.0,
+            transform: Transform::Log { lo: 0.05, hi: 5.0 },
+            lower: 0.05,
+            upper: 5.0,
+            rw_sd_auto: false,
+            perturb_only_at_t0: false,
+        }];
+        let priors = vec![Prior::Fixed(crate::inference::prior::Density::Flat)];
+        let config = OdeNutsConfig {
+            n_warmup: 5,
+            n_samples: 5,
+            max_tree_depth: 3,
+            target_accept: 0.8,
+            init_step_size: 0.2,
+            metric: MassMetric::Diagonal,
+            dt,
+            burnin_dt: dt,
+            seed: 952,
+        };
+        match run_ode_nuts(&cm, &obs_model, &obs_times, &params, &estimated, &priors, &config) {
+            Err(SimError::Validation(msg)) => assert!(
+                msg.contains("gradient") && msg.contains("not finite"),
+                "refusal must name the non-finite gradient, got: {msg}"
+            ),
+            Err(e) => panic!("expected a Validation refusal, got {e}"),
+            Ok(r) => panic!(
+                "a NaN initial gradient must be refused; the run returned {} samples \
+                 with {} divergent",
+                r.samples.len(), r.n_divergent
+            ),
+        }
     }
 }
