@@ -1294,4 +1294,73 @@ mod tests {
         assert!(grad[0].abs() > 1.0, "∂/∂beta should be materially nonzero, got {}", grad[0]);
         assert!(grad[1].abs() > 1.0, "∂/∂gamma should be materially nonzero, got {}", grad[1]);
     }
+
+    /// gh#952: the ODE forward sensitivities of a model with a power of a
+    /// compartment that starts at zero. `sir_pow_zero_base`'s infection rate
+    /// contains `R^alpha` with `R(0) = 0`, so the state Jacobian `∂rate/∂R` and
+    /// `∂rate/∂alpha` are evaluated at a zero base on the first step. The
+    /// textbook power rule emits `R^alpha·(alpha·(1/R))` and `R^alpha·log(R)`
+    /// there — NaN at runtime — and the NaN reaches every parameter's
+    /// sensitivity column through the Jacobian. Each sensitivity must be finite
+    /// and match a central finite difference of the solved state.
+    #[test]
+    fn ode_sensitivity_finite_and_matches_fd_at_a_zero_base_power() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let path = std::path::PathBuf::from(&manifest)
+            .join("../../../tests/fixtures/gradient/ir/sir_pow_zero_base.ir.json");
+        let mut model: ir::Model = ir::from_str(
+            &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse: {e}"));
+        for p in &mut model.parameters {
+            p.value = p.value.with_value(match p.name.as_str() {
+                "beta" => 0.5, "gamma" => 0.1, "alpha" => 1.5,
+                other => panic!("unexpected parameter {other}"),
+            });
+        }
+        let compiled = CompiledModel::new(model).unwrap();
+
+        let names = ["beta", "gamma", "alpha"];
+        let est: Vec<usize> = names.iter().map(|n| compiled.param_index[*n]).collect();
+        let mut params = vec![0.0; compiled.param_index.len()];
+        for p in &compiled.model.parameters {
+            params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+        }
+        let r = compiled.model.compartments.iter().position(|c| c.name == "R").unwrap();
+        assert_eq!(compiled.initial_state_mean(&params).unwrap().0.counts[r], 0,
+            "non-vacuity: R must start at exactly zero");
+
+        // R^alpha grows superlinearly, so a short horizon and a fine step keep
+        // the solve away from the clamp guard (a different refusal).
+        let dt = 0.1;
+        let cfg = OdeConfig { t_start: 0.0, t_end: 10.0, dt };
+        let obs_times: Vec<f64> = (1..=10).map(|t| t as f64).collect();
+        let d = est.len();
+        let seed = vec![0.0; compiled.model.compartments.len() * d];
+        let solve = |p: &[f64]| {
+            crate::ode::integrate_obs_sensitivity(&compiled, p, &est, &seed, &cfg, &obs_times, dt)
+                .unwrap()
+        };
+
+        let recs = solve(&params);
+        for rec in &recs {
+            assert!(rec.state_sens.iter().chain(&rec.inc_sens).all(|s| s.is_finite()),
+                "t = {}: a sensitivity is non-finite: state_sens {:?}", rec.t, rec.state_sens);
+        }
+
+        // ∂R(t_end)/∂θ against a central FD of the solved state.
+        let last = recs.len() - 1;
+        for (k, (&midx, name)) in est.iter().zip(names).enumerate() {
+            let eps = 1e-6 * params[midx].abs();
+            let mut pp = params.clone();
+            let mut pm = params.clone();
+            pp[midx] += eps;
+            pm[midx] -= eps;
+            let fd = (solve(&pp)[last].counts[r] - solve(&pm)[last].counts[r]) / (2.0 * eps);
+            let got = recs[last].state_sens[r * d + k];
+            let rel = (got - fd).abs() / fd.abs().max(1e-8);
+            eprintln!("  ∂R(10)/∂{name} = {got:.6} vs FD {fd:.6} (rel err {rel:.2e})");
+            assert!(rel < 1e-4, "∂R(10)/∂{name} = {got} vs FD {fd} (rel err {rel:.2e})");
+        }
+    }
 }

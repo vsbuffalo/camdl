@@ -462,16 +462,32 @@ let differentiate ?(bindings = []) (top : expr) (target : diff_target)
                       left  = BinOp { op = Mul; left = dl; right = b.right };
                       right = BinOp { op = Mul; left = b.left; right = dr } };
                     right = BinOp { op = Mul; left = b.right; right = b.right } })
-      (* Power rule: d(f^g) = f^g * (g' ln f + g f'/f) *)
+      (* Power rule, written to stay finite at a zero base (gh#952):
+           d(f^g) = g·f^(g−1)·f′ + g′·[f > 0 ? f^g·ln f : 0]
+         The textbook form f^g·(g′ ln f + g f′/f) is equal for f > 0 but
+         evaluates ln 0 and 1/0 at f = 0 — NaN at runtime — where the true
+         derivative is finite (∂(I²)/∂I = 0, ∂(I^α)/∂α → 0). The guard gives the
+         one-sided limit f^g·ln f → 0 (g > 0); the runtime evaluates only the
+         taken branch, so ln f is never reached at f ≤ 0. A constant exponent
+         has g′ = 0, and simplify reduces the rule to g·f^(g−1)·f′. For
+         0 < g < 1, f^(g−1) is infinite at f = 0 and stays non-finite: that
+         derivative is genuinely singular. *)
       | Pow -> map2 (d b.left) (d b.right)
-                 (fun df dg -> BinOp { op = Mul;
-                    left = BinOp { op = Pow; left = b.left; right = b.right };
-                    right = BinOp { op = Add;
-                      left  = BinOp { op = Mul; left = dg;
-                                      right = UnOp { op = Log; arg = b.left } };
-                      right = BinOp { op = Mul; left = b.right;
-                                      right = BinOp { op = Div; left = df;
-                                                      right = b.left } } } })
+                 (fun df dg ->
+                    let f = b.left and g = b.right in
+                    let f_pow_g_ln_f =
+                      Cond { pred = BinOp { op = Gt; left = f; right = Const 0.0 };
+                             then_ = BinOp { op = Mul;
+                                             left = BinOp { op = Pow; left = f; right = g };
+                                             right = UnOp { op = Log; arg = f } };
+                             else_ = Const 0.0 } in
+                    BinOp { op = Add;
+                      left = BinOp { op = Mul;
+                        left = BinOp { op = Mul; left = g;
+                          right = BinOp { op = Pow; left = f;
+                            right = BinOp { op = Sub; left = g; right = Const 1.0 } } };
+                        right = df };
+                      right = BinOp { op = Mul; left = dg; right = f_pow_g_ln_f } })
       (* Min/Max: subgradient — differentiate the active branch (WrtParam). For
          WrtPop, a min/max OF STATE is nonsmooth at the crossover — refuse (§1h);
          state-free min/max has ∂/∂compartment = 0. *)
