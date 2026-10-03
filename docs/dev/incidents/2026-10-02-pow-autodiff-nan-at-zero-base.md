@@ -2,8 +2,8 @@
 
 Date: 2026-10-02
 
-Status: **fixed** (gh#952). The autodiff rule is fixed in `6bc496bb`; the ODE
-NUTS startup refusal and the corrected `nl-lbfgs` message are in `0ea1ed54`.
+Status: **fixed** (gh#952). The autodiff rule is fixed in `6311034c`; the ODE
+NUTS startup refusal and the corrected `nl-lbfgs` message are in `466f5ab6`.
 Every new test was confirmed red before its fix and green after.
 
 Class: **code-vs-code**. The OCaml autodiff emits a derivative expression that
