@@ -795,6 +795,80 @@ fn test_gradient_vs_finite_differences_lagged_forcing() {
     eprintln!("  max relative error: {:.2e}", max_rel_err);
 }
 
+/// gh#952: the derivative of a power must be finite where its base is zero.
+/// `sir_pow_zero_base`'s infection rate contains `R^alpha` with `R(0) = 0`,
+/// and stays positive through `I`, so the chain-binomial gradient evaluates
+/// `∂rate/∂alpha = beta·S·R^alpha·ln R/N` at `R = 0` — true value 0. The
+/// textbook power rule emits `R^alpha·log(R)` there, which the runtime
+/// evaluates to NaN, poisoning the whole gradient.
+#[test]
+fn test_gradient_vs_finite_differences_pow_zero_base() {
+    let mut model = load_model("../../../tests/fixtures/gradient/ir/sir_pow_zero_base.ir.json");
+    for p in &mut model.parameters {
+        p.value = p.value.with_value(match p.name.as_str() {
+            "beta" => 0.5, "gamma" => 0.1, "alpha" => 1.5,
+            other => panic!("unexpected parameter {other}"),
+        });
+    }
+    let compiled = Arc::new(CompiledModel::new(model).unwrap());
+
+    let dt = 1.0;
+    let t_end = compiled.model.simulation.t_end;
+    let n_params = compiled.param_index.len();
+    let mut params = vec![0.0; n_params];
+    for p in &compiled.model.parameters {
+        params[compiled.param_index[p.name.as_str()]] = p.value.resolved_value().unwrap();
+    }
+
+    let mut rng = StatefulRng::new(42);
+    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
+
+    let observations: Vec<Observation> = vec![];
+    let obs_model = MultiStreamObsModel::empty(compiled.clone());
+    let oas = build_obs_at_substep(&observations, compiled.model.simulation.t_start, dt).unwrap();
+
+    let model_to_estimated: Vec<Option<usize>> = (0..n_params).map(Some).collect();
+    let rate_grads_for_run = sim::inference::pgas_grad::resolve_rate_grad_for_run(
+        &compiled.resolved.rate_grads_indexed,
+        &model_to_estimated,
+    );
+    let estimated_to_model: Vec<usize> = (0..n_params).collect();
+
+    let (ll, grad) = complete_data_loglik_grad(
+        &compiled, &trajectory, &params, &observations, dt,
+        &obs_model, n_params, &rate_grads_for_run, &oas,
+        &estimated_to_model,
+        sim::inference::pgas::InverseTemperature::COLD,
+    ).unwrap();
+    assert!(ll.is_finite(), "complete-data LL must be finite");
+
+    for name in ["alpha", "beta", "gamma"] {
+        let i = compiled.param_index[name];
+        assert!(grad[i].is_finite(),
+            "d(ll)/d({name}) is {} — a zero-base power derivative evaluated to NaN", grad[i]);
+
+        let eps = 1e-5 * params[i].abs();
+        let mut p_plus = params.clone();
+        let mut p_minus = params.clone();
+        p_plus[i] += eps;
+        p_minus[i] -= eps;
+        let ll_plus = complete_data_loglik(
+            &compiled, &trajectory, &p_plus, &observations, dt, &obs_model, &oas,
+        ).unwrap().total;
+        let ll_minus = complete_data_loglik(
+            &compiled, &trajectory, &p_minus, &observations, dt, &obs_model, &oas,
+        ).unwrap().total;
+        let fd = (ll_plus - ll_minus) / (2.0 * eps);
+        let rel_err = if fd.abs() > 1e-10 { (grad[i] - fd).abs() / fd.abs() } else { (grad[i] - fd).abs() };
+
+        eprintln!("  d(ll)/d({:6}) = {:14.6} (analytical) vs {:14.6} (fd), rel_err = {:.2e}",
+            name, grad[i], fd, rel_err);
+        assert!(rel_err < 1e-4,
+            "zero-base power gradient mismatch for {name}: analytical={:.6}, fd={:.6}, rel_err={:.2e}",
+            grad[i], fd, rel_err);
+    }
+}
+
 /// T2: NUTS invariance on a known 2D Gaussian target.
 /// Runs NUTS for 5K steps on N([3, -1], [[1, 0.5], [0.5, 2]]).
 /// Verifies sample mean within 3σ of true mean.

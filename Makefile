@@ -307,6 +307,7 @@ update-gradient-golden: build-ocaml
 	@echo "Recompiling gradient fixtures..."
 	@mkdir -p $(GRADIENT_DIR)/ir
 	@$(CAMDLC) $(GRADIENT_DIR)/seir_seasonal_lagged.camdl -o $(GRADIENT_DIR)/ir/seir_seasonal_lagged.ir.json
+	@$(CAMDLC) $(GRADIENT_DIR)/sir_pow_zero_base.camdl -o $(GRADIENT_DIR)/ir/sir_pow_zero_base.ir.json
 
 # Recompile the regression fixtures (params baked via --set) →
 # tests/fixtures/regression/ir/*.ir.json. These reproduce specific fixed bugs;

@@ -1,0 +1,42 @@
+# Gradient regression fixture for derivatives of a power at a zero base
+# (docs/dev/incidents/2026-10-02-pow-autodiff-nan-at-zero-base.md, gh#952).
+#
+# This is a probe, not an epidemiological model. The infection rate contains
+# R^alpha, and R starts at zero, so the derivatives of the rate are evaluated at
+# a zero base:
+#
+#   ∂rate/∂alpha = beta·S·R^alpha·ln R / N  → 0 as R → 0
+#   ∂rate/∂R     = beta·S·alpha·R^(alpha−1) / N − rate / N   (finite at R = 0
+#                  because alpha ≥ 1)
+#
+# The infection rate stays positive while R = 0 (through I), so the chain-binomial
+# gradient evaluates these derivatives rather than skipping a zero-rate
+# transition. The ODE forward sensitivities evaluate them at t = 0.
+
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta  : rate
+  gamma : rate
+  alpha : positive [1] in [1.0, 2.0]   # exponent ≥ 1: ∂(R^alpha)/∂R is finite at R = 0
+}
+
+transitions {
+  infection : S --> I  @ beta * S * (I + unchecked_dim(R ^ alpha, dim = population, reason = "zero-base derivative probe")) / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init {
+  S = 990
+  I = 10
+  R = 0
+}
+
+simulate {
+  from = 0 'days
+  to   = 30 'days
+}

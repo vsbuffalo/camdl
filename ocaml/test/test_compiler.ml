@@ -4066,6 +4066,107 @@ let test_rate_state_grad_through_binding () =
   | Some (Ir.DEGrad _) -> ()
   | _ -> Alcotest.failf "∂rate/∂S through binding N must be a real gradient (binding recursion)"
 
+(* ── gh#952: power-rule derivatives at a zero base ── *)
+
+(* Evaluates an emitted derivative with the Rust runtime's default semantics
+   (rust/crates/sim/src/resolved_expr.rs, `allow_degenerate_rates` off):
+   division by zero, log of a non-positive number, and a non-finite power are
+   NaN, and a conditional evaluates only the branch it takes. A derivative
+   that is finite here is finite when the runtime evaluates it. *)
+let rec eval_like_runtime pops params (e : Ir.expr) : float =
+  let ev = eval_like_runtime pops params in
+  match e with
+  | Ir.Const c -> c
+  | Ir.Pop n -> List.assoc n pops
+  | Ir.Param n -> List.assoc n params
+  | Ir.UncheckedDim u -> ev u.inner
+  | Ir.Cond c -> if ev c.pred > 0.0 then ev c.then_ else ev c.else_
+  | Ir.UnOp { op; arg } ->
+    let a = ev arg in
+    (match op with
+     | Ir.Neg -> -. a
+     | Ir.Exp -> exp a
+     | Ir.Log -> if a > 0.0 then log a else Float.nan
+     | _ -> Alcotest.failf "eval_like_runtime: unexpected unary op")
+  | Ir.BinOp { op; left; right } ->
+    let a = ev left and b = ev right in
+    (match op with
+     | Ir.Add -> a +. b
+     | Ir.Sub -> a -. b
+     | Ir.Mul -> a *. b
+     | Ir.Div -> if b = 0.0 then Float.nan else a /. b
+     | Ir.Pow -> let r = a ** b in if Float.is_finite r then r else Float.nan
+     | Ir.Gt -> if a > b then 1.0 else 0.0
+     | Ir.Lt -> if a < b then 1.0 else 0.0
+     | _ -> Alcotest.failf "eval_like_runtime: unexpected binary op")
+  | _ -> Alcotest.failf "eval_like_runtime: unexpected node %s"
+           (Yojson.Safe.to_string (Serde.expr_to_json e))
+
+let pow_ e g = Ir.BinOp { op = Ir.Pow; left = e; right = g }
+
+(* The emitted ∂rate/∂param (WrtParam) or ∂rate/∂compartment (WrtPop). *)
+let emitted_grad ~wrt rate =
+  let entry = match wrt with
+    | `Param p ->
+      (match Autodiff.differentiate_rate rate [ p ] [] [] with
+       | Ok g -> List.assoc_opt p g
+       | Error msg -> Alcotest.failf "differentiate_rate errored: %s" msg)
+    | `Pop c -> List.assoc_opt c (Autodiff.differentiate_rate_state rate [ c ] [] [] [])
+  in
+  match entry with
+  | Some (Ir.DEGrad e) -> e
+  | Some (Ir.DEUnsupported _) -> Alcotest.fail "power derivative was refused"
+  | None -> Alcotest.fail "power derivative was dropped as a genuine zero"
+
+let check_pow_grad name ~wrt rate ~pops ~params expected =
+  let got = eval_like_runtime pops params (emitted_grad ~wrt rate) in
+  Alcotest.(check (float 1e-12)) name expected got
+
+let test_pow_grad_constant_exponent_at_zero_base () =
+  (* ∂(I²)/∂I = 2I. The general rule emits I²·(2·(1/I)), which is NaN at
+     I = 0 where the true derivative is 0. *)
+  let rate = pow_ (Ir.Pop "I") (Ir.Const 2.0) in
+  check_pow_grad "∂(I²)/∂I at I = 0" ~wrt:(`Pop "I") rate ~pops:[ "I", 0.0 ] ~params:[] 0.0;
+  check_pow_grad "∂(I²)/∂I at I = 3" ~wrt:(`Pop "I") rate ~pops:[ "I", 3.0 ] ~params:[] 6.0;
+  (* The same rule with a parameter base: ∂(a²)/∂a = 2a. *)
+  let rate = pow_ (Ir.Param "a") (Ir.Const 2.0) in
+  check_pow_grad "∂(a²)/∂a at a = 0" ~wrt:(`Param "a") rate ~pops:[] ~params:[ "a", 0.0 ] 0.0
+
+let test_pow_grad_parameter_exponent_at_zero_base () =
+  (* ∂(I^α)/∂α = I^α·ln I → 0 as I → 0 (α > 0). The general rule emits
+     I^α·log(I), which is NaN at I = 0. *)
+  let rate = pow_ (Ir.Pop "I") (Ir.Param "alpha") in
+  check_pow_grad "∂(I^α)/∂α at I = 0" ~wrt:(`Param "alpha") rate
+    ~pops:[ "I", 0.0 ] ~params:[ "alpha", 0.97 ] 0.0;
+  check_pow_grad "∂(I^α)/∂α at I = 5" ~wrt:(`Param "alpha") rate
+    ~pops:[ "I", 5.0 ] ~params:[ "alpha", 0.97 ] (5.0 ** 0.97 *. log 5.0);
+  (* ∂(I^α)/∂I = α·I^(α−1): 0 at I = 0 for α > 1. *)
+  check_pow_grad "∂(I^α)/∂I at I = 0, α = 1.5" ~wrt:(`Pop "I") rate
+    ~pops:[ "I", 0.0 ] ~params:[ "alpha", 1.5 ] 0.0;
+  check_pow_grad "∂(I^α)/∂I at I = 4, α = 1.5" ~wrt:(`Pop "I") rate
+    ~pops:[ "I", 4.0 ] ~params:[ "alpha", 1.5 ] 3.0
+
+let test_pow_grad_genuine_singularity_stays_nonfinite () =
+  (* For 0 < α < 1, ∂(I^α)/∂I = α·I^(α−1) is infinite at I = 0. No finite
+     value is correct there, so the emitted derivative must not produce one. *)
+  let rate = pow_ (Ir.Pop "I") (Ir.Param "alpha") in
+  let got = eval_like_runtime [ "I", 0.0 ] [ "alpha", 0.5 ]
+      (emitted_grad ~wrt:(`Pop "I") rate) in
+  Alcotest.(check bool) "∂(I^0.5)/∂I at I = 0 is non-finite" false (Float.is_finite got)
+
+let test_pow_grad_both_sides_vary_matches_finite_difference () =
+  (* Base and exponent both depend on the parameter: f = a + 1, g = a·k.
+     Checks the full rule against a central finite difference at an interior
+     point, where the general and corrected rules must agree. *)
+  let rate = pow_ (Ir.BinOp { op = Ir.Add; left = Ir.Param "a"; right = Ir.Const 1.0 })
+      (Ir.BinOp { op = Ir.Mul; left = Ir.Param "a"; right = Ir.Param "k" }) in
+  let value a = eval_like_runtime [] [ "a", a; "k", 0.7 ] rate in
+  let a = 1.3 and h = 1e-6 in
+  let fd = (value (a +. h) -. value (a -. h)) /. (2.0 *. h) in
+  let got = eval_like_runtime [] [ "a", a; "k", 0.7 ]
+      (emitted_grad ~wrt:(`Param "a") rate) in
+  Alcotest.(check (float 1e-6)) "∂((a+1)^(a·k))/∂a matches central FD" fd got
+
 (* ── gh#275 §1h: ∂projection/∂compartment for a DerivedExpr projection ── *)
 
 let test_differentiate_projection_derivedexpr () =
@@ -14156,6 +14257,10 @@ let () =
       Alcotest.test_case "rate_state_grad: ∂/∂compartment emits nonzero comps (gh#275)" `Quick test_rate_state_grad_smooth;
       Alcotest.test_case "rate_state_grad: nonsmooth-of-state (floor) is refused (gh#275)" `Quick test_rate_state_grad_nonsmooth_refused;
       Alcotest.test_case "rate_state_grad: BindingRef inverts to state-bearing (gh#275)" `Quick test_rate_state_grad_through_binding;
+      Alcotest.test_case "autodiff: ∂(x^c) is finite at a zero base (gh#952)" `Quick test_pow_grad_constant_exponent_at_zero_base;
+      Alcotest.test_case "autodiff: ∂(I^α) is finite at a zero base (gh#952)" `Quick test_pow_grad_parameter_exponent_at_zero_base;
+      Alcotest.test_case "autodiff: ∂(I^α)/∂I for α < 1 stays non-finite at 0 (gh#952)" `Quick test_pow_grad_genuine_singularity_stays_nonfinite;
+      Alcotest.test_case "autodiff: ∂(f^g), both varying, matches FD (gh#952)" `Quick test_pow_grad_both_sides_vary_matches_finite_difference;
       Alcotest.test_case "projection_state_grad: DerivedExpr ∂/∂compartment emitted (gh#275 §1h)" `Quick test_differentiate_projection_derivedexpr;
       Alcotest.test_case "projection_state_grad: linear projection emits nothing (gh#275 §1h)" `Quick test_differentiate_projection_linear_is_empty;
       Alcotest.test_case "ic_grad: ∂init/∂θ emits nonzero params (gh#275)" `Quick test_ic_grad_parameterized;
