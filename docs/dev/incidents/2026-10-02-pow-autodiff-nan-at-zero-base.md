@@ -2,14 +2,14 @@
 
 Date: 2026-10-02
 
-Status: **open** — fix tracked in gh#952. The fix lands in the commits after
-this one. They add red→green tests: the compiled derivative of `x^2` at `x = 0`,
-and an ODE sensitivity run with a zero initial compartment.
+Status: **fixed** (gh#952). The autodiff rule is fixed in `6bc496bb`; the ODE
+NUTS startup refusal and the corrected `nl-lbfgs` message are in `0ea1ed54`.
+Every new test was confirmed red before its fix and green after.
 
 Class: **code-vs-code**. The OCaml autodiff emits a derivative expression that
 the Rust runtime cannot evaluate at a point where the true derivative is finite.
-The fix belongs on the OCaml side. A test pins the emitted derivative's value at
-the domain edge, and the gradient consumers reject a non-finite gradient.
+The fix belongs on the OCaml side. Tests pin the emitted derivative's value at
+the domain edge, and the ODE NUTS startup probe refuses a non-finite gradient.
 
 ## What happened
 
@@ -144,10 +144,13 @@ What happens downstream depends on which gradient method consumes the NaN.
   starting elsewhere. The zero comes from a fixed initial condition, so every θ
   fails. Loud, but wrongly explained.
 - **ODE NUTS.** The startup probe requires only a finite `log_p`
-  (`ode_nuts.rs:266`), so it accepts the NaN gradient. Each NaN-gradient
-  evaluation is scored as `−∞`, so every proposal is rejected and the chain
-  stays at its initial values. The run ends with 100% divergent transitions.
-  This is inferred from the code; no NUTS fit has been run.
+  (`ode_nuts.rs:266`), so it accepts the NaN gradient. Every trajectory's first
+  leapfrog step starts from that gradient and produces a NaN energy, so every
+  proposal is rejected and the chain stays at its initial values. The run
+  returns normally with every transition divergent. Measured with a
+  hand-installed NaN state derivative
+  (`ode_nuts::tests::non_finite_initial_gradient_is_refused`, before its fix): 5
+  samples, 5 divergent.
 - **PGAS (particle Gibbs with ancestor sampling) with NUTS for θ.** A transition
   whose rate is at most `RATE_EPSILON` is skipped before its derivative is
   evaluated (`pgas_grad.rs:139`). That hides the common case: `β·S·I^α/N` is
@@ -205,13 +208,22 @@ flag is opt-in and outside this fix's scope.
    - For `f < 0` with a differentiated exponent the guard returns 0. The forward
      value `f^g` is itself NaN there unless `g` is an integer, so that region is
      already outside the model's domain.
-2. **Gradient consumers.** Make both NUTS targets (ODE and PGAS) treat a
-   non-finite gradient as a rejected point, like a non-finite value. Make the
-   ODE NUTS startup probe refuse a non-finite initial gradient with a message,
-   instead of starting a chain that cannot move. This is the gh#811 class again:
-   the value and its gradient disagree about where the target is defined.
-3. **The `nl-lbfgs` message.** It should name a non-finite derivative at a state
-   boundary as a possible cause, not only the bounds.
+2. **ODE NUTS startup.** The startup probe refuses a finite posterior with a
+   non-finite gradient, naming the parameter and the usual cause, instead of
+   starting a chain that cannot move. Later evaluations already map a non-finite
+   gradient to `−∞` (`target_or_neg_inf`), so the starting point was the only
+   unguarded entry. This is the gh#811 class again: the value and its gradient
+   disagree about where the target is defined. After the autodiff fix it is
+   still reachable through a genuinely singular derivative (previous section).
+3. **PGAS: no target change.** `nuts_step` already marks a NaN-energy leaf
+   divergent and refuses a non-finite proposal (gh#81). A sweep whose current
+   trajectory makes the gradient non-finite leaves θ in place, which preserves
+   `p(θ | x)`. Returning `−∞` from the target would behave identically. What
+   remains open is reporting: these sweeps are counted as ordinary divergences,
+   indistinguishable from a step size that is too large.
+4. **The `nl-lbfgs` message.** It now names a singular derivative at a zero
+   compartment as the likely cause when every start fails, before suggesting
+   bounds or a different start.
 
 ## What this suggests
 
