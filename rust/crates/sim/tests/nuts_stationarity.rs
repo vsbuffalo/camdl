@@ -108,7 +108,6 @@ fn corr_normal(rho: f64) -> impl Fn(&[f64]) -> (f64, Vec<f64>) {
 /// subtree U-turn checked from a point outside the subtree) left them exact
 /// while biasing every multi-dimensional row by ≈10–11% in variance.
 #[test]
-#[ignore = "red until gh#956: a NUTS subtree's U-turn is checked from a point outside the subtree"]
 fn nuts_kernel_is_stationary_on_known_targets() {
     let mut worst = 0.0f64;
 

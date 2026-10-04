@@ -350,6 +350,11 @@ fn leapfrog(
 /// A subtree of `2^depth` leapfrog states, built by [`build_tree`] outward from
 /// a point that is not itself part of the subtree.
 struct Subtree {
+    /// The subtree's near end — its first leaf, one leapfrog step from the
+    /// point it was extended from. With `z_far`/`p_far` it bounds the subtree
+    /// for the U-turn check (Hoffman & Gelman 2014, Algorithm 3).
+    z_near: Vec<f64>,
+    p_near: Vec<f64>,
     /// The subtree's far end — the state the trajectory extends from next.
     z_far: Vec<f64>,
     p_far: Vec<f64>,
@@ -397,6 +402,7 @@ fn build_tree(
         let accept_prob = if energy_nonfinite { 0.0 } else { ((-h_new + h0).exp()).min(1.0) };
 
         return Subtree {
+            z_near: z_new.clone(), p_near: p_new.clone(),
             z_far: z_new.clone(), p_far: p_new, grad_far: grad_new,
             z_proposal: z_new, log_p_proposal: log_p_new,
             n_valid, stop: divergent, divergent,
@@ -429,13 +435,20 @@ fn build_tree(
         (inner.z_proposal, inner.log_p_proposal)
     };
 
-    let z_minus = if direction > 0.0 { z.to_vec() } else { outer.z_far.clone() };
-    let z_plus = if direction > 0.0 { outer.z_far.clone() } else { z.to_vec() };
-    let p_minus = if direction > 0.0 { p.to_vec() } else { outer.p_far.clone() };
-    let p_plus = if direction > 0.0 { outer.p_far.clone() } else { p.to_vec() };
-    let stop = outer.stop || uturn(&z_minus, &z_plus, &p_minus, &p_plus, mass);
+    // U-turn across this subtree's own two ends (Hoffman & Gelman 2014,
+    // Algorithm 3). The point `z` it was extended from is not one of its
+    // leaves; including it makes the stopping rule depend on where in the
+    // trajectory the chain started, and the kernel loses its invariant
+    // distribution in ≥2 dimensions (gh#956).
+    let (z_minus, p_minus, z_plus, p_plus) = if direction > 0.0 {
+        (&inner.z_near, &inner.p_near, &outer.z_far, &outer.p_far)
+    } else {
+        (&outer.z_far, &outer.p_far, &inner.z_near, &inner.p_near)
+    };
+    let stop = outer.stop || uturn(z_minus, z_plus, p_minus, p_plus, mass);
 
     Subtree {
+        z_near: inner.z_near, p_near: inner.p_near,
         z_far: outer.z_far, p_far: outer.p_far, grad_far: outer.grad_far,
         z_proposal, log_p_proposal,
         n_valid: n_inner + n_outer,
