@@ -794,61 +794,71 @@ mod warmup_tests {
             (lp, sz.iter().map(|v| -v).collect())
         };
 
-        // Windowed warm-up from IDENTITY mass — the adapter must learn Σ itself.
-        let mut rng = StatefulRng::new(20260707);
-        let mut z = vec![0.0; 3];
-        let (mut lp, mut g) = target(&z);
-        let mut adapter = WarmupAdapter::new(MassMetric::Dense, 3, 1000, 0.5, 0.8);
-        for sweep in 0..1000 {
-            let cfg = NUTSConfig {
-                max_tree_depth: 10,
-                step_size: adapter.step_size(),
-                mass_matrix: adapter.mass().clone(),
-            };
-            let r = nuts_step(&z, lp, &g, &cfg, &target, &mut rng);
-            if r.accepted {
-                z = r.params;
-                lp = r.log_posterior;
-                let (_, gg) = target(&z);
-                g = gg;
+        // One warm-up + sampling run per seed; returns the run's worst-dimension
+        // ESS/iter. A single 3,000-draw run is too noisy to threshold: per-seed
+        // values for a correctly adapted metric range from ~0.5 to 1.0.
+        let min_ess_for_seed = |seed: u64| -> f64 {
+            // Windowed warm-up from IDENTITY mass — the adapter must learn Σ itself.
+            let mut rng = StatefulRng::new(20260707 + seed);
+            let mut z = vec![0.0; 3];
+            let (mut lp, mut g) = target(&z);
+            let mut adapter = WarmupAdapter::new(MassMetric::Dense, 3, 1000, 0.5, 0.8);
+            for sweep in 0..1000 {
+                let cfg = NUTSConfig {
+                    max_tree_depth: 10,
+                    step_size: adapter.step_size(),
+                    mass_matrix: adapter.mass().clone(),
+                };
+                let r = nuts_step(&z, lp, &g, &cfg, &target, &mut rng);
+                if r.accepted {
+                    z = r.params;
+                    lp = r.log_posterior;
+                    let (_, gg) = target(&z);
+                    g = gg;
+                }
+                adapter.observe(sweep, &z, r.mean_accept_prob);
             }
-            adapter.observe(sweep, &z, r.mean_accept_prob);
-        }
-        adapter.finalize();
-        let step = adapter.step_size();
-        let mass = adapter.into_mass();
+            adapter.finalize();
+            let step = adapter.step_size();
+            let mass = adapter.into_mass();
 
-        // Sample under the adapted (step, metric).
-        let cfg = NUTSConfig { max_tree_depth: 10, step_size: step, mass_matrix: mass };
-        let n = 3000usize;
-        let mut cols = [
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-            Vec::with_capacity(n),
-        ];
-        for _ in 0..n {
-            let r = nuts_step(&z, lp, &g, &cfg, &target, &mut rng);
-            if r.accepted {
-                z = r.params;
-                lp = r.log_posterior;
-                let (_, gg) = target(&z);
-                g = gg;
+            // Sample under the adapted (step, metric).
+            let cfg = NUTSConfig { max_tree_depth: 10, step_size: step, mass_matrix: mass };
+            let n = 3000usize;
+            let mut cols = [
+                Vec::with_capacity(n),
+                Vec::with_capacity(n),
+                Vec::with_capacity(n),
+            ];
+            for _ in 0..n {
+                let r = nuts_step(&z, lp, &g, &cfg, &target, &mut rng);
+                if r.accepted {
+                    z = r.params;
+                    lp = r.log_posterior;
+                    let (_, gg) = target(&z);
+                    g = gg;
+                }
+                for j in 0..3 {
+                    cols[j].push(z[j]);
+                }
             }
-            for j in 0..3 {
-                cols[j].push(z[j]);
-            }
-        }
-        let ess: Vec<f64> = (0..3).map(|j| ess_per_iter(&cols[j])).collect();
-        eprintln!("windowed-warmup ESS/iter on correlated Gaussian: {ess:?} (step={step:.3})");
+            let ess: Vec<f64> = (0..3).map(|j| ess_per_iter(&cols[j])).collect();
+            eprintln!("seed {seed}: windowed-warmup ESS/iter {ess:.2?} (step={step:.3})");
+            ess.iter().cloned().fold(f64::INFINITY, f64::min)
+        };
+        let n_seeds = 8u64;
+        let mean_min_ess = (0..n_seeds).map(min_ess_for_seed).sum::<f64>() / n_seeds as f64;
+        eprintln!("mean over {n_seeds} seeds of the worst-dimension ESS/iter: {mean_min_ess:.3}");
 
-        // A single-freeze / mis-estimated metric caps this near ~0.4; a converged
-        // metric gives near-independent draws. Assert every dimension clears 0.6 —
-        // comfortably above the bad-metric ceiling, comfortably below the ~0.9 a
-        // converged dense metric delivers.
+        // Averaged over 8 seeds, the worst-dimension ESS/iter is ~0.69 for this
+        // dense adaptation, and ~0.41 (diagonal metric) or ~0.48 (identity) for a
+        // metric that cannot represent the correlation (gh#956 measurements).
+        // 0.6 separates the two.
         assert!(
-            ess.iter().all(|&e| e > 0.6),
-            "windowed warm-up should reach ESS/iter > 0.6 on all dims; got {ess:?} \
-             — the metric adaptation is not converging to the posterior covariance"
+            mean_min_ess > 0.6,
+            "windowed warm-up should reach a mean worst-dimension ESS/iter > 0.6 over \
+             {n_seeds} seeds; got {mean_min_ess:.3} — the metric adaptation is not \
+             converging to the posterior covariance"
         );
     }
 }
