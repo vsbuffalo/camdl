@@ -226,8 +226,7 @@ pub fn nuts_step(
     for depth in 0..max_depth {
         let direction: f64 = if rng.uniform() < 0.5 { 1.0 } else { -1.0 };
 
-        let (z_new, p_new, grad_new, z_prime, log_p_prime,
-             n_prime, stop_prime, div_prime, n_lf, sum_ap, n_as) = if direction > 0.0 {
+        let sub = if direction > 0.0 {
             build_tree(
                 &z_plus, &p_plus, &grad_plus, direction, depth, eps,
                 &config.mass_matrix, log_slice, h0, delta_max,
@@ -240,10 +239,12 @@ pub fn nuts_step(
                 log_prob_and_grad, rng,
             )
         };
+        let n_prime = sub.n_valid;
+        let stop_prime = sub.stop;
 
-        n_leapfrog += n_lf;
-        sum_accept_prob += sum_ap;
-        n_accept_steps += n_as;
+        n_leapfrog += sub.n_leapfrog;
+        sum_accept_prob += sub.sum_accept_prob;
+        n_accept_steps += sub.n_accept_steps;
 
         if !stop_prime && n_prime > 0 {
             // gh#audit-H1. Hoffman & Gelman (2014) Algorithm 6 line 4
@@ -262,18 +263,18 @@ pub fn nuts_step(
                 (n_prime as f64 / n_valid as f64).min(1.0)
             };
             if rng.uniform() < accept_prob {
-                z_proposal = z_prime;
-                log_p_proposal = log_p_prime;
+                z_proposal = sub.z_proposal;
+                log_p_proposal = sub.log_p_proposal;
             }
         }
 
         n_valid += n_prime;
-        divergent = divergent || div_prime;
+        divergent = divergent || sub.divergent;
 
         if direction > 0.0 {
-            z_plus = z_new; p_plus = p_new; grad_plus = grad_new;
+            z_plus = sub.z_far; p_plus = sub.p_far; grad_plus = sub.grad_far;
         } else {
-            z_minus = z_new; p_minus = p_new; grad_minus = grad_new;
+            z_minus = sub.z_far; p_minus = sub.p_far; grad_minus = sub.grad_far;
         }
 
         let stop = stop_prime || uturn(&z_minus, &z_plus, &p_minus, &p_plus,
@@ -346,6 +347,26 @@ fn leapfrog(
     (z_new, p_half, log_p_new, grad_new)
 }
 
+/// A subtree of `2^depth` leapfrog states, built by [`build_tree`] outward from
+/// a point that is not itself part of the subtree.
+struct Subtree {
+    /// The subtree's far end — the state the trajectory extends from next.
+    z_far: Vec<f64>,
+    p_far: Vec<f64>,
+    grad_far: Vec<f64>,
+    /// The state sampled from this subtree's valid leaves.
+    z_proposal: Vec<f64>,
+    log_p_proposal: f64,
+    /// Number of leaves inside the slice.
+    n_valid: usize,
+    /// A divergence or U-turn somewhere in the subtree: stop doubling.
+    stop: bool,
+    divergent: bool,
+    n_leapfrog: usize,
+    sum_accept_prob: f64,
+    n_accept_steps: usize,
+}
+
 /// Recursively build a balanced binary tree of leapfrog states.
 #[allow(clippy::too_many_arguments)]
 fn build_tree(
@@ -354,7 +375,7 @@ fn build_tree(
     mass: &MassMatrix, log_slice: f64, h0: f64, delta_max: f64,
     log_prob_and_grad: &dyn Fn(&[f64]) -> (f64, Vec<f64>),
     rng: &mut StatefulRng,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, f64, usize, bool, bool, usize, f64, usize) {
+) -> Subtree {
     if depth == 0 {
         let (z_new, p_new, log_p_new, grad_new) =
             leapfrog(z, p, grad, eps, direction, mass, log_prob_and_grad);
@@ -375,49 +396,55 @@ fn build_tree(
         let divergent = energy_nonfinite || (h_new - h0).abs() > delta_max;
         let accept_prob = if energy_nonfinite { 0.0 } else { ((-h_new + h0).exp()).min(1.0) };
 
-        return (z_new.clone(), p_new, grad_new, z_new, log_p_new,
-                n_valid, divergent, divergent, 1, accept_prob, 1);
+        return Subtree {
+            z_far: z_new.clone(), p_far: p_new, grad_far: grad_new,
+            z_proposal: z_new, log_p_proposal: log_p_new,
+            n_valid, stop: divergent, divergent,
+            n_leapfrog: 1, sum_accept_prob: accept_prob, n_accept_steps: 1,
+        };
     }
 
-    // Left subtree
-    let (z_inner, p_inner, grad_inner, z_prime, log_p_prime,
-         n_prime, stop_prime, div_prime, n_lf1, sum_ap1, n_as1) =
-        build_tree(z, p, grad, direction, depth - 1, eps, mass,
-                   log_slice, h0, delta_max, log_prob_and_grad, rng);
-
-    if stop_prime {
-        return (z_inner, p_inner, grad_inner, z_prime, log_p_prime,
-                n_prime, true, div_prime, n_lf1, sum_ap1, n_as1);
+    // Inner half: the first 2^(depth-1) states, extended from `z`.
+    let inner = build_tree(z, p, grad, direction, depth - 1, eps, mass,
+                           log_slice, h0, delta_max, log_prob_and_grad, rng);
+    if inner.stop {
+        return inner;
     }
 
-    // Right subtree
-    let (z_outer, p_outer, grad_outer, z_dprime, log_p_dprime,
-         n_dprime, stop_dprime, div_dprime, n_lf2, sum_ap2, n_as2) =
-        build_tree(&z_inner, &p_inner, &grad_inner, direction, depth - 1, eps, mass,
-                   log_slice, h0, delta_max, log_prob_and_grad, rng);
+    // Outer half: the next 2^(depth-1) states, extended from the inner far end.
+    let outer = build_tree(&inner.z_far, &inner.p_far, &inner.grad_far, direction,
+                           depth - 1, eps, mass, log_slice, h0, delta_max,
+                           log_prob_and_grad, rng);
 
     // Random choice (Hoffman & Gelman Algorithm 6)
-    let (z_proposal, log_p_proposal) = if n_dprime > 0 && n_prime + n_dprime > 0 {
-        if rng.uniform() < n_dprime as f64 / (n_prime + n_dprime) as f64 {
-            (z_dprime, log_p_dprime)
+    let n_inner = inner.n_valid;
+    let n_outer = outer.n_valid;
+    let (z_proposal, log_p_proposal) = if n_outer > 0 && n_inner + n_outer > 0 {
+        if rng.uniform() < n_outer as f64 / (n_inner + n_outer) as f64 {
+            (outer.z_proposal, outer.log_p_proposal)
         } else {
-            (z_prime, log_p_prime)
+            (inner.z_proposal, inner.log_p_proposal)
         }
     } else {
-        (z_prime, log_p_prime)
+        (inner.z_proposal, inner.log_p_proposal)
     };
 
-    let n_valid = n_prime + n_dprime;
-    let divergent = div_prime || div_dprime;
+    let z_minus = if direction > 0.0 { z.to_vec() } else { outer.z_far.clone() };
+    let z_plus = if direction > 0.0 { outer.z_far.clone() } else { z.to_vec() };
+    let p_minus = if direction > 0.0 { p.to_vec() } else { outer.p_far.clone() };
+    let p_plus = if direction > 0.0 { outer.p_far.clone() } else { p.to_vec() };
+    let stop = outer.stop || uturn(&z_minus, &z_plus, &p_minus, &p_plus, mass);
 
-    let z_minus = if direction > 0.0 { z.to_vec() } else { z_outer.clone() };
-    let z_plus = if direction > 0.0 { z_outer.clone() } else { z.to_vec() };
-    let p_minus = if direction > 0.0 { p.to_vec() } else { p_outer.clone() };
-    let p_plus = if direction > 0.0 { p_outer.clone() } else { p.to_vec() };
-    let stop = stop_dprime || uturn(&z_minus, &z_plus, &p_minus, &p_plus, mass);
-
-    (z_outer, p_outer, grad_outer, z_proposal, log_p_proposal,
-     n_valid, stop, divergent, n_lf1 + n_lf2, sum_ap1 + sum_ap2, n_as1 + n_as2)
+    Subtree {
+        z_far: outer.z_far, p_far: outer.p_far, grad_far: outer.grad_far,
+        z_proposal, log_p_proposal,
+        n_valid: n_inner + n_outer,
+        stop,
+        divergent: inner.divergent || outer.divergent,
+        n_leapfrog: inner.n_leapfrog + outer.n_leapfrog,
+        sum_accept_prob: inner.sum_accept_prob + outer.sum_accept_prob,
+        n_accept_steps: inner.n_accept_steps + outer.n_accept_steps,
+    }
 }
 
 /// U-turn criterion: (z+ - z-) · M^{-1} p < 0 for either endpoint.
