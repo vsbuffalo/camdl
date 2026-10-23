@@ -43,6 +43,22 @@ Every one of these came from a real miss. Run them; they are cheap.
    decision and it is the maintainer's, not yours. Fixing instance 1 of 14
    quietly is the worst of the three options.
 
+## Design radar (required in every PR body)
+
+Four items, each with its evidence pasted. A radar filled in without grep output
+is not done.
+
+1. **Instance or class.** The sibling-sweep grep and its hit count; each
+   sibling's disposition and `gh#NN`.
+2. **Did the fix add a copy of anything?** Another struct for the same concept,
+   a parallel validation path, a duplicated error string. gh#923 — backend, dt
+   and seeds each declared in three or four separate clap and serde structs — is
+   what accumulated copies look like.
+3. **Is there a seam that would make this bug impossible?** One sentence. File
+   it as `kind/design` or `kind/refactor`; do not implement it in the fix.
+4. **Disposition:** none / filed `gh#NN` / needs maintainer, with the one-line
+   question.
+
 ## Batching
 
 One PR per issue is the default and is right for anything with semantics. Batch
@@ -73,6 +89,10 @@ inherits none of the four checks above unless you hand them over.
 
 Not worth it for: anything on the high-risk list, anything where the fix shape
 is still an open question, or fewer than three issues.
+
+An issue whose evidence lives only on an unpushed or `worktree-agent-*` branch
+is not s-class until that branch is pushed (gh#957 and gh#958 are the current
+examples).
 
 ## The gate
 
