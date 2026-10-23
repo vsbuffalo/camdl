@@ -1,8 +1,9 @@
 # Claude Code — keep local settings and worktrees out of git, but DO track
-# shared, version-controlled skills, slash-commands, path-scoped rules, and the
-# team settings (settings.json = shared policy; settings.local.json stays
-# personal/ignored).
+# shared, version-controlled skills, subagents, slash-commands, path-scoped
+# rules, and the team settings (settings.json = shared policy;
+# settings.local.json stays personal/ignored).
 .claude/*
+!.claude/agents/
 !.claude/skills/
 !.claude/commands/
 !.claude/rules/
