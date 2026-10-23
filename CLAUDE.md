@@ -186,7 +186,9 @@ each carries that area's required reading: `dsl-surface.md`, `ir-schema.md`,
 
 Skills, invoked when the task calls for them: `review-report` (the numbered
 issue list + design calls), `incident-report` (the reproduction bar),
-`golden-update`, `releasing`, `release-notes`, `triage`.
+`golden-update`, `releasing`, `release-notes`, `triage`. Agent issue fixing
+(`camdl-fixer` → `camdl-reviewer` → maintainer):
+`docs/dev/agentic-burn-down.md`.
 
 How an agent establishes and reports what is true — paste-the-command
 verification, inference vs verified, red→green TDD, the "gate" vocabulary rule,
