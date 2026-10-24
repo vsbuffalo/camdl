@@ -43,9 +43,9 @@ final report and into the PR body. A step without pasted output did not happen.
    exercising the bug; rewrite it.
 
 4. **Fix, then the narrow gate.**
-   - Narrowest green test run covering the change:
-     `cargo test -p <crate> --lib`, one `--test` target, or one `dune exec`
-     binary. Paste it.
+   - Narrowest green test run covering the change: `cargo test -p <crate> --lib`
+     (`--bin camdl` for `cli`, which has no library target), one `--test`
+     target, or one `dune exec` binary. Paste it.
    - Clippy on the touched files only: rerun the baseline command into
      `$TMPDIR/clippy-after.txt` and paste
      `diff $TMPDIR/clippy-before.txt $TMPDIR/clippy-after.txt` (must add

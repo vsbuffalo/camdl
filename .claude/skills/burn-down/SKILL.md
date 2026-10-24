@@ -24,7 +24,12 @@ Every one of these came from a real miss. Run them; they are cheap.
    - the rest of the flag/variant/branch family — `gh#514` fixed the `--init`
      flags and left ~13 siblings (gh#540);
    - the same guard on the other path — `gh#496` guarded `batch.rs` and left
-     `fit/mod.rs` (gh#536).
+     `fit/mod.rs` (gh#536);
+   - for a defect in how a value is shown (an off-by-one, a unit, a format),
+     every `format!`/`eprintln!`/`writeln!` that prints it — readers of the
+     field are not enough. The gh#972 fix and its independent review both missed
+     the 0-based `chain_id` in an error message nine lines above code the
+     reviewer had read (gh#979).
 
    If siblings exist and you are not fixing them, **say so in the PR body and
    file the follow-up in the same breath.** Silence reads as "handled".
@@ -97,11 +102,12 @@ examples).
 ## The gate
 
 The working loop is the narrowest suite that covers the change — one
-`cargo test -p <crate> --lib`, one `dune exec` test binary, one `--test` target.
-`make test` is the authoritative gate and is slow (tens of minutes on a warm
-tree, longer from cold); CLAUDE.md accepts **either** a full local `make test`
-**or** CI as authoritative, so push early and let CI run while you start the
-next issue. Do not skip both.
+`cargo test -p <crate> --lib` (`--bin camdl` for `cli`, which has no library
+target), one `dune exec` test binary, one `--test` target. `make test` is the
+authoritative gate and is slow (tens of minutes on a warm tree, longer from
+cold); CLAUDE.md accepts **either** a full local `make test` **or** CI as
+authoritative, so push early and let CI run while you start the next issue. Do
+not skip both.
 
 Two things CI will not tell you, so check them locally before pushing:
 
