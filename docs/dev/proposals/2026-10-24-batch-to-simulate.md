@@ -214,22 +214,48 @@ together with re-use, and it replaces `batch status`.
 **Arm labels.** Without `--scenario`, the run's one arm is
 `ScenarioRef::Inline { name: "baseline", enable, disable, .. }`
 (`main.rs:1711`), so an arm built with `--enable vaccination` or
-`--param beta=0.3` is labelled `baseline` in the `scenario` column and in the
-store listing, and two different ad-hoc arms are indistinguishable. Batch's
-manifest arms each had a name. The label is presentation only: the arm's
-identity already includes its `enable`/`disable` sets (gh#573) and its parameter
-overrides, so no leaf re-keys. Decision: the label is derived from the flags,
-deterministically, at that one construction site: `baseline` when nothing is
-overridden; otherwise `baseline` followed by `+name` for each enabled
+`--param beta=0.3` is labelled `baseline` in its leaf path, in `run.json` and in
+the store listing (no `scenario` column is written for a single arm,
+`main.rs:2914, 2928`, and `--scenario` conflicts with the ad-hoc flags,
+`args/mod.rs:149-154`), and two different ad-hoc arms are indistinguishable.
+Batch's manifest arms each had a name. Decision: the label is derived from the
+resolved arm, deterministically, at that one construction site: `baseline` when
+nothing is overridden; otherwise `baseline` followed by `+name` for each enabled
 intervention, `-name` for each disabled one, and `;param=value` for each
-`--param`, in flag order, for example `baseline+vaccination` or
+`--param`, each group sorted by name and each value in Rust's shortest
+round-trip form, so the label is a pure function of the resolved scenario and
+`beta=.3` and `beta=0.3` give one label: `baseline+vaccination`,
 `baseline;beta=0.3`. A derived label cannot collide with a declared scenario,
-because declared names cannot contain `+`, `-` followed by a letter at that
-position, or `;`. Mandating a name was rejected: it would refuse every existing
-`--enable` invocation, including the book's. A flag that overrides the derived
-label is a follow-up if anyone asks. This is distinct from `--label`, which is a
-display label for the whole run in `camdl list` and `camdl show`
-(`args/mod.rs:549-554`) and never reaches the `scenario` column.
+because declared names are identifiers (`[A-Za-z_][A-Za-z0-9_]*`,
+`lexer.mll:176-177`). Mandating a name was rejected: it would refuse every
+existing `--enable` invocation, including the book's. A flag that overrides the
+derived label is a follow-up if anyone asks. This is distinct from `--label`,
+the display label for the whole run in `camdl list` and `camdl show`
+(`args/mod.rs:549-554`).
+
+The label reaches two places where only identity belongs, and PR B fixes both
+before it changes the label (§8). The first is the leaf lookup. A leaf's run ID
+is its five level hashes alone ("the label is provenance, the hash is identity",
+`resolve.rs:226-236`), but its directory is `{label}-{hash8}` per level
+(`layout.rs:110-112`), and both reuse checks, `check_reuse`
+(`resolve.rs:387-396`) and `CasSink::should_run`, find a leaf by building that
+path from the current labels and looking there. A leaf whose label changed while
+its content did not is therefore a miss although the store holds it: today,
+renaming a model file (the model level's label is the file stem), a params file
+or a scenario preset orphans every stored run of it, and the derived label would
+orphan every existing ad-hoc leaf the same way, while the same resolved arm
+reached through a preset and through flags would be stored twice under two
+names. The store gains one lookup, `runid::find_leaf(root, kind, levels)`, that
+walks the levels and at each one takes the child directory whose segment ends in
+that level's `hash8` (or its `~hash16`/`~full64` escalation), whatever label
+precedes it, then verifies identity from the leaf's own record exactly as
+`lookup` does now; among several candidates the one whose identity verifies
+wins, exact label preferred; a short-hash collision with a different identity is
+a miss and falls into the existing escalation on commit. Both reuse checks and
+`--force`'s displacement use it. New leaves are still written at `store_path`
+under the current label, so browsing is unchanged, and a leaf written under
+`baseline-<h8>` is found and reused by a run that now labels the arm
+`baseline+vaccination`. The second place is the ensemble grid level, below.
 
 **Store.** Each cell is a `Sim` leaf exactly as `simulate` and `batch` write one
 today, through `CasSink`, with the leaf's parameter label naming the swept
@@ -293,17 +319,21 @@ and strips nothing (`fit/cas.rs:211-217`). Under D-B every design point shares
 the seed and has draw index 0, so `--sweep beta=0.15,0.3` and
 `--sweep beta=0.3,0.15` sort to the same cell set and the same ID while their
 combined files differ (blocker 1 of the coordinate-kind implementation review).
-The fix must not add an element to the tuple: a `None` there serializes as
-`null` and re-keys every stored draws ensemble. It is the accepted proposal's
-form (`:1195-1200`): a top-level optional field on `EnsembleGridLevel`,
-serialized only when present (`skip_serializing_if = "Option::is_none"`),
-carrying the design identity (per cell, its design index and `point_id`), set
-only for jobs with a design axis. A unit test beside
-`levels_are_byte_identical_to_the_literals_they_replaced`
-(`sim_ensemble_cas.rs:203`) pins that a draws ensemble's level bytes are
-unchanged. `RunEntry` (`batch.rs:502-524`), which populates `EnsembleCell`
-(`main.rs:2694-2705`) with `draw_idx: spec.point_idx` (`batch.rs:1500, 1709`),
-gains the design field; for a sweep cell its `draw_idx` is 0.
+The tuple also carries the arm's label, a display string in a key: two ensembles
+of identical cells hash differently when the arm is named by a preset in one and
+derived from flags in the other, and renaming a preset re-keys every ensemble
+that used it. The grid level is rewritten rather than patched: the per-cell
+tuple becomes `(point_id, process_seed, sim_run_id)`, the run ID already pinning
+the scenario's content, and the level gains a plain `design` field, the resolved
+design of §3 for a sweep job and `None` otherwise, serialized as it is. That
+re-keys every stored multi-cell ensemble once (§8); the accepted coordinate-kind
+proposal's optional-field form (`:1195-1200`) existed only to avoid that re-key
+and is not used, since a representation is not contorted to stay hash-neutral.
+The unit test beside `levels_are_byte_identical_to_the_literals_they_replaced`
+(`sim_ensemble_cas.rs:203`) becomes the moved identity pin. `RunEntry`
+(`batch.rs:502-524`), which populates `EnsembleCell` (`main.rs:2694-2705`) with
+`draw_idx: spec.point_idx` (`batch.rs:1500, 1709`), gains the design field; for
+a sweep cell `point_id` is its design index and for a draws cell its draw index.
 
 ## 4. What is dropped, and why
 
@@ -370,10 +400,12 @@ ported (§6). After the move, the doc references to `batch::` at `engine.rs:4`,
 both producing `ParamSource::Sweep { points, replicates }` (the variant exists,
 `sim_job.rs:179`, arms at `sim_job.rs:205, 218`, `engine.rs:368`; batch is its
 only constructor today, `batch.rs:639, 1841`); the seed-index rule in the sweep
-arm of `plan_grid`; the design field on `RunEntry` and the optional field on
-`EnsembleGridLevel`; `point_id`, `sweep:<param>` and `seed` in the ensemble and
-observation writers; the (design point, scenario) key on `SimQuantities` and the
-filled `DesignCoords.sweep`; store re-use and the hit/miss dry-run view for
+arm of `plan_grid`; the design field on `RunEntry` and the grid level of §3
+(label out of the per-cell tuple, the design as a plain field);
+`runid::find_leaf` and its use by `check_reuse`, `CasSink::should_run` and
+`--force`'s displacement; `point_id`, `sweep:<param>` and `seed` in the ensemble
+and observation writers; the (design point, scenario) key on `SimQuantities` and
+the filled `DesignCoords.sweep`; store re-use and the hit/miss dry-run view for
 multi-cell `simulate` (both land in `SimSink`, `main.rs:2241, 2508`, or whatever
 `simulate`'s sink becomes after the move, as a `should_run` override that
 consults the moved `CasSink::should_run` and reads a hit's `traj.tsv` back for
@@ -394,7 +426,7 @@ called from `Makefile:209`) and the eight manifests `tests/fixtures/exp_*.toml`.
 `ParamSource::Sweep` and `Seeds::Explicit` stay.
 
 **Unaffected:** `engine.rs`, `sim_job.rs` (`SimulateJob`, `Seeds`, `ObsOutput`,
-`ScenarioRef`), `sim_ensemble_cas.rs` apart from the new field,
+`ScenarioRef`), `sim_ensemble_cas.rs` apart from the grid level,
 `params_resolver`, `config_v2::SeedsSpec` (belongs to `[synthetic]`),
 `fit/predict.rs` apart from calling the lifted expansion, `fit/contrasts.rs`,
 `mre.rs`, `profile.rs`, `compare.rs` (no code dependency on batch).
@@ -406,8 +438,8 @@ store re-use and the arm label are counted. Duplicated concepts removed: the
 TOML sweep grammar, the third Cartesian expansion,
 `ConfigSection`/`SeedsSection`, the ad-hoc `ScenarioEntry`, the second Rayon
 pool. Net additions that are real but small, and that the accepted proposal
-would add anyway: the optional field on the grid level, a second column regime
-in the combined tables, a two-key quantities accumulator.
+would add anyway: the design field on the grid level, a second column regime in
+the combined tables, a two-key quantities accumulator.
 
 ## 6. Tests
 
@@ -423,8 +455,10 @@ New, red before the flags and green after:
    two cells of one replicate carry the same `seed`; `point_id` starts at 0 and
    `replicate` starts at 0.
 3. `--sweep beta=0.2,0.3` and `--sweep beta=0.3,0.2` produce different ensemble
-   IDs, and a draws-only ensemble's grid-level bytes are unchanged (the unit
-   test beside `levels_are_byte_identical_to_the_literals_they_replaced`).
+   IDs; two ensembles of identical cells, the arm named by a preset in one and
+   derived from flags in the other, produce one ID; the unit test beside
+   `levels_are_byte_identical_to_the_literals_they_replaced` pins the new
+   grid-level bytes.
 4. `--sweep gamma=… --sweep beta=…` and `--sweep beta=… --sweep gamma=…` give
    the same `point_id`s, and the same as `fit predict --sweep` on the same grid.
 5. `--sweep` with `--draws`, with `--design-from`, with a `--param` naming the
@@ -448,11 +482,19 @@ New, red before the flags and green after:
    leaf has no observation subtree at the exact address, including a leaf that
    holds another cadence's or seed's subtree, and writes the requested one; a
    third run with the same flag is then all hits.
-10. `--enable vaccination` labels its arm `baseline+vaccination` in the
-    `scenario` column and the store listing; `--param beta=0.3` gives
-    `baseline;beta=0.3`; plain `simulate` still gives `baseline`; the leaf
-    identities are unchanged by the label.
-11. `camdl batch` exits with clap's unknown-subcommand error
+10. `--enable vaccination` labels its arm `baseline+vaccination` in the leaf
+    path, `run.json` and the store listing; `--param beta=0.3` and
+    `--param beta=.3` both give `baseline;beta=0.3`; plain `simulate` still
+    gives `baseline`; the leaf identities are unchanged by the label, and a leaf
+    written under `baseline-<h8>` before this PR is a hit for the relabelled
+    run.
+11. A leaf is found by hash, not by name: simulate, rename the scenario preset
+    in the model file, simulate again, every cell a hit and zero simulated; the
+    same after renaming the model file; a store that renamed nothing has the
+    same hits as before. In the `runid` crate: `find_leaf` on two directories
+    with one `hash8` returns the one whose identity verifies, and returns none
+    when neither does.
+12. `camdl batch` exits with clap's unknown-subcommand error
     (`cas_integration.rs:1069` already asserts this); no source line matches
     `cmd_batch_run`, `ExperimentToml`, `BatchArgs`, `CasSink::probe` or
     `sampling::`.
@@ -510,23 +552,34 @@ deletion.
 
 ## 8. Identity
 
-`--sweep` and `--sweep-file` are new, so no existing run re-keys. The ensemble
-grid level gains a top-level optional field that is absent for every existing
-job and skipped when absent, so every existing ensemble ID is unchanged; test 3
-pins the bytes. Store re-use changes no identity: it reads what the store
-already holds. The derived arm label is presentation and re-keys nothing. The
-tag `archive/batch` is placed on the last commit on main that carries the verb,
-before the deletion commit, with this proposal named in the tag message.
+`--sweep` and `--sweep-file` are new, so no existing sim leaf re-keys, and store
+re-use reads what the store already holds. PR B lands two changes to how the
+store is keyed, each in its own commit, before the derived label. The lookup by
+hash (§3 "Arm labels") changes no identity; every leaf a renamed label had
+orphaned becomes a hit again, and a store that renamed nothing sees the same
+hits as before. The grid level drops the scenario label from its per-cell tuple
+and carries the resolved design as a plain field, so every stored multi-cell
+ensemble re-keys once; the moved identity pin (test 3) is that commit's whole
+content, and the release-notes entry under _Run identity_, shared with the
+tempering and `rho` removals, says so and that a rebuilt ensemble aggregates
+cells the store already holds, so the cost is aggregation, not simulation. The
+derived arm label then changes the path and recorded label of new ad-hoc leaves
+and nothing else. The tag `archive/batch` is placed on the last commit on main
+that carries the verb, before the deletion commit, with this proposal named in
+the tag message.
 
 ## 9. Order of work
 
 1. **PR A, pure move.** §5's shared sink to `cas_sink.rs`, `probe` left behind
    for deletion; `simulate` and `batch` outputs byte-identical on the fixtures;
    full `make test`.
-2. **PR B, the flags.** `--sweep`, `--sweep-file`, the lifted expansion, the
-   seed rule, the `RunEntry` and grid-level fields, the combined and observation
+2. **PR B, the flags.** In this order: `find_leaf` and the two reuse checks on
+   it (test 12); the grid-level identity commit, alone (test 3's pin); then
+   `--sweep`, `--sweep-file`, the lifted expansion, the seed rule, the
+   `RunEntry` and grid-level design fields, the combined and observation
    columns, the quantities key, store re-use, the dry-run view, the resolved
-   design in the record, the derived arm label, tests 1–10; full `make test`.
+   design in the record, and last the derived arm label; tests 1–10 and 12; full
+   `make test`.
 3. **PR C, the deletion.** Tag `archive/batch`; delete §5's list; port and
    delete tests per §6, re-express the shell test; docs per §7; close gh#930 and
    gh#286; relabel gh#738 and gh#599 to `simulate`/`CasSink`; note the scope
@@ -540,13 +593,13 @@ Each PR formats every touched `.md` with `mdfmt` except
 
 This takes the design half of the coordinate-kind proposal's flag stage
 (`--sweep`, `--sweep-file`, the name-sorted product, D-B seeds, `point_id` and
-`sweep:<param>` columns, the grid-level field in its specified form) and leaves
-the rest: the `--draws <path>` refusal, the provenance sidecar, the design ×
-sample product, `band`, the per-cell and summary tables, fixed headers, the
-within-axis `replicate`, and `fit predict`'s move onto the shared grid. Both
-forks of that arc keep D-B and the two columns, so nothing here is undone by
-either; the `seed` column is additive. What the rewrite inherits is simpler by
-the whole of `batch`.
+`sweep:<param>` columns, the grid level re-keyed as §8 says rather than its §9.1
+optional field) and leaves the rest: the `--draws <path>` refusal, the
+provenance sidecar, the design × sample product, `band`, the per-cell and
+summary tables, fixed headers, the within-axis `replicate`, and `fit predict`'s
+move onto the shared grid. Both forks of that arc keep D-B and the two columns,
+so nothing here is undone by either; the `seed` column is additive. What the
+rewrite inherits is simpler by the whole of `batch`.
 
 Two things the coordinate-kind proposal and the session holding its rewrite must
 be told when PR B lands: that its flag stage's design half has shipped on
@@ -571,18 +624,18 @@ session is told directly as well as through the commits.
   construction; the risk is a stale leaf masking a changed input, which the
   store's identity makes impossible unless the identity is wrong, and `--force`
   remains the override.
-- The derived arm label changes the `scenario` column of every existing
-  `--enable`/`--disable`/`--param` run from `baseline` to the derived form. That
-  is a presentation change in combined files and listings, not an identity
-  change; the book's scenarios chapter reads the column and is updated in
+- The derived arm label changes the path and recorded label of new
+  `--enable`/`--disable`/`--param` leaves from `baseline` to the derived form;
+  existing leaves are found by hash and reused, and keep the label they were
+  written with in listings. The book's scenarios chapter is updated in
   `camdl-docs#1`.
 
 ## 12. Decisions (the maintainer, 2026-10-24)
 
 1. **Multi-cell `simulate` re-uses cells the store already holds**, for
    consistency with every other store-backed verb; a cell is held only when
-   every requested artifact is present, checked at the exact observation subtree
-   (§3). Decided; §3.
+   every requested artifact is present, checked at the exact observation
+   subtree, and a leaf is found by its hash, not by its label (§3). Decided; §3.
 2. **The pairing key is a `seed` column now**; the within-axis `replicate` comes
    with the coordinate-kind rewrite, layered on top. Decided; §3.
 3. **One index base, 0, everywhere a user sees an index.** `point_id` stays
@@ -590,8 +643,10 @@ session is told directly as well as through the commits.
    chain directories and chain labels move to 0 in gh#990, which supersedes
    gh#980's two-type design. Decided; §3.
 4. **Ad-hoc arms get a derived label** (`baseline+vaccination`,
-   `baseline;beta=0.3`) in the flags PR; no mandatory name, no new flag.
-   Decided; §3 "Arm labels".
+   `baseline;beta=0.3`) in the flags PR, after the store finds leaves by hash
+   and the ensemble key drops the label, so no leaf is stored twice and every
+   stored multi-cell ensemble re-keys once, declared; no mandatory name, no new
+   flag. Decided; §3 "Arm labels", §8.
 5. **Observation tables under a sweep carry `point_id`, `sweep:<param>` and
    `seed`**, never `draw`. Decided; §3.
 6. **The ensemble leaf's existing `run.json` carries the resolved design.** No
