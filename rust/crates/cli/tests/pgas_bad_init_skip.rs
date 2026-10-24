@@ -2,7 +2,7 @@
 //! density.
 //!
 //! `run_pgas` used to warn on a non-finite initial complete-data
-//! log-likelihood and sample anyway, seeding every rung with `-inf`. On a
+//! log-likelihood and sample anyway, seeding the chain with `-inf`. On a
 //! 40,000-sweep production fit one such chain held acceptance 0.000 and
 //! `n_divergent` 1.000 for the whole run and contributed ONE distinct
 //! parameter vector to the pooled posterior.
