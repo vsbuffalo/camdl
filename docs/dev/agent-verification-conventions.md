@@ -104,6 +104,23 @@ The general habit this is an instance of: when a word is doing several jobs in
 one document, name each job. This applies to prose, commit messages, proposals,
 and code comments alike.
 
+## A new inference method merges with the note that measures it
+
+A new algorithm, sampler option, or variance-reduction or tempering scheme is a
+claim: that it does something better than the method already there. The claim is
+verified the way every other claim in this document is — run the comparison and
+paste it — and the artifact is a `docs/dev/notes/` note that measures the
+improvement against the existing method on at least one committed fixture. For a
+sampler that is effective samples per unit compute, acceptance, or bias against
+an oracle; for an optimiser, iterations to the same maximum. The feature arrives
+on a branch, never directly on main, and the merge commit cites the note.
+
+The failure mode this prevents is a method that works, passes its own tests, and
+is never shown to help. Three such methods — PGAS tempering, correlated PMMH,
+and NUTS on the ODE backend — reached main that way and were removed for it; the
+decision record is
+`docs/dev/proposals/2026-10-24-remove-pgas-tempering-ode-nuts-and-correlated-pmmh.md`.
+
 ## Proposals
 
 The rules for writing one — read the area's normative docs first, be
