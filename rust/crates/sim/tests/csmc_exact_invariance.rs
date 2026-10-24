@@ -245,11 +245,9 @@ fn enumerate_paths(initial: &[i64], n_substeps: usize) -> Vec<PGASTrajectory> {
     out
 }
 
-/// The exact smoothing target over the enumerated support: `π_β(X) ∝ p(X | θ) ·
-/// p(y | X, θ)^β`, read from the same `complete_data_loglik` the θ-move
-/// conditions on. At `β = 1` this is `p(X, y)`; below it, the tempered rung's
-/// conditional (gh#551) — process density at full weight, observation density
-/// raised to `β`.
+/// The exact smoothing target over the enumerated support: `π(X) ∝ p(X | θ) ·
+/// p(y | X, θ)`, the joint `p(X, y)` at θ, read from the same
+/// `complete_data_loglik` the θ-move conditions on.
 fn exact_target(
     f: &Fixture,
 ) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>, usize>) {
