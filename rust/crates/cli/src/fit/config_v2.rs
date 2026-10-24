@@ -2263,6 +2263,13 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
                  `starts = \"from_prior\"`, or a `from_posterior` from a short run."
                     .to_string(),
             ),
+            "tempering" => Some(
+                "`tempering` was removed with PGAS parallel tempering (gh#789): every \
+                 PGAS chain samples the posterior directly, as the ladder's cold rung \
+                 did. Delete the line. Fits stored before the removal are not reused \
+                 and cannot be resumed; they run again."
+                    .to_string(),
+            ),
             _ => None,
         };
         if let Some(why) = retired {
@@ -3810,6 +3817,21 @@ cooling = 0.7
         let err = parse(&stale_chain).expect_err("`init_mle` under [method] is not a key");
         assert!(err.contains("from_posterior") && err.contains("from_mle"),
             "must name both sourced rules; got: {err}");
+
+        // `tempering` left with PGAS parallel tempering (gh#789). The message
+        // says the key was removed and that the fix is to delete the line, not
+        // a bare "unknown key" an author would read as a typo; the same file
+        // without the line parses.
+        let stale_tempering = format!(
+            "{base}[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+             chains = 2\nparticles = 100\nsweeps = 10\ntempering = [1.0]\n"
+        );
+        let err = parse(&stale_tempering).expect_err("`tempering` under [method] is not a key");
+        assert!(err.contains("`tempering`") && err.contains("removed") && err.contains("elete"),
+            "must say the key was removed and to delete the line; got: {err}");
+        let without = stale_tempering.replace("tempering = [1.0]\n", "");
+        assert!(parse(&without).is_ok(),
+            "the same file without the line must parse: {:?}", parse(&without).err());
     }
 
     /// The NLopt stages carry the same five keys whether or not the algorithm
@@ -7016,8 +7038,10 @@ decibans_thresh = 100.0
         // one chain-start key is `starts` under its TOML spelling, and the
         // retired `init` / `init_mle` / `survey_*` keys are gone. A deliberate
         // re-key of every method leaf, ruled in §8 item 22; see the commit for
-        // the --resume consequence.
-        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"particles":100,"starts":"uniform_unconstrained","tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
+        // the --resume consequence. Moved again when PGAS parallel tempering
+        // was removed (gh#789): the `tempering` key left the payload, so every
+        // PGAS leaf re-keys — the release notes' Run-identity entry.
+        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"particles":100,"starts":"uniform_unconstrained","thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
         assert_eq!(payload_str, expected,
             "identity_payload byte format drifted — every existing \
              resume_state.bin would be invalidated. If this change is \

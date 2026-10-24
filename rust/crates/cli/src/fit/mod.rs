@@ -264,6 +264,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", msg);
         std::process::exit(1);
     }
+    // PGAS parallel tempering was removed (gh#789); the flag is trapped so a
+    // stale script is answered with the fix rather than clap's "unexpected
+    // argument".
+    if let Some(raw) = a._removed_tempering.as_deref() {
+        eprintln!(
+            "error: --tempering is no longer accepted on `camdl fit run`: PGAS parallel \
+             tempering was removed (gh#789), and every PGAS chain samples the posterior \
+             directly, as the ladder's cold rung did. Drop `--tempering {raw}`; a \
+             `tempering = [...]` line under [method] must be deleted too. Fits stored \
+             before the removal are not reused and cannot be resumed; they run again."
+        );
+        std::process::exit(1);
+    }
     let fit_path              = a.config.to_string_lossy().into_owned();
     let base_seed             = a.seed.unwrap_or(1);
     let force                 = a.force;
