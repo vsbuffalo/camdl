@@ -34,20 +34,24 @@ question and is labelled as one.
    shows upstream additions as phantom deletions by the branch.
 
 2. **Red on main, green on the branch.** On your clean checkout, bring in only
-   the PR's test file(s) (`git checkout pr-N -- <test path>`), run the test,
-   paste it failing. Then `git checkout -- .`, `git switch pr-N`, run it again,
-   paste it passing. If it passes on main, the test does not exercise the bug:
-   that is a **blocker** finding.
+   the PR's test: `git checkout pr-N -- <test path>` when the test has its own
+   file, or, for a Rust unit test in the same file as the fix, a patch of only
+   the test hunks cut from `$TMPDIR/pr-N.patch` and applied with `git apply`.
+   Run the test and paste it failing. Then `git checkout -- .`,
+   `git switch pr-N`, run it again, paste it passing. If it passes on main, the
+   test does not exercise the bug: that is a **blocker** finding.
 
 3. **Independent sibling sweep.** Before reading the PR's Sibling sweep section,
    do your own per burn-down check 1 (`rg` for other callers, readers of
    anything moved, the rest of the flag/variant family, the same guard on the
-   other path). Then compare. Any hit the PR missed is a finding.
+   other path, and every print site of a value whose display was wrong). Then
+   compare. Any hit the PR missed is a finding, at least **medium**.
 
 4. **Every claim is executed.** Walk the PR body sentence by sentence. A claim
-   about behaviour with no pasted command behind it is a **high** finding. "Not
-   exercised" entries are honest and are not findings; a claim that should have
-   been listed there and was not, is.
+   about behaviour the PR changes, with no pasted command behind it, is a
+   **high** finding; any other unbacked claim is **medium**. "Not exercised"
+   entries are honest and are not findings; a claim that should have been listed
+   there and was not, is.
 
 5. **Design radar is evidenced.** Each of its four items must carry grep (or
    equivalent) output, not only a sentence. An item that is filled in but not
