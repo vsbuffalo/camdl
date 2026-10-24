@@ -85,11 +85,14 @@ pub struct FitState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_eval_logliks: Vec<f64>,
 
-    /// The chain ids `chain_eval_logliks` and `chain_eval_ses` belong to,
-    /// parallel to both. Written because those two are built by
-    /// `ChainResults::chain_eval_logliks`, which sorts by chain id and then
-    /// DISCARDS it — and IF2 drops PF-degenerate chains before that point, so
-    /// a position in the vector is not a chain number. Without this the
+    /// The chains `chain_eval_logliks` and `chain_eval_ses` belong to,
+    /// parallel to both, as **1-based chain numbers** — the same numbering as
+    /// `best_chain` and the `chain_N/` directories, not the 0-based
+    /// `ChainScore::chain_id` they are converted from (gh#972). Written
+    /// because those two are built by `ChainResults::chain_eval_logliks`,
+    /// which sorts by chain id and then DISCARDS it — and IF2 drops
+    /// PF-degenerate chains before that point, so a position in the vector is
+    /// not a chain number. Without this the
     /// summary's per-chain table labelled row `i` as "chain i + 1", which put
     /// the `<- selected` marker on the wrong chain whenever any chain had been
     /// dropped. Empty in fit_state files written before this field existed;
