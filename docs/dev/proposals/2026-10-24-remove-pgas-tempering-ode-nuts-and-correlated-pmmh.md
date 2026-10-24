@@ -1,11 +1,11 @@
 # Remove PGAS tempering, NUTS on the ODE backend, and correlated PMMH; archive each under a git tag
 
 - Date: 2026-10-24
-- Status: accepted by the maintainer on 2026-10-24: all three cuts and the PGAS
-  fit re-key confirmed; the `camdl batch` removal is its own proposal,
-  `2026-10-24-batch-to-simulate.md`. One consequence surfaced while writing the
-  correlated-PMMH section and has not yet been put to the maintainer: removing
-  `rho` also re-keys every PMMH fit and every PMMH `camdl profile` run (§5.6).
+- Status: accepted by the maintainer on 2026-10-24: all three cuts confirmed;
+  both re-keys (PGAS `tempering` §3.6, PMMH `rho` §5.6) land as one identity
+  change, recorded as one Run-identity entry in the release notes. The
+  `camdl batch` removal is its own proposal, `2026-10-24-batch-to-simulate.md`
+  (PR #988).
 - Archive tags: `archive/pgas-tempering`, `archive/ode-nuts`,
   `archive/correlated-pmmh` (§7).
 - Relates-to: gh#789, gh#569, gh#551, gh#917, gh#390, gh#921, gh#767, gh#102,
@@ -14,8 +14,8 @@
   `2026-06-26-ode-nuts-gradient-spine.md` (the proposals that introduced the ODE
   gradient stack and NUTS on it);
   `2026-09-27-coordinate-kind-design-vs-sample.md` (accepted; owns scenario
-  algebra); `2026-10-04-effect-fire-time-authority.md` (draft; its PGAS step
-  touches the sweep this proposal simplifies, and its clock table has a
+  algebra); `2026-10-04-effect-fire-time-authority.md` (PR #989; draft; its PGAS
+  step touches the sweep this proposal simplifies, and its clock table has a
   correlated-PMMH row); the note
   `2026-10-06-run-grid-workflows-and-composition.md` (the usage survey;
   uncommitted at the time of writing);
@@ -189,14 +189,20 @@ at `config_v2.rs:7042` contains `"tempering":[1.0]`, and its own message says a
 change "invalidate[s] every existing resume_state.bin". Removing the field
 therefore re-keys every PGAS fit leaf, so no new PGAS run deduplicates against
 an existing one and no in-flight PGAS fit can resume. Stored results stay
-readable. Per `run-identity.md` this is a deliberate, versioned re-key: the
-implementer bumps the fit-config identity level per `VERSIONING.md`, moves the
-identity golden in its own reviewed commit, and lands nothing else in that
-commit. A `fit.toml` that still says `tempering = [1.0]` is refused with an
-actionable message naming the removed field and the fix (delete the line), in
-the shape of the removed-flag traps at `args/mod.rs:115-125`; no alias, no
-silent acceptance. The re-key is the price of the cut; the maintainer confirmed
-it on 2026-10-24.
+readable. Per `run-identity.md` this is a deliberate re-key, never collateral.
+What that is concretely: `VERSIONING.md:25-31` makes a run-identity change a
+release-notes entry under _Run identity_, naming which results will run again,
+and defers a vocabulary for kinds of identity change; it names no version
+constant, and none (`FIT_IDENTITY_VERSION` or equivalent) exists in the tree. So
+the implementer moves the identity golden in its own reviewed commit, lands
+nothing else in that commit, and the release notes carry the entry. A `fit.toml`
+that still says `tempering = [1.0]` is refused with an actionable message naming
+the removed field and the fix (delete the line), in the shape of the
+removed-flag traps at `args/mod.rs:115-125`; no alias, no silent acceptance. The
+re-key is the price of the cut; the maintainer confirmed it on 2026-10-24,
+together with the PMMH `rho` re-key of §5.6: the two land as one identity change
+with one _Run identity_ entry, and PR A's re-key is not released without PR C's
+(§9).
 
 ### 3.7 Issues
 
@@ -292,7 +298,24 @@ stay because `nl-lbfgs` needs them.
   the ODE sampler.
 - Comments that name `run_ode_nuts` or `ode_nuts`: `pgas.rs:3566`,
   `nuts.rs:580`, `types.rs:696`.
-- Tests: `rust/crates/cli/tests/nuts_ode_recovery.rs`, whole file; the `nuts`
+- `FitAlgorithm::Nuts`, the algorithm tag written into every leaf's `run.json`
+  (`run_meta.rs:83`, `#[serde(rename = "nuts")]`), and its arms:
+  `run_meta.rs:99, 126, 848, 902` (`nuts_summary.json`),
+  `posterior_draws.rs:242`, `method_result.rs:881, 1329, 2071`, `loglik.rs:189`,
+  `methods.rs:569, 697`, `config_v2.rs:1511, 2385`. With it the
+  `MethodResult::Nuts(NutsStageResult)` variant (`method_result.rs:36`;
+  `NutsStageResult` itself at `:819`, its `"nuts"` loader at `:909`, test
+  `:2060`) and that variant's readers:
+  `fit_summary.rs:122, 582, 656-659, 784,
+  1702, 2788, 2841, 2850, 2942, 2955, 3261, 3495`,
+  `gating.rs:451`, `table_row.rs:285`, `loglik.rs:207`. The `Algorithm::Nuts`
+  match arms in `config_v2.rs` (`:1416, 1433, 1529, 1536, 1545, 1563, 1627`) and
+  in `fit/mod.rs` (`:79`, the `pub mod nuts`;
+  `:140, 217, 412-417, 1566-1581,
+  1836`).
+- Tests: `rust/crates/cli/tests/nuts_ode_recovery.rs`,
+  `gh932_nuts_draws_carry_fixed.rs` and `gh910_nuts_chain_dirs_one_based.rs`,
+  whole files (each fits `algorithm = "nuts"` on the ODE backend); the `nuts`
   cell of `coarse_burnin_ode.rs` (its fixture at `:131`; the `mh` cell at `:274`
   stays); the `"nuts"` entry in `gh900_every_method_writes_progress.rs:223` and
   its fixture at `:170`. `state_grad_gating.rs` stays, with its header (`:4`,
@@ -318,8 +341,8 @@ stay because `nl-lbfgs` needs them.
   `:950`) and the IR fields they emit (`transition.rs:144`,
   `observation.rs:364`, `model.rs:453`). No IR change, so no `ir/VERSION` bump.
 - `burnin_dt`, the coarse integration step for the unscored warm-up before the
-  first observation: `Algorithm::Mh` carries it too (`config_v2.rs:1173`), the
-  garki project uses it under `mh`, and `validate_burnin_dt` (`:1833`) is
+  first observation: `Algorithm::Mh` carries it too (`config_v2.rs:1173`), one
+  external ODE project uses it under `mh`, and `validate_burnin_dt` (`:1833`) is
   shared.
 - Tests: `nl_lbfgs_ode_recovery.rs`, `state_grad_gating.rs`, the `mh` cell of
   `coarse_burnin_ode.rs`.
@@ -328,7 +351,16 @@ stay because `nl-lbfgs` needs them.
 
 Removing a method removes its own fit leaves and changes no other method's
 identity payload; `burnin_dt` on `mh` is identity-defining and untouched. No
-identity bump.
+identity change, so no _Run identity_ release-notes entry for this cut.
+
+One consequence the other two cuts do not have. `FitAlgorithm` is the algorithm
+tag recorded in every leaf's `run.json` under `inputs` (`run_meta.rs:71-75`),
+and with the `Nuts` variant gone a stored NUTS leaf's `"algorithm": "nuts"` no
+longer deserialises, so stored NUTS results stop being readable by camdl. The
+tempering and correlated-PMMH cuts remove a field from a payload, not a variant
+from the tag enum, which is why their stored results stay readable. The archive
+tag (§4.8) is how a NUTS result is read back if ever needed. Inferred from the
+enum change; not run.
 
 ### 4.7 Issues
 
@@ -364,9 +396,11 @@ Around the filter: `--rho` on `fit run` (`args/mod.rs:924-928`,
 `fit/mod.rs:286-288, 303`) and `--pmmh-rho` on `camdl profile`
 (`args/mod.rs:1947`, `profile.rs:260-273`); the obs-alignment resolution for
 `pmmh`, where the correlated rows require on-grid observations
-(`cli/src/fit/methods.rs:540-560`) and the flag that feeds them
-(`config_v2.rs:2455`); one row of the effect fire-time proposal's clock table;
-and the correlated-PMMH passages in `docs/inference.md` and `docs/fit-toml.md`.
+(`cli/src/fit/methods.rs:533-549`), the `ic_free` refusal for correlated PMMH
+(`:651-660`), and the `correlated` flag that feeds both, computed at
+`cas.rs:568`, `runner.rs:448-454` and `config_v2.rs:2455`; one row of the effect
+fire-time proposal's clock table; and the correlated-PMMH passages in
+`docs/inference.md` and `docs/fit-toml.md`.
 
 ### 5.2 Users
 
@@ -417,7 +451,13 @@ the record of one such doubling. Removing the method collapses both to one arm.
   `init_noise_width` and `t_start` (`:34, 69-80`; the comment at `:34` says only
   correlated PMMH reads `t_start`), `PMMHState.current_randoms` (`:163`),
   `CorrelatedEvalFn` (`:539`), the `eval_loglik_correlated` parameter of
-  `run_pmmh` (`:554`) and the correlated branches (`:633-643, 757-805`).
+  `run_pmmh` (`:554`) and the correlated branches (`:633-643, 757-805`). Two
+  lines on the plain path go with them:
+  `use super::correlated_pf::PFRandomState` (`:572`) and
+  `cpm_steps_per_obs(&obs_times, config.t_start, config.dt)` (`:580-582`) run
+  unconditionally, but they only size a noise vector the plain path never draws
+  (`config.rho.map(..)` at `:634`), so removing them moves no plain-PMMH draw
+  and the §10 plain-PMMH byte pin still holds.
 - `rust/crates/sim/src/chain_binomial.rs`: `StepScratch.gamma_override`,
   `binomial_z_values`, `binomial_z_idx` (`:60-71`) and the arms that read them
   in `step_one` (`:691, 708-716`).
@@ -426,33 +466,72 @@ the record of one such doubling. Removing the method collapses both to one arm.
   (`:830, 837`) and their construction (`:2059-2061`).
 - `rust/crates/cli/src/fit/pmmh.rs`: `PmmhStageOpts.rho` and its validation
   (`:34-65`), the forced `None` on the ODE-MH path (`:139-143`), the gh#193
-  obs-grid preflight (`:195-205`), the correlated evaluator (`:662-684`).
+  obs-grid preflight (`:195-205`), the `rho` argument of `pf_noise::measure` and
+  `pf_noise::summarize` (`:264-265, 269`), the correlated evaluator
+  (`:662-684`).
 - `rust/crates/cli/src/fit/pf_noise.rs`: the `Some(rho)` arm of the pair
   measurement and `eval_correlated` (`:339-392`). The `None` arm and the
   preflight itself stay: they serve plain PMMH (gh#767).
-- `rust/crates/cli/src/profile.rs`: `--pmmh-rho` handling (`:179, 260-273`), the
-  obs-grid preflight (`:929-937`), the correlated evaluator (`:1615-1626`), the
-  `"rho"` key of the PMMH algorithm payload (`:1824`) and the knob plumbing
-  (`:1170, 1582, 2182, 2192`); `args/mod.rs:1947`.
+- `rust/crates/cli/src/profile.rs`: `ProfilePmmhKnobs.rho` (`:179`, the hashed
+  field; §5.6), `--pmmh-rho` handling (`:260-273`), the obs-grid preflight
+  (`:929-937`), the correlated evaluator (`:1615-1626`), the `"rho"` key of the
+  PMMH display payload (`:1824`) and the knob plumbing
+  (`:1170, 1582, 2182,
+  2192`); `args/mod.rs:1947`.
 - `rust/crates/cli/src/fit/config_v2.rs`: the `rho` field (`:1133`), its CLI
-  override (`:1631-1634`), `CliStageOverrides.rho` (`:1697`), the correlated
-  flag in the alignment check (`:2455`), the tests at `:3390-3391` and
-  `:7076-7077`, and the PMMH payload golden at `:7057` (moved in the identity
-  commit, §5.6).
-- `rust/crates/cli/src/fit/methods.rs:540-560`: the correlated rows of the
-  `pmmh` alignment match collapse into the plain rows.
+  override (`:1631-1634`), `CliStageOverrides.rho` (`:1697`), the `correlated`
+  flag in the `ic_free` check (`:2455`; it feeds `validate_ic_free`, not the
+  alignment gate), the tests at `:3390-3391` and `:7076-7077`, and the PMMH
+  payload golden at `:7057` (moved in the identity commit, §5.6).
+- `rust/crates/cli/src/fit/methods.rs`: the `correlated: bool` parameter of
+  `resolve_obs_alignment` (`:512-521`) and of `validate_ic_free` (`:636-642`);
+  the correlated rows of the `pmmh` alignment match (`:533-549`) collapse into
+  the plain rows and the `A::Pmmh if correlated` arm (`:651-660`) goes; the
+  callers that compute the flag, `cas.rs:568`, `runner.rs:448-454` and
+  `config_v2.rs:2455`, drop it; the tests `obs_alignment_pmmh_is_rho_dependent`
+  (`:1185`) and `ic_free_correlated_pmmh_names_the_correlated_reason` (`:1297`)
+  go.
 - `rust/crates/cli/src/args/mod.rs:924-928` (`--rho`) and
   `rust/crates/cli/src/fit/mod.rs:286-288, 303`.
 - Tests, whole files: `rust/crates/sim/tests/correlated_pf_finite.rs`,
   `gh367_correlated_pf_death_mask.rs`, `normal_to_gamma_unbiased.rs`,
-  `binomial_quantile_underflow.rs`, `gh772_poisson_quantile.rs`;
-  `rust/crates/cli/tests/gh772_cpm_initial_state_laws.rs`. Tests inside mixed
-  files: the `cpm_*` group in `sim/tests/pmmh.rs` (`:433-540`); the
-  correlated-PF cells of `gh216_cursor_firing.rs` (`:55, 357, 431, 469`; the
-  firing-time invariant keeps its particle-filter, IF2 and PGAS cells).
-- The comment at `intervention.rs:230`; the correlated-PMMH passages in
-  `docs/inference.md` and `docs/fit-toml.md`, and whatever a grep for
-  `correlated` finds in the other `docs/*.md` and `README.md`.
+  `binomial_quantile_underflow.rs`, `gh772_poisson_quantile.rs`,
+  `gh772_cpm_initial_state_laws.rs` (all under `sim/tests/`). Tests inside mixed
+  files: the `cpm_*` group in `sim/tests/pmmh.rs`, from the "Correlated PF (CPM)
+  observation-grid handling" header at `:420` through
+  `pmmh_with_rho_runs_on_a_model_that_draws_its_initial_state` (`:1015`, ends
+  `:1080`; `run_cpm_core` at `:433`); the correlated-PF cells of
+  `gh216_cursor_firing.rs` (`:55, 357, 431, 469`; the firing-time invariant
+  keeps its particle-filter, IF2 and PGAS cells). In `cli/tests`: the correlated
+  fixture `write_correlated_pmmh_toml` and the two tests that use it in
+  `fit_sparse_holes.rs` (`:132, 394, 477`), and
+  `correlated_pmmh_measures_and_persists_under_its_own_scheme` in
+  `gh764_pf_noise_persisted.rs` (`:244`, with the `rho_line` parameter of its
+  `write_fit_toml` helper, `:100`). Tests that stay and lose only the flag:
+  `profile_pmmh.rs:113, 454` (and its `algorithm.rho` assertion, `:173-176`),
+  `profile_priors.rs:242`, `profile_diagnostics.rs:184, 464`,
+  `prior_posterior_invariants.rs:174`; `profile_diagnostics.rs:464` and
+  `prior_posterior_invariants.rs:174` already pass `--pmmh-rho 0.0`, which is
+  the plain filter, and the rest pass `0.99`; each keeps running as plain PMMH
+  with the flag dropped.
+- Mechanical: the plain
+  `PMMHConfig { .., rho: None, n_source_groups: 0, init_noise_width: 0 }`
+  constructors, eight in `sim/tests/pmmh.rs`
+  (`:194, 240, 277, 311, 346, 407,
+  1096, 1125`),
+  `pmmh_scale_collapse.rs:144-145` and `gh226_inf_loglik_backstop.rs:55-56`,
+  lose the three fields; in the mechanical commit (§9).
+- Comments that name the correlated filter, CPM or `rho`:
+  `sim/src/intervention.rs:230`, `sim/src/inference/degeneracy.rs:87, 106-111`,
+  `sim/src/inference/types.rs:228, 314`, `sim/src/inference/resampling.rs:28`,
+  `sim/src/schedule.rs:266, 482, 621`, `sim/src/effects.rs:344`,
+  `sim/src/time.rs:151`, `sim/src/inference/pgas.rs:1326, 1372`,
+  `sim/src/inference/multi_stream_obs.rs:2758`,
+  `sim/src/compiled_model.rs:1906`, `sim/src/inference/particle_filter.rs:321`,
+  `cli/src/fit/cas.rs:486, 551`, `cli/src/fit/runner.rs:431-432`.
+- The correlated-PMMH passages in `docs/inference.md` and `docs/fit-toml.md`,
+  and whatever a grep for `correlated` finds in the other `docs/*.md` and
+  `README.md`.
 
 ### 5.5 What stays
 
@@ -461,27 +540,39 @@ proposal with Robbins–Monro scaling, the likelihood-noise preflight
 (`pf_noise.rs`) and its persisted spread. `camdl profile --algorithm pmmh`
 stays, without `--pmmh-rho`.
 
-### 5.6 Identity: this re-keys every PMMH fit and every PMMH profile
+### 5.6 Identity: this re-keys every PMMH fit and every `camdl profile` run
 
 `rho` is part of the PMMH stage identity: the canonical payload golden at
 `config_v2.rs:7057` contains `"rho":null`, and `:7076-7077` asserts that setting
 it changes the payload. Removing the field re-keys every PMMH fit leaf, with the
 same consequences as §3.6: no new PMMH run deduplicates against an existing one,
-no in-flight PMMH fit resumes, stored results stay readable. `camdl profile`
-keys its PMMH cells on a payload that carries `"rho"` (`profile.rs:1824`, hashed
-whole by `canonical_config_hash`), so every PMMH profile run re-keys as well.
+no in-flight PMMH fit resumes, stored results stay readable.
 
-Same mechanics as §3.6: a versioned identity bump per `VERSIONING.md`, the two
-goldens moved in their own reviewed commit with nothing else in it, and removal
-traps so that `rho = …` under `pmmh` in a `fit.toml`, `--rho` and `--pmmh-rho`
-are refused with a message naming the removed field and the fix (delete it), in
-the shape of `args/mod.rs:115-125`. If PR A's identity bump has not shipped in a
-release when PR C lands, PR C's identity commit joins that bump rather than
-adding a second one; pending re-keys land in one bump.
+`camdl profile` is re-keyed more widely. Its method-level identity is the
+`ProfileMethodLevel` struct (`profile.rs:153-164`), which carries a
+`ProfilePmmhKnobs { steps, particles, rho }` field (`:175-180`, no
+`skip_serializing_if`) for every algorithm, and `canonical_config_hash` hashes
+that struct whole (`:1163-1171`); the if2 round-trip test at `:2182` builds it
+with `pmmh: ProfilePmmhKnobs { .., rho: None }`. Removing the field therefore
+re-keys every `camdl profile` run, whatever its algorithm, not only the PMMH
+ones. The `"rho"` key of the PMMH algorithm payload at `:1824` is the display
+payload, recorded in `inputs` and not hashed (comment at `:1815-1817`); it goes
+too, but moves no key.
 
-The maintainer confirmed the PGAS re-key on 2026-10-24. This PMMH re-key is a
-consequence of the `rho` decision that was not on the table at the time and is
-recorded here so it is confirmed before PR C's identity commit lands.
+Same mechanics as §3.6: the fit payload golden (`config_v2.rs:7057`) and the
+profile method-level literal (`profile.rs:2182, 2192`) moved in their own
+reviewed commit with nothing else in it, and removal traps so that `rho = …`
+under `pmmh` in a `fit.toml`, `--rho` and `--pmmh-rho` are refused with a
+message naming the removed field and the fix (delete it), in the shape of
+`args/mod.rs:115-125`. PR C's identity commit joins PR A's: one identity change
+covers both removals, and PR A's re-key is not released without PR C's. What
+that one identity change concretely is, per `VERSIONING.md:25-31`: one _Run
+identity_ entry in the release notes naming the PGAS fit leaves, the PMMH fit
+leaves and every `camdl profile` leaf as the results that will run again. There
+is no version constant to increment; `VERSIONING.md` defers a vocabulary for
+kinds of identity change, and no `FIT_IDENTITY_VERSION` or equivalent exists.
+
+The maintainer confirmed both re-keys on 2026-10-24.
 
 ### 5.7 Issues
 
@@ -578,26 +669,33 @@ same maximum. The merge commit cites the note.
 
 Tempering (commit `163c80d7`, 2026-04-09), correlated PMMH (`009b6f08`,
 2026-04-05) and NUTS on the ODE backend (`951dc5c9`, 2026-07-07) each reached
-main without such a note. The one comparison that was made, DELENDA, was made
-after the fact and lives outside the repository. This proposal, and the three
-PRs it specifies, are the cost of that. The rule is written into `CLAUDE.md`
-("Commits and tracking") and `docs/dev/agent-verification-conventions.md` in the
-same commit as this proposal.
+main without such a note. The correlated-PMMH commit did carry a design
+proposal, now archived as
+`docs/dev/proposals/archive/pre-alpha/2026-04-05-correlated-pseudo-marginal.md`:
+it states a motivating variance figure (sd(log L̂) of 30 to 170 at 2,000
+particles on a T = 1096 series, giving 1 to 2% acceptance) and an implementation
+plan, but no comparison against plain PMMH, before or after; that is the
+difference between a design note and the measurement note this section asks for.
+The one comparison that was made, DELENDA, was made after the fact and lives
+outside the repository. This proposal, and the three PRs it specifies, are the
+cost of that. The rule is written into `CLAUDE.md` ("Commits and tracking") and
+`docs/dev/agent-verification-conventions.md` in the same commit as this
+proposal.
 
 ## 9. Order of work
 
 1. **PR A, delete tempering.** Three commits: (i) the ladder, swaps, diagnostic,
    CLI, tests and docs (§3.4); (ii) the β parameter and the rung loop (§3.5)
-   with the mechanical test edits; (iii) the identity bump, the moved identity
-   golden and the removal trap (§3.6), alone. Issues per §3.7. The §10
-   single-rung pin runs before and after (i)+(ii).
+   with the mechanical test edits; (iii) the identity change: the moved identity
+   golden and the removal trap (§3.6), alone; its _Run identity_ release-notes
+   entry is the one PR C shares (§5.6). Issues per §3.7. The §10 single-rung pin
+   runs before and after (i)+(ii).
 2. **PR B, delete NUTS on the ODE backend.** §4.4 in one commit, the
    `methods.rs` steer rewrite and the doc edits included; no identity commit
    (§4.6). Issues per §4.7.
 3. **PR C, delete correlated PMMH.** Two commits: (i) §5.4, with the plain-PMMH
-   pin of §10 run before and after; (ii) the identity bump or its join to PR
-   A's, the two moved goldens and the removal traps (§5.6), alone. Issues per
-   §5.7.
+   pin of §10 run before and after; (ii) the join to PR A's identity change: the
+   two moved goldens and the removal traps (§5.6), alone. Issues per §5.7.
 4. **Then** the fire-time application-seam PR, whose PGAS step is smaller for PR
    A having landed and whose clock table is one row shorter for PR C.
 
