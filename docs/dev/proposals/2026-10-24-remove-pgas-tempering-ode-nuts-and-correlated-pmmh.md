@@ -65,16 +65,16 @@ external modelling projects on the maintainer's machine, counted in aggregate
 2026-10-24: 45 `mh` and 12 `nl-sbplx` configs, `burnin_dt` under `mh`, nothing
 on the cut list.
 
-| method or surface                    | book configs | project configs     | notes                                  |
-| ------------------------------------ | ------------ | ------------------- | -------------------------------------- |
-| IF2                                  | 38           | 10                  | the teaching and profiling method      |
-| PMMH                                 | 11           | 46                  | two projects                           |
-| PGAS                                 | 2            | 207                 | one project, touched 2026-10-20        |
-| `mh`, `nl-sbplx`, `nl-bobyqa` on ODE | 0            | 87                  | derivative-free; 57 of them from garki |
-| `nuts` on ODE                        | 0            | 1                   | a synthetic self-check (§4.2)          |
-| `nl-lbfgs`                           | 0            | 1                   | a labelled demonstration; stays (§4.5) |
-| PGAS `tempering` ladder              | 0            | 0 live (2 archived) |                                        |
-| correlated PMMH (`rho`)              | 0            | 1                   | 2026-09-10, `rho = 0.99` (§5.2)        |
+| method or surface                    | book configs | project configs     | notes                                            |
+| ------------------------------------ | ------------ | ------------------- | ------------------------------------------------ |
+| IF2                                  | 38           | 10                  | the teaching and profiling method                |
+| PMMH                                 | 11           | 46                  | two projects                                     |
+| PGAS                                 | 2            | 207                 | one project, touched 2026-10-20                  |
+| `mh`, `nl-sbplx`, `nl-bobyqa` on ODE | 0            | 87                  | derivative-free; 57 of them from one ODE project |
+| `nuts` on ODE                        | 0            | 1                   | a synthetic self-check (§4.2)                    |
+| `nl-lbfgs`                           | 0            | 1                   | a labelled demonstration; stays (§4.5)           |
+| PGAS `tempering` ladder              | 0            | 0 live (2 archived) |                                                  |
+| correlated PMMH (`rho`)              | 0            | 1                   | 2026-09-10, `rho = 0.99` (§5.2)                  |
 
 ## 2. Summary
 
