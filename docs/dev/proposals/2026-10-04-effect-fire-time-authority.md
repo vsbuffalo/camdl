@@ -1,8 +1,8 @@
 ---
 date: 2026-10-04
-status: draft — D1, D2 decided by the maintainer; D3, D4 written as recommended and awaiting the maintainer's confirmation (§5)
+status: accepted — D1–D4 and the window rule decided by the maintainer (D1, D2 on 2026-10-06; D3, D4 and the window rule on 2026-10-24); implementation follows §8, preceded by the application-seam PR (step 0)
 area: simulation timing spine / effect firing / inference correctness
-issues: gh#957 (off-grid event), gh#958 (effect at t_start)
+issues: gh#957 (off-grid event), gh#958 (effect at t_start); gh#984, gh#985, gh#986 (filed 2026-10-24 from this work)
 related:
   - 2026-06-05-unified-timeline-effect-architecture.md
   - 2026-06-07-scheduling-spine-v2.md
@@ -183,9 +183,24 @@ the recurring enumeration overshoots its bound by float error
 (`intervention.rs:93`, `:99`: `t <= rs.end + rs.period·1e-9`), so a last fire
 computed as `t_end + 1e-12` is the fire at `t_end`. Inside the window the Grid
 key is `k = ⌊(t − t_start)/dt + ½ + GRID_TOL⌋` capped at `n_substeps`, and the
-instant it names is `min(t_start + k·dt, t_end)`: the key uses the nominal grid,
-and the `min` only re-labels the instant of a shortened last substep, which ends
-at `t_end` rather than at `t_start + n_substeps·dt`.
+instant it names is `min(t_start + k·dt, t_end)`. One refinement for a shortened
+last substep, decided 2026-10-24: an effect that falls inside that substep snaps
+to the nearer of its two actual boundaries, `t_start + (n_substeps − 1)·dt` and
+`t_end`, not to the nominal grid point `t_start + n_substeps·dt` that the step
+never reaches. With `t_end = 2.5`, `dt = 1` and an effect at 2.45, the nominal
+key gives k = 2 and fires it at 2.0 although 2.5 is 0.05 away; the refinement
+fires it at 2.5. The two keys differ only for a time in the second half of a
+shortened last substep, so a run whose window is a whole number of steps is
+unaffected. Whenever the refinement and not the nominal key decided the step,
+`EffectPlan::build` emits a warning on stderr naming the effect, its declared
+time and the boundary it snapped to, so a modeller sees the one case where the
+run's length rather than the grid chose the instant. Extending `t_end` to the
+next grid point was considered and rejected: windows declared in years in a
+daily model are the normal case (the He 2010 vignette runs `to = 21 'years`,
+7670.0925 days at `dt = 1`), extension would move their final row and every
+`final()` quantity, and under the particle filter the last observation defines
+`t_end`. No model in the book or the external projects has an effect in a
+shortened last substep.
 
 **Amounts.** An action's expression is evaluated at the firing instant with the
 backend's step — `cfg.dt` for chain-binomial and ODE, `iv_resolution_dt` for
@@ -350,6 +365,9 @@ only. The runs that change, on every Grid path:
 - the window: an effect in `(t_end, t_end + dt/2]` fires on the last step today
   (measured: `to = 4`, `add(A, 100) at [4.3]` lands on the t = 4 row) and does
   not fire after.
+- a shortened last substep: an effect in its second half fires at `t_end`, the
+  nearest actual boundary (§4), instead of at the preceding grid point, with a
+  warning; no model in the book or the external projects is affected.
 
 Under Exact: an effect in `(t_start − dt/2, t_start)` fires today (measured:
 `from = 2`, `add(A, 100) at [1.7]` is in the t = 3 row) and does not fire after;
@@ -358,28 +376,30 @@ no longer fires early (§2, gh#198). A resumed run keys on its own origin; a
 contrast fork resumes at an output time on the original grid, so the grids
 differ by whole steps (inferred; `splice_invariant.rs` checks it).
 
-**D3 — Under PGAS, an estimated parameter inside an effect's action or schedule
-is refused in this PR.** `complete_data_loglik` (`pgas.rs:1803`) scores
-`log p(x₀ | θ)` from `trajectory.initial_counts` through `initial_state_logpdf`
-(`:1835`), then for each substep the transition density of `rec.flows` given
-`rec.counts_before`. The deterministic effect map between substeps — and, after
-D1, between x₀ and `substeps[0].counts_before` — appears in no term. With
-`init { I = 0 }`, `events { seed : add(I, I0) at [0] }` and `I0` estimated, a
-proposed `I0′` changes no term: the complete-data density is flat in `I0`, the
-θ-move accepts on the prior ratio alone, and the reported posterior for `I0` is
-its prior, with no warning. The same holds today for `add(I, I0) at [5]`, so the
-bias is pre-existing; D1 makes the `at [0]` form live too. A parametric
-`at [<param>]` schedule whose parameter is estimated is the same flatness
-through the fire step rather than the amount, and nothing refuses it under Snap
-(the guard at `intervention.rs:356` runs only under Exact, which the CLI never
-gives PGAS). This is read from code, not run; the test that would show it is a
-PGAS fit of that model, whose `I0` posterior must move off the prior — red
-today. The refusal lives at the `run_pgas` boundary (`pgas.rs:3890`), where the
-estimated set is known (`if2_params`, the set the NUTS gradient-coverage refusal
-at `:4371-4392` already reads): any effect action (`add`, `transfer` by
-`fraction` or `count`, `set`) or `at [...]` expression that references an
-estimated parameter is refused with the parameter and the effect named, through
-a parameter-reference walk over the resolved expressions
+**D3 — Under PGAS, an estimated parameter inside an effect's action or schedule,
+or inside a plain `init {}` assignment, is refused in this PR; under IF2, an
+estimated parameter inside an effect's schedule is refused too.**
+`complete_data_loglik` (`pgas.rs:1803`) scores `log p(x₀ | θ)` from
+`trajectory.initial_counts` through `initial_state_logpdf` (`:1835`), then for
+each substep the transition density of `rec.flows` given `rec.counts_before`.
+The deterministic effect map between substeps — and, after D1, between x₀ and
+`substeps[0].counts_before` — appears in no term. With `init { I = 0 }`,
+`events { seed : add(I, I0) at [0] }` and `I0` estimated, a proposed `I0′`
+changes no term: the complete-data density is flat in `I0`, the θ-move accepts
+on the prior ratio alone, and the reported posterior for `I0` is its prior, with
+no warning. The same holds today for `add(I, I0) at [5]`, so the bias is
+pre-existing; D1 makes the `at [0]` form live too. A parametric `at [<param>]`
+schedule whose parameter is estimated is the same flatness through the fire step
+rather than the amount, and nothing refuses it under Snap (the guard at
+`intervention.rs:356` runs only under Exact, which the CLI never gives PGAS).
+This is read from code, not run; the test that would show it is a PGAS fit of
+that model, whose `I0` posterior must move off the prior — red today. The
+refusal lives at the `run_pgas` boundary (`pgas.rs:3890`), where the estimated
+set is known (`if2_params`, the set the NUTS gradient-coverage refusal at
+`:4371-4392` already reads): any effect action (`add`, `transfer` by `fraction`
+or `count`, `set`) or `at [...]` expression that references an estimated
+parameter is refused with the parameter and the effect named, through a
+parameter-reference walk over the resolved expressions
 (`compiled_model.rs:1960-1975`, `:1988`; the sibling of `references_state`,
 `:1994`). `check_model_capabilities` (`methods.rs:710`) cannot host it: it sees
 the backend and the model, not the fit's estimated set. Rejected: (b) ship and
@@ -388,6 +408,31 @@ repository ranks worst, and the refusal costs one message. Real support (an
 effect-map term in the density, or a θ-move that re-walks the stored path under
 the proposed θ) is the follow-up in §9. Reactive-intervention triggers are out
 of scope for this PR.
+
+Decided by the maintainer on 2026-10-24, with two extensions found while
+deciding. First, a plain `init {}` assignment that references an estimated
+parameter (`init { I = I0 }` with `I0` estimated) has the same flat density
+under PGAS: `initial_state_logpdf` is zero for a deterministic `init`, and the
+stored path's x₀ does not move with the proposed `I0′`; the comment at
+`pgas.rs:2884` already says a declared law is "what makes an initial-state
+parameter estimable at all". The refusal names the init-law spelling
+`I ~ poisson(rate = I0)` as the fix. Second, IF2 builds its effect timeline once
+per run from `base_params` (`if2.rs:303-320`) while each particle carries its
+own θ, so an estimated parameter in an effect's schedule moves nothing: the fire
+time is frozen at its starting value for every particle and every iteration, and
+the swarm's value for it performs a cooled random walk, exit 0 (gh#984). The
+existing guard `guard_attimesexpr_exact` skips events
+(`if iv.kind.is_event()
+{ continue; }`), which is how the book's seeding idiom
+`events { founders_arrive : add(E, n_seed) at [tau] }` reaches IF2 unrefused. It
+is correct under PMMH and `pfilter`, which rebuild the timeline at each
+likelihood evaluation's θ (`particle_filter.rs:245`), and the book fits it with
+PMMH. The `EffectPlan` is likewise built once per filter run and cannot hold
+per-particle times, so under IF2 `build` refuses an estimated parameter in any
+effect's schedule, events included, with the same message shape; amounts stay
+allowed under IF2 because `step` evaluates them with the particle's own θ. The
+inference docs say "use PMMH for seed timing" until gh#986's replay θ-move
+lands. Tracked as gh#986 (PGAS) and gh#984 (IF2).
 
 **D4 — At the origin, draining events and `set` read the post-inflow state.**
 The spec's stage order for the fixed-step backends (§13.10,
@@ -411,6 +456,26 @@ today's Gillespie boundary path — it would make the origin the one place where
 draining event cannot see an inflow declared beside it. The Gillespie mid-run
 boundary keeps its current reading in this PR; that is a separate pre-existing
 inconsistency between the backends, listed in §9.
+
+Decided by the maintainer on 2026-10-24, and generalised: the two-phase rule
+(inflows from the snapshot, then drains and `set` on the resulting state, then
+interventions in declaration order) is the rule at every instant on every
+backend, not only at the origin. It is the only candidate under which the
+declaration order of events never matters, a drain cannot overdraw (gh#217's
+reason), and `set` means set. With `add(X, 10)` and `set X = 5` at one instant,
+chain-binomial gives 5 in either order; Gillespie's boundary path resolves both
+against the same snapshot and sums the deltas to 15; the ODE's boundary path
+(`apply_boundary_batch_continuous`, `effects.rs:531`) reads every amount from a
+frozen snapshot but applies them one at a time, so it gives 15 or 5 depending on
+declaration order (gh#985; read from code, not run). Rather than add a fourth
+application site (`apply_origin_batch`), the implementation lands one
+application function with an optional advance hook between the two phases:
+chain-binomial fills the hook with its fused multinomial draw; Gillespie, the
+ODE and the origin leave it empty; `apply_events_at` and
+`apply_boundary_batch_continuous` become its callers. That function is its own
+PR before this one (§8, step 0), and `apply_origin_batch` is then that function
+with no hook. Spec §13.10 is extended to state the same rule for the continuous
+backends' boundaries and for the origin.
 
 ## 6. Tests
 
@@ -508,6 +573,16 @@ now snaps, as in the pomp reference) and should be re-run before release.
 
 ## 8. One PR, in this order
 
+0. **Application seam, as its own PR before this one** (gh#985, D4). One
+   function applies an effect batch to a state in the §13.10 order, with an
+   optional advance hook between the inflow phase and the drain phase:
+   `step_one` passes its fused multinomial advance; Gillespie and the ODE pass
+   none. `apply_events_at` (`intervention.rs:158`) and
+   `apply_boundary_batch_continuous` (`effects.rs:531`) are replaced by calls to
+   it. Behaviour-preserving except the coincident inflow-plus-drain and
+   inflow-plus-`set` cases on Gillespie and the ODE, each pinned red-then-green
+   in `cross_backend_lifecycle_agreement.rs`. Spec §13.10 gains the
+   continuous-backend sentence. Lands green on `make test` before step 1 starts.
 1. **Foundation.** Move `GRID_TOL` to `schedule.rs`; add `effect_plan.rs`
    (`FireClock`, `Origin`, `fire_step`, `EffectPlan`), unit-tested on the §2
    cases and §6.5. `validate_recurring_dt_collisions` takes `t_start` and the
@@ -520,14 +595,17 @@ now snaps, as in the pomp reference) and should be re-run before release.
    a separate commit, and the gh#198 rewrites (§6.2).
 3. **PF, IF2, correlated PF.** `ProcessModel::fire_clock` and `apply_origin`;
    `ExactInferenceTimeline::build` takes the clock and builds the plan; the
-   correlated PF builds it directly; the fit pre-flight collision check runs
-   only under Grid. The two callers of `guard_exact_offgrid_effect_time` here
-   (`intervention.rs:408`, `correlated_pf.rs:654`) drop it; the function itself
-   stays until step 5 because PGAS still calls it (`pgas.rs:3963`). The oracle
-   and the IF2 and correlated-PF harnesses (§6.1).
+   correlated PF builds it directly; under IF2 the build refuses an estimated
+   parameter in any effect's schedule, events included (D3, gh#984); the fit
+   pre-flight collision check runs only under Grid. The two callers of
+   `guard_exact_offgrid_effect_time` here (`intervention.rs:408`,
+   `correlated_pf.rs:654`) drop it; the function itself stays until step 5
+   because PGAS still calls it (`pgas.rs:3963`). The oracle and the IF2 and
+   correlated-PF harnesses (§6.1).
 4. **PGAS, `pgas_init` and the contrast fork.** The three origin sites of §4,
-   the `j_ref` pre-state, the debug invariant, the D3 refusal at `run_pgas`; the
-   fork at the plan's firing instant; §6.3 and §6.4.
+   the `j_ref` pre-state, the debug invariant, the D3 refusal at `run_pgas`
+   (effect action, effect schedule, plain `init` assignment); the fork at the
+   plan's firing instant; §6.3 and §6.4.
 5. **Delete and document.** Remove everything under "Removed" in §4, now
    unreferenced by the runtime, and port the nine test files that still call
    those functions — `gh216_cursor_firing.rs` (`timeline_effects`),
@@ -540,9 +618,10 @@ now snaps, as in the pomp reference) and should be re-run before release.
    `cross_backend_lifecycle_agreement.rs:380`, `gate_licm_ab.rs:374`,
    `gh187_pgas_scheduled_intervention.rs:13`). Rewrite the documents that state
    the old rule: language spec §13.2, §13.7 and §13.10 (the origin stage, D1 and
-   D4) by hand, and its contrast sentence at line 4446; IR spec §2.3.1; run spec
-   line 5367 (the fork is before the firing instant) and §14.3 (lines 5957-5981,
-   the `round(t/dt)` key); `docs/dev/scheduling-spine.md:81` and `:97-118`;
+   D4, and the same two-phase rule for the continuous backends' boundaries) by
+   hand, and its contrast sentence at line 4446; IR spec §2.3.1; run spec line
+   5367 (the fork is before the firing instant) and §14.3 (lines 5957-5981, the
+   `round(t/dt)` key); `docs/dev/scheduling-spine.md:81` and `:97-118`;
    `docs/inference.md:1738-1791` (a forecast from a saved state does not re-fire
    an effect at its origin — the state is post-effect, `Origin::Resumed`).
 
@@ -551,18 +630,18 @@ Each step ends green on `make test-inference`; the PR lands on a green
 
 ## 9. Follow-up issues to file after the PR lands
 
-Not filed by this proposal. Each is a pre-existing defect or deferral the PR
-exposes and leaves in place.
+Two were filed on 2026-10-24; the third is not yet filed.
 
-1. **PGAS support for an estimated parameter in an effect action or schedule** —
-   the real fix behind D3: an effect-map term in `complete_data_loglik`, or a
-   θ-move that re-walks the stored path under the proposed θ. The red test is
-   D3's (the `I0` posterior must move off the prior).
-2. **The Gillespie mid-run boundary event phase.** `apply_events_at` resolves
-   draining events against the pre-inflow state at every boundary
-   (`intervention.rs:183-199`); chain-binomial and the spec read the post-inflow
-   state, and so does the origin after D4. The two backends therefore disagree
-   on a coincident `add` and draining `transfer` at an interior boundary.
+1. **gh#986 — the replay θ-move.** The real fix behind D3: recompute each
+   substep's pre-state from x₀, the recorded flows and the effect map under the
+   proposed θ, then score the recorded flows against it. Effect amounts are
+   deterministic (`effects.rs:630`), so no new density term is needed, and a
+   path that overdraws under the proposal scores −∞ and is rejected. It covers
+   effect amounts, effect times and plain `init` assignments at once. The red
+   test is D3's (the `I0` posterior must move off the prior). gh#984 is the IF2
+   half: closed by the D3 refusal, reopened only if per-particle timelines are
+   ever built.
+2. **gh#985 — coincident events at one instant.** Closed by step 0 of §8.
 3. **PGAS applies `balance` to x₀ on one path only.**
    `draw_free_particle_initial_state` rewrites the balance target
    (`pgas.rs:2790-2799`); the reference walk takes `initial_state_draw`
