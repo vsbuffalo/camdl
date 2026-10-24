@@ -154,6 +154,14 @@ Small, well-scoped work → a GitHub issue (`gh issue create`), referenced `gh#N
 in the commit subject. Bigger lifts (schema/IR changes, new inference methods,
 anything cross-cutting) → a `docs/dev/proposals/` doc first.
 
+**A new inference feature lands with its measurement.** A new algorithm, sampler
+option, tempering or variance-reduction scheme arrives on a branch, never
+directly on main, and merges only together with a `docs/dev/notes/` note that
+measures the claimed improvement against the existing method on a committed
+fixture, cited from the merge commit. Three features that reached main without
+one are removed by
+`docs/dev/proposals/2026-10-24-remove-pgas-tempering-ode-nuts-and-correlated-pmmh.md`.
+
 **One commit is one thing.** Dead code found while doing other work gets deleted
 in its own commit first.
 
@@ -186,7 +194,9 @@ each carries that area's required reading: `dsl-surface.md`, `ir-schema.md`,
 
 Skills, invoked when the task calls for them: `review-report` (the numbered
 issue list + design calls), `incident-report` (the reproduction bar),
-`golden-update`, `releasing`, `release-notes`, `triage`.
+`golden-update`, `releasing`, `release-notes`, `triage`. Agent issue fixing
+(`camdl-fixer` → `camdl-reviewer` → maintainer):
+`docs/dev/agentic-burn-down.md`.
 
 How an agent establishes and reports what is true — paste-the-command
 verification, inference vs verified, red→green TDD, the "gate" vocabulary rule,

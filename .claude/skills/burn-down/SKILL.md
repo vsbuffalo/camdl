@@ -24,7 +24,12 @@ Every one of these came from a real miss. Run them; they are cheap.
    - the rest of the flag/variant/branch family — `gh#514` fixed the `--init`
      flags and left ~13 siblings (gh#540);
    - the same guard on the other path — `gh#496` guarded `batch.rs` and left
-     `fit/mod.rs` (gh#536).
+     `fit/mod.rs` (gh#536);
+   - for a defect in how a value is shown (an off-by-one, a unit, a format),
+     every `format!`/`eprintln!`/`writeln!` that prints it — readers of the
+     field are not enough. The gh#972 fix and its independent review both missed
+     the 0-based `chain_id` in an error message nine lines above code the
+     reviewer had read (gh#979).
 
    If siblings exist and you are not fixing them, **say so in the PR body and
    file the follow-up in the same breath.** Silence reads as "handled".
@@ -42,6 +47,22 @@ Every one of these came from a real miss. Run them; they are cheap.
    ask. "Fix these fourteen flags, or make the category impossible?" is a design
    decision and it is the maintainer's, not yours. Fixing instance 1 of 14
    quietly is the worst of the three options.
+
+## Design radar (required in every PR body)
+
+Four items, each with its evidence pasted. A radar filled in without grep output
+is not done.
+
+1. **Instance or class.** The sibling-sweep grep and its hit count; each
+   sibling's disposition and `gh#NN`.
+2. **Did the fix add a copy of anything?** Another struct for the same concept,
+   a parallel validation path, a duplicated error string. gh#923 — backend, dt
+   and seeds each declared in three or four separate clap and serde structs — is
+   what accumulated copies look like.
+3. **Is there a seam that would make this bug impossible?** One sentence. File
+   it as `kind/design` or `kind/refactor`; do not implement it in the fix.
+4. **Disposition:** none / filed `gh#NN` / needs maintainer, with the one-line
+   question.
 
 ## Batching
 
@@ -74,14 +95,19 @@ inherits none of the four checks above unless you hand them over.
 Not worth it for: anything on the high-risk list, anything where the fix shape
 is still an open question, or fewer than three issues.
 
+An issue whose evidence lives only on an unpushed or `worktree-agent-*` branch
+is not s-class until that branch is pushed (gh#957 and gh#958 are the current
+examples).
+
 ## The gate
 
 The working loop is the narrowest suite that covers the change — one
-`cargo test -p <crate> --lib`, one `dune exec` test binary, one `--test` target.
-`make test` is the authoritative gate and is slow (tens of minutes on a warm
-tree, longer from cold); CLAUDE.md accepts **either** a full local `make test`
-**or** CI as authoritative, so push early and let CI run while you start the
-next issue. Do not skip both.
+`cargo test -p <crate> --lib` (`--bin camdl` for `cli`, which has no library
+target), one `dune exec` test binary, one `--test` target. `make test` is the
+authoritative gate and is slow (tens of minutes on a warm tree, longer from
+cold); CLAUDE.md accepts **either** a full local `make test` **or** CI as
+authoritative, so push early and let CI run while you start the next issue. Do
+not skip both.
 
 Two things CI will not tell you, so check them locally before pushing:
 
