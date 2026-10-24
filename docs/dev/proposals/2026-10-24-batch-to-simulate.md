@@ -118,16 +118,15 @@ says. camdl standardises on one index base, 0, everywhere a user sees an index:
 the `draw` and `replicate` columns (1-based today, `draw_idx + 1` and
 `run_idx + 1`, `main.rs:2913-2929, 3081`), the `chain_N/` directories and every
 1-based chain label (gh#980's class), and `--exclude-chains`. Of these, PR B
-converts `replicate`: the combined and observation tables `simulate` writes
-carry `replicate` as the global run ordinal counted from 0 (`run_idx`, not
-`run_idx + 1`), so the sweep-job tables this proposal adds carry one base
-throughout. A draws job's `draw` column keeps its base until gh#990 lands, so in
-that interval `replicate` and `draw` differ in base in a draws job's table. The
-remaining conversions (`draw`, the chain directories and labels,
-`--exclude-chains`) are gh#990 ("One index base: every user-facing index counts
-from 0"), which supersedes gh#980's two-type design (`ChainIndex` plus
-`ChainLabel`) with a single index type, since with one base the second type has
-nothing to guard. `point_id` is born 0-based and never converted.
+converts the two columns `simulate` writes, which share one writer: the combined
+and observation tables carry `replicate` as the global run ordinal counted from
+0 (`run_idx`, not `run_idx + 1`) and, in a draws job, `draw` counted from 0
+(`draw_idx`), so no table this proposal ships mixes bases. The remaining
+conversions (the chain directories and labels, `--exclude-chains`) are gh#990
+("One index base: every user-facing index counts from 0"), which supersedes
+gh#980's two-type design (`ChainIndex` plus `ChainLabel`) with a single index
+type, since with one base the second type has nothing to guard. `point_id` is
+born 0-based and never converted.
 
 **Composition.** `--sweep` and `--sweep-file` compose with `--scenario`,
 `--replicates`, `--seeds`, `--param`, `--params` and every output flag.
@@ -445,7 +444,10 @@ New, red before the flags and green after:
    `sweep:beta` and `seed` and no `draw`.
 9. A second identical multi-cell run simulates zero cells and produces the same
    combined file; `--force` recomputes them; `--dry-run` reports every cell as a
-   hit.
+   hit. The same run given an observation flag re-simulates every cell whose
+   leaf has no observation subtree at the exact address, including a leaf that
+   holds another cadence's or seed's subtree, and writes the requested one; a
+   third run with the same flag is then all hits.
 10. `--enable vaccination` labels its arm `baseline+vaccination` in the
     `scenario` column and the store listing; `--param beta=0.3` gives
     `baseline;beta=0.3`; plain `simulate` still gives `baseline`; the leaf
@@ -584,9 +586,9 @@ session is told directly as well as through the commits.
 2. **The pairing key is a `seed` column now**; the within-axis `replicate` comes
    with the coordinate-kind rewrite, layered on top. Decided; §3.
 3. **One index base, 0, everywhere a user sees an index.** `point_id` stays
-   0-based as D-C said; `replicate` flips to 0-based in PR B; the 1-based
-   `draw`, chain directories and chain labels move to 0 in gh#990, which
-   supersedes gh#980's two-type design. Decided; §3.
+   0-based as D-C said; `replicate` and `draw` flip to 0-based in PR B; the
+   chain directories and chain labels move to 0 in gh#990, which supersedes
+   gh#980's two-type design. Decided; §3.
 4. **Ad-hoc arms get a derived label** (`baseline+vaccination`,
    `baseline;beta=0.3`) in the flags PR; no mandatory name, no new flag.
    Decided; §3 "Arm labels".
