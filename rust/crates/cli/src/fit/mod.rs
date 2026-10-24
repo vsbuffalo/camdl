@@ -264,6 +264,19 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         eprintln!("error: {}", msg);
         std::process::exit(1);
     }
+    // PGAS parallel tempering was removed (gh#789); the flag is trapped so a
+    // stale script is answered with the fix rather than clap's "unexpected
+    // argument".
+    if let Some(raw) = a._removed_tempering.as_deref() {
+        eprintln!(
+            "error: --tempering is no longer accepted on `camdl fit run`: PGAS parallel \
+             tempering was removed (gh#789), and every PGAS chain samples the posterior \
+             directly, as the ladder's cold rung did. Drop `--tempering {raw}`; a \
+             `tempering = [...]` line under [method] must be deleted too. Fits stored \
+             before the removal are not reused and cannot be resumed; they run again."
+        );
+        std::process::exit(1);
+    }
     let fit_path              = a.config.to_string_lossy().into_owned();
     let base_seed             = a.seed.unwrap_or(1);
     let force                 = a.force;
@@ -272,17 +285,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // collected once so the method identity can see all of them. Applied to
     // the in-memory method below, before the CAS claim — the dispatch sites
     // no longer override anything, so there is no route around the key.
-    //
-    // `--tempering` is validated HERE rather than at dispatch: it now feeds the
-    // identity, and a malformed value should fail before a run_id is computed
-    // from it, not after the claim.
-    if let Some(t) = &a.tempering {
-        if t.is_empty() || (t[0] - 1.0).abs() > sim::inference::pgas::COLD_RUNG_TOLERANCE {
-            eprintln!("error: --tempering must start with β=1.0 (cold chain). \
-                       Got: {:?}", t);
-            std::process::exit(1);
-        }
-    }
     if let Some(r) = a.rho {
         if !(0.0..1.0).contains(&r) {
             eprintln!("error: --rho must be in [0, 1). Got: {}", r);
@@ -290,7 +292,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
     let cli_overrides = crate::fit::config_v2::CliStageOverrides {
-        tempering:            a.tempering.clone(),
         max_tree_depth:       a.max_tree_depth,
         trajectory_warmup:    a.trajectory_warmup,
         csmc_sweeps_per_nuts: a.csmc_sweeps_per_nuts,

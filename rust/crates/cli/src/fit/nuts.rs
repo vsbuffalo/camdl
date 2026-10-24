@@ -3,7 +3,7 @@
 //! Gradient-based Bayesian sampling of the deterministic ODE marginal likelihood
 //! via `sim::inference::ode_nuts::run_ode_nuts` (which composes `det_grad` with
 //! the prior + Jacobian into a NUTS target). Leaner than the PGAS stage — no
-//! particles, no CSMC, no tempering; just per-chain NUTS and the shared trace /
+//! particles, no CSMC; just per-chain NUTS and the shared trace /
 //! fit_state output. On a stochastic backend, gradient-NUTS lives inside `pgas`,
 //! so this path is `ode`-only (routed by the method registry).
 

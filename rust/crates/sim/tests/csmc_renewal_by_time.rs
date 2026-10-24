@@ -292,7 +292,6 @@ fn sweeps(n_sweeps: u64, n_particles: usize) -> Vec<SweepProfile> {
                 SEED + seed, &obs_at_substep, EffectFiring::default(),
                 sim::rng::BinomialAlgorithm::Btpe,
                 true,
-                sim::inference::pgas::InverseTemperature::COLD,
             )
             .expect("csmc_as");
             SweepProfile {

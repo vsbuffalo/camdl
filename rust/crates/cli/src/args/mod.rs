@@ -793,6 +793,10 @@ pub struct FitRunArgs {
     pub _removed_init_method: Option<String>,
     #[arg(long = "starts-from", value_name = "DIR_OR_HASH", hide = true)]
     pub _removed_starts_from: Option<String>,
+    // `--tempering` went with PGAS parallel tempering (gh#789); same shape,
+    // its own message.
+    #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
+    pub _removed_tempering: Option<String>,
 
     /// User-supplied display label for this fit (1–64 chars after
     /// trim; allowed: letters, digits, spaces, commas, dot,
@@ -861,13 +865,6 @@ pub struct FitRunArgs {
     pub cooling_target_iters: Option<usize>,
 
     // ── PGAS-specific algorithm overrides  ──────────
-
-    /// Override [method.tempering]. Comma-separated β values
-    /// for parallel tempering ladder. First value MUST be 1.0.
-    /// Example: `--tempering "1.0,0.7,0.4,0.15"`.
-    #[arg(long, value_name = "B1,B2,...",
-          value_parser = parse_f64_list)]
-    pub tempering: Option<Vec<f64>>,
 
     /// Override [method.max_tree_depth] (NUTS depth ceiling).
     ///
@@ -938,18 +935,6 @@ pub struct FitRunArgs {
     /// per-step predictive samples for `camdl compare`).
     #[arg(long)]
     pub record_prequential: bool,
-}
-
-/// Parser for `--tempering "1.0,0.7,0.4"` and similar comma-list
-/// f64 args. Empty string is rejected; spaces around commas are
-/// trimmed.
-fn parse_f64_list(s: &str) -> Result<Vec<f64>, String> {
-    if s.trim().is_empty() {
-        return Err("expected comma-separated f64 list".into());
-    }
-    s.split(',')
-        .map(|p| p.trim().parse::<f64>().map_err(|e| format!("'{}': {}", p, e)))
-        .collect()
 }
 
 /// Output format for `camdl fit summary`. `text` is the default

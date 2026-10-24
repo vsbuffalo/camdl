@@ -1044,16 +1044,6 @@ pub enum Algorithm {
         #[serde(default)]
         thin: Option<usize>,
 
-        /// Temperature ladder for parallel tempering (replica
-        /// exchange; Earl & Deem 2005, Geyer 1991). Each entry is
-        /// β ∈ (0, 1]. The first entry MUST be 1.0 (cold chain).
-        /// Only the cold rung contributes posterior samples; heated
-        /// rungs explore a flatter likelihood surface (ll × β) and
-        /// exchange with adjacent rungs via Metropolis swaps.
-        /// Default: `[1.0]` (no tempering, single rung).
-        /// Example: `[1.0, 0.7, 0.4, 0.15]`.
-        #[serde(default = "default_pgas_tempering")]
-        tempering: Vec<f64>,
         /// Maximum NUTS tree depth (Hoffman & Gelman 2014). Stiff
         /// posteriors hit this and need a higher value. Default: 10.
         #[serde(default = "default_max_tree_depth")]
@@ -1206,8 +1196,8 @@ pub enum Algorithm {
     /// NUTS on the deterministic ODE marginal likelihood (gh#275 Phase 2) — a
     /// gradient-based Bayesian sampler using forward sensitivities (`det_grad`).
     /// Deterministic-likelihood, `ode`-only; on a stochastic backend gradient-NUTS
-    /// lives inside `pgas`. Leaner than `PGAS` — no particles, no CSMC, no
-    /// tempering; just NUTS warm-up (dual-averaging step size) and sampling.
+    /// lives inside `pgas`. Leaner than `PGAS` — no particles, no CSMC;
+    /// just NUTS warm-up (dual-averaging step size) and sampling.
     #[serde(rename = "nuts")]
     Nuts {
         backend: crate::run_meta::InferenceBackend,
@@ -1606,11 +1596,10 @@ impl Algorithm {
         // to override: `*StageOpts::from_stage` reads what is written below.
         match self {
             Algorithm::PGAS {
-                tempering, max_tree_depth, trajectory_warmup,
+                max_tree_depth, trajectory_warmup,
                 csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts, binomial,
                 ancestor_sampling, ..
             } => {
-                if let Some(t) = &cli.tempering { *tempering = t.clone(); }
                 if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
                 if let Some(w) = cli.trajectory_warmup { *trajectory_warmup = w; }
                 if let Some(s) = cli.csmc_sweeps_per_nuts { *csmc_sweeps_per_nuts = s; }
@@ -1682,7 +1671,6 @@ impl Algorithm {
 /// would invalidate cached fits for nothing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CliStageOverrides {
-    pub tempering: Option<Vec<f64>>,
     pub max_tree_depth: Option<usize>,
     pub trajectory_warmup: Option<usize>,
     pub csmc_sweeps_per_nuts: Option<usize>,
@@ -1802,7 +1790,6 @@ fn default_loglik_eval_replicates() -> usize { 8 }
 fn default_cooling_target_iters() -> usize { 50 }
 
 // PGAS defaults
-fn default_pgas_tempering() -> Vec<f64> { vec![1.0] }
 fn default_max_tree_depth() -> usize { 10 }
 fn default_csmc_sweeps_per_nuts() -> usize { 1 }
 fn default_n_trajectories() -> usize { 200 }
@@ -2274,6 +2261,13 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
                 "`survey_top_k` starts were removed with their `survey_path` / \
                  `survey_top_k_n` companions: a survey landscape is not a posterior. Use \
                  `starts = \"from_prior\"`, or a `from_posterior` from a short run."
+                    .to_string(),
+            ),
+            "tempering" => Some(
+                "`tempering` was removed with PGAS parallel tempering (gh#789): every \
+                 PGAS chain samples the posterior directly, as the ladder's cold rung \
+                 did. Delete the line. Fits stored before the removal are not reused \
+                 and cannot be resumed; they run again."
                     .to_string(),
             ),
             _ => None,
@@ -3371,8 +3365,6 @@ starts     = "{starts}"
     #[test]
     fn every_cli_sampler_flag_changes_the_stage_identity() {
         let cases: Vec<(&str, Method, CliStageOverrides)> = vec![
-            ("--tempering", pgas_method(),
-             CliStageOverrides { tempering: Some(vec![1.0, 0.5]), ..Default::default() }),
             ("--max-tree-depth", pgas_method(),
              CliStageOverrides { max_tree_depth: Some(7), ..Default::default() }),
             ("--trajectory-warmup", pgas_method(),
@@ -3488,7 +3480,7 @@ starts     = "{starts}"
             "folded by cas_n_trajectories instead — hashing it here double-folds");
         // Everything else the stage carries is present, under its TOML spelling.
         for key in ["algorithm", "backend", "chains", "particles", "burn_in", "thin",
-                    "tempering", "use_nuts", "dense_mass", "max_tree_depth",
+                    "use_nuts", "dense_mass", "max_tree_depth",
                     "starts", "trajectory_warmup", "csmc_sweeps_per_nuts"] {
             assert!(obj.contains_key(key),
                 "'{key}' must be in the stage identity; present keys: {:?}",
@@ -3784,10 +3776,10 @@ cooling = 0.7
         );
         assert!(parse(&ok).is_ok(), "a valid IF2 method must parse");
 
-        // A PGAS optional key (tempering) must be accepted, not falsely flagged.
+        // A PGAS optional key (max_tree_depth) must be accepted, not falsely flagged.
         let ok_pgas = format!(
             "{base}[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
-             chains = 2\nparticles = 100\nsweeps = 10\ntempering = [1.0, 0.5]\n"
+             chains = 2\nparticles = 100\nsweeps = 10\nmax_tree_depth = 8\n"
         );
         assert!(parse(&ok_pgas).is_ok(), "a valid PGAS method with optional keys must parse");
 
@@ -3825,6 +3817,21 @@ cooling = 0.7
         let err = parse(&stale_chain).expect_err("`init_mle` under [method] is not a key");
         assert!(err.contains("from_posterior") && err.contains("from_mle"),
             "must name both sourced rules; got: {err}");
+
+        // `tempering` left with PGAS parallel tempering (gh#789). The message
+        // says the key was removed and that the fix is to delete the line, not
+        // a bare "unknown key" an author would read as a typo; the same file
+        // without the line parses.
+        let stale_tempering = format!(
+            "{base}[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
+             chains = 2\nparticles = 100\nsweeps = 10\ntempering = [1.0]\n"
+        );
+        let err = parse(&stale_tempering).expect_err("`tempering` under [method] is not a key");
+        assert!(err.contains("`tempering`") && err.contains("removed") && err.contains("elete"),
+            "must say the key was removed and to delete the line; got: {err}");
+        let without = stale_tempering.replace("tempering = [1.0]\n", "");
+        assert!(parse(&without).is_ok(),
+            "the same file without the line must parse: {:?}", parse(&without).err());
     }
 
     /// The NLopt stages carry the same five keys whether or not the algorithm
@@ -6823,7 +6830,6 @@ decibans_thresh = 100.0
                 backend: crate::run_meta::InferenceBackend::ChainBinomial,
                 chains: 4, particles: 100, sweeps,
                 burn_in: Some(200), thin: Some(2),
-                tempering: vec![1.0],
                 max_tree_depth: 10,
                 trajectory_warmup: 0,
                 csmc_sweeps_per_nuts: 1,
@@ -6882,16 +6888,10 @@ decibans_thresh = 100.0
 
     #[test]
     fn pgas_identity_payload_includes_new_algorithmic_knobs() {
-        // tempering, max_tree_depth, trajectory_warmup,
-        // csmc_sweeps_per_nuts, dense_mass, use_nuts ALL change chain
-        // dynamics and MUST invalidate identity.
+        // max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
+        // dense_mass, use_nuts ALL change chain dynamics and MUST
+        // invalidate identity.
         let base = make_pgas_stage(1000);
-
-        let mut s = make_pgas_stage(1000);
-        if let Algorithm::PGAS { ref mut tempering, .. } = s.algorithm {
-            *tempering = vec![1.0, 0.5];
-        }
-        assert_ne!(base.identity_payload(), s.identity_payload(), "tempering");
 
         let mut s = make_pgas_stage(1000);
         if let Algorithm::PGAS { ref mut max_tree_depth, .. } = s.algorithm { *max_tree_depth = 14; }
@@ -7038,8 +7038,10 @@ decibans_thresh = 100.0
         // one chain-start key is `starts` under its TOML spelling, and the
         // retired `init` / `init_mle` / `survey_*` keys are gone. A deliberate
         // re-key of every method leaf, ruled in §8 item 22; see the commit for
-        // the --resume consequence.
-        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"particles":100,"starts":"uniform_unconstrained","tempering":[1.0],"thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
+        // the --resume consequence. Moved again when PGAS parallel tempering
+        // was removed (gh#789): the `tempering` key left the payload, so every
+        // PGAS leaf re-keys — the release notes' Run-identity entry.
+        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"particles":100,"starts":"uniform_unconstrained","thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
         assert_eq!(payload_str, expected,
             "identity_payload byte format drifted — every existing \
              resume_state.bin would be invalidated. If this change is \

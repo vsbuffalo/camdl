@@ -78,7 +78,7 @@ INFERENCE_TESTS=(
     rust/crates/sim/tests/pmmh.rs
     rust/crates/sim/tests/pmmh_hierarchical.rs
     rust/crates/sim/tests/pgas_resume.rs
-    rust/crates/sim/tests/pgas_tempering.rs
+    rust/crates/sim/tests/pgas_cold_chain_determinism.rs
     rust/crates/sim/tests/particle_filter.rs
     rust/crates/sim/tests/obs_level_params.rs
     rust/crates/sim/tests/obs_time_dependence.rs

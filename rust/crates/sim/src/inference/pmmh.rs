@@ -235,7 +235,7 @@ pub struct PMMHResumeState {
 // MCMC", *Stat. Comput.* 18:343–373, §3), and it is also the simplest way to
 // satisfy the *containment* condition that adaptive-MCMC ergodicity needs
 // alongside diminishing adaptation (Roberts & Rosenthal 2007, *J. Appl. Probab.*
-// 44:458–475). `pgas.rs` already does this for its own per-rung Robbins–Monro
+// 44:458–475). `pgas.rs` already does this for its own Robbins–Monro
 // scale (`log_proposal_sd.clamp(-20.0, 5.0)`).
 //
 // Why the floor is −10 here and −20 there: the two quantities have different

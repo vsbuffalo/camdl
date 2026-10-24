@@ -74,7 +74,7 @@ use sim::inference::pgas::{complete_data_loglik, ObsAtSubstep, PGASTrajectory};
 /// The two halves MUST come from the same sweep. A `θ` from one sweep paired
 /// with an `x` from another is a cross term, and putting it on the diagonal
 /// would make the whole diagnostic read backwards — a locked chain would look
-/// exchangeable. The producer takes both from the cold rung's state at the end
+/// exchangeable. The producer takes both from the chain's state at the end
 /// of the final sweep, which is one instant.
 pub struct ChainDraw<'a> {
     /// 1-based chain id, matching the `chain_N/` output directory.

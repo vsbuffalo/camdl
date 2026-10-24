@@ -132,7 +132,6 @@ fn sweep(f: &Fixture, ancestor_sampling: bool, seed: u64) -> sim::inference::pga
         EffectFiring::default(),
         sim::rng::BinomialAlgorithm::Btpe,
         ancestor_sampling,
-        sim::inference::pgas::InverseTemperature::COLD,
     )
     .expect("csmc_as");
     diag

@@ -306,7 +306,6 @@ fn pgas_config() -> PGASConfig {
         use_nuts: false,
         dense_mass: false,
         max_tree_depth: 10,
-        tempering: vec![1.0],
         trajectory_warmup: 0,
         csmc_sweeps_per_nuts: 1,
         step_policy: sim::schedule::StepPolicy::Snap,

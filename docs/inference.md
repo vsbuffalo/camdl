@@ -1236,7 +1236,7 @@ does not bias the posterior.
 R0–sigma trade-off creates basins separated by 50+ log-likelihood units. IF2
 with only 4 chains can land in the wrong basin (e.g., R0≈28 instead of the true
 R0≈20), and PGAS initialized there may never cross the barrier. More IF2 scout
-chains is the fix — tempering can't bridge 50+ nat gaps either.
+chains is the fix.
 
 **Where priors live, and what `starts = "from_prior"` reads.** Parameter priors
 belong in the **model**, declared with `~`:
