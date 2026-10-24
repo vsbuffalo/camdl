@@ -430,7 +430,6 @@ fn pgas_nuts_runs_cleanly_on_seir_with_discrete_seed_event() {
         use_nuts: true,
         dense_mass: false,
         max_tree_depth: 8,
-        tempering: vec![1.0],
         trajectory_warmup: 0,
         csmc_sweeps_per_nuts: 1,
         step_policy: sim::schedule::StepPolicy::Snap,
@@ -489,7 +488,7 @@ fn exact_alignment_rejected_on_always_active_event_model() {
         ancestor_sampling: true,
         n_particles: 10, n_sweeps: 1, burn_in: 0, thin: 1, dt: 0.5,
         use_nuts: false, dense_mass: false, max_tree_depth: 4,
-        tempering: vec![1.0], trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,
+        trajectory_warmup: 0, csmc_sweeps_per_nuts: 1,
         step_policy: sim::schedule::StepPolicy::Exact,
     };
 

@@ -232,10 +232,9 @@ reporting mostly about its own truncation point.
 | IF2 (MLE)        | Â                    | —               | > 1.5 + LL spread | multimodal surface, more chains                |
 | IF2 (MLE)        | logit position \|z\| | < 2             | > 3               | widen bounds or change transform               |
 | PGAS (posterior) | R̂ (rank-normalized)  | < 1.05          | > 1.1             | more sweeps; check multimodality with `survey` |
-| PGAS (posterior) | trajectory renewal   | > 30%           | < 10%             | more CSMC particles or tempering               |
+| PGAS (posterior) | trajectory renewal   | > 30%           | < 10%             | more CSMC particles                            |
 | PGAS (posterior) | NUTS divergences     | 0               | any               | reduce step size, reparameterize               |
 | PGAS (posterior) | NUTS max tree depth  | < 20% of sweeps | > 50%             | increase `max_treedepth`                       |
-| PGAS (posterior) | tempering swap rate  | 20–50%          | < 10%             | denser temperature ladder                      |
 
 ## 6. When it doesn't converge: a failing gate is information
 

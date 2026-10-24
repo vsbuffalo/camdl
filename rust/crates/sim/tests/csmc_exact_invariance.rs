@@ -390,27 +390,6 @@ fn one_sweep_is_invariant_when_some_substeps_skip_resampling() {
     check_invariance(&SPARSE, N_SUBSTEPS, true, "sparse (some substeps skip resampling)", COLD);
 }
 
-/// gh#551: the same invariance on a TEMPERED rung. At `β < 1` the sweep must
-/// leave `π_β(X | θ, y) ∝ p(X | θ) · p(y | X, θ)^β` invariant — observation
-/// density tempered, process density not. That is a statement about every
-/// place `csmc_as` scores an observation at once: the filter weights, the
-/// Eq.-(17) ancestor weights built from them, the final draw, and the
-/// observation terms of the ancestor-sampling suffix ratio. A sweep that
-/// tempered some of those and not others would target neither `π_1` nor
-/// `π_β`, and fails here.
-///
-/// `β = 0.15` is chosen for power against the subtler of the two halves.
-/// Measured at M = 200 000: filter weights left untempered fails at any β
-/// tried (`z_agg = 74` already at `β = 0.4`); the suffix ratio alone left
-/// untempered moves only the ancestor-sampling acceptance, and gave
-/// `z_agg = 3.9` at `β = 0.4` — under the bar — but `8.1` at `β = 0.15`,
-/// where the correct kernel gives `−0.85`.
-#[test]
-fn one_sweep_leaves_the_tempered_smoothing_target_invariant() {
-    let beta = InverseTemperature::new(0.15).unwrap();
-    check_invariance(&DENSE, N_SUBSTEPS, true, "dense, tempered at β = 0.4", beta);
-}
-
 fn check_invariance(
     schedule: &[(usize, f64)],
     n_substeps: usize,

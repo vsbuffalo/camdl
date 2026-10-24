@@ -334,15 +334,6 @@ pub enum DiagnosticKind {
         flow: u64,
     },
 
-    // ── Tempering ────────────────────────────────────────────────
-    LowSwapRate {
-        rung_i: usize,
-        rung_j: usize,
-        beta_i: f64,
-        beta_j: f64,
-        rate: f64,
-    },
-
     // ── Resume ───────────────────────────────────────────────────
     ResumeConfigMismatch {
         expected: String,
@@ -436,8 +427,6 @@ impl DiagnosticKind {
             Self::ZeroRateNonzeroFlow { .. } => Severity::Warning,
             Self::ResumeConfigMismatch { .. } => Severity::Error,
             Self::ResumeParamMissing { .. } => Severity::Warning,
-            Self::LowSwapRate { rate, .. } if *rate < 0.01 => Severity::Error,
-            Self::LowSwapRate { .. } => Severity::Warning,
             Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::RandomWalk, .. }
                 if *rate < 0.05 || *rate > 0.80 => Severity::Error,
             Self::AcceptanceRateUnhealthy { rate, kernel: AcceptanceKernel::Nuts, .. }
@@ -575,9 +564,6 @@ impl DiagnosticKind {
             Self::ZeroRateNonzeroFlow { transition, flow } =>
                 format!("Transition '{}' has rate=0 but flow={}. Add iota.",
                     transition, flow),
-            Self::LowSwapRate { beta_i, beta_j, rate, .. } =>
-                format!("Tempering swap rate B={:.2}↔{:.2}: {:.1}%.",
-                    beta_i, beta_j, rate * 100.0),
             Self::ResumeConfigMismatch { .. } =>
                 "Resume config hash mismatch — model/data/priors changed.".into(),
             Self::ResumeParamMissing { param } =>
@@ -630,10 +616,6 @@ impl DiagnosticKind {
             ],
             Self::ZeroRateNonzeroFlow { .. } => vec![
                 "Add a seeding term (iota) to the rate expression",
-            ],
-            Self::LowSwapRate { .. } => vec![
-                "Add more temperature rungs (denser ladder)",
-                "The LL gap between basins may be too large for tempering",
             ],
             Self::CompressedLogitPosition { .. } => vec![
                 "Widen parameter bounds if scientifically justified",

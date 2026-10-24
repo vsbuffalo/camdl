@@ -483,7 +483,7 @@ fn stage_config_hash(method: &Method) -> Result<ContentHash, String> {
     method.starts()?;
     // Gate the Method struct itself: `identity_payload()` already built its
     // Value via `json!`, which would have nulled any non-finite cooling /
-    // rho / tempering — so check the source struct before trusting it.
+    // rho — so check the source struct before trusting it.
     ensure_finite(method)?;
     let v = serde_json::json!({
         "identity": method.identity_payload(),

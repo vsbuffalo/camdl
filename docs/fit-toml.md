@@ -333,7 +333,7 @@ the default `starts` from `from_prior` to `uniform_unconstrained`.
 | `algorithm`              | backend          | role                                              | key fields                                                                                     |
 | ------------------------ | ---------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50)          |
-| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `tempering`, `max_tree_depth`)           |
+| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `max_tree_depth`)                        |
 | `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                            |
 | `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                                      |
 | `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                             |
@@ -409,36 +409,6 @@ It is off by default; `burnin_dt = dt` is also off. A fit is refused, naming
 distinct run ids and never share a cached posterior. The other methods do not
 take it — the particle methods (`if2`, `pgas`, `pmmh`) simulate the warm-up
 stochastically, and the NLopt optimizers integrate at `dt` throughout.
-
-### Tempering (PGAS)
-
-```toml
-tempering = [
-  1.0,
-  0.7,
-  0.4,
-  0.15,
-] # first entry MUST be 1.0 (cold chain); only the cold rung samples
-```
-
-Each rung `k` samples a flattened version of the posterior in which only the
-**observation** density is tempered:
-
-```
-π_k(θ, x) ∝ p(θ) · p(x | θ) · p(y | x, θ)^β_k
-```
-
-The prior and the process density (initial state and transitions) stay at full
-weight, so a hot rung's latent trajectory is still one the model can produce —
-only the data's pull on it, and on θ, is weakened. Every move a rung makes
-targets this law: the θ update (MH or NUTS), the particle-Gibbs trajectory
-refresh, and the swap between adjacent rungs, whose acceptance ratio uses the
-observation log-likelihood alone. The cold rung (`β = 1`) is the posterior, and
-its draws are the only ones reported; the ladder changes how well the cold chain
-mixes, never what it converges to.
-
-Add intermediate β values when the tempering swap rate is low (see the
-diagnostics table in `camdl docs workflow`).
 
 ## How `fit.toml` relates to the model
 

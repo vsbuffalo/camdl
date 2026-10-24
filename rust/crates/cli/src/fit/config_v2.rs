@@ -1044,16 +1044,6 @@ pub enum Algorithm {
         #[serde(default)]
         thin: Option<usize>,
 
-        /// Temperature ladder for parallel tempering (replica
-        /// exchange; Earl & Deem 2005, Geyer 1991). Each entry is
-        /// β ∈ (0, 1]. The first entry MUST be 1.0 (cold chain).
-        /// Only the cold rung contributes posterior samples; heated
-        /// rungs explore a flatter likelihood surface (ll × β) and
-        /// exchange with adjacent rungs via Metropolis swaps.
-        /// Default: `[1.0]` (no tempering, single rung).
-        /// Example: `[1.0, 0.7, 0.4, 0.15]`.
-        #[serde(default = "default_pgas_tempering")]
-        tempering: Vec<f64>,
         /// Maximum NUTS tree depth (Hoffman & Gelman 2014). Stiff
         /// posteriors hit this and need a higher value. Default: 10.
         #[serde(default = "default_max_tree_depth")]
@@ -1206,8 +1196,8 @@ pub enum Algorithm {
     /// NUTS on the deterministic ODE marginal likelihood (gh#275 Phase 2) — a
     /// gradient-based Bayesian sampler using forward sensitivities (`det_grad`).
     /// Deterministic-likelihood, `ode`-only; on a stochastic backend gradient-NUTS
-    /// lives inside `pgas`. Leaner than `PGAS` — no particles, no CSMC, no
-    /// tempering; just NUTS warm-up (dual-averaging step size) and sampling.
+    /// lives inside `pgas`. Leaner than `PGAS` — no particles, no CSMC;
+    /// just NUTS warm-up (dual-averaging step size) and sampling.
     #[serde(rename = "nuts")]
     Nuts {
         backend: crate::run_meta::InferenceBackend,
@@ -1606,11 +1596,10 @@ impl Algorithm {
         // to override: `*StageOpts::from_stage` reads what is written below.
         match self {
             Algorithm::PGAS {
-                tempering, max_tree_depth, trajectory_warmup,
+                max_tree_depth, trajectory_warmup,
                 csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts, binomial,
                 ancestor_sampling, ..
             } => {
-                if let Some(t) = &cli.tempering { *tempering = t.clone(); }
                 if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
                 if let Some(w) = cli.trajectory_warmup { *trajectory_warmup = w; }
                 if let Some(s) = cli.csmc_sweeps_per_nuts { *csmc_sweeps_per_nuts = s; }
@@ -1682,7 +1671,6 @@ impl Algorithm {
 /// would invalidate cached fits for nothing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CliStageOverrides {
-    pub tempering: Option<Vec<f64>>,
     pub max_tree_depth: Option<usize>,
     pub trajectory_warmup: Option<usize>,
     pub csmc_sweeps_per_nuts: Option<usize>,
@@ -1802,7 +1790,6 @@ fn default_loglik_eval_replicates() -> usize { 8 }
 fn default_cooling_target_iters() -> usize { 50 }
 
 // PGAS defaults
-fn default_pgas_tempering() -> Vec<f64> { vec![1.0] }
 fn default_max_tree_depth() -> usize { 10 }
 fn default_csmc_sweeps_per_nuts() -> usize { 1 }
 fn default_n_trajectories() -> usize { 200 }
@@ -3371,8 +3358,6 @@ starts     = "{starts}"
     #[test]
     fn every_cli_sampler_flag_changes_the_stage_identity() {
         let cases: Vec<(&str, Method, CliStageOverrides)> = vec![
-            ("--tempering", pgas_method(),
-             CliStageOverrides { tempering: Some(vec![1.0, 0.5]), ..Default::default() }),
             ("--max-tree-depth", pgas_method(),
              CliStageOverrides { max_tree_depth: Some(7), ..Default::default() }),
             ("--trajectory-warmup", pgas_method(),
@@ -3488,7 +3473,7 @@ starts     = "{starts}"
             "folded by cas_n_trajectories instead — hashing it here double-folds");
         // Everything else the stage carries is present, under its TOML spelling.
         for key in ["algorithm", "backend", "chains", "particles", "burn_in", "thin",
-                    "tempering", "use_nuts", "dense_mass", "max_tree_depth",
+                    "use_nuts", "dense_mass", "max_tree_depth",
                     "starts", "trajectory_warmup", "csmc_sweeps_per_nuts"] {
             assert!(obj.contains_key(key),
                 "'{key}' must be in the stage identity; present keys: {:?}",
@@ -3784,10 +3769,10 @@ cooling = 0.7
         );
         assert!(parse(&ok).is_ok(), "a valid IF2 method must parse");
 
-        // A PGAS optional key (tempering) must be accepted, not falsely flagged.
+        // A PGAS optional key (max_tree_depth) must be accepted, not falsely flagged.
         let ok_pgas = format!(
             "{base}[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\n\
-             chains = 2\nparticles = 100\nsweeps = 10\ntempering = [1.0, 0.5]\n"
+             chains = 2\nparticles = 100\nsweeps = 10\nmax_tree_depth = 8\n"
         );
         assert!(parse(&ok_pgas).is_ok(), "a valid PGAS method with optional keys must parse");
 
@@ -6823,7 +6808,6 @@ decibans_thresh = 100.0
                 backend: crate::run_meta::InferenceBackend::ChainBinomial,
                 chains: 4, particles: 100, sweeps,
                 burn_in: Some(200), thin: Some(2),
-                tempering: vec![1.0],
                 max_tree_depth: 10,
                 trajectory_warmup: 0,
                 csmc_sweeps_per_nuts: 1,
@@ -6882,16 +6866,10 @@ decibans_thresh = 100.0
 
     #[test]
     fn pgas_identity_payload_includes_new_algorithmic_knobs() {
-        // tempering, max_tree_depth, trajectory_warmup,
-        // csmc_sweeps_per_nuts, dense_mass, use_nuts ALL change chain
-        // dynamics and MUST invalidate identity.
+        // max_tree_depth, trajectory_warmup, csmc_sweeps_per_nuts,
+        // dense_mass, use_nuts ALL change chain dynamics and MUST
+        // invalidate identity.
         let base = make_pgas_stage(1000);
-
-        let mut s = make_pgas_stage(1000);
-        if let Algorithm::PGAS { ref mut tempering, .. } = s.algorithm {
-            *tempering = vec![1.0, 0.5];
-        }
-        assert_ne!(base.identity_payload(), s.identity_payload(), "tempering");
 
         let mut s = make_pgas_stage(1000);
         if let Algorithm::PGAS { ref mut max_tree_depth, .. } = s.algorithm { *max_tree_depth = 14; }
