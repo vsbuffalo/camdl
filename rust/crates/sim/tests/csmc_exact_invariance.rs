@@ -51,11 +51,10 @@ use sim::inference::dense_cells;
 use sim::inference::multi_stream_obs::{BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec};
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{
-    build_obs_at_substep, complete_data_loglik, csmc_as, EffectFiring, InverseTemperature,
+    build_obs_at_substep, complete_data_loglik, csmc_as, EffectFiring,
     ObsAtSubstep, PGASTrajectory, SubstepRecord,
 };
 
-const COLD: InverseTemperature = InverseTemperature::COLD;
 use sim::rng::StatefulRng;
 
 const DT: f64 = 1.0;
@@ -253,7 +252,6 @@ fn enumerate_paths(initial: &[i64], n_substeps: usize) -> Vec<PGASTrajectory> {
 /// raised to `β`.
 fn exact_target(
     f: &Fixture,
-    beta: f64,
 ) -> (Vec<PGASTrajectory>, Vec<f64>, HashMap<Vec<u64>, usize>) {
     let all = enumerate_paths(&f.initial_counts, f.n_substeps);
     let mut paths = Vec::new();
@@ -269,11 +267,7 @@ fn exact_target(
             &f.obs_at_substep,
         )
         .expect("complete_data_loglik");
-        let ll = if c.total.is_finite() {
-            c.initial_state + c.transition + beta * c.observation
-        } else {
-            c.total
-        };
+        let ll = c.total;
         if ll.is_finite() {
             paths.push(traj);
             logp.push(ll);
@@ -379,7 +373,7 @@ fn the_scored_density_is_the_producers_own_law() {
 
 #[test]
 fn one_sweep_leaves_the_smoothing_target_invariant() {
-    check_invariance(&DENSE, N_SUBSTEPS, true, "dense (observation on every substep)", COLD);
+    check_invariance(&DENSE, N_SUBSTEPS, true, "dense (observation on every substep)");
 }
 
 /// The same question on a schedule with UNOBSERVED substeps, where the weights
@@ -387,7 +381,7 @@ fn one_sweep_leaves_the_smoothing_target_invariant() {
 /// never reaches that branch, so without this case the skip is unexercised.
 #[test]
 fn one_sweep_is_invariant_when_some_substeps_skip_resampling() {
-    check_invariance(&SPARSE, N_SUBSTEPS, true, "sparse (some substeps skip resampling)", COLD);
+    check_invariance(&SPARSE, N_SUBSTEPS, true, "sparse (some substeps skip resampling)");
 }
 
 fn check_invariance(
@@ -395,10 +389,9 @@ fn check_invariance(
     n_substeps: usize,
     expect_splices: bool,
     label: &str,
-    beta: InverseTemperature,
 ) {
     let f = fixture_with(schedule, n_substeps);
-    let (paths, pi, index) = exact_target(&f, beta.get());
+    let (paths, pi, index) = exact_target(&f);
 
     // Non-vacuity (3): a target concentrated on one path passes for free.
     let ess = 1.0 / pi.iter().map(|p| p * p).sum::<f64>();
@@ -434,7 +427,6 @@ fn check_invariance(
             EffectFiring::default(),
             sim::rng::BinomialAlgorithm::Btpe,
             true,
-            beta,
         )
         .expect("csmc_as");
         n_proposed += diag.n_as_proposed;
@@ -528,5 +520,5 @@ fn check_invariance(
 /// the exactly-enumerated counterexample in the gh#718 review.
 #[test]
 fn one_sweep_is_invariant_with_no_resampling_step_at_all() {
-    check_invariance(&TRAP, TRAP_SUBSTEPS, false, "trap (no substep ever draws an ancestry)", COLD);
+    check_invariance(&TRAP, TRAP_SUBSTEPS, false, "trap (no substep ever draws an ancestry)");
 }

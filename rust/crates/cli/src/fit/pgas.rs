@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 /// One chain's representative `(θ, x)` draw for the cross-chain compatibility
-/// matrix (gh#785) — the cold rung's parameter vector and the latent path it
+/// matrix (gh#785) — the chain's parameter vector and the latent path it
 /// held at the end of the final sweep. `None` for a chain that never sampled.
 type ChainFinalDraw = Option<(Vec<f64>, PGASTrajectory)>;
 
@@ -570,9 +570,9 @@ pub fn run_stage(
     // chain that never sampled — a start refused as `BadInit` (gh#607) has no
     // path, so it is omitted from the matrix rather than given a null row.
     //
-    // Both halves come from `PGASResult`'s end-of-run cold-rung state, which is
+    // Both halves come from `PGASResult`'s end-of-run chain state, which is
     // ONE instant: `final_trajectory` and `resume_state.params` are both
-    // `rungs[0].*` cloned adjacently at the end of the final sweep
+    // `chain.*` cloned adjacently at the end of the final sweep
     // (`sim/inference/pgas.rs`). Taking θ from `sweeps.last()` instead would
     // pair the last RETAINED sweep's parameters with the FINAL sweep's path —
     // the same sweep only when `thin` divides the post-burn-in count, and a
@@ -1212,8 +1212,8 @@ pub fn run_stage(
             }
 
             // gh#785. This chain's representative (θ, x) pair for the
-            // cross-chain compatibility matrix. Both from the end-of-run cold
-            // rung, i.e. the same sweep — see the declaration.
+            // cross-chain compatibility matrix. Both from the end-of-run chain
+            // state, i.e. the same sweep — see the declaration.
             {
                 let mut fd = chain_final_draw.lock().unwrap();
                 fd[chain_id] = Some((

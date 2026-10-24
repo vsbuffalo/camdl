@@ -386,38 +386,6 @@ fn fd_check(
     rel_tol: f64,
     name: &str,
 ) {
-    fd_check_at(
-        compiled, trajectory, observations, obs_model, params, param_names,
-        estimated_indices, params_to_check, dt, rel_tol, name,
-        sim::inference::pgas::InverseTemperature::COLD,
-    );
-}
-
-/// The tempered energy a rung at inverse temperature `beta` integrates
-/// (gh#551): process density at full weight, observation density times `beta`,
-/// built from the VALUE path's components — independent of the gradient fn.
-fn tempered_energy(c: &sim::inference::pgas::LogLikComponents, beta: f64) -> f64 {
-    c.initial_state + c.transition + beta * c.observation
-}
-
-/// `fd_check` at an arbitrary rung temperature: the gradient fn's energy must
-/// equal the value path's `process + β·obs`, and its gradient must match a
-/// central difference of that same tempered energy.
-#[allow(clippy::too_many_arguments)]
-fn fd_check_at(
-    compiled: &Arc<CompiledModel>,
-    trajectory: &sim::inference::pgas::PGASTrajectory,
-    observations: &[Observation],
-    obs_model: &MultiStreamObsModel,
-    params: &[f64],
-    param_names: &[String],
-    estimated_indices: &[usize],
-    params_to_check: &[usize],
-    dt: f64,
-    rel_tol: f64,
-    name: &str,
-    beta: sim::inference::pgas::InverseTemperature,
-) {
     let d = estimated_indices.len();
     let n_model_params = compiled.model.parameters.len();
     let mut model_to_estimated: Vec<Option<usize>> = vec![None; n_model_params];
@@ -436,19 +404,17 @@ fn fd_check_at(
         obs_model,
         d, &rate_grads_for_run, &oas,
         &estimated_to_model,
-        beta,
     ).unwrap();
     assert!(ll.is_finite(), "[{}] log-likelihood must be finite, got {}", name, ll);
     eprintln!("[{}] LL = {:.4}", name, ll);
-    let value_path = tempered_energy(
-        &complete_data_loglik(compiled, trajectory, params, observations, dt, obs_model, &oas)
-            .unwrap(),
-        beta.get(),
-    );
+    // The gradient fn's energy must equal the value path's total.
+    let value_path =
+        complete_data_loglik(compiled, trajectory, params, observations, dt, obs_model, &oas)
+            .unwrap()
+            .total;
     assert!(
         (ll - value_path).abs() <= 1e-9 * value_path.abs().max(1.0),
-        "[{name}] gradient fn energy {ll} != value path process + β·obs {value_path} (β = {})",
-        beta.get(),
+        "[{name}] gradient fn energy {ll} != value path total {value_path}",
     );
 
     for &est_idx in params_to_check {
@@ -461,14 +427,14 @@ fn fd_check_at(
         p_plus[model_idx] += eps;
         p_minus[model_idx] -= eps;
 
-        let ll_plus = tempered_energy(&complete_data_loglik(
+        let ll_plus = complete_data_loglik(
             compiled, trajectory, &p_plus, observations, dt,
             obs_model, &oas,
-        ).unwrap(), beta.get());
-        let ll_minus = tempered_energy(&complete_data_loglik(
+        ).unwrap().total;
+        let ll_minus = complete_data_loglik(
             compiled, trajectory, &p_minus, observations, dt,
             obs_model, &oas,
-        ).unwrap(), beta.get());
+        ).unwrap().total;
         let fd = (ll_plus - ll_minus) / (2.0 * eps);
 
         let analytic = grad[est_idx];
@@ -1207,7 +1173,6 @@ fn gh180_parametric_projection_grad_matches_fd() {
     let (_ll, grad) = complete_data_loglik_grad(
         &compiled, &trajectory, &params, &observations, dt,
         &obs_model, d, &rate_grads_for_run, &oas, &estimated_indices,
-        sim::inference::pgas::InverseTemperature::COLD,
     ).unwrap();
     let qgam_est = estimated_indices.iter().position(|&i| i == qgam_idx).unwrap();
     eprintln!("[gh180_parametric_projection] d(ll)/d(qgam) = {:.6e} (analytic)", grad[qgam_est]);

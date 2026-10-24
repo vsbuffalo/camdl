@@ -136,7 +136,6 @@ fn csmc_returns_a_continuous_path() {
             EffectFiring::default(),
             sim::rng::BinomialAlgorithm::Btpe,
             true,
-            sim::inference::pgas::InverseTemperature::COLD,
         )
         .expect("csmc_as");
         sweeps += 1;
