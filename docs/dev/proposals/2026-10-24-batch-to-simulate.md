@@ -170,7 +170,16 @@ cell is skipped and its `traj.tsv` is read back for the combined file and the
 mirror; `--force` recomputes as it does today. The bytes are identical by
 construction; the only risk is a stale cell masking a changed input, which the
 count-in-the-key rule already forbids. Test: a second identical run simulates
-zero cells.
+zero cells. A cell counts as held only when every artifact the run asks for is
+present: a leaf that holds `traj.tsv` but no `obs/` child is a miss for a run
+given an observation flag, and is re-simulated, because the observations are
+drawn with their own seed alongside the trajectory and are not reconstructed
+from `traj.tsv` afterwards (the gh#738 and gh#599 class). Without an observation
+flag no observations are generated at all, and the leaf holds `run.json` and
+`traj.tsv` only; with any of the four flags the leaf also holds
+`obs/<hash>/<stream>.tsv` and `obs.json` (observation seed, process seed,
+streams), and the directory or file named by the flag receives the copy a
+modeller reads (verified by running both on 2026-10-24).
 
 **Dry run.** Multi-cell `simulate --dry-run` prints, per cell, whether the store
 already holds it and the leaf path, with hit and miss counts, as
