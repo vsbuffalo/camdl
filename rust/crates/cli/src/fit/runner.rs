@@ -2470,13 +2470,16 @@ impl ChainResults {
         v.into_iter().map(|(_, ll)| ll).collect()
     }
 
-    /// The chain ids of [`Self::chain_eval_logliks`], in the same order.
+    /// The chain numbers of [`Self::chain_eval_logliks`], in the same order.
     /// Reported rather than reconstructed from the position: IF2 drops
     /// PF-degenerate chains, so `per_chain` is a subset and its index is not
-    /// a chain number.
+    /// a chain number. 1-based, because this is written to `fit_state.toml`
+    /// and printed by `fit summary`: it must name the `chain_N/` directory
+    /// and match the `best ll=… (chain N)` line, while `ChainScore::chain_id`
+    /// is the 0-based in-memory index (gh#912, gh#972).
     pub fn chain_eval_ids(&self) -> Vec<usize> {
         let mut v: Vec<usize> = self.loglik_eval.per_chain.iter()
-            .map(|s| s.chain_id).collect();
+            .map(|s| s.chain_id + 1).collect();
         v.sort_unstable();
         v
     }
@@ -4155,6 +4158,36 @@ mod tests {
         assert_ne!(theta, best.mle.as_slice(),
             "winner_theta and best.mle must differ in this fixture, \
              else the test isn't catching the bug class");
+    }
+
+    /// gh#972: `chain_eval_ids` is written to `fit_state.toml` and printed
+    /// by `fit summary` as the chain column of the per-chain loglik-eval
+    /// table, so it must be the 1-based chain number that names `chain_N/`
+    /// and the `best ll=… (chain N)` line, not the 0-based in-memory index.
+    /// Chain 2 (index 1) was dropped, so the ids are not a contiguous run
+    /// and the per_chain order is scrambled — position-based labels and a
+    /// missing sort would both fail too.
+    #[test]
+    fn chain_eval_ids_are_one_based_chain_numbers() {
+        use crate::fit::loglik_eval::{ChainScore, LoglikEvalOutcome, FilterStats};
+        let score = |chain_id: usize, loglik: f64| ChainScore {
+            chain_id, theta: vec![0.1], loglik, se: 0.1,
+            filter_stats: FilterStats::failed(),
+        };
+        let cr = ChainResults {
+            results: vec![],
+            best_chain: 2,
+            best_loglik: -40.0,
+            chain_agreement: HashMap::new(),
+            loglik_eval: LoglikEvalOutcome {
+                per_chain: vec![score(2, -40.0), score(0, -45.0)],
+                overall_winner_idx: 0,
+            },
+        };
+        assert_eq!(cr.chain_eval_ids(), vec![1, 3],
+            "chain indices 0 and 2 are chains 1 and 3 in every artifact");
+        assert_eq!(cr.chain_eval_logliks(), vec![-45.0, -40.0],
+            "logliks stay parallel to the ids");
     }
 
     /// resolve_prior precedence chain: fit.toml override → model IR → Flat.
