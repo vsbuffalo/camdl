@@ -162,6 +162,23 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   chain-binomial, Gillespie, or ODE. Migration: pick one of the three surviving
   backends (chain-binomial is the closest stochastic analogue).
 
+- **PGAS parallel tempering was removed (gh#789).** The `tempering = [...]` key
+  under `[method]` for `algorithm = "pgas"` and the `--tempering` flag on
+  `fit run` are gone; every PGAS chain samples the posterior directly, as the
+  ladder's cold rung did. Migration: delete the `tempering` line and drop the
+  flag. A `fit.toml` that still carries the key is refused with that
+  instruction. The `LowSwapRate` diagnostic goes with it.
+
+## Run identity
+
+- **Every stored PGAS fit re-keys.** `tempering` was part of the PGAS method
+  identity, so removing it changes every PGAS leaf's `run_id`: a new PGAS run
+  does not deduplicate against one stored before this change, and an in-flight
+  PGAS fit cannot `--resume` across it (its saved config hash no longer
+  matches). Stored results stay readable; the fits run again. This entry is
+  shared with the correlated-PMMH removal, whose `rho` re-key lands as the same
+  identity change.
+
 ## Language (DSL)
 
 - **Restricted sums for sparse/spatial coupling (gh#185):**

@@ -793,6 +793,10 @@ pub struct FitRunArgs {
     pub _removed_init_method: Option<String>,
     #[arg(long = "starts-from", value_name = "DIR_OR_HASH", hide = true)]
     pub _removed_starts_from: Option<String>,
+    // `--tempering` went with PGAS parallel tempering (gh#789); same shape,
+    // its own message.
+    #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
+    pub _removed_tempering: Option<String>,
 
     /// User-supplied display label for this fit (1–64 chars after
     /// trim; allowed: letters, digits, spaces, commas, dot,
