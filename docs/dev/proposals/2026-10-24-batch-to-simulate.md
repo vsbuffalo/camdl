@@ -13,7 +13,7 @@
   sibling cut proposal, PR #987), the note
   `2026-10-06-run-grid-workflows-and-composition.md` (the usage survey), gh#930,
   gh#286, gh#738, gh#599, gh#923, gh#598, gh#572, gh#571, gh#562, gh#948,
-  gh#980, `vsbuffalo/camdl-docs#1`.
+  gh#980, gh#990, `vsbuffalo/camdl-docs#1`.
 - Required reading: `.claude/rules/run-identity.md` (a sweep cell's identity and
   the ensemble hash, §8), `.claude/rules/proposals.md`.
 - Evidence: a read-only inventory of main `bff4cec4` taken on 2026-10-24, the
@@ -65,26 +65,26 @@ completeness.
 
 ## 2. Every batch capability, and where it goes
 
-| capability                                            | `batch` today                                                            | `simulate` today                                                                                 | after this proposal                                                        |
-| ----------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
-| scenarios from the model's `scenarios {}` block       | `[[scenario]] name = …`                                                  | `--scenario`, repeatable, comma-split                                                            | unchanged                                                                  |
-| ad-hoc scenario: values plus `enable`/`disable` lists | several per manifest, each named                                         | one per invocation: `--param`, `--enable`, `--disable`; the arm is labelled `baseline`           | one per invocation, labelled from its flags (§3, "Arm labels")             |
-| deterministic parameter grid                          | `[sweep]` list, linspace, logspace, range                                | none                                                                                             | **`--sweep PARAM=GRID`**, repeatable; name-sorted Cartesian product (§3)   |
-| a grid read from a file                               | `[design.*]` outputs only                                                | none (a hand grid passed as `--draws FILE` is pooled into a band, gh#562)                        | **`--sweep-file FILE`** (§3)                                               |
-| generated designs: Latin hypercube, Halton, Saltelli  | `[design.*]` (`sampling.rs`)                                             | none                                                                                             | dropped (§4); generate externally, pass as `--sweep-file`                  |
-| posterior, prior or uniform draws                     | none                                                                     | `--draws`, `--n-draws`, `--draws-out`                                                            | unchanged                                                                  |
-| replicates and seeds                                  | `[config.seeds]` explicit list                                           | `--replicates`, `--seeds`                                                                        | unchanged; sweep cells seed per D-B (§3)                                   |
-| common random numbers across design points            | yes (explicit seeds)                                                     | not applicable                                                                                   | yes, by D-B (§3)                                                           |
-| skip cells already in the store on a re-run           | yes (`CasSink::should_run`, `batch.rs:1418`)                             | no: runs every cell (`batch.rs:1618-1622`)                                                       | **yes** for multi-cell `simulate` (§3)                                     |
-| recompute existing cells                              | `--force`                                                                | `--force` (`args/mod.rs:547`)                                                                    | unchanged                                                                  |
-| parallel cells                                        | `--parallel`                                                             | `--parallel`                                                                                     | unchanged                                                                  |
-| synthetic observations into the store                 | `[obs] enabled = true`, no path needed                                   | the same sink, enabled by any of the four path flags (`main.rs:986, 1874`)                       | unchanged; the directory is the product (§4)                               |
-| plan without running, with store hits and misses      | `--dry-run` prints hit/miss counts and leaf paths (`batch.rs:1310-1320`) | `--dry-run` prints model, backend, seeds, scenarios only (`main.rs:4532-4590`)                   | **hit/miss counts and leaf paths** in multi-cell `simulate --dry-run` (§3) |
-| report on a grid's cells                              | `batch status`                                                           | none                                                                                             | dropped (§4); `--dry-run` carries the hit/miss view                        |
-| per-cell leaves labelled by the swept values          | yes (`params_path_label`, `batch.rs:1359`)                               | yes, same sink                                                                                   | unchanged                                                                  |
-| combined table across cells                           | none                                                                     | `ensemble.tsv` with a global `replicate` ordinal and a `draw` column (`main.rs:2769, 2913-2929`) | `point_id`, `sweep:<param>` and `seed` columns for sweep jobs (§3)         |
-| the grid declaration kept with the results            | the manifest                                                             | the per-cell `run.json`; the ensemble record holds only counts (`main.rs:2750-2756`)             | the ensemble record carries the resolved design (§3)                       |
-| copy a GeoJSON beside the outputs                     | `[config] geo` (`batch.rs:325, 924-930`)                                 | none                                                                                             | dropped (§4)                                                               |
+| capability                                            | `batch` today                                                            | `simulate` today                                                                                    | after this proposal                                                        |
+| ----------------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| scenarios from the model's `scenarios {}` block       | `[[scenario]] name = …`                                                  | `--scenario`, repeatable, comma-split                                                               | unchanged                                                                  |
+| ad-hoc scenario: values plus `enable`/`disable` lists | several per manifest, each named                                         | one per invocation: `--param`, `--enable`, `--disable`; the arm is labelled `baseline`              | one per invocation, labelled from its flags (§3, "Arm labels")             |
+| deterministic parameter grid                          | `[sweep]` list, linspace, logspace, range                                | none                                                                                                | **`--sweep PARAM=GRID`**, repeatable; name-sorted Cartesian product (§3)   |
+| a grid read from a file                               | `[design.*]` outputs only                                                | none (a hand grid passed as `--draws FILE` is pooled into a band, gh#562)                           | **`--sweep-file FILE`** (§3)                                               |
+| generated designs: Latin hypercube, Halton, Saltelli  | `[design.*]` (`sampling.rs`)                                             | none                                                                                                | dropped (§4); generate externally, pass as `--sweep-file`                  |
+| posterior, prior or uniform draws                     | none                                                                     | `--draws`, `--n-draws`, `--draws-out`                                                               | unchanged                                                                  |
+| replicates and seeds                                  | `[config.seeds]` explicit list                                           | `--replicates`, `--seeds`                                                                           | unchanged; sweep cells seed per D-B (§3)                                   |
+| common random numbers across design points            | yes (explicit seeds)                                                     | not applicable                                                                                      | yes, by D-B (§3)                                                           |
+| skip cells already in the store on a re-run           | yes (`CasSink::should_run`, `batch.rs:1418`)                             | no: `SimSink` keeps the default `should_run`, which is `true` (`main.rs:2508`, `engine.rs:129-131`) | **yes** for multi-cell `simulate` (§3)                                     |
+| recompute existing cells                              | `--force`                                                                | `--force` (`args/mod.rs:547`)                                                                       | unchanged                                                                  |
+| parallel cells                                        | `--parallel`                                                             | `--parallel`                                                                                        | unchanged                                                                  |
+| synthetic observations into the store                 | `[obs] enabled = true`, no path needed                                   | the same sink, enabled by any of the four path flags (`main.rs:986, 1874`)                          | unchanged; the directory is the product (§4)                               |
+| plan without running, with store hits and misses      | `--dry-run` prints hit/miss counts and leaf paths (`batch.rs:1310-1320`) | `--dry-run` prints model, backend, seeds, scenarios only (`main.rs:4532-4590`)                      | **hit/miss counts and leaf paths** in multi-cell `simulate --dry-run` (§3) |
+| report on a grid's cells                              | `batch status`                                                           | none                                                                                                | dropped (§4); `--dry-run` carries the hit/miss view                        |
+| per-cell leaves labelled by the swept values          | yes (`params_path_label`, `batch.rs:1359`)                               | yes, same sink                                                                                      | unchanged                                                                  |
+| combined table across cells                           | none                                                                     | `ensemble.tsv` with a global `replicate` ordinal and a `draw` column (`main.rs:2769, 2913-2929`)    | `point_id`, `sweep:<param>` and `seed` columns for sweep jobs (§3)         |
+| the grid declaration kept with the results            | the manifest                                                             | the per-cell `run.json`; the ensemble record holds only counts (`main.rs:2750-2756`)                | the ensemble record carries the resolved design (§3)                       |
+| copy a GeoJSON beside the outputs                     | `[config] geo` (`batch.rs:325, 924-930`)                                 | none                                                                                                | dropped (§4)                                                               |
 
 ## 3. The `simulate` surface after this proposal
 
@@ -114,14 +114,20 @@ to its rewrite and are not pre-empted.
 
 **`point_id`** is the 0-based position of the design point in the name-sorted
 product, or its 0-based row in the sweep file, as the accepted proposal's D-C
-says. The maintainer decided on 2026-10-24 that camdl standardises on one index
-base, 0, everywhere a user sees an index: the `draw` and `replicate` columns
-(1-based today, `draw_idx + 1` and `run_idx + 1`, `main.rs:2913-2929, 3081`),
-the `chain_N/` directories and every 1-based chain label (gh#980's class), and
-`--exclude-chains`. Those conversions are not this proposal's work; they are one
-issue, filed with it, that supersedes gh#980's two-type design (`ChainIndex`
-plus `ChainLabel`) with a single index type, since with one base the second type
-has nothing to guard. `point_id` is born 0-based and never converted.
+says. camdl standardises on one index base, 0, everywhere a user sees an index:
+the `draw` and `replicate` columns (1-based today, `draw_idx + 1` and
+`run_idx + 1`, `main.rs:2913-2929, 3081`), the `chain_N/` directories and every
+1-based chain label (gh#980's class), and `--exclude-chains`. Of these, PR B
+converts `replicate`: the combined and observation tables `simulate` writes
+carry `replicate` as the global run ordinal counted from 0 (`run_idx`, not
+`run_idx + 1`), so the sweep-job tables this proposal adds carry one base
+throughout. A draws job's `draw` column keeps its base until gh#990 lands, so in
+that interval `replicate` and `draw` differ in base in a draws job's table. The
+remaining conversions (`draw`, the chain directories and labels,
+`--exclude-chains`) are gh#990 ("One index base: every user-facing index counts
+from 0"), which supersedes gh#980's two-type design (`ChainIndex` plus
+`ChainLabel`) with a single index type, since with one base the second type has
+nothing to guard. `point_id` is born 0-based and never converted.
 
 **Composition.** `--sweep` and `--sweep-file` compose with `--scenario`,
 `--replicates`, `--seeds`, `--param`, `--params` and every output flag.
@@ -161,25 +167,44 @@ batch's sweeps used explicit seeds, where the index is unused.
 **Re-using cells the store already holds.** The store names every cell by a hash
 of its inputs. Batch looked that hash up before simulating and, when the store
 already held the cell, skipped the simulation and read the stored trajectory
-back; `simulate`'s sink always answers "run" because its `-o` mirror wanted
-every trajectory in memory (`batch.rs:1618-1622`). So today an interrupted
-500-cell grid restarts from nothing and adding one β value to a five-value sweep
+back: `CasSink::should_run` (`batch.rs:1418-1466`) returns `false` on a hit.
+`simulate` wraps that same `CasSink` in `SimSink` (`main.rs:2234-2241`), whose
+`RunSink` impl (`:2508`) does not override `should_run`, so the trait default of
+`true` (`engine.rs:129-131`) applies and every planned cell runs, because the
+`-o` mirror wanted every trajectory in memory. So today an interrupted 500-cell
+grid restarts from nothing and adding one β value to a five-value sweep
 re-simulates all six. This proposal gives multi-cell `simulate` batch's
 behaviour, which is also how every other store-backed verb behaves: a committed
 cell is skipped and its `traj.tsv` is read back for the combined file and the
 mirror; `--force` recomputes as it does today. The bytes are identical by
 construction; the only risk is a stale cell masking a changed input, which the
-count-in-the-key rule already forbids. Test: a second identical run simulates
-zero cells. A cell counts as held only when every artifact the run asks for is
-present: a leaf that holds `traj.tsv` but no `obs/` child is a miss for a run
-given an observation flag, and is re-simulated, because the observations are
-drawn with their own seed alongside the trajectory and are not reconstructed
-from `traj.tsv` afterwards (the gh#738 and gh#599 class). Without an observation
-flag no observations are generated at all, and the leaf holds `run.json` and
-`traj.tsv` only; with any of the four flags the leaf also holds
-`obs/<hash>/<stream>.tsv` and `obs.json` (observation seed, process seed,
-streams), and the directory or file named by the flag receives the copy a
-modeller reads (verified by running both on 2026-10-24).
+count-in-the-key rule already forbids.
+
+What counts as a hit is made exact. Today a hit is an identity match whose
+record is `Completed` with the leaf's own files present (`Lookup::Hit`,
+`runid/store.rs:87-97, 234-238`), and `CasSink::should_run` adds one rule on
+top: observations requested and `<leaf>/obs/` absent means run
+(`batch.rs:1461-1463`). That rule checks presence of the `obs/` directory, not
+the exact subtree, because the sink holds the base model while the subtree
+address is computed from the scenario-applied model, so a leaf holding a
+different cadence's or seed's observations is skipped silently and the run
+reports "cached" for observations it never wrote. The rule here is the exact
+one. The engine computes each cell's observation subtree address,
+`obs/<hash8>-<obs_seed>/`, from the scenario-applied model before it asks the
+sink whether to run, and `should_run` reports a hit only when the leaf is
+`Completed` with its own files present and, if observations are requested, that
+exact subtree holds every requested stream file and its `obs.json`. Directory
+presence alone is not a hit. A miss on either count re-simulates the cell,
+because the observations are drawn with their own seed alongside the trajectory
+and are not reconstructed from `traj.tsv` afterwards (the gh#738 and gh#599
+class). Test: a second identical run simulates zero cells, and a leaf holding
+another cadence's or seed's observation subtree is re-simulated. Without an
+observation flag no observations are generated at all, and the leaf holds
+`run.json` and `traj.tsv` only; with any of the four flags the leaf also holds
+`obs/<hash8>-<obs_seed>/<stream>.tsv` and, inside that same subtree,
+`obs/<hash8>-<obs_seed>/obs.json` (observation seed, process seed, streams;
+`batch.rs:2126-2128, 2177-2178`), and the directory or file named by the flag
+receives the copy a modeller reads (both forms were run in the demonstration).
 
 **Dry run.** Multi-cell `simulate --dry-run` prints, per cell, whether the store
 already holds it and the leaf path, with hit and miss counts, as
@@ -205,7 +230,7 @@ position, or `;`. Mandating a name was rejected: it would refuse every existing
 `--enable` invocation, including the book's. A flag that overrides the derived
 label is a follow-up if anyone asks. This is distinct from `--label`, which is a
 display label for the whole run in `camdl list` and `camdl show`
-(`args/mod.rs:243-248`) and never reaches the `scenario` column.
+(`args/mod.rs:549-554`) and never reaches the `scenario` column.
 
 **Store.** Each cell is a `Sim` leaf exactly as `simulate` and `batch` write one
 today, through `CasSink`, with the leaf's parameter label naming the swept
@@ -224,9 +249,10 @@ file says which replicate of draw 1 they pair with.
   §9.1 rows 2–3 of the accepted proposal, `point_id` and one `sweep:<param>`
   column per swept parameter, name-sorted, written with Rust's shortest
   round-trip `f64` formatting so a value joins exactly against the grid that
-  produced it; no `draw` column; and a `seed` column holding the cell's process
-  seed. The `seed` column is the pairing key: under D-B two design points at the
-  same replicate carry the same seed, so a modeller joins on
+  produced it; the global `replicate` ordinal counted from 0 (the `point_id`
+  paragraph above); no `draw` column; and a `seed` column holding the cell's
+  process seed. The `seed` column is the pairing key: under D-B two design
+  points at the same replicate carry the same seed, so a modeller joins on
   `(scenario, seed, time)` to form the paired difference D-B promises. The
   global `replicate` ordinal cannot serve, because it counts across points; the
   within-axis `replicate` of the 2026-10-06 note's storage rules is the
@@ -349,8 +375,12 @@ arm of `plan_grid`; the design field on `RunEntry` and the optional field on
 `EnsembleGridLevel`; `point_id`, `sweep:<param>` and `seed` in the ensemble and
 observation writers; the (design point, scenario) key on `SimQuantities` and the
 filled `DesignCoords.sweep`; store re-use and the hit/miss dry-run view for
-multi-cell `simulate`; the resolved design in the ensemble record; the derived
-arm label; the `--param`-versus-sweep refusal.
+multi-cell `simulate` (both land in `SimSink`, `main.rs:2241, 2508`, or whatever
+`simulate`'s sink becomes after the move, as a `should_run` override that
+consults the moved `CasSink::should_run` and reads a hit's `traj.tsv` back for
+the mirror, never in the moved code itself; the exact hit rule of §3 tightens
+`CasSink::should_run` in this PR, after the move); the resolved design in the
+ensemble record; the derived arm label; the `--param`-versus-sweep refusal.
 
 **Deleted** (after the flags land): `main.rs:149-151, 345-361, 571-572`
 (`Batch(BatchCmd)`, `BatchCmd`, dispatch) and `:27` (`mod batch;`);
@@ -389,9 +419,10 @@ New, red before the flags and green after:
    seed per replicate: sweeping a parameter the dynamics do not read (an
    observation-only parameter with observation output disabled) gives
    byte-identical trajectories across the two points. That is the D-B pin.
-2. The combined table of a sweep job has `point_id`, `sweep:beta` and `seed` and
-   no `draw`; `sweep:beta` round-trips `0.1234567` exactly; the two cells of one
-   replicate carry the same `seed`; `point_id` starts at 0.
+2. The combined table of a sweep job has `point_id`, `replicate`, `sweep:beta`
+   and `seed` and no `draw`; `sweep:beta` round-trips `0.1234567` exactly; the
+   two cells of one replicate carry the same `seed`; `point_id` starts at 0 and
+   `replicate` starts at 0.
 3. `--sweep beta=0.2,0.3` and `--sweep beta=0.3,0.2` produce different ensemble
    IDs, and a draws-only ensemble's grid-level bytes are unchanged (the unit
    test beside `levels_are_byte_identical_to_the_literals_they_replaced`).
@@ -521,8 +552,8 @@ be told when PR B lands: that its flag stage's design half has shipped on
 `--draws
 <path>` refusal and the sidecar), and that `point_id` is 0-based as D-C
 said and every other user-facing index is moving to 0 as well (so its §9.1 and
-the note's within-axis `replicate` are 0-based too). The maintainer asked that
-the design-vs-sample session be told directly as well as through the commits.
+the note's within-axis `replicate` are 0-based too). The design-vs-sample
+session is told directly as well as through the commits.
 
 ## 11. Risks
 
@@ -547,13 +578,15 @@ the design-vs-sample session be told directly as well as through the commits.
 ## 12. Decisions (the maintainer, 2026-10-24)
 
 1. **Multi-cell `simulate` re-uses cells the store already holds**, for
-   consistency with every other store-backed verb. Decided; §3.
+   consistency with every other store-backed verb; a cell is held only when
+   every requested artifact is present, checked at the exact observation subtree
+   (§3). Decided; §3.
 2. **The pairing key is a `seed` column now**; the within-axis `replicate` comes
    with the coordinate-kind rewrite, layered on top. Decided; §3.
 3. **One index base, 0, everywhere a user sees an index.** `point_id` stays
-   0-based as D-C said; the 1-based `draw`, `replicate`, chain directories and
-   chain labels move to 0 in a separate issue that supersedes gh#980's two-type
-   design. Decided; §3.
+   0-based as D-C said; `replicate` flips to 0-based in PR B; the 1-based
+   `draw`, chain directories and chain labels move to 0 in gh#990, which
+   supersedes gh#980's two-type design. Decided; §3.
 4. **Ad-hoc arms get a derived label** (`baseline+vaccination`,
    `baseline;beta=0.3`) in the flags PR; no mandatory name, no new flag.
    Decided; §3 "Arm labels".
