@@ -159,7 +159,7 @@ option, tempering or variance-reduction scheme arrives on a branch, never
 directly on main, and merges only together with a `docs/dev/notes/` note that
 measures the claimed improvement against the existing method on a committed
 fixture, cited from the merge commit. Three features that reached main without
-one were removed for it:
+one are removed by
 `docs/dev/proposals/2026-10-24-remove-pgas-tempering-ode-nuts-and-correlated-pmmh.md`.
 
 **One commit is one thing.** Dead code found while doing other work gets deleted

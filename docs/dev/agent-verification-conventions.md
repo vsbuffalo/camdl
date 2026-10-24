@@ -117,8 +117,7 @@ on a branch, never directly on main, and the merge commit cites the note.
 
 The failure mode this prevents is a method that works, passes its own tests, and
 is never shown to help. Three such methods — PGAS tempering, correlated PMMH,
-and NUTS on the ODE backend — reached main that way and were removed for it; the
-decision record is
+and NUTS on the ODE backend — reached main that way and are removed by
 `docs/dev/proposals/2026-10-24-remove-pgas-tempering-ode-nuts-and-correlated-pmmh.md`.
 
 ## Proposals
