@@ -2654,7 +2654,6 @@ restarting mid-schedule is statistically incoherent.
 | ---------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `burn_in`              | `2000`  | Discarded sweeps. Must be `< sweeps`.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `thin`                 | `5`     | Retain every k-th post-burn-in sweep.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `tempering`            | `[1.0]` | Parallel-tempering ladder of β ∈ (0,1]. First entry must be `1.0`; only the cold rung samples. Rung `k` targets `p(θ)·p(x∣θ)·p(y∣x,θ)^β_k`: only the observation density is tempered, and the swap ratio uses the observation log-likelihood (gh#551).                                                                                                                                                                                                                 |
 | `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible).                                                                                                                                                                                                                                                                                                                                                                         |
@@ -3313,22 +3312,21 @@ check, `--dt-check-strict` tightens its threshold (0.5 nats for chain_binomial,
 overridden run is a distinct artifact rather than a cache hit on the
 un-overridden one — with the exception noted after the table.
 
-| flag                      | overrides                             | algorithm |
-| ------------------------- | ------------------------------------- | --------- |
-| `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh`       | gate      |
-| `--cooling-target-iters`  | `cooling_target_iters`                | IF2       |
-| `--tempering <B1,B2,...>` | `tempering` (first value must be 1.0) | PGAS      |
-| `--max-tree-depth <N>`    | `max_tree_depth`                      | PGAS/NUTS |
-| `--trajectory-warmup <N>` | `trajectory_warmup`                   | PGAS      |
-| `--csmc-sweeps-per-nuts`  | `csmc_sweeps_per_nuts`                | PGAS      |
-| `--n-trajectories <N>`    | `n_trajectories`                      | PGAS      |
-| `--diagonal-mass`         | `dense_mass = false`                  | PGAS/NUTS |
-| `--no-nuts`               | `use_nuts = false`                    | PGAS      |
-| `--no-adapt`              | `adapt = false`                       | PMMH/MH   |
-| `--adapt-start <N>`       | `adapt_start`                         | PMMH/MH   |
-| `--rho <F>`               | `rho` (correlated pseudo-marginal)    | PMMH      |
-| `--record-ancestry`       | `record_ancestry = true`              | PFilter   |
-| `--record-prequential`    | `record_prequential = true`           | PFilter   |
+| flag                      | overrides                          | algorithm |
+| ------------------------- | ---------------------------------- | --------- |
+| `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh`    | gate      |
+| `--cooling-target-iters`  | `cooling_target_iters`             | IF2       |
+| `--max-tree-depth <N>`    | `max_tree_depth`                   | PGAS/NUTS |
+| `--trajectory-warmup <N>` | `trajectory_warmup`                | PGAS      |
+| `--csmc-sweeps-per-nuts`  | `csmc_sweeps_per_nuts`             | PGAS      |
+| `--n-trajectories <N>`    | `n_trajectories`                   | PGAS      |
+| `--diagonal-mass`         | `dense_mass = false`               | PGAS/NUTS |
+| `--no-nuts`               | `use_nuts = false`                 | PGAS      |
+| `--no-adapt`              | `adapt = false`                    | PMMH/MH   |
+| `--adapt-start <N>`       | `adapt_start`                      | PMMH/MH   |
+| `--rho <F>`               | `rho` (correlated pseudo-marginal) | PMMH      |
+| `--record-ancestry`       | `record_ancestry = true`           | PFilter   |
+| `--record-prequential`    | `record_prequential = true`        | PFilter   |
 
 The boolean overrides are one-way: they can switch a setting off, and switching
 it back means editing the TOML.
@@ -5676,9 +5674,9 @@ changed priors.
 
 Method-side coverage is every key the `[method]` serializes to, one line per
 changed key in key order, with nested tables flattened to dotted paths
-(`gate.a_thresh`) and arrays diffed whole (`tempering`); a key one side lacks
-reads `null`. A file with no `[method]` against one with reads
-`[method]: (new) pgas` / `[method]: (removed)`:
+(`gate.a_thresh`) and arrays diffed whole; a key one side lacks reads `null`. A
+file with no `[method]` against one with reads `[method]: (new) pgas` /
+`[method]: (removed)`:
 
 ```
 $ camdl fit diff if2_a.toml if2_c.toml     # particles 1000→2000, cooling 0.70→0.95
@@ -6269,7 +6267,6 @@ Post-fit audit
 Per-algorithm overrides
   --decibans-thresh DB        gate's inter-chain loglik-spread floor
   --cooling-target-iters N    IF2 cooling target
-  --tempering B1,B2,...       parallel-tempering ladder; first value must be 1.0
   --max-tree-depth N          NUTS depth ceiling
   --trajectory-warmup N       CSMC-only sweeps before parameter updates
   --csmc-sweeps-per-nuts N    CSMC trajectory updates per parameter update

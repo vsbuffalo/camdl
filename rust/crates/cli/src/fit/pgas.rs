@@ -198,7 +198,6 @@ pub struct PgasStageOpts {
     pub n_sweeps: usize,
     pub burn_in: usize,
     pub thin: usize,
-    pub tempering: Vec<f64>,
     pub max_tree_depth: usize,
     pub trajectory_warmup: usize,
     pub csmc_sweeps_per_nuts: usize,
@@ -225,40 +224,17 @@ impl PgasStageOpts {
         match algorithm {
             super::config_v2::Algorithm::PGAS {
                 chains, particles, sweeps, burn_in, thin,
-                tempering, max_tree_depth, trajectory_warmup,
+                max_tree_depth, trajectory_warmup,
                 csmc_sweeps_per_nuts, n_trajectories,
                 dense_mass, use_nuts, ancestor_sampling, binomial,
                 ..
             } => {
-                if tempering.is_empty()
-                    || (tempering[0] - 1.0).abs() > sim::inference::pgas::COLD_RUNG_TOLERANCE
-                {
-                    return Err(format!(
-                        "stage tempering ladder must start with β=1.0 \
-                         (cold chain). Got: {:?}", tempering));
-                }
-                // Every entry must be in (0, 1]. β > 1 concentrates the
-                // likelihood (sharper than the posterior); β ≤ 0 inverts
-                // it (anti-annealing). Either way the chain converges
-                // to the wrong target with no runtime error. Convention
-                // is also a non-increasing ladder, but that's not
-                // required for correctness — only the (0, 1] range is.
-                // See docs/dev/reviews/2026-04-30-correctness.md H4.
-                for (i, &beta) in tempering.iter().enumerate() {
-                    if !(beta > 0.0 && beta <= 1.0) {
-                        return Err(format!(
-                            "tempering[{}] = {} is out of range (0, 1]; \
-                             every β must be positive and ≤ 1.0. \
-                             Got ladder: {:?}", i, beta, tempering));
-                    }
-                }
                 Ok(PgasStageOpts {
                     n_chains: *chains,
                     n_particles: *particles,
                     n_sweeps: *sweeps,
                     burn_in: burn_in.unwrap_or(DEFAULT_BURN_IN),
                     thin: thin.unwrap_or(DEFAULT_THIN),
-                    tempering: tempering.clone(),
                     max_tree_depth: *max_tree_depth,
                     trajectory_warmup: *trajectory_warmup,
                     csmc_sweeps_per_nuts: *csmc_sweeps_per_nuts,
@@ -558,16 +534,14 @@ pub fn run_stage(
     let t0 = std::time::Instant::now();
     let _is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
 
-    // gh#audit-C7. Per-chain NUTS / tempering diagnostics surfaced from
-    // PGASResult. Indexed by chain_id, populated inside the parallel
-    // closure via Mutex (only written once per chain). Consumed after
-    // the loop to wire DiagnosticKind::DivergentTransitions /
-    // MaxTreeDepthHits / LowSwapRate.
+    // gh#audit-C7. Per-chain NUTS diagnostics surfaced from PGASResult.
+    // Indexed by chain_id, populated inside the parallel closure via Mutex
+    // (only written once per chain). Consumed after the loop to wire
+    // DiagnosticKind::DivergentTransitions / MaxTreeDepthHits.
     #[derive(Clone, Default)]
     struct ChainNutsDiag {
         n_divergent_post_burn:    usize,
         n_max_treedepth_post_burn: usize,
-        swap_acceptance_rates:    Vec<f64>,
     }
     let chain_nuts: std::sync::Mutex<Vec<ChainNutsDiag>> =
         std::sync::Mutex::new(vec![ChainNutsDiag::default(); n_chains]);
@@ -685,7 +659,6 @@ pub fn run_stage(
                 dt,
                 use_nuts,
                 dense_mass,
-                tempering: pgas_opts.tempering.clone(),
                 max_tree_depth: pgas_opts.max_tree_depth,
                 trajectory_warmup: pgas_opts.trajectory_warmup,
                 csmc_sweeps_per_nuts: pgas_opts.csmc_sweeps_per_nuts,
@@ -1226,16 +1199,15 @@ pub fn run_stage(
                     .map(|(p, &r)| format!("{}={:.0}%", p.name, r * 100.0))
                     .collect::<Vec<_>>().join(", "));
 
-            // gh#audit-C7. Surface per-chain NUTS / tempering diagnostics so the
-            // post-loop diagnostic-collector pass can construct
-            // DivergentTransitions / MaxTreeDepthHits / LowSwapRate variants.
-            // Mutex contention is negligible (n_chains writes total).
+            // gh#audit-C7. Surface per-chain NUTS diagnostics so the post-loop
+            // diagnostic-collector pass can construct DivergentTransitions /
+            // MaxTreeDepthHits variants. Mutex contention is negligible
+            // (n_chains writes total).
             {
                 let mut nd = chain_nuts.lock().unwrap();
                 nd[chain_id] = ChainNutsDiag {
                     n_divergent_post_burn:    result.n_divergent_post_burn,
                     n_max_treedepth_post_burn: result.n_max_treedepth_post_burn,
-                    swap_acceptance_rates:    result.swap_acceptance_rates.clone(),
                 };
             }
 
@@ -1466,15 +1438,12 @@ pub fn run_stage(
         }
     };
 
-    // gh#audit-C7 + audit-H4. NUTS / tempering diagnostics surfaced from
-    // PGASResult fields. Thresholds:
+    // gh#audit-C7 + audit-H4. NUTS diagnostics surfaced from PGASResult
+    // fields. Thresholds:
     //   - DivergentTransitions: ANY post-burn-in divergence (Stan
     //     convention). Matters for posterior validity, not just
     //     adaptation.
     //   - MaxTreeDepthHits: > 5% of post-burn-in sweeps (Stan).
-    //   - LowSwapRate: any adjacent-rung pair with rate < 0.10 over
-    //     the whole run (audit M18). Indicates the temperature ladder
-    //     is too sparse — chains aren't mixing across rungs.
     let n_post_burn = n_sweeps.saturating_sub(burn_in);
     let nuts_diag = chain_nuts.lock().unwrap();
     for chain_id in 0..n_chains {
@@ -1493,17 +1462,6 @@ pub fn run_stage(
                     n_sweeps:  n_post_burn,
                     pct,
                     max_depth: pgas_opts.max_tree_depth,
-                });
-            }
-        }
-        for (i, &rate) in nd.swap_acceptance_rates.iter().enumerate() {
-            if rate < 0.10 {
-                collector.push(DiagnosticKind::LowSwapRate {
-                    rung_i: i,
-                    rung_j: i + 1,
-                    beta_i: pgas_opts.tempering[i],
-                    beta_j: pgas_opts.tempering[i + 1],
-                    rate,
                 });
             }
         }
@@ -2074,76 +2032,6 @@ fn write_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::config_v2::Algorithm;
-
-    fn pgas_stage_with_tempering(tempering: Vec<f64>) -> Algorithm {
-        Algorithm::PGAS {
-            backend: crate::run_meta::InferenceBackend::ChainBinomial,
-            chains: 1, particles: 10, sweeps: 10,
-            burn_in: Some(2), thin: Some(1),
-            tempering,
-            max_tree_depth: 10,
-            trajectory_warmup: 0,
-            csmc_sweeps_per_nuts: 1,
-            n_trajectories: 10,
-            dense_mass: true,
-            use_nuts: true,
-            binomial: sim::rng::BinomialAlgorithm::Btpe,
-            ancestor_sampling: true,
-        }
-    }
-
-    #[test]
-    fn tempering_rejects_first_entry_not_one() {
-        // First entry MUST be 1.0 (cold chain).
-        let stage = pgas_stage_with_tempering(vec![0.7, 0.4]);
-        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
-        assert!(err.contains("must start with β=1.0"), "got: {}", err);
-    }
-
-    #[test]
-    fn tempering_rejects_beta_above_one() {
-        // β > 1 concentrates likelihood — physically nonsensical.
-        let stage = pgas_stage_with_tempering(vec![1.0, 1.5, 0.4]);
-        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
-        assert!(err.contains("out of range"), "got: {}", err);
-        assert!(err.contains("1.5"), "got: {}", err);
-    }
-
-    #[test]
-    fn tempering_rejects_negative_beta() {
-        // β < 0 inverts the likelihood (anti-annealing).
-        let stage = pgas_stage_with_tempering(vec![1.0, -0.2]);
-        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
-        assert!(err.contains("out of range"), "got: {}", err);
-    }
-
-    #[test]
-    fn tempering_rejects_zero_beta() {
-        // β = 0 would scale all log-likelihoods to 0 (uniform), not
-        // a valid replica-exchange rung.
-        let stage = pgas_stage_with_tempering(vec![1.0, 0.5, 0.0]);
-        let err = PgasStageOpts::from_algorithm(&stage).unwrap_err();
-        assert!(err.contains("out of range"), "got: {}", err);
-    }
-
-    #[test]
-    fn tempering_accepts_well_formed_ladder() {
-        // [1.0, 0.7, 0.4, 0.15] — typical 4-rung exchange ladder.
-        let stage = pgas_stage_with_tempering(vec![1.0, 0.7, 0.4, 0.15]);
-        let opts = PgasStageOpts::from_algorithm(&stage)
-            .expect("well-formed ladder must validate");
-        assert_eq!(opts.tempering, vec![1.0, 0.7, 0.4, 0.15]);
-    }
-
-    #[test]
-    fn tempering_default_single_rung() {
-        // Default `[1.0]` (no tempering) must validate.
-        let stage = pgas_stage_with_tempering(vec![1.0]);
-        let opts = PgasStageOpts::from_algorithm(&stage)
-            .expect("single-rung [1.0] must validate");
-        assert_eq!(opts.tempering, vec![1.0]);
-    }
 
     /// The `trajectories` reader's contract on chain ids. Rendering cannot
     /// test this: an empty `per_chain` and no report at all both render as

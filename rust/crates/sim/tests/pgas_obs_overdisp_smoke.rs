@@ -158,7 +158,6 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
         use_nuts: true,        // NUTS — exercises the gradient
         dense_mass: false,
         max_tree_depth: 8,
-        tempering: vec![1.0],
         trajectory_warmup: 0,
         csmc_sweeps_per_nuts: 1,
         step_policy: sim::schedule::StepPolicy::Snap,
@@ -285,7 +284,6 @@ fn smoke_pgas_nuts_estimates_rho() {
         use_nuts: true,
         dense_mass: false,
         max_tree_depth: 8,
-        tempering: vec![1.0],
         trajectory_warmup: 0,
         csmc_sweeps_per_nuts: 1,
         step_policy: sim::schedule::StepPolicy::Snap,

@@ -559,56 +559,6 @@ fn gh76_negbin_obs_grad_matches_fd() {
     );
 }
 
-/// gh#551: a tempered PGAS rung's NUTS energy is
-/// `log p(x | θ) + β · log p(y | x, θ)`. The same fixture as
-/// `gh76_negbin_obs_grad_matches_fd`, at `β = 0.3`: the gradient fn must return
-/// exactly the value path's tempered energy, and a gradient that matches its
-/// central difference — for observation parameters (`rho`, `k`, `p_detect`,
-/// whose whole gradient is scaled by β) and for a rate parameter (`beta`, whose
-/// transition gradient must NOT be scaled while its observation part is).
-#[test]
-fn gh551_tempered_energy_and_gradient_match_fd() {
-    let mut model = load_model("../../../ocaml/golden/seir_observations.ir.json");
-    set_param_defaults(&mut model, &[
-        ("beta", 0.3), ("sigma", 0.2), ("gamma", 0.1),
-        ("rho", 0.5), ("k", 5.0), ("p_detect", 0.8),
-        ("N0", 10000.0), ("I0", 10.0),
-    ]);
-    model.simulation.t_end = 60.0;
-    let compiled = Arc::new(CompiledModel::new(model).unwrap());
-    let (params, param_names) = build_params_and_names(&compiled);
-
-    let t_start = compiled.model.simulation.t_start;
-    let t_end = compiled.model.simulation.t_end;
-    let dt = 1.0;
-    let mut rng = StatefulRng::new(42);
-    let trajectory = simulate_reference(&compiled, &params, t_end, dt, &mut rng).unwrap();
-    let n_substeps = trajectory.substeps.len();
-    let (substep_idx, obs_times) = obs_substep_indices_regular(
-        t_start, dt, n_substeps, 14.0, 14.0, t_end,
-    );
-    let per_stream = project_trajectory_to_obs(&compiled, &trajectory, &substep_idx, &params, dt);
-    let obs_model = build_obs_model(compiled.clone(), &obs_times, per_stream);
-    let observations: Vec<Observation> = obs_times.iter()
-        .map(|&t| Observation { time: t, value: 0.0 }).collect();
-
-    let n_params = compiled.param_index.len();
-    let estimated_indices: Vec<usize> = (0..n_params).collect();
-    let to_check = [
-        compiled.param_index["rho"],
-        compiled.param_index["k"],
-        compiled.param_index["p_detect"],
-        compiled.param_index["beta"],
-    ];
-    fd_check_at(
-        &compiled, &trajectory, &observations, &obs_model,
-        &params, &param_names, &estimated_indices, &to_check,
-        dt, 1e-4,
-        "gh551_tempered_negbin_obs",
-        sim::inference::pgas::InverseTemperature::new(0.3).unwrap(),
-    );
-}
-
 #[test]
 fn licm_hoisting_kernel_grad_matches_fd() {
     // gh#284 coverage: the DIRECT LICM-on gradient check. The existing FD tests

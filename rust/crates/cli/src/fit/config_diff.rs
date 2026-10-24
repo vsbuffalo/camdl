@@ -474,8 +474,8 @@ pub fn method_setting_changes(this: &Method, baseline: &Method) -> Vec<MethodSet
 /// move `validate_method_keys` makes to get its allowed-key set. The
 /// previous hand-maintained per-variant projection listed a SUBSET of each
 /// variant's fields, so `fit diff` reported "no settings changed" for two
-/// configs differing in anything swept into its `..` (tempering, use_nuts,
-/// dt_check, the starts rule, …) — a silent wrong answer from a provenance
+/// configs differing in anything swept into its `..` (use_nuts, dt_check,
+/// the starts rule, …) — a silent wrong answer from a provenance
 /// surface. Deriving from serialization means the key set can never drift
 /// from the enum; keys carry the TOML-side spellings (`starts`), which is
 /// what the user wrote and diffs against.
@@ -490,8 +490,8 @@ fn stage_settings_map(method: &Method) -> BTreeMap<String, serde_json::Value> {
 
 /// Recursively flatten a JSON object into dotted-path keys. Non-object
 /// leaves (numbers, strings, bools, nulls, arrays) are inserted as-is —
-/// arrays (e.g. `tempering`) diff as whole values, which is the readable
-/// grain for a settings row.
+/// arrays diff as whole values, which is the readable grain for a settings
+/// row.
 fn flatten_settings(
     prefix: &str,
     v: &serde_json::Value,
@@ -693,11 +693,10 @@ mod tests {
     }
 
     /// The settings map must cover EVERY method field, not a hand-picked
-    /// subset: the old per-variant projection swallowed `tempering`,
-    /// `use_nuts`, the starts rule and more with `..`, so a diff over any of
-    /// them reported "no settings changed". Derived-from-serialization can't
-    /// drift from the enum; this pins the fields the old code demonstrably
-    /// missed.
+    /// subset: the old per-variant projection swallowed `use_nuts`, the
+    /// starts rule and more with `..`, so a diff over any of them reported
+    /// "no settings changed". Derived-from-serialization can't drift from
+    /// the enum; this pins the fields the old code demonstrably missed.
     #[test]
     fn settings_map_covers_fields_the_old_projection_swallowed() {
         let cfg = FitConfig::from_toml_str(r#"
@@ -716,12 +715,12 @@ mod tests {
         chains     = 2
         particles  = 100
         sweeps     = 10
-        tempering  = [1.0, 0.5]
+        use_nuts   = false
         starts     = "from_prior"
         "#).expect("toml parse");
         let method = cfg.inference.method.as_ref().unwrap();
         let m = stage_settings_map(method);
-        for key in ["algorithm", "backend", "chains", "tempering", "use_nuts", "starts"] {
+        for key in ["algorithm", "backend", "chains", "use_nuts", "starts"] {
             assert!(m.contains_key(key),
                 "settings map must carry '{key}' — a fit diff over it \
                  previously reported no change; keys present: {:?}",
@@ -729,12 +728,12 @@ mod tests {
         }
         // And a diff over one of the previously-swallowed fields yields a row.
         let mut hot = method.clone();
-        if let crate::fit::config_v2::Algorithm::PGAS { tempering, .. } = &mut hot.algorithm {
-            *tempering = vec![1.0, 0.7, 0.4];
+        if let crate::fit::config_v2::Algorithm::PGAS { use_nuts, .. } = &mut hot.algorithm {
+            *use_nuts = true;
         }
         let hot_map = stage_settings_map(&hot);
-        assert_ne!(m.get("tempering"), hot_map.get("tempering"),
-            "a tempering change must be visible to fit diff");
+        assert_ne!(m.get("use_nuts"), hot_map.get("use_nuts"),
+            "a use_nuts change must be visible to fit diff");
     }
 
     #[test]

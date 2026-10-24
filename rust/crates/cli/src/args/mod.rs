@@ -862,13 +862,6 @@ pub struct FitRunArgs {
 
     // ── PGAS-specific algorithm overrides  ──────────
 
-    /// Override [method.tempering]. Comma-separated β values
-    /// for parallel tempering ladder. First value MUST be 1.0.
-    /// Example: `--tempering "1.0,0.7,0.4,0.15"`.
-    #[arg(long, value_name = "B1,B2,...",
-          value_parser = parse_f64_list)]
-    pub tempering: Option<Vec<f64>>,
-
     /// Override [method.max_tree_depth] (NUTS depth ceiling).
     ///
     #[arg(long, value_name = "N")]
@@ -938,18 +931,6 @@ pub struct FitRunArgs {
     /// per-step predictive samples for `camdl compare`).
     #[arg(long)]
     pub record_prequential: bool,
-}
-
-/// Parser for `--tempering "1.0,0.7,0.4"` and similar comma-list
-/// f64 args. Empty string is rejected; spaces around commas are
-/// trimmed.
-fn parse_f64_list(s: &str) -> Result<Vec<f64>, String> {
-    if s.trim().is_empty() {
-        return Err("expected comma-separated f64 list".into());
-    }
-    s.split(',')
-        .map(|p| p.trim().parse::<f64>().map_err(|e| format!("'{}': {}", p, e)))
-        .collect()
 }
 
 /// Output format for `camdl fit summary`. `text` is the default

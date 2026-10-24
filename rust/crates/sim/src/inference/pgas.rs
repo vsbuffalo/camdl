@@ -61,19 +61,6 @@ pub struct PGASConfig {
     /// Dense handles parameter correlations (e.g., R0-amplitude ridge).
     /// Set false for diagonal-only (handles scale but not correlations).
     pub dense_mass: bool,
-    /// Temperature ladder for parallel tempering (replica exchange).
-    /// Each entry is a β value in (0, 1]. The first entry MUST be 1.0
-    /// (cold chain). Default: `[1.0]` (no tempering, single rung).
-    /// Example: `[1.0, 0.7, 0.4, 0.15]` runs 4 temperature rungs.
-    /// Only the cold (β=1) rung contributes posterior samples and trace output.
-    /// Rung `k` targets `p(θ) · p(x | θ) · p(y | x, θ)^{β_k}` (gh#551): only
-    /// the observation density is tempered; prior and process density
-    /// (initial state + transitions) stay at full weight, so a heated rung's
-    /// trajectory is still a path the model can produce while the data's pull
-    /// on it and on θ is weakened. Rungs exchange states with adjacent rungs
-    /// via Metropolis swap proposals whose ratio uses the observation
-    /// log-likelihood only.
-    pub tempering: Vec<f64>,
     /// Maximum NUTS tree depth. Default: 10.
     pub max_tree_depth: usize,
     /// Number of CSMC-only sweeps before parameter updates begin.
@@ -1046,47 +1033,10 @@ impl InverseTemperature {
     /// `β = 1`: the cold rung, whose draws are the posterior.
     pub const COLD: Self = Self(1.0);
 
-    /// Parse a ladder entry. `β` must lie in `(0, 1]`: `β = 0` would drop the
-    /// data entirely (the rung samples the prior predictive), `β > 1` sharpens
-    /// rather than flattens, and NaN is not a temperature.
-    pub fn new(beta: f64) -> Result<Self, String> {
-        if beta > 0.0 && beta <= 1.0 {
-            Ok(Self(beta))
-        } else {
-            Err(format!("tempering β values must be in (0, 1], got {beta}"))
-        }
-    }
-
     pub fn get(self) -> f64 {
         self.0
     }
-
-    /// Parse a whole tempering ladder. An empty ladder is the single cold
-    /// rung. The first entry must be within [`COLD_RUNG_TOLERANCE`] of 1 and is
-    /// then **snapped to [`Self::COLD`]**, so the rung whose draws are reported
-    /// is exactly the posterior on every path — a ladder written as
-    /// `0.9999999999` would otherwise temper the reported rung by that value.
-    /// Every other entry goes through [`Self::new`].
-    pub fn parse_ladder(ladder: &[f64]) -> Result<Vec<Self>, String> {
-        let Some((&first, rest)) = ladder.split_first() else {
-            return Ok(vec![Self::COLD]);
-        };
-        if (first - 1.0).abs() > COLD_RUNG_TOLERANCE {
-            return Err(format!(
-                "first tempering rung must be β=1.0 (cold chain), got {first}"
-            ));
-        }
-        std::iter::once(Ok(Self::COLD))
-            .chain(rest.iter().map(|&b| Self::new(b)))
-            .collect()
-    }
 }
-
-/// How far the first entry of a tempering ladder may sit from 1 and still be
-/// read as the cold rung (and snapped to exactly `β = 1` by
-/// [`InverseTemperature::parse_ladder`]). The one definition the CLI's ladder
-/// validation and `run_pgas` both use.
-pub const COLD_RUNG_TOLERANCE: f64 = 1e-9;
 
 /// Decomposed complete-data log-likelihood components.
 #[derive(Clone, Debug)]
@@ -1207,13 +1157,6 @@ pub struct PGASResult {
     pub n_max_treedepth_total: usize,
     /// gh#audit-C7. Sweeps that hit max_treedepth post-burn-in.
     pub n_max_treedepth_post_burn: usize,
-    /// gh#audit-C7 / M18. Per-adjacent-rung swap acceptance rates
-    /// (length n_rungs - 1; empty when n_rungs == 1). Adjacent-pair
-    /// rate `swap_acceptance_rates[i]` = accepted_{i,i+1} /
-    /// proposed_{i,i+1}. Used to wire DiagnosticKind::LowSwapRate
-    /// (audit H4): rate < 0.10 on tempered chains is a sign the
-    /// temperature ladder is too sparse.
-    pub swap_acceptance_rates: Vec<f64>,
     /// gh#784. Where this chain's initial reference trajectory `X₀` came from,
     /// on a fresh start; `None` when the chain resumed (the restored trajectory
     /// was produced by an earlier call). `ForwardDraw(..)` means the
@@ -3642,201 +3585,6 @@ pub(crate) fn prior_log_density_and_grad_z(
 // Rung state for parallel tempering
 // ═══════════════════════════════════════════════════════════════════
 
-/// Log Metropolis acceptance ratio for a replica-exchange swap between rung `i`
-/// (inverse temperature `beta_i`, currently holding a state whose untempered
-/// **observation** log-likelihood is `ll_i`) and rung `j`.
-///
-/// # Derivation
-///
-/// Rung `k` targets observation-only tempering (gh#551, see
-/// [`InverseTemperature`]): writing a rung's state as `s = (θ, x)`,
-///
-/// ```text
-/// π_k(s) ∝ p(θ) · p(x | θ) · p(y | x, θ)^{β_k}  =  q(s) · e^{β_k·ℓ(s)}
-/// ```
-///
-/// with `q(s) = p(θ)·p(x | θ)` (prior and process density, untempered) and
-/// `ℓ(s) = log p(y | x, θ)`. The proposal exchanges the two rungs' states and
-/// is its own reverse, so the Hastings ratio is 1 and the acceptance ratio is
-/// just the ratio of joint target densities:
-///
-/// ```text
-/// log(now)   = β_i·ℓ_i + β_j·ℓ_j + log q(s_i) + log q(s_j)
-/// log(after) = β_i·ℓ_j + β_j·ℓ_i + log q(s_j) + log q(s_i)
-/// ```
-///
-/// The `q` terms are identical — the same two states appear either way, only
-/// assigned to different rungs — so they cancel, leaving the observation
-/// log-likelihoods alone. That is why the caller passes
-/// `RungLik::observation` and not the complete-data total: the process density
-/// is in `q`, and feeding it through `ℓ` would weight it by `(β_i − β_j)` when
-/// it must cancel. What remains is
-///
-/// ```text
-/// log α = (β_i − β_j)(ℓ_j − ℓ_i)
-/// ```
-///
-/// Read it in words: `i` is the colder rung, so `(β_i − β_j) > 0` and the sign
-/// is the sign of `(ℓ_j − ℓ_i)`. **Accept when the hotter rung holds the better
-/// state** — i.e. when the free-roaming chain has found somewhere good, move it
-/// down to the chain whose draws we report. That is the entire purpose of the
-/// ladder.
-///
-/// # Why this is a named function rather than an inline expression (gh#550)
-///
-/// It shipped inverted, as `(β_i − β_j)(ℓ_i − ℓ_j)`, from 2026-04-09 to
-/// 2026-08-10 — so it rejected exactly the swaps above and accepted their
-/// opposites, moving states from the deliberately-flattened rungs INTO the cold
-/// one. Every surface signal stayed healthy (finite log-liks, plausible swap
-/// rates), and the inline comment restated the same wrong formula, so review saw
-/// agreement rather than a contradiction.
-///
-/// Two things follow, both deliberate here. The comment above **derives** the
-/// result instead of restating it, so it can disagree with the code. And the
-/// expression is a function so it can be tested without running a fit — the
-/// direct reason no test pinned it before.
-///
-/// The likely origin of the slip: the physics literature states this in
-/// energies, `Δ = (β_i − β_j)(E_i − E_j)` (Hukushima & Nemoto 1996, eq. 6), with
-/// Boltzmann weight `e^{−βE}`. Ours is `L^β = e^{βℓ}`, so `E = −ℓ`; substituting
-/// without the sign flip produces exactly the shipped expression.
-///
-/// Incident: `docs/dev/incidents/2026-08-10-pgas-tempering-swap-sign.md`.
-#[inline]
-fn swap_log_alpha(beta_i: f64, beta_j: f64, ll_i: f64, ll_j: f64) -> f64 {
-    (beta_i - beta_j) * (ll_j - ll_i)
-}
-
-#[cfg(test)]
-mod swap_log_alpha_tests {
-    use super::swap_log_alpha;
-    use crate::inference::mh_accept;
-    use crate::rng::StatefulRng;
-
-    /// gh#471. The swap site keeps its own `log_alpha >= 0.0 || u_ln < log_alpha`
-    /// form rather than routing through `mh_accept`, because the two consume
-    /// RNG differently (`||` short-circuits on a certain accept). They are kept
-    /// only because they make the same DECISION — and that equivalence is
-    /// CONDITIONAL, which is what this pins.
-    ///
-    /// The condition is `u ∈ [0, 1)`: `u_ln` is then strictly negative, so
-    /// `log_alpha == 0.0` accepts under both forms. `log_alpha == 0.0` is not a
-    /// corner here — it is exactly what equal βs or equal log-likelihoods
-    /// produce. If `uniform()` ever moved to a convention that can return 1.0,
-    /// `u_ln` could reach 0 and the two forms would silently disagree at that
-    /// value.
-    #[test]
-    fn swap_forms_agree_given_half_open_uniform() {
-        // The precondition itself, asserted rather than assumed.
-        let mut rng = StatefulRng::new(9);
-        for _ in 0..10_000 {
-            let u = rng.uniform();
-            assert!((0.0..1.0).contains(&u), "uniform() returned {u}, outside [0, 1)");
-        }
-
-        let u_lns = [
-            f64::NEG_INFINITY,          // u = 0
-            (1e-300f64).ln(),
-            (0.5f64).ln(),
-            (1.0 - f64::EPSILON / 2.0).ln(), // the largest u the RNG can return
-        ];
-        let alphas = [
-            f64::INFINITY, f64::NEG_INFINITY, f64::NAN,
-            0.0, -0.0, 50.0, -50.0, 1e-300, -1e-300,
-        ];
-        for &la in &alphas {
-            for &u_ln in &u_lns {
-                let swap_form = la >= 0.0 || u_ln < la;
-                assert_eq!(swap_form, mh_accept(la, u_ln),
-                    "forms disagree at log_alpha={la}, u_ln={u_ln} — the swap \
-                     site may no longer keep its own form");
-            }
-        }
-    }
-
-    /// The invariant, not an example: for arbitrary rungs and states, the
-    /// returned value must equal the log ratio of the joint product target
-    /// computed INDEPENDENTLY from its definition.
-    ///
-    /// This is the test that would have caught gh#550. A single worked case can
-    /// be satisfied by a coincidentally-correct wrong formula; this cannot,
-    /// because the oracle is built from `π_k ∝ L^{β_k}·p` rather than from any
-    /// rearrangement of the expression under test.
-    #[test]
-    fn matches_the_product_target_ratio_computed_independently() {
-        // Oracle: log Π(after) − log Π(now), with the priors written out and
-        // cancelled by construction rather than by algebra.
-        fn oracle(beta_i: f64, beta_j: f64, ll_i: f64, ll_j: f64) -> f64 {
-            let log_now   = beta_i * ll_i + beta_j * ll_j;
-            let log_after = beta_i * ll_j + beta_j * ll_i;
-            log_after - log_now
-        }
-
-        let betas = [1.0, 0.8, 0.5, 0.25, 0.05];
-        let lls   = [-1.0, -12.5, -200.0, -1e4, 0.0, -3.25];
-        let mut checked = 0usize;
-        for (bi, &beta_i) in betas.iter().enumerate() {
-            for &beta_j in betas.iter().skip(bi + 1) {
-                for &ll_i in &lls {
-                    for &ll_j in &lls {
-                        let got = swap_log_alpha(beta_i, beta_j, ll_i, ll_j);
-                        let want = oracle(beta_i, beta_j, ll_i, ll_j);
-                        assert!((got - want).abs() <= 1e-9 * want.abs().max(1.0),
-                            "beta_i={beta_i} beta_j={beta_j} ll_i={ll_i} ll_j={ll_j}: \
-                             got {got}, product-target ratio is {want}");
-                        checked += 1;
-                    }
-                }
-            }
-        }
-        assert!(checked > 300, "grid barely ran: {checked} comparisons");
-    }
-
-    /// The direction the ladder exists for, as a named case: a hot rung holding
-    /// a much better state must be accepted with certainty.
-    ///
-    /// gh#550 shipped the negation, which gave log α = −50 here — a rejection
-    /// probability of 1 − 2e−22 for a trade that raises the joint density by a
-    /// factor of e^50.
-    #[test]
-    fn accepts_when_the_hotter_rung_holds_the_better_state() {
-        // Cold rung β=1.0 stuck at ll=-200; hot rung β=0.5 found ll=-100.
-        let log_alpha = swap_log_alpha(1.0, 0.5, -200.0, -100.0);
-        assert!(log_alpha > 0.0,
-            "a hot rung holding the better state must be accepted; got {log_alpha}");
-        assert!((log_alpha - 50.0).abs() < 1e-9, "expected +50, got {log_alpha}");
-
-        // And the converse: when the COLD rung is already better, the trade
-        // would move the worse state into the reported chain, so it must not be
-        // automatic. This is the arm the inverted code accepted with certainty.
-        let reverse = swap_log_alpha(1.0, 0.5, -100.0, -200.0);
-        assert!(reverse < 0.0,
-            "swapping a worse state into the cold rung must be penalised; got {reverse}");
-    }
-
-    /// Antisymmetry in the rung roles: proposing the same exchange from either
-    /// side is the same move, so the ratio must simply negate. Guards against a
-    /// future "fix" that special-cases one ordering.
-    #[test]
-    fn negates_when_the_two_rungs_are_swapped() {
-        for (beta_i, beta_j, ll_i, ll_j) in
-            [(1.0, 0.5, -200.0, -100.0), (0.9, 0.1, -1.0, -50.0), (1.0, 0.99, 0.0, -0.5)]
-        {
-            let a = swap_log_alpha(beta_i, beta_j, ll_i, ll_j);
-            let b = swap_log_alpha(beta_j, beta_i, ll_j, ll_i);
-            assert!((a - b).abs() < 1e-12, "not symmetric under role exchange: {a} vs {b}");
-        }
-    }
-
-    /// Equal temperatures or equal likelihoods leave nothing to gain, so the
-    /// ratio is exactly 0 (accept — the states are interchangeable).
-    #[test]
-    fn is_zero_when_there_is_nothing_to_gain() {
-        assert_eq!(swap_log_alpha(0.7, 0.7, -10.0, -900.0), 0.0);
-        assert_eq!(swap_log_alpha(1.0, 0.3, -42.0, -42.0), 0.0);
-    }
-}
-
 /// Per-rung state for parallel tempering. Consolidates the 12+ parallel
 /// vectors that were previously maintained separately.
 struct RungState {
@@ -4263,30 +4011,12 @@ pub fn run_pgas(
         eprintln!("  NUTS enabled (gradient expressions found in IR)");
     }
 
-    // ── Parallel tempering setup ──
-    let n_rungs = config.tempering.len().max(1);
-    // The first rung is snapped to exactly β = 1 (see `parse_ladder`).
-    let betas: Vec<InverseTemperature> = InverseTemperature::parse_ladder(&config.tempering)
-        .unwrap_or_else(|e| panic!("{e}"));
-    if n_rungs > 1 {
-        eprintln!("  parallel tempering: {} rungs, β = {:?}", n_rungs, config.tempering);
-    }
+    // One chain at β = 1. The inverse-temperature parameter itself and the
+    // per-rung loop below go in the next commit.
+    let n_rungs = 1usize;
+    let betas = [InverseTemperature::COLD];
 
     // NUTS state — restored from resume or initialized fresh.
-    //
-    // Im18 in 2026-04-19 inference review batch 2: only the cold
-    // rung's NUTS state (mass matrix, step size, dual averaging,
-    // acceptance counts) is persisted in ChainResumeState and
-    // restored here. Heated rungs (β < 1) always start with
-    // `MassMatrix::identity`, step_size = 0.1, and fresh dual
-    // averaging — so every resume re-warms the heated rungs, which
-    // wastes sweeps on tempered fits that resume frequently.
-    //
-    // A full fix requires extending ChainResumeState to hold a
-    // Vec<RungNUTSState> and handling back-compat with legacy
-    // single-rung resume files. Not done here; when a tempered fit
-    // hits the pain point the schema upgrade is straightforward.
-    let resumed = resume_nuts.is_some();
     let (nuts_mass_init, nuts_step_size_init, log_proposal_sd_restored,
          total_accepted_init) = if let Some((mass, ss, lpsd, ta)) = resume_nuts {
         (mass, ss, lpsd, ta)
@@ -4316,31 +4046,16 @@ pub fn run_pgas(
 
     let mut sweeps = Vec::new();
 
-    // On resume the rungs' likelihood is `current_components` above:
+    // On resume the chain's likelihood is `current_components` above:
     // `complete_data_loglik` at the restored (θ, X). The resume state carries
-    // no saved likelihood — a rung needs the split its tempered target reads
-    // (`RungLik`), which is recomputed, never restored (gh#551).
+    // no saved likelihood; it is recomputed, never restored.
 
-    // Im18: make the heated-rung re-warmup visible in logs.
-    // Check the restored NUTS tuple rather than `resume_from` (the
-    // latter is partially moved into earlier bindings).
-    if resumed && n_rungs > 1 {
-        log::info!(
-            "pgas resume: restored cold rung NUTS state; heated rungs \
-             (β<1) re-warm from defaults each resume. Long-running \
-             tempered fits may want to avoid frequent interruption."
-        );
-    }
-
-    // Swap acceptance tracking (n_rungs - 1 adjacent pairs)
-    let mut swap_proposed: Vec<usize> = vec![0; n_rungs.saturating_sub(1)];
     let mut n_max_treedepth: usize = 0;
     let mut n_divergent: usize = 0;
     // gh#audit-C7. Post-burn-in counters (Stan-canonical surface;
     // burn-in counts are expected during step-size adaptation).
     let mut n_max_treedepth_post_burn: usize = 0;
     let mut n_divergent_post_burn: usize = 0;
-    let mut swap_accepted: Vec<usize> = vec![0; n_rungs.saturating_sub(1)];
 
     if start_sweep >= config.n_sweeps {
         eprintln!("  warning: chain already completed {} sweeps (requested {}). \
@@ -4796,18 +4511,13 @@ pub fn run_pgas(
         // reached finite density, refuse the chain here: the reasoning and the
         // measured evidence are at `start_at_zero_density`'s definition.
         //
-        // Placed before the swap, the callback, and the draw recorder, so a
-        // refused chain leaves no trace row, no retained draw, and no saved
-        // trajectory — nothing for a downstream number to pick up.
+        // Placed before the callback and the draw recorder, so a refused chain
+        // leaves no trace row, no retained draw, and no saved trajectory —
+        // nothing for a downstream number to pick up.
         //
-        // ANY rung finite is enough, not just the cold one: a swap proposal
-        // from a `−∞` cold rung to a finite hot rung has `log α =
-        // (β_i − β_j)(ℓ_j − (−∞)) = +∞` and is accepted with certainty
-        // (`swap_log_alpha`), so the ladder can still pull the cold rung out.
-        // (ℓ there is the rung's observation term, which `RungLik` sets to
-        // `−∞` whenever the rung's total is non-finite — so this holds whether
-        // the zero came from the observation or the process density.)
-        // With the default single rung this reduces to "the cold rung".
+        // `RungLik` sets the total to `−∞` whenever the evaluation is
+        // non-finite, so this holds whether the zero came from the observation
+        // or the process density.
         if let Some((log_posterior, transition, observation, ivp, log_prior)) =
             start_at_zero_density
         {
@@ -4839,64 +4549,6 @@ pub fn run_pgas(
             }
         }
 
-        // ── Replica exchange: swap adjacent rungs ──
-        if n_rungs > 1 {
-            // Even-odd scheme: alternate starting parity each sweep
-            let pair_start = sweep % 2;
-            let mut i = pair_start;
-            while i + 1 < n_rungs {
-                let j = i + 1;
-                swap_proposed[i] += 1;
-
-                // gh#550. Derivation in `swap_log_alpha`; the short version is
-                // that the sign is the sign of (ℓ_j − ℓ_i), so a swap is
-                // accepted when the HOTTER rung holds the better state — which
-                // is the whole purpose of the ladder.
-                //
-                // gh#551: ℓ is the OBSERVATION log-likelihood. Each rung targets
-                // p(θ)·p(x|θ)·p(y|x,θ)^β, so prior and process density are
-                // common to both sides of the exchange and cancel; only the
-                // tempered factor survives.
-                let log_alpha = swap_log_alpha(
-                    betas[i].get(), betas[j].get(),
-                    rungs[i].lik.observation, rungs[j].lik.observation);
-
-                // Not routed through `mh_accept`, deliberately — but for a
-                // narrower reason than an earlier version of this comment
-                // claimed, and the difference is worth stating because that
-                // claim is what let gh#550 sit here for four months.
-                //
-                // The two forms make the same DECISION, given that
-                // `StatefulRng::uniform` returns `u ∈ [0, 1)`: `u_ln` is then
-                // strictly negative, so `log_alpha == 0.0` (common here —
-                // it is what equal βs or equal lls produce) accepts under
-                // both. That precondition is load-bearing. If `uniform` ever
-                // moved to an `OpenClosed01` convention, `u_ln` could reach 0
-                // and the two would silently diverge at exactly that value.
-                // `swap_forms_agree_given_half_open_uniform` pins it.
-                //
-                // What differs is RNG CONSUMPTION: `||` short-circuits on a
-                // certain accept and draws no uniform, where
-                // `mh_accept(…, rng.uniform().ln())` always draws one.
-                // Converting would be distribution-neutral and
-                // stream-breaking for tempered NUTS runs, which reach this
-                // site but not the θ-block accept above. That is the whole of
-                // the reason to leave it — NOT any claim that the site is
-                // otherwise beyond scrutiny. gh#550 was a sign error sitting
-                // two lines above this comment while it asserted the site was
-                // fine.
-                if log_alpha >= 0.0 || rng.uniform().ln() < log_alpha {
-                    swap_accepted[i] += 1;
-
-                    // Swap all state between rungs i and j
-                    rungs.swap(i, j);
-                    rung_accepted.swap(i, j);
-                }
-
-                i += 2;
-            }
-        }
-
         // ── Cold rung (index 0) output ──
         // Log adapted proposal SDs at end of burn-in (cold rung only)
         if sweep + 1 == adapt_end {
@@ -4922,29 +4574,6 @@ pub fn run_pgas(
                         n_divergent);
                 }
             }
-
-            // Report swap rates at end of burn-in
-            if n_rungs > 1 {
-                eprintln!("  tempering swap rates:");
-                for i in 0..n_rungs - 1 {
-                    let rate = if swap_proposed[i] > 0 {
-                        swap_accepted[i] as f64 / swap_proposed[i] as f64
-                    } else { 0.0 };
-                    eprintln!("    B={:.2} <-> B={:.2}: {:.1}%",
-                        betas[i].get(), betas[i + 1].get(), rate * 100.0);
-                }
-            }
-        }
-
-        // Periodic swap rate report (every 500 sweeps during sampling)
-        if n_rungs > 1 && sweep > 0 && sweep % 500 == 0 {
-            let rates: Vec<String> = (0..n_rungs - 1).map(|i| {
-                let rate = if swap_proposed[i] > 0 {
-                    swap_accepted[i] as f64 / swap_proposed[i] as f64
-                } else { 0.0 };
-                format!("{:.0}%", rate * 100.0)
-            }).collect();
-            eprintln!("  sweep {}: swap rates [{}]", sweep, rates.join(", "));
         }
 
         let cold_proposal_sd: Vec<f64> = rungs[0].log_proposal_sd.iter()
@@ -4992,14 +4621,6 @@ pub fn run_pgas(
         total_accepted: rungs[0].total_accepted.clone(),
     };
 
-    // gh#audit-C7 / M18. Compute swap acceptance rates as a final
-    // surface; n_rungs == 1 → empty vec, no diagnostic to fire.
-    let swap_acceptance_rates: Vec<f64> = (0..n_rungs.saturating_sub(1))
-        .map(|i| if swap_proposed[i] > 0 {
-            swap_accepted[i] as f64 / swap_proposed[i] as f64
-        } else { 0.0 })
-        .collect();
-
     Ok(PGASResult {
         sweeps,
         final_trajectory: rungs[0].trajectory.clone(),
@@ -5009,7 +4630,6 @@ pub fn run_pgas(
         n_divergent_post_burn,
         n_max_treedepth_total: n_max_treedepth,
         n_max_treedepth_post_burn,
-        swap_acceptance_rates,
         init_source,
     })
 }
@@ -5404,13 +5024,12 @@ mod theta_proposal_score_tests {
     fn a_successful_evaluation_passes_its_total_through() {
         let score = theta_proposal_score(Ok(components(-12.5))).expect("Ok must not error");
         assert_eq!(score.total, -12.5);
-        // gh#551: at β = 1 the tempered target IS the total, bitwise.
+        // At β = 1 the target IS the total, bitwise.
         assert_eq!(score.log_target(InverseTemperature::COLD), -12.5);
         // Including the ordinary "this θ is ruled out" outcome, which
         // `complete_data_loglik` already reports as Ok(−∞).
         let score = theta_proposal_score(Ok(components(f64::NEG_INFINITY))).unwrap();
         assert_eq!(score.total, f64::NEG_INFINITY);
-        assert_eq!(score.log_target(InverseTemperature::new(0.3).unwrap()), f64::NEG_INFINITY);
     }
 
     /// The gh#82 fix: every θ-dependent failure becomes a rejected proposal.
@@ -5439,10 +5058,6 @@ mod theta_proposal_score_tests {
             assert_eq!(
                 score.total, f64::NEG_INFINITY,
                 "a rejected proposal scores −∞ so log α is non-finite: {shown}",
-            );
-            assert_eq!(
-                score.log_target(InverseTemperature::new(0.3).unwrap()), f64::NEG_INFINITY,
-                "and −∞ on every rung, not only the cold one: {shown}",
             );
         }
     }
@@ -5477,7 +5092,7 @@ mod theta_proposal_score_tests {
 
 #[cfg(test)]
 mod rung_lik_tests {
-    //! gh#551. The split a tempered rung's moves consume.
+    //! The split of the complete-data log-likelihood the θ-move consumes.
     use super::*;
 
     fn components(initial_state: f64, transition: f64, observation: f64) -> LogLikComponents {
@@ -5489,9 +5104,9 @@ mod rung_lik_tests {
         }
     }
 
-    /// The default single-rung chain must not move: at β = 1 the θ-move's
-    /// target is the complete-data total, to the bit, for values whose sum
-    /// is not exactly representable (so a reassociation would show).
+    /// The chain must not move: at β = 1 the θ-move's target is the
+    /// complete-data total, to the bit, for values whose sum is not exactly
+    /// representable (so a reassociation would show).
     #[test]
     fn cold_target_is_the_total_bitwise() {
         for (a, b, c) in [(-1.25, -3.7, -8.1), (-0.1, -0.2, -0.3), (-1e-17, -123.456, -7.0e3)] {
@@ -5500,19 +5115,10 @@ mod rung_lik_tests {
         }
     }
 
-    /// Below β = 1 only the observation term is scaled.
-    #[test]
-    fn hot_target_tempers_the_observation_only() {
-        let lik = RungLik::from_components(&components(-2.0, -5.0, -10.0));
-        assert_eq!(lik.log_target(InverseTemperature::new(0.25).unwrap()), -7.0 + 0.25 * -10.0);
-        assert_eq!(lik.observation, -10.0);
-        assert_eq!(lik.total, -17.0);
-    }
-
     /// `complete_data_loglik` stops at the first `−∞` and leaves the later
     /// components partial. A finite partial observation sum beside a `−∞`
-    /// total must not reach the swap or the θ-move as if it were a
-    /// measurement: a zero-density state stays at zero density everywhere.
+    /// total must not reach the θ-move as if it were a measurement: a
+    /// zero-density state stays at zero density everywhere.
     #[test]
     fn a_zero_density_state_is_zero_density_under_every_consumer() {
         let partial = LogLikComponents {
@@ -5524,32 +5130,7 @@ mod rung_lik_tests {
         };
         let lik = RungLik::from_components(&partial);
         assert_eq!(lik.observation, f64::NEG_INFINITY);
-        for beta in [1.0, 0.5, 0.1] {
-            assert_eq!(lik.log_target(InverseTemperature::new(beta).unwrap()), f64::NEG_INFINITY);
-        }
-    }
-
-    /// The reported rung is exactly β = 1 whenever the ladder is accepted.
-    #[test]
-    fn the_first_rung_is_snapped_to_cold() {
-        let ladder = InverseTemperature::parse_ladder(&[1.0 - 1e-10, 0.5]).unwrap();
-        assert_eq!(ladder[0], InverseTemperature::COLD);
-        assert_eq!(ladder[0].get().to_bits(), 1.0f64.to_bits());
-        assert_eq!(ladder[1].get(), 0.5);
-        assert_eq!(InverseTemperature::parse_ladder(&[]).unwrap(), vec![InverseTemperature::COLD]);
-        assert!(InverseTemperature::parse_ladder(&[1.0 - 1e-8, 0.5]).is_err());
-        assert!(InverseTemperature::parse_ladder(&[0.5]).is_err());
-        assert!(InverseTemperature::parse_ladder(&[1.0, 0.0]).is_err());
-    }
-
-    #[test]
-    fn a_ladder_entry_outside_zero_one_is_refused() {
-        for bad in [0.0, -0.5, 1.0 + 1e-12, f64::NAN, f64::INFINITY] {
-            assert!(InverseTemperature::new(bad).is_err(), "{bad} must be refused");
-        }
-        for good in [1.0, 0.5, 1e-9] {
-            assert_eq!(InverseTemperature::new(good).unwrap().get(), good);
-        }
+        assert_eq!(lik.log_target(InverseTemperature::COLD), f64::NEG_INFINITY);
     }
 }
 
