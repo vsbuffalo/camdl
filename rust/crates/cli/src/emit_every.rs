@@ -15,7 +15,7 @@
 //! moves the model hash, so a `fit` against REAL data — where `emit_schedule` is
 //! never read — would re-key and orphan a completed fit over a cosmetic emission
 //! change. Instead each path keys what the override actually determines: the
-//! emitted obs artifact ([`crate::batch::obs_subtree_hash`]) and, on the
+//! emitted obs artifact ([`crate::cas_sink::obs_subtree_hash`]) and, on the
 //! `[synthetic]` path, the generated data's own bytes (which the fit already
 //! hashes). A run without the flag keys exactly as it always did.
 

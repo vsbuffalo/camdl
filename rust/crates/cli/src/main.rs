@@ -24,6 +24,7 @@ mod check_update;   // `camdl check-update` — GitHub release-availability chec
 mod sampling;
 mod sim_job;       // SimulateJob / ParamSource / Seeds / ScenarioRef / ObsOutput (run-spec §3)
 mod engine;        // run_job: the single engine behind simulate + batch run (run-spec §3.1)
+mod cas_sink;      // CasSink: the content-addressed store sink shared by simulate + batch run
 mod batch;
 mod eval;
 mod pfilter;        // used internally by fit runner for data loading
@@ -2239,7 +2240,7 @@ fn write_quantities_sidecar(q: &SimQuantities) {
 /// needs every cell's rows; cache hits are handled idempotently by the
 /// store's `commit_atomic`.
 struct SimSink {
-    cas: crate::batch::CasSink,
+    cas: crate::cas_sink::CasSink,
     stream: StreamSink,
     /// `--stdout`: the user opted out of the store, so skip the leaf commit
     /// entirely — only the `stream` mirror runs, and the caller writes its
@@ -2528,7 +2529,7 @@ impl engine::RunSink for SimSink {
     }
 }
 
-/// Build the simulate-side [`crate::batch::CasSink`] so each cell's leaf is
+/// Build the simulate-side [`crate::cas_sink::CasSink`] so each cell's leaf is
 /// byte-identical to the leaf `batch run` writes for the same logical cell.
 ///
 /// The identity inputs mirror batch exactly:
@@ -2561,7 +2562,7 @@ fn build_simulate_cas_sink(
     // re-key, because its bytes do not depend on the emission cadence.
     emit_every: Option<crate::emit_every::EmitEvery>,
     total_runs: usize,
-) -> Result<crate::batch::CasSink, String> {
+) -> Result<crate::cas_sink::CasSink, String> {
     // A required output time adds a recorded snapshot, and can raise the
     // integration end to reach it — it changes the leaf's bytes. The leaf is
     // keyed off the model as loaded here, not off the schedule
@@ -2600,8 +2601,8 @@ fn build_simulate_cas_sink(
     // matching a model preset reads its effective delta via
     // `ResolvedEntry::from_preset` (preset route); the no-scenario case is the
     // CLI ad-hoc baseline.
-    let resolved_scenarios: Vec<crate::batch::ResolvedEntry> = if scenario_names.is_empty() {
-        vec![crate::batch::ResolvedEntry {
+    let resolved_scenarios: Vec<crate::cas_sink::ResolvedEntry> = if scenario_names.is_empty() {
+        vec![crate::cas_sink::ResolvedEntry {
             name: "baseline".to_string(),
             route: None,
             enable: run.adhoc_enable.clone(),
@@ -2633,7 +2634,7 @@ fn build_simulate_cas_sink(
             };
             // The effective (compose-walked, scale-bearing) delta, from the
             // authority the preset route applies (gh#573).
-            crate::batch::ResolvedEntry::from_preset(&base_model, name, t_end)
+            crate::cas_sink::ResolvedEntry::from_preset(&base_model, name, t_end)
         }).collect::<Result<Vec<_>, String>>()?
     };
 
@@ -2644,7 +2645,7 @@ fn build_simulate_cas_sink(
     let model_stem = hashing::path_stem_slug(display_path);
     let runs_dir = format!("{}/sims", cas_root);
 
-    Ok(crate::batch::CasSink {
+    Ok(crate::cas_sink::CasSink {
         resolved_scenarios,
         model_path: display_path.to_string(),
         model_stem,
@@ -2669,7 +2670,7 @@ fn build_simulate_cas_sink(
         // `run_one_cell` (no inner bar), so the sink owns the overall cells
         // bar — otherwise the ensemble runs silently. The `Task` honours
         // `--progress none`/`plain` internally.
-        progress: crate::batch::cells_progress(total_runs, "simulate"),
+        progress: crate::cas_sink::cells_progress(total_runs, "simulate"),
     })
 }
 
@@ -2683,7 +2684,7 @@ fn build_simulate_cas_sink(
 /// derived convenience view, so a write hiccup must not fail the whole run
 /// (mirrors the obs-child non-fatal posture).
 fn write_sim_ensemble(
-    cas: &crate::batch::CasSink,
+    cas: &crate::cas_sink::CasSink,
     combined_bytes: &[u8],
     cas_root: &str,
     label: Option<String>,
@@ -2795,7 +2796,7 @@ fn write_sim_ensemble(
 /// store-relative `sims/…` tail. (Whether a leaf was freshly written or a
 /// cache hit is not distinguished here — `commit_atomic` is idempotent and
 /// does not report which; that is a follow-up.)
-fn report_cas_leaves(runs: &[crate::batch::RunEntry], cas_root: &str) {
+fn report_cas_leaves(runs: &[crate::cas_sink::RunEntry], cas_root: &str) {
     let root = cas_root.trim_end_matches('/');
     match runs.len() {
         0 => {}
