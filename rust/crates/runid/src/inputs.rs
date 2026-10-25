@@ -392,7 +392,7 @@ pub struct RunProvenance {
 // leaves (Trajectory, SyntheticObs) are wired in M2; the inference leaves
 // (FitStage, PfilterEval, Survey, Projection) in M3.
 
-/// `simulate`/`batch` leaf: the latent dynamics — NOT the obs model. (M2
+/// `simulate` leaf: the latent dynamics — NOT the obs model. (M2
 /// interim: `model` is the whole-IR [`ModelDigest`]; M2.5 swaps in the
 /// dynamics/output split so an obs-only edit does not re-key the trajectory.)
 #[derive(Debug, Clone, PartialEq, RunInput)]

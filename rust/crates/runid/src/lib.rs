@@ -29,7 +29,7 @@
 //!    in declaration order. The derive folds **every** non-provenance field,
 //!    *include by default* — there is no skip-if-default. Mark a field
 //!    `#[run_input(provenance)]` to exclude it entirely (display only). The
-//!    `simulate` / `batch` `config` level uses this path.
+//!    `simulate` `config` level uses this path.
 //! 2. **Hash of canonical JSON** (CLI `fit/cas.rs`). `FitConfigV2` is serde
 //!    only; it enters identity as the digest of its key-sorted JSON (the
 //!    `FitDigest::fit_toml` field), so `#[serde(skip_serializing_if = …)]`

@@ -171,7 +171,7 @@ fn a_competing_augment_inside_the_window_is_not_clobbered() {
 
 /// The other half of the same window: two augments of DIFFERENT names. A
 /// snapshot write-back drops the competitor's manifest entry, orphaning its
-/// file and staleing a completed leaf. `batch` augments exactly such a pair
+/// file and staleing a completed leaf. `simulate` augments exactly such a pair
 /// (`event_log.tsv`, `reactive_log.tsv`).
 #[test]
 fn a_competing_augment_of_another_name_keeps_both_entries() {
@@ -388,7 +388,8 @@ fn augment_on_a_missing_leaf_is_a_no_op() {
 // ── S2: the overwrite door ──────────────────────────────────────────────────
 
 /// `--force` had no store-level meaning: there was no path that replaced a
-/// Completed leaf, so batch recomputed and had its bytes discarded at commit,
+/// Completed leaf, so the grid writer recomputed and had its bytes discarded at
+/// commit,
 /// while fit and survey died with AlreadyCompleted. `displace_completed`
 /// quarantines the incumbent so the recompute lands on a clean leaf — and
 /// quarantine, not delete, so a forced rerun never destroys what it replaces.

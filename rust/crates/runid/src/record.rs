@@ -78,7 +78,7 @@ pub enum ColumnRole {
     Iteration,
     /// MCMC chain key.
     Chain,
-    /// Ensemble/batch replicate key.
+    /// Ensemble replicate key.
     Replicate,
     /// Scenario key.
     Scenario,

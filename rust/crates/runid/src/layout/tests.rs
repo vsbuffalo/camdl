@@ -170,8 +170,9 @@ fn segment_is_label_dash_hash8_with_no_disambiguator() {
 
 /// A `--draws prior` row on a many-parameter stratified model builds a
 /// `param_label` = every drawn `name=value` pair joined by `_` (see
-/// `cli::batch::cell_resolve`). On a 23×2-stratified model that label runs to
-/// hundreds of bytes; rendered as a single on-disk directory segment it
+/// `cli::cas_sink::CasSink::cell_resolve`). On a 23×2-stratified model that
+/// label runs to hundreds of bytes; rendered as a single on-disk directory
+/// segment it
 /// exceeded `NAME_MAX` (255) and `commit` failed with `ENAMETOOLONG` (errno
 /// 63). The segment must be capped so it always fits in one path component.
 #[test]
