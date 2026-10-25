@@ -922,9 +922,9 @@ pub struct SimulateJob {
 
 It carries no output directory, no `--force`, no label, and no GeoJSON path:
 those are write-side concerns owned by the sink, not by the job. `camdl
-simulate` builds one in `main.rs` and always sets `parallel: 1` (its combined
-wide-format output is order-sensitive); `fit predict` builds one for its
-free-forward replay and passes its own thread count.
+simulate` builds one in `main.rs` with `parallel` from `--parallel` /
+`CAMDL_PARALLEL` (absent: sequential; 0: every core); `fit predict` builds one
+for its free-forward replay and passes its own thread count.
 
 The engine that consumes it is `rust/crates/cli/src/engine.rs`:
 
@@ -1665,8 +1665,11 @@ per-cell leaf's `run.json`, not in the combined TSV — except under a sweep,
 whose `seed` column is the pairing key across design points. `draw` is the
 0-based draw index.
 
-`--parallel` is accepted by `camdl simulate` but not honoured — the simulate
-grid runs sequentially (`main.rs` builds its job with `parallel: 1`).
+`--parallel N` (env `CAMDL_PARALLEL`) runs the simulation phase of a multi-cell
+`simulate` on N Rayon threads (0 = every core; absent = sequential). The
+combined files, the observation tables and the stored ensemble are byte-identical
+whatever the value: a cell's seed is a function of its grid position, and the
+engine merges cells in canonical order.
 
 ### 4.5 `camdl list` / `show` / `cat` / `label` — the primary access path
 
@@ -2023,7 +2026,7 @@ pub struct SimulateJob {
     pub set_vec_entries: Vec<(String, String)>, // --param-vec
     pub table_files: Vec<(String, String)>,  // --table
     pub obs: ObsOutput,
-    pub parallel: usize,               // rayon threads; simulate always passes 1
+    pub parallel: usize,               // rayon threads; --parallel (absent 1, 0 = all cores)
 }
 
 pub enum ParamSource {
@@ -6027,8 +6030,9 @@ Ensemble
                               that sets or scales one (§5.5)
   --sweep-file FILE           design points from a TSV: header = parameters, one row
                               per point. Refused with --sweep and --draws
-  --parallel N                accepted, not honoured: cells run sequentially (§4.4;
-                              env CAMDL_PARALLEL)
+  --parallel N                Rayon threads for the simulation phase; output is
+                              byte-identical whatever the value (0 = all cores;
+                              env CAMDL_PARALLEL; §4.4)
 
 Trajectory output
   -o, --output FILE           plain-TSV mirror IN ADDITION to the store leaf

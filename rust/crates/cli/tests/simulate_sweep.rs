@@ -581,6 +581,39 @@ fn quantities_are_grouped_per_design_point_and_scenario() {
     assert_eq!(rows.len(), 2);
 }
 
+/// `--parallel` runs the simulation phase on Rayon, and the outputs do not
+/// depend on the thread count: a cell's seed is a function of its grid
+/// position and the engine merges cells in canonical order. Two fresh stores
+/// (so neither run reads a cell back) with `--parallel 1` and `--parallel 4`
+/// over a four-cell sweep of a dynamics parameter give byte-identical combined
+/// files, observation tables and stored ensembles.
+#[test]
+fn parallel_runs_are_byte_identical_to_the_serial_run() {
+    fn run(threads: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let fx = Fixture::new();
+        assert_ok(
+            &fx.simulate(&[
+                "--sweep", "beta=0.3,0.5", "--replicates", "2", "--seed", "11",
+                "-o", "c.tsv", "--obs-dir", "synth", "--parallel", threads,
+            ]),
+            &format!("--parallel {threads}"),
+        );
+        assert_eq!(fx.leaves().len(), 4, "four cells simulated");
+        let ens = run_leaves(&fx.path("out").join("ensembles"));
+        assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
+        (
+            std::fs::read(fx.path("c.tsv")).unwrap(),
+            std::fs::read(fx.path("synth").join("cases.tsv")).unwrap(),
+            std::fs::read(ens[0].join("ensemble.tsv")).unwrap(),
+        )
+    }
+    let serial = run("1");
+    let parallel = run("4");
+    assert_eq!(serial.0, parallel.0, "the combined trajectory file must not depend on --parallel");
+    assert_eq!(serial.1, parallel.1, "the observation table must not depend on --parallel");
+    assert_eq!(serial.2, parallel.2, "the stored ensemble.tsv must not depend on --parallel");
+}
+
 /// Test 3 (first half) — `--sweep beta=0.2,0.3` and `--sweep beta=0.3,0.2`
 /// are the same cell set (under D-B every point shares the seed) but two
 /// combined files, so two ensemble identities: the design is in the key.
