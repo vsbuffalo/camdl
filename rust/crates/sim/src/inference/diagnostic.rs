@@ -7,6 +7,8 @@
 
 use serde::{Serialize, Deserialize};
 
+use crate::inference::json_f64;
+
 /// Severity level for inference diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -94,20 +96,33 @@ pub fn acceptance_diagnostic(
 /// Each variant carries exactly the data needed for programmatic decisions.
 /// The variant name is the stable identifier that downstream tooling and
 /// CI pipelines should match on.
+///
+/// Every `f64` a variant carries, nested ones included, is written through
+/// [`json_f64`]: a finite value is the plain JSON number, a non-finite one is
+/// `"inf"` / `"-inf"` / `"NaN"`. Without it `serde_json` writes `null`, which
+/// does not read back as an `f64` — one infinite R̂ made the whole
+/// `diagnostics.json` unreadable, refused chains' records with it. A new `f64`
+/// field takes the same attribute; `every_variant_round_trips_non_finite_
+/// numbers_losslessly` fails on one that does not.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DiagnosticKind {
     // ── Convergence ──────────────────────────────────────────────
     RhatHigh {
         param: String,
+        #[serde(with = "json_f64")]
         rhat: f64,
+        #[serde(with = "json_f64")]
         threshold: f64,
     },
     MultimodalLikelihood {
+        #[serde(with = "json_f64")]
         ll_spread: f64,
+        #[serde(with = "json_f64")]
         max_chain_agreement: f64,
     },
     ConvergenceIncomplete {
+        #[serde(with = "json_f64")]
         max_chain_agreement: f64,
         n_unconverged: usize,
         n_total: usize,
@@ -115,13 +130,18 @@ pub enum DiagnosticKind {
 
     // ── ESS / Particle Filter ────────────────────────────────────
     LowESS {
+        #[serde(with = "json_f64")]
         obs_time: f64,
+        #[serde(with = "json_f64")]
         ess: f64,
         n_particles: usize,
+        #[serde(with = "json_f64")]
         ess_fraction: f64,
     },
     LowESSAtMLE {
+        #[serde(with = "json_f64")]
         ess_mean: f64,
+        #[serde(with = "json_f64")]
         ess_min: f64,
         n_particles: usize,
     },
@@ -142,6 +162,7 @@ pub enum DiagnosticKind {
         chain_id: usize,
         /// Estimated parameter name → starting value on the natural
         /// scale, exactly as offered to the inference engine.
+        #[serde(with = "json_f64::map")]
         params: std::collections::BTreeMap<String, f64>,
         /// One-line cause from the upstream PFDegenerateKind /
         /// fallback message. Surface in the diagnostic so the user
@@ -161,6 +182,7 @@ pub enum DiagnosticKind {
     MaxTreeDepthHits {
         n_hits: usize,
         n_sweeps: usize,
+        #[serde(with = "json_f64")]
         pct: f64,
         max_depth: usize,
     },
@@ -171,11 +193,13 @@ pub enum DiagnosticKind {
 
     // ── PGAS ─────────────────────────────────────────────────────
     DegenerateAncestorSampling {
+        #[serde(with = "json_f64")]
         pct: f64,
         n_degenerate: usize,
         n_substeps: usize,
     },
     LowTrajectoryRenewal {
+        #[serde(with = "json_f64")]
         renewal: f64,
     },
     /// gh#791. Renewal is concentrated at the END of the series: the per-bin
@@ -208,18 +232,23 @@ pub enum DiagnosticKind {
     ///   so would contradict the number printed beside it.
     PathRenewalCoalesced {
         /// Mean renewal over the first half of the bins.
+        #[serde(with = "json_f64")]
         prefix: f64,
         /// `last_bin − first_bin`. Near 0 when renewal is uniform in time,
         /// large when it is concentrated late. Reads only the two end bins —
         /// see the type doc for what it therefore cannot say.
+        #[serde(with = "json_f64")]
         gradient: f64,
         /// Renewal in the first bin — the earliest tenth of the series, where
         /// the initial condition and the earliest dynamics live.
+        #[serde(with = "json_f64")]
         first_bin: f64,
         /// Renewal in the last bin.
+        #[serde(with = "json_f64")]
         last_bin: f64,
         /// The aggregate `trajectory_renewal` this profile resolves, so the
         /// message can say what reading the aggregate alone would have given.
+        #[serde(with = "json_f64")]
         aggregate: f64,
         /// Bins in the profile, and in the `prefix` mean — carried so the
         /// message states the span rather than assuming the reader knows it.
@@ -262,10 +291,14 @@ pub enum DiagnosticKind {
         /// Particles per sweep.
         n_particles: usize,
         /// The bar: the fraction of `n_particles` a mean ESS is under.
+        #[serde(with = "json_f64")]
         starved_below: f64,
         /// The worst observation's time, mean ESS and smallest ESS.
+        #[serde(with = "json_f64")]
         worst_time: f64,
+        #[serde(with = "json_f64")]
         worst_mean: f64,
+        #[serde(with = "json_f64")]
         worst_min: f64,
     },
     GammaDensityDisabled {
@@ -274,6 +307,7 @@ pub enum DiagnosticKind {
 
     // ── PMMH ─────────────────────────────────────────────────────
     AcceptanceRateUnhealthy {
+        #[serde(with = "json_f64")]
         rate: f64,
         param: Option<String>,
         /// Which θ-move kernel produced the rate (gh#631): the healthy band is
@@ -286,7 +320,9 @@ pub enum DiagnosticKind {
     // ── Parameters ───────────────────────────────────────────────
     ParamNearBound {
         param: String,
+        #[serde(with = "json_f64")]
         value: f64,
+        #[serde(with = "json_f64")]
         bound: f64,
         bound_type: String,
     },
@@ -296,14 +332,17 @@ pub enum DiagnosticKind {
     },
     FlatProfile {
         param: String,
+        #[serde(with = "json_f64")]
         curvature: f64,
     },
     AutoRwSd {
         param: String,
+        #[serde(with = "json_f64")]
         rw_sd: f64,
     },
     CompressedLogitPosition {
         param: String,
+        #[serde(with = "json_f64")]
         z: f64,
     },
     AutoRwSdNoConsensus {
@@ -315,14 +354,19 @@ pub enum DiagnosticKind {
     CoolingExhausted {
         exhausted_at_iter: usize,
         total_iters: usize,
+        #[serde(with = "json_f64")]
         rw_fraction_at_exhaustion: f64,
     },
 
     // ── Observation Model ────────────────────────────────────────
     ObsModelMismatch {
+        #[serde(with = "json_f64")]
         obs_time: f64,
+        #[serde(with = "json_f64")]
         observed: f64,
+        #[serde(with = "json_f64")]
         predicted_mean: f64,
+        #[serde(with = "json_f64")]
         n_sigma: f64,
     },
     ZeroRateNonzeroFlow {
@@ -1005,5 +1049,249 @@ mod tests {
             "the entry must name its method under `method`:\n{json}");
         assert!(!json.contains(r#""stage""#),
             "and must not carry the old `stage` key:\n{json}");
+    }
+
+    /// One of every variant, with `x` in every `f64` slot it carries — nested
+    /// ones included, since a `bad_init` record's `attempts` are what a reader
+    /// of a refused chain consults, and a non-finite number there made the
+    /// record unreadable the same way.
+    fn every_variant(x: f64) -> Vec<DiagnosticKind> {
+        use crate::inference::obs_attempt::{NegInfCause, ObsCellState, StreamAttempt};
+        let attempt = StreamAttempt {
+            stream: "cases".into(),
+            time: x,
+            date: None,
+            cell: ObsCellState::Scored { y_obs: x },
+            projected_max: Some(x),
+            projected_median: Some(x),
+            n_projected_zero: 0,
+            n_projected_nan: 0,
+            n_neg_inf: 2,
+            neg_inf_causes: vec![
+                (NegInfCause::ArgumentOutOfDomain { arg: "dispersion".into(), value: x }, 1),
+                (NegInfCause::ObservedOutsideSupport { observed: x }, 1),
+            ],
+            n_live: 2,
+            n_dead: 0,
+            n_particles: 2,
+        };
+        vec![
+            DiagnosticKind::RhatHigh { param: "beta".into(), rhat: x, threshold: x },
+            DiagnosticKind::MultimodalLikelihood { ll_spread: x, max_chain_agreement: x },
+            DiagnosticKind::ConvergenceIncomplete {
+                max_chain_agreement: x, n_unconverged: 1, n_total: 2,
+            },
+            DiagnosticKind::LowESS { obs_time: x, ess: x, n_particles: 10, ess_fraction: x },
+            DiagnosticKind::LowESSAtMLE { ess_mean: x, ess_min: x, n_particles: 10 },
+            DiagnosticKind::InitialLoglikInfinite,
+            DiagnosticKind::BadInit {
+                chain_id: 3,
+                params: std::collections::BTreeMap::from([("beta".to_string(), x)]),
+                reason: "every particle scored -inf".into(),
+                attempts: vec![attempt],
+            },
+            DiagnosticKind::MaxTreeDepthHits { n_hits: 1, n_sweeps: 2, pct: x, max_depth: 10 },
+            DiagnosticKind::DivergentTransitions { n_divergent: 1, n_sweeps: 2 },
+            DiagnosticKind::DegenerateAncestorSampling { pct: x, n_degenerate: 1, n_substeps: 2 },
+            DiagnosticKind::LowTrajectoryRenewal { renewal: x },
+            DiagnosticKind::PathRenewalCoalesced {
+                prefix: x, gradient: x, first_bin: x, last_bin: x, aggregate: x,
+                n_bins: 10, n_prefix_bins: 5,
+            },
+            DiagnosticKind::FilterWeightCollapse { n_sweeps: 1, n_total_sweeps: 2, n_windows: 3 },
+            DiagnosticKind::FilterStarved {
+                n_starved: 1, n_obs: 2, n_particles: 10, starved_below: x,
+                worst_time: x, worst_mean: x, worst_min: x,
+            },
+            DiagnosticKind::GammaDensityDisabled { reason: "r".into() },
+            DiagnosticKind::AcceptanceRateUnhealthy {
+                rate: x, param: None, kernel: AcceptanceKernel::RandomWalk,
+            },
+            DiagnosticKind::ParamNearBound {
+                param: "beta".into(), value: x, bound: x, bound_type: "upper".into(),
+            },
+            DiagnosticKind::ProfileCIUnbounded { param: "beta".into(), direction: "above".into() },
+            DiagnosticKind::FlatProfile { param: "beta".into(), curvature: x },
+            DiagnosticKind::AutoRwSd { param: "beta".into(), rw_sd: x },
+            DiagnosticKind::CompressedLogitPosition { param: "beta".into(), z: x },
+            DiagnosticKind::AutoRwSdNoConsensus { n_good: 1, n_total: 2 },
+            DiagnosticKind::CoolingExhausted {
+                exhausted_at_iter: 1, total_iters: 2, rw_fraction_at_exhaustion: x,
+            },
+            DiagnosticKind::ObsModelMismatch {
+                obs_time: x, observed: x, predicted_mean: x, n_sigma: x,
+            },
+            DiagnosticKind::ZeroRateNonzeroFlow { transition: "infection".into(), flow: 3 },
+            DiagnosticKind::ResumeConfigMismatch { expected: "a".into(), found: "b".into() },
+            DiagnosticKind::ResumeParamMissing { param: "beta".into() },
+        ]
+    }
+
+    /// Position in declaration order. No wildcard arm, so a new variant does
+    /// not compile until it is listed here — and the coverage assertion in
+    /// the round-trip test then fails until `every_variant` builds it.
+    fn variant_index(k: &DiagnosticKind) -> usize {
+        use DiagnosticKind::*;
+        match k {
+            RhatHigh { .. } => 0,
+            MultimodalLikelihood { .. } => 1,
+            ConvergenceIncomplete { .. } => 2,
+            LowESS { .. } => 3,
+            LowESSAtMLE { .. } => 4,
+            InitialLoglikInfinite => 5,
+            BadInit { .. } => 6,
+            MaxTreeDepthHits { .. } => 7,
+            DivergentTransitions { .. } => 8,
+            DegenerateAncestorSampling { .. } => 9,
+            LowTrajectoryRenewal { .. } => 10,
+            PathRenewalCoalesced { .. } => 11,
+            FilterWeightCollapse { .. } => 12,
+            FilterStarved { .. } => 13,
+            GammaDensityDisabled { .. } => 14,
+            AcceptanceRateUnhealthy { .. } => 15,
+            ParamNearBound { .. } => 16,
+            ProfileCIUnbounded { .. } => 17,
+            FlatProfile { .. } => 18,
+            AutoRwSd { .. } => 19,
+            CompressedLogitPosition { .. } => 20,
+            AutoRwSdNoConsensus { .. } => 21,
+            CoolingExhausted { .. } => 22,
+            ObsModelMismatch { .. } => 23,
+            ZeroRateNonzeroFlow { .. } => 24,
+            ResumeConfigMismatch { .. } => 25,
+            ResumeParamMissing { .. } => 26,
+        }
+    }
+
+    /// A rank-normalized R̂ is `+∞` when every chain sat at its own single
+    /// value — a sampler that never accepted a move, from spread starts — and
+    /// that is exactly when the `RhatHigh` finding matters most. `serde_json`
+    /// writes a non-finite `f64` as `null` and refuses `null` for an `f64` on
+    /// the way back, so the finding made the whole `diagnostics.json`
+    /// unreadable, and `fit summary` dropped every record in it, the refused
+    /// chains' `bad_init` records included.
+    #[test]
+    fn an_infinite_rhat_reads_back_from_diagnostics_json_beside_a_refused_chain() {
+        // The R̂ the runner would hand the finding, from the estimator itself.
+        let frozen = vec![vec![0.24; 30], vec![0.44; 30]];
+        let rhat = crate::inference::convergence::rank_convergence(&frozen)
+            .expect("frozen chains are scored")
+            .rhat;
+        assert_eq!(rhat, f64::INFINITY,
+            "fixture premise: two frozen chains at different values give R̂ = +inf");
+
+        let c = DiagnosticCollector::new("pmmh");
+        c.push(DiagnosticKind::RhatHigh { param: "beta".into(), rhat, threshold: 1.1 });
+        c.push(bad_init("beta", 4.8));
+        let path = std::env::temp_dir().join(format!(
+            "camdl_diag_inf_rhat_{}_{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        c.write_json(path.to_str().unwrap()).expect("diagnostics.json is written");
+        let raw = std::fs::read_to_string(&path).expect("written file reads");
+        let _ = std::fs::remove_file(&path);
+
+        let back: Vec<Diagnostic> = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("diagnostics.json must read back: {e}\n{raw}"));
+        assert_eq!(back.len(), 2, "both records survive:\n{raw}");
+        match &back[0].kind {
+            DiagnosticKind::RhatHigh { rhat, .. } => assert_eq!(*rhat, f64::INFINITY,
+                "the infinity itself survives, not a stand-in:\n{raw}"),
+            other => panic!("first record is the R̂ finding, got {other:?}"),
+        }
+        assert_eq!(back[0].severity, Severity::Error, "and still reads as an error");
+        assert!(matches!(back[1].kind, DiagnosticKind::BadInit { chain_id: 1, .. }),
+            "the refused chain's record is read:\n{raw}");
+    }
+
+    /// Every variant, with every `f64` it carries at `+∞`, `−∞` and `NaN`,
+    /// writes and reads back to the same bytes. `NaN` is not `PartialEq` with
+    /// itself, so equality is checked on the re-serialized text, which also
+    /// keeps `+∞`, `−∞` and `NaN` apart.
+    #[test]
+    fn every_variant_round_trips_non_finite_numbers_losslessly() {
+        let covered: std::collections::BTreeSet<usize> =
+            every_variant(0.5).iter().map(variant_index).collect();
+        assert_eq!(covered, (0..27).collect(),
+            "every_variant must build one of every DiagnosticKind variant");
+
+        for x in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            for kind in every_variant(x) {
+                let first = serde_json::to_string(&kind).expect("serializes");
+                let back: DiagnosticKind = serde_json::from_str(&first)
+                    .unwrap_or_else(|e| panic!("{x} must read back: {e}\n{first}"));
+                let second = serde_json::to_string(&back).expect("re-serializes");
+                assert_eq!(first, second, "the round trip at {x} must be lossless");
+            }
+        }
+    }
+
+    /// A finite number is written as the JSON number it always was: the
+    /// non-finite representation must not move a single byte of an ordinary
+    /// file, which existing readers (`fit summary`, the end-to-end tests, the
+    /// watcher) parse. Pinned on the bytes the writer produced before the
+    /// non-finite fix.
+    #[test]
+    fn finite_numbers_keep_their_on_disk_bytes() {
+        let json: Vec<String> = every_variant(0.25).iter()
+            .map(|k| serde_json::to_string(k).expect("serializes"))
+            .collect();
+        let want = [
+            r#"{"type":"rhat_high","param":"beta","rhat":0.25,"threshold":0.25}"#,
+            r#"{"type":"multimodal_likelihood","ll_spread":0.25,"max_chain_agreement":0.25}"#,
+            r#"{"type":"convergence_incomplete","max_chain_agreement":0.25,"n_unconverged":1,"n_total":2}"#,
+            r#"{"type":"low_e_s_s","obs_time":0.25,"ess":0.25,"n_particles":10,"ess_fraction":0.25}"#,
+            r#"{"type":"low_e_s_s_at_m_l_e","ess_mean":0.25,"ess_min":0.25,"n_particles":10}"#,
+            r#"{"type":"initial_loglik_infinite"}"#,
+            concat!(
+                r#"{"type":"bad_init","chain_id":3,"params":{"beta":0.25},"#,
+                r#""reason":"every particle scored -inf","attempts":[{"stream":"cases","#,
+                r#""time":0.25,"date":null,"cell":{"state":"scored","y_obs":0.25},"#,
+                r#""projected_max":0.25,"projected_median":0.25,"n_projected_zero":0,"#,
+                r#""n_projected_nan":0,"n_neg_inf":2,"neg_inf_causes":[[{"cause":"#,
+                r#""argument_out_of_domain","arg":"dispersion","value":0.25},1],"#,
+                r#"[{"cause":"observed_outside_support","observed":0.25},1]],"#,
+                r#""n_live":2,"n_dead":0,"n_particles":2}]}"#,
+            ),
+            r#"{"type":"max_tree_depth_hits","n_hits":1,"n_sweeps":2,"pct":0.25,"max_depth":10}"#,
+            r#"{"type":"divergent_transitions","n_divergent":1,"n_sweeps":2}"#,
+            r#"{"type":"degenerate_ancestor_sampling","pct":0.25,"n_degenerate":1,"n_substeps":2}"#,
+            r#"{"type":"low_trajectory_renewal","renewal":0.25}"#,
+            concat!(
+                r#"{"type":"path_renewal_coalesced","prefix":0.25,"gradient":0.25,"#,
+                r#""first_bin":0.25,"last_bin":0.25,"aggregate":0.25,"n_bins":10,"#,
+                r#""n_prefix_bins":5}"#,
+            ),
+            r#"{"type":"filter_weight_collapse","n_sweeps":1,"n_total_sweeps":2,"n_windows":3}"#,
+            concat!(
+                r#"{"type":"filter_starved","n_starved":1,"n_obs":2,"n_particles":10,"#,
+                r#""starved_below":0.25,"worst_time":0.25,"worst_mean":0.25,"worst_min":0.25}"#,
+            ),
+            r#"{"type":"gamma_density_disabled","reason":"r"}"#,
+            r#"{"type":"acceptance_rate_unhealthy","rate":0.25,"param":null,"kernel":"random_walk"}"#,
+            r#"{"type":"param_near_bound","param":"beta","value":0.25,"bound":0.25,"bound_type":"upper"}"#,
+            r#"{"type":"profile_c_i_unbounded","param":"beta","direction":"above"}"#,
+            r#"{"type":"flat_profile","param":"beta","curvature":0.25}"#,
+            r#"{"type":"auto_rw_sd","param":"beta","rw_sd":0.25}"#,
+            r#"{"type":"compressed_logit_position","param":"beta","z":0.25}"#,
+            r#"{"type":"auto_rw_sd_no_consensus","n_good":1,"n_total":2}"#,
+            concat!(
+                r#"{"type":"cooling_exhausted","exhausted_at_iter":1,"total_iters":2,"#,
+                r#""rw_fraction_at_exhaustion":0.25}"#,
+            ),
+            concat!(
+                r#"{"type":"obs_model_mismatch","obs_time":0.25,"observed":0.25,"#,
+                r#""predicted_mean":0.25,"n_sigma":0.25}"#,
+            ),
+            r#"{"type":"zero_rate_nonzero_flow","transition":"infection","flow":3}"#,
+            r#"{"type":"resume_config_mismatch","expected":"a","found":"b"}"#,
+            r#"{"type":"resume_param_missing","param":"beta"}"#,
+        ];
+        assert_eq!(json.len(), want.len());
+        for (got, want) in json.iter().zip(want) {
+            assert_eq!(got, want, "a finite number's on-disk form must not change");
+        }
     }
 }

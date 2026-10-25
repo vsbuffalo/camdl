@@ -77,12 +77,12 @@ pub enum ConvergenceError {
     ///
     /// `value` is non-finite by construction — that is what the variant is for
     /// — and `serde_json` writes any non-finite `f64` as `null`, which will not
-    /// read back. It is carried as its `Display` form (`inf` / `-inf` / `NaN`),
-    /// which `f64::from_str` parses, so the round-trip is exact.
+    /// read back. It is carried as `"inf"` / `"-inf"` / `"NaN"` by
+    /// [`crate::inference::json_f64`], so the round-trip is exact.
     NonFiniteDraw {
         chain: usize,
         draw: usize,
-        #[serde(with = "nonfinite_f64")]
+        #[serde(with = "crate::inference::json_f64")]
         value: f64,
     },
     /// Every draw of every chain is the same value to within
@@ -96,22 +96,6 @@ pub enum ConvergenceError {
     /// chains were started raises this instead of reporting the number.
     /// `starts` is the rule as written, for the report.
     PointStart { n_chains: usize, starts: String },
-}
-
-/// `f64` as its `Display` string, for the one field that is non-finite by
-/// construction. JSON has no encoding for `inf`/`NaN`, and `serde_json`'s
-/// silent `null` would make the field unreadable on the way back.
-mod nonfinite_f64 {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&v.to_string())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse::<f64>().map_err(serde::de::Error::custom)
-    }
 }
 
 /// Why a parameter has no R̂, and — the part that decides what a fit may

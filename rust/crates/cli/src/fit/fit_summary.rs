@@ -1281,10 +1281,8 @@ impl Formatter {
     /// when nothing was refused.
     fn refused_chains_lines(&self, refused: &RefusedChains) -> String {
         let mut s = String::new();
-        if let Some(e) = &refused.unreadable {
-            s.push_str(&format!("  {}\n", self.warn(&format!(
-                "diagnostics.json could not be read, so refused chains are not \
-                 listed: {e}"))));
+        for e in &refused.unreadable {
+            s.push_str(&format!("  {}\n", self.warn(e)));
         }
         for (chain, reason) in &refused.records {
             s.push_str(&format!("  {} chain {chain}: {reason}\n", self.warn("refused")));
@@ -3591,35 +3589,50 @@ fn dump_params_only(
 struct RefusedChains {
     /// `(1-based chain id, reason)`, in chain order.
     records: Vec<(usize, String)>,
-    /// Set when `diagnostics.json` exists but does not parse, so the summary
-    /// says it could not look rather than implying nothing was refused.
-    unreadable: Option<String>,
+    /// One sentence per thing in `diagnostics.json` that could not be read —
+    /// the whole file when it is not a JSON array, else each entry that does
+    /// not parse — so the summary says it could not look rather than implying
+    /// nothing was refused. Empty when everything read.
+    unreadable: Vec<String>,
 }
 
 impl RefusedChains {
+    /// Entry by entry, so one record that does not parse costs that record and
+    /// not the file: an R̂ of `+∞` that an earlier binary wrote as `null` must
+    /// not take the `bad_init` records beside it out of the summary.
     fn load(stage_dir: &Path) -> Self {
         use sim::inference::diagnostic::{Diagnostic, DiagnosticKind};
         let path = stage_dir.join("diagnostics.json");
         let Ok(raw) = std::fs::read_to_string(&path) else {
-            return RefusedChains { records: Vec::new(), unreadable: None };
+            return RefusedChains { records: Vec::new(), unreadable: Vec::new() };
         };
-        match serde_json::from_str::<Vec<Diagnostic>>(&raw) {
-            Ok(diags) => {
-                let mut records: Vec<(usize, String)> = diags
-                    .into_iter()
-                    .filter_map(|d| match d.kind {
-                        DiagnosticKind::BadInit { chain_id, reason, .. } => Some((chain_id, reason)),
-                        _ => None,
-                    })
-                    .collect();
-                records.sort_by_key(|(id, _)| *id);
-                RefusedChains { records, unreadable: None }
+        let entries = match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+            Ok(entries) => entries,
+            Err(e) => {
+                return RefusedChains {
+                    records: Vec::new(),
+                    unreadable: vec![format!(
+                        "diagnostics.json could not be read, so refused chains are not \
+                         listed: {}: {e}",
+                        path.display()
+                    )],
+                }
             }
-            Err(e) => RefusedChains {
-                records: Vec::new(),
-                unreadable: Some(format!("{}: {e}", path.display())),
-            },
+        };
+        let mut records = Vec::new();
+        let mut unreadable = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            match serde_json::from_value::<Diagnostic>(entry.clone()) {
+                Ok(d) => {
+                    if let DiagnosticKind::BadInit { chain_id, reason, .. } = d.kind {
+                        records.push((chain_id, reason));
+                    }
+                }
+                Err(e) => unreadable.push(unreadable_entry(&path, i, entry, &e)),
+            }
         }
+        records.sort_by_key(|(id, _)| *id);
+        RefusedChains { records, unreadable }
     }
 
     /// `"6 of 8 chains ran — refused at start: 3, 5"`, or `None` when every
@@ -3648,6 +3661,98 @@ impl RefusedChains {
     }
 }
 
+/// The sentence for entry `i` (0-based) of `diagnostics.json`, which did not
+/// parse with `err`.
+///
+/// When the entry's `null`s are what stop it — a file written before
+/// non-finite numbers were spelled out, where `null` stood for `+∞`, `−∞` and
+/// `NaN` alike — the sentence names those fields and says so. The entry is
+/// still refused: admitting the `null` as any one of the three would be a
+/// guess, and the guess decides a finding's severity.
+fn unreadable_entry(path: &Path, i: usize, entry: &serde_json::Value, err: &serde_json::Error) -> String {
+    let kind = entry
+        .pointer("/kind/type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown type");
+    let head = format!("{} entry {} (`{kind}`) could not be read", path.display(), i + 1);
+    let culprits = null_culprits(entry);
+    if culprits.is_empty() {
+        return format!("{head}: {err}");
+    }
+    let fields: Vec<String> = culprits.iter().map(|f| format!("`{f}`")).collect();
+    format!(
+        "{head}: {} {} null. The file was written before camdl spelled a non-finite \
+         number as \"inf\", \"-inf\" or \"NaN\"; null stood for all three, so the value \
+         is not recoverable from it. The file's other entries are read.",
+        fields.join(", "),
+        if fields.len() == 1 { "is" } else { "are" },
+    )
+}
+
+/// The fields of `entry` whose `null` alone stops it parsing as a
+/// [`Diagnostic`], as dotted paths under `kind` (`rhat`, `attempts.0.time`).
+///
+/// Found by trial rather than by schema, so it cannot drift from the type: with
+/// every `null` replaced by the non-finite spelling `"NaN"` — which a number
+/// field, an optional number and an optional string all accept — the entry
+/// must parse, or its fault is something else and nothing is named. Each
+/// `null` is then restored alone; the ones the entry cannot carry are the
+/// culprits, and a `null` that is a value (an attempt's `projected_max` when no
+/// particle was live) is not blamed.
+fn null_culprits(entry: &serde_json::Value) -> Vec<String> {
+    use serde_json::Value;
+    use sim::inference::diagnostic::Diagnostic;
+
+    fn nulls(v: &Value, at: &str, out: &mut Vec<String>) {
+        match v {
+            Value::Null => out.push(at.to_string()),
+            Value::Array(xs) => {
+                for (i, x) in xs.iter().enumerate() {
+                    nulls(x, &format!("{at}/{i}"), out);
+                }
+            }
+            Value::Object(m) => {
+                for (k, x) in m {
+                    let k = k.replace('~', "~0").replace('/', "~1");
+                    nulls(x, &format!("{at}/{k}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let parses = |v: &Value| serde_json::from_value::<Diagnostic>(v.clone()).is_ok();
+    let set = |v: &mut Value, at: &str, to: Value| {
+        if let Some(slot) = v.pointer_mut(at) {
+            *slot = to;
+        }
+    };
+
+    let mut paths = Vec::new();
+    nulls(entry, "", &mut paths);
+    let mut filled = entry.clone();
+    for at in &paths {
+        set(&mut filled, at, Value::from("NaN"));
+    }
+    if paths.is_empty() || !parses(&filled) {
+        return Vec::new();
+    }
+    paths
+        .into_iter()
+        .filter(|at| {
+            let mut one = filled.clone();
+            set(&mut one, at, Value::Null);
+            !parses(&one)
+        })
+        .map(|at| {
+            let at = at.strip_prefix("/kind/").unwrap_or(at.trim_start_matches('/'));
+            at.split('/')
+                .map(|seg| seg.replace("~1", "/").replace("~0", "~"))
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3658,11 +3763,11 @@ mod tests {
     /// silently picking one source.
     #[test]
     fn refused_chains_ran_of() {
-        let none = RefusedChains { records: Vec::new(), unreadable: None };
+        let none = RefusedChains { records: Vec::new(), unreadable: Vec::new() };
         assert_eq!(none.ran_of(8, None), None);
         let two = RefusedChains {
             records: vec![(3, "a".into()), (5, "b".into())],
-            unreadable: None,
+            unreadable: Vec::new(),
         };
         assert_eq!(two.ran_of(8, Some(6)).as_deref(),
             Some("6 of 8 chains ran — refused at start: 3, 5"));
@@ -3672,6 +3777,111 @@ mod tests {
         let s = none.ran_of(8, Some(6)).unwrap();
         assert!(s.starts_with("6 of 8 chains ran")
             && s.contains("2 chain(s) not accounted for"), "{s}");
+    }
+
+    /// A stage directory holding `diagnostics.json` with `raw` as its body.
+    fn stage_with_diagnostics(tag: &str, raw: &str) -> std::path::PathBuf {
+        let dir = crate::test_support::unique_temp_dir(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diagnostics.json"), raw).unwrap();
+        dir
+    }
+
+    /// The defect: a fit whose chains froze at different values has R̂ = +∞,
+    /// and its `RhatHigh` finding made `diagnostics.json` unreadable — so the
+    /// chain the same run refused at its start went unlisted, and the summary
+    /// said it could not look. The file here is written by the collector the
+    /// samplers use, so it is the file a fit leaves behind.
+    #[test]
+    fn a_refused_chain_is_listed_beside_an_infinite_rhat() {
+        use sim::inference::diagnostic::{DiagnosticCollector, DiagnosticKind};
+        let c = DiagnosticCollector::new("pmmh");
+        c.push(DiagnosticKind::RhatHigh {
+            param: "beta".into(), rhat: f64::INFINITY, threshold: 1.1,
+        });
+        c.push(DiagnosticKind::BadInit {
+            chain_id: 2,
+            params: std::collections::BTreeMap::from([("beta".to_string(), 4.8)]),
+            reason: "no start of 10 could be scored".into(),
+            attempts: Vec::new(),
+        });
+        let dir = crate::test_support::unique_temp_dir("summary_inf_rhat_refused");
+        std::fs::create_dir_all(&dir).unwrap();
+        c.write_json(dir.join("diagnostics.json").to_str().unwrap()).unwrap();
+
+        let refused = RefusedChains::load(&dir);
+        let lines = plain_formatter().refused_chains_lines(&refused);
+        let ran = refused.ran_of(3, Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!lines.contains("could not be read"),
+            "a file the current writer produced must read:\n{lines}");
+        assert!(lines.contains("refused chain 2: no start of 10 could be scored"),
+            "the refused chain is listed:\n{lines}");
+        assert_eq!(ran.as_deref(), Some("2 of 3 chains ran — refused at start: 2"));
+    }
+
+    /// A `diagnostics.json` written before non-finite numbers were spelled
+    /// out carries `null` where its R̂ was `+∞`. That entry cannot be read
+    /// honestly — `null` was written for `+∞`, `−∞` and `NaN` alike — so it is
+    /// refused by name; but the refusal is the ENTRY's, and the chain the same
+    /// file records as refused is still listed. The `null`s an attempt carries
+    /// for a summary it could not compute are values, not damage, and must
+    /// not be blamed.
+    #[test]
+    fn a_legacy_null_refuses_its_entry_by_field_and_keeps_the_rest_of_the_file() {
+        let raw = r#"[
+  {
+    "kind": { "type": "rhat_high", "param": "beta", "rhat": null, "threshold": 1.1 },
+    "severity": "error",
+    "message": "rank-normalized split R̂ for 'beta' is inf (threshold 1.100).",
+    "method": "pmmh",
+    "timestamp": "2026-10-20T00:00:00Z"
+  },
+  {
+    "kind": { "type": "acceptance_rate_unhealthy", "rate": null, "param": null, "kernel": "random_walk" },
+    "severity": "error",
+    "message": "chain acceptance rate NaN% is outside healthy range [15%, 50%] (random-walk MH).",
+    "method": "pmmh",
+    "timestamp": "2026-10-20T00:00:00Z"
+  },
+  {
+    "kind": {
+      "type": "bad_init",
+      "chain_id": 2,
+      "params": { "beta": 4.8 },
+      "reason": "no start of 10 could be scored",
+      "attempts": [ {
+        "stream": "cases", "time": 7.0, "date": null,
+        "cell": { "state": "scored", "y_obs": 18.0 },
+        "projected_max": null, "projected_median": null,
+        "n_projected_zero": 0, "n_projected_nan": 0, "n_neg_inf": 0,
+        "neg_inf_causes": [], "n_live": 0, "n_dead": 30, "n_particles": 30
+      } ]
+    },
+    "severity": "error",
+    "message": "Chain 2 starting parameters were pathological — skipped.",
+    "method": "pmmh",
+    "timestamp": "2026-10-20T00:00:00Z"
+  }
+]"#;
+        let dir = stage_with_diagnostics("summary_legacy_null", raw);
+        let refused = RefusedChains::load(&dir);
+        let lines = plain_formatter().refused_chains_lines(&refused);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(lines.contains("refused chain 2: no start of 10 could be scored"),
+            "the refused chain is listed from the entry that does read:\n{lines}");
+        assert!(lines.contains("rhat_high") && lines.contains("`rhat`"),
+            "the unreadable entry is named, with its field:\n{lines}");
+        assert!(lines.contains("written before"),
+            "and the reader is told the file predates the fix:\n{lines}");
+        assert!(lines.contains("acceptance_rate_unhealthy") && lines.contains("`rate` is null"),
+            "every unreadable entry is named, each with its own field:\n{lines}");
+        for legit in ["projected_max", "projected_median", "date", "`param`"] {
+            assert!(!lines.contains(legit),
+                "a null that is a value ({legit}) is not blamed:\n{lines}");
+        }
     }
     use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
     use crate::fit::loglik::LoglikType;
