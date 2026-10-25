@@ -1,15 +1,15 @@
 //! gh#572: a scenario that touches a parameter a user-authored coordinate
-//! varies — a `[sweep]` / `[design.*]` point set, or a `--draws <file.tsv>` —
-//! is refused before any cell runs (proposal 2026-06-27 §4).
+//! varies — a `--sweep` / `--sweep-file` point set, or a `--draws <file.tsv>`
+//! — is refused before any cell runs (proposal 2026-06-27 §4).
 //!
 //! Precedence would let the scenario win: its `set` overrides, and its `scale`
 //! rescales, every swept value, so the grid would not vary that parameter and
 //! the store would hold leaves labelled with values that never ran. The
-//! refusal covers every command that plans cells: `batch run`, `batch run
-//! --dry-run`, `batch status`, and `simulate --draws <file>`. Generated draws
-//! (`--draws uniform|prior|posterior`) are the negative control: a scenario
-//! over generated draws is the counterfactual those runs exist for, and stays
-//! allowed.
+//! refusal covers every command that plans cells: `simulate --sweep`,
+//! `simulate --sweep-file`, `simulate --draws <file>`, and the `--dry-run` of
+//! each. Generated draws (`--draws uniform|prior|posterior`) are the negative
+//! control: a scenario over generated draws is the counterfactual those runs
+//! exist for, and stays allowed.
 //!
 //! CLI-level on purpose: the defect class is a guard that some command path
 //! does not reach, which a test of the guard function alone cannot see.
@@ -60,42 +60,18 @@ scenarios {
 }
 "#;
 
-/// A scratch directory holding the model, a params file, and a batch manifest
-/// running `scenario` over a three-point `mu` sweep.
+/// A scratch directory holding the model and a params file; every run sweeps
+/// `mu` over three points under one scenario.
 struct Fixture {
     dir: tempfile::TempDir,
 }
 
 impl Fixture {
-    fn new(scenario: &str) -> Self {
+    fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         std::fs::write(p.join("m.camdl"), MODEL).unwrap();
         std::fs::write(p.join("p.toml"), "mu = 0.1\nnu = 0.1\n").unwrap();
-        std::fs::write(
-            p.join("batch.toml"),
-            format!(
-                r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ n = 1 }}
-backend = "ode"
-parallel = 1
-
-[[scenario]]
-name = "{scenario}"
-
-[sweep]
-mu = [0.2, 0.3, 0.4]
-"#,
-                model = p.join("m.camdl").display(),
-                params = p.join("p.toml").display(),
-                out = p.join("out").display(),
-            ),
-        )
-        .unwrap();
         Fixture { dir }
     }
 
@@ -113,21 +89,13 @@ mu = [0.2, 0.3, 0.4]
     }
 
     /// `simulate m.camdl --params p.toml --backend ode --output-dir out --sweep
-    /// mu=0.2,0.3,0.4 --scenario <scenario> <flags…>` — the same three-point
-    /// `mu` sweep as the manifest, on `simulate`'s design axis.
+    /// mu=0.2,0.3,0.4 --scenario <scenario> <flags…>` — a three-point `mu`
+    /// sweep on `simulate`'s design axis.
     fn simulate_sweep(&self, scenario: &str, flags: &[&str]) -> Output {
         let mut args = vec![
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "ode",
             "--output-dir", "out", "--sweep", "mu=0.2,0.3,0.4", "--scenario", scenario,
         ];
-        args.extend_from_slice(flags);
-        self.camdl(&args)
-    }
-
-    /// `batch <sub> <manifest> <flags…>` — `batch run` / `batch status`.
-    fn batch(&self, sub: &str, flags: &[&str]) -> Output {
-        let manifest = self.path("batch.toml").to_string_lossy().into_owned();
-        let mut args = vec!["batch", sub, manifest.as_str()];
         args.extend_from_slice(flags);
         self.camdl(&args)
     }
@@ -171,16 +139,11 @@ fn assert_refused(out: &Output, what: &str, lines: &[&str]) {
     }
 }
 
-/// `batch run`, `batch run --dry-run` and `batch status` all refuse the
-/// manifest with the same diagnostic, and nothing is written to the store.
-/// `simulate --sweep` and `simulate --sweep --dry-run` refuse the same grid
-/// the same way (proposal 2026-10-24-batch-to-simulate §6 test 5).
-fn assert_every_batch_command_refuses(scenario: &str, lines: &[&str]) {
-    let fx = Fixture::new(scenario);
-    for (sub, flags) in [("run", &["--dry-run"][..]), ("status", &[][..]), ("run", &[][..])] {
-        let what = format!("{scenario} / batch {sub} {}", flags.join(" "));
-        assert_refused(&fx.batch(sub, flags), &what, lines);
-    }
+/// `simulate --sweep` and `simulate --sweep --dry-run` both refuse the grid
+/// with the same diagnostic, and nothing is written to the store (proposal
+/// 2026-10-24-batch-to-simulate §6 test 5).
+fn assert_simulate_sweep_refuses(scenario: &str, lines: &[&str]) {
+    let fx = Fixture::new();
     for flags in [&["--dry-run"][..], &[][..]] {
         let what = format!("{scenario} / simulate --sweep {}", flags.join(" "));
         assert_refused(&fx.simulate_sweep(scenario, flags), &what, lines);
@@ -190,7 +153,7 @@ fn assert_every_batch_command_refuses(scenario: &str, lines: &[&str]) {
 
 #[test]
 fn sweep_of_a_parameter_the_scenario_sets_is_refused() {
-    assert_every_batch_command_refuses(
+    assert_simulate_sweep_refuses(
         "pin_mu",
         &[
             "error: parameter `mu` is controlled by both the sweep and scenario `pin_mu`",
@@ -204,7 +167,7 @@ fn sweep_of_a_parameter_the_scenario_sets_is_refused() {
 
 #[test]
 fn sweep_of_a_parameter_the_scenario_scales_is_refused() {
-    assert_every_batch_command_refuses(
+    assert_simulate_sweep_refuses(
         "half_mu",
         &[
             "error: parameter `mu` is controlled by both the sweep and scenario `half_mu`",
@@ -220,7 +183,7 @@ fn sweep_of_a_parameter_the_scenario_scales_is_refused() {
 #[test]
 fn sweep_of_a_parameter_a_composed_preset_sets_is_refused() {
     // `combo` itself sets only `nu`; `mu` arrives through `compose = [pin_mu]`.
-    assert_every_batch_command_refuses(
+    assert_simulate_sweep_refuses(
         "combo",
         &[
             "error: parameter `mu` is controlled by both the sweep and scenario `combo`",
@@ -233,77 +196,66 @@ fn sweep_of_a_parameter_a_composed_preset_sets_is_refused() {
 #[test]
 fn sweep_under_a_scenario_on_another_parameter_runs_every_point() {
     // `pin_nu` touches only `nu`: no collision, three distinct leaves.
-    // (cas_integration.rs `batch_sweep_records_sweep_point_in_run_json` covers
-    // the same allowed shape on sir_basic with an ad-hoc scenario.)
-    let fx = Fixture::new("pin_nu");
-    let dry = fx.batch("run", &["--dry-run"]);
-    assert!(dry.status.success(), "dry run must plan the grid; stderr:\n{}", stderr(&dry));
-    let run = fx.batch("run", &[]);
-    assert!(run.status.success(), "batch run must succeed; stderr:\n{}", stderr(&run));
-    assert_eq!(fx.leaves().len(), 3, "three sweep points are three computations");
-    // The same grid through `simulate --sweep` plans and runs, and lands on the
-    // same three leaves (one identity per point, found by hash).
+    // (cas_integration.rs `sweep_point_is_recorded_in_run_json_and_listed`
+    // covers the same allowed shape on sir_basic under the implicit arm.)
+    let fx = Fixture::new();
     let dry = fx.simulate_sweep("pin_nu", &["--dry-run"]);
-    assert!(dry.status.success(), "simulate --sweep --dry-run must plan; stderr:\n{}", stderr(&dry));
+    assert!(dry.status.success(), "dry run must plan the grid; stderr:\n{}", stderr(&dry));
+    assert!(
+        stderr(&dry).contains("0 cache hits → read back, 3 misses → would simulate"),
+        "the plan is three cells, none stored yet; stderr:\n{}",
+        stderr(&dry)
+    );
+    assert!(fx.leaves().is_empty(), "a dry run writes nothing");
     let run = fx.simulate_sweep("pin_nu", &[]);
     assert!(run.status.success(), "simulate --sweep must succeed; stderr:\n{}", stderr(&run));
-    assert_eq!(fx.leaves().len(), 3, "simulate --sweep over the same grid adds no leaf");
-    let status = fx.batch("status", &[]);
-    assert!(status.status.success(), "status must report; stderr:\n{}", stderr(&status));
+    assert_eq!(fx.leaves().len(), 3, "three sweep points are three computations");
+    // The same grid again: every cell is a hit, planned and run alike, and no
+    // leaf is added.
+    let dry = fx.simulate_sweep("pin_nu", &["--dry-run"]);
+    assert!(dry.status.success(), "second dry run must plan; stderr:\n{}", stderr(&dry));
     assert!(
-        String::from_utf8_lossy(&status.stdout).contains("Completed:  3/3 leaves present"),
-        "status counts the three leaves; stdout:\n{}",
-        String::from_utf8_lossy(&status.stdout)
+        stderr(&dry).contains("3 cache hits → read back, 0 misses"),
+        "the dry run counts the three leaves; stderr:\n{}",
+        stderr(&dry)
     );
+    let again = fx.simulate_sweep("pin_nu", &[]);
+    assert!(again.status.success(), "second run must succeed; stderr:\n{}", stderr(&again));
+    assert!(
+        stderr(&again).contains("3 of 3 cells read from the store; simulated 0"),
+        "the second run reads every cell back; stderr:\n{}",
+        stderr(&again)
+    );
+    assert_eq!(fx.leaves().len(), 3, "the same grid adds no leaf");
 }
 
 #[test]
-fn design_block_over_a_parameter_the_scenario_sets_is_refused() {
-    // A `[design.*]` block's points run as a sweep, so the same refusal applies,
-    // before the block's `parameter_points.tsv` is written.
-    let fx = Fixture::new("pin_mu");
-    std::fs::write(
-        fx.path("design.toml"),
-        format!(
-            r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ n = 1 }}
-backend = "ode"
-parallel = 1
-
-[[scenario]]
-name = "pin_mu"
-
-[design.sens]
-method = "random"
-n = 3
-parameters.mu = {{ range = {{ min = 0.05, max = 0.5 }} }}
-"#,
-            model = fx.path("m.camdl").display(),
-            params = fx.path("p.toml").display(),
-            out = fx.path("out").display(),
-        ),
-    )
-    .unwrap();
-    let manifest = fx.path("design.toml").to_string_lossy().into_owned();
+fn sweep_file_over_a_parameter_the_scenario_sets_is_refused() {
+    // A `--sweep-file` row set runs as a sweep, so the same refusal applies,
+    // on the run and on the dry run, before anything is written.
+    let fx = Fixture::new();
+    std::fs::write(fx.path("mu.tsv"), "mu\n0.2\n0.3\n0.4\n").unwrap();
     for extra in [&["--dry-run"][..], &[][..]] {
-        let mut args = vec!["batch", "run", manifest.as_str()];
+        let mut args = vec![
+            "simulate", "m.camdl", "--params", "p.toml", "--backend", "ode",
+            "--output-dir", "out", "--sweep-file", "mu.tsv", "--scenario", "pin_mu",
+        ];
         args.extend_from_slice(extra);
         assert_refused(
             &fx.camdl(&args),
-            "design × pin_mu",
-            &["error: parameter `mu` is controlled by both the sweep and scenario `pin_mu`"],
+            "sweep file × pin_mu",
+            &[
+                "error: parameter `mu` is controlled by both the sweep and scenario `pin_mu`",
+                "  sweep:     mu = [0.2, 0.3, 0.4]",
+            ],
         );
     }
-    assert!(!fx.path("out").exists(), "a refused design writes nothing under the output root");
+    assert!(fx.leaves().is_empty(), "a refused sweep file writes no leaf");
 }
 
 #[test]
 fn draws_file_column_the_scenario_sets_is_refused_with_the_shared_diagnostic() {
-    let fx = Fixture::new("pin_mu");
+    let fx = Fixture::new();
     std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
     let out = fx.camdl(&[
         "simulate", "m.camdl", "--draws", "mydraws.tsv", "--scenario", "pin_mu",
@@ -330,7 +282,7 @@ fn draws_file_column_the_scenario_sets_is_refused_with_the_shared_diagnostic() {
 fn simulate_dry_run_refuses_a_draws_file_column_the_scenario_sets() {
     // The dry run plans the same cells the run would, so it refuses the same
     // collision — before printing a plan.
-    let fx = Fixture::new("pin_mu");
+    let fx = Fixture::new();
     std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
     let out = fx.camdl(&[
         "simulate", "m.camdl", "--draws", "mydraws.tsv", "--scenario", "pin_mu",
@@ -355,7 +307,7 @@ fn simulate_dry_run_refuses_a_draws_file_column_the_scenario_sets() {
 
 #[test]
 fn draws_file_column_the_scenario_scales_is_refused() {
-    let fx = Fixture::new("half_mu");
+    let fx = Fixture::new();
     std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
     let out = fx.camdl(&[
         "simulate", "m.camdl", "--draws", "mydraws.tsv", "--scenario", "half_mu",
@@ -380,8 +332,8 @@ fn draws_file_column_the_scenario_scales_is_refused() {
 /// three draws are three computations.
 ///
 /// This is where the "a cell's `params` level is the parameters the engine
-/// ran" invariant (gh#583) is still reachable end to end: the batch sweep
-/// that used to exercise it is now refused by this issue's guard.
+/// ran" invariant (gh#583) is still reachable end to end: a sweep under such
+/// a scenario is refused by this issue's guard.
 #[test]
 fn generated_draws_under_a_scenario_are_allowed_and_key_the_values_that_ran() {
     let dir = tempfile::tempdir().unwrap();

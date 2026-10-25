@@ -9,8 +9,9 @@
 //!
 //! CLI-level on purpose: the defect was in the wiring (which fields reached
 //! the hasher), so a hasher-only test would stay green while it was broken.
-//! Both identity paths are covered — `batch run` (`resolve_batch_scenarios`)
-//! and `simulate --scenario` (`build_simulate_cas_sink`).
+//! Both store paths are covered — several `--scenario` arms in one invocation
+//! (the multi-cell sink) and one arm per invocation (the single-cell path),
+//! which build their scenario delta at separate sites.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -122,31 +123,29 @@ fn leaves_by_scenario(sims: &Path) -> BTreeMap<String, Leaf> {
     run_leaves(sims).iter().map(|l| (scenario_label(l), read_leaf(l))).collect()
 }
 
-/// Run one `batch run` over `scenarios` (seed 1, chain_binomial, dt 1).
-fn batch_run(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
+/// Run one `simulate --scenario a,b,…` over `scenarios` (seed 1,
+/// chain_binomial, dt 1): every arm in one multi-cell invocation.
+fn simulate_arms(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let (model, params) = write_inputs(tmp.path());
     let out = tmp.path().join("out");
-    let mut manifest = format!(
-        "[config]\nmodel = \"{}\"\nparams = \"{}\"\noutput_dir = \"{}\"\nbackend = \"chain_binomial\"\n\
-         dt = 1\nseeds = {{ list = [1] }}\nparallel = 1\n",
-        model.display(),
-        params.display(),
-        out.display()
-    );
-    for s in scenarios {
-        manifest.push_str(&format!("\n[[scenario]]\nname = \"{s}\"\n"));
-    }
-    let batch = tmp.path().join("exp.toml");
-    std::fs::write(&batch, manifest).unwrap();
+    let arms = scenarios.join(",");
     let run = Command::new(&bin)
-        .args(["batch", "run", &batch.to_string_lossy()])
+        .args([
+            "simulate", &model.to_string_lossy(),
+            "--params", &params.to_string_lossy(),
+            "--scenario", &arms,
+            "--backend", "chain_binomial",
+            "--dt", "1",
+            "--seed", "1",
+            "--output-dir", &out.to_string_lossy(),
+        ])
         .output()
         .expect("spawn");
     assert!(
         run.status.success(),
-        "batch run failed: {}",
+        "simulate --scenario {arms} failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
     leaves_by_scenario(&out.join("sims"))
@@ -210,19 +209,20 @@ fn assert_distinct(leaves: &BTreeMap<String, Leaf>, a: &str, b: &str) {
     );
 }
 
-/// (a) Scale-only difference re-keys — batch run.
+/// (a) Scale-only difference re-keys — several arms in one invocation.
 #[test]
-fn batch_scale_only_difference_changes_run_id() {
-    let leaves = batch_run(&["halved", "doubled"]);
+fn multi_scenario_scale_only_difference_changes_run_id() {
+    let leaves = simulate_arms(&["halved", "doubled"]);
     assert_eq!(leaves.len(), 2, "two identities are two leaves: {leaves:?}");
     assert_distinct(&leaves, "halved", "doubled");
 }
 
-/// (b) Compose-only difference re-keys — batch run. The two presets' own
-/// fields are empty; everything they change arrives through `compose`.
+/// (b) Compose-only difference re-keys — several arms in one invocation. The
+/// two presets' own fields are empty; everything they change arrives through
+/// `compose`.
 #[test]
-fn batch_compose_only_difference_changes_run_id() {
-    let leaves = batch_run(&["via_half", "via_double"]);
+fn multi_scenario_compose_only_difference_changes_run_id() {
+    let leaves = simulate_arms(&["via_half", "via_double"]);
     assert_eq!(leaves.len(), 2, "two identities are two leaves: {leaves:?}");
     assert_distinct(&leaves, "via_half", "via_double");
 }
@@ -236,8 +236,8 @@ fn batch_compose_only_difference_changes_run_id() {
 /// hit on the first arm's leaf rather than a second copy under its own name
 /// (proposal 2026-10-24-batch-to-simulate §3 "Arm labels").
 #[test]
-fn batch_same_effective_delta_via_compose_shares_run_id() {
-    let leaves = batch_run(&["halved", "via_half"]);
+fn multi_scenario_same_effective_delta_via_compose_shares_run_id() {
+    let leaves = simulate_arms(&["halved", "via_half"]);
     assert_eq!(
         leaves.keys().collect::<Vec<_>>(),
         vec!["halved"],
@@ -247,8 +247,9 @@ fn batch_same_effective_delta_via_compose_shares_run_id() {
     );
 }
 
-/// (a)+(b)+(c) through the `simulate --scenario` identity path, which builds
-/// its scenario delta at a separate site from `batch run`.
+/// (a)+(b)+(c) through the single-cell path — one `simulate --scenario s`
+/// per arm — which builds its scenario delta at a separate site from the
+/// multi-cell sink.
 #[test]
 fn simulate_scenario_identity_hashes_effective_delta() {
     let (leaves, mirrors) = simulate_each(&["halved", "doubled", "via_half", "via_double"]);

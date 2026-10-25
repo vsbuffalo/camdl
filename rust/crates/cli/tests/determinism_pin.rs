@@ -1,5 +1,5 @@
-//! Determinism PIN tests — the tripwire for the simulate/batch `run_job`
-//! unification (proposal: 2026-05-28-simulate-batch-coherence-and-obs-ensembles.md).
+//! Determinism PIN tests — the tripwire for the `run_job` engine behind
+//! `simulate` (proposal: 2026-05-28-simulate-batch-coherence-and-obs-ensembles.md).
 //!
 //! These lock the parts of `simulate`'s current RNG behaviour that the
 //! existing `ir/golden` single-run determinism suites do NOT cover, and that

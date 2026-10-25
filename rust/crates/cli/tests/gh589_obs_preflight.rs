@@ -1,11 +1,12 @@
 //! gh#589: a misaligned stream must not leave a partial obs child behind.
 //!
-//! The batch obs loop validates and writes in the same iteration, and writes
-//! `obs.json` only after every stream. Adding the alignment guard made that
-//! loop body fallible partway through a multi-file write, so an aligned stream
-//! followed by a misaligned one would leave the first stream's `.tsv` on disk
-//! with no provenance file. Validation is hoisted; this pins that it stays
-//! hoisted.
+//! The store's obs writer (`cas_sink::write_obs_into_cas`) validated and
+//! wrote in the same iteration, and writes `obs.json` only after every
+//! stream. Adding the alignment guard made that loop body fallible partway
+//! through a multi-file write, so an aligned stream followed by a misaligned
+//! one would leave the first stream's `.tsv` on disk with no provenance file.
+//! Validation is hoisted; this pins that it stays hoisted, on the multi-cell
+//! `simulate` path that writes the subtree under every leaf.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,16 +64,12 @@ fn a_misaligned_stream_leaves_no_partial_obs_child() {
     let model = tmp.path().join("m.camdl");
     std::fs::write(&model, MODEL).unwrap();
     std::fs::write(tmp.path().join("p.toml"), "beta = 0.5\ngamma = 0.1\n").unwrap();
-    std::fs::write(
-        tmp.path().join("exp.toml"),
-        "[config]\nmodel = \"m.camdl\"\nparams = \"p.toml\"\n\
-         backend = \"chain_binomial\"\ndt = 1.0\noutput_dir = \"out\"\n\n\
-         [obs]\nenabled = true\n",
-    )
-    .unwrap();
 
     let out = Command::new(binary())
-        .args(["batch", "run", "exp.toml"])
+        .args([
+            "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
+            "--dt", "1", "--seeds", "1,2", "--obs-dir", "synth", "--output-dir", "out",
+        ])
         .current_dir(tmp.path())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
@@ -88,7 +85,7 @@ fn a_misaligned_stream_leaves_no_partial_obs_child() {
     // validate-as-you-write loop would have emitted `weekly.tsv` before
     // failing on `daily`, leaving a child with data and no obs.json.
     let mut leftovers = Vec::new();
-    for e in walk(&tmp.path().join("out")) {
+    for e in walk(&tmp.path().join("out")).into_iter().chain(walk(&tmp.path().join("synth"))) {
         let name = e.file_name().unwrap().to_string_lossy().to_string();
         if name.ends_with(".tsv") && (name.starts_with("weekly") || name.starts_with("daily")) {
             leftovers.push(e.display().to_string());
