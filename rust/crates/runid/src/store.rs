@@ -61,7 +61,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::hash::{ContentHash, HASH_VERSION};
-use crate::record::{FileChecksum, RunRecord, RunStatus, FORMAT_VERSION};
+use crate::kind::{run_id, ArtifactKind};
+use crate::layout::store_path;
+use crate::record::{FileChecksum, LevelId, RunRecord, RunStatus, FORMAT_VERSION};
 
 /// The identity a lookup/commit expects to find at a path. Identity is the
 /// `run_id` (a function of kind + level hashes); a path may hold a *different*
@@ -751,6 +753,99 @@ impl CasStore for FsCasStore {
     ) -> Result<PathBuf, CasError> {
         self.commit_atomic(path, record, artifacts)
     }
+}
+
+/// Find the directory of a `Completed`, integrity-checked leaf whose identity
+/// is `levels`, under `root/<kind dir>/`, whatever labels its path segments
+/// carry.
+///
+/// A leaf's directory is one `{label}-{hash8}` segment per level
+/// ([`crate::layout`]), and the label is provenance: renaming a model file, a
+/// params file or a scenario preset changes the label and leaves the identity
+/// alone, so a lookup that builds the path from the *current* labels misses a
+/// leaf the store holds, and a run that writes it again stores one identity
+/// twice under two names. This walk reads the store by its hashes instead.
+/// At each level it takes every child directory whose segment ends in that
+/// level's `hash8` — at the last level also the store's `~{hash16}` /
+/// `~{full64}` disambiguations of the leaf's `run_id` — and verifies each
+/// candidate leaf exactly as [`FsCasStore::lookup`] does (identity gate,
+/// `Completed`, current versions, exact-set). The exact current-label path is
+/// tried first, so a store that renamed nothing answers as it always did;
+/// among several hash-matching candidates the first [`Lookup::Hit`] in sorted
+/// name order wins. A short-hash collision with a different identity is not a
+/// hit, and a miss here leaves the commit path's own escalation
+/// (`disambiguation_candidates`) to place a new leaf at `store_path`.
+///
+/// `None` means the store holds no usable leaf of this identity: a miss, a
+/// stale or incomplete record, or only collisions.
+pub fn find_leaf(root: &Path, kind: ArtifactKind, levels: &[LevelId]) -> Option<PathBuf> {
+    if levels.is_empty() {
+        return None;
+    }
+    let store = FsCasStore::new(root);
+    let hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
+    let id = LeafIdentity::new(run_id(kind, &hashes));
+
+    // The exact-label path first: the common case, and the one a store that
+    // renamed nothing sees. Its `~` escalations are leaves this identity may
+    // have landed at after a collision with another identity.
+    let exact = store_path(root, kind, levels);
+    for cand in disambiguation_candidates(&exact, &id.run_id) {
+        if matches!(store.lookup(&cand, &id), Lookup::Hit(_)) {
+            return Some(cand);
+        }
+    }
+
+    // Otherwise walk by hash, one level at a time, widening to every child
+    // whose segment carries this level's hash8.
+    let mut frontier = vec![root.join(kind.store_dir())];
+    for (depth, level) in levels.iter().enumerate() {
+        let leaf_level = depth + 1 == levels.len();
+        let suffix = format!("-{}", level.hash.short8());
+        let mut next = Vec::new();
+        for parent in &frontier {
+            let Ok(entries) = fs::read_dir(parent) else { continue };
+            let mut names: Vec<String> = entries
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            for name in names {
+                let base = if leaf_level {
+                    strip_disambiguator(&name, &id.run_id)
+                } else {
+                    name.as_str()
+                };
+                if base.ends_with(&suffix) {
+                    next.push(parent.join(&name));
+                }
+            }
+        }
+        if next.is_empty() {
+            return None;
+        }
+        frontier = next;
+    }
+    frontier
+        .into_iter()
+        .find(|cand| matches!(store.lookup(cand, &id), Lookup::Hit(_)))
+}
+
+/// A leaf segment without the store's `~{hash16}` / `~{full64}` disambiguator
+/// of `run_id`, when it carries one; the segment itself otherwise. Only the
+/// two escalations the commit path writes are recognised, so a label that
+/// happens to contain `~` is not cut.
+fn strip_disambiguator<'a>(name: &'a str, run_id: &ContentHash) -> &'a str {
+    let hex = run_id.to_hex();
+    for suffix in [&hex[..16], hex.as_str()] {
+        if let Some(base) = name.strip_suffix(suffix) {
+            if let Some(base) = base.strip_suffix('~') {
+                return base;
+            }
+        }
+    }
+    name
 }
 
 /// A held Mode B claim: the exclusive lock on a leaf dir while it streams.

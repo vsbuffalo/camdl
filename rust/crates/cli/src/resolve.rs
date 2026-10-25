@@ -375,6 +375,14 @@ pub enum ReuseVerdict {
 /// an `exists()` check, or a bespoke cache scan — each of those grew its own
 /// bugs (survey's `landscape.tsv.exists()` had no identity gate at all).
 ///
+/// The leaf is found by its hashes, not its labels ([`runid::find_leaf`]):
+/// a leaf's `run_id` is its level hashes alone, while its directory is
+/// `{label}-{hash8}` per level, so a lookup built from the current labels
+/// missed every leaf whose model file, params file or scenario preset had
+/// since been renamed, and the derived arm label would have orphaned every
+/// stored ad-hoc leaf the same way. A store that renamed nothing answers
+/// exactly as before: the exact-label path is tried first.
+///
 /// Under [`WritePolicy::Force`] a matching `Completed` leaf is quarantined
 /// first, so the caller always gets `MustRun` and the recompute lands on a
 /// clean leaf rather than colliding with the incumbent at commit time.
@@ -384,16 +392,17 @@ pub fn check_reuse(
     resolved: &ResolvedArtifact,
     policy: WritePolicy,
 ) -> Result<ReuseVerdict, CasError> {
-    let dir = store_path(root, resolved.kind, &resolved.levels);
-    let id = runid::LeafIdentity::new(resolved.run_id);
+    let found = runid::find_leaf(root, resolved.kind, &resolved.levels);
     if policy == WritePolicy::Force {
-        store.displace_completed(&dir, &id)?;
+        if let Some(dir) = &found {
+            store.displace_completed(dir, &runid::LeafIdentity::new(resolved.run_id))?;
+        }
         return Ok(ReuseVerdict::MustRun);
     }
-    match store.lookup(&dir, &id) {
-        runid::Lookup::Hit(_) => Ok(ReuseVerdict::CacheHit { dir }),
-        _ => Ok(ReuseVerdict::MustRun),
-    }
+    Ok(match found {
+        Some(dir) => ReuseVerdict::CacheHit { dir },
+        None => ReuseVerdict::MustRun,
+    })
 }
 
 /// The outcome of [`begin_resolved_write`].
@@ -474,6 +483,13 @@ fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatu
 
 /// The one legal CAS writer. Derives the leaf path from `resolved`'s identity,
 /// builds the record in one place, and dispatches to the chosen store mode.
+///
+/// A new leaf lands at `store_path` under the current labels. A leaf the store
+/// already holds for this identity is written *to*, wherever its labels put
+/// it ([`runid::find_leaf`]), so the store's own same-identity rules apply —
+/// an atomic commit dedups against it (and refuses divergent bytes), a
+/// streaming claim reports it `AlreadyCompleted` — instead of a second copy of
+/// one identity appearing under a renamed label.
 pub fn begin_resolved_write(
     store: &FsCasStore,
     root: &Path,
@@ -481,7 +497,8 @@ pub fn begin_resolved_write(
     meta: &RecordMeta,
     mode: WriteMode,
 ) -> Result<ResolvedWrite, CasError> {
-    let dir = store_path(root, resolved.kind, &resolved.levels);
+    let dir = runid::find_leaf(root, resolved.kind, &resolved.levels)
+        .unwrap_or_else(|| store_path(root, resolved.kind, &resolved.levels));
     match mode {
         WriteMode::Atomic(artifacts) => {
             let record = build_record(resolved, meta, RunStatus::Completed);
