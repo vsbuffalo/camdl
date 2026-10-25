@@ -989,8 +989,9 @@ pub struct FitSummaryArgs {
     pub strict: bool,
 
     /// Recompute the posterior diagnostics (R̂ / ESS / mean) over a SUBSET of
-    /// the MCMC chains, dropping the named 1-based chain ids (comma-separated,
-    /// e.g. `--exclude-chains 3,5`). A view only — nothing on disk changes. The
+    /// the MCMC chains, dropping the named chain ids (comma-separated, e.g.
+    /// `--exclude-chains 3,5`). Chain ids count from 0, the same numbers as
+    /// the `chain` column of `draws.tsv` and the `chain_N/` dirs. A view only — nothing on disk changes. The
     /// stage's identity line then reads `K of N chains (excluded 3,5)`, and the
     /// verdict's forkable count says it is over the retained chains. Post-hoc
     /// exclusion
@@ -1082,7 +1083,8 @@ observation noise, making it the diluted (rhat_pred) kind. `simulate` has no
 chains behind it and writes neither column.
 
 --by-chain adds a leading `chain` column: `all` on the pooled rows, the
-1-based chain id on one extra band per chain, on both horizons. Use it after
+chain id (counted from 0, as in draws.tsv's `chain` column) on one extra band
+per chain, on both horizons. Use it after
 rhat_mean has flagged something, to see *which* way the chains disagree.
 
   free_forward per chain  do the chains project the same future? Overlapping
@@ -1189,7 +1191,8 @@ pub struct FitPredictArgs {
     pub seed: Option<u64>,
 
     /// Also band each MCMC chain on its own, tagged by a leading `chain` column
-    /// (`all` on the pooled rows, the 1-based chain id on the per-chain ones) —
+    /// (`all` on the pooled rows, the chain id on the per-chain ones, counted
+    /// from 0 as in the `chain` column of `draws.tsv`) —
     /// the same way `--scenario` tags its arms and `--sweep` its grid cells. The
     /// pooled band is unchanged and stays first-class; this adds rows to the
     /// same file, never a second file tree. Use it to *look* at a disagreement
@@ -1219,8 +1222,9 @@ pub struct FitPredictArgs {
     pub by_chain: bool,
 
     /// Drop the named MCMC chains from the posterior cloud before banding —
-    /// a comma-separated list of 1-based chain ids (matching the `chain_N/`
-    /// dirs and the `fit summary` per-chain table), e.g. `--exclude-chains 3,5`.
+    /// a comma-separated list of chain ids, counted from 0 (matching the
+    /// `chain` column of `draws.tsv`, the `chain_N/` dirs and the `fit summary`
+    /// per-chain table), e.g. `--exclude-chains 3,5`.
     /// The escape hatch for a known-stuck minority of chains; post-hoc exclusion
     /// BIASES the posterior toward the retained mode and always prints a warning.
     /// A chain id not in the fit, or excluding every chain, is a hard error.
@@ -1439,8 +1443,8 @@ pub struct FitTableArgs {
     #[arg(long = "quantity", value_name = "NAME")]
     pub quantities: Vec<String>,
 
-    /// Drop the named 1-based MCMC chains (comma-separated, e.g.
-    /// `--exclude-chains 3,5`) from each fit's posterior cloud when DERIVING a
+    /// Drop the named MCMC chains (comma-separated chain ids counted from 0,
+    /// as in the `chain` column of `draws.tsv`, e.g. `--exclude-chains 3,5`) from each fit's posterior cloud when DERIVING a
     /// `--quantity` cell. Only affects derived cells, so it requires
     /// `--quantity`; the same drop set is applied to every fit in the cohort
     /// (chain 3 of fit A is unrelated to chain 3 of fit B — pair with `--hash`
@@ -2687,8 +2691,8 @@ pub struct CompareArgs {
     /// path is e.g. `ctl_rm.toml` with no `@` — do not add a spurious `@`. Bare
     /// ids `--exclude-chains 3,4` apply COHORT-WIDE to every fit (convenient
     /// only when the fits share a stuck-chain index — otherwise use the per-fit
-    /// form). Chain ids are 1-based (matching the `chain_N/` dirs and the `fit
-    /// summary` per-chain table). Mixing bare and `@fit:ids` tokens is rejected;
+    /// form). Chain ids count from 0 (matching the `chain` column of
+    /// `draws.tsv`, the `chain_N/` dirs and the `fit summary` per-chain table). Mixing bare and `@fit:ids` tokens is rejected;
     /// a fit with no posterior cloud (an optimizer fit, or an explicit
     /// prequential.json) ignores the flag. Post-hoc exclusion BIASES the
     /// posterior toward the retained mode and always prints a warning. A chain
