@@ -325,11 +325,12 @@ fn forecast_starts_from_the_restored_state_at_the_declared_origin() {
     assert_eq!(tmin, 30.0, "the forecast starts at the file's origin, not the model's t_start");
     assert_eq!(tmax, 90.0, "and runs to the model's declared horizon");
 
-    // Replicate 1's first row must be particle row 0's counts, exactly.
+    // Replicate 0's first row must be particle row 0's counts, exactly
+    // (`replicate` counts from 0, like every user-facing index).
     let reps = col(&hdr, &rows, "replicate");
     let first_idx = (0..rows.len())
-        .find(|&i| reps[i] == "1" && times[i] == 30.0)
-        .expect("replicate 1 has a row at the origin");
+        .find(|&i| reps[i] == "0" && times[i] == 30.0)
+        .expect("replicate 0 has a row at the origin");
     for comp in ["S", "I", "R"] {
         let si = scols.iter().position(|c| c == comp).unwrap();
         assert_eq!(
@@ -344,15 +345,16 @@ fn forecast_starts_from_the_restored_state_at_the_declared_origin() {
     let s0 = col(&hdr, &rows, "S")[first_idx];
     assert_ne!(s0, "990", "starting from init {{}} would put S at 990");
 
-    // Every replicate restores its OWN row.
-    for rep in 1..=N_SMALL {
+    // Every replicate restores its OWN row (`replicate` is 0-based, like the
+    // particle rows it indexes).
+    for rep in 0..N_SMALL {
         let i = (0..rows.len())
             .find(|&i| reps[i] == rep.to_string() && times[i] == 30.0)
             .unwrap_or_else(|| panic!("replicate {rep} has an origin row"));
         let si = scols.iter().position(|c| c == "I").unwrap();
         assert_eq!(
-            col(&hdr, &rows, "I")[i], srows[rep - 1][si],
-            "replicate {rep} must restore particle row {}", rep - 1
+            col(&hdr, &rows, "I")[i], srows[rep][si],
+            "replicate {rep} must restore particle row {rep}"
         );
     }
 }

@@ -1977,6 +1977,22 @@ fn run_simulate(a: &args::SimulateArgs) {
     // the stored ensemble is rendered date-free (as the `Sim` leaves are) and
     // the mirror alone is dated. Without `--dates` the two are one buffer.
     let undated_out: Option<Vec<u8>> = (a.dates && traj_out.is_some()).then(Vec::new);
+    // The parameter-point axis the combined tables label: the design of a
+    // sweep job (its swept parameters, name-sorted), the draws of a draws job,
+    // or none.
+    let point_axis: PointAxis = match (&design, &draws_path) {
+        (Some((_, d)), _) => {
+            let mut params: Vec<String> = match d {
+                crate::sim_ensemble_cas::ResolvedDesign::Sweep { params, .. } =>
+                    params.iter().map(|p| p.name.clone()).collect(),
+                crate::sim_ensemble_cas::ResolvedDesign::File { params, .. } => params.clone(),
+            };
+            params.sort();
+            PointAxis::Sweep { params }
+        }
+        (None, Some(_)) => PointAxis::Draws,
+        (None, None) => PointAxis::None,
+    };
     let stream = StreamSink {
         traj_out,
         undated_out,
@@ -1991,9 +2007,8 @@ fn run_simulate(a: &args::SimulateArgs) {
         obs_files: Vec::new(),
         obs_plans: Vec::new(),
         emit_every: emit_every.clone(),
-        total_runs: 1,
-        n_scenarios: 1,
-        n_draws: 1,
+        // The counts are captured in `on_start`; the axis is the job's.
+        shape: TableShape { total_runs: 1, n_scenarios: 1, n_points: 1, axis: point_axis.clone() },
     };
 
     // ── Generated quantities (proposal 2026-06-25) ──────────────────────────
@@ -2019,9 +2034,14 @@ fn run_simulate(a: &args::SimulateArgs) {
             // report a two-point "posterior band" over a baseline and its
             // counterfactual. A `--draws` file with a single row must still
             // band.
+            // A sweep point is a design coordinate like a scenario: one
+            // replicate per point is one realization per group (point mode),
+            // more is a band over the replicates of each group — never a band
+            // across points (the gh#562 class).
             let mode = if matches!(
                 job.source,
                 crate::sim_job::ParamSource::Point { replicates: 1 }
+                    | crate::sim_job::ParamSource::Sweep { replicates: 1, .. }
             ) {
                 crate::quantity_output::Mode::Point
             } else {
@@ -2031,11 +2051,12 @@ fn run_simulate(a: &args::SimulateArgs) {
                 quantities: q_model.quantities.clone(),
                 mode,
                 scenario_axis: !scenario_names.is_empty(),
+                axis: point_axis.clone(),
                 out_dir,
                 vocabulary: quantities_override.clone(),
                 compiled: None,
                 eval: None,
-                by_scenario: indexmap::IndexMap::new(),
+                by_group: indexmap::IndexMap::new(),
                 calendar: io::CalendarMeta::from_model(&q_model),
                 emit_every: emit_every.clone(),
             })
@@ -2228,17 +2249,18 @@ fn run_simulate(a: &args::SimulateArgs) {
 /// `quantities.json` manifest. Regenerated, never part of the CAS leaf, so it
 /// is written whether or not the run stored one — `--stdout` included (gh#574).
 fn write_quantities_sidecar(q: &SimQuantities) {
-    if !q.by_scenario.is_empty() {
-        // One design cell per scenario, each banded over ITS OWN draws. The
-        // `scenario` column is emitted iff the run has a scenario axis: with
-        // no `--scenario` there is exactly one cell and no coordinate to
-        // report, and labelling it would name a world the run did not
-        // simulate (proposal §2.4, §3.3).
+    if !q.by_group.is_empty() {
+        // One design cell per (design point, scenario), each banded over ITS
+        // OWN replicates. The `scenario` column is emitted iff the run has a
+        // scenario axis: with no `--scenario` there is exactly one arm and no
+        // coordinate to report, and labelling it would name a world the run
+        // did not simulate (proposal §2.4, §3.3). The `sweep:<param>` columns
+        // are emitted iff the run has a design axis, from the group's point.
         let mut stacked = crate::quantity_output::StackedQuantities::new(q.mode);
-        for (scenario, acc) in &q.by_scenario {
+        for ((_, scenario), acc) in &q.by_group {
             let coords = crate::quantity_output::DesignCoords {
                 scenario: q.scenario_axis.then_some(scenario.as_str()),
-                sweep: &[],
+                sweep: &acc.sweep,
             };
             stacked
                 // `simulate` has no fit behind it, so there is no
@@ -2339,6 +2361,9 @@ struct SimQuantities {
     /// design coordinate to report, and inventing one would name a world the
     /// run did not simulate (proposal §2.4).
     scenario_axis: bool,
+    /// The parameter-point axis: a sweep job's groups carry their point's
+    /// swept values as `sweep:<param>` coordinates.
+    axis: PointAxis,
     /// The directory to write the quantity TSVs + manifest into.
     out_dir: std::path::PathBuf,
     /// The supplied reporting vocabulary, `None` when the model's own
@@ -2351,20 +2376,21 @@ struct SimQuantities {
     /// the compile happens once per run, never per cell.
     compiled: Option<std::sync::Arc<sim::CompiledModel>>,
     eval: Option<sim::quantity::QuantityEvaluator>,
-    /// Per scenario: that scenario's draws and its own time axis.
+    /// Per (design point, scenario): that group's draws and its own time axis.
     ///
-    /// Scenario is a DESIGN coordinate — it says which world was simulated —
-    /// while draws/replicates/seeds are SAMPLING coordinates within one world.
-    /// A quantile summarises the second kind only; taking one across scenarios
+    /// A scenario and a design point are DESIGN coordinates — they say which
+    /// world was simulated — while draws/replicates/seeds are SAMPLING
+    /// coordinates within one world. A quantile summarises the second kind
+    /// only; taking one across scenarios, or across the points of a sweep,
     /// averages a baseline and its counterfactual into a ribbon describing
     /// neither (gh#562). Keyed here, at the point cells are assigned, because
     /// that is where the information exists — a renderer handed already-merged
     /// cells cannot un-merge them.
     ///
-    /// Insertion order is the engine's canonical order (scenario outermost),
-    /// and `run_job` merges strictly in that order even under Rayon, so the
-    /// rendered file lists scenarios deterministically.
-    by_scenario: indexmap::IndexMap<String, ScenarioQuant>,
+    /// Insertion order is the engine's canonical order (scenario outermost,
+    /// then point), and `run_job` merges strictly in that order even under
+    /// Rayon, so the rendered file lists groups deterministically.
+    by_group: indexmap::IndexMap<(usize, String), GroupQuant>,
     /// Calendar semantics for the `time` axis, stamped into `quantities.json` so
     /// a consumer maps `time → Date` without re-deriving `origin`/`time_unit`.
     calendar: io::CalendarMeta,
@@ -2373,16 +2399,19 @@ struct SimQuantities {
     emit_every: Option<crate::emit_every::EmitEvery>,
 }
 
-/// One scenario's accumulated quantity draws and the time axis they were
-/// produced on. Per scenario, not per run: once a scenario can declare its own
-/// horizon (gh#561), a run-global axis would render a September scenario
-/// against an August one.
+/// One (design point, scenario) group's accumulated quantity draws and the
+/// time axis they were produced on. Per group, not per run: once a scenario
+/// can declare its own horizon (gh#561), a run-global axis would render a
+/// September scenario against an August one.
 #[derive(Default)]
-struct ScenarioQuant {
+struct GroupQuant {
     /// One inner `Vec` per cell: each quantity leaf's value, in `quantities`
     /// order. Retains derived values, never the trajectory.
     draws: Vec<Vec<sim::quantity::QuantityResult>>,
     times: Vec<f64>,
+    /// The group's design point as `(param, value)` pairs in name order —
+    /// its `sweep:<param>` coordinates; empty off the sweep axis.
+    sweep: Vec<(String, f64)>,
 }
 
 /// Whether two output-time grids agree, on the RELATIVE tolerance the rest of
@@ -2555,18 +2584,25 @@ impl SimQuantities {
         // parameter would be strictly weaker, however well the key were typed,
         // because a caller could pass one key for every cell.
         let scenario = cell.spec.scenario.name();
-        let acc = self.by_scenario.entry(scenario.to_string()).or_default();
+        let point = cell.spec.point_idx;
+        let sweep: Vec<(String, f64)> = match &self.axis {
+            PointAxis::Sweep { .. } =>
+                cell.spec.point_overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            PointAxis::Draws | PointAxis::None => Vec::new(),
+        };
+        let acc = self.by_group.entry((point, scenario.to_string())).or_default();
         if acc.draws.is_empty() {
             acc.times = times;
+            acc.sweep = sweep;
         } else if !time_grids_match(&acc.times, &times) {
             // Later cells PROVE compatibility rather than being folded into the
             // first cell's axis. Without this, a future feature letting cells of
             // ONE scenario differ in cadence would silently reinstate gh#562 at
             // smaller scale — first-wins, no diagnostic.
             return Err(format!(
-                "scenario '{scenario}': cell {} has {} output times but this \
-                 scenario's earlier cells have {}. Quantity cells within a \
-                 scenario must share a time grid.",
+                "scenario '{scenario}', point {point}: cell {} has {} output times \
+                 but this group's earlier cells have {}. Quantity cells within a \
+                 group must share a time grid.",
                 cell.spec.run_idx,
                 times.len(),
                 acc.times.len()
@@ -2905,10 +2941,107 @@ struct ObsRow {
     /// What the value was drawn over — an instant, or `[start, stop)`; a
     /// windowed stream writes both boundaries (gh#833).
     coverage: sim::inference::Coverage,
-    replicate: usize,
-    draw: usize,
-    scenario: String,
+    /// The cell this row belongs to, as the table's coordinate columns say it.
+    coords: CellCoords,
     value: f64,
+}
+
+/// The parameter-point axis of a job, as the combined trajectory and
+/// observation tables label it (proposal 2026-10-24-batch-to-simulate §3
+/// "Combined outputs").
+#[derive(Clone, Debug)]
+enum PointAxis {
+    /// One parameter point: no point column.
+    None,
+    /// `--draws`: a `draw` column, the 0-based draw index, when the job has
+    /// more than one draw.
+    Draws,
+    /// `--sweep` / `--sweep-file`: `point_id` (the 0-based design index), one
+    /// `sweep:<param>` column per swept parameter in name order, written in
+    /// Rust's shortest round-trip form so a value joins exactly against the
+    /// grid that produced it, and `seed`, the cell's process seed — the pairing
+    /// key, since under decision D-B two design points at one replicate share
+    /// it. Never a `draw` column: a design point is not a draw.
+    Sweep { params: Vec<String> },
+}
+
+/// The grid shape that decides which coordinate columns the combined tables
+/// carry: `replicate` (the global run ordinal, counted from 0) when the run
+/// has more than one cell, `scenario` when more than one arm ran, then the
+/// point axis's columns. One writer for the trajectory table and both
+/// observation tables, so no table mixes conventions.
+#[derive(Clone, Debug)]
+struct TableShape {
+    total_runs: usize,
+    n_scenarios: usize,
+    n_points: usize,
+    axis: PointAxis,
+}
+
+/// One cell's coordinates in the combined tables.
+#[derive(Clone, Debug)]
+struct CellCoords {
+    run_idx: usize,
+    scenario: String,
+    point_idx: usize,
+    /// The cell's value of each swept parameter, in the axis's name order;
+    /// empty off the sweep axis.
+    point_values: Vec<f64>,
+    seed: u64,
+}
+
+impl CellCoords {
+    fn of(spec: &engine::CellSpec, axis: &PointAxis) -> Self {
+        let point_values = match axis {
+            PointAxis::Sweep { params } => params
+                .iter()
+                .map(|p| spec.point_overrides.get(p).copied().unwrap_or(f64::NAN))
+                .collect(),
+            PointAxis::Draws | PointAxis::None => Vec::new(),
+        };
+        CellCoords {
+            run_idx: spec.run_idx,
+            scenario: spec.scenario.name().to_string(),
+            point_idx: spec.point_idx,
+            point_values,
+            seed: spec.process_seed,
+        }
+    }
+}
+
+impl TableShape {
+    /// The coordinate header cells, each followed by a tab, so the time
+    /// column follows directly.
+    fn write_coord_header(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        if self.total_runs > 1 { write!(out, "replicate\t")?; }
+        if self.n_scenarios > 1 { write!(out, "scenario\t")?; }
+        match &self.axis {
+            PointAxis::Sweep { params } => {
+                write!(out, "point_id\t")?;
+                for p in params { write!(out, "sweep:{p}\t")?; }
+                write!(out, "seed\t")?;
+            }
+            PointAxis::Draws if self.n_points > 1 => write!(out, "draw\t")?,
+            PointAxis::Draws | PointAxis::None => {}
+        }
+        Ok(())
+    }
+
+    /// One row's coordinate cells, each followed by a tab.
+    fn write_coord_cells(&self, out: &mut impl std::io::Write, c: &CellCoords) -> std::io::Result<()> {
+        if self.total_runs > 1 { write!(out, "{}\t", c.run_idx)?; }
+        if self.n_scenarios > 1 { write!(out, "{}\t", c.scenario)?; }
+        match &self.axis {
+            PointAxis::Sweep { .. } => {
+                write!(out, "{}\t", c.point_idx)?;
+                for v in &c.point_values { write!(out, "{v}\t")?; }
+                write!(out, "{}\t", c.seed)?;
+            }
+            PointAxis::Draws if self.n_points > 1 => write!(out, "{}\t", c.point_idx)?,
+            PointAxis::Draws | PointAxis::None => {}
+        }
+        Ok(())
+    }
 }
 
 /// Which file one stream's rows belong in under `--obs-dir`, and what those
@@ -2963,11 +3096,9 @@ struct StreamSink {
     /// gh#656: the `--emit-every` override for this run's emitted observations.
     /// `None` for every run without the flag.
     emit_every: Option<crate::emit_every::EmitEvery>,
-    // Grid shape, captured in `on_start`, used by the column-gating logic
-    // and the post-loop combined-obs writer.
-    total_runs: usize,
-    n_scenarios: usize,
-    n_draws: usize,
+    /// Which coordinate columns the combined tables carry: the point axis is
+    /// fixed at construction, the counts are captured in `on_start`.
+    shape: TableShape,
 }
 
 /// One cell's rows of the combined wide-format trajectory TSV, renderable with
@@ -2980,12 +3111,8 @@ struct WideTrajBlock<'a> {
     time_unit: &'a str,
     /// The first cell writes the version line and the column header.
     write_header: bool,
-    run_idx: usize,
-    draw_idx: usize,
-    total_runs: usize,
-    n_scenarios: usize,
-    n_draws: usize,
-    scenario_label: &'a str,
+    shape: &'a TableShape,
+    coords: &'a CellCoords,
 }
 
 impl WideTrajBlock<'_> {
@@ -2996,9 +3123,7 @@ impl WideTrajBlock<'_> {
         let e = |e: std::io::Error| e.to_string();
         if self.write_header {
             writeln!(out, "# {}", version::VERSION).map_err(e)?;
-            if self.total_runs > 1 { write!(out, "replicate\t").map_err(e)?; }
-            if self.n_scenarios > 1 { write!(out, "scenario\t").map_err(e)?; }
-            if self.n_draws > 1 { write!(out, "draw\t").map_err(e)?; }
+            self.shape.write_coord_header(out).map_err(e)?;
             // `t t_start t_stop [date date_start date_stop]`: the instant
             // the states are read at and the period the flows cover
             // (gh#833), the same cells the leaf's `traj.tsv` carries.
@@ -3010,9 +3135,7 @@ impl WideTrajBlock<'_> {
             writeln!(out).map_err(e)?;
         }
         for (snap, period) in self.traj.snapshots.iter().zip(self.traj.flow_periods()) {
-            if self.total_runs > 1 { write!(out, "{}\t", self.run_idx + 1).map_err(e)?; }
-            if self.n_scenarios > 1 { write!(out, "{}\t", self.scenario_label).map_err(e)?; }
-            if self.n_draws > 1 { write!(out, "{}\t", self.draw_idx + 1).map_err(e)?; }
+            self.shape.write_coord_cells(out, self.coords).map_err(e)?;
             util::write_traj_time_cells(out, snap.t, period).map_err(e)?;
             if let Some(o) = date_origin {
                 util::write_traj_date_cells(out, o, self.time_unit, snap.t, period)?;
@@ -3026,20 +3149,16 @@ impl WideTrajBlock<'_> {
 
 impl engine::RunSink for StreamSink {
     fn on_start(&mut self, grid: &engine::Grid) {
-        self.total_runs = grid.total_runs;
-        self.n_scenarios = grid.n_scenarios;
-        self.n_draws = grid.n_points;
+        self.shape.total_runs = grid.total_runs;
+        self.shape.n_scenarios = grid.n_scenarios;
+        self.shape.n_points = grid.n_points;
     }
 
     fn merge_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
         let traj = &cell.traj;
         let model = &cell.model;
         let run_idx = cell.spec.run_idx;
-        let draw_idx = cell.spec.point_idx;
-        let total_runs = self.total_runs;
-        let n_scenarios = self.n_scenarios;
-        let n_draws = self.n_draws;
-        let scenario_label = cell.spec.scenario.name().to_string();
+        let coords = CellCoords::of(&cell.spec, &self.shape.axis);
 
         // Diagnostics (first run only).
         if run_idx == 0 && !traj.transition_diagnostics.is_empty() {
@@ -3077,8 +3196,8 @@ impl engine::RunSink for StreamSink {
             let block = WideTrajBlock {
                 traj, cols: &cols, time_unit: &model.time_unit,
                 write_header: !self.traj_header_written,
-                run_idx, draw_idx, total_runs, n_scenarios, n_draws,
-                scenario_label: &scenario_label,
+                shape: &self.shape,
+                coords: &coords,
             };
             block.write(out, date_origin)?;
             if let Some(ref mut undated) = self.undated_out {
@@ -3163,9 +3282,7 @@ impl engine::RunSink for StreamSink {
                     self.obs_data[si].push(ObsRow {
                         time: obs_t,
                         coverage,
-                        replicate: run_idx + 1,
-                        draw: draw_idx + 1,
-                        scenario: scenario_label.clone(),
+                        coords: coords.clone(),
                         value: draw,
                     });
                 }
@@ -3184,10 +3301,7 @@ impl StreamSink {
         if (self.obs_path.is_none() && self.obs_dir.is_none()) || self.obs_data.is_empty() {
             return;
         }
-        let total_runs = self.total_runs;
-        let n_scenarios = self.n_scenarios;
-        let n_draws = self.n_draws;
-        let multi_rep = total_runs > 1;
+        let total_runs = self.shape.total_runs;
         let date_render = self.dates_render.as_ref();
 
         // --obs / --obs-only: single wide-format file.
@@ -3196,9 +3310,7 @@ impl StreamSink {
                 .unwrap_or_else(|e| { eprintln!("cannot create {}: {}", path, e); std::process::exit(1); });
             let mut out = std::io::BufWriter::new(f);
 
-            if multi_rep { write!(out, "replicate\t").unwrap(); }
-            if n_scenarios > 1 { write!(out, "scenario\t").unwrap(); }
-            if n_draws > 1 { write!(out, "draw\t").unwrap(); }
+            self.shape.write_coord_header(&mut out).unwrap();
             write!(out, "time").unwrap();
             if date_render.is_some() { write!(out, "\tdate").unwrap(); }
             for name in &self.obs_stream_names { write!(out, "\t{}", name).unwrap(); }
@@ -3208,9 +3320,7 @@ impl StreamSink {
             for run in 0..total_runs {
                 for ti in 0..n_times {
                     let row_idx = run * n_times + ti;
-                    if multi_rep { write!(out, "{}\t", run + 1).unwrap(); }
-                    if n_scenarios > 1 { write!(out, "{}\t", self.obs_data[0][row_idx].scenario).unwrap(); }
-                    if n_draws > 1 { write!(out, "{}\t", self.obs_data[0][row_idx].draw).unwrap(); }
+                    self.shape.write_coord_cells(&mut out, &self.obs_data[0][row_idx].coords).unwrap();
                     let t_val = self.obs_data[0][row_idx].time;
                     write!(out, "{}", t_val).unwrap();
                     if let Some((o, tu)) = date_render {
@@ -3260,9 +3370,7 @@ impl StreamSink {
                         .unwrap_or_else(|e| { eprintln!("error rendering date: {}", e); std::process::exit(1); })
                 };
 
-                if multi_rep { write!(out, "replicate\t").unwrap(); }
-                if n_scenarios > 1 { write!(out, "scenario\t").unwrap(); }
-                if n_draws > 1 { write!(out, "draw\t").unwrap(); }
+                self.shape.write_coord_header(&mut out).unwrap();
                 match &plan.columns {
                     crate::obs_emit::TemporalColumns::Time(t) => {
                         write!(out, "{t}").unwrap();
@@ -3284,9 +3392,7 @@ impl StreamSink {
                 for ri in 0..self.obs_data[first].len() {
                     for &si in &group {
                         let row = &self.obs_data[si][ri];
-                        if multi_rep { write!(out, "{}\t", row.replicate).unwrap(); }
-                        if n_scenarios > 1 { write!(out, "{}\t", row.scenario).unwrap(); }
-                        if n_draws > 1 { write!(out, "{}\t", row.draw).unwrap(); }
+                        self.shape.write_coord_cells(&mut out, &row.coords).unwrap();
                         match (&plan.columns, row.coverage) {
                             (crate::obs_emit::TemporalColumns::Window { .. },
                              sim::inference::Coverage::Interval { start, stop }) => {

@@ -1700,17 +1700,21 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario baseline,with_
 
 `camdl cat` on the ensemble emits the combined wide-format TSV, with leading
 index columns gated on the grid shape — `replicate` always, then `scenario` when
-more than one scenario ran, then `draw` under `--draws`:
+more than one scenario ran, then `draw` under `--draws`, or `point_id`, one
+`sweep:<param>` column per swept parameter and `seed` under `--sweep` /
+`--sweep-file`:
 
 ```
 # 0.1.0+3e2b2888 (2026-08-10)
 replicate	scenario	t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
-1	baseline	0	0	0	99990	0	10	0	0	0	0	0	0
+0	baseline	0	0	0	99990	0	10	0	0	0	0	0	0
 ```
 
-`replicate` is a 1-based cell index, not the seed. With `--seeds 10,20` the
-column still reads `1` and `2`; the seed that produced a row is recorded in the
-per-cell leaf's `run.json`, not in the combined TSV.
+`replicate` is a 0-based cell index, not the seed. With `--seeds 10,20` the
+column reads `0` and `1`; the seed that produced a row is recorded in the
+per-cell leaf's `run.json`, not in the combined TSV — except under a sweep,
+whose `seed` column is the pairing key across design points. `draw` is the
+0-based draw index.
 
 `--parallel` is accepted by `camdl simulate` but not honoured — the simulate
 grid always runs sequentially. Use `camdl batch run --parallel N` for a
