@@ -136,12 +136,28 @@ pub enum ScoutGateVerdict {
         delta_db: f64,
         threshold_db: f64,
         sigma_max: f64,
-        /// `(chain, clean-eval loglik)` for every chain that reached the
-        /// eval, the chain carried from `FitState::chain_eval_ids` so the
-        /// refusal names the chain whose `chain_N/` holds it, not a row
-        /// position (gh#978).
-        chain_logliks: Vec<(ChainIndex, f64)>,
+        /// The clean-eval loglik of every chain that reached the eval, with
+        /// the chain it belongs to when `fit_state.toml` records it.
+        chain_logliks: SpreadChains,
     },
+}
+
+/// The per-chain clean-eval logliks behind a `DecibansSpread` refusal.
+///
+/// The spread itself is computable from the logliks alone, so a missing
+/// `chain_eval_ids` must not let a wide spread pass. But a position in
+/// `chain_eval_logliks` is not a chain: IF2 drops filter-degenerate chains
+/// before the eval, so once any chain is missing, labelling by position names
+/// the wrong `chain_N/` (gh#978). The two cases are therefore distinct values,
+/// and only `Named` can name a chain.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpreadChains {
+    /// `(chain, clean-eval loglik)`, the chain carried from
+    /// `FitState::chain_eval_ids`.
+    Named(Vec<(ChainIndex, f64)>),
+    /// The logliks only: `fit_state.toml` has no `chain_eval_ids`, or a count
+    /// that disagrees with the logliks', so no loglik can be attributed.
+    Unnamed(Vec<f64>),
 }
 
 /// Check scout's fit_state for pre-refine convergence.
@@ -157,7 +173,8 @@ pub enum ScoutGateVerdict {
 ///    `max(gate.decibans_thresh, 8 · max(SE) · NATS_TO_DB)`. The
 ///    SE-aware floor prevents penalising chains whose Monte-Carlo
 ///    spread alone could explain the observed log-lik spread.
-///    Failure → `DecibansSpread`.
+///    Failure → `DecibansSpread`, naming chains only when
+///    `chain_eval_ids` matches the logliks ([`SpreadChains`]).
 ///
 /// Legacy fit_state files (no `tail_chain_agreement`) return `Ok` —
 /// the caller is expected to warn and proceed. Same fall-through for
@@ -223,11 +240,10 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
 
     // Step 2 — decibans-spread check on clean-eval logliks. Skipped
     // when the scout is pre-§Proposal 1 and didn't write the new fields.
-    // The ids are required alongside: a per-chain verdict that cannot name
-    // its chains would name the wrong ones (gh#978).
+    // The ids are not needed to measure the spread, so their absence does
+    // not skip the check; it only stops the refusal naming chains (gh#978).
     if scout.chain_eval_logliks.len() >= 2
         && scout.chain_eval_ses.len() == scout.chain_eval_logliks.len()
-        && scout.chain_eval_ids.len() == scout.chain_eval_logliks.len()
     {
         let hi = scout.chain_eval_logliks.iter().cloned()
             .fold(f64::NEG_INFINITY, f64::max);
@@ -245,8 +261,12 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
                 delta_db,
                 threshold_db,
                 sigma_max,
-                chain_logliks: scout.chain_eval_ids.iter().copied()
-                    .zip(scout.chain_eval_logliks.iter().copied()).collect(),
+                chain_logliks: if scout.chain_eval_ids.len() == scout.chain_eval_logliks.len() {
+                    SpreadChains::Named(scout.chain_eval_ids.iter().copied()
+                        .zip(scout.chain_eval_logliks.iter().copied()).collect())
+                } else {
+                    SpreadChains::Unnamed(scout.chain_eval_logliks.clone())
+                },
             };
         }
     }
@@ -258,12 +278,14 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
 /// Names the spread, the threshold (and which limb of `max(...)` it
 /// came from), and the per-chain logliks in nats and decibans — each
 /// against its own chain number — so the user can see whether one chain
-/// is the obvious outlier and open the right `chain_N/` (gh#978).
+/// is the obvious outlier and open the right `chain_N/` (gh#978). With
+/// [`SpreadChains::Unnamed`] the logliks are listed without a chain and
+/// the message says why.
 pub fn format_decibans_spread_verdict(
     delta_db: f64,
     threshold_db: f64,
     sigma_max: f64,
-    chain_logliks: &[(ChainIndex, f64)],
+    chain_logliks: &SpreadChains,
 ) -> String {
     let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
     let floor_source = if se_floor_db >= threshold_db {
@@ -278,6 +300,23 @@ pub fn format_decibans_spread_verdict(
          Δℓ = {:.2} dB > threshold = {:.2} dB ({})\n\n  \
          Per-chain clean logliks (nats / dB from worst):\n",
         delta_db, threshold_db, floor_source);
+    let chain_logliks = match chain_logliks {
+        SpreadChains::Named(v) => v.as_slice(),
+        SpreadChains::Unnamed(v) => {
+            let lo = v.iter().copied().fold(f64::INFINITY, f64::min);
+            let mut sorted = v.clone();
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            for ll in &sorted {
+                msg.push_str(&format!("    ℓ = {:>9.2}  ({:+.2} dB from worst)\n",
+                    ll, (ll - lo) * NATS_TO_DB));
+            }
+            msg.push_str("\n  fit_state.toml records no `chain_eval_ids` matching these \
+                logliks, so they cannot be attributed to chains; re-run the scout to \
+                record which chain each belongs to.\n");
+            msg.push_str(PICK_ONE);
+            return msg;
+        }
+    };
     let lo = chain_logliks.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
     let mut sorted: Vec<(ChainIndex, f64)> = chain_logliks.to_vec();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -305,7 +344,12 @@ pub fn format_decibans_spread_verdict(
             "\n  Chain driving the spread (lowest clean loglik): chain {worst}\n"));
     }
 
-    msg.push_str("\n  Pick one:\n    \
+    msg.push_str(PICK_ONE);
+    msg
+}
+
+/// The remedies closing every `DecibansSpread` message.
+const PICK_ONE: &str = "\n  Pick one:\n    \
                   - re-run scout with more chains (the wider the spread,\n      \
                     the higher the chance one chain is in the right basin)\n    \
                   - inspect chain_evaluations.tsv to see which candidate\n      \
@@ -315,9 +359,7 @@ pub fn format_decibans_spread_verdict(
                     [method.loglik_eval] n_particles or n_replicates\n    \
                   - relax the gate via [method.gate].decibans_thresh\n      \
                     or pass --decibans-thresh on the next run\n\n  \
-                  To start from it anyway:  camdl fit run fit.toml --allow-nonconverged-source");
-    msg
-}
+                  To start from it anyway:  camdl fit run fit.toml --allow-nonconverged-source";
 
 /// Render the Hard verdict as a human error message.
 ///
@@ -649,7 +691,8 @@ mod tests {
                     "30 dB floor must bind (8·σ·NATS_TO_DB ≈ 17.4 dB < 30); got {}",
                     threshold_db);
                 assert!((sigma_max - 0.5).abs() < 1e-12);
-                assert_eq!(chain_logliks.len(), 2);
+                assert!(matches!(&chain_logliks, SpreadChains::Named(v) if v.len() == 2),
+                    "ids recorded, so the chains are named: {chain_logliks:?}");
             }
             other => panic!("expected DecibansSpread, got {:?}", other),
         }
@@ -698,8 +741,8 @@ mod tests {
     /// report the aggregate spread. A single clear low outlier among six chains
     /// clears the modified-z threshold, so the "Outlier chains" line names it.
     /// `(chain, loglik)` pairs for contiguous chains counted from 0.
-    fn indexed(logliks: &[f64]) -> Vec<(ChainIndex, f64)> {
-        logliks.iter().enumerate().map(|(i, &v)| (ChainIndex(i), v)).collect()
+    fn indexed(logliks: &[f64]) -> SpreadChains {
+        SpreadChains::Named(logliks.iter().enumerate().map(|(i, &v)| (ChainIndex(i), v)).collect())
     }
 
     #[test]
@@ -741,7 +784,8 @@ mod tests {
     #[test]
     fn decibans_message_fallback_names_worst_on_smooth_spread() {
         let chain_logliks = indexed(&[-60.0, -70.0, -80.0, -90.0, -100.0, -110.0]);
-        let scores = super::super::chain_diagnostics::chain_loglik_mod_zscores(&chain_logliks);
+        let SpreadChains::Named(named) = &chain_logliks else { unreachable!() };
+        let scores = super::super::chain_diagnostics::chain_loglik_mod_zscores(named);
         assert!(
             scores.iter().all(|s| !s.is_outlier),
             "precondition: a smooth gradient has no single robust outlier: {:?}",
@@ -783,14 +827,28 @@ mod tests {
         );
     }
 
-    /// Without the ids the per-chain leg cannot name its chains, so it does
-    /// not run: no verdict is better than one that names the wrong chain.
+    /// Without the ids the spread is still measurable, so a wide one is still
+    /// refused — a missing field must not certify convergence. The refusal
+    /// lists the logliks without naming a chain, since a position in
+    /// `chain_eval_logliks` is not a chain (gh#978).
     #[test]
-    fn decibans_leg_needs_the_chain_ids() {
+    fn decibans_leg_refuses_without_the_chain_ids_and_names_no_chain() {
         let mut s = make_state(&[("beta", 1.001)], &[], &[-60.0, -60.0], -60.0);
         s.chain_eval_logliks = vec![-60.0, -300.0];
         s.chain_eval_ses = vec![0.5, 0.5];
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
-        assert!(matches!(check_scout_convergence(&s, &gate), ScoutGateVerdict::Ok));
+        let msg = match check_scout_convergence(&s, &gate) {
+            ScoutGateVerdict::DecibansSpread {
+                delta_db, threshold_db, sigma_max, chain_logliks,
+            } => {
+                assert_eq!(chain_logliks, SpreadChains::Unnamed(vec![-60.0, -300.0]));
+                format_decibans_spread_verdict(delta_db, threshold_db, sigma_max, &chain_logliks)
+            }
+            other => panic!("expected DecibansSpread without ids, got {other:?}"),
+        };
+        assert!(!msg.contains("chain 0") && !msg.contains("chain 1"),
+            "no chain may be named without the ids:\n{msg}");
+        assert!(msg.contains("cannot be attributed to chains"), "{msg}");
+        assert!(msg.contains("-300.00"), "the logliks are still listed:\n{msg}");
     }
 }
