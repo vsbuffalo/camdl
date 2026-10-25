@@ -801,7 +801,7 @@ fn show_sim_ensemble_record(leaf: &cas_read::Leaf, rel_path: &str, created: Syst
         println!("  {:<9} {}-{}", lvl.name, lvl.label, lvl.hash.short8().dimmed());
     }
     if let Some(obj) = rec.inputs.as_object() {
-        for key in ["n_cells", "n_scenarios", "n_seeds", "n_draws"] {
+        for key in ["n_cells", "n_scenarios", "n_seeds", "n_draws", "n_points"] {
             if let Some(v) = obj.get(key) {
                 if v.is_null() { continue; }
                 println!("{}", key.bright_black()); println!("  {}", v);

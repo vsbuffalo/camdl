@@ -1767,9 +1767,20 @@ fn run_simulate(a: &args::SimulateArgs) {
     //     --enable/--disable (or empty), so the baseline path keeps
     //     `scenario_name = None` exactly as before.
     use crate::sim_job::{ObsOutput, ParamSource, ScenarioRef, Seeds, SimulateJob};
+    // The ad-hoc arm's label is derived from what the flags resolved to
+    // (`sim_job::adhoc_arm_label`), at this site and at the sink's
+    // `ResolvedEntry` alike, so two different ad-hoc arms are told apart in
+    // the leaf path, `run.json` and the listings. Provenance only: the arm's
+    // identity is its resolved delta, and a leaf written under an earlier
+    // label is found by hash.
+    let adhoc_label = crate::sim_job::adhoc_arm_label(
+        &base_sim_run.adhoc_enable,
+        &base_sim_run.adhoc_disable,
+        &a.model_overrides.param.iter().map(|p| (p.name.clone(), p.value)).collect::<Vec<_>>(),
+    );
     let scenarios: Vec<ScenarioRef> = if scenario_names.is_empty() {
         vec![ScenarioRef::Inline {
-            name: "baseline".to_string(),
+            name: adhoc_label.clone(),
             enable: base_sim_run.adhoc_enable.clone(),
             disable: base_sim_run.adhoc_disable.clone(),
             params: indexmap::IndexMap::new(),
@@ -1903,7 +1914,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         // Nothing is displaced or written — `--force` is reported, not applied.
         if total_runs > 1 {
             let cas = build_simulate_cas_sink(
-                &base_sim_run, &ir_path, &scenario_names, &cas_root,
+                &base_sim_run, &ir_path, &scenario_names, &adhoc_label, &cas_root,
                 want_obs, a.force, label_arg.clone(), fit_dep.clone(),
                 a.allow_degenerate_rates, output_cols.clone(), emit_every.clone(), total_runs,
             ).unwrap_or_else(|e| {
@@ -1954,6 +1965,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         &base_sim_run,
         &ir_path,
         &scenario_names,
+        &adhoc_label,
         &cas_root,
         want_obs || obs_only.is_some() || obs_only_dir.is_some()
             || obs_path.is_some() || obs_dir.is_some(),
@@ -2806,6 +2818,10 @@ fn build_simulate_cas_sink(
     // model's real name so leaves land under `sims/sir-<hash>/…`.
     display_path: &str,
     scenario_names: &[String],
+    // The derived label of the ad-hoc arm (`sim_job::adhoc_arm_label`), used
+    // when `scenario_names` is empty; the same string the job's
+    // `ScenarioRef::Inline` carries, so the sink finds the cell's entry.
+    adhoc_label: &str,
     cas_root: &str,
     obs_enabled: bool,
     force: bool,
@@ -2860,7 +2876,7 @@ fn build_simulate_cas_sink(
     // CLI ad-hoc baseline.
     let resolved_scenarios: Vec<crate::cas_sink::ResolvedEntry> = if scenario_names.is_empty() {
         vec![crate::cas_sink::ResolvedEntry {
-            name: "baseline".to_string(),
+            name: adhoc_label.to_string(),
             route: None,
             enable: run.adhoc_enable.clone(),
             disable: run.adhoc_disable.clone(),
