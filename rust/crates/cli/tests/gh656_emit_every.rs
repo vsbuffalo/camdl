@@ -368,7 +368,7 @@ fn the_dsl_tick_spelling_is_refused_with_a_plain_number_hint() {
 /// Two cadences are two artifacts, and one cadence twice is one artifact.
 ///
 /// The obs subtree is addressed `obs/{obs_hash8}-{obs_seed}` under the sim leaf,
-/// and `obs_hash` folds the override (`batch::obs_subtree_hash`). Drop that fold
+/// and `obs_hash` folds the override (`cas_sink::obs_subtree_hash`). Drop that fold
 /// and the two cadences collide on one directory — the second run silently
 /// overwriting the first's weekly file with daily rows under an address that
 /// still claims to be the first's.

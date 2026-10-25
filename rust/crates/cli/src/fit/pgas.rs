@@ -255,7 +255,7 @@ impl PgasStageOpts {
 // Per-method entry point for PGAS — wide because every flag is
 // independent at the dispatch site (stage_dir, opts struct, RNG seed,
 // --resume, the resolved starts). Same pattern as
-// `batch::run_one_scenario` and `main::run_simulate`, both of which
+// `main::build_simulate_cas_sink` and `main::run_simulate`, both of which
 // also carry this allow.
 #[allow(clippy::too_many_arguments)]
 pub fn run_stage(

@@ -564,7 +564,7 @@ pub struct PresetDelta {
 ///
 /// The single authority for "what does scenario X change," read by both the
 /// value resolver ([`resolve_parameters`], which applies the delta) and the
-/// run identity (`batch::ResolvedEntry::from_preset`, which hashes it). The
+/// run identity (`cas_sink::ResolvedEntry::from_preset`, which hashes it). The
 /// two reading one function is what makes it impossible for a preset to
 /// change the trajectory without changing the `run_id` (gh#573: the identity
 /// used to read the preset's own literal fields, missing `scale` and every
@@ -613,7 +613,7 @@ pub fn resolve_preset_delta(
 ///
 /// **The single authority for "what horizon does this scenario run to."** Every
 /// consumer goes through here — the window (`util::apply_scenario_horizon`), the
-/// run identity (`batch::ResolvedEntry::t_end`), and the two guards that refuse a
+/// run identity (`cas_sink::ResolvedEntry::t_end`), and the two guards that refuse a
 /// horizon where reductions are differenced (`fit::contrasts`, `fit::predict`).
 /// Before this existed, four sites each did their own `model.presets` lookup and
 /// agreed only by coincidence; a window/identity divergence is a silent-wrong
