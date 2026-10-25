@@ -1,15 +1,17 @@
-//! Integration test: `batch run` archives `model.graph.json` beside
-//! `model.render.json` in the run's output dir, so a viewer (camdl-watch) can
-//! draw the compartmental flow diagram without recompiling.
+//! Integration test: `camdl render --format graph` emits the structured flow
+//! graph (`model.graph.json`) a viewer (camdl-watch) draws the compartmental
+//! diagram from without recompiling — the sidecar `fit run` archives beside
+//! `model.render.json`.
 //!
 //! Proposal: docs/dev/proposals/2026-07-20-model-diagram-and-identifiability.md
 //!
 //! Shells out to the built `camdl` binary and exercises the real
-//! compile → render-graph → archive path (`util::render_model_graph_json` +
-//! the batch archive site). The model is an age-stratified SIR carrying every
-//! feature the emitter must surface: an `age` plate, a mean-field pool read
-//! through `let` bindings, a `consecutive(age)` aging edge, a birth inflow
-//! (empty source), and a death outflow (empty sink).
+//! compile → render-graph path (`camdl render` delegating to `camdlc render
+//! --format graph`, the same emitter `util::render_model_graph_json` reads).
+//! The model is an age-stratified SIR carrying every feature the emitter must
+//! surface: an `age` plate, a mean-field pool read through `let` bindings, a
+//! `consecutive(age)` aging edge, a birth inflow (empty source), and a death
+//! outflow (empty sink).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -65,55 +67,25 @@ fn edge<'a>(g: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
 }
 
 #[test]
-fn batch_run_archives_model_graph_json() {
+fn render_graph_emits_the_flow_graph_a_viewer_draws() {
     let bin = require_binary();
     let tmp = tempfile::tempdir().unwrap();
     let model = tmp.path().join("agepool.camdl");
-    let output = tmp.path().join("output");
     std::fs::write(&model, MODEL).unwrap();
 
-    let batch = tmp.path().join("batch.toml");
-    std::fs::write(
-        &batch,
-        format!(
-            r#"
-[config]
-model = "{model}"
-output_dir = "{out}"
-seeds = {{ n = 1 }}
-parallel = 1
-
-[[scenario]]
-name = "baseline"
-"#,
-            model = model.display(),
-            out = output.display()
-        ),
-    )
-    .unwrap();
-
     let run = Command::new(&bin)
-        .args(["batch", "run", &batch.to_string_lossy()])
+        .args(["render", &model.to_string_lossy(), "--format", "graph"])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn");
     assert!(
         run.status.success(),
-        "batch run failed:\n{}",
+        "camdl render --format graph failed:\n{}",
         String::from_utf8_lossy(&run.stderr)
     );
 
-    // The graph sidecar lands in the output dir beside model.render.json.
-    let graph_path = output.join("model.graph.json");
-    assert!(
-        graph_path.is_file(),
-        "batch run must archive model.graph.json beside model.render.json; \
-         dir listing: {:?}",
-        std::fs::read_dir(&output).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>()
-    );
-
-    let g: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&graph_path).unwrap())
-            .expect("model.graph.json must be well-formed JSON");
+    let g: serde_json::Value = serde_json::from_slice(&run.stdout)
+        .expect("the graph render must be well-formed JSON");
 
     // Base compartments are the nodes.
     let node_ids: Vec<&str> = g["nodes"]

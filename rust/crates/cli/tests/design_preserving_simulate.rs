@@ -700,28 +700,34 @@ fn a_quantity_over_a_covariate_stream_is_refused_by_name() {
         "the refusal names the stream, the column and the issue:\n{stderr}");
 }
 
-/// gh#829 on `batch run`'s `[obs]` subtree, the other writer that draws with no
-/// data columns. It is refused before any cell runs, so no leaf carries an
-/// `obs/` file of zeros.
+/// gh#829 on the multi-cell store path, the other writer that draws with no
+/// data columns: a `--seeds` run with an observation flag writes an `obs/`
+/// subtree under every leaf. It is refused before any cell runs, so no leaf
+/// carries an `obs/` file of zeros and no dataset is written.
 #[test]
-fn batch_obs_refuses_a_covariate_stream_by_name_and_writes_nothing() {
+fn multi_cell_obs_refuses_a_covariate_stream_by_name_and_writes_nothing() {
     if camdlc().is_none() { return; }
-    let tmp = tempdir("batch_covariate");
+    let tmp = tempdir("multi_cell_covariate");
     let ir = compile(tmp.path(), "survey", COVARIATE_MODEL);
     let truth = truth_toml(tmp.path());
     let store = tmp.path().join("results");
-    let manifest = tmp.path().join("batch.toml");
-    std::fs::write(&manifest, format!(
-        "[config]\nmodel = \"{}\"\nparams = \"{}\"\noutput_dir = \"{}\"\n\
-         seeds = {{ list = [1, 2] }}\n\n[obs]\nenabled = true\n",
-        ir.display(), truth.display(), store.display())).unwrap();
-    let output = run(&["batch", "run", manifest.to_str().unwrap()]);
+    let synth = tmp.path().join("synth");
+    let output = run(&[
+        "simulate", ir.to_str().unwrap(),
+        "--params", truth.to_str().unwrap(),
+        "--seeds", "1,2",
+        "--obs-dir", synth.to_str().unwrap(),
+        "--output-dir", store.to_str().unwrap(),
+        "--backend", "chain_binomial", "--dt", "1",
+    ]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(),
-        "batch [obs] on a covariate stream must be refused:\n{stderr}");
+        "a multi-cell observation run over a covariate stream must be refused:\n{stderr}");
     assert!(stderr.contains("'survey'") && stderr.contains("`tested`")
             && stderr.contains("gh#829"),
         "the refusal names the stream, the column and the issue:\n{stderr}");
+    assert!(!synth.exists() || tsv_files_under(&synth).is_empty(),
+        "no observation file is written for a stream that cannot be drawn");
     let in_store: Vec<PathBuf> = tsv_files_under(&store).into_iter()
         .filter(|p| p.components().any(|c| c.as_os_str() == "obs"))
         .collect();

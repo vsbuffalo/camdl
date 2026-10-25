@@ -120,8 +120,8 @@ fn integrator_override_splits_the_cas_leaves() {
         "rk4 and rk45 runs must land in two distinct CAS leaves");
 }
 
-/// `--force` must actually replace the stored artifact. It never did: batch
-/// recomputed the cell and the fresh bytes were discarded at commit as an
+/// `--force` must actually replace the stored artifact. It never did: the
+/// cell was recomputed and the fresh bytes were discarded at commit as an
 /// already-completed no-op, so the leaf kept its original content. The store
 /// now has an overwrite door (displace-then-recompute, incumbent quarantined).
 #[test]
@@ -449,15 +449,16 @@ init { S = 990  I = 10 }
 simulate { from = 0 'days  to = 10 'days }
 "#;
 
-/// gh#583 (the batch half). `batch run` hashed its params file's raw entries
-/// as the cell's parameters, `simulate` hashed the model defaults overlaid by
-/// the same file — two walks, neither the resolver's. On a model with a
-/// defaulted parameter the same cell (same model, params file, seed) got two
-/// `params` levels, so `simulate` and `batch run` each re-simulated what the
-/// other had stored. Both now hash the resolved values of the cell's own
-/// `SimRun`, so they meet on one leaf.
+/// gh#583 (the multi-cell half). The lone-run and the multi-cell paths each
+/// build their `CasSink` at their own site; before the fix one hashed the
+/// params file's raw entries as the cell's parameters and the other the model
+/// defaults overlaid by the same file — two walks, neither the resolver's. On
+/// a model with a defaulted parameter the same cell (same model, params file,
+/// seed) got two `params` levels, so each path re-simulated what the other
+/// had stored. Both now hash the resolved values of the cell's own `SimRun`,
+/// so they meet on one leaf.
 #[test]
-fn simulate_and_batch_share_a_leaf_over_a_defaulted_parameter() {
+fn single_and_multi_cell_runs_share_a_leaf_over_a_defaulted_parameter() {
     let bin = camdl_bin();
     let Some(cc) = camdlc() else {
         eprintln!("skip: camdlc.exe missing (run `make build`)");
@@ -467,12 +468,13 @@ fn simulate_and_batch_share_a_leaf_over_a_defaulted_parameter() {
         eprintln!("skip: release camdl missing (run `make build`)");
         return;
     }
-    let tmp = tempdir("batchdefault");
+    let tmp = tempdir("multicelldefault");
     let ir = compile(tmp.path(), &cc, SIR_DEFAULTED, "m");
     let params = tmp.path().join("p.toml");
     std::fs::write(&params, "beta = 0.3\nN0 = 1000\n").unwrap();
     let out = tmp.path().join("store");
 
+    // The lone run of seed 3.
     let st = Command::new(&bin)
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&params)
@@ -480,19 +482,19 @@ fn simulate_and_batch_share_a_leaf_over_a_defaulted_parameter() {
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     assert!(st.status.success(), "simulate: {}", String::from_utf8_lossy(&st.stderr));
+    assert_eq!(sim_leaves(&out).len(), 1, "the lone run writes one leaf");
 
-    let manifest = tmp.path().join("b.toml");
-    std::fs::write(&manifest, format!(
-        "[config]\nmodel = \"{}\"\nparams = \"{}\"\noutput_dir = \"{}\"\nseeds = {{ list = [3] }}\n",
-        ir.display(), params.display(), out.display(),
-    )).unwrap();
+    // A multi-cell run whose first cell is the same (model, params file, seed).
     let st = Command::new(&bin)
-        .args(["batch", "run"]).arg(&manifest)
+        .args(["simulate"]).arg(&ir)
+        .args(["--params"]).arg(&params)
+        .args(["--seeds", "3,4", "--output-dir"]).arg(&out)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
-    assert!(st.status.success(), "batch run: {}", String::from_utf8_lossy(&st.stderr));
+    assert!(st.status.success(), "simulate --seeds: {}", String::from_utf8_lossy(&st.stderr));
 
     let leaves = sim_leaves(&out);
-    assert_eq!(leaves.len(), 1,
-        "simulate and batch run of one cell must resolve to one leaf; got {leaves:?}");
+    assert_eq!(leaves.len(), 2,
+        "the lone run and the multi-cell run of seed 3 must resolve to one leaf \
+         (plus seed 4's); got {leaves:?}");
 }

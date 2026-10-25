@@ -260,8 +260,8 @@ fn cas_different_models_do_not_collide() {
 #[test]
 fn cas_multi_seeds_writes_one_leaf_per_seed() {
     // `--cas supports single runs only` is gone: CAS is the default and
-    // multi-run writes one content-addressed leaf per cell — exactly like
-    // `batch run`. `--seeds 1:3` is three seed-slots → three leaves with
+    // multi-run writes one content-addressed leaf per cell. `--seeds 1:3` is
+    // three seed-slots → three leaves with
     // three distinct seed-level segments.
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
@@ -338,78 +338,71 @@ fn cas_replicates_write_one_leaf_each_and_single_run_writes_one() {
     assert_eq!(dirs1.len(), 1, "a lone simulate run must write exactly one leaf");
 }
 
-/// The load-bearing invariant: `simulate --seeds …` and `batch run` write
-/// leaves at the SAME store paths with the SAME `run_id`s and BYTE-IDENTICAL
-/// `traj.tsv` for the same (model, config, params, scenario, process_seed)
-/// cells. Both go through the shared `CasSink` write path, so divergence here
-/// means the two entry points resolved identity differently — a silent-wrong-
-/// answer class bug (a `simulate` leaf would never be served to a `batch`
-/// cache lookup, or vice versa).
+/// The load-bearing invariant: the multi-cell path (`simulate --seeds …`,
+/// whose sink wraps the shared `CasSink`) and the single-cell path
+/// (`simulate --seed N`) write leaves at the SAME store paths with the SAME
+/// `run_id`s and BYTE-IDENTICAL `traj.tsv` for the same (model, config,
+/// params, scenario, process_seed) cells. Both resolve identity through one
+/// `CasSink`, so divergence here means the two paths resolved identity
+/// differently — a silent-wrong-answer class bug (a lone run's leaf would
+/// never be a hit for the same cell of an ensemble, or vice versa).
 #[test]
-fn simulate_and_batch_leaves_are_byte_identical() {
+fn multi_cell_and_single_cell_leaves_are_byte_identical() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
 
     let params = tmp.path().join("params.toml");
     std::fs::write(&params, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
 
-    let sim_out = tmp.path().join("sim_out");
-    let batch_out = tmp.path().join("batch_out");
+    let multi_out = tmp.path().join("multi_out");
+    let single_out = tmp.path().join("single_out");
 
-    // simulate over an explicit seed list.
+    // One multi-cell run over an explicit seed list.
     let st = Command::new(&bin)
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--params", &params.to_string_lossy(),
                "--seeds", "10,11,12",
-               "--output-dir", &sim_out.to_string_lossy(),
+               "--output-dir", &multi_out.to_string_lossy(),
                "-o", &tmp.path().join("c.tsv").to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "simulate --seeds should succeed");
 
-    // The equivalent batch run: same model, params, seed list, baseline.
-    let batch_toml = tmp.path().join("b.toml");
-    std::fs::write(&batch_toml, format!(r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ list = [10, 11, 12] }}
-parallel = 1
+    // The same three cells, one lone run each, into a second store.
+    for seed in ["10", "11", "12"] {
+        let st = Command::new(&bin)
+            .args(["simulate", &golden_sir_basic().to_string_lossy(),
+                   "--scenario", "baseline",
+                   "--params", &params.to_string_lossy(),
+                   "--seed", seed,
+                   "--output-dir", &single_out.to_string_lossy()])
+            .status().expect("spawn");
+        assert!(st.success(), "simulate --seed {seed} should succeed");
+    }
 
-[[scenario]]
-name = "baseline"
-"#,
-        model = golden_sir_basic().display(),
-        params = params.display(),
-        out = batch_out.display(),
-    )).unwrap();
-    let st = Command::new(&bin)
-        .args(["batch", "run", &batch_toml.to_string_lossy()])
-        .status().expect("spawn");
-    assert!(st.success(), "batch run should succeed");
-
-    // Enumerate the simulate leaves; for each, the same store-relative path
-    // must exist under batch with the same run_id and identical traj bytes.
-    let sims_root = sim_out.join("sims");
-    let sim_leaves: Vec<_> = walkdir(&sims_root).into_iter()
+    // Enumerate the multi-cell leaves; for each, the same store-relative path
+    // must exist in the single-run store with the same run_id and identical
+    // traj bytes.
+    let multi_root = multi_out.join("sims");
+    let multi_leaves: Vec<_> = walkdir(&multi_root).into_iter()
         .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(sim_leaves.len(), 3, "expected 3 simulate leaves");
+    assert_eq!(multi_leaves.len(), 3, "expected 3 multi-cell leaves");
 
-    for sl in &sim_leaves {
-        let rel = sl.strip_prefix(&sims_root).unwrap();
-        let bl = batch_out.join("sims").join(rel);
-        assert!(bl.join("run.json").exists(),
-            "batch missing the same-path leaf: {}", rel.display());
+    for ml in &multi_leaves {
+        let rel = ml.strip_prefix(&multi_root).unwrap();
+        let sl = single_out.join("sims").join(rel);
+        assert!(sl.join("run.json").exists(),
+            "single-run store missing the same-path leaf: {}", rel.display());
 
-        let sid = read_meta(sl)["run_id"].as_str().unwrap().to_string();
-        let bid = read_meta(&bl)["run_id"].as_str().unwrap().to_string();
-        assert_eq!(sid, bid, "run_id mismatch at {}", rel.display());
+        let mid = read_meta(ml)["run_id"].as_str().unwrap().to_string();
+        let sid = read_meta(&sl)["run_id"].as_str().unwrap().to_string();
+        assert_eq!(mid, sid, "run_id mismatch at {}", rel.display());
 
+        let mbytes = std::fs::read(ml.join("traj.tsv")).unwrap();
         let sbytes = std::fs::read(sl.join("traj.tsv")).unwrap();
-        let bbytes = std::fs::read(bl.join("traj.tsv")).unwrap();
-        assert_eq!(sbytes, bbytes,
-            "traj.tsv bytes differ between simulate and batch at {}", rel.display());
+        assert_eq!(mbytes, sbytes,
+            "traj.tsv bytes differ between the multi-cell and single-cell paths at {}",
+            rel.display());
     }
 }
 
@@ -423,15 +416,14 @@ fn model_dirs(sims: &Path) -> Vec<String> {
     v
 }
 
-/// gh#583 item E. `simulate` and `batch run` of the same cell of a `.camdl`
-/// SOURCE model must land on the same store path. `batch run` named the
-/// model directory after the compiled IR it resolved the source to — the IR
-/// cache's content hash, or `camdl_<pid>` with the cache off — so the same
-/// run_id lived under a different directory per entry point (and, with the
-/// cache off, per invocation), and the directory-scoped cache lookup missed on
-/// every rerun.
+/// gh#583 item E. Every run of the same cell of a `.camdl` SOURCE model must
+/// land on the same store path. The model directory is named for the source
+/// stem, never for the compiled IR the source resolved to — the IR cache's
+/// content hash, or `camdl_<pid>` with the cache off — which would put the
+/// same run_id under a different directory per invocation and miss the
+/// directory-scoped cache lookup on every rerun.
 #[test]
-fn simulate_and_batch_of_a_camdl_source_land_on_the_same_path() {
+fn a_camdl_source_lands_on_one_model_directory_with_the_ir_cache_on_or_off() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let model = tmp.path().join("sir_basic.camdl");
@@ -450,46 +442,39 @@ fn simulate_and_batch_of_a_camdl_source_land_on_the_same_path() {
         .output().expect("spawn");
     assert!(out.status.success(), "simulate: {}", String::from_utf8_lossy(&out.stderr));
     let sims = store.join("sims");
-    let after_simulate = model_dirs(&sims);
-    assert_eq!(after_simulate.len(), 1, "one model directory: {after_simulate:?}");
-    assert!(after_simulate[0].starts_with("sir_basic-"),
-        "named for the model: {after_simulate:?}");
+    let after_first = model_dirs(&sims);
+    assert_eq!(after_first.len(), 1, "one model directory: {after_first:?}");
+    assert!(after_first[0].starts_with("sir_basic-"),
+        "named for the model: {after_first:?}");
 
-    let batch_toml = tmp.path().join("b.toml");
-    std::fs::write(&batch_toml, format!(r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ list = [10] }}
-
-[[scenario]]
-name = "baseline"
-"#,
-        model = model.display(), params = params.display(), out = store.display(),
-    )).unwrap();
-    // With the IR cache on and off: the second names the compiled temp file
-    // after the process id, so it would differ from every other invocation.
+    // A multi-cell run of the same source, with the IR cache on and then off:
+    // the second compiles to a temp file named after the process id, so a
+    // directory named for the IR would differ from every other invocation.
     for no_cache in [false, true] {
         let mut cmd = Command::new(&bin);
-        cmd.args(["batch", "run", &batch_toml.to_string_lossy()]);
+        cmd.args(["simulate", &model.to_string_lossy(),
+                  "--scenario", "baseline",
+                  "--params", &params.to_string_lossy(),
+                  "--seeds", "10,11",
+                  "--output-dir", &store.to_string_lossy()]);
         if no_cache { cmd.env("CAMDL_NO_IR_CACHE", "1"); }
         let out = cmd.output().expect("spawn");
-        assert!(out.status.success(), "batch run: {}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(model_dirs(&sims), after_simulate,
-            "batch run (IR cache {}) must land in simulate's model directory",
+        assert!(out.status.success(), "simulate --seeds: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(model_dirs(&sims), after_first,
+            "a run with the IR cache {} must land in the first run's model directory",
             if no_cache { "off" } else { "on" });
     }
 }
 
-/// gh#592. `batch status` on a manifest whose `model` is `.camdl` source —
-/// the shape of every example in its `--help` — read the source as IR JSON,
-/// failed to parse it, and reported a completed sweep as not started. It also
-/// printed a remaining cell's path with `sims/` twice. Status must predict the
-/// identity `batch run` resolves, so it loads the model the way run does:
-/// compiled from source, with `[output] every` lowered into it.
+/// gh#592, on the surface that replaced `batch status`: the store view of a
+/// multi-cell `--dry-run` over a `.camdl` source with `--output-every`. It
+/// must predict the identity the run resolves — the model compiled from
+/// source, with the output cadence lowered into it — so a completed grid
+/// reports every cell a hit, one more seed reports exactly one miss, and the
+/// missing cell's leaf path is printed once, relative to the store, under the
+/// model's own directory.
 #[test]
-fn batch_status_reads_a_camdl_manifest_and_counts_its_leaves() {
+fn a_camdl_source_dry_run_counts_the_leaves_the_run_wrote() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let model = tmp.path().join("sir_basic.camdl");
@@ -498,45 +483,34 @@ fn batch_status_reads_a_camdl_manifest_and_counts_its_leaves() {
     let params = tmp.path().join("params.toml");
     std::fs::write(&params, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
     let store = tmp.path().join("store");
-    let manifest = |seeds: &str| format!(r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ list = [{seeds}] }}
-
-[[scenario]]
-name = "baseline"
-
-[output]
-every = 2.0
-"#,
-        model = model.display(), params = params.display(), out = store.display());
-    let batch_toml = tmp.path().join("b.toml");
-    std::fs::write(&batch_toml, manifest("1, 2")).unwrap();
-
-    let out = Command::new(&bin).args(["batch", "run", &batch_toml.to_string_lossy()])
-        .output().expect("spawn");
-    assert!(out.status.success(), "batch run: {}", String::from_utf8_lossy(&out.stderr));
-
-    let status = |toml: &Path| {
-        let out = Command::new(&bin).args(["batch", "status", &toml.to_string_lossy()])
-            .output().expect("spawn");
-        assert!(out.status.success(), "batch status: {}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8_lossy(&out.stdout).into_owned()
+    let simulate = |seeds: &str, dry_run: bool| -> String {
+        let mut cmd = Command::new(&bin);
+        cmd.args(["simulate", &model.to_string_lossy(),
+                  "--scenario", "baseline",
+                  "--params", &params.to_string_lossy(),
+                  "--seeds", seeds,
+                  "--output-every", "2",
+                  "--output-dir", &store.to_string_lossy()]);
+        if dry_run { cmd.arg("--dry-run"); }
+        let out = cmd.output().expect("spawn");
+        assert!(out.status.success(), "simulate --seeds {seeds} (dry run: {dry_run}): {}",
+            String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr).into_owned()
     };
-    let s = status(&batch_toml);
-    assert!(s.contains("Completed:  2/2 leaves present"),
-        "a completed .camdl sweep reports every leaf present:\n{s}");
 
-    // One more seed: that cell is the one left, printed under the store once.
-    std::fs::write(&batch_toml, manifest("1, 2, 3")).unwrap();
-    let s = status(&batch_toml);
-    assert!(s.contains("Completed:  2/3 leaves present"), "{s}");
-    let line = s.lines().find(|l| l.contains("seed=3")).unwrap_or_else(|| panic!("{s}"));
-    let path = line.split("→ ").nth(1).unwrap_or_else(|| panic!("{line}")).trim();
-    assert!(path.starts_with(&format!("{}/sims/sir_basic-", store.display())),
-        "rooted at the store, under the model's own directory: {path}");
+    simulate("1,2", false);
+    let s = simulate("1,2", true);
+    assert!(s.contains("2 cache hits → read back, 0 misses"),
+        "a completed .camdl grid reports every cell a hit:\n{s}");
+
+    // One more seed: that cell is the one miss, printed under the store once.
+    let s = simulate("1,2,3", true);
+    assert!(s.contains("2 cache hits → read back, 1 misses → would simulate"), "{s}");
+    let line = s.lines().find(|l| l.contains("[miss]")).unwrap_or_else(|| panic!("{s}"));
+    assert!(line.contains("seed_3-"), "the miss is the new seed: {line}");
+    let path = line.split("[miss] ").nth(1).unwrap_or_else(|| panic!("{line}")).trim();
+    assert!(path.starts_with("sims/sir_basic-"),
+        "relative to the store, under the model's own directory: {path}");
     assert!(!path.contains("sims/sims"), "sims/ printed once: {path}");
 }
 
@@ -863,7 +837,7 @@ fn cat_emits_cached_trajectory() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     // The canonical leaf carries no `# camdl <version>` provenance header
     // (that lives in run.json's `engine_version`); the trajectory TSV is the
-    // batch-converged form starting with the `t` column header.
+    // canonical form starting with the `t` column header.
     assert!(stdout.starts_with("t\t"), "cat should emit the trajectory header row: {:?}",
         &stdout[..stdout.len().min(40)]);
     assert!(stdout.contains("\tS\t") || stdout.contains("\tI\t"),
@@ -874,58 +848,38 @@ fn cat_emits_cached_trajectory() {
     assert_eq!(out.stdout, cached, "cat output must match cached bytes byte-for-byte");
 }
 
+/// A `--sweep` point is recoverable from the live tree: each leaf's `params`
+/// level is labelled by the swept value (`beta=0.2`), `camdl list` shows it,
+/// and no grid-level index file is written — `sims/manifest.json` was retired
+/// (gh#147 item D); the per-leaf `run.json` and the derived `index.json` are
+/// the only index.
 #[test]
-fn batch_sweep_records_sweep_point_in_run_json() {
-    // Regression: before this fix, batch sweeps wrote run.json with no
-    // record of the sweep parameter values — you could see there were 8
-    // distinct scen_hashes but not which beta value produced which
-    // trajectory. This test runs a minimal --batch with a 3-point sweep and
-    // asserts the sweep point is recoverable from the live tree (the `params`
-    // level label + `camdl list`). manifest.json was retired (gh#147 item D);
-    // the per-leaf run.json + derived index.json are the only index.
+fn sweep_point_is_recorded_in_run_json_and_listed() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
 
-    // Use the golden sir_basic IR directly (no .camdl → camdlc step).
-    // Write a params.toml with the non-swept params pinned.
+    // The golden sir_basic IR directly (no .camdl → camdlc step), the
+    // non-swept params pinned by a params file. No `--scenario`: sir_basic's
+    // `baseline` PRESET sets beta, so a beta sweep under it is refused
+    // (`scenario_coordinate_collision_gh572.rs`); the implicit arm leaves beta
+    // to the sweep.
     let params_path = tmp.path().join("params.toml");
-    std::fs::write(&params_path, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
-
-    // Minimal batch TOML with a 3-point sweep over beta.
-    let batch_path = tmp.path().join("batch.toml");
-    std::fs::write(&batch_path, format!(r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ n = 1 }}
-parallel = 1
-
-# An ad-hoc scenario that leaves `beta` alone. sir_basic's `baseline` PRESET
-# sets beta, so a beta sweep under it is refused (see
-# `batch_sweep_under_a_preset_setting_the_swept_param_is_refused`).
-[[scenario]]
-name = "plain"
-params = {{ gamma = 0.1 }}
-
-[sweep]
-beta = [0.2, 0.3, 0.4]
-"#,
-        model = golden_sir_basic().display(),
-        params = params_path.display(),
-        out = output.display(),
-    )).unwrap();
+    std::fs::write(&params_path, "gamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
 
     let st = Command::new(&bin)
-        .args(["batch", "run", &batch_path.to_string_lossy()])
+        .args(["simulate", &golden_sir_basic().to_string_lossy(),
+               "--params", &params_path.to_string_lossy(),
+               "--sweep", "beta=0.2,0.3,0.4",
+               "--seed", "1",
+               "--output-dir", &output.to_string_lossy()])
         .status().expect("spawn");
-    assert!(st.success(), "batch sweep should succeed");
+    assert!(st.success(), "simulate --sweep should succeed");
 
-    // Find all run.json files (one per sweep point × scenario × seed = 3 total)
+    // One leaf per sweep point × scenario × seed = 3.
     let run_dirs: Vec<_> = walkdir(&output.join("sims")).into_iter()
         .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(run_dirs.len(), 3, "expected 3 runs for 3-point sweep");
+    assert_eq!(run_dirs.len(), 3, "expected 3 leaves for a 3-point sweep");
 
     // The sweep point is a resolved value in the PARAMS level (not the
     // scenario delta, not the model hash). Its label encodes `beta=<v>`.
@@ -943,14 +897,13 @@ beta = [0.2, 0.3, 0.4]
     assert!((beta_values[1] - 0.3).abs() < 1e-9);
     assert!((beta_values[2] - 0.4).abs() < 1e-9);
 
-    // manifest.json is retired (gh#147 item D) — `batch run` must NOT write
-    // a batch-level index. The live tree (run.json per leaf) is the truth.
     assert!(!output.join("sims").join("manifest.json").exists(),
-        "batch run must not write sims/manifest.json (retired)");
+        "a sweep must not write sims/manifest.json (retired)");
 
-    // `camdl list` should show the beta values in PARAMS column
+    // `camdl list --kind sim` shows the beta values in the PARAMS column (the
+    // default listing folds a multi-cell run's cells into its ensemble row).
     let out = Command::new(&bin)
-        .args(["list", &output.to_string_lossy()])
+        .args(["list", &output.to_string_lossy(), "--kind", "sim"])
         .output().expect("spawn");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -959,103 +912,31 @@ beta = [0.2, 0.3, 0.4]
     assert!(stdout.contains("beta=0.4"), "list should show beta=0.4: {}", stdout);
 }
 
-/// gh#572: sir_basic's `baseline` preset sets beta = 0.3, so a beta sweep
-/// under it would run beta = 0.3 at every point — before gh#572 the store held
-/// one leaf for three requested sweep values. That manifest is now refused
-/// before any cell runs, naming the parameter, both sources, and the fix.
-///
-/// The identity invariant this test used to pin (gh#583: a cell's `params`
-/// level is the values the engine ran, so shadowed cells are one leaf) is now
-/// reachable only through generated draws, and is pinned there:
-/// `scenario_coordinate_collision_gh572.rs`
-/// `generated_draws_under_a_scenario_are_allowed_and_key_the_values_that_ran`.
+/// `--dry-run` on a sweep prints the resolved grid on stderr, exits 0, and
+/// touches nothing under the store.
 #[test]
-fn batch_sweep_under_a_preset_setting_the_swept_param_is_refused() {
+fn sweep_dry_run_prints_the_grid_and_writes_nothing() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
     let params_path = tmp.path().join("params.toml");
-    std::fs::write(&params_path, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
-    let batch_path = tmp.path().join("batch.toml");
-    std::fs::write(&batch_path, format!(r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ n = 1 }}
-parallel = 1
-
-[[scenario]]
-name = "baseline"
-
-[sweep]
-beta = [0.2, 0.3, 0.4]
-"#,
-        model = golden_sir_basic().display(),
-        params = params_path.display(),
-        out = output.display(),
-    )).unwrap();
-    let out = Command::new(&bin)
-        .args(["batch", "run", &batch_path.to_string_lossy()])
-        .output().expect("spawn");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a preset-shadowed sweep must be refused; stderr:\n{stderr}");
-    for line in [
-        "error: parameter `beta` is controlled by both the sweep and scenario `baseline`",
-        "  sweep:     beta = [0.2, 0.3, 0.4]",
-        "  scenario:  set beta = 0.3",
-        "Fix: remove `beta` from the sweep",
-    ] {
-        assert!(stderr.contains(line), "diagnostic lacks {line:?}; stderr:\n{stderr}");
-    }
-    assert!(
-        walkdir(&output).into_iter().all(|p| !p.join("run.json").exists()),
-        "a refused sweep writes no leaf"
-    );
-}
-
-#[test]
-fn simulate_batch_dry_run_prints_grid_no_output() {
-    // --dry-run on `batch run` must print the resolved sweep grid
-    // on stderr, exit 0, and touch zero files under output/runs/.
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-    let params_path = tmp.path().join("params.toml");
-    std::fs::write(&params_path, "beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
-    let batch_path = tmp.path().join("batch.toml");
-    std::fs::write(&batch_path, format!(r#"
-[config]
-model = "{model}"
-params = "{params}"
-output_dir = "{out}"
-seeds = {{ n = 1 }}
-parallel = 1
-
-[[scenario]]
-name = "plain"
-params = {{ gamma = 0.1 }}
-
-[sweep]
-beta = [0.2, 0.3, 0.4]
-"#,
-        model = golden_sir_basic().display(),
-        params = params_path.display(),
-        out = output.display(),
-    )).unwrap();
+    std::fs::write(&params_path, "gamma = 0.1\nN0 = 1000\nI0 = 10\n").unwrap();
 
     let out = Command::new(&bin)
-        .args(["batch", "run", &batch_path.to_string_lossy(), "--dry-run"])
+        .args(["simulate", &golden_sir_basic().to_string_lossy(),
+               "--params", &params_path.to_string_lossy(),
+               "--sweep", "beta=0.2,0.3,0.4",
+               "--seed", "1",
+               "--output-dir", &output.to_string_lossy(),
+               "--dry-run"])
         .output().expect("spawn");
     assert!(out.status.success(), "dry-run should exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("camdl batch run (dry run)"),
+    assert!(stderr.contains("camdl simulate (dry run)"),
         "stderr should mark the dry run: {}", stderr);
-    assert!(stderr.contains("Sweep grid"), "stderr should include sweep grid: {}", stderr);
-    for beta in ["0.2", "0.3", "0.4"] {
-        assert!(stderr.contains(beta), "stderr should include beta={}: {}", beta, stderr);
-    }
-    assert!(stderr.contains("no simulation"),
+    assert!(stderr.contains("sweep: beta = [0.2, 0.3, 0.4]"),
+        "stderr should include the sweep grid: {}", stderr);
+    assert!(stderr.contains("(dry run — no simulation, no files written.)"),
         "stderr should confirm no simulation ran: {}", stderr);
 
     // Must not have written any run files.
