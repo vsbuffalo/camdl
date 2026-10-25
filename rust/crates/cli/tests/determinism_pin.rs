@@ -160,8 +160,9 @@ fn explicit_seeds_match_single_runs() {
     let multi = tmp.path().join("multi.tsv");
     run_sim(&bin, &model, &["--seeds", "7,8,9"], &multi);
 
-    // Multi output has a leading `replicate` column. Extract replicate 2's
-    // rows (1-based → seed 8), stripping the replicate column, into t → row.
+    // Multi output has a leading `replicate` column. Extract replicate 1's
+    // rows (0-based → the second seed, 8), stripping the replicate column,
+    // into t → row.
     let multi_txt = std::fs::read_to_string(&multi).unwrap();
     let lines = content_lines(&multi_txt);
     let header = lines[0];
@@ -172,20 +173,20 @@ fn explicit_seeds_match_single_runs() {
         let mut it = l.splitn(2, '\t');
         let rep: u64 = it.next().unwrap().parse().unwrap();
         let rest = it.next().unwrap();
-        if rep == 2 {
+        if rep == 1 {
             let t: i64 = rest.split('\t').next().unwrap().parse().unwrap();
             rep2.insert(t, rest.to_string());
         }
     }
-    assert!(!rep2.is_empty(), "no replicate-2 rows found in multi output");
+    assert!(!rep2.is_empty(), "no replicate-1 rows found in multi output");
 
-    // Standalone seed 8 (replicate 2 ↔ second seed in the list).
+    // Standalone seed 8 (replicate 1 ↔ second seed in the list).
     let single = tmp.path().join("single8.tsv");
     run_sim(&bin, &model, &["--seed", "8"], &single);
     let single_rows = rows_by_t(&std::fs::read_to_string(&single).unwrap());
 
     assert_eq!(rep2, single_rows,
-        "replicate 2 of `--seeds 7,8,9` must be byte-identical to standalone \
+        "replicate 1 of `--seeds 7,8,9` must be byte-identical to standalone \
          `--seed 8`. A mismatch means the multi-run path derives or threads \
          the seed differently from the single-run path — exactly the \
          incoherence the unification must not introduce.");

@@ -1617,7 +1617,8 @@ fn ensemble_round_trip_deps_cat_and_list() {
         "cat <ensemble> must equal the -o combined TSV byte-for-byte");
 
     // The combined TSV header carries a `replicate` column, and the data has
-    // exactly 3 distinct replicate values.
+    // exactly 3 distinct replicate values, counted from 0 (one index base for
+    // every user-facing index, proposal 2026-10-24-batch-to-simulate §3).
     let text = String::from_utf8(mirror_bytes).unwrap();
     let header = text.lines().find(|l| !l.starts_with('#')).expect("a header line");
     assert_eq!(header.split('\t').next().unwrap(), "replicate",
@@ -1628,8 +1629,8 @@ fn ensemble_round_trip_deps_cat_and_list() {
         .filter_map(|l| l.split('\t').next())
         .filter(|c| !c.is_empty())
         .collect();
-    assert_eq!(reps, ["1", "2", "3"].into_iter().collect(),
-        "combined TSV must contain replicates 1,2,3, got {reps:?}");
+    assert_eq!(reps, ["0", "1", "2"].into_iter().collect(),
+        "combined TSV must contain replicates 0,1,2, got {reps:?}");
 
     // `list --kind ensemble` surfaces the ensemble (table to stderr; json to
     // stdout, one record per line).
