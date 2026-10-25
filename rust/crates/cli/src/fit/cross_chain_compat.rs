@@ -577,10 +577,10 @@ mod tests {
             assert!(split.m[d][d] > split.m[d][j] + 50.0,
                 "the displaced chain's own path must be far more probable under its own \
                  parameters ({:.1}) than chain {}'s path ({:.1})",
-                split.m[d][d], j + 1, split.m[d][j]);
+                split.m[d][d], j, split.m[d][j]);
             assert!(split.m[j][j] > split.m[j][d] + 50.0,
                 "chain {}'s parameters must score the displaced path far below their own \
-                 ({:.1} vs {:.1})", j + 1, split.m[j][j], split.m[j][d]);
+                 ({:.1} vs {:.1})", j, split.m[j][j], split.m[j][d]);
         }
     }
 

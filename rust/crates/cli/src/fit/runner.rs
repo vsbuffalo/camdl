@@ -4130,9 +4130,8 @@ mod tests {
 
     /// gh#972: `chain_eval_ids` is written to `fit_state.toml` and printed
     /// by `fit summary` as the chain column of the per-chain loglik-eval
-    /// table, so it must be the 1-based chain number that names `chain_N/`
-    /// and the `best ll=… (chain N)` line, not the 0-based in-memory index.
-    /// Chain 2 (index 1) was dropped, so the ids are not a contiguous run
+    /// table, so it must be the chain number that names `chain_N/` and the
+    /// `best ll=… (chain N)` line, not the row's position. Chain 1 was dropped, so the ids are not a contiguous run
     /// and the per_chain order is scrambled — position-based labels and a
     /// missing sort would both fail too.
     #[test]

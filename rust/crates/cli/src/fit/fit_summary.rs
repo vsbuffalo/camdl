@@ -3554,8 +3554,8 @@ fn dump_params_only(
 /// records in the stage's `diagnostics.json` (gh#607, gh#663) — the durable
 /// record, which does not depend on anything having captured stderr.
 struct RefusedChains {
-    /// `(1-based chain id, reason)`, in chain order.
-    records: Vec<(usize, String)>,
+    /// `(chain, reason)`, in chain order.
+    records: Vec<(ChainIndex, String)>,
     /// One sentence per thing in `diagnostics.json` that could not be read —
     /// the whole file when it is not a JSON array, else each entry that does
     /// not parse — so the summary says it could not look rather than implying
@@ -3592,7 +3592,7 @@ impl RefusedChains {
             match serde_json::from_value::<Diagnostic>(entry.clone()) {
                 Ok(d) => {
                     if let DiagnosticKind::BadInit { chain_id, reason, .. } = d.kind {
-                        records.push((chain_id, reason));
+                        records.push((ChainIndex(chain_id), reason));
                     }
                 }
                 Err(e) => unreadable.push(unreadable_entry(&path, i, entry, &e)),
@@ -3733,7 +3733,7 @@ mod tests {
         let none = RefusedChains { records: Vec::new(), unreadable: Vec::new() };
         assert_eq!(none.ran_of(8, None), None);
         let two = RefusedChains {
-            records: vec![(3, "a".into()), (5, "b".into())],
+            records: vec![(ChainIndex(3), "a".into()), (ChainIndex(5), "b".into())],
             unreadable: Vec::new(),
         };
         assert_eq!(two.ran_of(8, Some(6)).as_deref(),
