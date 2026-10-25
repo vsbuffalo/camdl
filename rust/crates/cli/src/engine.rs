@@ -163,13 +163,26 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
     let table_files: HashMap<String, String> =
         job.table_files.iter().cloned().collect();
 
+    // Decision D-B (proposal 2026-09-27-coordinate-kind-design-vs-sample,
+    // applied by 2026-10-24-batch-to-simulate §3 "Seeds"): a DESIGN coordinate
+    // never enters the process seed. A sweep point is a value the user chose,
+    // not a sample, so every design point at a given replicate shares one
+    // random stream — paired differences across points are low-variance and
+    // inserting a point leaves the others' trajectories unchanged. A draw row
+    // is a sample and keeps its index in the mix. `CellSpec.point_idx` keeps
+    // the design index either way, for labelling.
+    let seed_point_idx = |point_idx: usize| match job.source {
+        crate::sim_job::ParamSource::Sweep { .. } => 0,
+        _ => point_idx,
+    };
+
     let mut specs = Vec::with_capacity(total_runs);
     let mut run_idx = 0usize;
     for scenario in scenarios.iter() {
         for (point_idx, point_overrides) in param_points.iter().enumerate() {
             for rep in 0..replicates {
                 let process_seed = process_seed_for(
-                    explicit_seeds, base_seed, point_idx, rep, total_runs,
+                    explicit_seeds, base_seed, seed_point_idx(point_idx), rep, total_runs,
                 );
                 let obs_seed = process_seed ^ SEED_MIX_OBS;
                 let sim_run = build_cell_sim_run(

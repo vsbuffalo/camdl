@@ -1351,34 +1351,6 @@ struct LeafObs {
     aux: Vec<Vec<(String, f64)>>,
 }
 
-/// Expand the `--sweep` specs into Cartesian grid cells, each a sorted-by-name
-/// `(param, value)` list. No specs → a single empty cell, so the free-forward
-/// production runs exactly once (byte-identical to the no-sweep path). Mirrors
-/// [`crate::batch`]'s `expand_sweep`, but yields a sorted-name coordinate so the
-/// `sweep:<param>` columns (and the manifest sweep object) are deterministic.
-fn expand_predict_sweep(specs: &[crate::args::types::SweepSpec]) -> Vec<Vec<(String, f64)>> {
-    if specs.is_empty() {
-        return vec![Vec::new()];
-    }
-    // Sort by parameter name for a deterministic column/axis order.
-    let mut sorted: Vec<&crate::args::types::SweepSpec> = specs.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let mut cells: Vec<Vec<(String, f64)>> = vec![Vec::new()];
-    for spec in sorted {
-        let values = spec.grid.expand();
-        let mut next = Vec::with_capacity(cells.len() * values.len());
-        for cell in &cells {
-            for &v in &values {
-                let mut c = cell.clone();
-                c.push((spec.name.clone(), v));
-                next.push(c);
-            }
-        }
-        cells = next;
-    }
-    cells
-}
-
 fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, String> {
     // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
     //    its segment + config.
@@ -1581,44 +1553,22 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
     // (a loud error), never a silent baseline replay — see Guard 2.
 
     // 3c. Expand the parameter sweep into Cartesian grid cells, each a sorted
-    // `(param, value)` list. No `--sweep` → a single empty cell, so the
-    // free-forward production runs exactly once, byte-identical to the no-sweep
-    // path. A swept value rides in the SAME draw/sweep tier as a draw (it
-    // OVERRIDES the swept parameter in each draw row), so the resolver applies it
-    // below the scenario tier. A scenario touching a swept parameter is refused
-    // (3d); on the parameters it does touch, the scenario's tier applies.
-    let sweep_points: Vec<Vec<(String, f64)>> = expand_predict_sweep(&args.sweep);
+    // `(param, value)` list — the one expansion `simulate --sweep` uses too
+    // (`crate::sweep`), so both verbs give the same `point_id` to the same
+    // flags. No `--sweep` → a single empty cell, so the free-forward production
+    // runs exactly once, byte-identical to the no-sweep path. A swept value
+    // rides in the SAME draw/sweep tier as a draw (it OVERRIDES the swept
+    // parameter in each draw row), so the resolver applies it below the
+    // scenario tier. A scenario touching a swept parameter is refused (3d); on
+    // the parameters it does touch, the scenario's tier applies.
+    let sweep_points: Vec<Vec<(String, f64)>> = crate::sweep::expand_sweep_specs(&args.sweep);
     let swept_params: std::collections::BTreeSet<String> =
         args.sweep.iter().map(|s| s.name.clone()).collect();
 
     // Each swept parameter must be a real model parameter, named at most once —
     // a sweep over an undeclared (or duplicated) name would vary a `sweep:<param>`
     // column while the dynamics never move (a silent no-op).
-    {
-        use std::collections::HashSet;
-        if swept_params.len() != args.sweep.len() {
-            return Err(
-                "--sweep names the same parameter more than once; sweep each \
-                 parameter at most once (the grid is the Cartesian product of \
-                 distinct parameters)"
-                    .to_string(),
-            );
-        }
-        let model_params: HashSet<&str> =
-            model.parameters.iter().map(|p| p.name.as_str()).collect();
-        let unknown: Vec<&str> = swept_params
-            .iter()
-            .map(|s| s.as_str())
-            .filter(|p| !model_params.contains(p))
-            .collect();
-        if !unknown.is_empty() {
-            return Err(format!(
-                "--sweep names parameter(s) the model does not declare: {} \
-                 (a sweep must vary a real model parameter)",
-                unknown.join(", ")
-            ));
-        }
-    }
+    crate::sweep::check_swept_names(&args.sweep, &model)?;
 
     // 3d. A scenario and a sweep on the SAME parameter is a hard error: the
     // scenario's `set` would override (its `scale` rescale) every sweep value,
@@ -4861,27 +4811,6 @@ mod tests {
         // One-step row: the sweep:k cell is blank (empty), not a fabricated value.
         assert_eq!(lines[3],
             "fitted\t\t7\tone_step\tposterior\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
-    }
-
-    #[test]
-    fn expand_predict_sweep_empty_is_one_null_cell_and_cartesian_is_sorted() {
-        use crate::args::types::{Grid, SweepSpec};
-        // No specs → exactly one empty cell (the no-sweep single-pass path).
-        assert_eq!(expand_predict_sweep(&[]), vec![Vec::<(String, f64)>::new()]);
-        // Two params → Cartesian product, each cell sorted by param name.
-        let specs = vec![
-            SweepSpec { name: "rho".to_string(), grid: Grid::List(vec![0.3, 0.5]) },
-            SweepSpec { name: "k".to_string(), grid: Grid::List(vec![8.0]) },
-        ];
-        let cells = expand_predict_sweep(&specs);
-        assert_eq!(
-            cells,
-            vec![
-                vec![("k".to_string(), 8.0), ("rho".to_string(), 0.3)],
-                vec![("k".to_string(), 8.0), ("rho".to_string(), 0.5)],
-            ],
-            "k sorts before rho; the grid is the Cartesian product"
-        );
     }
 
     #[test]

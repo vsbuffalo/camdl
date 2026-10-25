@@ -388,9 +388,38 @@ pub struct SimulateArgs {
     /// draws cloud — requires `--fit <fit results dir>`. "prior" samples the
     /// parameters with a prior and "uniform" the ones with declared bounds;
     /// every other parameter comes from the model default, `--params`, the
-    /// scenario or `--param`.
+    /// scenario or `--param`. A draw is a SAMPLE from a measure; a value you
+    /// choose is a design point — use --sweep / --sweep-file for those.
     #[arg(long)]
     pub draws: Option<String>,
+
+    /// Deterministic grid over a parameter (repeatable): the DESIGN axis.
+    /// GRID is a list (`beta=0.2,0.3,0.6`), `lin(min,max,n)` or
+    /// `log10(min,max,n)`; an indexed parameter is named underscore-joined
+    /// (`beta_north`). Several --sweep flags form the Cartesian product
+    /// sorted by parameter name, the first name varying slowest; `point_id`
+    /// is a point's 0-based position in it. Every design point at a given
+    /// replicate shares one random stream (common random numbers), so paired
+    /// differences across points are low-variance and adding a point leaves
+    /// the others' trajectories unchanged; for independent noise per point,
+    /// run one invocation per point with a distinct --seed. Composes with
+    /// --scenario, --replicates, --seeds and the output flags; refused with
+    /// --draws, with a --param on a swept parameter, and with a scenario that
+    /// sets or scales one. Cells already in the store are read back, not
+    /// re-simulated (--force recomputes; --dry-run shows hits and misses).
+    #[arg(long, value_name = "PARAM=GRID",
+          conflicts_with_all = ["draws", "design_from", "sweep_file"])]
+    pub sweep: Vec<SweepSpec>,
+
+    /// Design points from a TSV: the header names model parameters, each row
+    /// is one design point, `point_id` its 0-based row. The DESIGN axis, like
+    /// --sweep (not a sample — a hand grid passed as --draws FILE would be
+    /// pooled into a band). A column naming no model parameter, a file with
+    /// zero rows, and a duplicate row are refused. The file enters the
+    /// ensemble's record by content digest.
+    #[arg(long, value_name = "FILE",
+          conflicts_with_all = ["draws", "design_from", "sweep"])]
+    pub sweep_file: Option<PathBuf>,
 
     /// Companion for `--draws`. With `--draws prior`, a fit.toml supplying
     /// priors. With `--draws posterior`, the fit results directory to read the
@@ -434,7 +463,7 @@ pub struct SimulateArgs {
     /// with `-o`/`--obs*`, which mirror the store this flag opts out of.
     #[arg(long, conflicts_with_all = [
         "output", "obs", "obs_dir", "obs_only", "obs_only_dir",
-        "seeds", "replicates", "draws",
+        "seeds", "replicates", "draws", "sweep", "sweep_file",
     ])]
     pub stdout: bool,
 
@@ -563,9 +592,9 @@ pub struct SimulateArgs {
     /// realize`. Pass a PATH to also mirror the log to that file (format from
     /// --tsv/--format/extension); bare `--event-log` (or `auto`) records only
     /// into the leaf. Single-run only — conflicts with --seeds / --replicates
-    /// / --draws.
+    /// / --draws / --sweep / --sweep-file.
     #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "auto",
-          conflicts_with_all = ["seeds", "replicates", "draws"])]
+          conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
     pub event_log: Option<PathBuf>,
 
     /// Event-log format: `parquet` (default, production) or `tsv`
@@ -583,7 +612,8 @@ pub struct SimulateArgs {
     /// `camdl cat <id> --stream reactive_log.tsv`); this flag is a convenience
     /// mirror, symmetric with `-o` for the trajectory — the leaf stays the
     /// system of record. Single-run only.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["seeds", "replicates", "draws"])]
+    #[arg(long, value_name = "PATH",
+          conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
     pub reactive_log: Option<PathBuf>,
 }
 
