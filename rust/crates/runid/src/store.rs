@@ -760,9 +760,11 @@ impl CasStore for FsCasStore {
 /// carry.
 ///
 /// A leaf's directory is one `{label}-{hash8}` segment per level
-/// ([`crate::layout`]), and the label is provenance: renaming a model file, a
-/// params file or a scenario preset changes the label and leaves the identity
-/// alone, so a lookup that builds the path from the *current* labels misses a
+/// ([`crate::layout`]), and the label is provenance: renaming a model file
+/// changes the model level's label (its stem) and leaves the identity alone
+/// (a preset's name, by contrast, is in the model's content digest, and a
+/// params file's name is in no label), so a lookup that builds the path from
+/// the *current* labels misses a
 /// leaf the store holds, and a run that writes it again stores one identity
 /// twice under two names. This walk reads the store by its hashes instead.
 /// At each level it takes every child directory whose segment ends in that
