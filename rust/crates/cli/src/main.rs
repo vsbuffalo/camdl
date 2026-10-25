@@ -2686,7 +2686,9 @@ struct StoredCell {
     spec: engine::CellSpec,
     traj_tsv: String,
     model: ir::Model,
-    obs: Vec<Vec<f64>>,
+    /// Per stream, the stored values as the leaf wrote them (validated as
+    /// numbers, kept as text so the mirror renders them unchanged).
+    obs: Vec<Vec<String>>,
 }
 
 impl SimSink {
@@ -2717,11 +2719,11 @@ impl SimSink {
                     // column after the temporal column(s) and writes no extra
                     // columns into the leaf.
                     let last = line.rsplit('\t').next().unwrap_or("");
-                    let v: f64 = last.parse().map_err(|_| format!(
+                    last.parse::<f64>().map_err(|_| format!(
                         "{} line {}: cannot read `{}` as the stored observation value",
                         path.display(), i + 1, last
                     ))?;
-                    vals.push(v);
+                    vals.push(last.to_string());
                 }
                 out.push(vals);
             }
@@ -3109,7 +3111,25 @@ struct ObsRow {
     coverage: sim::inference::Coverage,
     /// The cell this row belongs to, as the table's coordinate columns say it.
     coords: CellCoords,
-    value: f64,
+    value: ObsValue,
+}
+
+/// A row's value: drawn in this run, or read back verbatim from a stored leaf.
+/// A stored value is written exactly as the leaf wrote it, so a read-back row
+/// is byte-identical to the row a fresh run would have produced (a real value
+/// that rounds to an integer at six decimals stays `2.000000`, never `2`).
+enum ObsValue {
+    Drawn(f64),
+    Stored(String),
+}
+
+impl ObsValue {
+    fn render(&self) -> String {
+        match self {
+            ObsValue::Drawn(v) => obs_emit::format_obs_value(*v),
+            ObsValue::Stored(text) => text.clone(),
+        }
+    }
 }
 
 /// The parameter-point axis of a job, as the combined trajectory and
@@ -3156,22 +3176,28 @@ struct CellCoords {
     seed: u64,
 }
 
-impl CellCoords {
-    fn of(spec: &engine::CellSpec, axis: &PointAxis) -> Self {
+impl CellCoords {    /// Errs rather than writing a placeholder when a swept parameter has no
+    /// value on the cell: a `sweep:<param>` cell is a coordinate, and a
+    /// plausible-looking `NaN` there would be a wrong answer, not a blank.
+    fn of(spec: &engine::CellSpec, axis: &PointAxis) -> Result<Self, String> {
         let point_values = match axis {
             PointAxis::Sweep { params } => params
                 .iter()
-                .map(|p| spec.point_overrides.get(p).copied().unwrap_or(f64::NAN))
-                .collect(),
+                .map(|p| {
+                    spec.point_overrides.get(p).copied().ok_or_else(|| format!(
+                        "cell {} (point {}) carries no value for swept parameter `{}`",
+                        spec.run_idx, spec.point_idx, p
+                    ))
+                })
+                .collect::<Result<Vec<f64>, String>>()?,
             PointAxis::Draws | PointAxis::None => Vec::new(),
         };
-        CellCoords {
+        Ok(CellCoords {
             run_idx: spec.run_idx,
             scenario: spec.scenario.name().to_string(),
-            point_idx: spec.point_idx,
-            point_values,
+            point_idx: spec.point_idx,            point_values,
             seed: spec.process_seed,
-        }
+        })
     }
 }
 
@@ -3322,9 +3348,8 @@ impl engine::RunSink for StreamSink {
 
     fn merge_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
         let traj = &cell.traj;
-        let model = &cell.model;
-        let run_idx = cell.spec.run_idx;
-        let coords = CellCoords::of(&cell.spec, &self.shape.axis);
+        let model = &cell.model;        let run_idx = cell.spec.run_idx;
+        let coords = CellCoords::of(&cell.spec, &self.shape.axis)?;
 
         // Diagnostics (first run only).
         if run_idx == 0 && !traj.transition_diagnostics.is_empty() {
@@ -3415,7 +3440,7 @@ impl engine::RunSink for StreamSink {
                         time: obs_t,
                         coverage,
                         coords: coords.clone(),
-                        value: draw,
+                        value: ObsValue::Drawn(draw),
                     });
                 }
             }
@@ -3483,9 +3508,8 @@ impl StreamSink {
     /// cells and copied, never re-rendered. Under `--dates` the three date
     /// cells are rendered from the row's own `t`/`t_start`/`t_stop`. Stored
     /// observation values are pushed under the shared plan's rows.
-    fn merge_stored(&mut self, cell: &StoredCell) -> Result<(), String> {
-        let model = &cell.model;
-        let coords = CellCoords::of(&cell.spec, &self.shape.axis);
+    fn merge_stored(&mut self, cell: &StoredCell) -> Result<(), String> {        let model = &cell.model;
+        let coords = CellCoords::of(&cell.spec, &self.shape.axis)?;
         let mut lines = cell.traj_tsv.lines();
         let header = lines.next().ok_or_else(|| "stored traj.tsv is empty".to_string())?;
         let Some(rest_header) = header.strip_prefix(util::TRAJ_TIME_HEADER) else {
@@ -3586,8 +3610,10 @@ impl StreamSink {
                         self.obs_stream_names[si], values.len(), rows.len()
                     ));
                 }
-                for (&value, &(time, coverage)) in values.iter().zip(&rows) {
-                    self.obs_data[si].push(ObsRow { time, coverage, coords: coords.clone(), value });
+                for (value, &(time, coverage)) in values.iter().zip(&rows) {
+                    self.obs_data[si].push(ObsRow {
+                        time, coverage, coords: coords.clone(), value: ObsValue::Stored(value.clone()),
+                    });
                 }
             }
         }
@@ -3629,12 +3655,7 @@ impl StreamSink {
                         write!(out, "\t{}", d).unwrap();
                     }
                     for si in 0..self.obs_stream_names.len() {
-                        let val = self.obs_data[si][row_idx].value;
-                        if val == val.round() && val.abs() < 1e15 {
-                            write!(out, "\t{}", val as i64).unwrap();
-                        } else {
-                            write!(out, "\t{:.6}", val).unwrap();
-                        }
+                        write!(out, "\t{}", self.obs_data[si][row_idx].value.render()).unwrap();
                     }
                     writeln!(out).unwrap();
                 }
@@ -3711,12 +3732,7 @@ impl StreamSink {
                         for (_, level) in &self.obs_files[si].dims {
                             write!(out, "\t{level}").unwrap();
                         }
-                        let val = row.value;
-                        if val == val.round() && val.abs() < 1e15 {
-                            writeln!(out, "\t{}", val as i64).unwrap();
-                        } else {
-                            writeln!(out, "\t{:.6}", val).unwrap();
-                        }
+                        writeln!(out, "\t{}", row.value.render()).unwrap();
                     }
                 }
                 drop(out);

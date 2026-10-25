@@ -1574,8 +1574,9 @@ fn sim_levels(labels: [&str; 5], hash_bytes: [u8; 5]) -> (Vec<crate::record::Lev
 }
 
 /// A leaf committed under one set of labels is found by a lookup that carries
-/// other labels for the same hashes — a renamed model file, params file or
-/// scenario preset is a label change, never an identity change.
+/// other labels for the same hashes — a renamed model file is a label change,
+/// never an identity change (a preset's name is in the model digest; a params
+/// file's name is in no label).
 #[test]
 fn find_leaf_finds_a_leaf_under_another_label() {
     let root = tmp_root("find_relabel");

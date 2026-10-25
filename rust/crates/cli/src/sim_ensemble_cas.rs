@@ -22,7 +22,9 @@
 //!     re-keys the ensemble, and the arm's label — a display string, not
 //!     identity — is deliberately absent: two ensembles of identical cells
 //!     hash alike whether an arm was named by a preset or derived from flags,
-//!     and renaming a preset re-keys nothing here. The cell COUNT is folded in
+//!     and renaming a preset re-keys nothing at this level (it does re-key the
+//!     ensemble through every cell's `sim_run_id`, since the name is in the
+//!     model digest). The cell COUNT is folded in
 //!     explicitly (`n_cells`): 3 replicates vs 4 is a different combined TSV,
 //!     so a different ensemble (count-in-the-key, the n_trajectories collision
 //!     class). Sorting makes the digest order-independent. The `design` is the
