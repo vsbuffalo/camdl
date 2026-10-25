@@ -1465,7 +1465,11 @@ fn thinned_draws_params_tomls(
         &segment.to_string_lossy(), None,
     ) {
         Ok(p) => p.with_selection(selection.cloned()),
-        Err(_) => return Ok(None),
+        // No cloud: the caller scores the point estimate instead. Any other
+        // failure (a leaf refused for its chain numbering, gh#990) is an error,
+        // not a fallback.
+        Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => return Ok(None),
+        Err(e) => return Err(e.into()),
     };
     let (rows, _info) = pdraws.load_params_with_info()?;
     let n = rows.len();
@@ -1655,7 +1659,12 @@ fn point_estimate_params_toml(
     match crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), None) {
         Ok(pdraws) => posterior_mean_params_toml(&pdraws.with_selection(selection.cloned())),
         // No posterior cloud → an optimizer fit; its θ̂ is the single winner.
-        Err(_) => crate::fit::fit_summary::winner_params_toml(segment),
+        Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => {
+            crate::fit::fit_summary::winner_params_toml(segment)
+        }
+        // Anything else — a leaf refused for counting its chains from 1
+        // (gh#990) — must not be scored at a winner instead.
+        Err(e) => Err(e.into()),
     }
 }
 

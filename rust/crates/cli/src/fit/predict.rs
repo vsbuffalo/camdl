@@ -706,15 +706,6 @@ impl FitResult {
         selection: Option<ChainSelection>,
     ) -> Result<FitResult, String> {
         let seg_str = segment.to_str().ok_or("fit path is not valid UTF-8")?;
-        // A leaf whose chain directories count from 1 is refused here, before
-        // the cloud is resolved: the `Err` arm below reads any resolution
-        // failure as "no posterior cloud, so a point-estimate fit", and the
-        // refusal must not be mistaken for that (gh#990).
-        if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
-            for s in view.stages.iter().filter(|s| s.method.is_posterior_sampler()) {
-                crate::chain_index::refuse_one_based_layout(&s.stage_dir)?;
-            }
-        }
         match posterior_draws::resolve_posterior_draws(seg_str, None) {
             Ok(pref) => {
                 let pref = pref.with_selection(selection);
@@ -767,8 +758,11 @@ impl FitResult {
                 ))
             }
             // No cloud: classify as a point-estimate fit, naming the method
-            // the refusal is about.
-            Err(e) => {
+            // the refusal is about. Only `NoPosterior` means that; any other
+            // failure — a leaf refused for counting its chains from 1
+            // (gh#990) among them — is the answer, not a reason to reclassify.
+            Err(posterior_draws::PosteriorDrawsError::Other(e)) => Err(e),
+            Err(posterior_draws::PosteriorDrawsError::NoPosterior(e)) => {
                 if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
                     if let Some(s) = view.stages.last() {
                         return Ok(FitResult::PointEstimate {

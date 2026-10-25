@@ -348,8 +348,8 @@ so a bare `toml` reader still sees the parameters at the top level. The block
 records `camdl_version`, `timestamp`, `content_hash` (a tamper hash over the
 numeric values only, at 12-decimal precision, so editing a provenance field does
 not invalidate it), `fit_hash`, `backend`, `dt`, `model`, `model_identity`,
-per-stream `[provenance.data]` path+hash entries, `seed`, `method`, 1-indexed
-`chain`, `log_likelihood`, `loglik_sd`, `n_particles`, and optional
+per-stream `[provenance.data]` path+hash entries, `seed`, `method`, `chain`
+(counted from 0, §2), `log_likelihood`, `loglik_sd`, `n_particles`, and optional
 `ess_mean`/`ess_min`. `camdl simulate --params` reads `backend`/`dt` back to
 warn when a downstream simulation would run under different dynamics than the
 fit, and refuses the file when its parameter values no longer hash to
@@ -2766,8 +2766,11 @@ rows and `cross_chain_compat.json`'s `chains`. `simulate`'s `replicate`, `draw`
 and `point_id` count from 0 too. Joining any two of these takes no arithmetic,
 and no artifact carries a second base to convert from. A leaf written by a camdl
 that numbered its directories from 1 (`chain_1/` with no `chain_0/`) is refused
-by every reader that addresses a chain by name — `fit summary`, `fit predict`,
-`fit run --resume` — rather than read with every chain shifted by one.
+by every reader that addresses a chain by name or reads the posterior cloud —
+`fit summary` (every `--format`), `fit predict`, `fit table --quantity`,
+`compare` when it derives a prequential, `simulate --draws posterior`, and
+`fit run --resume`, which refuses the base leaf before copying any chain state —
+rather than read with every chain shifted by one.
 
 - **`<root>`** is `output_dir` from the `fit.toml` (anchored at the `fit.toml`),
   else `$CAMDL_OUTPUT_DIR` (anchored at the working directory), else `results`

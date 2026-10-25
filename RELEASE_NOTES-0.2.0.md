@@ -129,8 +129,10 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   (`--exclude-chains 3,5` now names the chains that were `4,6`; a script that
   opened `chain_<c+1>/` for a `draws.tsv` row with `chain = c` opens
   `chain_<c>/`). A fit written before this release (`chain_1/` with no
-  `chain_0/`) is refused by `fit summary`, `fit predict`, `fit table`, `compare`
-  and `fit run --resume` with a message naming the change; re-run the fit. Also
+  `chain_0/`) is refused with a message naming the change by `fit summary`
+  (every `--format`), `fit predict`, `fit table --quantity`, `compare` when it
+  derives the fit's prequential, `simulate --draws posterior`, and
+  `fit run --resume` (before any chain state is copied); re-run the fit. Also
   closes gh#978, gh#979, gh#981 and gh#913, which were the same two-base
   conversion at four more sites.
 
