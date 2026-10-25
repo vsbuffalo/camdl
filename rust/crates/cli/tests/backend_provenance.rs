@@ -27,18 +27,34 @@ fn golden_pure_death() -> PathBuf {
     Path::new(&manifest).join("../../../ir/golden/pure_death.ir.json")
 }
 
+/// The tamper hash `camdl fit` declares in `[provenance] content_hash`:
+/// SHA-256 over `{name}={value:.12}\0` in name order, first 8 hex characters
+/// (`fit::provenance::mle_params_tamper_hash`; run-spec §10.6). The fixtures
+/// compute it so each is a fit's unedited file, which `simulate --params`
+/// checks before it reads the block.
+fn tamper_hash(params: &[(&str, f64)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted = params.to_vec();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let mut h = Sha256::new();
+    for (name, value) in sorted {
+        h.update(format!("{}={:.12}\x00", name, value).as_bytes());
+    }
+    hex::encode(&h.finalize()[..4])
+}
+
 /// Write a minimal mle_params.toml with a `[provenance]` block claiming
 /// the fit used `backend` at `dt=1.0`. Top-level params come first
 /// (required by TOML so they stay at the file's top level, not scoped
 /// under the [provenance] table) — matches what `write_mle_params`
-/// produces in production.
+/// produces in production, down to the content hash over `mu`.
 fn write_fake_mle(path: &Path, backend: &str, dt: f64) {
     let contents = format!(r#"mu = 0.05
 
 [provenance]
 camdl_version = "test"
 timestamp = "2026-04-19T00:00:00Z"
-content_hash = "deadbeef"
+content_hash = "{hash}"
 backend = "{}"
 dt = {}
 model = "pure_death.ir.json"
@@ -49,8 +65,62 @@ chain = 1
 log_likelihood = -22.0
 loglik_sd = 0.0
 n_particles = 500
-"#, backend, dt);
+"#, backend, dt, hash = tamper_hash(&[("mu", 0.05)]));
     std::fs::write(path, contents).unwrap();
+}
+
+/// A fit-written params file whose values were edited afterwards is refused
+/// before anything runs: the block's `content_hash` no longer matches the
+/// values, and the message names the file and both ways forward.
+#[test]
+fn simulate_refuses_a_params_file_edited_after_its_fit() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let mle = tmp.path().join("mle.toml");
+    write_fake_mle(&mle, "chain_binomial", 1.0);
+    let text = std::fs::read_to_string(&mle).unwrap();
+    assert!(text.contains("mu = 0.05\n"), "{text}");
+    std::fs::write(&mle, text.replace("mu = 0.05\n", "mu = 0.07\n")).unwrap();
+
+    let output = tmp.path().join("out");
+    let out = Command::new(&bin)
+        .args(["simulate", &golden_pure_death().to_string_lossy(),
+               "--params", &mle.to_string_lossy(),
+               "--seed", "1", "--output-dir", &output.to_string_lossy(),
+               "-o", &tmp.path().join("t.tsv").to_string_lossy()])
+        .output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "an edited fit params file must be refused; stderr: {stderr}");
+    let mle_s = mle.to_string_lossy();
+    for needle in [
+        &format!("params file {mle_s} was edited after the fit that produced it") as &str,
+        "content_hash = \"",
+        "re-run the fit",
+        "remove the [provenance] block",
+    ] {
+        assert!(stderr.contains(needle), "diagnostic lacks {needle:?}; stderr: {stderr}");
+    }
+    assert!(!output.join("sims").exists(), "a refused run writes no leaf");
+    assert!(!tmp.path().join("t.tsv").exists(), "a refused run writes no mirror");
+}
+
+/// The unedited file a fit writes runs, silently as far as the check goes.
+#[test]
+fn simulate_runs_an_unedited_fit_params_file() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let mle = tmp.path().join("mle.toml");
+    write_fake_mle(&mle, "chain_binomial", 1.0);
+    let out = Command::new(&bin)
+        .args(["simulate", &golden_pure_death().to_string_lossy(),
+               "--params", &mle.to_string_lossy(),
+               "--seed", "1", "--output-dir", &tmp.path().join("out").to_string_lossy(),
+               "-o", &tmp.path().join("t.tsv").to_string_lossy()])
+        .output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    assert!(!stderr.contains("edited after the fit"), "stderr: {stderr}");
+    assert!(tmp.path().join("t.tsv").is_file());
 }
 
 #[test]
@@ -162,7 +232,7 @@ fn simulate_from_mle_params_writes_a_valid_sim_record() {
 [provenance]
 camdl_version = "test"
 timestamp = "2026-04-19T00:00:00Z"
-content_hash = "deadbeef"
+content_hash = "{hash}"
 fit_hash = "{}"
 backend = "chain_binomial"
 dt = 1.0
@@ -174,7 +244,7 @@ chain = 1
 log_likelihood = -22.0
 loglik_sd = 0.0
 n_particles = 500
-"#, fit_hash);
+"#, fit_hash, hash = tamper_hash(&[("mu", 0.05)]));
     std::fs::write(&mle, contents).unwrap();
 
     let output = tmp.path().join("out");
@@ -433,6 +503,23 @@ cooling = 0.7
         .unwrap_or_else(|| panic!("no [provenance].backend line in:\n{contents}"));
     assert!(line.contains("\"chain_binomial\""),
         "mle_params must record the stage backend (chain_binomial); got: {line}");
+
+    // The round trip the hand-written fixtures above cannot make: the file a
+    // real fit writes passes `simulate --params`' tamper check. Its estimates
+    // carry ten decimals, so this pins that the declared `content_hash` is
+    // over the values as written (a hash over the unrounded estimate refused
+    // every real fit's file).
+    let sim = Command::new(&bin)
+        .args(["simulate", &seed_timing_model().to_string_lossy(),
+               "--params", &mle.to_string_lossy(),
+               "--seed", "1", "--output-dir", &tmp.path().join("sim").to_string_lossy(),
+               "-o", &tmp.path().join("t.tsv").to_string_lossy()])
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output().expect("spawn camdl simulate");
+    let stderr = String::from_utf8_lossy(&sim.stderr);
+    assert!(sim.status.success(), "simulate --params on the fit's own file must run; stderr: {stderr}");
+    assert!(!stderr.contains("edited after the fit"), "stderr: {stderr}");
+    assert!(stderr.contains("backend auto-matched"), "the block was read: {stderr}");
 }
 
 fn walkdir(root: &Path) -> Vec<PathBuf> {
