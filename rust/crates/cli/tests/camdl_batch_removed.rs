@@ -29,7 +29,9 @@ fn batch_is_an_unrecognized_subcommand() {
             .args(["batch", sub, "/no/such/sweep.toml"])
             .output()
             .expect("spawn camdl");
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        // clap colours its error text when the environment asks for it (CI
+        // does), putting escape codes inside the quotes; compare the plain text.
+        let stderr = strip_ansi(&String::from_utf8_lossy(&out.stderr));
         assert_eq!(out.status.code(), Some(2), "clap's usage error exits 2; stderr: {stderr}");
         assert!(
             stderr.contains("unrecognized subcommand 'batch'"),
@@ -37,4 +39,24 @@ fn batch_is_an_unrecognized_subcommand() {
              or a run; got: {stderr}"
         );
     }
+}
+
+/// Remove ANSI SGR escape sequences (`ESC [ … m`) so a coloured and an
+/// uncoloured rendering of the same message compare equal.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for d in chars.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
