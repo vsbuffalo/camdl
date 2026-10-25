@@ -1898,6 +1898,20 @@ fn run_simulate(a: &args::SimulateArgs) {
             &obs_path, &obs_dir, &obs_only,
             design.as_ref().map(|(_, d)| d),
         );
+        // The store view of a multi-cell plan: which cells the store already
+        // holds, under the exact rule the run applies, and the leaf paths.
+        // Nothing is displaced or written — `--force` is reported, not applied.
+        if total_runs > 1 {
+            let cas = build_simulate_cas_sink(
+                &base_sim_run, &ir_path, &scenario_names, &cas_root,
+                want_obs, a.force, label_arg.clone(), fit_dep.clone(),
+                a.allow_degenerate_rates, output_cols.clone(), emit_every.clone(), total_runs,
+            ).unwrap_or_else(|e| {
+                eprintln!("error preparing CAS: {}", e);
+                std::process::exit(1);
+            });
+            print_store_view(&cas, &job, a.force, a.quantities_out.is_some());
+        }
         return;
     }
 
@@ -2070,7 +2084,20 @@ fn run_simulate(a: &args::SimulateArgs) {
         }
     };
 
-    let mut sink = SimSink { cas: cas_sink, stream, skip_cas: a.stdout, quant };
+    // Store re-use: a multi-cell run skips the cells the store already holds
+    // and reads them back. `--stdout` opted out of the store; a
+    // `--quantities-out` run needs every trajectory in memory (see `SimSink`);
+    // a lone run keeps its path (its commit dedups against the store).
+    let reuse = total_runs > 1 && !a.stdout && quant.is_none();
+    let mut sink = SimSink {
+        cas: cas_sink,
+        stream,
+        skip_cas: a.stdout,
+        quant,
+        reuse,
+        pending: std::collections::BTreeMap::new(),
+        n_reused: 0,
+    };
     // The `--event-log` branch drives the sink's `RunSink` methods directly
     // (one recorded cell), so the trait must be in scope here.
     use engine::RunSink as _;
@@ -2189,7 +2216,13 @@ fn run_simulate(a: &args::SimulateArgs) {
         }
     }
 
-    // Report where the leaves landed.
+    // Report what the store supplied and where the leaves landed.
+    if sink.n_reused > 0 {
+        crate::status::step("cached", format!(
+            "{} of {} cells read from the store; simulated {}",
+            sink.n_reused, total_runs, total_runs - sink.n_reused
+        ));
+    }
     report_cas_leaves(&sink.cas.completed_runs, &cas_root);
 
     // ── Write the combined observation mirror ───────────────────────────────
@@ -2328,10 +2361,19 @@ fn write_quantities_sidecar(q: &SimQuantities) {
 /// `RunSink` for `camdl simulate`: writes the per-cell content-addressed
 /// leaf (`cas`, shared with `batch run`) AND the `--output`/`--obs` mirror
 /// (`stream`, the combined wide-format TSV). The store is the system of
-/// record; the mirror is the convenience view. Every planned cell runs —
-/// `should_run` is never overridden to skip — because the combined mirror
-/// needs every cell's rows; cache hits are handled idempotently by the
-/// store's `commit_atomic`.
+/// record; the mirror is the convenience view.
+///
+/// A multi-cell run re-uses what the store already holds (proposal
+/// 2026-10-24-batch-to-simulate §3): a cell whose leaf is a hit under
+/// [`crate::cas_sink::CasSink::stored_hit`]'s exact rule is not simulated,
+/// and its `traj.tsv` rows — and, when observations were asked for, its
+/// stored observation values — are read back into the combined outputs in
+/// canonical order. The engine classifies every cell before any runs, so
+/// skipped cells are held in `pending` and spliced in by `run_idx` as the
+/// live cells merge. A `--quantities-out` run simulates every cell: the
+/// quantities are a regenerated sidecar computed from the in-memory
+/// trajectory, and the stored `traj.tsv` writes real values at four decimals,
+/// so it cannot stand in. A lone run keeps today's path (commit dedup).
 struct SimSink {
     cas: crate::cas_sink::CasSink,
     stream: StreamSink,
@@ -2339,6 +2381,14 @@ struct SimSink {
     /// entirely — only the `stream` mirror runs, and the caller writes its
     /// buffer to stdout. The store is otherwise the system of record.
     skip_cas: bool,
+    /// Whether cells the store already holds are skipped and read back:
+    /// a multi-cell run without `--stdout` and without `--quantities-out`.
+    reuse: bool,
+    /// Skipped cells, by `run_idx`, waiting for their place in canonical
+    /// order among the live cells' merges.
+    pending: std::collections::BTreeMap<usize, StoredCell>,
+    /// How many cells were read from the store rather than simulated.
+    n_reused: usize,
     /// Generated quantities (proposal 2026-06-25), `Some` iff the model declares
     /// a `quantities {}` block AND `--quantities-out <dir>` was given. The
     /// evaluator is compiled lazily on the first cell (from that cell's
@@ -2584,11 +2634,14 @@ impl SimQuantities {
         // parameter would be strictly weaker, however well the key were typed,
         // because a caller could pass one key for every cell.
         let scenario = cell.spec.scenario.name();
-        let point = cell.spec.point_idx;
-        let sweep: Vec<(String, f64)> = match &self.axis {
-            PointAxis::Sweep { .. } =>
+        // A design point is a group key; a draw is a sample within its
+        // scenario's group, so a draws job keeps one group per scenario.
+        let (point, sweep): (usize, Vec<(String, f64)>) = match &self.axis {
+            PointAxis::Sweep { .. } => (
+                cell.spec.point_idx,
                 cell.spec.point_overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            PointAxis::Draws | PointAxis::None => Vec::new(),
+            ),
+            PointAxis::Draws | PointAxis::None => (0, Vec::new()),
         };
         let acc = self.by_group.entry((point, scenario.to_string())).or_default();
         if acc.draws.is_empty() {
@@ -2613,12 +2666,104 @@ impl SimQuantities {
     }
 }
 
+/// A cell the store already held, read back for the combined outputs: its
+/// leaf's `traj.tsv` text (spliced in as rows, never re-rendered, so the bytes
+/// are the leaf's), the scenario-applied model it ran, and — when observations
+/// were asked for — each stream's stored values in plan-row order.
+struct StoredCell {
+    spec: engine::CellSpec,
+    traj_tsv: String,
+    model: ir::Model,
+    obs: Vec<Vec<f64>>,
+}
+
+impl SimSink {
+    /// Read a hit back from the store: the leaf `stored_hit` found, its
+    /// `traj.tsv`, and the observation subtree the exact rule required.
+    fn read_stored(&self, spec: &engine::CellSpec) -> Result<StoredCell, String> {
+        let (rt, _, _) = self.cas.cell_resolve(spec)?;
+        let (dir, _) = self.cas.stored_leaf(&rt);
+        let traj_path = dir.join("traj.tsv");
+        let traj_tsv = std::fs::read_to_string(&traj_path)
+            .map_err(|e| format!("reading stored {}: {}", traj_path.display(), e))?;
+        let model = util::resolve_run_ir(&spec.sim_run)?;
+        let obs = if self.stream.obs_path.is_some() || self.stream.obs_dir.is_some() {
+            let obs_dir = crate::cas_sink::obs_subtree_dir(
+                &dir, &model.observations, self.stream.emit_every.as_ref(), spec.obs_seed,
+            )?;
+            let mut out = Vec::with_capacity(model.observations.len());
+            for o in &model.observations {
+                let path = obs_dir.join(format!("{}.tsv", o.name));
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("reading stored {}: {}", path.display(), e))?;
+                let mut vals = Vec::new();
+                for (i, line) in text.lines().enumerate().skip(1) {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    // The value is the last column: the writer puts the scored
+                    // column after the temporal column(s) and writes no extra
+                    // columns into the leaf.
+                    let last = line.rsplit('\t').next().unwrap_or("");
+                    let v: f64 = last.parse().map_err(|_| format!(
+                        "{} line {}: cannot read `{}` as the stored observation value",
+                        path.display(), i + 1, last
+                    ))?;
+                    vals.push(v);
+                }
+                out.push(vals);
+            }
+            out
+        } else {
+            Vec::new()
+        };
+        Ok(StoredCell { spec: spec.clone(), traj_tsv, model, obs })
+    }
+
+    /// Splice every pending stored cell with `run_idx < before` into the
+    /// combined outputs, in canonical order.
+    fn flush_pending_before(&mut self, before: usize) -> Result<(), String> {
+        let ready: Vec<usize> = self.pending.range(..before).map(|(k, _)| *k).collect();
+        for k in ready {
+            let cell = self.pending.remove(&k).expect("key listed from the map");
+            self.stream.merge_stored(&cell)?;
+        }
+        Ok(())
+    }
+}
+
 impl engine::RunSink for SimSink {
     fn on_start(&mut self, grid: &engine::Grid) {
         self.stream.on_start(grid);
     }
 
+    fn should_run(&mut self, spec: &engine::CellSpec) -> bool {
+        if !self.reuse {
+            return true;
+        }
+        self.cas.should_run(spec)
+    }
+
+    fn on_skip(&mut self, spec: &engine::CellSpec) {
+        self.cas.on_skip(spec);
+        self.n_reused += 1;
+        match self.read_stored(spec) {
+            Ok(cell) => {
+                self.pending.insert(spec.run_idx, cell);
+            }
+            // Surfaced with the commit errors after the loop: a hit the mirror
+            // cannot read back is a run that did not produce what was asked.
+            Err(e) => self.cas.errors.push(format!(
+                "scenario={} seed={}: reading the stored cell back: {}",
+                spec.scenario.name(), spec.process_seed, e
+            )),
+        }
+    }
+
     fn merge_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
+        // Stored cells that precede this one in canonical order go first, so
+        // the combined outputs read as if every cell had run.
+        self.flush_pending_before(cell.spec.run_idx)?;
         // Leaf first (system of record), then the mirror. A commit error is
         // accumulated on `cas.errors` and surfaced after the loop, never
         // silently dropped. Under `--stdout` the leaf is suppressed.
@@ -2633,6 +2778,11 @@ impl engine::RunSink for SimSink {
             q.push_cell(cell)?;
         }
         Ok(())
+    }
+
+    fn on_finish(&mut self, grid: &engine::Grid) -> Result<(), String> {
+        self.flush_pending_before(usize::MAX)?;
+        self.stream.on_finish(grid)
     }
 }
 
@@ -3223,46 +3373,12 @@ impl engine::RunSink for StreamSink {
             let params = compiled.default_params.clone();
             let mut obs_rng = sim::rng::StatefulRng::new(cell.spec.obs_seed);
 
-            if run_idx == 0 {
-                for obs_model in &model.observations {
-                    self.obs_stream_names.push(obs_model.name.clone());
-                    self.obs_files.push(ObsFileKey {
-                        source: obs_model.source.clone(),
-                        dims: crate::obs_emit::dim_cells(obs_model)?,
-                    });
-                    self.obs_data.push(Vec::new());
-                    // `model` is the cell's resolved model, so this is the
-                    // cell's own horizon under a per-scenario `to` (gh#561),
-                    // and its forecast origin under `--init-state` (gh#641 —
-                    // `None` for every ordinary run). The cells share one obs
-                    // axis, and the pre-flight has already refused a grid whose
-                    // cells disagree about it.
-                    let times = obs_emit_schedule_times(
-                        obs_model,
-                        cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
-                        model.simulation.t_end,
-                        self.emit_every.as_ref(),
-                    )?;
-                    // The rows the declaration assigns to those times, within
-                    // the run (gh#833). A wide file has one `time` column and
-                    // cannot carry a windowed stream's two boundaries.
-                    let plan = crate::obs_emit::plan_emission(
-                        obs_model, &times, run_start_of(traj, model), model.simulation.t_end,
-                        self.emit_every.as_ref().and_then(|e| e.resolve_for(&obs_model.source)),
-                    )?;
-                    if self.obs_path.is_some()
-                        && matches!(plan.columns, crate::obs_emit::TemporalColumns::Window { .. })
-                    {
-                        return Err(format!(
-                            "observation stream '{}' declares `window_start`/`window_stop` \
-                             columns, which a single wide `--obs` file cannot carry.\n  \
-                             Use --obs-dir (one file per stream, keeps trajectory) or \
-                             --obs-only-dir (one file per stream, suppresses trajectory).",
-                            obs_model.name
-                        ));
-                    }
-                    self.obs_plans.push(plan);
-                }
+            if self.obs_plans.is_empty() {
+                self.ensure_obs_streams(
+                    model,
+                    run_start_of(traj, model),
+                    cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t),
+                )?;
             }
 
             for (si, obs_ir) in model.observations.iter().enumerate() {
@@ -3294,6 +3410,174 @@ impl engine::RunSink for StreamSink {
 }
 
 impl StreamSink {
+    /// Plan the observation streams once, from the first cell merged (live or
+    /// stored): the stream names, the files they belong in, and the rows each
+    /// stream's declaration assigns to its emit times.
+    ///
+    /// `model` is the cell's resolved model, so this is the cell's own horizon
+    /// under a per-scenario `to` (gh#561), and its forecast origin under
+    /// `--init-state` (gh#641 — `None` for every ordinary run). The cells
+    /// share one obs axis, and the pre-flight has already refused a grid whose
+    /// cells disagree about it.
+    fn ensure_obs_streams(
+        &mut self,
+        model: &ir::Model,
+        run_start: f64,
+        init_origin: Option<f64>,
+    ) -> Result<(), String> {
+        for obs_model in &model.observations {
+            self.obs_stream_names.push(obs_model.name.clone());
+            self.obs_files.push(ObsFileKey {
+                source: obs_model.source.clone(),
+                dims: crate::obs_emit::dim_cells(obs_model)?,
+            });
+            self.obs_data.push(Vec::new());
+            let times = obs_emit_schedule_times(
+                obs_model, init_origin, model.simulation.t_end, self.emit_every.as_ref(),
+            )?;
+            // The rows the declaration assigns to those times, within the run
+            // (gh#833). A wide file has one `time` column and cannot carry a
+            // windowed stream's two boundaries.
+            let plan = crate::obs_emit::plan_emission(
+                obs_model, &times, run_start, model.simulation.t_end,
+                self.emit_every.as_ref().and_then(|e| e.resolve_for(&obs_model.source)),
+            )?;
+            if self.obs_path.is_some()
+                && matches!(plan.columns, crate::obs_emit::TemporalColumns::Window { .. })
+            {
+                return Err(format!(
+                    "observation stream '{}' declares `window_start`/`window_stop` \
+                     columns, which a single wide `--obs` file cannot carry.\n  \
+                     Use --obs-dir (one file per stream, keeps trajectory) or \
+                     --obs-only-dir (one file per stream, suppresses trajectory).",
+                    obs_model.name
+                ));
+            }
+            self.obs_plans.push(plan);
+        }
+        Ok(())
+    }
+
+    /// Splice a cell the store already held into the combined outputs.
+    ///
+    /// The leaf's `traj.tsv` rows are the rows this mirror would have written
+    /// — the leaf renderer and the mirror share `write_traj_time_cells` and
+    /// `TrajColumns::write_row`, and the leaf's column selection is in its
+    /// identity — so each stored row is prefixed with the cell's coordinate
+    /// cells and copied, never re-rendered. Under `--dates` the three date
+    /// cells are rendered from the row's own `t`/`t_start`/`t_stop`. Stored
+    /// observation values are pushed under the shared plan's rows.
+    fn merge_stored(&mut self, cell: &StoredCell) -> Result<(), String> {
+        let model = &cell.model;
+        let coords = CellCoords::of(&cell.spec, &self.shape.axis);
+        let mut lines = cell.traj_tsv.lines();
+        let header = lines.next().ok_or_else(|| "stored traj.tsv is empty".to_string())?;
+        let Some(rest_header) = header.strip_prefix(util::TRAJ_TIME_HEADER) else {
+            return Err(format!(
+                "stored traj.tsv header `{header}` is not the current trajectory format; \
+                 re-run with --force to recompute the cell"
+            ));
+        };
+        let rows: Vec<&str> = lines.filter(|l| !l.trim().is_empty()).collect();
+        let run_start: f64 = rows
+            .first()
+            .and_then(|r| r.split('\t').next())
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(model.simulation.t_start);
+
+        if self.traj_out.is_some() {
+            let date_origin: Option<String> = if self.dates {
+                match model.origin.as_deref() {
+                    Some(o) => {
+                        if self.dates_render.is_none() {
+                            self.dates_render = Some((o.to_string(), model.time_unit.clone()));
+                        }
+                        Some(o.to_string())
+                    }
+                    None => return Err(
+                        "--dates requires the model to declare an `origin` \
+                         (e.g. `origin = date(\"2020-01-01\")`).".to_string()),
+                }
+            } else {
+                None
+            };
+            let write_header = !self.traj_header_written;
+            let shape = self.shape.clone();
+            let time_unit = model.time_unit.clone();
+            let render = |out: &mut Vec<u8>, dates: Option<&str>| -> Result<(), String> {
+                use std::io::Write;
+                let e = |e: std::io::Error| e.to_string();
+                if write_header {
+                    writeln!(out, "# {}", version::VERSION).map_err(e)?;
+                    shape.write_coord_header(out).map_err(e)?;
+                    write!(out, "{}", util::TRAJ_TIME_HEADER).map_err(e)?;
+                    if dates.is_some() {
+                        write!(out, "{}", util::TRAJ_DATE_HEADER).map_err(e)?;
+                    }
+                    writeln!(out, "{rest_header}").map_err(e)?;
+                }
+                for row in &rows {
+                    let mut it = row.splitn(4, '\t');
+                    let (t, start, stop) = match (it.next(), it.next(), it.next()) {
+                        (Some(t), Some(a), Some(b)) => (t, a, b),
+                        _ => return Err(format!("stored traj.tsv row `{row}` lacks the three time cells")),
+                    };
+                    let rest = it.next();
+                    shape.write_coord_cells(out, &coords).map_err(e)?;
+                    write!(out, "{t}\t{start}\t{stop}").map_err(e)?;
+                    if let Some(origin) = dates {
+                        let num = |x: &str| x.parse::<f64>()
+                            .map_err(|_| format!("stored traj.tsv time cell `{x}` is not a number"));
+                        util::write_traj_date_cells(out, origin, &time_unit, num(t)?, (num(start)?, num(stop)?))?;
+                    }
+                    if let Some(rest) = rest {
+                        write!(out, "\t{rest}").map_err(e)?;
+                    }
+                    writeln!(out).map_err(e)?;
+                }
+                Ok(())
+            };
+            if let Some(out) = self.traj_out.as_mut() {
+                render(out, date_origin.as_deref())?;
+            }
+            if let Some(undated) = self.undated_out.as_mut() {
+                render(undated, None)?;
+            }
+            self.traj_header_written = true;
+        }
+
+        if self.obs_path.is_some() || self.obs_dir.is_some() {
+            if self.dates && self.dates_render.is_none() {
+                match model.origin.as_deref() {
+                    Some(o) => self.dates_render = Some((o.to_string(), model.time_unit.clone())),
+                    None => return Err(
+                        "--dates requires the model to declare an `origin` \
+                         (e.g. `origin = date(\"2020-01-01\")`).".to_string()),
+                }
+            }
+            if self.obs_plans.is_empty() {
+                let init_origin = cell.spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
+                self.ensure_obs_streams(model, run_start, init_origin)?;
+            }
+            for si in 0..self.obs_plans.len() {
+                let rows = self.obs_plans[si].coverages();
+                let values = cell.obs.get(si).ok_or_else(|| format!(
+                    "stored cell holds no values for stream '{}'", self.obs_stream_names[si]))?;
+                if values.len() != rows.len() {
+                    return Err(format!(
+                        "stored observations for stream '{}' have {} rows but this run emits {}; \
+                         re-run with --force to recompute the cell",
+                        self.obs_stream_names[si], values.len(), rows.len()
+                    ));
+                }
+                for (&value, &(time, coverage)) in values.iter().zip(&rows) {
+                    self.obs_data[si].push(ObsRow { time, coverage, coords: coords.clone(), value });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Write the combined synthetic-observation output after all cells are
     /// merged. Reproduces the pre-unification post-loop obs writers.
     fn write_obs_output(&self) {
@@ -4919,6 +5203,55 @@ fn print_dry_run(
         ].iter().flatten().cloned().collect();
         eprintln!("  {} {} = {} runs", d("total:"), parts.join(" × "), total_runs);
     }
+}
+
+/// The store view of a multi-cell dry run: per cell, whether the store already
+/// holds it (the exact rule of [`crate::cas_sink::CasSink::stored_hit`]) and
+/// its leaf path, then the hit and miss counts. The sink already resolves each
+/// cell's identity, so this is the view, not new computation; nothing is
+/// displaced or written.
+fn print_store_view(
+    cas: &crate::cas_sink::CasSink,
+    job: &crate::sim_job::SimulateJob,
+    force: bool,
+    quantities: bool,
+) {
+    let d = style::dim;
+    let (specs, _) = engine::plan_grid(job);
+    let root = cas.root();
+    let rel_of = |dir: &std::path::Path| {
+        dir.strip_prefix(&root).unwrap_or(dir).to_string_lossy().into_owned()
+    };
+    let mut hits = 0usize;
+    let mut cells: Vec<(bool, String)> = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let entry = match cas.stored_hit(spec) {
+            Ok(Some(dir)) => {
+                hits += 1;
+                (true, rel_of(&dir))
+            }
+            Ok(None) => (false, cas.cell_resolve(spec).map(|(_, _, rel)| rel).unwrap_or_default()),
+            Err(e) => (false, format!("(identity unresolved: {e})")),
+        };
+        cells.push(entry);
+    }
+    let misses = cells.len() - hits;
+    eprintln!();
+    eprintln!("{} {}", d("store:"), root.display());
+    for (hit, rel) in &cells {
+        eprintln!("  [{}] {}", if *hit { "hit " } else { "miss" }, rel);
+    }
+    if force {
+        eprintln!("  {} in the store; --force recomputes every cell ({} runs)", hits, cells.len());
+    } else if quantities {
+        eprintln!(
+            "  {} cache hits, {} misses; quantities requested: {} cells recomputed",
+            hits, misses, cells.len()
+        );
+    } else {
+        eprintln!("  {} cache hits → read back, {} misses → would simulate", hits, misses);
+    }
+    eprintln!("(dry run — no simulation, no files written.)");
 }
 
 fn format_param_value(v: f64) -> String {

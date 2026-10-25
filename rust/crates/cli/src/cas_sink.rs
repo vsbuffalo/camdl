@@ -418,62 +418,77 @@ mod gh169_params_label {
     }
 }
 
+impl CasSink {
+    /// Where the store already holds this cell: a `Completed`, integrity-checked
+    /// leaf of the cell's identity — found by its hashes, whatever its labels
+    /// — that holds every artifact this run asks for. `None` means the cell
+    /// must run. Pure: nothing is displaced or written, so a dry run can ask
+    /// the same question `should_run` asks.
+    ///
+    /// The trajectory alone is not a hit when observations were asked for:
+    /// the obs subtree is a child written beside the trajectory, drawn with
+    /// its own seed and never reconstructed from `traj.tsv`, so a leaf
+    /// without it would be reported "cached" for observations it never wrote
+    /// (the gh#738 / gh#599 class). The check is the EXACT subtree
+    /// `obs/<hash8>-<obs_seed>/` — addressed from the scenario-applied model
+    /// the cell runs ([`crate::util::resolve_run_ir`], the same model
+    /// `merge_cell` writes from), with every requested stream file and its
+    /// `obs.json` present. A leaf holding another cadence's or seed's subtree
+    /// is a miss, and directory presence alone is not a hit.
+    pub(crate) fn stored_hit(
+        &self,
+        spec: &crate::engine::CellSpec,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let (rt, _, _) = self.cell_resolve(spec)?;
+        let Some(dir) = runid::find_leaf(&self.root(), runid::ArtifactKind::Sim, &rt.levels) else {
+            return Ok(None);
+        };
+        if self.obs_enabled && !self.base_model.observations.is_empty() {
+            let model = crate::util::resolve_run_ir(&spec.sim_run)?;
+            let obs_dir = obs_subtree_dir(
+                &dir, &model.observations, self.emit_every.as_ref(), spec.obs_seed,
+            )?;
+            if !obs_dir.join("obs.json").is_file() {
+                return Ok(None);
+            }
+            for o in &model.observations {
+                if !obs_dir.join(format!("{}.tsv", o.name)).is_file() {
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(dir))
+    }
+}
+
 impl crate::engine::RunSink for CasSink {
     fn should_run(&mut self, spec: &crate::engine::CellSpec) -> bool {
-        match self.cell_resolve(spec) {
-            Ok((rt, _dir, _)) => {
-                let store = runid::FsCasStore::new(self.root());
+        if self.force {
+            // Through the one policy seam: under Force the incumbent is
+            // displaced (quarantined) HERE, so the recompute lands on a clean
+            // leaf — previously force only skipped this check and the
+            // recomputed bytes were discarded at commit as an
+            // already-completed no-op, which is why `--force` could not change
+            // a stored artifact. A failure surfaces in `merge_cell`.
+            if let Ok((rt, _, _)) = self.cell_resolve(spec) {
+                let root = self.root();
+                let store = runid::FsCasStore::new(&root);
                 let artifact = crate::resolve::ResolvedArtifact {
                     kind: runid::ArtifactKind::Sim,
                     levels: rt.levels.clone(),
                     run_id: rt.run_id,
                     display_inputs: rt.display_inputs.clone(),
                 };
-                let policy = if self.force {
-                    crate::resolve::WritePolicy::Force
-                } else {
-                    crate::resolve::WritePolicy::Reuse
-                };
-                // Through the one policy seam. Under Force the incumbent is
-                // displaced (quarantined) HERE, so the recompute lands on a
-                // clean leaf — previously force only skipped this check and
-                // the recomputed bytes were discarded at commit as an
-                // already-completed no-op, which is why `--force` could not
-                // change a stored artifact.
-                let root = self.root();
-                match crate::resolve::check_reuse(&store, &root, &artifact, policy) {
-                    Ok(crate::resolve::ReuseVerdict::CacheHit { dir }) => {
-                        // A trajectory hit is not enough when observations were
-                        // asked for: the obs subtree is a CHILD, written only
-                        // by `merge_cell`, so skipping a cached cell also skips
-                        // its obs. `batch --obs` over a store populated by
-                        // obs-free runs therefore produced no observations at
-                        // all, silently — the user asked for a thing and got
-                        // nothing, with a "cached" line implying otherwise.
-                        //
-                        // The check is PRESENCE of the obs subtree, not its
-                        // exact address: `should_run` has only `base_model`,
-                        // while `merge_cell` writes from `cell.model` (scenario
-                        // + sweep applied). Recomputing the subtree hash from
-                        // the wrong model would reintroduce the
-                        // divergent-resolution class this arc exists to remove.
-                        // Residual, tracked separately: a leaf holding SOME
-                        // obs subtree but not this cadence's still skips.
-                        // `true` here means RUN. Run when observations were
-                        // requested and this leaf has none; otherwise the
-                        // trajectory hit stands and the cell is skipped.
-                        self.obs_enabled
-                            && !self.base_model.observations.is_empty()
-                            && !dir.join("obs").is_dir()
-                    }
-                    Ok(crate::resolve::ReuseVerdict::MustRun) => true,
-                    // Cache check failed → run; the error surfaces in merge_cell.
-                    Err(_) => true,
-                }
+                let _ = crate::resolve::check_reuse(
+                    &store, &root, &artifact, crate::resolve::WritePolicy::Force,
+                );
             }
-            // No cache key without a resolve → run; the error surfaces in merge_cell.
-            Err(_) => true,
+            return true;
         }
+        // `true` means RUN: run unless the store holds everything this run
+        // asks for. A failed resolve runs too; its error surfaces in
+        // `merge_cell`.
+        !matches!(self.stored_hit(spec), Ok(Some(_)))
     }
 
     fn on_skip(&mut self, spec: &crate::engine::CellSpec) {
@@ -570,7 +585,7 @@ impl crate::engine::RunSink for CasSink {
         let mut meta = crate::resolve::RecordMeta::new(
             ir::IR_VERSION.trim(), self.model_path.clone(), self.label.clone())
             .with_deps(self.fit_dep.clone())
-            .with_children(children);
+            .with_children(children.clone());
 
         let mut artifacts = runid::Artifacts::new();
         artifacts.insert("traj.tsv", traj_bytes);
@@ -678,6 +693,20 @@ impl crate::engine::RunSink for CasSink {
         // failure here is non-fatal — children are independent, so a missing
         // obs child never staleens the parent trajectory.
         if has_obs {
+            // The commit above declared this subtree as a child only on a
+            // FRESH leaf; a leaf the store already held (a dedup at commit, or
+            // one first written without observations) keeps its stored record.
+            // An `obs/` directory a record does not declare is an orphan to the
+            // exact-set check, which made the leaf `Stale`, and the next
+            // recompute reclaimed the directory — taking every earlier
+            // cadence's subtree with it. `children` is recorded, never hashed,
+            // so declaring the subtree in place changes no identity.
+            if let Some(ids) = children.get("obs") {
+                if let Err(e) = ensure_obs_children_declared(&dest, ids) {
+                    self.errors.push(format!("scenario={} seed={}: declaring obs child: {}",
+                        name, spec.process_seed, e));
+                }
+            }
             // gh#641: a restarted cell's obs axis begins at the forecast
             // origin, exactly as the `-o`/`--obs` mirror's does. `None` for
             // every ordinary cell — and for every `batch run` cell, which has
@@ -762,6 +791,36 @@ fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<()
         .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
+/// Ensure a leaf's `run.json` declares every id in `ids` under its `obs`
+/// child, rewriting it atomically (tmp + rename) only when one is missing.
+/// `children` is metadata, not identity — the run_id and exact-set of the
+/// leaf's own files are untouched — so this is the same in-place record
+/// update `ensure_provenance_label` performs. Idempotent: a no-op when the
+/// record already declares them (the fresh-commit case).
+fn ensure_obs_children_declared(
+    leaf_dir: &std::path::Path,
+    ids: &[runid::ContentHash],
+) -> Result<(), String> {
+    let path = leaf_dir.join("run.json");
+    let txt = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let mut rec: runid::RunRecord = serde_json::from_str(&txt)
+        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
+    let declared = rec.children.entry("obs".to_string()).or_default();
+    let missing: Vec<runid::ContentHash> =
+        ids.iter().filter(|id| !declared.contains(id)).copied().collect();
+    if missing.is_empty() {
+        return Ok(()); // already current — no rewrite
+    }
+    declared.extend(missing);
+    let tmp = leaf_dir.join("run.json.tmp");
+    let json = serde_json::to_string_pretty(&rec)
+        .map_err(|e| format!("serialize run.json: {}", e))?;
+    std::fs::write(&tmp, json)
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("write {}: {}", path.display(), e))
+}
+
 // ─── Observation ensemble writer (CLI review #4) ───────────────────────────
 
 /// Sample synthetic observations for one completed run and write them into
@@ -818,6 +877,22 @@ pub(crate) fn obs_subtree_hash(
 /// rule).
 const OBS_FILE_FORMAT: &str = "\nobs-file-format:2";
 
+/// The directory a leaf's observation subtree lives in:
+/// `<leaf>/obs/<hash8>-<obs_seed>/`, the `hash8` being the first eight hex
+/// of [`obs_subtree_hash`] over the scenario-applied model's observation
+/// blocks. One function for the writer and for the store-hit check
+/// ([`CasSink::stored_hit`]), so the address asked about is the address
+/// written.
+pub(crate) fn obs_subtree_dir(
+    leaf: &std::path::Path,
+    observations: &[ir::observation::ObservationModel],
+    emit: Option<&crate::emit_every::EmitEvery>,
+    obs_seed: u64,
+) -> Result<std::path::PathBuf, String> {
+    let obs_hash = obs_subtree_hash(observations, emit)?;
+    Ok(leaf.join("obs").join(format!("{}-{}", &obs_hash[..8.min(obs_hash.len())], obs_seed)))
+}
+
 fn write_obs_into_cas(
     run_dir: &std::path::Path,
     model: &ir::Model,
@@ -839,6 +914,7 @@ fn write_obs_into_cas(
 
     let obs_hash = obs_subtree_hash(&model.observations, emit)?;
     let obs_seed = process_seed ^ crate::util::SEED_MIX_OBS;
+    let obs_dir = obs_subtree_dir(run_dir, &model.observations, emit, obs_seed)?;
 
     // Preflight EVERY stream before creating any file (gh#589 review).
     //
@@ -873,9 +949,6 @@ fn write_obs_into_cas(
         plans.push(plan);
     }
 
-    let obs_dir = run_dir.join("obs").join(format!(
-        "{}-{}", &obs_hash[..8.min(obs_hash.len())], obs_seed,
-    ));
     std::fs::create_dir_all(&obs_dir)
         .map_err(|e| format!("cannot create {}: {}", obs_dir.display(), e))?;
 

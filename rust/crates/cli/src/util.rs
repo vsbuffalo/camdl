@@ -3345,6 +3345,20 @@ pub fn resolved_parameter_values(model: &ir::Model) -> std::collections::BTreeMa
 /// ([`run_simulation_lineage`]) so both see byte-identical parameter
 /// resolution.
 pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), String> {
+    let model = resolve_run_ir(run)?;
+    let compiled = CompiledModel::new(model.clone())
+        .map_err(|e| format!("model compile error: {:?}", e))?;
+    Ok((compiled, model))
+}
+
+/// The `ir::Model` a cell runs — scenario horizon, `--to`, `--init-state`
+/// origin, every parameter tier and the required snapshots applied — before
+/// it is compiled. [`resolve_run_model`] is this plus the compile; a caller
+/// that needs the resolved model but not its compiled form (the store sink
+/// addressing a cell's observation subtree, which is keyed on the resolved
+/// `observations` blocks) reads it here, so the two cannot describe different
+/// models.
+pub fn resolve_run_ir(run: &SimRun) -> Result<ir::Model, String> {
     // The shared load (anchors + `--integrator`), so this model and the CAS
     // `base_model` are one load by construction (gh#583 item C).
     let mut model = load_run_model(run)?;
@@ -3418,10 +3432,7 @@ pub fn resolve_run_model(run: &SimRun) -> Result<(CompiledModel, ir::Model), Str
     // The caller's required snapshots, after the two guards above and before
     // compile — see [`apply_required_output_times`] for both reasons.
     apply_required_output_times(&mut model, &run.required_output_times);
-    let compiled = CompiledModel::new(model.clone())
-        .map_err(|e| format!("model compile error: {:?}", e))?;
-
-    Ok((compiled, model))
+    Ok(model)
 }
 
 /// Run a simulation and return the full trajectory.
