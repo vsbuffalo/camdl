@@ -563,7 +563,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     let cells = [EnsembleCell {
         scenario_label: "baseline".into(),
         process_seed: 1,
-        draw_idx: 0,
+        point_id: 0,
         sim_run_id: ContentHash::from_bytes([9; 32]),
         traj_digest: ContentHash::from_bytes([10; 32]),
         params_level: ContentHash::from_bytes([11; 32]),
@@ -576,6 +576,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         backend: ForwardBackend::ChainBinomial,
         dt: 1.0,
         cells: &cells,
+        design: None,
     })
     .expect("sim_ensemble");
     out.push(("sim_ensemble", ens.levels[0].hash, ens.run_id));
@@ -728,11 +729,19 @@ fn cas_identity_pins() {
         // config JSON drops the `[provenance]` key, which it had serialized as
         // `null` even when absent — so every fit re-keys, noted or not. No
         // other kind hashes the fit config blob.
+        //
+        // Proposal 2026-10-24-batch-to-simulate (§3 "Ensemble identity", §8)
+        // then moved `sim_ensemble` ALONE: its `grid` level's per-cell tuple
+        // became `(point_id, process_seed, sim_run_id)` — the arm's label, a
+        // display string, left the key — and the level gained a plain
+        // `design` field (`null` here). Every stored multi-cell ensemble
+        // re-keys once and is rebuilt from cells the store already holds. No
+        // other kind hashes an ensemble level, and no `sim` leaf changes.
         ("sim", "4d378bf80f18768cad7d968ca547d05db64f9cc382deb62054507c6044811bf9"),
         ("fit", "a2e975020b0d34ec5c4c08126c4b9b0fe54db631badc96ca6bdf59c1a57de01b"),
         ("pfilter", "e1994c64f4b2eea615d031e5bfe239d8c506f9c0471c94336df5c94ab9fc575a"),
         ("survey", "3a56923c978abaa4bb73f7b6b8a940bca6c47c9f51d127071fee3191fe1045cb"),
-        ("sim_ensemble", "c7cdd710a9f4d92c2b10751737fc56098209f27de97934f302cc55f45d932c1a"),
+        ("sim_ensemble", "5f1c403bf8eba26c9b14a88c9f1db057b5f4843ba507cc6364d78637e8f6ece2"),
         ("profile", "38359dc3df9ab8544384ddc5210eb7ab3a7e6cd50fc1af7c49c8f2141a0b819a"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not

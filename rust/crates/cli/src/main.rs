@@ -2699,7 +2699,7 @@ fn write_sim_ensemble(
             Some(crate::sim_ensemble_cas::EnsembleCell {
                 scenario_label: r.scenario.clone(),
                 process_seed: r.process_seed,
-                draw_idx: r.draw_idx,
+                point_id: r.point_id,
                 sim_run_id: r.run_id?,
                 traj_digest: r.traj_digest?,
                 params_level: r.params_level?,
@@ -2721,6 +2721,7 @@ fn write_sim_ensemble(
         backend: cas.backend,
         dt: cas.dt,
         cells: &cells,
+        design: None,
     };
     let resolved = match crate::sim_ensemble_cas::resolve_sim_ensemble(&ctx) {
         Ok(r) => r,
@@ -2743,7 +2744,7 @@ fn write_sim_ensemble(
         s.len()
     };
     let n_draws = {
-        let mut d: Vec<usize> = cells.iter().map(|c| c.draw_idx).collect();
+        let mut d: Vec<usize> = cells.iter().map(|c| c.point_id).collect();
         d.sort_unstable();
         d.dedup();
         d.len()
