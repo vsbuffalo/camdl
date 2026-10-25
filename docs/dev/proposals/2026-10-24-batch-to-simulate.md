@@ -110,9 +110,12 @@ parameter list; a file with zero rows is refused; a duplicate row is refused
 (decision D-E of the accepted proposal), which also answers what happens when a
 generated design repeats a point. `--sweep` and `--sweep-file` are mutually
 exclusive: their composition (a file grid crossed with a flag grid) is not
-specified, so it is refused rather than given a silent shape. Nothing else about
-the file is specified here; the coordinate-kind proposal's `label`, `point_id`
-and provenance columns belong to its rewrite and are not pre-empted.
+specified, so it is refused rather than given a silent shape. A `point_id`
+column, when present, is honoured as the coordinate-kind proposal's D-C says:
+its non-negative integers, each unique, are the written ids, while the row
+position stays the internal index used for seeding; a file without the column
+keeps the 0-based row. The `label` and provenance columns belong to that
+proposal's rewrite and are not pre-empted.
 
 **`point_id`** is the 0-based position of the design point in the name-sorted
 product, or its 0-based row in the sweep file, as the accepted proposal's D-C
