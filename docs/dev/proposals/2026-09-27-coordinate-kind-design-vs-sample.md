@@ -1,10 +1,19 @@
 # A parameter point is a design coordinate or a sample, and the cell says which
 
 - Date: 2026-09-27
-- Status: accepted — every call is recorded in §16; ready to implement
-- Relates-to: gh#562, gh#572, gh#575, gh#630, gh#948, gh#949,
+- Status: accepted — every call is recorded in §16; what remains is the stages
+  of §14
+- Implemented so far: `--sweep` and `--sweep-file` on `simulate`, D-B seeds, the
+  `point_id` / `sweep:<param>` / `seed` columns of the combined tables, the
+  `SimEnsemble` grid level keyed on `(point_id, process_seed, sim_run_id)` plus
+  the resolved design, `runid::find_leaf`, store re-use in a multi-cell
+  `simulate`, and the derived ad-hoc arm label (`2eb48284`, through
+  `2026-10-24-batch-to-simulate.md`)
+- Relates-to: gh#562, gh#572, gh#575, gh#630, gh#948, gh#949, gh#990,
   `2026-06-27-sealed-fit-packets-handles-and-override-algebra.md` (§4),
-  `2026-08-11-scenario-banding-in-simulate.md` (implemented)
+  `2026-08-11-scenario-banding-in-simulate.md` (implemented),
+  `2026-10-24-batch-to-simulate.md` (accepted; pulls the design axis forward and
+  retires `batch`)
 - Builds on: an untracked architecture-review note on gh#562 (2026-08-11). Every
   claim this proposal uses from it is restated in §4; the note is not needed to
   read this document.
@@ -13,10 +22,13 @@
   through the ordinary tiers, and a per-arm pre-flight refuses a parameter no
   tier sets. §7.2's "varying columns" rests on it.
 
-All code references are against `origin/main` at `15cf347c`. A reference marked
-_verified_ was read at that line; _inferred_ means reasoned from the code but
-not executed. Output shown under **after** is the format this proposal
-specifies; it does not exist yet.
+All code references are against `origin/main` at `15cf347c`, except that
+passages describing the landed design axis cite `2eb48284` by file and function
+(`sweep.rs`, `cas_sink.rs`, `sim_ensemble_cas.rs`, `runid/src/store.rs`,
+`sim_job.rs`, `main.rs`). A reference marked _verified_ was read at that line;
+_inferred_ means reasoned from the code but not executed. Output shown under
+**after** is the format this proposal specifies; where it does not say
+otherwise, it does not exist yet.
 
 ## Summary
 
@@ -39,11 +51,14 @@ the cell carries, set by one constructor. On the command line the flags come in
 axis-named pairs: `--sweep` / `--sweep-file` build the design axis, `--draws` /
 `--draws-file` build the sample axis, and a bare `--draws <path>` is refused
 naming both file flags. Design coordinates stop entering the process seed, so
-design points share common random numbers. The output gains a normative schema:
-a `point_id` on every design-bearing row, exact design coordinates, a `band`
-column saying what each band is over, and a self-describing manifest.
-`fit predict`'s sweep moves onto the grid, so both verbs put their partition
-coordinates in the cell. The IR and goldens are untouched.
+design points share common random numbers. The design pair, the seed rule and
+the design columns of the combined tables are on `simulate` already; the sample
+pair, the refusal and the rest are the stages of §14. The output gains a
+normative schema: a `point_id` on every design-bearing row, exact design
+coordinates, a `band` column saying what each band is over, and a
+self-describing manifest. `fit predict`'s sweep moves onto the grid, so both
+verbs put their partition coordinates in the cell. The IR and goldens are
+untouched.
 
 ## 1. How the user works with each axis
 
@@ -66,11 +81,12 @@ What stays the same: scenarios, replicates, seeds,
 `--draws
 posterior|prior|uniform`, `batch run` manifests and their store leaves.
 What changes: a bare `--draws FILE` is refused with a message naming
-`--sweep-file` and `--draws-file`; `simulate --sweep` and `--sweep-file` are
-new; banded files gain a `band` column and design-bearing rows a `point_id` (in
-`fit predict` too, as its own commit); a scenario, a `--param`, or a design
-value that touches a varying sampled column is recorded; the manifest says what
-every entry is.
+`--sweep-file` and `--draws-file`; `simulate --sweep` and `--sweep-file`, which
+exist, gain their composition with a sample axis (today `--sweep` with `--draws`
+is refused); banded files gain a `band` column and design-bearing rows a
+`point_id` (in `fit predict` too, as its own commit); a scenario, a `--param`,
+or a design value that touches a varying sampled column is recorded; the
+manifest says what every entry is.
 
 ## 2. Terms
 
@@ -176,17 +192,19 @@ conditions; it describes no distribution anyone stated.
 
 ### 4.2 `fit predict` keeps its sweep coordinate outside the cell
 
-`fit predict` does not use the grid's sweep axis. It expands `--sweep` itself
-(`predict.rs:1590`, verified), then for each sweep point overwrites the swept
-parameters in every posterior draw row (`predict.rs:2235-2237`) and runs one
-`ParamSource::Draws` job per scenario (`predict.rs:2254`, `:2262`). The sweep
-value lives in the loop variable of `for sweep_pt in &sweep_points`
-(`predict.rs:2188`), reaches the renderer directly (`predict.rs:2300-2303`), and
-keys `FreeForwardCell` (`predict.rs:2343-2345`). Every predict cell looks like a
-posterior draw; its partition coordinate is not in the cell, and its collision
-check runs separately (`predict.rs:1623-1649`, verified), whose comment says so:
-"predict folds the sweep into the draw rows, which the engine sees as generated
-draws".
+`fit predict` does not use the grid's sweep axis. It expands `--sweep` through
+the shared `sweep::expand_sweep_specs` and checks the names through
+`sweep::check_swept_names` (`predict.rs:1564-1571`; the same two calls
+`simulate --sweep` makes, so the two verbs give one `point_id` to one grid),
+then for each sweep point overwrites the swept parameters in every posterior
+draw row (`predict.rs:2235-2237`) and runs one `ParamSource::Draws` job per
+scenario (`predict.rs:2254`, `:2262`). The sweep value lives in the loop
+variable of `for sweep_pt in &sweep_points` (`predict.rs:2188`), reaches the
+renderer directly (`predict.rs:2300-2303`), and keys `FreeForwardCell`
+(`predict.rs:2343-2345`). Every predict cell looks like a posterior draw; its
+partition coordinate is not in the cell, and its collision check runs separately
+(`predict.rs:1623-1649`, verified), whose comment says so: "predict folds the
+sweep into the draw rows, which the engine sees as generated draws".
 
 ### 4.3 The rejected design, and the four reasons
 
@@ -232,9 +250,12 @@ generated draws (`--draws posterior|prior|uniform`) are not checked.
 
 The guard decides which is which by matching `ParamSource`
 (`engine.rs:367-375`): `Sweep` and `Draws { explicit_file: Some(_) }` are
-checked, everything else passes. So the correct policy is keyed on the proxy
-reason 3 rejects, and it inherits the proxy's blind spots: a `[design.NAME]`
-block is reported as "the sweep" (the noun is chosen at
+checked, everything else passes. `simulate --sweep` and `--sweep-file` build
+`ParamSource::Sweep` too, so the guard refuses a scenario over a swept parameter
+on the run and on the dry run (W10); a `--param` on a swept parameter is refused
+separately, at `simulate`'s front end (W12). So the correct policy is keyed on
+the proxy reason 3 rejects, and it inherits the proxy's blind spots: a
+`[design.NAME]` block is reported as "the sweep" (the noun is chosen at
 `params_resolver.rs:860`, and the design path builds a `Sweep`,
 `batch.rs:1841`), and predict's sweep needs its own call because the engine
 cannot see it. The existing test for the design-block refusal
@@ -251,8 +272,14 @@ file has one row per group; only `peak_I` is shown.
 
 ### W1 — Sensitivity sweep: how does the peak depend on `beta`?
 
-**Today** there is no `simulate --sweep`; the nearest spelling is a draws file,
-which pools (§4.1). `batch run` sweeps but emits no quantities (follow-up F3).
+**Today** `simulate --sweep` and `--sweep-file` run the grid: one store leaf per
+cell, labelled by the swept values; `point_id`, `sweep:beta` and `seed` in the
+combined tables (§9.2); common random numbers across points (§7.3); and, under
+`--quantities-out`, quantities accumulated per (design point, scenario), so a
+sweep is never banded across points. The quantity files do not yet carry
+`point_id` or `band`, and point versus band is still decided from the source
+kind rather than from the realizations (Stage 4, §10). A draws file still pools
+(§4.1). `batch run` sweeps but emits no quantities (follow-up F3).
 
 **After**, three spellings; the first two produce identical files:
 
@@ -300,11 +327,11 @@ sweep leaves the other three points' trajectories byte-identical.
 
 **Collisions.** `--scenario pinned` (`set beta`) or `--scenario distancing`
 (`scale beta`) touches the swept parameter and is refused before any cell runs
-(W10). `--param beta=0.5` is refused the same way (W12).
-`--sweep gamma=0.05,0.1,0.2 --scenario distancing` touches distinct parameters
-and runs: three groups, header `scenario  point_id  sweep:gamma  value` (one
-`--scenario` is one arm, so the `scenario` column holds `distancing` on every
-row).
+(W10). `--param beta=0.5` is refused the same way (W12). Both refusals are in
+place today. `--sweep gamma=0.05,0.1,0.2 --scenario distancing` touches distinct
+parameters and runs: three groups, header
+`scenario  point_id  sweep:gamma  value` (one `--scenario` is one arm, so the
+`scenario` column holds `distancing` on every row).
 
 ### W2 — Space-filling design: where in (`beta`, `gamma`) space is the epidemic large?
 
@@ -334,10 +361,15 @@ point_id  sweep:beta           sweep:gamma          value
 …
 ```
 
-(64 rows; `point_id` is taken from the file, §12.1.) This **recomputes** every
-point: `simulate` does not look up the `batch run` leaves, and its seeds differ
-from the manifest's explicit seeds unless the same `--seeds` list is given
-(§7.3). Collisions: a scenario touching `beta` or `gamma` is refused, naming
+(64 rows. `point_id` is the 0-based row today and is taken from the file's
+`point_id` column once the §12.1 reader lands; the landed reader refuses that
+column as one naming no parameter, so the generated table's leading `point_id`
+column is dropped before it is passed.) A multi-cell `simulate` finds each cell
+in the store by its hashes (§13) and reads a stored cell back instead of
+simulating it, so this run lands on the `batch run` leaves only when the cells
+coincide, which they do under the same `--seeds` list; under `--seed` alone its
+seeds differ from the manifest's explicit seeds (§7.3) and every point is
+recomputed. Collisions: a scenario touching `beta` or `gamma` is refused, naming
 "the design `wide`" from `batch run` and "the sweep file `parameter_points.tsv`"
 from `simulate`.
 
@@ -607,7 +639,9 @@ or uniform (did you mean 'prior'?)`.
 ### W10 — A sweep that a scenario would override
 
 **Today** (landed with gh#572), a manifest sweeping `beta` under `pinned` is
-refused by `batch run`, `batch run --dry-run` and `batch status`:
+refused by `batch run`, `batch run --dry-run` and `batch status`, and
+`simulate --sweep beta=0.15,0.3,0.6 --scenario pinned` is refused by the same
+guard, on the run and on the dry run:
 
 ```
 error: parameter `beta` is controlled by both the sweep and scenario `pinned`
@@ -681,11 +715,22 @@ gh#948 routes `--scenario` through, the §8 guard applies unchanged.
 camdl simulate sir.camdl --sweep beta=0.15,0.3,0.6 --param beta=0.5 ...
 ```
 
-**Today** this cannot be written in `simulate` (no `--sweep`); with a draws file
-the analogue runs, because `--param` sits at tier 5 above the draw/sweep tier
-(`util.rs:3280-3290`) and wins silently: three identical runs labelled with
-three values. **After**, `--param` and expanded `--param-vec` entries are part
-of the collision footprint (§8): on a design name they are refused —
+**Today** `simulate` refuses this before any cell runs, at its front end rather
+than in the guard (`main.rs`, the check that follows the design's expansion),
+because `--param` sits at tier 5 above the draw/sweep tier (`util.rs:3280-3290`)
+and would win silently:
+
+```
+error: parameter `beta` is both swept and pinned by `--param beta=0.5`.
+  A `--param` outranks every other tier, so the sweep would not vary `beta`: every design point would run at 0.5 while its label and `sweep:beta` column said otherwise.
+  Fix: drop `--param beta=…`, or remove `beta` from the sweep.
+```
+
+The landed check reads `--param` only, not `--param-vec`. With a draws file the
+analogue still runs: three identical runs labelled with three values. **After**,
+`--param` and expanded `--param-vec` entries are part of the collision footprint
+(§8), so one formatter names the overrider for a scenario and for `--param`
+alike: on a design name they are refused —
 
 ```
 error: parameter `beta` is controlled by both the sweep and --param
@@ -792,8 +837,9 @@ sides share one `SampleAxis` (same rows, same measure): the band coordinate then
 denotes the same parameter vector on both sides. Pairing across scenarios always
 satisfies this (a job has one sample axis, and the process seed excludes the
 scenario, `engine.rs:11-23`). Pairing across design points satisfies it when the
-design is crossed with a sample axis; after this proposal it also enjoys common
-random numbers there, because the design index no longer enters the seed (§7.3).
+design is crossed with a sample axis; since the design axis landed it also
+enjoys common random numbers there, because the design index does not enter the
+seed (§7.3).
 
 ### 6.4 Out of scope
 
@@ -1033,11 +1079,14 @@ impl CellCoords {
 }
 ```
 
-`process_seed_for` (`engine.rs:52-66`) receives `seed_index` where it receives
-`point_idx` today. Design points therefore share process seeds (common random
-numbers), matching `batch run` (explicit seeds, `batch.rs:596`, where the index
-is unused, `engine.rs:59-60`) and `fit predict` (the seed follows the draw
-index). Consequences, job by job:
+`process_seed_for` (`engine.rs:52-66`) receives `seed_index` where `plan_grid`
+today passes `seed_point_idx(point_idx)`: `0` for a `ParamSource::Sweep` job and
+the point index otherwise (the D-B closure in `plan_grid`, `engine.rs`), so the
+landed flags already run under this rule and `seed_index` is its typed form.
+Design points therefore share process seeds (common random numbers), matching
+`batch run` (explicit seeds, `batch.rs:596`, where the index is unused,
+`engine.rs:59-60`) and `fit predict` (the seed follows the draw index).
+Consequences, job by job:
 
 - `--draws posterior|prior|uniform` and `--draws-file`: sample index = today's
   `point_idx`; every trajectory is unchanged. `--draws-file FILE` has exactly
@@ -1045,9 +1094,12 @@ index). Consequences, job by job:
   `-n` every row runs at its row index. With `-n`, the file is subsampled and
   the seed index is the row's position in the subsample, as for
   `--draws posterior` today.
-- `--sweep` and `--sweep-file` are new; they have no runs to preserve. Every
-  design point uses `seed_index = 0`, so inserting or removing a point leaves
-  the other points' trajectories unchanged.
+- `--sweep` and `--sweep-file` run every design point at seed index 0 today, so
+  inserting or removing a point leaves the other points' trajectories unchanged;
+  with `--seeds` the explicit list is used by position, as `batch run` did. The
+  pin (`tests/simulate_sweep.rs`): sweeping a parameter the dynamics do not
+  read, with observation output disabled, gives byte-identical trajectories
+  across the points of one replicate.
 - The same file passed as `--sweep-file` and as `--draws-file` runs at different
   seeds (0 for every row vs the row index), so the two do not share store leaves
   beyond row 0; their ensembles are keyed apart as well (§7.6).
@@ -1061,10 +1113,11 @@ index). Consequences, job by job:
 
 `seed_index` also replaces `point_idx` at the per-draw lookups that follow the
 sample: the `--init-state fit` row (`engine.rs:452-455`),
-`ConditionedSource::per_draw` (`predict.rs:1187`), `chain_of_point`
-(`predict.rs:1262`), and `RunEntry.draw_idx` (`batch.rs:1500`, `:1709`), which
-feeds the `SimEnsemble` grid digest (`sim_ensemble_cas.rs:19-24`, `:120-133`,
-`:192`; `main.rs:2701`).
+`ConditionedSource::per_draw` (`predict.rs:1187`) and `chain_of_point`
+(`predict.rs:1262`). `RunEntry.point_id` (`cas_sink.rs`) is not one of them: it
+is the cell's 0-based position on the point axis — the design index of a sweep
+cell, the draw index of a draws cell — and feeds the `SimEnsemble` grid digest
+as such (§7.6).
 
 ### 7.4 Resolver tier 3.5 splits in two, design over sample
 
@@ -1157,54 +1210,65 @@ per-axis sizes the banner, the dry run and the combined writers need (§12.3,
 
 ### 7.6 Parse at the boundary, and who reads what
 
-| Front end                 | Today                                                              | After                                                                           |
-| ------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| `simulate --draws …`      | `main.rs:1725-1741`: `Draws { explicit_file }` or `Point`          | `SampleAxis::draws(rows, Posterior \| Prior \| UniformBounds, varying)`         |
-| `simulate --draws-file`   | (was `--draws FILE`)                                               | `SampleAxis::draws(rows, sidecar measure \| Asserted, varying)`                 |
-| `simulate --sweep-file`   | —                                                                  | `DesignAxis::from_rows(rows, File { path })` (reader §12.1)                     |
-| `simulate --sweep`        | —                                                                  | `DesignAxis::sweep(&specs)`                                                     |
-| `batch run [sweep]`       | `batch.rs:631-646` (`sweep_source`): `Sweep` or `Point`            | `DesignAxis::from_rows(points, Sweep)`                                          |
-| `batch run [design.NAME]` | `batch.rs:1841`: `Sweep`                                           | `DesignAxis::from_rows(points, Design { method })`                              |
-| `fit predict`             | `predict.rs:2254`: `Draws { explicit_file: None }` per sweep point | one plan: `DesignAxis::sweep(&args.sweep)` × `SampleAxis::draws(.., Posterior)` |
+| Front end                 | Today                                                                             | After                                                                           |
+| ------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `simulate --draws …`      | `main.rs:1725-1741`: `Draws { explicit_file }` or `Point`                         | `SampleAxis::draws(rows, Posterior \| Prior \| UniformBounds, varying)`         |
+| `simulate --draws-file`   | (was `--draws FILE`)                                                              | `SampleAxis::draws(rows, sidecar measure \| Asserted, varying)`                 |
+| `simulate --sweep-file`   | `sweep::read_sweep_file`: `Sweep`                                                 | `DesignAxis::from_rows(rows, File { path })` (reader §12.1)                     |
+| `simulate --sweep`        | `sweep::expand_sweep_specs`: `Sweep`                                              | `DesignAxis::sweep(&specs)`                                                     |
+| `batch run [sweep]`       | `batch.rs:631-646` (`sweep_source`): `Sweep` or `Point`                           | `DesignAxis::from_rows(points, Sweep)`                                          |
+| `batch run [design.NAME]` | `batch.rs:1841`: `Sweep`                                                          | `DesignAxis::from_rows(points, Design { method })`                              |
+| `fit predict`             | `sweep::expand_sweep_specs`, then `Draws { explicit_file: None }` per sweep point | one plan: `DesignAxis::sweep(&args.sweep)` × `SampleAxis::draws(.., Posterior)` |
 
-`simulate --sweep` reuses the CLI grammar already shared by `fit run`,
-`fit predict` and `profile`: `args::types::SweepSpec` (`args/types.rs:255`; a
-value list, `lin(min,max,n)` or `log10(min,max,n)`). Predict's expansion,
-`expand_predict_sweep` (`predict.rs:1359-1380`, Cartesian, sorted by name), and
-its duplicate-name and unknown-name checks (`predict.rs:1594-1621`) move into
-`DesignAxis::sweep` and `ParamPlan::new`, so both verbs expand and validate
-through one function. The batch TOML sweep grammar (`batch.rs:143`,
+`simulate --sweep` uses the CLI grammar shared by `fit run`, `fit predict` and
+`profile`: `args::types::SweepSpec` (`args/types.rs:255`; a value list,
+`lin(min,max,n)` or `log10(min,max,n)`). The expansion and the duplicate-name
+and unknown-name checks live in one module both verbs call,
+`sweep::expand_sweep_specs` and `sweep::check_swept_names` (`sweep.rs`;
+predict's private expansion is gone). `DesignAxis::sweep` and `ParamPlan::new`
+wrap those two functions, so both verbs keep expanding and validating through
+one path. The batch TOML sweep grammar (`batch.rs:143`,
 `linspace`/`logspace`/`range`) is a different surface syntax and stays; its
 expansion (`expand_sweep`, `batch.rs:293`) feeds `DesignAxis::from_rows`. A
 zipped (non-Cartesian) design is a `--sweep-file`. The `explicit_file` field
 (`sim_job.rs:186-195`) is deleted.
 
-| Consumer                                                                   | Reads                                                              | Replaces                                                                             |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| Collision guard (§8)                                                       | plan design names/origin, varying, `fixed_cli`                     | `ParamSource` match at `engine.rs:367-375`; predict's call at `predict.rs:1623-1649` |
-| `SimQuantities::push_cell` (`main.rs:2485`)                                | `cell.spec.coords().partition_key()`                               | `cell.spec.scenario.name()`                                                          |
-| `PredictiveSink::merge_cell` (`predict.rs:1127`)                           | same                                                               | same, plus the enclosing `sweep_pt` loop variable                                    |
-| `FreeForwardCell`, `assemble_predictive` (`predict.rs:2343`, `:2492-2496`) | `PartitionKey` + `DesignPoint`                                     | the `sweep_pt` loop variable                                                         |
-| Quantity mode (`main.rs:1952-1961`)                                        | per-quantity rule (§10)                                            | `matches!(source, Point { replicates: 1 })`                                          |
-| `CasSink::cell_resolve` label (`batch.rs:1152`)                            | design names ∪ varying columns                                     | `point_overrides.keys()`                                                             |
-| Seed and per-draw lookups (§7.3)                                           | `coords.seed_index()`                                              | `point_idx`                                                                          |
-| `RunEntry.draw_idx` → `SimEnsemble` grid (§7.3)                            | sample index; axis kind folded into the grid level for design jobs | `point_idx`                                                                          |
-| Wide trajectory / obs writers (`main.rs:2915`, `:2952`, `:3081`, `:3115`)  | `CellCoords`, `Grid` (§9.2)                                        | `draw = point_idx + 1`, `n_draws = grid.n_points`                                    |
-| Contrasts arm resolver (`contrasts.rs:643`)                                | sample row at tier 3.5a                                            | draw row at tier 3.5                                                                 |
+| Consumer                                                                   | Reads                                                                                                                                           | Replaces                                                                             |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Collision guard (§8)                                                       | plan design names/origin, varying, `fixed_cli`                                                                                                  | `ParamSource` match at `engine.rs:367-375`; predict's call at `predict.rs:1623-1649` |
+| `SimQuantities::push_cell` (`main.rs:2485`)                                | `cell.spec.coords().partition_key()`                                                                                                            | `cell.spec.scenario.name()`                                                          |
+| `PredictiveSink::merge_cell` (`predict.rs:1127`)                           | same                                                                                                                                            | same, plus the enclosing `sweep_pt` loop variable                                    |
+| `FreeForwardCell`, `assemble_predictive` (`predict.rs:2343`, `:2492-2496`) | `PartitionKey` + `DesignPoint`                                                                                                                  | the `sweep_pt` loop variable                                                         |
+| Quantity mode (`main.rs:1952-1961`)                                        | per-quantity rule (§10)                                                                                                                         | `matches!(source, Point { replicates: 1 })`                                          |
+| `CasSink::cell_resolve` label (`batch.rs:1152`)                            | design names ∪ varying columns                                                                                                                  | `point_overrides.keys()`                                                             |
+| Seed and per-draw lookups (§7.3)                                           | `coords.seed_index()`                                                                                                                           | `point_idx`                                                                          |
+| `RunEntry.point_id` → `SimEnsemble` grid (§7.3)                            | `(point_id, process_seed, sim_run_id)` per cell plus the resolved `design` (landed; below)                                                      | the `(label, seed, draw_idx, run_id)` tuple                                          |
+| Wide trajectory / obs writers (`TableShape` / `CellCoords`, `main.rs`)     | the engine's `CellCoords` (§7.5), feeding the one landed writer (§9.2); the writer's own `CellCoords` is the table-side struct of the same name | `point_idx`, read as `point_id` or `draw` by `PointAxis`                             |
+| Contrasts arm resolver (`contrasts.rs:643`)                                | sample row at tier 3.5a                                                                                                                         | draw row at tier 3.5                                                                 |
 
-The `SimEnsemble` grid level folds the axis kind for design jobs so that
-`--sweep-file X` and `--draws-file X` cannot produce one ensemble `run_id` over
-different bytes (the two write different combined-file columns, §9.2). The fold
-is an optional field of `EnsembleGridLevel` (`sim_ensemble_cas.rs:101`, built at
-`:132`), serialized only when present
-(`skip_serializing_if = "Option::is_none"`) and set only for jobs with a design
-axis. `batch run` jobs have design axes but write no ensemble: ensembles are
-built only on the `simulate` path (`write_sim_ensemble`, `main.rs:2685`, the
-cell list at `:2694-2701`), and no `simulate` job that exists today has a design
-axis, so no existing ensemble grid hash changes; Stage 5 tests both halves — a
-`--draws uniform` ensemble's grid-level hash equals its value on the parent
-commit, and a `--sweep-file X` and a `--draws-file X` ensemble over the same
-file have different grid-level hashes.
+The `SimEnsemble` grid level is keyed on cell identity and carries the resolved
+design (`EnsembleGridLevel`, `sim_ensemble_cas.rs`). Per cell the level holds
+`(point_id, process_seed, sim_run_id)`, sorted, beside the cell count; the arm's
+label, a display string, is not in it, so two ensembles of identical cells hash
+alike whether an arm was named by a preset or derived from flags. The level's
+`design` field is a plain field: the `ResolvedDesign` of a sweep job —
+`Sweep { params, n_points }`, the name-sorted parameters with their values, or
+`File { params, digest, n_points }`, the header's parameters and the file's
+content digest — and `None` otherwise, serialized as it is, `None` included, so
+a design-less job and a sweep job over the same cells are two ensembles. The
+design is what keeps `--sweep beta=0.2,0.3` and `--sweep beta=0.3,0.2` two
+ensembles, since under D-B every design point shares the seed and the sorted
+cells alone would agree; it is also what separates a `--sweep-file X` ensemble
+from a `--draws-file X` one once the sample flag exists, the design job carrying
+`Some` and the sample job `None`. Keying the level this way re-keyed every
+stored multi-cell ensemble once; the per-cell `Sim` leaves were untouched, so a
+rebuilt ensemble aggregates cells the store already holds, and the release notes
+record it under _Run identity_ (`RELEASE_NOTES-0.2.0.md`). The level's bytes are
+pinned by `grid_level_identity_is_pinned` (`sim_ensemble_cas.rs`) for a
+design-less job and for a two-point `beta` sweep; a change there is a
+release-notes event, never collateral. `batch run` jobs have design axes but
+write no ensemble: ensembles are built only on the `simulate` path
+(`write_sim_ensemble`, `main.rs`).
 
 ## 8. Collision policy keys on the coordinate kind
 
@@ -1228,7 +1292,9 @@ The footprint of each overriding source is intersected with the plan:
 - **Sources:** each scenario's `scenario_param_footprint`
   (`params_resolver.rs:698-733`), and the job's tier-5 entries — `--param` and
   the expanded `--param-vec` names (`util.rs:3280-3290`, the list the resolver
-  applies at tier 5).
+  applies at tier 5). `simulate` refuses a `--param` on a swept name at its
+  front end today (W12); moving the check here gives it the guard's formatter
+  and extends it to `--param-vec`, which the front-end check does not read.
 - **Against design names** — non-empty is a hard error. `UserCoordinate`
   (`params_resolver.rs:806`) becomes a view of `DesignOrigin` plus the tier-5
   source, so the formatter names the origin ("the sweep", "the design `wide`",
@@ -1313,25 +1379,47 @@ insertion order would be scenario-major.
 
 ### 9.2 Combined trajectory and observation files
 
-The wide writer (`main.rs:2905-2921`) writes `replicate` (the global cell
-ordinal `run_idx + 1`, when `total_runs > 1`), `scenario` (when
-`n_scenarios > 1`), `draw` (when `n_draws > 1`), then time and state columns;
-observation rows mirror it (`main.rs:3081`, `:3115`, `:3179`). After:
+One writer decides the coordinate columns of the combined trajectory table and
+of both observation tables (`TableShape` / `CellCoords`, `main.rs`), so no table
+mixes conventions:
 
-| Column            | Present when                          | Value                           |
-| ----------------- | ------------------------------------- | ------------------------------- |
-| `replicate`       | `total_runs > 1` (unchanged)          | global cell ordinal (unchanged) |
-| `scenario`        | `n_scenarios > 1` (unchanged, gh#576) | scenario name                   |
-| `point_id`        | design axis present                   | the design point's id           |
-| `sweep:<param>` … | design axis present                   | exact coordinate                |
-| `draw`            | sample axis with more than one row    | sample index + 1                |
+| Column            | Present when                       | Value                                                           |
+| ----------------- | ---------------------------------- | --------------------------------------------------------------- |
+| `replicate`       | `total_runs > 1`                   | global cell ordinal (`run_idx`), counted from 0                 |
+| `scenario`        | `n_scenarios > 1` (gh#576)         | scenario name                                                   |
+| `point_id`        | design axis present                | the design point's id, counted from 0                           |
+| `sweep:<param>` … | design axis present                | exact coordinate; one column per swept parameter, in name order |
+| `seed`            | design axis present                | the cell's process seed — the pairing key across design points  |
+| `draw`            | sample axis with more than one row | sample index, counted from 0                                    |
 
-A design job with no sample axis writes no `draw` column; today's `--draws FILE`
-output (now `--draws-file`) is byte-identical. Combined trajectory and
+This is the landed shape for a design job and for a draws job. What the rewrite
+adds is the design × sample product, in which one row carries `point_id`,
+`sweep:<param>`, `seed` and `draw` together, and `--draws-file`, which writes
+exactly what today's `--draws FILE` writes. A design job with no sample axis
+writes no `draw` column: a design point is not a draw. Combined trajectory and
 observation rows keep the engine's canonical cell order, `plan_grid`'s
 `scenario → design point → sample → replicate` (§7.5), then time; unlike the
 quantity files they are not re-sorted, because with no design axis that order is
 today's and re-sorting would change today's bytes.
+
+**Index base.** The canonical base is 0 for every index a user sees, in every
+verb (`2026-10-24-batch-to-simulate.md` §12, decision 3; gh#990). `simulate` is
+converted: `replicate`, `draw` and `point_id` in these tables count from 0, and
+`point_id` was born 0-based (D-C). `fit`'s chain numbers (the `chain_N/`
+directories, the chain labels, the `chain` column of `predictive/*.tsv`,
+`--exclude-chains`) and the draw indices `fit predict` reports are still 1-based
+until gh#990 lands, so a join across verbs on `draw` is unsafe until then. The
+base is not left to each verb.
+
+**Pairing.** The `seed` column is the pairing key today: under D-B two design
+points at one replicate share a process seed, so a modeller joins on
+`(scenario, seed, time)` to form the paired difference of §6.3. A sweep job's
+`replicate` cannot serve, because it is the global run ordinal and counts across
+points. The within-axis replicate index (`CellCoords.rep`, §7.5) becomes the
+pairing coordinate when this proposal's cell lands, layered on top of `seed`,
+which stays. Duplicate explicit seeds (`--seeds 7,7`) make seed pairing
+degenerate, two cells of one point sharing a seed, which the sink already
+tolerates.
 
 ### 9.3 Manifest fields
 
@@ -1456,26 +1544,32 @@ grouping assertions fail on row count.
 
 Reason 2 is removed by Stage 7 (predict's sweep is in the cell). Reason 3 is the
 subject of §6. Reason 4 no longer holds: `--sweep-file` and `simulate --sweep`
-reach the design path in Stage 5.
+build `ParamSource::Sweep` today and reach the `DesignAxis` path in Stage 5.
 
 ## 12. Front-end validation
 
 ### 12.1 The `--sweep-file` reader
 
-`--sweep-file` gets its own reader rather than `load_draws_tsv_keyed`
-(`main.rs:4462`), which requires at least two columns (`main.rs:4472-4474`) and
-silently strips `chain`/`draw` (`main.rs:4502`). The `--draws-file` reader keeps
-`load_draws_tsv_keyed` but drops the two-column minimum, so a one-parameter
-sample file loads. The `--sweep-file` reader:
+`--sweep-file` has its own reader, `sweep::read_sweep_file` (`sweep.rs`), rather
+than `load_draws_tsv_keyed` (`main.rs:4462`), which requires at least two
+columns (`main.rs:4472-4474`) and silently strips `chain`/`draw`
+(`main.rs:4502`). The landed reader accepts one or more parameter columns,
+tab-separated; takes `point_id` as the 0-based row; records the file in the
+ensemble by its content digest, never its path; and refuses, before anything
+runs: a column that names no model parameter, listing the model's parameters; a
+parameter named by two columns; a header with zero rows; a cell that is not a
+number or not finite, naming the line and column; and a duplicate row, naming
+both line numbers (D-E). The `--draws-file` reader keeps `load_draws_tsv_keyed`
+but drops the two-column minimum, so a one-parameter sample file loads. What the
+`--sweep-file` reader still gains:
 
-- accepts one or more parameter columns; tab-separated, with a message that
-  detects a comma-separated file;
-- takes an optional integer `point_id` column (unique, carried to output) and an
-  optional string `label` column (carried to the manifest);
-- refuses `chain` or `draw` columns, with a hint to use `--draws-file`;
-- refuses a non-finite value, naming the line and column;
-- refuses duplicate rows, naming both line numbers (D-E);
-- refuses a constant column when the file has two or more rows, with a hint:
+- a message that detects a comma-separated file;
+- an optional integer `point_id` column (unique, carried to output) and an
+  optional string `label` column (carried to the manifest) — today either is
+  refused as a column naming no parameter;
+- refusing `chain` or `draw` columns with a hint to use `--draws-file` — today
+  they are refused as columns naming no parameter, without the hint;
+- refusing a constant column when the file has two or more rows, with a hint:
   "column `gamma` is the same on every row, so it is not a coordinate; set it
   with --param or --params". A one-row file is a single condition and every
   column of it is a coordinate.
@@ -1488,29 +1582,35 @@ backfilled columns are not file columns and are never varying. For
 `--sweep-file` backfilled constants apply to every point and never become design
 names. The check that `--fit` comes with a parameter source (`main.rs:1168`,
 "--fit requires --draws") accepts any of `--draws`, `--draws-file`, `--sweep`
-and `--sweep-file`.
+and `--sweep-file`; today it accepts `--draws` alone, so `--fit` beside
+`--sweep-file` is refused.
 
 ### 12.3 Flags, conflicts, and what the dry run says
 
-- `--draws` and `--draws-file` are mutually exclusive; `--sweep` and
-  `--sweep-file` are mutually exclusive; a sample flag and a design flag
-  compose. Several `--sweep` flags form a Cartesian product sorted by name; a
-  repeated name is refused.
-- Conflict lists that name only `draws` gain `draws_file`, `sweep` and
-  `sweep_file`: `--stdout` (`args/mod.rs:435-438`), `--event-log` (`:567`),
-  `--reactive-log` (`:586`). `--reactive-log` mirrors only the last cell
-  (`main.rs:2137`), so a multi-cell design is refused rather than mirrored
-  partially. `--draws-out` (`requires = "draws"`, `:420`) stays tied to
-  generated draws.
+- `--sweep` and `--sweep-file` are mutually exclusive, several `--sweep` flags
+  form a Cartesian product sorted by name, and a repeated or undeclared name is
+  refused (landed, `sweep.rs`). `--draws` and `--draws-file` are mutually
+  exclusive. A sample flag and a design flag compose; today `--sweep` or
+  `--sweep-file` beside `--draws` is refused by clap, because the single-variant
+  `ParamSource` cannot hold both, and lifting that refusal is the design ×
+  sample product of §7.1.
+- The conflict lists of `--stdout`, `--event-log` and `--reactive-log` name
+  `sweep` and `sweep_file` (landed) and gain `draws_file`. `--reactive-log`
+  mirrors only the last cell (`main.rs:2137`), so a multi-cell design is refused
+  rather than mirrored partially. `--draws-out` (`requires = "draws"`, `:420`)
+  stays tied to generated draws.
 - `--init-state fit` needs the posterior it pairs against (`main.rs:1149-1163`);
   with a design axis it is refused for the reason `conditioned_here` refuses a
   swept conditioned read. `--init-state FILE` refuses `--draws` today
   (`main.rs:1316-1324`); it also refuses `--draws-file`, `--sweep-file` and
-  `--sweep`.
-- `print_dry_run` (`main.rs:4532`) and the run-count banner
-  (`main.rs:1683-1691`) describe design points, samples, replicates, scenarios
-  and total cells; a grid above 10 000 cells prints a warning with the product
-  spelled out.
+  `--sweep`. Neither form names `--sweep` today.
+- `print_dry_run` prints the resolved design — each `sweep: <param> = [values]`
+  line and the point count, or the sweep file's parameters, point count and
+  digest — and, for a multi-cell run, each cell as a store hit or miss with its
+  leaf path and the two counts (landed). It and the run-count banner
+  (`main.rs:1683-1691`) still gain the sample axis beside design points,
+  replicates, scenarios and total cells, and a grid above 10 000 cells prints a
+  warning with the product spelled out.
 
 ### 12.4 The provenance sidecar
 
@@ -1543,33 +1643,47 @@ subsample subsamples again from the file's rows and appends the step.
 
 ## 13. What changes for users, and what does not re-key
 
-| #  | Command                                                              | Today                                       | After                                                                                                                                        |
-| -- | -------------------------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1  | `simulate --draws FILE …`                                            | runs; pools a grid under `--quantities-out` | refused, naming `--sweep-file` and `--draws-file` (W9)                                                                                       |
-| 2  | `simulate --draws-file FILE`                                         | (does not exist)                            | today's `--draws FILE` seeds and trajectories; allowed under a scenario (W5)                                                                 |
-| 3  | `simulate --sweep`, `--sweep-file`                                   | (do not exist)                              | one group per point; CRN across points; refused against a scenario or `--param` on those params                                              |
-| 4  | `simulate --draws-out PATH`                                          | writes the file                             | same columns as today (posterior: estimated + `[fixed]`; prior/uniform: varying, since gh#949) + `PATH.json`; prints the `--draws-file` hint |
-| 5  | `batch run [design.NAME]` × colliding scenario                       | refused as "the sweep"                      | refused as "the design `NAME`"                                                                                                               |
-| 6  | Scenario, `--param` or design value setting a varying sampled column | runs silently                               | runs; note on stderr; recorded in `summary`                                                                                                  |
-| 7  | Banded quantity files (`simulate` and `fit predict`)                 | no statement of what the band is over       | `band` column; `point_id` on design rows; exact `sweep:` values; manifest `mode`/`summary`                                                   |
-| 8  | `fit predict --sweep` after the grid move                            | —                                           | byte-identical to Stage 7's parent commit                                                                                                    |
-| 9  | Groups whose realizations are all bit-identical                      | zero-width band                             | point mode when every group of the quantity is constant (§10)                                                                                |
-| 10 | `--design-from` with a file                                          | `--draws FILE`                              | `--draws-file` or `--sweep-file`; writes `truths.tsv`, `design_from.json`                                                                    |
-| 11 | `--draws-file` with `-n`; large files without `-n`                   | (`-n` ignored for `--draws FILE`)           | strided subsample with `-n`; every row without it, plus a warning above 1000 rows                                                            |
+| #  | Command                                                              | Today                                                                                                                                                                                                         | After                                                                                                                                        |
+| -- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1  | `simulate --draws FILE …`                                            | runs; pools a grid under `--quantities-out`                                                                                                                                                                   | refused, naming `--sweep-file` and `--draws-file` (W9)                                                                                       |
+| 2  | `simulate --draws-file FILE`                                         | (does not exist)                                                                                                                                                                                              | today's `--draws FILE` seeds and trajectories; allowed under a scenario (W5)                                                                 |
+| 3  | `simulate --sweep`, `--sweep-file`                                   | one leaf per cell, read back from the store on a re-run; CRN across points; `point_id`, `sweep:<param>` and `seed` columns; refused against a scenario or `--param` on those params; refused beside `--draws` | compose with a sample axis; quantity files gain `point_id` and `band`                                                                        |
+| 4  | `simulate --draws-out PATH`                                          | writes the file                                                                                                                                                                                               | same columns as today (posterior: estimated + `[fixed]`; prior/uniform: varying, since gh#949) + `PATH.json`; prints the `--draws-file` hint |
+| 5  | `batch run [design.NAME]` × colliding scenario                       | refused as "the sweep"                                                                                                                                                                                        | refused as "the design `NAME`"                                                                                                               |
+| 6  | Scenario, `--param` or design value setting a varying sampled column | runs silently                                                                                                                                                                                                 | runs; note on stderr; recorded in `summary`                                                                                                  |
+| 7  | Banded quantity files (`simulate` and `fit predict`)                 | no statement of what the band is over                                                                                                                                                                         | `band` column; `point_id` on design rows; exact `sweep:` values; manifest `mode`/`summary`                                                   |
+| 8  | `fit predict --sweep` after the grid move                            | —                                                                                                                                                                                                             | byte-identical to Stage 7's parent commit                                                                                                    |
+| 9  | Groups whose realizations are all bit-identical                      | zero-width band                                                                                                                                                                                               | point mode when every group of the quantity is constant (§10)                                                                                |
+| 10 | `--design-from` with a file                                          | `--draws FILE`                                                                                                                                                                                                | `--draws-file` or `--sweep-file`; writes `truths.tsv`, `design_from.json`                                                                    |
+| 11 | `--draws-file` with `-n`; large files without `-n`                   | (`-n` ignored for `--draws FILE`)                                                                                                                                                                             | strided subsample with `-n`; every row without it, plus a warning above 1000 rows                                                            |
 
 **Run identity.** Every `sim` `run_id` folds the engine version, including the
 git hash (`version.rs:12-15`; `ModelDigest::from_model`,
 `runid/src/inputs.rs:304`; `resolve.rs:202`), so no `run_id` survives a commit
 and "`run_id` unchanged" cannot be a test. The claim this proposal makes is **no
-re-key beyond the existing per-build engine-version fold**: for every job that
-exists today, the `params`, `scenario`, `seed` and `config` level hashes, the
-store path segments below the model level, and the trajectory bytes are
-unchanged. The baseline is `main` after gh#949 (`198dc096`, landed): gh#949
-changed resolved values (and so `params` level hashes) for
+re-key beyond the existing per-build engine-version fold**, with one declared
+exception that has already happened: for every job that exists today, the
+`params`, `scenario`, `seed` and `config` level hashes of every `Sim` leaf, the
+hash half of each store path segment below the model level, and the trajectory
+bytes are unchanged. The exception is the `SimEnsemble` grid level, which
+re-keyed once when the arm's label left its per-cell tuple and the resolved
+design joined it (§7.6); the release notes record it under _Run identity_, and
+the remaining stages move no hash. The label half of a path segment is
+provenance, not identity: an ad-hoc arm is labelled from its flags
+(`baseline+vaccination`, `baseline;beta=0.3`; `sim_job::adhoc_arm_label`) in its
+leaf path, its `run.json` and the listings, and a leaf written under an earlier
+label is found by `runid::find_leaf`, which tries the current-label path first
+and then walks the store by each level's `hash8`, verifying the candidate's
+record exactly as `lookup` does, so the leaf is re-used rather than stored
+twice. A renamed scenario preset is an identity change, because the preset's
+name is in the model's content digest (`runid::ir_hash`), so every leaf of that
+model is a genuine miss; a renamed model file is label-only, the model level's
+label being the file stem. The baseline is `main` after gh#949 (`198dc096`,
+landed): gh#949 changed resolved values (and so `params` level hashes) for
 `--params X --draws uniform|prior` and for arms that had run at a leaked
 scenario value, and those changes are gh#949's, not this proposal's. The new
 flags are new keys: `--sweep` and `--sweep-file` runs have no predecessors, and
-a `--sweep-file` ensemble folds its axis kind (§7.6).
+a `--sweep-file` ensemble carries its design in the grid level (§7.6).
 
 **IR and goldens are unaffected.** All changes are in `rust/crates/cli` and
 docs. No `ir/VERSION` bump, no `ocaml/` change, no golden regeneration.
@@ -1580,7 +1694,9 @@ Each stage lands alone with a green `make test`, ships no pooling regression and
 no lost refusal, and each named test fails on the defect it guards (a mutation
 check is named where the test could otherwise pass vacuously). Byte-neutral
 stages are checked by comparing level hashes, path segments below the model
-level, and output bytes — never whole `run_id`s (§13).
+level, and output bytes — never whole `run_id`s (§13). Stage numbers are kept,
+because §5, §9 and §16 refer to them; a stage whose content has landed says so,
+and what it lists is what remains.
 
 **Stage 0 — one constructor for `CellSpec`.** `CasSink::predict_cells` calls
 `plan_grid`. Its iteration order today is point → scenario → seed
@@ -1596,14 +1712,15 @@ paths.
 `ParamSource`; move replicate count into `Seeds`; split `point_overrides`;
 migrate the §7.6 consumers mechanically, keeping today's seeds for every
 existing flag (`--draws FILE` builds an `Asserted` sample with the row index as
-seed index). Interim rule until Stage 5: a file-sourced sample (`Asserted`, or
-from Stage 3 a sidecar-read measure) is refused against a scenario footprint
-exactly as today's draws file is, with today's message, so
-`tests/scenario_coordinate_collision_gh572.rs:282-334` stays green. _Tests:_
-`tests/determinism_pin.rs` unchanged and green; a unit test planning point,
-generated-draws, draws-file and explicit-seed sweep jobs and asserting each
-cell's `process_seed` equals `process_seed_for` with the old `point_idx` (the
-old formula kept in the test as the oracle); an A/B of
+seed index; `--sweep` and `--sweep-file` build a `DesignAxis` with origin
+`Sweep` or `File` and keep seed index 0). Interim rule until Stage 5: a
+file-sourced sample (`Asserted`, or from Stage 3 a sidecar-read measure) is
+refused against a scenario footprint exactly as today's draws file is, with
+today's message, so `tests/scenario_coordinate_collision_gh572.rs:282-334` stays
+green. _Tests:_ `tests/determinism_pin.rs` unchanged and green; a unit test
+planning point, generated-draws, draws-file and explicit-seed sweep jobs and
+asserting each cell's `process_seed` equals `process_seed_for` with the old
+`point_idx` (the old formula kept in the test as the oracle); an A/B of
 `simulate --draws uniform -n 5 --scenario a,b` and a `batch run` sweep comparing
 level hashes, path segments below the model, and every output file's bytes.
 
@@ -1624,10 +1741,10 @@ and with a `--draws FILE` whose `N0` column is constant (the Stage 1 interim
 refusal applies to scenario footprints over file columns, so this case uses
 `--param N0=…` instead); a posterior over an indexed family pins the §7.2
 `estimated`-to-column mapping; `--draws uniform --param beta=0.5` exits 0 and
-records an imposition `"by": "--param"` (the `--param`-on-design refusal is
-tested in Stage 5, when `simulate` first has a design axis). Mutation check:
-make the guard treat design names as sample columns and confirm the batch
-refusal test goes red.
+records an imposition `"by": "--param"` (the `--param`-on-design refusal exists
+at `simulate`'s front end, W12; this stage moves it into the guard and keeps its
+test). Mutation check: make the guard treat design names as sample columns and
+confirm the batch refusal test goes red.
 
 **Stage 3 — provenance sidecar (D-D).** `--draws-out` keeps today's columns
 (posterior: estimated + `[fixed]`) and adds `FILE.json`; the sidecar reader
@@ -1661,18 +1778,27 @@ the new header; a sweep value `0.1234567` renders exactly; every manifest entry
 validates against §9.3 (a test walking the fields), with `design_shadows` and
 `measure_note` exempted for predict entries until Stage 7.
 
-**Stage 5 — the flag split, `simulate --sweep`, and design grouping, together.**
-`--sweep-file` (reader §12.1), `--draws-file`, `simulate --sweep`; the bare
-`--draws <path>` refusal and the typo message; D-B seeds for design jobs;
-`by_partition` and the §10 bit-identical mode rule in the same stage — for
-**both** verbs, so `fit predict` also renders a quantity whose every group is
-constant in point mode; that predict output change is intended and pinned by a
-test (a predict run whose quantity is a function of a `[fixed]` parameter only
-renders `value`, not a zero-width band) — so no build can pool design points
-(the interim refusal of Stage 1 is lifted here, for `--draws-file` only).
-Combined writer columns (§9.2) and the ensemble axis fold; flag conflicts,
-dry-run and banner (§12.3); `--init-state` refusals; `--fit` backfill rules and
-the `--fit` source check (§12.2); `--draws-file` routed into `--design-from`
+**Stage 5 — the sample-side flag split and the §10 mode rule.** The design half
+of this stage is on `simulate`: `--sweep` and `--sweep-file` (the reader in its
+landed form, §12.1); D-B seeds for design jobs (§7.3); the combined writer
+columns of §9.2; quantities accumulated per (design point, scenario) under a
+static mode rule (one replicate per point gives a point-mode row per group, more
+gives a band over the replicates of each group); the grid level with its
+`design` (§7.6); the `sweep` and `sweep_file` conflicts, the dry-run design and
+hit/miss view (§12.3); the W12 `--param` refusal; and the `--sweep-file`
+refusals of §12.1 — pinned by `tests/simulate_sweep.rs`,
+`tests/simulate_store_reuse.rs`, `tests/simulate_arm_label.rs` and the unit
+tests of `sweep.rs` and `sim_ensemble_cas.rs`. What remains: `--draws-file`; the
+bare `--draws <path>` refusal and the typo message; `by_partition` and the §10
+bit-identical mode rule — for **both** verbs, so `fit predict` also renders a
+quantity whose every group is constant in point mode; that predict output change
+is intended and pinned by a test (a predict run whose quantity is a function of
+a `[fixed]` parameter only renders `value`, not a zero-width band) — so no build
+can pool design points (the interim refusal of Stage 1 is lifted here, for
+`--draws-file` only); the design × sample product, lifting the clap refusal of
+`--sweep` beside `--draws`; the `draws_file` conflicts, the sample axis in the
+dry run and banner (§12.3); the `--init-state` refusals; `--fit` backfill rules
+and the `--fit` source check (§12.2); `--draws-file` routed into `--design-from`
 with today's behaviour (one dataset per row, dataset-index seeds), so
 `--design-from` never loses file input between this stage and Stage 6. Docs in
 the same stage: every `--draws FILE` in `docs/camdl-run-spec.md` (lines 1041,
@@ -1684,41 +1810,43 @@ sentence on `--draws uniform` (1150-1154). Tests that pass `--draws FILE` move
 to `--draws-file`: `tests/simulate_identity_parity.rs:270`, `:317`,
 `tests/gh641_init_state_forecast.rs:809`,
 `tests/scenario_coordinate_collision_gh572.rs:282-334` (the last now asserts the
-`--sweep-file` refusal and the `--draws-file` allowance). _Tests:_ the W9
-refusal verbatim, including both replacement flags; `--draws prio` gives the
-typo message; `--sweep beta=0.15,0.3,0.6 --backend ode --dt 0.1` gives rows
-`0 0.15 70`, `1 0.3 304`, `2 0.6 536`; `--sweep-file` with the same three rows
-gives byte-identical files; common random numbers, with
-`--backend
-chain_binomial --replicates 3`: every design point's cells carry the
-same three `process_seed`s, and inserting a new point at the front and,
-separately, in the middle of the sweep leaves every other point's trajectory
-bytes identical; `--draws-file f.tsv` trajectories equal the parent commit's
-`--draws f.tsv` trajectories byte for byte, for a 5-row file and for a 250-row
-file (above `--draws posterior`'s default cap of 200, so a cap would show); the
-ensemble axis-kind fold (§7.6) leaves a `--draws uniform` ensemble's grid-level
-hash unchanged and separates `--sweep-file X` from `--draws-file X`; imposition
-notes print once per (scenario, column) for a two-scenario, three-point run; the
-W12 `--param` refusal; `--sweep-file` duplicate rows refused naming both lines;
-ODE `--replicates 4` renders `peak_I` in point mode while an observation
-quantity is banded; an ODE `--init-state FILE --replicates 4` bands `peak_I`
-(rows differ); in a `--draws uniform` run with scenarios `baseline,pinned` where
-`beta` is the only varying column, the `pinned` rows read `band = process` and
-the `baseline` rows `uniform_bounds`. Mutation check: key `by_partition` on the
-scenario alone and confirm the three-row assertion fails on the row count, not
-the header.
+`--sweep-file` refusal and the `--draws-file` allowance). _Tests_ (the design
+half's are landed; these remain): the W9 refusal verbatim, including both
+replacement flags; `--draws prio` gives the typo message;
+`--sweep beta=0.15,0.3,0.6 --backend ode --dt 0.1` gives rows `0 0.15 70`,
+`1 0.3 304`, `2 0.6 536` once Stage 4 has put `point_id` in the quantity files;
+`--sweep-file` with the same three rows gives byte-identical files; common
+random numbers, with `--backend chain_binomial --replicates 3`: every design
+point's cells carry the same three `process_seed`s (landed), and inserting a new
+point at the front and, separately, in the middle of the sweep leaves every
+other point's trajectory bytes identical; `--draws-file f.tsv` trajectories
+equal the parent commit's `--draws f.tsv` trajectories byte for byte, for a
+5-row file and for a 250-row file (above `--draws posterior`'s default cap of
+200, so a cap would show); the grid-level pin (`grid_level_identity_is_pinned`)
+holds, and a `--sweep-file X` and a `--draws-file X` ensemble over one file have
+different grid-level hashes, the design being `Some` for one and `None` for the
+other (§7.6); imposition notes print once per (scenario, column) for a
+two-scenario, three-point run; ODE `--replicates 4` renders `peak_I` in point
+mode while an observation quantity is banded; an ODE
+`--init-state FILE --replicates 4` bands `peak_I` (rows differ); in a
+`--draws uniform` run with scenarios `baseline,pinned` where `beta` is the only
+varying column, the `pinned` rows read `band = process` and the `baseline` rows
+`uniform_bounds`. Mutation check: key `by_partition` on the scenario alone and
+confirm the three-row assertion fails on the row count, not the header.
 
 **Stage 6 — `--design-from` on the new axes.** Accept `--sweep`, `--sweep-file`
-and the remaining sources; priors from the design `fit.toml`; write `truths.tsv`
-and `design_from.json`; seeds stay by dataset index (W11). Dataset files
-byte-identical. _Test:_ `--sweep-file truths.tsv` writes one `ds_NN/` per row,
-`truths.tsv` with `point_id`, and `"axis": "design"`; `--draws prior -n 3` gives
+(today `--design-from` conflicts with both, by clap) and the remaining sources;
+priors from the design `fit.toml`; write `truths.tsv` and `design_from.json`;
+seeds stay by dataset index (W11). Dataset files byte-identical. _Test:_
+`--sweep-file truths.tsv` writes one `ds_NN/` per row, `truths.tsv` with
+`point_id`, and `"axis": "design"`; `--draws prior -n 3` gives
 `"axis": "sample", "measure": "prior"` with the design fit.toml's hash.
 
-**Stage 7 — `fit predict` on the grid.** One plan; `DesignAxis::sweep` carries
-predict's name checks; the pre-flight guard call stays before the free-forward
-closure; rows rendered design-major explicitly; to bound memory, one `run_job`
-call per design point (a design slice) rather than one for the whole grid, since
+**Stage 7 — `fit predict` on the grid.** One plan; `DesignAxis::sweep` wraps the
+shared `sweep::expand_sweep_specs` and `sweep::check_swept_names` predict
+already calls; the pre-flight guard call stays before the free-forward closure;
+rows rendered design-major explicitly; to bound memory, one `run_job` call per
+design point (a design slice) rather than one for the whole grid, since
 `run_job` holds every cell's result until the merge phase (`engine.rs:232-247`).
 A slice is **one global plan filtered by design index**: `plan_grid` runs once
 over the whole plan, and each slice is the `Vec<CellSpec>` of cells whose
@@ -1772,7 +1900,11 @@ flag the command has. _Tests:_ `params_resolver.rs` unit tests at `:2206`,
   `sweep:*`, `draw`, `rep`, `process_seed`, optionally quantity values) so
   paired reductions are possible from `simulate` output.
 - **F3 — `batch run --quantities-out`,** so exploring a design does not need a
-  `simulate --sweep-file` round trip that recomputes every point (W2).
+  `simulate --sweep-file` round trip that recomputes every point (W2). This
+  lapses with `batch` (`2026-10-24-batch-to-simulate.md` §4 drops the design
+  generators): a generated design is a TSV, and
+  `simulate --sweep-file … --quantities-out` is the one run, with no second
+  pass.
 
 The earlier plan to file a separate issue for common random numbers across
 design points is withdrawn: D-B makes it the default for the new flags, and no
