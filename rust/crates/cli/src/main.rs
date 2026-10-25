@@ -894,6 +894,20 @@ fn run_simulate(a: &args::SimulateArgs) {
     let model_dt: Option<f64> = util::peek_simulation_dt(&ir_path_compiled);
     let mut dt           = a.backend.dt.or(model_dt).unwrap_or(1.0_f64);
     let seed             = a.seed;
+    // `--parallel N` / CAMDL_PARALLEL: the Rayon thread count for the
+    // simulation phase of a multi-cell run. Absent → sequential; 0 → every
+    // core, as the other verbs read it. The engine's Rayon branch runs on the
+    // global pool, which defaults to every core, so the pool is capped here
+    // (mirrors fit/pfilter/profile/survey); `build_global` is one-shot per
+    // process and an already-initialised Err is ignored as those verbs do.
+    let parallel: usize = match a.parallel {
+        None => 1,
+        Some(0) => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+        Some(n) => n,
+    };
+    if parallel > 1 {
+        let _ = rayon::ThreadPoolBuilder::new().num_threads(parallel).build_global();
+    }
     let overrides: HashMap<String, f64> = a.model_overrides.param.iter()
         .map(|p| (p.name.clone(), p.value)).collect();
     let table_files: HashMap<String, String> = a.model_overrides.table.iter()
@@ -1864,10 +1878,11 @@ fn run_simulate(a: &args::SimulateArgs) {
         set_vec_entries: base_sim_run.set_vec_entries.clone(),
         table_files: base_sim_run.table_files.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         obs: obs_mode,
-        // simulate keeps its historical sequential, in-order streaming
-        // (combined wide-format output is order-sensitive); `--parallel` is
-        // accepted by `SimulateArgs` and not consulted here (run-spec §4.4).
-        parallel: 1,
+        // Output is byte-identical whatever the thread count: a cell's seed is
+        // a function of its grid position, and the engine merges cells in
+        // canonical order, so the writers see the sequence a serial run
+        // produces (run-spec §4.4).
+        parallel,
     };
 
     // ── Pre-flight: every generated-draws cell has a value for every parameter

@@ -560,7 +560,9 @@ pub struct SimulateArgs {
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
     pub output_dir: PathBuf,
 
-    /// Concurrent simulation runs
+    /// Rayon threads for the simulation phase of a multi-cell run (absent:
+    /// sequential; 0 = all cores). Output is byte-identical whatever the
+    /// value: cells are seeded by grid position and merged in canonical order.
     #[arg(long, env = "CAMDL_PARALLEL")]
     pub parallel: Option<usize>,
 
