@@ -174,8 +174,8 @@ fn stage_leaf(out: &Path) -> PathBuf {
 }
 
 /// One chain's `trace.tsv` as a header plus one row of fields per sweep.
-fn trace(stage: &Path, chain_1based: usize) -> (Vec<String>, Vec<Vec<String>>) {
-    let path = stage.join(format!("chain_{chain_1based}/trace.tsv"));
+fn trace(stage: &Path, chain: usize) -> (Vec<String>, Vec<Vec<String>>) {
+    let path = stage.join(format!("chain_{chain}/trace.tsv"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
@@ -184,7 +184,7 @@ fn trace(stage: &Path, chain_1based: usize) -> (Vec<String>, Vec<Vec<String>>) {
     let rows: Vec<Vec<String>> = lines
         .map(|l| l.split('\t').map(String::from).collect::<Vec<_>>())
         .collect();
-    assert!(!rows.is_empty(), "chain {chain_1based} wrote no trace rows");
+    assert!(!rows.is_empty(), "chain {chain} wrote no trace rows");
     for r in &rows {
         assert_eq!(r.len(), header.len(), "trace row width must match the header");
     }
@@ -207,7 +207,7 @@ fn profile_from_traces(stage: &Path) -> ([Option<f64>; N_BINS], f64, usize) {
     let mut n = [0usize; N_BINS];
     let mut agg_sum = 0.0;
     let mut n_sweeps = 0usize;
-    for c in 1..=CHAINS {
+    for c in 0..CHAINS {
         let (header, rows) = trace(stage, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
@@ -239,7 +239,7 @@ fn profile_from_traces(stage: &Path) -> ([Option<f64>; N_BINS], f64, usize) {
 fn as_accept_profile_from_traces(stage: &Path) -> [Option<f64>; N_BINS] {
     let mut sum = [0.0f64; N_BINS];
     let mut n = [0usize; N_BINS];
-    for c in 1..=CHAINS {
+    for c in 0..CHAINS {
         let (header, rows) = trace(stage, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
@@ -268,7 +268,7 @@ fn as_accept_profile_from_traces(stage: &Path) -> [Option<f64>; N_BINS] {
 fn ancestor_ess_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>) {
     let mut pre = Vec::new();
     let mut post = Vec::new();
-    for c in 1..=CHAINS {
+    for c in 0..CHAINS {
         let (header, rows) = trace(stage, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
@@ -289,7 +289,7 @@ fn ancestor_ess_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>) {
 /// sample size)`; `NA` — a sweep that measured no finite ratio — is skipped.
 fn logalpha_from_traces(stage: &Path) -> (Vec<f64>, Vec<f64>, u64) {
     let (mut median, mut near, mut n) = (Vec::new(), Vec::new(), 0u64);
-    for c in 1..=CHAINS {
+    for c in 0..CHAINS {
         let (header, rows) = trace(stage, c);
         for row in &rows {
             let sweep: usize = col(&header, row, "sweep").parse().expect("sweep parses");
@@ -537,7 +537,7 @@ fn pgas_summary_carries_the_per_bin_renewal_profile() {
     // ── The aggregate is not replaced ─────────────────────────────────────
     // `trajectory_renewal` is what downstream tools read today, and it stays
     // where they read it.
-    let (header, _) = trace(&stage, 1);
+    let (header, _) = trace(&stage, 0);
     for c in ["trajectory_renewal", "renewal_b0", "renewal_b9", "as_accept",
               "as_accept_b0", "as_accept_b9",
               "as_logalpha_median", "as_logalpha_near", "as_logalpha_n",

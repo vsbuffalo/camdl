@@ -6,7 +6,7 @@
 //! Strategy: run one tiny real PGAS fit to produce a valid, self-contained fit
 //! segment (archived IR, sidecar, FitView), then OVERWRITE its `draws.tsv` with
 //! a controlled 4-chain cloud — three tight chains plus one deliberate outlier
-//! (0-based chain 3 = the user's `chain 4`, with a much larger `beta`). This
+//! (chain 3, with a much larger `beta`). This
 //! gives a KNOWN outlier chain deterministically, which a converging sampler
 //! would not reliably produce. The read-side commands then read that cloud
 //! through the one filter.
@@ -84,9 +84,9 @@ const DATA: &str =
 /// the well-mixed-vs-well-mixed control has a clean, low-noise baseline.
 const DRAWS_PER_CHAIN: usize = 30;
 
-/// A controlled 4-chain posterior cloud. Chains 0,1,2 (the user's 1,2,3) are
-/// tight around a SLOW epidemic (`beta ≈ 0.35`); chain 3 (the user's `chain 4`)
-/// is a stuck outlier at a FAST epidemic (`beta ≈ 0.85`), so dropping it must
+/// A controlled 4-chain posterior cloud. Chains 0,1,2 are tight around a SLOW
+/// epidemic (`beta ≈ 0.35`); chain 3 is a stuck outlier at a FAST epidemic
+/// (`beta ≈ 0.85`), so dropping it must
 /// move the free-forward bands sharply — and dropping a tight chain must not.
 ///
 /// The tight chains carry a zero-mean cyclic jitter with a per-chain PHASE
@@ -319,24 +319,24 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
         "a full-cloud predictive.json must not stamp chain_selection"
     );
 
-    // Exclude the outlier chain 4 (0-based 3).
+    // Exclude the outlier chain 3.
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "4"],
+        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "3"],
     );
     assert!(out.status.success(), "excluded predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     // The non-quietable warning fired, naming the dropped chain.
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--exclude-chains dropped chain(s) 4") && stderr.to_lowercase().contains("bias"),
+        stderr.contains("--exclude-chains dropped chain(s) 3") && stderr.to_lowercase().contains("bias"),
         "predict must warn loudly about the biased selection, got:\n{stderr}"
     );
 
     let excl =
-        std::fs::read_to_string(seg.join("predictive-excl4").join("weekly_cases.tsv")).unwrap();
+        std::fs::read_to_string(seg.join("predictive-excl3").join("weekly_cases.tsv")).unwrap();
     let excl_rows = free_forward_rows(&excl);
-    // n_draws dropped from 120 to 90 (chain 4's 30 draws gone).
+    // n_draws dropped from 120 to 90 (chain 3's 30 draws gone).
     assert!(excl_rows.iter().all(|r| r.n_draws == 90), "excluded cloud replays 90 draws: {excl_rows:?}");
 
     // The bands MOVED, dramatically: the outlier chain's fast epidemic drives the
@@ -364,14 +364,14 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
         "…nor the pooled manifest"
     );
 
-    // Provenance stamped: chain_selection = {excluded:[4], kept:[1,2,3], n_total:4}.
+    // Provenance stamped: chain_selection = {excluded:[3], kept:[0,1,2], n_total:4}.
     let j: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("predictive-excl4.json")).unwrap(),
+        &std::fs::read_to_string(seg.join("predictive-excl3.json")).unwrap(),
     )
     .unwrap();
     let cs = j.get("chain_selection").expect("chain-subset predictive.json stamps chain_selection");
-    assert_eq!(cs["excluded"], serde_json::json!([4]));
-    assert_eq!(cs["kept"], serde_json::json!([1, 2, 3]));
+    assert_eq!(cs["excluded"], serde_json::json!([3]));
+    assert_eq!(cs["kept"], serde_json::json!([0, 1, 2]));
     assert_eq!(cs["n_total"], serde_json::json!(4));
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -381,8 +381,8 @@ fn exclude_outlier_chain_moves_bands_and_is_recorded() {
 fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     // Negative control: among the WELL-MIXED chains, dropping one more barely
     // moves the band — yet the selection is still recorded. The clean baseline
-    // is "outlier removed" (chains 1,2,3); then also dropping the well-mixed
-    // chain 2 (→ chains 1,3) must barely move the band, unlike dropping the
+    // is "outlier removed" (chains 0,1,2); then also dropping the well-mixed
+    // chain 1 (→ chains 0,2) must barely move the band, unlike dropping the
     // outlier. Comparing two clean subsets isolates the well-mixed effect
     // (dropping a tight chain while the outlier stays would instead RAISE the
     // outlier's weight — not a well-mixed control).
@@ -394,23 +394,23 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "4"],
+        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "3"],
     );
-    assert!(out.status.success(), "baseline exclude-4 failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "baseline exclude-3 failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let base_rows = free_forward_rows(
-        &std::fs::read_to_string(seg.join("predictive-excl4").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(seg.join("predictive-excl3").join("weekly_cases.tsv")).unwrap(),
     );
     assert!(base_rows.iter().all(|r| r.n_draws == 90), "baseline keeps 3 tight chains (90 draws)");
 
-    // Also drop a well-mixed chain (2). Chains 1,3 remain — still tight.
+    // Also drop a well-mixed chain (1). Chains 0,2 remain — still tight.
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "2,4"],
+        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "1,3"],
     );
     assert!(out.status.success(), "well-mixed exclude failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let neg_rows = free_forward_rows(
-        &std::fs::read_to_string(seg.join("predictive-excl2,4").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(seg.join("predictive-excl1,3").join("weekly_cases.tsv")).unwrap(),
     );
     assert!(neg_rows.iter().all(|r| r.n_draws == 60), "two tight chains remain (60 draws)");
 
@@ -418,12 +418,12 @@ fn exclude_well_mixed_chain_barely_moves_but_is_recorded() {
     // selection has its OWN manifest, so the full-cloud run below cannot
     // overwrite it (gh#795).
     let j: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(seg.join("predictive-excl2,4.json")).unwrap(),
+        &std::fs::read_to_string(seg.join("predictive-excl1,3.json")).unwrap(),
     )
     .unwrap();
     let cs = j.get("chain_selection").expect("even a small-effect exclusion is stamped");
-    assert_eq!(cs["excluded"], serde_json::json!([2, 4]));
-    assert_eq!(cs["kept"], serde_json::json!([1, 3]));
+    assert_eq!(cs["excluded"], serde_json::json!([1, 3]));
+    assert_eq!(cs["kept"], serde_json::json!([0, 2]));
     assert_eq!(cs["n_total"], serde_json::json!(4));
 
     // The full cloud (with the outlier) is the reference for the LARGE move.
@@ -466,7 +466,7 @@ fn nonexistent_chain_id_hard_errors() {
     assert!(!out.status.success(), "a chain id not in the fit must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("chain 9 not in this fit") && stderr.contains("chains 1..4"),
+        stderr.contains("chain 9 not in this fit") && stderr.contains("chains 0..3"),
         "error names the bad id and the valid range, got:\n{stderr}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
@@ -481,7 +481,7 @@ fn excluding_every_chain_hard_errors() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "1,2,3,4"],
+        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "0,1,2,3"],
     );
     assert!(!out.status.success(), "excluding every chain must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -500,21 +500,21 @@ fn summary_subset_shows_header_recomputes_and_warns() {
     let (tmp, seg) = setup(&bin, "summary");
     let seg_str = seg.to_string_lossy().into_owned();
 
-    // Text summary over the chain subset (drop the outlier chain 4).
-    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "4", "--no-color"]);
+    // Text summary over the chain subset (drop the outlier chain 3).
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "3", "--no-color"]);
     assert!(out.status.success(), "summary --exclude-chains failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     // The stage's identity line names the subset and what was dropped.
     assert!(
-        stdout.contains("3 of 4 chains (excluded 4)"),
+        stdout.contains("3 of 4 chains (excluded 3)"),
         "summary identity line must show the chain subset, got:\n{stdout}"
     );
     // And the per-chain table says what the selection did NOT filter, so its
     // rows are not read as sharing the recomputed scope of the tables above.
     assert!(
-        stdout.contains("including the excluded 4"),
+        stdout.contains("including the excluded 3"),
         "the chains table must name the scope it kept, got:\n{stdout}"
     );
     // The recomputed R̂ over the three tight chains is finite and below the gate
@@ -525,17 +525,17 @@ fn summary_subset_shows_header_recomputes_and_warns() {
 
     // The loud, non-quietable warning fired to stderr.
     assert!(
-        stderr.contains("--exclude-chains dropped chain(s) 4") && stderr.to_lowercase().contains("bias"),
+        stderr.contains("--exclude-chains dropped chain(s) 3") && stderr.to_lowercase().contains("bias"),
         "summary must warn about the biased selection, got:\n{stderr}"
     );
 
     // JSON summary stamps the provenance and carries the recomputed R̂.
-    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--format", "json", "--exclude-chains", "4"]);
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--format", "json", "--exclude-chains", "3"]);
     assert!(out.status.success(), "json summary failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let j: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
     let cs = j.get("chain_selection").expect("json summary stamps chain_selection");
-    assert_eq!(cs["excluded"], serde_json::json!([4]));
-    assert_eq!(cs["kept"], serde_json::json!([1, 2, 3]));
+    assert_eq!(cs["excluded"], serde_json::json!([3]));
+    assert_eq!(cs["kept"], serde_json::json!([0, 1, 2]));
     assert_eq!(cs["n_total"], serde_json::json!(4));
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -606,16 +606,16 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
         "full-cloud band keeps the stored min ESS {STORED_ESS_MIN}, got {full_ess}"
     );
 
-    // Exclude the stuck outlier chain 4: the band must be RELABELLED with the
+    // Exclude the stuck outlier chain 3: the band must be RELABELLED with the
     // recomputed subset R̂ / ESS.
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "4"],
+        &["fit", "predict", &seg_str, "--horizon", "free_forward", "--exclude-chains", "3"],
     );
     assert!(out.status.success(), "excluded predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (excl_rhat_s, excl_ess_s) = free_forward_convergence_cells(
-        &std::fs::read_to_string(seg.join("predictive-excl4").join("weekly_cases.tsv")).unwrap(),
+        &std::fs::read_to_string(seg.join("predictive-excl3").join("weekly_cases.tsv")).unwrap(),
     );
     let excl_rhat: f64 = excl_rhat_s.parse().expect("recomputed rhat_max cell parses");
     let excl_ess: f64 = excl_ess_s.parse().expect("recomputed ess_min cell parses");
@@ -639,7 +639,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
 
     // (2) predict and summary AGREE on the same fit + selection — the divergence
     //     that IS the bug is closed. summary recomputes over the same subset.
-    let sout = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "4", "--no-color"]);
+    let sout = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "3", "--no-color"]);
     assert!(sout.status.success(), "summary --exclude-chains failed:\n{}", String::from_utf8_lossy(&sout.stderr));
     let sstdout = String::from_utf8_lossy(&sout.stdout);
     let summary_rhat = summary_max_rhat(&sstdout);
@@ -666,7 +666,7 @@ fn summary_nonexistent_chain_hard_errors() {
     assert!(!out.status.success(), "a chain id not in the fit must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("chain 9 not in this fit") && stderr.contains("chains 1..4"),
+        stderr.contains("chain 9 not in this fit") && stderr.contains("chains 0..3"),
         "error names the bad id and range, got:\n{stderr}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
@@ -678,7 +678,7 @@ fn summary_excluding_every_chain_hard_errors() {
     let (tmp, seg) = setup(&bin, "summaryall");
     let seg_str = seg.to_string_lossy().into_owned();
 
-    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "1,2,3,4"]);
+    let out = run(&bin, &tmp, &["fit", "summary", &seg_str, "--exclude-chains", "0,1,2,3"]);
     assert!(!out.status.success(), "excluding every chain must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("empty posterior"), "empty-posterior refusal, got:\n{stderr}");
@@ -716,7 +716,7 @@ fn table_forwards_selection_to_quantity_derivation() {
     // Keep ONLY the outlier chain (drop the three tight chains): the peak median
     // jumps to the outlier's fast-epidemic peak — proof the flag reached the
     // derivation and reshaped the cloud.
-    let (peak_outlier, stderr) = table_peak(&bin, &tmp, &fits_root_str, &["--exclude-chains", "1,2,3"]);
+    let (peak_outlier, stderr) = table_peak(&bin, &tmp, &fits_root_str, &["--exclude-chains", "0,1,2"]);
     assert!(
         peak_outlier > peak_full * 1.3,
         "keeping only the outlier chain must raise the derived peak median \
@@ -724,7 +724,7 @@ fn table_forwards_selection_to_quantity_derivation() {
     );
     // The cohort warning fired.
     assert!(
-        stderr.contains("will drop chain(s) 1,2,3") && stderr.to_lowercase().contains("bias"),
+        stderr.contains("will drop chain(s) 0,1,2") && stderr.to_lowercase().contains("bias"),
         "fit table must warn about the cohort-wide exclusion, got:\n{stderr}"
     );
 
@@ -740,7 +740,7 @@ fn table_exclude_chains_requires_quantity() {
 
     // --exclude-chains without --quantity is inert (fit table otherwise reads
     // stored metadata), so clap refuses it rather than silently doing nothing.
-    let out = run(&bin, &tmp, &["fit", "table", &fits_root_str, "--exclude-chains", "4"]);
+    let out = run(&bin, &tmp, &["fit", "table", &fits_root_str, "--exclude-chains", "3"]);
     assert!(!out.status.success(), "--exclude-chains without --quantity must be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

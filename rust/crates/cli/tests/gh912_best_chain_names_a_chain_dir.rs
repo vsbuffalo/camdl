@@ -5,19 +5,19 @@
 //! the method's own stderr line (`… (chain N)`), `fit_state.toml`'s
 //! `best_chain`, and `run.json`'s `inputs.best_chain` (which is what
 //! `camdl show` and `camdl list --format json` print). They were not the
-//! same number: the two files carried the runner's 0-based index while the
-//! stderr line and every `chain_N/` directory were numbered from one, so on
-//! a two-chain fit the stored value named the chain that did NOT win, and a
-//! stored `0` named a directory no method writes.
+//! same number: the two files carried one index while the stderr line and
+//! every `chain_N/` directory carried another, so on a two-chain fit the
+//! stored value named the chain that did NOT win. Since gh#990 there is one
+//! base, 0, and nothing to convert.
 //!
 //! What this pins, per method, on a real leaf:
 //!
 //!   * the three surfaces agree on one number;
-//!   * that number is in `1..=n_chains`;
+//!   * that number is in `0..n_chains`;
 //!   * `chain_<best_chain>/` is a directory on the leaf, so a reader can open
 //!     the winner's output with no arithmetic;
-//!   * on IF2, `mle_params.toml`'s `[provenance] chain` — 1-indexed since it
-//!     was written — agrees with it, so the leaf does not name two chains.
+//!   * on IF2, `mle_params.toml`'s `[provenance] chain` agrees with it, so
+//!     the leaf does not name two chains.
 //!
 //! Both fits are the committed spatial polio AFP+ES fixture
 //! (`tests/fixtures/polio_afp_es/`) shrunk to a test-sized method block: a
@@ -228,17 +228,17 @@ fn assert_best_chain_names_a_chain_dir(
 
     assert_eq!(stored, printed,
         "{method}: fit_state.toml says best_chain = {stored} but the run printed \
-         chain {printed} — the stored value must be the 1-based chain number the \
-         run named, not the 0-based index (gh#912).\nleaf: {}", leaf.display());
+         chain {printed} — the stored value must be the chain number the run \
+         named (gh#912, gh#990).\nleaf: {}", leaf.display());
     assert_eq!(recorded, printed,
         "{method}: run.json inputs.best_chain = {recorded} but the run printed \
          chain {printed} — `camdl show` and `camdl list --format json` print this \
-         value raw, so it must be the 1-based chain number (gh#912).\nleaf: {}",
+         value raw, so it must be the chain number (gh#912, gh#990).\nleaf: {}",
         leaf.display());
 
-    assert!((1..=n_chains).contains(&stored),
+    assert!((0..n_chains).contains(&stored),
         "{method}: best_chain = {stored} is not a chain of a {n_chains}-chain fit \
-         (1..={n_chains}) — 0 names a directory no method writes (gh#912)");
+         (0..{n_chains}) (gh#912, gh#990)");
 
     let chain_dir = leaf.join(format!("chain_{stored}"));
     assert!(chain_dir.is_dir(),
@@ -290,8 +290,8 @@ fn pgas_best_chain_is_the_chain_the_run_named() {
 }
 
 /// IF2: the same three surfaces, plus the fourth artifact on an optimizer
-/// leaf — `mle_params.toml`'s `[provenance] chain`, which has been 1-indexed
-/// since it was written. Two artifacts of one leaf must not name two chains.
+/// leaf — `mle_params.toml`'s `[provenance] chain`. Two artifacts of one leaf
+/// must not name two chains.
 #[test]
 fn if2_best_chain_agrees_with_the_mle_provenance_chain() {
     let tmp = tempfile::tempdir().unwrap();

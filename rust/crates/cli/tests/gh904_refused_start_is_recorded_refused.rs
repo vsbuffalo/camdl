@@ -211,7 +211,7 @@ fn trace_data_rows(leaf: &Path) -> Vec<(PathBuf, usize)> {
 fn assert_refused_and_never_ran(rows: &[StartRow], leaf: &Path, rule: &str) {
     assert_eq!(rows.len(), 1, "one chain, no redraw under a point rule — one row");
     let r = &rows[0];
-    assert_eq!(r.chain_id, "1", "the column is 1-based (gh#781)");
+    assert_eq!(r.chain_id, "0", "the column counts from 0 (gh#990)");
     assert_eq!(r.attempt, "0", "a point rule redraws nothing, so the only attempt is 0");
     assert_eq!(r.source, rule, "the source is the rule that produced the point");
     assert_eq!(

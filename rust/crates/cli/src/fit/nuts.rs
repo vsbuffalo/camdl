@@ -12,6 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use sim::compiled_model::CompiledModel;
+
+use crate::chain_index::ChainIndex;
 use sim::inference::ode_nuts::OdeNutsConfig;
 use sim::inference::pmmh::Prior;
 
@@ -175,13 +177,12 @@ pub fn run_stage(
     // At most one chain per worker (gh#821, `chain_fanout`); the first
     // structural error stops further chains from starting.
     let chain_outs: Vec<ChainOut> = super::chain_fanout::try_run_chains(opts.n_chains, |chain_id| -> Result<ChainOut, String> {
-            // 1-based on disk, as pgas/pmmh/if2 write it. `chain_starts.tsv`,
-            // the `fit summary` chain table, the `bad_init` records and the
-            // stderr lines all number chains from one (gh#781), so the
-            // directory a reader opens is the number they were handed, with no
-            // arithmetic (gh#910). The id stays 0-based in here, and in
-            // `draws.tsv`'s `chain` join column.
-            let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
+            // The directory is named by the chain's number — the one
+            // `chain_starts.tsv`, the `fit summary` chain table, the stderr
+            // lines and `draws.tsv`'s `chain` column all carry (gh#910,
+            // gh#990).
+            let chain = ChainIndex(chain_id);
+            let chain_dir = chain.dir_in(stage_dir);
             std::fs::create_dir_all(&chain_dir)
                 .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
 
@@ -268,7 +269,7 @@ pub fn run_stage(
                             if it.iter.is_multiple_of(sample_every) || it.iter + 1 == it.total {
                                 log::info!(target: "nuts",
                                     "chain {} sampling {}/{} · depth={} · logpost={:.1}{}",
-                                    chain_id + 1, it.iter + 1, it.total, it.tree_depth,
+                                    chain, it.iter + 1, it.total, it.tree_depth,
                                     it.log_posterior, if it.divergent { " · DIVERGENT" } else { "" });
                             }
                         }
@@ -276,7 +277,7 @@ pub fn run_stage(
                             if it.iter.is_multiple_of(warmup_every) || it.iter + 1 == it.total {
                                 log::info!(target: "nuts",
                                     "chain {} warmup {}/{} · depth={} · step={:.4}",
-                                    chain_id + 1, it.iter + 1, it.total, it.tree_depth, it.step_size);
+                                    chain, it.iter + 1, it.total, it.tree_depth, it.step_size);
                             }
                         }
                     }
@@ -286,7 +287,7 @@ pub fn run_stage(
                 &compiled, &obs_model, &obs_times, chain_start,
                 &chain_estimated, &priors, &cfg, Some(&on_iter),
             )
-            .map_err(|e| format!("nuts chain {} error: {}", chain_id + 1, e))?;
+            .map_err(|e| format!("nuts chain {} error: {}", chain, e))?;
             // `on_iter`'s borrow of `writer` ends at the call above (its last use),
             // so the writer can now be flushed to disk.
             drop(writer); // flush the buffered trace to disk
@@ -314,7 +315,7 @@ pub fn run_stage(
             };
             let status = format!(
                 "chain {} · {} draws · {} divergent · accept={:.2} · step={:.4} · tree_depth={:.1}{}",
-                chain_id + 1,
+                chain,
                 result.samples.len(),
                 result.n_divergent,
                 result.mean_accept,
@@ -432,10 +433,7 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik,
         initial_loglik: f64::NEG_INFINITY,
-        // gh#912: `best_chain` is the 0-based `ChainOut::chain_id`; the stored
-        // value is the 1-based chain NUMBER, so it names the `chain_N/`
-        // directory beside this file and matches the per-chain status lines.
-        best_chain: best_chain + 1,
+        best_chain: ChainIndex(best_chain),
         n_chains: opts.n_chains,
         n_good_chains: None,
         start_values: start_values.iter().map(|(k, v)| (k.clone(), *v)).collect(),

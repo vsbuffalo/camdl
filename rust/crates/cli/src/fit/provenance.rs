@@ -2,6 +2,7 @@
 
 use sha2::{Sha256, Digest};
 
+use crate::chain_index::ChainIndex;
 use crate::version;
 
 // `compute_input_hash` moved to `crate::hashing::fit_input_hash`
@@ -59,7 +60,9 @@ pub struct MleProvenance {
     /// store level (`if2`, `nl-sbplx`, …) — the same word the config, the
     /// store path and the CLI use (gh#890).
     pub method: String,
-    pub chain: usize,
+    /// The chain whose estimate this is — the number of its `chain_N/`
+    /// directory and of `fit_state.toml`'s `best_chain` (gh#990).
+    pub chain: ChainIndex,
     pub log_likelihood: f64,
     pub loglik_sd: f64,
     pub n_particles: usize,
@@ -141,9 +144,7 @@ pub fn write_mle_params(
         data: data_map,
         seed: metadata.seed,
         method: metadata.method.clone(),
-        // The runner's chain index is 0-based; surface as 1-indexed in the
-        // provenance block, matching the `chain_N/` directories.
-        chain: metadata.best_chain_index + 1,
+        chain: metadata.best_chain,
         log_likelihood: metadata.loglik,
         loglik_sd: metadata.loglik_sd,
         n_particles: metadata.n_particles,
@@ -244,13 +245,10 @@ pub struct MleMetadata {
     pub seed: u64,
     /// The method label, written to `[provenance] method`.
     pub method: String,
-    /// The winning chain as the runner's own **0-based** index, which is what
-    /// every caller has in hand. `write_mle_params` adds one when it writes
-    /// `[provenance] chain`, so the file is 1-based like the `chain_N/`
-    /// directories. Named `_index` so it cannot be confused with
-    /// [`crate::fit::state::FitState::best_chain`], which is the 1-based
-    /// chain *number* as stored (gh#912).
-    pub best_chain_index: usize,
+    /// The winning chain — written to `[provenance] chain` as it is, the same
+    /// number as [`crate::fit::state::FitState::best_chain`] and the
+    /// `chain_N/` directory (gh#912, gh#990).
+    pub best_chain: ChainIndex,
     /// Simulation backend the fit used. Load-bearing for the
     /// backend-provenance guardrail in `camdl simulate --params`
     /// — downstream can only auto-match if we record this.
@@ -287,7 +285,7 @@ mod tests {
             data_hashes: vec![("cases".into(), "abc".into())],
             seed: 1,
             method: "if2".into(),
-            best_chain_index: 0,
+            best_chain: ChainIndex(0),
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             loglik: -12.5,
@@ -327,7 +325,7 @@ mod tests {
             data_hashes: vec![],
             seed: 1,
             method: "if2".into(),
-            best_chain_index: 0,
+            best_chain: ChainIndex(0),
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             loglik: -12.5,
@@ -405,7 +403,7 @@ mod tests {
             data_hashes: vec![],
             seed: 1,
             method: "if2".into(),
-            best_chain_index: 0,
+            best_chain: ChainIndex(0),
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             dt: 1.0,
             loglik: -12.5,

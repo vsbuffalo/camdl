@@ -412,7 +412,7 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
     let header: Vec<&str> = with_chain.lines().next().unwrap().split('\t').collect();
     assert_eq!(header[0], "chain", "the chain column leads: {header:?}");
 
-    // Both chains of the fit appear, 1-based, beside the pooled `all` rows.
+    // Both chains of the fit appear beside the pooled `all` rows.
     let chains: std::collections::BTreeSet<&str> = with_chain
         .lines()
         .skip(1)
@@ -420,8 +420,8 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
         .collect();
     assert_eq!(
         chains,
-        ["1", "2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
-        "the pooled band plus one band per chain, 1-based"
+        ["0", "1", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        "the pooled band plus one band per chain"
     );
 
     // The pooled rows survive untouched: drop the per-chain rows and the leading
@@ -483,7 +483,7 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
         .collect();
     assert_eq!(
         one_step_chains,
-        ["1", "2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        ["0", "1", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
         "one_step carries a pooled band plus one per chain"
     );
 
@@ -513,8 +513,8 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
 ///
 /// The sharp part is the numbering. `ChainSelection::apply_keyed` filters draws
 /// and leaves each row's `chain` value alone, so the ids in a subset artifact
-/// name the same chains as in the pooled one. Excluding chain 1 of a two-chain
-/// fit must therefore leave a `chain` column reading `2`, not a renumbered `1`
+/// name the same chains as in the pooled one. Excluding chain 0 of a two-chain
+/// fit must therefore leave a `chain` column reading `1`, not a renumbered `0`
 /// — a renumbering would make the two artifacts silently incomparable.
 #[test]
 fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address() {
@@ -527,12 +527,12 @@ fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address
         .expect("the pooled predictive is written first");
     let pooled_before = std::fs::read_to_string(&pooled).unwrap();
 
-    // Drop chain 1 and ask for the per-chain decomposition at the same time.
-    predict_with(&bin, &tmp, &["--by-chain", "--exclude-chains", "1"]);
+    // Drop chain 0 and ask for the per-chain decomposition at the same time.
+    predict_with(&bin, &tmp, &["--by-chain", "--exclude-chains", "0"]);
 
     // The exclusion keys the address; --by-chain adds none of its own.
-    let excl = find_artifact(&tmp.join("results"), "predictive-excl1", "weekly_cases")
-        .expect("--exclude-chains 1 writes predictive-excl1/, not predictive/");
+    let excl = find_artifact(&tmp.join("results"), "predictive-excl0", "weekly_cases")
+        .expect("--exclude-chains 0 writes predictive-excl0/, not predictive/");
     let txt = std::fs::read_to_string(&excl).unwrap();
     assert_eq!(
         std::fs::read_to_string(&pooled).unwrap(),
@@ -546,8 +546,8 @@ fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address
         txt.lines().skip(1).map(|l| l.split('\t').next().unwrap()).collect();
     assert_eq!(
         chains,
-        ["2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
-        "the retained chain keeps its own id 2 — an exclusion filters draws, it \
+        ["1", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        "the retained chain keeps its own id 1 — an exclusion filters draws, it \
          does not renumber, so these rows name the same chain the pooled \
          artifact's `2` rows do"
     );
@@ -575,7 +575,7 @@ fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address
     assert!(saw_free_forward, "free-forward rows exist in the subset artifact:\n{txt}");
 
     // The manifest travels to the keyed name and still declares `chain`.
-    let mf = find_file(&tmp.join("results"), "predictive-excl1.json")
+    let mf = find_file(&tmp.join("results"), "predictive-excl0.json")
         .expect("the keyed manifest is written beside the keyed directory");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&mf).unwrap()).unwrap();
@@ -587,7 +587,7 @@ fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address
         .collect();
     assert_eq!(coords.first().map(String::as_str), Some("chain"), "{coords:?}");
     assert_eq!(
-        v["streams"][0]["file"], "predictive-excl1/weekly_cases.tsv",
+        v["streams"][0]["file"], "predictive-excl0/weekly_cases.tsv",
         "the manifest points at the keyed location"
     );
 }
@@ -688,11 +688,11 @@ fn by_chain_decomposes_the_one_step_horizon_too() {
         .collect();
     assert!(!one_step.is_empty(), "a chain-binomial fit emits one_step rows:\n{with_chain}");
 
-    // One band per chain beside the pooled one, 1-based.
+    // One band per chain beside the pooled one.
     let chains: std::collections::BTreeSet<&str> = one_step.iter().map(|c| c[0]).collect();
     assert_eq!(
         chains,
-        ["1", "2", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
+        ["0", "1", "all"].into_iter().collect::<std::collections::BTreeSet<&str>>(),
         "the one-step horizon is decomposed by chain, not left pooled-only"
     );
 
@@ -704,7 +704,7 @@ fn by_chain_decomposes_the_one_step_horizon_too() {
     };
     let pooled_times = times_of("all");
     assert!(!pooled_times.is_empty());
-    for chain in ["1", "2"] {
+    for chain in ["0", "1"] {
         assert_eq!(times_of(chain), pooled_times, "chain {chain} covers the pooled time axis");
     }
 
@@ -728,7 +728,7 @@ fn by_chain_decomposes_the_one_step_horizon_too() {
         one_step.iter().filter(|c| c[0] == chain).map(|c| c[q50]).collect()
     };
     let pooled_band = band_of("all");
-    for chain in ["1", "2"] {
+    for chain in ["0", "1"] {
         assert_ne!(
             band_of(chain),
             pooled_band,
@@ -744,7 +744,7 @@ fn by_chain_decomposes_the_one_step_horizon_too() {
         .find(|c| c[0] == "all")
         .map(|c| c[c_n].parse().unwrap())
         .unwrap();
-    for chain in ["1", "2"] {
+    for chain in ["0", "1"] {
         let n: usize = one_step
             .iter()
             .find(|c| c[0] == chain)

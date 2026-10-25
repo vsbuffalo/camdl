@@ -3,13 +3,14 @@
 //!
 //! gh#781 made every artifact that names a chain name it the same way —
 //! `chain_starts.tsv`'s `chain_id`, the `fit summary` chain table, the
-//! `bad_init` records, every stderr refusal — all 1-based, "matching the
-//! `chain_N/` directories". NUTS wrote its directories from the 0-based loop
-//! index, so a two-chain NUTS leaf held `chain_0/` and `chain_1/` while
-//! `chain_starts.tsv` named chains 1 and 2. A reader who took chain 1 from any
-//! of those artifacts and opened `chain_1/` got chain 2's trace; the last
-//! chain's directory did not exist. Nothing errored and the trace was
-//! plausible.
+//! `bad_init` records, every stderr refusal — "matching the `chain_N/`
+//! directories". NUTS wrote its directories from a different base than the
+//! other artifacts used, so a two-chain NUTS leaf held directories whose
+//! numbers `chain_starts.tsv` did not name. A reader who took a chain number
+//! from any artifact and opened that directory got the neighbouring chain's
+//! trace; the last chain's directory did not exist. Nothing errored and the
+//! trace was plausible. Since gh#990 every chain number counts from 0,
+//! including `draws.tsv`'s `chain` key, so there is nothing to convert.
 //!
 //! The two claims pinned here, on a real two-chain NUTS leaf:
 //!
@@ -17,10 +18,9 @@
 //!    values in `chain_starts.tsv` — so the lookup a refusal sends a reader on
 //!    is a match on the number they were given, with no arithmetic.
 //! 2. Following `draws.tsv`'s `chain` join key into the directory it names
-//!    lands on that chain's own trace. `draws.tsv`'s `chain` column is the
-//!    0-based join key to `trajectories.tsv` (gh#666) and stays 0-based, so
-//!    chain `c`'s draws must be the draws in `chain_{c+1}/trace.tsv` — this is
-//!    the claim that actually fails silently when the directories are misnamed.
+//!    lands on that chain's own trace: chain `c`'s draws must be the draws in
+//!    `chain_c/trace.tsv` — this is the claim that actually fails silently when
+//!    the directories are misnamed.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -178,7 +178,7 @@ fn draws_for_chain(leaf: &Path, chain: usize) -> Vec<f64> {
 }
 
 #[test]
-fn a_nuts_leaf_numbers_its_chain_directories_from_one() {
+fn a_nuts_leaf_numbers_its_chain_directories_as_its_artifacts_do() {
     require_tools();
     let tmp = tempdir();
 
@@ -266,37 +266,36 @@ starts = "single"
          neither states (leaf {})",
         leaf.display()
     );
-    // The proposition `io::progress::CHAIN_NUMBERING` states — "1-based,
-    // matching the chain_N/ directories" — checked directly against the leaf,
-    // since a NUTS stage writes no `chains` block to carry the sentence (below).
-    let one_based: BTreeSet<usize> = (1..=N_CHAINS).collect();
+    // The proposition `io::progress::CHAIN_NUMBERING` states — "counted from
+    // 0, matching the chain_N/ directories" — checked directly against the
+    // leaf, since a NUTS stage writes no `chains` block to carry the sentence
+    // (below).
+    let from_zero: BTreeSet<usize> = (0..N_CHAINS).collect();
     assert_eq!(
-        dirs, one_based,
-        "the chain directories of a {N_CHAINS}-chain leaf are chain_1..chain_{N_CHAINS} \
-         — \"1-based, matching the chain_N/ directories\", which is what every \
-         artifact on the leaf says of its chain column — but they are {dirs:?} \
-         (leaf {})",
+        dirs, from_zero,
+        "the chain directories of a {N_CHAINS}-chain leaf are chain_0..chain_{} \
+         — counted from 0, which is what every artifact on the leaf says of its \
+         chain column — but they are {dirs:?} (leaf {})",
+        N_CHAINS - 1,
         leaf.display()
     );
 
     // Claim 2: following the join key lands on that chain's own trace. Chain
-    // `c` of `draws.tsv` (0-based, gh#666) is `chain_{c+1}/`.
+    // `c` of `draws.tsv` is `chain_c/`.
     for c in 0..N_CHAINS {
-        let dir = leaf.join(format!("chain_{}", c + 1));
+        let dir = leaf.join(format!("chain_{c}"));
         assert!(
             dir.is_dir(),
-            "draws.tsv carries chain {c}, whose trace is chain_{}/ — no such directory \
-             (leaf holds {dirs:?})",
-            c + 1
+            "draws.tsv carries chain {c}, whose trace is chain_{c}/ — no such directory \
+             (leaf holds {dirs:?})"
         );
         let drawn = draws_for_chain(&leaf, c);
         assert!(!drawn.is_empty(), "chain {c} has no rows in draws.tsv");
         let traced = column(&dir.join("trace.tsv"), "beta");
         assert!(
             traced.len() >= drawn.len(),
-            "chain_{}/trace.tsv has {} rows, fewer than the {} draws.tsv keeps for \
+            "chain_{c}/trace.tsv has {} rows, fewer than the {} draws.tsv keeps for \
              chain {c}",
-            c + 1,
             traced.len(),
             drawn.len()
         );
@@ -304,10 +303,9 @@ starts = "single"
         for (i, (d, t)) in drawn.iter().zip(tail).enumerate() {
             assert!(
                 (d - t).abs() <= 1e-12 * d.abs().max(t.abs()).max(1.0),
-                "draw {i} of chain {c} is beta={d}, but chain_{}/trace.tsv holds \
+                "draw {i} of chain {c} is beta={d}, but chain_{c}/trace.tsv holds \
                  beta={t} there — the join key names a directory that is not that \
                  chain's (leaf {})",
-                c + 1,
                 leaf.display()
             );
         }
@@ -323,7 +321,8 @@ starts = "single"
             .unwrap();
     if let Some(chains) = progress.get("chains") {
         assert_eq!(
-            chains["numbering"], "1-based, matching the chain_N/ directories",
+            chains["numbering"],
+            "counted from 0, matching the chain_N/ directories and draws.tsv's chain column",
             "the file explains its own chain column:\n{progress:#}"
         );
         for row in chains["chains"].as_array().expect("chain rows") {

@@ -586,11 +586,11 @@ cooling    = 0.9
         // iteration\tloglik\tif2_perturbed_loglik\tbeta\tgamma
         first_data.split('\t').nth(3).unwrap().parse().unwrap()
     };
-    // Chain ids are 1-based; `betas[i]` is chain i+1.
+    // `betas[i]` is chain i (gh#990).
     let argmin = betas.iter().enumerate()
-        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0 + 1;
+        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
     let argmax = betas.iter().enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0 + 1;
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
     let iter0_lo = read_iter_0_beta(argmin);
     let iter0_hi = read_iter_0_beta(argmax);
     let iter0_spread = (iter0_lo - iter0_hi).abs();

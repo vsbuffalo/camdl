@@ -79,7 +79,10 @@
 //! they are excluded from the centre/scale and rendered as `—`, so a broken
 //! chain is visible rather than silently reading as "clean."
 
+use std::collections::BTreeMap;
 use std::path::Path;
+
+use crate::chain_index::ChainIndex;
 
 use super::loglik::{LoglikType, TRACE_COL_COMPLETE_DATA_LL, TRACE_COL_TRANSITION_LL};
 
@@ -99,9 +102,10 @@ pub const CHAIN_LOGLIK_OUTLIER_MODZ: f64 = 3.5;
 /// between-chain spread.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChainZScore {
-    /// 1-based chain number for display (`chain 1` … `chain N`), matching the
-    /// user-facing convention used everywhere else in fit output.
-    pub chain: usize,
+    /// The chain's number — the one its `chain_N/` directory and every other
+    /// artifact carry (gh#990), read from the directory, never from a row's
+    /// position (gh#913).
+    pub chain: ChainIndex,
     /// Mean log-likelihood over this chain's post-burn-in draws. `NaN` when the
     /// chain had no readable trace rows (rendered `—`, never counted "clean").
     pub mean_loglik: f64,
@@ -113,23 +117,24 @@ pub struct ChainZScore {
     pub is_outlier: bool,
 }
 
-/// Per-chain robust modified z-scores from per-chain mean logliks, in chain
-/// order (index 0 = chain 1). See the module docs for the statistic. A single
-/// chain, or perfect agreement, yields all-zero scores and nothing flagged —
-/// the negative-control path.
-pub fn chain_loglik_mod_zscores(means: &[f64]) -> Vec<ChainZScore> {
+/// Per-chain robust modified z-scores from `(chain, mean loglik)` pairs, in
+/// the order given. The chain travels with its mean, so a leaf with a gap
+/// (a chain that never wrote a trace) labels every score with its own chain
+/// rather than renumbering the survivors by position (gh#913). See the module
+/// docs for the statistic. A single chain, or perfect agreement, yields
+/// all-zero scores and nothing flagged — the negative-control path.
+pub fn chain_loglik_mod_zscores(means: &[(ChainIndex, f64)]) -> Vec<ChainZScore> {
     let n = means.len();
     if n == 0 {
         return Vec::new();
     }
     // Robust centre + scale from the FINITE means only: a NaN from an unreadable
     // trace must neither poison the median/MAD nor read as "clean."
-    let finite: Vec<f64> = means.iter().copied().filter(|m| m.is_finite()).collect();
+    let finite: Vec<f64> = means.iter().map(|(_, m)| *m).filter(|m| m.is_finite()).collect();
     let (center, scale) = robust_center_scale(&finite);
     means
         .iter()
-        .enumerate()
-        .map(|(i, &m)| {
+        .map(|&(chain, m)| {
             // Finite mean + a positive, finite scale → a genuine z. Otherwise
             // (non-finite mean, or every finite chain identical so scale == 0)
             // there is no z to compute: NaN mean → NaN z (rendered `—`);
@@ -146,7 +151,7 @@ pub fn chain_loglik_mod_zscores(means: &[f64]) -> Vec<ChainZScore> {
             // silently passed as "not an outlier."
             let is_outlier = mod_z.is_finite() && mod_z.abs() > CHAIN_LOGLIK_OUTLIER_MODZ;
             ChainZScore {
-                chain: i + 1,
+                chain,
                 mean_loglik: m,
                 mod_z,
                 is_outlier,
@@ -218,8 +223,13 @@ pub struct ChainLoglikMeans {
     /// The trace column [`scored`](Self::scored) was read from, for labelling
     /// the table and for saying which column is missing when it is.
     pub scored_column: &'static str,
-    /// Per-chain mean of `scored_column` over the retained draws, in chain
-    /// order (index 0 = chain 1). `NaN` when a chain has no readable rows.
+    /// The chains, by the number of their `chain_N/` directory, ascending —
+    /// parallel to [`scored`](Self::scored) and to the `complete_data`
+    /// columns. Carried so a leaf with a gap labels each row with its own
+    /// chain (gh#913).
+    pub chain_ids: Vec<ChainIndex>,
+    /// Per-chain mean of `scored_column` over the retained draws, parallel to
+    /// [`chain_ids`](Self::chain_ids). `NaN` when a chain has no readable rows.
     pub scored: Vec<f64>,
     /// `true` when no discovered trace carries `scored_column` at all — a
     /// stage whose chains cannot be compared, which the caller must SAY rather
@@ -229,6 +239,13 @@ pub struct ChainLoglikMeans {
     /// beside the scored column and never ranked on. `None` for the marginal
     /// samplers, where the scored column already IS the target.
     pub complete_data: Option<CompleteDataMeans>,
+}
+
+impl ChainLoglikMeans {
+    /// `(chain, scored mean)` pairs — the input the outlier statistic takes.
+    pub fn scored_by_chain(&self) -> Vec<(ChainIndex, f64)> {
+        self.chain_ids.iter().copied().zip(self.scored.iter().copied()).collect()
+    }
 }
 
 /// PGAS's complete-data target and its latent-path term, per chain — the two
@@ -280,15 +297,14 @@ pub struct CompleteDataMeans {
 /// warm-up, so the mean is noisier but still honest. This never contaminates a
 /// well-formed fit.
 pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<ChainLoglikMeans> {
-    let mut chain_dirs = discover_chain_dirs(stage_dir);
+    let chain_dirs = discover_chain_dirs(stage_dir);
     if chain_dirs.is_empty() {
         return None;
     }
-    chain_dirs.sort_by_key(|(n, _)| *n);
 
-    // Per-chain kept-draw counts from draws.tsv, in ascending chain-id order.
-    // draws.tsv's `chain` column is 0-based and contiguous, so the i-th count
-    // pairs with the i-th chain dir once both are sorted ascending.
+    // Per-chain kept-draw counts from draws.tsv, keyed by the chain number —
+    // the same number the directory carries (gh#990) — so a chain with no
+    // draws pairs with nothing rather than with its neighbour's count.
     let draw_counts = read_draw_counts(&stage_dir.join("draws.tsv"));
 
     let scored_column = kind.chain_agreement_column();
@@ -306,6 +322,7 @@ pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<Cha
         vec![scored_column]
     };
 
+    let mut chain_ids = Vec::with_capacity(chain_dirs.len());
     let mut scored = Vec::with_capacity(chain_dirs.len());
     let mut complete = Vec::with_capacity(chain_dirs.len());
     let mut transition = Vec::with_capacity(chain_dirs.len());
@@ -316,7 +333,7 @@ pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<Cha
     let mut any_header_read = false;
     let mut any_scored_column = false;
 
-    for (i, (_, dir)) in chain_dirs.iter().enumerate() {
+    for (chain, dir) in &chain_dirs {
         let cols = read_trace_cols(&dir.join("trace.tsv"), &names);
         if let Some(cols) = cols.as_ref() {
             any_header_read = true;
@@ -324,13 +341,14 @@ pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<Cha
                 any_scored_column = true;
             }
         }
-        let k = draw_counts.get(i).copied();
+        let k = draw_counts.get(chain).copied();
         let mean_of = |slot: usize| -> f64 {
             let Some(Some(all)) = cols.as_ref().map(|c| &c[slot]) else {
                 return f64::NAN;
             };
             retained_mean(all, k)
         };
+        chain_ids.push(*chain);
         scored.push(mean_of(0));
         if wants_split {
             complete.push(mean_of(1));
@@ -340,6 +358,7 @@ pub fn read_chain_mean_logliks(stage_dir: &Path, kind: LoglikType) -> Option<Cha
 
     Some(ChainLoglikMeans {
         scored_column,
+        chain_ids,
         scored,
         scored_column_absent: any_header_read && !any_scored_column,
         complete_data: wants_split.then_some(CompleteDataMeans { complete, transition }),
@@ -362,12 +381,12 @@ fn retained_mean(all: &[f64], k: Option<usize>) -> f64 {
     }
 }
 
-/// Collect `(chain_number, dir)` for every `chain_<N>` subdirectory of
-/// `stage_dir` with a parseable trailing integer. Every sampler numbers these
-/// directories from one (gh#781, gh#910); sorting by the parsed number gives
-/// the chain order, and the display index the caller assigns sequentially then
-/// matches the directory name.
-fn discover_chain_dirs(stage_dir: &Path) -> Vec<(usize, std::path::PathBuf)> {
+/// Collect `(chain, dir)` for every `chain_<N>` subdirectory of `stage_dir`,
+/// in ascending chain order. The number is the chain's label everywhere
+/// (gh#990), and it is carried with the directory rather than re-derived from
+/// the position in this list, so a leaf with a gap labels each directory as
+/// itself (gh#913).
+fn discover_chain_dirs(stage_dir: &Path) -> Vec<(ChainIndex, std::path::PathBuf)> {
     let mut dirs = Vec::new();
     let Ok(entries) = std::fs::read_dir(stage_dir) else {
         return dirs;
@@ -380,12 +399,11 @@ fn discover_chain_dirs(stage_dir: &Path) -> Vec<(usize, std::path::PathBuf)> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if let Some(rest) = name.strip_prefix("chain_") {
-            if let Ok(n) = rest.parse::<usize>() {
-                dirs.push((n, path));
-            }
+        if let Some(chain) = ChainIndex::parse_dir_name(name) {
+            dirs.push((chain, path));
         }
     }
+    dirs.sort_by_key(|(c, _)| *c);
     dirs
 }
 
@@ -452,8 +470,8 @@ fn read_trace_cols(trace_path: &Path, names: &[&str]) -> Option<Vec<Option<Vec<f
 /// contamination impossible to miss.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChainNegInf {
-    /// 1-based display index, aligned with the per-chain loglik table.
-    pub chain: usize,
+    /// The chain's number, as its directory and the per-chain table carry it.
+    pub chain: ChainIndex,
     /// Retained rows whose log-posterior is non-finite.
     pub n_neginf: usize,
     /// Retained rows for this chain.
@@ -468,16 +486,16 @@ pub struct ChainNegInf {
 /// 37.5% of a pooled cloud downstream, R̂ 5.14, masquerading as a mode).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChainUniqueDraws {
-    /// 1-based display index, aligned with the per-chain loglik table.
-    pub chain: usize,
+    /// The chain's number, as its directory and the per-chain table carry it.
+    pub chain: ChainIndex,
     /// Distinct parameter vectors among the retained draws.
     pub n_unique: usize,
     /// Retained draws for this chain.
     pub n_draws: usize,
 }
 
-/// Per-chain distinct-parameter-vector counts from `draws.tsv`. The `chain`
-/// column is 0-based; vectors are compared as their exact on-disk text (the
+/// Per-chain distinct-parameter-vector counts from `draws.tsv`, keyed by its
+/// `chain` column; vectors are compared as their exact on-disk text (the
 /// writer round-trips full precision, so textual equality is value
 /// equality). `None` when draws.tsv is missing/unreadable.
 pub fn read_chain_unique_draws(stage_dir: &Path) -> Option<Vec<ChainUniqueDraws>> {
@@ -506,7 +524,7 @@ pub fn read_chain_unique_draws(stage_dir: &Path) -> Option<Vec<ChainUniqueDraws>
         return None;
     }
     Some(per_chain.into_iter().map(|(c, (set, n))| ChainUniqueDraws {
-        chain: c + 1,
+        chain: ChainIndex(c),
         n_unique: set.len(),
         n_draws: n,
     }).collect())
@@ -515,25 +533,24 @@ pub fn read_chain_unique_draws(stage_dir: &Path) -> Option<Vec<ChainUniqueDraws>
 /// Per-chain [`ChainNegInf`] screen over the retained trace rows. `None`
 /// when no chain traces exist (same discovery as the mean-loglik reader).
 pub fn read_chain_neginf(stage_dir: &Path) -> Option<Vec<ChainNegInf>> {
-    let mut chain_dirs = discover_chain_dirs(stage_dir);
+    let chain_dirs = discover_chain_dirs(stage_dir);
     if chain_dirs.is_empty() {
         return None;
     }
-    chain_dirs.sort_by_key(|(n, _)| *n);
     let draw_counts = read_draw_counts(&stage_dir.join("draws.tsv"));
     let mut out = Vec::with_capacity(chain_dirs.len());
-    for (i, (_, dir)) in chain_dirs.iter().enumerate() {
+    for (chain, dir) in &chain_dirs {
         let cols = read_trace_cols(&dir.join("trace.tsv"), &[TRACE_COL_LOG_POSTERIOR]);
         let all: &[f64] = match cols.as_ref().and_then(|c| c[0].as_ref()) {
             Some(v) => v,
             None => &[],
         };
-        let selected: &[f64] = match draw_counts.get(i).copied() {
+        let selected: &[f64] = match draw_counts.get(chain).copied() {
             Some(k) if k > 0 && k <= all.len() => &all[all.len() - k..],
             _ => all,
         };
         out.push(ChainNegInf {
-            chain: i + 1,
+            chain: *chain,
             n_neginf: selected.iter().filter(|v| !v.is_finite()).count(),
             n_retained: selected.len(),
         });
@@ -541,53 +558,62 @@ pub fn read_chain_neginf(stage_dir: &Path) -> Option<Vec<ChainNegInf>> {
     Some(out)
 }
 
-/// Read `draws.tsv` and return the per-chain kept-draw count, ordered by
-/// ascending 0-based `chain` id. Empty when the file is missing or has no
-/// `chain` column.
-fn read_draw_counts(draws_path: &Path) -> Vec<usize> {
+/// Read `draws.tsv` and return the per-chain kept-draw count, keyed by the
+/// `chain` column. Empty when the file is missing or has no `chain` column.
+fn read_draw_counts(draws_path: &Path) -> BTreeMap<ChainIndex, usize> {
     let Ok(contents) = std::fs::read_to_string(draws_path) else {
-        return Vec::new();
+        return BTreeMap::new();
     };
     let mut lines = contents.lines();
     let Some(header) = lines.next() else {
-        return Vec::new();
+        return BTreeMap::new();
     };
     let cols: Vec<&str> = header.split('\t').collect();
     let Some(chain_col) = cols.iter().position(|c| *c == "chain") else {
-        return Vec::new();
+        return BTreeMap::new();
     };
-    let mut counts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    let mut counts: BTreeMap<ChainIndex, usize> = BTreeMap::new();
     for line in lines {
         if line.trim().is_empty() {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        if let Some(id) = fields.get(chain_col).and_then(|s| s.parse::<usize>().ok()) {
+        if let Some(id) = fields.get(chain_col).and_then(|s| s.parse::<ChainIndex>().ok()) {
             *counts.entry(id).or_insert(0) += 1;
         }
     }
-    counts.into_values().collect()
+    counts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// `(chain, mean)` pairs for contiguous chains counted from 0.
+    fn indexed(means: &[f64]) -> Vec<(ChainIndex, f64)> {
+        means.iter().enumerate().map(|(i, &m)| (ChainIndex(i), m)).collect()
+    }
+
+    /// `means`'s chains paired with another per-chain column of the same reader.
+    fn paired(means: &ChainLoglikMeans, column: &[f64]) -> Vec<(ChainIndex, f64)> {
+        means.chain_ids.iter().copied().zip(column.iter().copied()).collect()
+    }
+
     #[test]
     fn flags_a_single_clear_outlier() {
         // Five well-mixed chains near -100 (jittered, as real chains are), one
         // stuck far below at -400.
-        let means = vec![-100.0, -101.0, -99.0, -100.5, -100.2, -400.0];
+        let means = indexed(&[-100.0, -101.0, -99.0, -100.5, -100.2, -400.0]);
         let scores = chain_loglik_mod_zscores(&means);
         assert_eq!(scores.len(), 6);
         let stuck = &scores[5];
-        assert_eq!(stuck.chain, 6);
+        assert_eq!(stuck.chain, ChainIndex(5));
         assert!(stuck.is_outlier, "stuck chain must flag: mod_z = {}", stuck.mod_z);
         assert!(stuck.mod_z < -CHAIN_LOGLIK_OUTLIER_MODZ, "mod_z strongly negative: {}", stuck.mod_z);
         for sc in &scores[..5] {
             assert!(!sc.is_outlier, "well-mixed chain {} wrongly flagged (mod_z={})", sc.chain, sc.mod_z);
         }
-        assert_eq!(outlier_labels(&scores), vec!["chain 6"]);
+        assert_eq!(outlier_labels(&scores), vec!["chain 5"]);
     }
 
     /// THE point of the robust upgrade: two co-stuck chains among six now BOTH
@@ -597,18 +623,18 @@ mod tests {
     #[test]
     fn four_good_two_stuck_flags_both_stuck_chains() {
         // 4 good (jittered) at ≈ -1204, 2 stuck at ≈ -1461.
-        let means = vec![-1204.0, -1205.0, -1203.0, -1206.0, -1461.0, -1462.0];
+        let means = indexed(&[-1204.0, -1205.0, -1203.0, -1206.0, -1461.0, -1462.0]);
         let scores = chain_loglik_mod_zscores(&means);
-        assert!(scores[4].is_outlier, "stuck chain 5 must flag: mod_z={}", scores[4].mod_z);
-        assert!(scores[5].is_outlier, "stuck chain 6 must flag: mod_z={}", scores[5].mod_z);
+        assert!(scores[4].is_outlier, "stuck chain 4 must flag: mod_z={}", scores[4].mod_z);
+        assert!(scores[5].is_outlier, "stuck chain 5 must flag: mod_z={}", scores[5].mod_z);
         assert!(
             scores[..4].iter().all(|s| !s.is_outlier),
             "good chains must not flag: {:?}",
             scores[..4].iter().map(|s| s.mod_z).collect::<Vec<_>>()
         );
         let labels = outlier_labels(&scores);
+        assert!(labels.contains(&"chain 4".to_string()), "must name chain 4: {labels:?}");
         assert!(labels.contains(&"chain 5".to_string()), "must name chain 5: {labels:?}");
-        assert!(labels.contains(&"chain 6".to_string()), "must name chain 6: {labels:?}");
         assert_eq!(labels.len(), 2, "exactly the two stuck chains: {labels:?}");
     }
 
@@ -616,7 +642,7 @@ mod tests {
     fn flags_nothing_when_well_mixed() {
         // Negative control: all chains agree — no outlier, and the scores are
         // small and finite (not a vacuous "everything is NaN" pass).
-        let means = vec![-100.0, -100.3, -99.8, -100.1, -99.9, -100.2];
+        let means = indexed(&[-100.0, -100.3, -99.8, -100.1, -99.9, -100.2]);
         let scores = chain_loglik_mod_zscores(&means);
         assert!(scores.iter().all(|s| !s.is_outlier), "well-mixed set must flag nothing");
         assert!(scores.iter().all(|s| s.mod_z.is_finite()), "scores must be finite");
@@ -626,7 +652,7 @@ mod tests {
 
     #[test]
     fn single_chain_has_no_spread() {
-        let scores = chain_loglik_mod_zscores(&[-42.0]);
+        let scores = chain_loglik_mod_zscores(&indexed(&[-42.0]));
         assert_eq!(scores.len(), 1);
         assert_eq!(scores[0].mod_z, 0.0);
         assert!(!scores[0].is_outlier);
@@ -640,17 +666,17 @@ mod tests {
         // Nine identical good chains at -50, one outlier at -500 → MAD = 0.
         let mut means = vec![-50.0; 9];
         means.push(-500.0);
-        let scores = chain_loglik_mod_zscores(&means);
+        let scores = chain_loglik_mod_zscores(&indexed(&means));
         assert!(scores.iter().all(|s| s.mod_z.is_finite()), "MeanAD fallback must yield finite scores, not NaN");
         assert!(scores[9].is_outlier, "the outlier must flag via MeanAD: mod_z={}", scores[9].mod_z);
         assert!(scores[..9].iter().all(|s| !s.is_outlier), "identical good chains must not flag");
-        assert_eq!(outlier_labels(&scores), vec!["chain 10"]);
+        assert_eq!(outlier_labels(&scores), vec!["chain 9"]);
     }
 
     #[test]
     fn all_identical_chains_yield_zero_not_nan() {
         // Both MAD and MeanAD are 0 → scale 0 → z = 0, no outliers, no NaN.
-        let scores = chain_loglik_mod_zscores(&[-10.0, -10.0, -10.0, -10.0]);
+        let scores = chain_loglik_mod_zscores(&indexed(&[-10.0, -10.0, -10.0, -10.0]));
         assert!(scores.iter().all(|s| s.mod_z == 0.0), "identical chains → mod_z = 0, not NaN");
         assert!(scores.iter().all(|s| !s.is_outlier));
     }
@@ -660,7 +686,7 @@ mod tests {
     /// it does not poison the finite chains' median/MAD.
     #[test]
     fn non_finite_mean_is_not_silently_clean() {
-        let means = vec![-50.0, -51.0, -49.0, f64::NAN, -400.0];
+        let means = indexed(&[-50.0, -51.0, -49.0, f64::NAN, -400.0]);
         let scores = chain_loglik_mod_zscores(&means);
         assert!(scores[3].mod_z.is_nan(), "broken chain's mod_z must be NaN, not a fake number");
         assert!(!scores[3].is_outlier, "a NaN score is not an outlier VERDICT (it is 'unassessable')");
@@ -678,20 +704,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let warmup = "1\t-900.0\t-905.0\n2\t-880.0\t-885.0\n";
-        // dir numbering starts at 1 (every sampler's convention). Distinct
-        // good means.
+        // Directories count from 0 (every sampler's convention, gh#990).
+        // Distinct good means.
         let write_trace = |c: usize, kept: &str| {
             let cd = dir.join(format!("chain_{c}"));
             std::fs::create_dir_all(&cd).unwrap();
             let body = format!("step\tlog_likelihood\tlog_posterior\n{warmup}{kept}");
             std::fs::write(cd.join("trace.tsv"), body).unwrap();
         };
-        write_trace(1, "3\t-50.0\t-52.0\n4\t-50.0\t-52.0\n5\t-50.0\t-52.0\n"); // mean -50.0
-        write_trace(2, "3\t-50.5\t-52.0\n4\t-50.5\t-52.0\n5\t-50.5\t-52.0\n"); // mean -50.5
-        write_trace(3, "3\t-49.5\t-51.0\n4\t-49.5\t-51.0\n5\t-49.5\t-51.0\n"); // mean -49.5
-        write_trace(4, "3\t-50.2\t-52.0\n4\t-50.2\t-52.0\n5\t-50.2\t-52.0\n"); // mean -50.2
-        write_trace(5, "3\t-49.8\t-51.0\n4\t-49.8\t-51.0\n5\t-49.8\t-51.0\n"); // mean -49.8
-        write_trace(6, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // stuck ≈ -300
+        write_trace(0, "3\t-50.0\t-52.0\n4\t-50.0\t-52.0\n5\t-50.0\t-52.0\n"); // mean -50.0
+        write_trace(1, "3\t-50.5\t-52.0\n4\t-50.5\t-52.0\n5\t-50.5\t-52.0\n"); // mean -50.5
+        write_trace(2, "3\t-49.5\t-51.0\n4\t-49.5\t-51.0\n5\t-49.5\t-51.0\n"); // mean -49.5
+        write_trace(3, "3\t-50.2\t-52.0\n4\t-50.2\t-52.0\n5\t-50.2\t-52.0\n"); // mean -50.2
+        write_trace(4, "3\t-49.8\t-51.0\n4\t-49.8\t-51.0\n5\t-49.8\t-51.0\n"); // mean -49.8
+        write_trace(5, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // stuck ≈ -300
 
         let mut draws = String::from("chain\tdraw\tbeta\n");
         for c in 0..6 {
@@ -707,18 +733,20 @@ mod tests {
             .expect("chain traces present");
         assert_eq!(means.scored_column, "log_likelihood");
         assert!(means.complete_data.is_none(), "no latent-path split for a marginal sampler");
+        assert_eq!(means.chain_ids, ChainIndex::all(6).collect::<Vec<_>>());
+        let by_chain = means.scored_by_chain();
         let means = means.scored;
         assert_eq!(means.len(), 6);
         // Warm-up (-900/-880) excluded → good chains ≈ -50, not dragged to -890.
         for (i, m) in means.iter().take(5).enumerate() {
-            assert!((m - (-50.0)).abs() < 1.0, "chain {} mean {} ≈ -50 (warm-up stripped)", i + 1, m);
+            assert!((m - (-50.0)).abs() < 1.0, "chain {} mean {} ≈ -50 (warm-up stripped)", i, m);
         }
-        assert!((means[5] - (-300.0)).abs() < 1.0, "chain 6 (stuck) mean {} ≈ -300", means[5]);
+        assert!((means[5] - (-300.0)).abs() < 1.0, "chain 5 (stuck) mean {} ≈ -300", means[5]);
 
-        let scores = chain_loglik_mod_zscores(&means);
-        assert!(scores[5].is_outlier, "stuck chain 6 must flag: mod_z={}", scores[5].mod_z);
+        let scores = chain_loglik_mod_zscores(&by_chain);
+        assert!(scores[5].is_outlier, "stuck chain 5 must flag: mod_z={}", scores[5].mod_z);
         assert!(scores[..5].iter().all(|s| !s.is_outlier), "good chains must not flag");
-        assert_eq!(outlier_labels(&scores), vec!["chain 6"]);
+        assert_eq!(outlier_labels(&scores), vec!["chain 5"]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -735,13 +763,13 @@ mod tests {
     /// A six-chain PGAS stage whose complete-data ranking and observation-only
     /// ranking DISAGREE, so the fixture discriminates between them.
     ///
-    /// - chain 3 has a hugely concentrated latent path (`transition_ll` −800 vs
+    /// - chain 2 has a hugely concentrated latent path (`transition_ll` −800 vs
     ///   ≈ −3000 elsewhere) and a perfectly ordinary data fit.
-    /// - chain 6 has an ordinary latent path and reproduces the data ≈450 nats
+    /// - chain 5 has an ordinary latent path and reproduces the data ≈450 nats
     ///   worse than every other chain.
     ///
-    /// Ranking on `log_complete_data_ll` flags chain 3 — a chain that fits the
-    /// data as well as any other. Ranking on `obs_ll` flags chain 6.
+    /// Ranking on `log_complete_data_ll` flags chain 2 — a chain that fits the
+    /// data as well as any other. Ranking on `obs_ll` flags chain 5.
     fn write_disagreeing_pgas_stage(dir: &std::path::Path) {
         std::fs::create_dir_all(dir).unwrap();
         // (transition_ll, obs_ll) per chain; complete = transition + obs.
@@ -754,7 +782,7 @@ mod tests {
             (-3000.0, -1400.0),  // ordinary path, BAD data fit
         ];
         for (i, (trans, obs)) in chains.iter().enumerate() {
-            let cd = dir.join(format!("chain_{}", i + 1));
+            let cd = dir.join(format!("chain_{i}"));
             std::fs::create_dir_all(&cd).unwrap();
             let complete = trans + obs;
             let mut body = String::from(
@@ -799,17 +827,17 @@ mod tests {
 
         // The scored quantity IS obs_ll (warm-up stripped: −1000 never enters).
         assert!((means.scored[5] - (-1400.0)).abs() < 1e-6,
-            "chain 6 must be scored on its obs_ll (−1400), got {}", means.scored[5]);
+            "chain 5 must be scored on its obs_ll (−1400), got {}", means.scored[5]);
         assert!((means.scored[2] - (-951.7)).abs() < 1e-6,
-            "chain 3 must be scored on its obs_ll (−951.7), got {}", means.scored[2]);
+            "chain 2 must be scored on its obs_ll (−951.7), got {}", means.scored[2]);
 
         // …and the flag follows it: the chain that fits the DATA worst.
-        let scores = chain_loglik_mod_zscores(&means.scored);
-        assert_eq!(outlier_labels(&scores), vec!["chain 6"],
+        let scores = chain_loglik_mod_zscores(&means.scored_by_chain());
+        assert_eq!(outlier_labels(&scores), vec!["chain 5"],
             "the badly-fitting chain is the outlier: {:?}",
             scores.iter().map(|s| s.mod_z).collect::<Vec<_>>());
         assert!(!scores[2].is_outlier,
-            "chain 3 fits the data like every other chain and must NOT flag \
+            "chain 2 fits the data like every other chain and must NOT flag \
              (mod_z = {})", scores[2].mod_z);
 
         // The fixture genuinely discriminates: the complete-data column the old
@@ -817,11 +845,11 @@ mod tests {
         // (kept visible in the table) — it is just no longer the ranking key.
         let split = means.complete_data.as_ref().expect("PGAS carries the split");
         assert!((split.complete[2] - (-1751.7)).abs() < 1e-6,
-            "chain 3's complete-data target is still read: {}", split.complete[2]);
+            "chain 2's complete-data target is still read: {}", split.complete[2]);
         assert!((split.transition[2] - (-800.0)).abs() < 1e-6,
-            "chain 3's transition term is still read: {}", split.transition[2]);
-        let cd_scores = chain_loglik_mod_zscores(&split.complete);
-        assert_eq!(outlier_labels(&cd_scores), vec!["chain 3"],
+            "chain 2's transition term is still read: {}", split.transition[2]);
+        let cd_scores = chain_loglik_mod_zscores(&paired(&means, &split.complete));
+        assert_eq!(outlier_labels(&cd_scores), vec!["chain 2"],
             "precondition: ranking on log_complete_data_ll flags the \
              concentrated-path chain, not the badly-fitting one: {:?}",
             cd_scores.iter().map(|s| s.mod_z).collect::<Vec<_>>());
@@ -845,7 +873,7 @@ mod tests {
             (-3100.9, -958.0), (-3172.6, -952.9), (-3354.4, -960.4),
         ];
         for (i, (trans, obs)) in chains.iter().enumerate() {
-            let cd = dir.join(format!("chain_{}", i + 1));
+            let cd = dir.join(format!("chain_{i}"));
             std::fs::create_dir_all(&cd).unwrap();
             let complete = trans + obs;
             std::fs::write(cd.join("trace.tsv"), format!(
@@ -864,12 +892,12 @@ mod tests {
             "observation spread ≈ 9 nats, got {}", range(&means.scored));
 
         // The two columns rank the chains differently on the REAL fit too, not
-        // only on a constructed cohort: chain 6 is 8.7 nats below best on data
+        // only on a constructed cohort: chain 5 is 8.7 nats below best on data
         // fit and 522 below best on the latent path, and only the observation
         // column names it.
-        let obs_flagged = outlier_labels(&chain_loglik_mod_zscores(&means.scored));
-        let cd_flagged = outlier_labels(&chain_loglik_mod_zscores(&split.complete));
-        assert_eq!(obs_flagged, vec!["chain 6"], "obs_ll names the worst DATA fit");
+        let obs_flagged = outlier_labels(&chain_loglik_mod_zscores(&means.scored_by_chain()));
+        let cd_flagged = outlier_labels(&chain_loglik_mod_zscores(&paired(&means, &split.complete)));
+        assert_eq!(obs_flagged, vec!["chain 5"], "obs_ll names the worst DATA fit");
         assert!(cd_flagged.is_empty(),
             "the complete-data column, whose spread is 60× larger, names NOBODY \
              — its own scale swamps the differences it would flag: {cd_flagged:?}");
@@ -890,13 +918,13 @@ mod tests {
     fn a_chain_bad_on_both_terms_is_still_flagged() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_gh667_agree");
         std::fs::create_dir_all(&dir).unwrap();
-        // Five chains agree; chain 6 is worse on BOTH terms.
+        // Five chains agree; chain 5 is worse on BOTH terms.
         let chains = [
             (-2900.0, -952.0), (-2910.0, -952.8), (-2890.0, -951.7),
             (-2905.0, -952.9), (-2895.0, -952.3), (-3900.0, -1400.0),
         ];
         for (i, (trans, obs)) in chains.iter().enumerate() {
-            let cd = dir.join(format!("chain_{}", i + 1));
+            let cd = dir.join(format!("chain_{i}"));
             std::fs::create_dir_all(&cd).unwrap();
             let complete = trans + obs;
             std::fs::write(cd.join("trace.tsv"), format!(
@@ -906,9 +934,11 @@ mod tests {
         let means = read_chain_mean_logliks(&dir, LoglikType::CompleteData).expect("traces");
         let split = means.complete_data.as_ref().expect("PGAS split");
         // Precondition: this cohort is one both columns agree on…
-        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&split.complete)), vec!["chain 6"]);
+        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&paired(&means, &split.complete))),
+            vec!["chain 5"]);
         // …and the scored column still names it.
-        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&means.scored)), vec!["chain 6"]);
+        assert_eq!(outlier_labels(&chain_loglik_mod_zscores(&means.scored_by_chain())),
+            vec!["chain 5"]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -920,7 +950,7 @@ mod tests {
     #[test]
     fn reader_keys_on_the_name_so_position_1_cannot_stand_in() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_pgas");
-        let cd = dir.join("chain_1");
+        let cd = dir.join("chain_0");
         std::fs::create_dir_all(&cd).unwrap();
         std::fs::write(
             cd.join("trace.tsv"),
@@ -943,7 +973,7 @@ mod tests {
     #[test]
     fn missing_scored_column_is_reported_not_silently_substituted() {
         let dir = crate::test_support::unique_temp_dir("chain_diag_no_obs");
-        let cd = dir.join("chain_1");
+        let cd = dir.join("chain_0");
         std::fs::create_dir_all(&cd).unwrap();
         std::fs::write(
             cd.join("trace.tsv"),
@@ -969,6 +999,38 @@ mod tests {
         assert!(!means.scored_column_absent,
             "an unreadable trace is not evidence about which columns a trace has");
         assert!(means.scored[0].is_nan());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// gh#913: a per-chain mean is labelled with the number parsed from its
+    /// `chain_N/` directory, so a leaf with a gap — a chain that died before
+    /// writing anything, or a hand-pruned leaf — attributes each mean to its
+    /// own chain rather than renumbering the survivors by position.
+    #[test]
+    fn chain_means_are_labelled_by_directory_number_not_position() {
+        let dir = crate::test_support::unique_temp_dir("chain_diag_gap");
+        std::fs::create_dir_all(&dir).unwrap();
+        // chain_1 never ran; chains 0 and 2 did, and 2 is the stuck one.
+        for (c, ll) in [(0usize, -50.0), (2usize, -300.0)] {
+            let cd = dir.join(format!("chain_{c}"));
+            std::fs::create_dir_all(&cd).unwrap();
+            std::fs::write(
+                cd.join("trace.tsv"),
+                format!("step\tlog_likelihood\tlog_posterior\n1\t{ll}\t{ll}\n2\t{ll}\t{ll}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            dir.join("draws.tsv"),
+            "chain\tdraw\tbeta\n0\t0\t0.5\n0\t1\t0.5\n2\t0\t0.5\n2\t1\t0.5\n",
+        )
+        .unwrap();
+        let means = read_chain_mean_logliks(&dir, LoglikType::Marginal).expect("traces");
+        assert_eq!(means.chain_ids, vec![ChainIndex(0), ChainIndex(2)]);
+        let scores = chain_loglik_mod_zscores(&means.scored_by_chain());
+        let labels: Vec<ChainIndex> = scores.iter().map(|s| s.chain).collect();
+        assert_eq!(labels, vec![ChainIndex(0), ChainIndex(2)],
+            "each mean carries its own directory's number");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

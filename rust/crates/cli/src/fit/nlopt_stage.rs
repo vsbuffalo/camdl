@@ -19,6 +19,7 @@ use sim::inference::deterministic::{
     optimize_det, NloptAlgorithm, OptResult, OptStatus,
 };
 
+use crate::chain_index::ChainIndex;
 use crate::fit::config_v2::{Algorithm, DtCheckConfig, GateConfig, Method, NloptStageConfig, Problem};
 use crate::fit::dt_check;
 use crate::fit::loglik::LoglikType;
@@ -281,10 +282,7 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION.to_string()),
         best_loglik: winner.loglik,
         initial_loglik: f64::NAN,
-        // gh#912: `winner_idx` is the 0-based chain index; the stored value is
-        // the 1-based chain NUMBER, matching the `chain` column of
-        // `chain_results.tsv` beside this file.
-        best_chain: winner_idx + 1,
+        best_chain: ChainIndex(winner_idx),
         n_chains,
         n_good_chains: Some(
             chain_outcomes
@@ -340,7 +338,7 @@ pub fn run_stage(
         data_hashes: data_hashes.to_vec(),
         seed,
         method: stage_name.to_string(),
-        best_chain_index: winner_idx,
+        best_chain: ChainIndex(winner_idx),
         // NLopt stages always run on the ODE backend (validated by
         // methods::validate_combo); record it from the inference domain
         // (total `From<InferenceBackend>` into the forward provenance field).
@@ -681,7 +679,7 @@ fn write_per_chain_files(
         write!(
             f,
             "{}\t{:.6}\t{}\t{}",
-            chain_idx + 1,
+            ChainIndex(*chain_idx),
             c.loglik,
             c.status.as_str(),
             c.n_evals,

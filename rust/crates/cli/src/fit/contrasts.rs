@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::chain_index::ChainIndex;
 use ir::contrast::{Contrast, ContrastExpr, RunNamespace};
 use ir::expr::{BinOp, Expr, UnOp};
 use ir::intervention::{Intervention, InterventionSchedule};
@@ -370,9 +371,7 @@ pub fn emit_contrasts(
     // model-wide, so the first forkable draw's path is representative; a draw that
     // happens to lack the derived fork errors loudly at `read_state_at`.
     let (_, snap_chain, snap_draw) = &forkable[0];
-    let snap_traj = stage_dir
-        .join(format!("chain_{}", snap_chain + 1))
-        .join("trajectories.tsv");
+    let snap_traj = ChainIndex(*snap_chain).dir_in(stage_dir).join("trajectories.tsv");
     let snapshot_times = io::trajectories::snapshot_times(&snap_traj, *snap_chain, *snap_draw)?;
 
     // Per contrast: derive the fork (last saved snapshot before the toggled
@@ -573,10 +572,10 @@ impl Arm {
             }
         }
 
-        // Read the smoothed latent state X_i(fork) from the saved path. The on-disk
-        // chain dir is 1-based (`chain_{N+1}`); the in-file `chain` column is the
-        // 0-based key `read_state_at` matches.
-        let traj_path = stage_dir.join(format!("chain_{}", chain + 1)).join("trajectories.tsv");
+        // Read the smoothed latent state X_i(fork) from the saved path. The
+        // in-file `chain` key is the number of the `chain_N/` directory
+        // (gh#990), and the key `read_state_at` matches.
+        let traj_path = ChainIndex(chain).dir_in(stage_dir).join("trajectories.tsv");
         let (int_s, real_s) =
             io::trajectories::read_state_at(&traj_path, col_spec, chain, draw, fork_t)
                 .map_err(|e| format!("contrast arm '{run}': reading X(fork={fork_t}): {e}"))?;

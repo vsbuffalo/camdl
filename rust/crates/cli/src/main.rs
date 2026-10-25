@@ -10,6 +10,7 @@ mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-id
 mod output_schema;  // run.json output_schema: column roles for tabular outputs (proposal 2026-07-15)
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
+mod chain_index;    // the chain number, counted from 0: the one index base every fit surface names (gh#990)
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
 mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-08-11 §3.6)
 mod quantities_file; // `--quantities FILE`: a separable reporting vocabulary + its artifact key
