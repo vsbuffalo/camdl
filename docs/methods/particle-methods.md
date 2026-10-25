@@ -1,25 +1,23 @@
-# Particle Methods in camdl: Bootstrap PF, IF2, CSMC-AS, Correlated PF
+# Particle Methods in camdl: Bootstrap PF, IF2, CSMC-AS
 
-**Scope:** the four distinct particle-method implementations in camdl, the
-algorithm each one runs, and where each is plugged in. All four sit under the
+**Scope:** the three distinct particle-method implementations in camdl, the
+algorithm each one runs, and where each is plugged in. All three sit under the
 Sequential Monte Carlo (SMC) umbrella but solve different problems: filtering,
-parameter inference by iterated filtering, conditional smoothing inside a Gibbs
-sampler, and correlated-randoms coupling for pseudo-marginal MCMC.
+parameter inference by iterated filtering, and conditional smoothing inside a
+Gibbs sampler.
 
 **Authoritative code:**
 
-| algorithm                                      | entry point                                                                          | callers                                                                                                                                     |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bootstrap PF (vanilla filter)                  | `rust/crates/sim/src/inference/particle_filter.rs:87` (`bootstrap_filter`)           | `cli/pfilter.rs`, `cli/fit/runner.rs:404` (`run_quick_pfilter`), `sim/inference/prequential.rs`, IF2 fallback path in `cli/if2.rs:399`      |
-| IF2 (parameter-augmented PF)                   | `rust/crates/sim/src/inference/if2.rs:191` (`run_if2`)                               | `cli/if2.rs` (standalone CLI), `cli/fit/runner.rs` (production chain runner under `fit run`)                                                |
-| CSMC-AS (conditional SMC w/ ancestor sampling) | `rust/crates/sim/src/inference/pgas.rs:681` (`csmc_as`)                              | `pgas.rs:1412, 1655` inside `run_pgas`                                                                                                      |
-| Correlated PF (for correlated-MH)              | `rust/crates/sim/src/inference/correlated_pf.rs:134` (`bootstrap_filter_correlated`) | `cli/fit/pmmh.rs:117, 298` — only when `pmmh_config.rho.is_some()`; otherwise PMMH calls vanilla `bootstrap_filter` via `run_quick_pfilter` |
+| algorithm                                      | entry point                                                                | callers                                                                                                                                |
+| ---------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Bootstrap PF (vanilla filter)                  | `rust/crates/sim/src/inference/particle_filter.rs:87` (`bootstrap_filter`) | `cli/pfilter.rs`, `cli/fit/runner.rs:404` (`run_quick_pfilter`), `sim/inference/prequential.rs`, IF2 fallback path in `cli/if2.rs:399` |
+| IF2 (parameter-augmented PF)                   | `rust/crates/sim/src/inference/if2.rs:191` (`run_if2`)                     | `cli/if2.rs` (standalone CLI), `cli/fit/runner.rs` (production chain runner under `fit run`)                                           |
+| CSMC-AS (conditional SMC w/ ancestor sampling) | `rust/crates/sim/src/inference/pgas.rs:681` (`csmc_as`)                    | `pgas.rs:1412, 1655` inside `run_pgas`                                                                                                 |
 
 **Shared infrastructure:**
 
 - `rust/crates/sim/src/inference/resampling.rs:17` — `systematic_resample`. Used
-  by `bootstrap_filter`, the inner loop of IF2, and `csmc_as`. The correlated PF
-  uses its own `sorted_systematic_resample` (`correlated_pf.rs:420`) — see §5.
+  by `bootstrap_filter`, the inner loop of IF2, and `csmc_as`.
 - `rust/crates/sim/src/inference/types.rs` — `ParticleState`, `SwarmState`, the
   trait surface every method consumes.
 - `rust/crates/sim/src/inference/traits.rs` — `ProcessModel` (the propagation
@@ -42,11 +40,10 @@ cycle as $t$ advances.
 
 The algorithms below differ along three axes:
 
-| axis           | values                                                             | what changes                                                                                                   |
-| -------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| **target**     | filter $p(x_t \mid y_{1:t})$ vs smoother $p(x_{1:T} \mid y_{1:T})$ | bootstrap PF and correlated PF target the filter; CSMC-AS targets the smoother                                 |
-| **θ-handling** | fixed θ vs perturbed θ                                             | bootstrap and correlated PFs hold θ fixed; IF2 makes θ part of the state                                       |
-| **coupling**   | independent runs vs correlated runs                                | vanilla PFs are independent across calls; the correlated PF uses correlated random numbers across MH proposals |
+| axis           | values                                                             | what changes                                                  |
+| -------------- | ------------------------------------------------------------------ | ------------------------------------------------------------- |
+| **target**     | filter $p(x_t \mid y_{1:t})$ vs smoother $p(x_{1:T} \mid y_{1:T})$ | bootstrap PF targets the filter; CSMC-AS targets the smoother |
+| **θ-handling** | fixed θ vs perturbed θ                                             | the bootstrap PF holds θ fixed; IF2 makes θ part of the state |
 
 A useful first-principles reference that sets up this taxonomy is Doucet &
 Johansen (2009), "A tutorial on particle filtering and smoothing: Fifteen years
@@ -269,89 +266,21 @@ CSMC-AS sweep showing ancestor sampling at $t=2$. Cross-reference
 
 ---
 
-## 5. Correlated bootstrap PF (for correlated-MH)
+## 5. When to use which
 
-**File:** `rust/crates/sim/src/inference/correlated_pf.rs:134`
-(`bootstrap_filter_correlated`).
-
-**What it computes:** the same marginal-likelihood estimator as the vanilla
-bootstrap PF, but with the random numbers driving propagation and resampling
-exposed as an explicit input `PFRandomState`. Two calls with **correlated**
-`PFRandomState` inputs (correlation $\rho \in (0, 1)$) yield log-likelihood
-estimates whose differences have **lower variance** than two independent calls —
-which makes the MH acceptance ratio in PMMH mix faster.
-
-### Algorithm (Deligiannidis-Doucet-Pitt 2018)
-
-Same propagate-weight-resample cycle as §2, with two changes:
-
-- **Random numbers as input**: instead of drawing from an internal RNG, each
-  propagation and each resample reads from `PFRandomState`, which packages all
-  the standard normals needed for the entire run. See `correlated_pf.rs:25`
-  (`PFRandomState`) and `correlated_pf.rs:32` for the Φ-transformed-uniform
-  field.
-- **Sorted systematic resampling**: at each resample step, particles are sorted
-  by a 1-D summary statistic before applying systematic resampling with a fixed
-  uniform offset. This makes the resampling step $\rho$-continuous — small
-  changes in the input randoms produce small changes in the resampled particles.
-  Without sorting, ordinary systematic resampling has discrete jumps that
-  destroy correlation. See `correlated_pf.rs:420`
-  (`sorted_systematic_resample`).
-
-The MH proposal in correlated-MH (Deligiannidis et al. §2.3) draws
-$u' = \rho u + \sqrt{1 - \rho^2} \, \epsilon$ where $u$ is the current state's
-`PFRandomState`-as-Gaussian and $\epsilon$ is a fresh standard normal vector.
-Both $u$ and $u'$ are passed to `bootstrap_filter_correlated`; the resulting
-log-likelihoods are correlated, and so the MH acceptance ratio sees lower
-variance.
-
-### When this helps and when it doesn't
-
-Discrete-state dynamics (the chain-binomial backend's main regime) **break
-correlation through the resampling step** more aggressively than
-continuous-state dynamics, because particles are integers and small noise
-perturbations don't move them. The net effect: camdl's correlated-MH path tops
-out at $\rho_{\text{eff}} \approx 0.68$ on chain-binomial models — useful but
-not transformative. This empirical ceiling is part of the motivation for PGAS as
-the production Bayesian path; see `docs/dev/proposals/2026-04-05-pgas.md`
-"Motivation."
-
-### Test coverage gap
-
-There is **no dedicated test file** for `correlated_pf` in
-`rust/crates/sim/tests/`. It is exercised through PMMH integration tests
-(`tests/pmmh.rs`, `tests/pmmh_hierarchical.rs`) but its correlation properties
-(the whole point of the algorithm) are not directly verified. This is a known
-gap; see TODO issue.
-
-### Citations
-
-- Deligiannidis, G., Doucet, A., & Pitt, M. K. (2018). The correlated
-  pseudomarginal method. _JRSS-B_, 80(5), 839–870. **Correlated PF in PMMH.**
-- Choppala, P., Gunawan, D., Chen, J., Tran, M.-N., & Kohn, R. (2016). Bayesian
-  inference for state space models using block and correlated pseudo marginal
-  methods. _arXiv:1612.07072_. Block-correlated extensions; useful for
-  understanding the sorted-resampling rationale.
+| if you want to...                                                | use                                                          | implemented as                                | typical caller                                                     |
+| ---------------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------- | ------------------------------------------------------------------ |
+| evaluate $\log p(y_{1:T} \mid \theta)$ at a fixed θ              | bootstrap PF                                                 | `bootstrap_filter`                            | `camdl pfilter`; loglik-eval / gate checks via `run_quick_pfilter` |
+| find the MLE $\hat\theta$                                        | IF2                                                          | `run_if2` (its own loop)                      | `camdl fit run` with `[method] algorithm = "if2"`                  |
+| sample from the posterior $p(\theta, x_{1:T} \mid y_{1:T})$      | Particle Gibbs with CSMC-AS for X-update + NUTS for θ-update | `csmc_as` inside `run_pgas`                   | `camdl fit run` with `[method] algorithm = "pgas"`                 |
+| sample posterior with classical PMMH (Andrieu-Doucet-Holenstein) | PMMH on top of bootstrap PF                                  | `run_pmmh` calling `bootstrap_filter`         | `camdl fit run` with `[method] algorithm = "pmmh"`                 |
+| score predictions sequentially                                   | bootstrap PF in prequential mode                             | `bootstrap_filter` with `PrequentialRecorded` | `camdl compare` via `prequential.rs`                               |
 
 ---
 
-## 6. When to use which
+## 6. Cross-cutting choices documented elsewhere
 
-| if you want to...                                                | use                                                          | implemented as                                   | typical caller                                                     |
-| ---------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------------------------ |
-| evaluate $\log p(y_{1:T} \mid \theta)$ at a fixed θ              | bootstrap PF                                                 | `bootstrap_filter`                               | `camdl pfilter`; loglik-eval / gate checks via `run_quick_pfilter` |
-| find the MLE $\hat\theta$                                        | IF2                                                          | `run_if2` (its own loop)                         | `camdl fit run` with `[method] algorithm = "if2"`                  |
-| sample from the posterior $p(\theta, x_{1:T} \mid y_{1:T})$      | Particle Gibbs with CSMC-AS for X-update + NUTS for θ-update | `csmc_as` inside `run_pgas`                      | `camdl fit run` with `[method] algorithm = "pgas"`                 |
-| sample posterior with classical PMMH (Andrieu-Doucet-Holenstein) | PMMH on top of bootstrap PF                                  | `run_pmmh` calling `bootstrap_filter`            | `camdl fit run` with `[method] algorithm = "pmmh"` (rho unset)     |
-| sample posterior with correlated PMMH (DDP 2018)                 | PMMH on top of correlated PF                                 | `run_pmmh` calling `bootstrap_filter_correlated` | `camdl fit run` with `[method] algorithm = "pmmh"` (rho set)       |
-| score predictions sequentially                                   | bootstrap PF in prequential mode                             | `bootstrap_filter` with `PrequentialRecorded`    | `camdl compare` via `prequential.rs`                               |
-
----
-
-## 7. Cross-cutting choices documented elsewhere
-
-- **Resampling.** All four methods systematic-resample by default (correlated PF
-  uses the sorted variant). Tested in
+- **Resampling.** All three methods systematic-resample by default. Tested in
   `sim/tests/particle_filter.rs::test_systematic_resample_*`.
 - **Cooling schedule.** IF2-specific. See [`cooling.md`](cooling.md).
 - **ESS thresholds and what they mean.** TODO `ess.md` (covers Liu-Chen 1995,
@@ -383,7 +312,7 @@ gap; see TODO issue.
   Methods in Practice_. Springer. The canonical book.
 - Doucet, A., & Johansen, A. (2009). A tutorial on particle filtering and
   smoothing: Fifteen years later. In _Handbook of Nonlinear Filtering_, Oxford.
-  Modern reference; covers all four algorithms above as specializations of one
+  Modern reference; covers all three algorithms above as specializations of one
   framework.
 - Gordon, N., Salmond, D., & Smith, A. (1993). Novel approach to
   nonlinear/non-Gaussian Bayesian state estimation. _IEE Proc-F_, 140(2),
@@ -406,5 +335,3 @@ gap; see TODO issue.
   Carlo methods. _JRSS-B_, 72(3), 269–342. Introduces PMMH and Particle Gibbs.
 - Lindsten, F., Jordan, M. I., & Schön, T. B. (2014). Particle Gibbs with
   ancestor sampling. _JMLR_, 15, 2145–2184. CSMC-AS.
-- Deligiannidis, G., Doucet, A., & Pitt, M. K. (2018). The correlated
-  pseudomarginal method. _JRSS-B_, 80(5), 839–870.

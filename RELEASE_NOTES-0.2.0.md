@@ -185,9 +185,11 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `[method]` for `algorithm = "pmmh"`, the `--rho` flag on `fit run` and the
   `--pmmh-rho` flag on `profile` are gone; `pmmh` runs the bootstrap particle
   filter with independent likelihood evaluations, as it did with `rho` unset.
-  Migration: delete the `rho` line and drop the flags. A `fit.toml` that still
-  carries the key, or a script that still passes either flag, is refused with
-  that instruction.
+  `camdl profile --algorithm pmmh` defaulted to a correlated filter with
+  `rho = 0.99`, so a profile user who never passed the flag sees different
+  numerics. Migration: delete the `rho` line and drop the flags. A `fit.toml`
+  that still carries the key, or a script that still passes either flag, is
+  refused with that instruction.
 
 - **NUTS on the ODE backend was removed.** `algorithm = "nuts"` (with
   `backend = "ode"`) and its keys `warmup`, `samples`, `target_accept`,

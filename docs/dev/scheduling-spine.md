@@ -2,10 +2,10 @@
 
 The timing spine is the correctness foundation for **all** forward simulation
 and **all** inference. Every backend (chain-binomial, ODE, Gillespie) and every
-inference algorithm (bootstrap PF, IF2, correlated-PF, PGAS, PMMH) walks the
-same `Schedule`, so a firing-time or coverage error here is not one backend's
-bug — it is wrong for everything. This doc is the reference for how the spine
-works and, in §2, the **normative invariant catalog** the property tests verify.
+inference algorithm (bootstrap PF, IF2, PGAS, PMMH) walks the same `Schedule`,
+so a firing-time or coverage error here is not one backend's bug — it is wrong
+for everything. This doc is the reference for how the spine works and, in §2,
+the **normative invariant catalog** the property tests verify.
 
 > **Naming note.** The effect type is currently `ir::intervention::Intervention`
 > with `kind: InterventionKind { Scenario, Event }` (events and interventions
@@ -109,14 +109,14 @@ Every path routes firing-_time_ through the spine +
 representation differs — and that is the correct seam (share the timing, keep
 the distinct dynamics):
 
-| path                                  | builds `effect_times`                   | fires via                    | apply                                                                     |
-| ------------------------------------- | --------------------------------------- | ---------------------------- | ------------------------------------------------------------------------- |
-| chain-binomial (Snap, fwd)            | `all_intervention_times` (incl. events) | `due_effects` round, on-grid | `step_one` PROPOSE/INTERVENE                                              |
-| ODE (Exact, fwd)                      | `all_intervention_times`                | cursor land                  | `apply_boundary_batch_continuous` (f64, no RNG)                           |
-| Gillespie (Exact, fwd)                | `all_intervention_times`                | cursor land                  | discrete apply **+ full propensity recompute**                            |
-| PF / IF2 / correlated-PF (Exact, inf) | `timeline_effects` (incl. events)       | cursor, `split_due_batch`    | `step_one`                                                                |
-| PGAS (Exact, inf)                     | `timeline_effects`                      | cursor, `split_due_batch`    | `step_one`; **rejects events under Exact** (loud floor, gh#219 follow-up) |
-| PMMH                                  | wraps a PF flavor                       | inherits                     | inherits                                                                  |
+| path                       | builds `effect_times`                   | fires via                    | apply                                                                     |
+| -------------------------- | --------------------------------------- | ---------------------------- | ------------------------------------------------------------------------- |
+| chain-binomial (Snap, fwd) | `all_intervention_times` (incl. events) | `due_effects` round, on-grid | `step_one` PROPOSE/INTERVENE                                              |
+| ODE (Exact, fwd)           | `all_intervention_times`                | cursor land                  | `apply_boundary_batch_continuous` (f64, no RNG)                           |
+| Gillespie (Exact, fwd)     | `all_intervention_times`                | cursor land                  | discrete apply **+ full propensity recompute**                            |
+| PF / IF2 (Exact, inf)      | `timeline_effects` (incl. events)       | cursor, `split_due_batch`    | `step_one`                                                                |
+| PGAS (Exact, inf)          | `timeline_effects`                      | cursor, `split_due_batch`    | `step_one`; **rejects events under Exact** (loud floor, gh#219 follow-up) |
+| PMMH                       | wraps the bootstrap PF                  | inherits                     | inherits                                                                  |
 
 Three things are deliberately backend-specific and must not be "unified" away:
 ODE's continuous apply (no RNG), Gillespie's post-effect propensity recompute (a
@@ -174,8 +174,8 @@ on a double-fire — firing observable to the bit.
 
 - **D1 backend firing-time agreement** — chain / ODE / Gillespie agree on _when_
   effects fire (the dynamics differ; the firing instants must not).
-- **D2 algorithm firing-time agreement** — PF / IF2 / correlated-PF / PGAS agree
-  on firing instants.
+- **D2 algorithm firing-time agreement** — PF / IF2 / PGAS agree on firing
+  instants.
 - **D3 no-silent-gap** — every (backend × algorithm × feature) cell works or
   fails _loudly_ (a `Capabilities` error), never silently wrong.
 - **D4 Snap/Exact equivalence on-grid** — identical results when all boundaries

@@ -194,16 +194,6 @@ same backend by another**. Representative confirmed cases:
   give "silently biased posteriors." Blocked with a hint to fix the parameter or
   switch to IF2/PMMH. This is a top-severity _silent-wrong-answer_ guard, caught
   correctly.
-- **The correlated-PMMH family** (`correlated_pf.rs`) rejects state-dependent
-  overdispersion σ², more than one overdispersed transition per source group,
-  and distinct σ² values across overdispersed transitions — all keyed on the
-  correlated-PMMH _algorithm variant_ (rho ≠ None), not the backend. Unequal
-  obs-window substep counts are **not** among them: each window carries its own
-  block of pre-drawn noise, sized at its own substep count
-  (`cpm_steps_per_obs`), so a reporting series that skips a day runs. What
-  `validate_cpm_obs_grid` still rejects is a grid that does not describe a
-  forward walk at all — a non-finite observation time, or times that go
-  backwards.
 - **`ic_free` requires `if2`, or a model that DRAWS its initial state**
   (`methods.rs::validate_ic_free`, called per stage from
   `FitConfigV2::validate`). Two properties are needed, not one: the algorithm
@@ -211,13 +201,13 @@ same backend by another**. Representative confirmed cases:
   differ in x₀ — the reweight at y₁ is what pins the initial state, and with one
   shared x₀ it scores every particle identically. `if2` has both for any model
   (it perturbs θ per particle at t=0 and each particle draws its own x₀ from its
-  own θ, gh#364). `pgas` / the ODE algorithms / correlated `pmmh` fail the
-  first, for every model. `pfilter` and plain `pmmh` have the first always and
-  the second **only when the model's `init { }` declares a law**: their
-  bootstrap filter draws x₀ per particle, and a deterministic `init { }` returns
-  the same state on every draw (gh#732). So this check takes a model fact
-  (`methods::InitLaw`) alongside the algorithm — the only one
-  `FitConfigV2::validate` takes beyond the parameter names.
+  own θ, gh#364). `pgas` and the ODE algorithms fail the first, for every model.
+  `pfilter` and `pmmh` have the first always and the second **only when the
+  model's `init { }` declares a law**: their bootstrap filter draws x₀ per
+  particle, and a deterministic `init { }` returns the same state on every draw
+  (gh#732). So this check takes a model fact (`methods::InitLaw`) alongside the
+  algorithm — the only one `FitConfigV2::validate` takes beyond the parameter
+  names.
 
   This is the axis's second silent-wrong-answer guard, and it was wrong until
   gh#732: it tested a _proxy_ (is some parameter flagged?) for a _property_
@@ -225,27 +215,10 @@ same backend by another**. Representative confirmed cases:
   property is re-checked in `FitRunConfig::build`, where a fit with neither
   source — no `init { }` law and no `perturb_only_at_t0` parameter — is refused
   before any filter time is spent.
-- **A DECLARED `init { }` law is supported on every algorithm, correlated PMMH
-  included** (gh#772). Since ir/VERSION 0.35 an initial condition may be drawn
-  (`I ~ poisson(rate = I0)`), which makes x₀ a random variable the filter has to
-  integrate over; every filter draws it per particle. Correlated PMMH is the one
-  that needed more than wiring, and it is worth knowing why, because the
-  constraint it lives under is the same one every future CPM feature will meet:
-  its efficiency comes from the whole particle system being a deterministic
-  function of one pre-drawn correlated random vector, so a draw taken from a
-  separate stream is uncorrelated noise injected into exactly the quantity the
-  method needs correlated between the current and proposed θ. x₀ is therefore
-  part of that vector — `PFRandomState::init_noise`, one block of
-  `CompiledModel::init_noise_width` standard normals per particle, read at the
-  build-time offsets in `CompiledModel::init_noise_offsets` and transformed to
-  each law at consumption time.
-
-  What is checked at dispatch is not the model feature but the noise's agreement
-  with the model: `bootstrap_filter_correlated` refuses a pre-drawn vector whose
-  `init_width` or `n_source_groups` disagrees with the compiled model's, before
-  any particle moves. A disagreeing stride does not error on its own — it reads
-  a valid float from another particle's slot — so it is refused by construction
-  rather than hoped against.
+- **A DECLARED `init { }` law is supported on every algorithm** (gh#772). Since
+  ir/VERSION 0.35 an initial condition may be drawn (`I ~ poisson(rate = I0)`),
+  which makes x₀ a random variable the filter has to integrate over; every
+  filter draws it per particle.
 - **`perturb_only_at_t0` requires the fit to have an `if2` stage**
   (`methods.rs::validate_perturb_only_at_t0`, called once from
   `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"

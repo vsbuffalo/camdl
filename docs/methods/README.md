@@ -20,10 +20,9 @@ Current notes:
 
 - [`cooling.md`](cooling.md) — IF2 cooling schedule: the formula, its relation
   to pomp's `cooling.fraction.50`, and worked numbers.
-- [`particle-methods.md`](particle-methods.md) — the four particle- method
+- [`particle-methods.md`](particle-methods.md) — the three particle-method
   implementations (bootstrap PF, IF2's parameter-augmented loop, CSMC-AS for
-  PGAS, correlated PF for correlated-MH PMMH); algorithm equations, file:line,
-  when-to-use-which, full citations.
+  PGAS); algorithm equations, file:line, when-to-use-which, full citations.
 
 Add new notes by convention: create `docs/methods/<topic>.md`, add a line here
 pointing at it, commit both together.
