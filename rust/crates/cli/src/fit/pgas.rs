@@ -151,8 +151,8 @@ impl TrajectoryStridePlan {
 /// goes into `pgas_summary.json`, so the artifact records what happened rather
 /// than what was planned.
 pub(crate) struct SavedPathCounts {
-    /// Which chain each row describes, 1-based to match the `chain_N/`
-    /// directories (the convention
+    /// Which chain each row describes, by the number that names its
+    /// `chain_N/` directory (the convention
     /// [`CHAIN_NUMBERING`](super::cross_chain_compat::CHAIN_NUMBERING) states
     /// in the artifact). Recorded rather than left implicit in the row order: a
     /// chain refused at its start (gh#607) never reaches this list, so the
@@ -1728,9 +1728,9 @@ pub fn run_stage(
                     .map(|spec| format!("{:.17e}", sweep.params[spec.index]))
                     .collect();
                 vals.extend(fixed_vals.iter().map(|v| format!("{:.17e}", v)));
-                // `chain` is 0-based to MATCH `trajectories.tsv`'s
-                // `PosteriorDraw.chain` (also `chain_id`, 0-based) — the join key.
-                // (The on-disk `chain_N` dir is 1-based; the in-file key is not.)
+                // `chain` is the chain's number — the same key as
+                // `trajectories.tsv`'s `PosteriorDraw.chain` (the join key) and
+                // the `N` of its `chain_N/` directory (gh#990).
                 writeln!(f, "{}\t{}\t{}", chain_id, sweep.sweep, vals.join("\t")).unwrap();
                 n_draws += 1;
             }
@@ -1782,7 +1782,7 @@ pub fn run_stage(
 ///
 /// `all_results` is the surviving-chain list in `chain_id` order, so the rows
 /// of `M` come out in the same order as `acceptance_rates` and the `draws.tsv`
-/// chain blocks. Ids are written 1-based to match `chain_N/`.
+/// chain blocks. Ids are the chain numbers that name `chain_N/`.
 ///
 /// Best-effort by design: this runs after every posterior artifact is already
 /// on disk, so a failure here reports itself on stderr and leaves the fit
@@ -1875,7 +1875,7 @@ pub(crate) const TRAJECTORIES_KEY: &str = "trajectories";
 
 /// One chain's row of the `trajectories` block.
 pub(crate) struct ChainSavedPaths {
-    /// Which chain this row is, 1-based, matching the `chain_N/` directories.
+    /// Which chain this row is, the number that names its `chain_N/` directory.
     /// Read from the artifact rather than inferred from the row's position:
     /// the rows are the chains that survived their start (gh#607), so on a
     /// stage where any chain was refused the two differ.
@@ -2329,28 +2329,26 @@ mod tests {
         assert_eq!(counts.n_forkable, vec![2, 2]);
     }
 
-    /// gh#823: the `chain_id` the summary records is the CHAIN, 1-based to
-    /// match the `chain_N/` directories — never the row's position in the
-    /// block, and never the 0-based index the producer works in.
+    /// gh#823: the `chain_id` the summary records is the CHAIN — the number
+    /// that names its `chain_N/` directory — never the row's position in the
+    /// block.
     ///
     /// `retained` holds only the chains that survived their start (gh#607), so
-    /// on a stage where any chain was refused the two differ. Here chains 1 and
-    /// 3 of 4 refused, leaving chains 2 and 4: the block must say `[2, 4]`. A
-    /// positional emitter says `[1, 2]` and sends a reader inspecting "chain 1"
-    /// to a directory holding only `trace.tsv`, while a 0-based one says
-    /// `[1, 3]` — the ids of two OTHER chains, which is worse, because both
-    /// exist and neither is the one described.
+    /// on a stage where any chain was refused the two differ. Here chains 0 and
+    /// 2 of 4 refused, leaving chains 1 and 3: the block must say `[1, 3]`. A
+    /// positional emitter says `[0, 1]` and sends a reader inspecting "chain 0"
+    /// to a directory holding only `trace.tsv`.
     ///
     /// `chain_starts.tsv` numbers its own `chain_id` column the same way and
     /// says so in its header, so the two artifacts name a chain identically
     /// (gh#781). This test pins THIS one.
     #[test]
-    fn the_recorded_chain_id_is_the_surviving_chain_one_based() {
-        // Chains 1 and 3 (1-based) were refused, so `retained` — which the
-        // caller builds from `all_results`, the survivors in 0-based chain
-        // order — holds 0-based 1 and 3.
+    fn the_recorded_chain_id_is_the_surviving_chain() {
+        // Chains 0 and 2 were refused, so `retained` — which the caller
+        // builds from `all_results`, the survivors in chain order — holds
+        // chains 1 and 3.
         let retained = vec![(1usize, vec![10, 12]), (3usize, vec![10, 12])];
-        // Indexed by 0-based chain id over ALL chains, refused ones included:
+        // Indexed by chain over ALL chains, refused ones included:
         // the refused chains' slots are empty because they never ran.
         let saved_sweeps = vec![vec![], vec![10, 12], vec![], vec![10]];
         let counts = SavedPathCounts::measure(&retained, &saved_sweeps);
@@ -2360,8 +2358,8 @@ mod tests {
             "the surviving chains' own ids, matching chain_1/ and chain_3/"
         );
         // And the counts are read from each survivor's OWN slot, not from the
-        // row's position — chain 4 wrote one path, chain 2 wrote two. A
-        // positional lookup would report chain 2's counts against chain 4.
+        // row's position — chain 3 wrote one path, chain 1 wrote two. A
+        // positional lookup would report chain 1's counts against chain 3.
         assert_eq!(counts.n_saved, vec![2, 1]);
         assert_eq!(counts.n_forkable, vec![2, 1]);
     }

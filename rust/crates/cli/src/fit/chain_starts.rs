@@ -1176,11 +1176,10 @@ pub fn source_label(rule: &ChainStarts, chain: ChainIndex) -> String {
 /// moved values. The file header says so, because a reader who has only the
 /// TSV would otherwise pair the two row-by-row.
 ///
-/// The `chain_id` column is **1-based** — the number the `chain_N/`
-/// directories, the stderr refusals and `diagnostics.json` all use — so a
-/// refusal naming "chain 4" leads to the row describing chain 4's start with
-/// no arithmetic (gh#781). [`ChainStartRecord::chain_id`] stays 0-based;
-/// this writer is the boundary.
+/// The `chain_id` column is the chain's number, counted from 0 — the number
+/// the `chain_N/` directories, the stderr refusals and `diagnostics.json` all
+/// use — so a refusal naming "chain 4" leads to the row describing chain 4's
+/// start with no arithmetic (gh#781, gh#990).
 pub fn write_chain_starts_tsv(
     dir: &Path,
     base: &[EstimatedParam],

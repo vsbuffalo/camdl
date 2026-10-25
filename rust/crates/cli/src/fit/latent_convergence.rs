@@ -534,29 +534,38 @@ pub fn latent_convergence(
 /// that saved no paths) are skipped, as the stage skips them; `Ok(None)` is a
 /// stage with no such file at all. Chains whose headers disagree are refused.
 pub fn read_stage_paths(stage_dir: &Path) -> Result<Option<(Vec<ChainPaths>, Vec<String>)>, String> {
-    let mut files: Vec<(usize, std::path::PathBuf)> = std::fs::read_dir(stage_dir)
+    let mut files: Vec<(ChainIndex, std::path::PathBuf)> = std::fs::read_dir(stage_dir)
         .map_err(|e| format!("cannot read {}: {e}", stage_dir.display()))?
         .flatten()
         .filter_map(|e| {
-            let n: usize = e.file_name().to_str()?.strip_prefix("chain_")?.parse().ok()?;
+            let n = ChainIndex::parse_dir_name(e.file_name().to_str()?)?;
             let p = e.path().join("trajectories.tsv");
             p.is_file().then_some((n, p))
         })
         .collect();
     files.sort_by_key(|(n, _)| *n);
-    let mut chains = Vec::new();
+    let mut chains: Vec<ChainPaths> = Vec::new();
     let mut columns: Option<Vec<String>> = None;
     for (n, p) in files {
         let Some((block, cols)) = ChainPaths::from_trajectories_tsv(&p)? else { continue };
-        match &columns {
-            None => columns = Some(cols),
-            Some(prev) if *prev != cols => {
+        // The directory and the file's `chain` key are the same number
+        // (gh#990); a file that disagrees would be scored and reported
+        // under the wrong chain, so it is refused rather than relabelled.
+        if block.chain != n {
+            return Err(format!(
+                "{}: the `chain` column says chain {}, but the file is under                  chain_{n}/; the directory and the key must name the same chain",
+                p.display(), block.chain
+            ));
+        }
+        match (&columns, chains.first()) {
+            (Some(prev), Some(first)) if *prev != cols => {
                 return Err(format!(
                     "chain {n}: {} names columns {:?}, chain {}'s names {:?}",
-                    p.display(), cols, chains.len(), prev
+                    p.display(), cols, first.chain, prev
                 ));
             }
-            Some(_) => {}
+            (None, _) => columns = Some(cols),
+            _ => {}
         }
         chains.push(block);
     }
@@ -1339,7 +1348,18 @@ mod tests {
         // A chain whose header names other columns is refused.
         std::fs::write(dir.path().join("chain_4/trajectories.tsv"),
             "chain\tdraw\ttime\tS\tflow_b\n4\t5\t0\t1\t0\n").unwrap();
-        assert!(read_stage_paths(dir.path()).unwrap_err().contains("chain 4"));
+        let e = read_stage_paths(dir.path()).unwrap_err();
+        assert!(e.contains("chain 4"), "{e}");
+        // The reference is named by its chain number (chain_1/ is read first),
+        // not by how many chains were read before the mismatch (two).
+        assert!(e.contains("chain 1's names"), "{e}");
+
+        // A file whose `chain` key is not its directory's number is refused,
+        // not scored under either label.
+        std::fs::write(dir.path().join("chain_4/trajectories.tsv"),
+            "chain\tdraw\ttime\tS\tflow_a\n3\t5\t0\t1\t0\n").unwrap();
+        let e = read_stage_paths(dir.path()).unwrap_err();
+        assert!(e.contains("says chain 3") && e.contains("chain_4/"), "{e}");
 
         // No chain wrote a path at all.
         let empty = tempfile::tempdir().unwrap();
