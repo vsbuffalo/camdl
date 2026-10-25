@@ -59,8 +59,13 @@ observations {
   }
 }
 
+quantities {
+  peak = max(I / N)
+}
+
 scenarios {
-  low_beta { set = { beta = 0.2 } }
+  low_beta   { set = { beta = 0.2 } }
+  high_gamma { set = { gamma = 0.3 } }
 }
 "#;
 
@@ -320,4 +325,155 @@ fn ensemble_record_carries_the_resolved_design() {
         }),
         "the design is recorded name-sorted with its values: {inputs}"
     );
+}
+
+/// The header and data rows of a camdl TSV (version line dropped).
+fn table(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<String> = lines.next().expect("header").split('\t').map(str::to_string).collect();
+    let rows = lines
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split('\t').map(str::to_string).collect())
+        .collect();
+    (header, rows)
+}
+
+fn column<'a>(header: &[String], rows: &'a [Vec<String>], name: &str) -> Vec<&'a str> {
+    let i = header.iter().position(|h| h == name).unwrap_or_else(|| panic!("no column `{name}` in {header:?}"));
+    rows.iter().map(|r| r[i].as_str()).collect()
+}
+
+fn distinct(v: &[&str]) -> Vec<String> {
+    let mut d: Vec<String> = v.iter().map(|s| s.to_string()).collect();
+    d.sort();
+    d.dedup();
+    d
+}
+
+/// Test 2 — the combined table of a sweep job carries `point_id`,
+/// `replicate`, `sweep:rho` and `seed` and no `draw`; `sweep:rho` round-trips
+/// `0.1234567` exactly; the two cells of one replicate carry the same `seed`;
+/// `point_id` and `replicate` count from 0.
+#[test]
+fn combined_table_of_a_sweep_job_has_point_id_sweep_and_seed_columns() {
+    let fx = Fixture::new();
+    assert_ok(
+        &fx.simulate(&["--sweep", "rho=0.1234567,0.5", "--replicates", "2", "--seed", "11", "-o", "c.tsv"]),
+        "sweep",
+    );
+    let (header, rows) = table(&fx.path("c.tsv"));
+    assert_eq!(
+        &header[..7],
+        ["replicate", "point_id", "sweep:rho", "seed", "t", "t_start", "t_stop"],
+        "coordinate columns lead the time columns: {header:?}"
+    );
+    assert!(!header.iter().any(|h| h == "draw"), "a sweep job writes no `draw` column: {header:?}");
+    assert_eq!(distinct(&column(&header, &rows, "sweep:rho")), vec!["0.1234567", "0.5"], "shortest round-trip");
+    assert_eq!(distinct(&column(&header, &rows, "point_id")), vec!["0", "1"], "point_id counts from 0");
+    assert_eq!(distinct(&column(&header, &rows, "replicate")), vec!["0", "1", "2", "3"], "replicate counts from 0");
+
+    // Pairing: two distinct seeds in all, each carried by both design points.
+    let seeds = column(&header, &rows, "seed");
+    let points = column(&header, &rows, "point_id");
+    assert_eq!(distinct(&seeds).len(), 2, "two replicates are two seeds, shared across points");
+    for seed in distinct(&seeds) {
+        let with: Vec<String> = distinct(
+            &seeds.iter().zip(&points).filter(|(s, _)| **s == seed).map(|(_, p)| *p).collect::<Vec<_>>(),
+        );
+        assert_eq!(with, vec!["0", "1"], "seed {seed} must appear under both design points");
+    }
+}
+
+/// Test 4 — `--sweep gamma=… --sweep rho=…` and the flags in the other order
+/// give the same `point_id`s and the same combined file (the product is sorted
+/// by parameter name, the first name varying slowest).
+#[test]
+fn point_ids_do_not_depend_on_flag_order() {
+    let fx = Fixture::new();
+    assert_ok(
+        &fx.simulate(&["--sweep", "rho=0.5,0.9", "--sweep", "gamma=0.1,0.2", "--seed", "5", "-o", "a.tsv"]),
+        "rho then gamma",
+    );
+    assert_ok(
+        &fx.simulate(&["--sweep", "gamma=0.1,0.2", "--sweep", "rho=0.5,0.9", "--seed", "5", "-o", "b.tsv"]),
+        "gamma then rho",
+    );
+    let a = std::fs::read(fx.path("a.tsv")).unwrap();
+    assert_eq!(a, std::fs::read(fx.path("b.tsv")).unwrap(), "flag order must not change the combined file");
+    let (header, rows) = table(&fx.path("a.tsv"));
+    assert_eq!(&header[..6], ["replicate", "point_id", "sweep:gamma", "sweep:rho", "seed", "t"]);
+    // point_id 0 is (gamma=0.1, rho=0.5), 1 is (gamma=0.1, rho=0.9): gamma varies slowest.
+    let pid = column(&header, &rows, "point_id");
+    let g = column(&header, &rows, "sweep:gamma");
+    let r = column(&header, &rows, "sweep:rho");
+    let at = |id: &str| -> (String, String) {
+        let i = pid.iter().position(|p| *p == id).unwrap();
+        (g[i].to_string(), r[i].to_string())
+    };
+    assert_eq!(at("0"), ("0.1".into(), "0.5".into()));
+    assert_eq!(at("1"), ("0.1".into(), "0.9".into()));
+    assert_eq!(at("2"), ("0.2".into(), "0.5".into()));
+    assert_eq!(at("3"), ("0.2".into(), "0.9".into()));
+}
+
+/// Test 8 — the observation tables of a sweep job carry `point_id`,
+/// `sweep:rho` and `seed` and no `draw`.
+#[test]
+fn observation_tables_of_a_sweep_job_carry_the_design_columns() {
+    let fx = Fixture::new();
+    assert_ok(
+        &fx.simulate(&["--sweep", "rho=0.5,0.9", "--replicates", "2", "--seed", "11", "--obs-only-dir", "synth"]),
+        "sweep with --obs-only-dir",
+    );
+    let (header, rows) = table(&fx.path("synth").join("cases.tsv"));
+    assert_eq!(header, ["replicate", "point_id", "sweep:rho", "seed", "time", "cases"]);
+    assert_eq!(distinct(&column(&header, &rows, "point_id")), vec!["0", "1"]);
+    assert_eq!(distinct(&column(&header, &rows, "sweep:rho")), vec!["0.5", "0.9"]);
+    assert_eq!(distinct(&column(&header, &rows, "replicate")), vec!["0", "1", "2", "3"]);
+    assert_eq!(distinct(&column(&header, &rows, "seed")).len(), 2, "seeds pair the points");
+    // The single-file form carries the same coordinates.
+    assert_ok(
+        &fx.simulate(&["--sweep", "rho=0.5,0.9", "--replicates", "2", "--seed", "11", "--obs-only", "all.tsv"]),
+        "sweep with --obs-only",
+    );
+    let (header, _) = table(&fx.path("all.tsv"));
+    assert_eq!(header, ["replicate", "point_id", "sweep:rho", "seed", "time", "cases"]);
+}
+
+/// Test 7 — quantities under a sweep are banded per (design point, scenario),
+/// never across points; one replicate per point gives a point-mode row per
+/// group.
+#[test]
+fn quantities_are_grouped_per_design_point_and_scenario() {
+    // Banded: 2 points × 2 scenarios, 3 replicates each → 4 groups of 3.
+    let fx = Fixture::new();
+    assert_ok(
+        &fx.simulate(&[
+            "--sweep", "rho=0.5,0.9", "--scenario", "low_beta,high_gamma", "--replicates", "3",
+            "--seed", "2", "--quantities-out", "q",
+        ]),
+        "banded sweep",
+    );
+    let (header, rows) = table(&fx.path("q").join("quantities").join("peak.tsv"));
+    assert_eq!(&header[..2], ["scenario", "sweep:rho"], "{header:?}");
+    assert!(header.iter().any(|h| h == "n_draws"), "banded: {header:?}");
+    assert_eq!(rows.len(), 4, "one band per (point, scenario): {rows:?}");
+    let groups: std::collections::BTreeSet<(String, String)> = rows
+        .iter()
+        .map(|r| (r[0].clone(), r[1].clone()))
+        .collect();
+    assert_eq!(groups.len(), 4, "each (scenario, point) once: {groups:?}");
+    assert!(column(&header, &rows, "n_draws").iter().all(|n| *n == "3"), "a band over the 3 replicates of its group: {rows:?}");
+
+    // Point mode: one replicate per point → one point-mode row per group.
+    let fx = Fixture::new();
+    assert_ok(
+        &fx.simulate(&["--sweep", "rho=0.5,0.9", "--seed", "2", "--quantities-out", "q"]),
+        "point-mode sweep",
+    );
+    let (header, rows) = table(&fx.path("q").join("quantities").join("peak.tsv"));
+    assert_eq!(header, ["sweep:rho", "value"], "{header:?}");
+    assert_eq!(distinct(&column(&header, &rows, "sweep:rho")), vec!["0.5", "0.9"]);
+    assert_eq!(rows.len(), 2);
 }
