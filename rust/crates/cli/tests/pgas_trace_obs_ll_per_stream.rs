@@ -176,7 +176,7 @@ burn_in = 2
     p
 }
 
-/// The `chain_1/trace.tsv` of the `post` stage leaf under `<out>/fits/`.
+/// The `chain_0/trace.tsv` of the `post` stage leaf under `<out>/fits/`.
 fn trace_of_post_leaf(out: &Path) -> String {
     let mut stack = vec![out.join("fits")];
     while let Some(d) = stack.pop() {
@@ -186,8 +186,8 @@ fn trace_of_post_leaf(out: &Path) -> String {
                 &std::fs::read_to_string(&rj).unwrap_or_default(),
             ) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("fit_stage") {
-                    return std::fs::read_to_string(d.join("chain_1/trace.tsv"))
-                        .expect("read chain_1/trace.tsv");
+                    return std::fs::read_to_string(d.join("chain_0/trace.tsv"))
+                        .expect("read chain_0/trace.tsv");
                 }
             }
         }

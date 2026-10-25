@@ -10,15 +10,15 @@
 //!
 //! The assertion is a CONSISTENCY one rather than a hardcoded draw: the value
 //! the table prints must equal the value `chain_starts.tsv` records for
-//! chain 1. Pinning the literal LHS draw would break the day the sampler's
+//! chain 0. Pinning the literal LHS draw would break the day the sampler's
 //! stream changes for an unrelated reason, and would not actually state the
 //! invariant, which is that the two artifacts describe the same run. The
 //! declared start is asserted ABSENT separately, so a table that silently fell
 //! back to the config cannot pass by coincidence.
 //!
 //! `starts = "lhs"` is the mode that separates the two: it stratifies over
-//! `bounds` and uses the base point for no chain, so chain 1's start differs
-//! from `[estimate].start`. Under `single`, or `uniform`'s chain 1, the two
+//! `bounds` and uses the base point for no chain, so chain 0's start differs
+//! from `[estimate].start`. Under `single`, or `uniform`'s chain 0, the two
 //! coincide and the test would prove nothing.
 //!
 //! Cheap on purpose — 2 chains, 20 particles, 1 iteration. Starting points are
@@ -58,10 +58,10 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// chain 1's `beta` from the run's `chain_starts.tsv` — the row the chain ran
+/// chain 0's `beta` from the run's `chain_starts.tsv` — the row the chain ran
 /// from (`status = accepted`; a start the pre-flight filter refused is on the
 /// record ahead of it as `rejected`, gh#887).
-fn chain_one_beta(root: &Path) -> f64 {
+fn first_chain_beta(root: &Path) -> f64 {
     let mut stack = vec![root.to_path_buf()];
     let mut found = None;
     while let Some(dir) = stack.pop() {
@@ -84,8 +84,8 @@ fn chain_one_beta(root: &Path) -> f64 {
     let (beta, id, status) = (col("beta"), col("chain_id"), col("status"));
     let row: Vec<&str> = lines
         .map(|l| l.split('\t').collect::<Vec<_>>())
-        .find(|r| r[id] == "1" && r[status] == "accepted")
-        .expect("chain 1's accepted row");
+        .find(|r| r[id] == "0" && r[status] == "accepted")
+        .expect("chain 0's accepted row");
     row[beta].parse().unwrap_or_else(|_| panic!("non-numeric beta {:?}", row[beta]))
 }
 
@@ -163,12 +163,12 @@ dt = 1.0
     assert!(out.status.success(), "fit run failed:\nstderr={stderr}");
 
     let shown = preflight_beta(&stderr);
-    let ran_from = chain_one_beta(&dir.join("results"));
+    let ran_from = first_chain_beta(&dir.join("results"));
 
     // The invariant: the table and the audit sidecar describe one run.
     assert!((shown - ran_from).abs() < 1e-4,
         "the transforms table printed beta={shown}, but chain_starts.tsv records \
-         chain 1 starting at {ran_from}. The table must report the realised \
+         chain 0 starting at {ran_from}. The table must report the realised \
          start (gh#513).\nstderr:\n{stderr}");
 
     // And it is genuinely the realised one, not the config's. Without this the
@@ -179,7 +179,7 @@ dt = 1.0
          starts = \"lhs\", which uses the base point for no chain — this is exactly \
          gh#513.\nstderr:\n{stderr}");
 
-    // The header has to say the chains diverge, or a reader takes chain 1's
+    // The header has to say the chains diverge, or a reader takes chain 0's
     // row for all of them.
     assert!(stderr.contains("chains start at different points"),
         "the transforms header must flag that chains start apart under lhs\

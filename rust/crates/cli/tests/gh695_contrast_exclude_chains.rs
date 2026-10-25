@@ -275,7 +275,7 @@ fn predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Output {
 
 /// The headline: a contrast must band over the cloud the run's own manifest
 /// describes. Before the fix, `contrasts/averted.tsv` was byte-identical with
-/// and without `--exclude-chains 2` while `predictive.json` recorded chain 2 as
+/// and without `--exclude-chains 1` while `predictive.json` recorded chain 1 as
 /// excluded — the artifact and the manifest disagreeing about which draws
 /// produced the number.
 #[test]
@@ -288,7 +288,7 @@ fn contrast_bands_over_the_retained_chains_only() {
     let per_chain = draws_per_chain(&seg);
     assert_eq!(per_chain.len(), 2, "the fixture fit must have two chains, got {per_chain:?}");
     let n_all: usize = per_chain.values().sum();
-    let n_kept = per_chain[&0]; // 1-based chain 1 = 0-based 0, the retained one
+    let n_kept = per_chain[&0]; // chain 0, the retained one
 
     // (a) The full-cloud run — the baseline both later comparisons are made
     //     against.
@@ -311,8 +311,8 @@ fn contrast_bands_over_the_retained_chains_only() {
         "an unselected run records no chain_selection"
     );
 
-    // (b) The same run with chain 2 excluded.
-    let out = predict(&bin, &tmp, &["--exclude-chains", "2"]);
+    // (b) The same run with chain 1 excluded.
+    let out = predict(&bin, &tmp, &["--exclude-chains", "1"]);
     assert!(
         out.status.success(),
         "fit predict --exclude-chains failed:\nstderr={}",
@@ -321,9 +321,9 @@ fn contrast_bands_over_the_retained_chains_only() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     // The subset contrast is written at its OWN address (gh#795), so it can
     // never replace the pooled one — which must still hold (a)'s bytes.
-    let sub_averted = contrast_path(&seg, "averted", Some("2"));
+    let sub_averted = contrast_path(&seg, "averted", Some("1"));
     let sub_bytes = std::fs::read(&sub_averted)
-        .expect("contrasts-excl2/averted.tsv must be emitted");
+        .expect("contrasts-excl1/averted.tsv must be emitted");
     let sub_n_used = contrast_n_used(&sub_averted);
     assert_eq!(
         std::fs::read(&averted).unwrap(),
@@ -341,7 +341,7 @@ fn contrast_bands_over_the_retained_chains_only() {
 
     // The contrast's denominator and the free-forward rows' denominator are the
     // same cloud — the issue's own measurement (`n_used` vs `n_draws`).
-    let ff = predictive_n_draws(&seg, "weekly_cases", Some("2"));
+    let ff = predictive_n_draws(&seg, "weekly_cases", Some("1"));
     assert_eq!(
         ff,
         vec![n_kept],
@@ -357,19 +357,19 @@ fn contrast_bands_over_the_retained_chains_only() {
         ff[0]
     );
 
-    // The manifest and the data now agree: the manifest names chain 2 as
+    // The manifest and the data now agree: the manifest names chain 1 as
     // excluded, and the contrast really did drop it.
-    let sel = manifest_chain_selection(&seg, Some("2"))
+    let sel = manifest_chain_selection(&seg, Some("1"))
         .expect("a selected run stamps chain_selection");
-    assert_eq!(sel["excluded"], serde_json::json!([2]), "manifest: {sel}");
-    assert_eq!(sel["kept"], serde_json::json!([1]), "manifest: {sel}");
+    assert_eq!(sel["excluded"], serde_json::json!([1]), "manifest: {sel}");
+    assert_eq!(sel["kept"], serde_json::json!([0]), "manifest: {sel}");
     assert_eq!(sel["n_total"], serde_json::json!(2), "manifest: {sel}");
 
     // The count is visible, not only inferable from the file: the reducer names
     // the retained-chain scope on stderr.
     assert!(
         stderr.contains("contrasts band over the RETAINED chains")
-            && stderr.contains("chain(s) 2 excluded"),
+            && stderr.contains("chain(s) 1 excluded"),
         "the reducer must name the retained-chain scope and the dropped chain; \
          stderr:\n{stderr}"
     );
@@ -409,14 +409,14 @@ fn empty_forkable_intersection_refuses_by_name() {
     let per_chain = draws_per_chain(&seg);
     let n_chain0 = per_chain[&0];
 
-    // Drop 0-based chain 1's saved paths (the on-disk dir is 1-based: chain_2).
-    let orphaned = stage_dir(&seg).join("chain_2");
+    // Drop chain 1's saved paths (its directory is chain_1/).
+    let orphaned = stage_dir(&seg).join("chain_1");
     assert!(orphaned.is_dir(), "expected saved paths at {}", orphaned.display());
     std::fs::remove_dir_all(&orphaned).unwrap();
 
-    // Excluding chain 1 retains only the chain whose paths are gone → the
+    // Excluding chain 0 retains only the chain whose paths are gone → the
     // (retained ∩ forkable) intersection is empty.
-    let out = predict(&bin, &tmp, &["--exclude-chains", "1"]);
+    let out = predict(&bin, &tmp, &["--exclude-chains", "0"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
@@ -424,11 +424,11 @@ fn empty_forkable_intersection_refuses_by_name() {
          succeeded.\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("--exclude-chains 1") && stderr.contains("no forkable posterior draws"),
+        stderr.contains("--exclude-chains 0") && stderr.contains("no forkable posterior draws"),
         "the refusal must name the selection as the cause; stderr:\n{stderr}"
     );
     assert!(
-        !contrast_path(&seg, "averted", Some("1")).exists()
+        !contrast_path(&seg, "averted", Some("0")).exists()
             && !contrast_path(&seg, "averted", None).exists(),
         "a refused contrast must leave no artifact behind — at its own address \
          or the pooled one"
@@ -437,13 +437,13 @@ fn empty_forkable_intersection_refuses_by_name() {
     // Negative control: excluding the chain that has NO saved paths is not an
     // error at all — the retained chain still carries a full forkable cloud, and
     // the band is over exactly its draws.
-    let out = predict(&bin, &tmp, &["--exclude-chains", "2"]);
+    let out = predict(&bin, &tmp, &["--exclude-chains", "1"]);
     assert!(
         out.status.success(),
         "excluding the path-less chain must still predict:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let averted = contrast_path(&seg, "averted", Some("2"));
+    let averted = contrast_path(&seg, "averted", Some("1"));
     assert!(averted.is_file(), "the retained chain's contrast must be emitted");
     assert_eq!(
         contrast_n_used(&averted),

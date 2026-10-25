@@ -455,9 +455,8 @@ fn show_fit_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
         }
     }
     // Display fields recorded in `inputs` (display-only, never hashed), each
-    // printed exactly as recorded — `best_chain` is the 1-based chain number
-    // naming a `chain_N/` directory on this leaf, so nothing is added to it
-    // here (gh#912).
+    // printed exactly as recorded — `best_chain` is the number of a
+    // `chain_N/` directory on this leaf (gh#912, gh#990).
     if let Some(obj) = rec.inputs.as_object() {
         for key in ["method", "backend", "n_chains", "best_chain", "best_loglik"] {
             if let Some(v) = obj.get(key) {
@@ -1650,8 +1649,8 @@ fn print_fits_json(fits: &[FitEntry]) {
                     // its best sweep, and `complete_data` says so, so it is not
                     // read as a marginal likelihood comparable to IF2's.
                     "loglik_type": crate::fit::loglik::LoglikType::from(s.method).tag(),
-                    // Printed exactly as recorded: the 1-based chain number,
-                    // naming a `chain_N/` directory on the leaf (gh#912).
+                    // Printed exactly as recorded: the number of a `chain_N/`
+                    // directory on the leaf (gh#912, gh#990).
                     "best_chain": s.best_chain,
                 })
             })

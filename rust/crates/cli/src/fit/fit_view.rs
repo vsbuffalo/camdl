@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use runid::{ArtifactKind, RunRecord};
 
+use crate::chain_index::ChainIndex;
 use crate::fit::fit_tree::{derive_axes, StageAxes};
 use crate::run_meta::{InferenceBackend, FitAlgorithm, ParameterProvenance, ResolvedPriorEntry};
 
@@ -54,12 +55,12 @@ pub struct FitStageView {
     pub seed: u64,
     pub n_chains: usize,
     pub best_loglik: Option<f64>,
-    /// `inputs.best_chain` as recorded: the **1-based chain number** that won,
-    /// naming a `chain_N/` directory under `stage_dir` (gh#912). Renderers
-    /// print it as it stands — adding one here would name the neighbour.
-    /// `None` for a method with replicates rather than competing chains
-    /// (pfilter), and on a leaf written before the field existed.
-    pub best_chain: Option<usize>,
+    /// `inputs.best_chain` as recorded: the chain that won, naming a
+    /// `chain_N/` directory under `stage_dir` (gh#912, gh#990). Renderers
+    /// print it as it stands. `None` for a method with replicates rather than
+    /// competing chains (pfilter), and on a leaf written before the field
+    /// existed.
+    pub best_chain: Option<ChainIndex>,
     /// Path-derived `(data_kind, fit_seed, sweep_slug)` axes — `None` for a
     /// stage outside the canonical `{real,synthetic}/...` layout.
     pub axes: Option<StageAxes>,
@@ -172,7 +173,7 @@ fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<Fit
         best_chain: inputs
             .get("best_chain")
             .and_then(|v| v.as_u64())
-            .map(|x| x as usize),
+            .map(|x| ChainIndex(x as usize)),
         axes: derive_axes(seg, dir),
     })
 }
@@ -413,11 +414,11 @@ mod tests {
         assert_eq!(scout.seed, 1, "if2 seed");
         assert_eq!(scout.n_chains, 4, "if2 n_chains");
         assert_eq!(scout.best_loglik, Some(-120.5), "if2 best_loglik");
-        assert_eq!(scout.best_chain, Some(2), "if2 best_chain");
+        assert_eq!(scout.best_chain, Some(ChainIndex(2)), "if2 best_chain");
         let refine = view.stages.iter().find(|s| s.method == FitAlgorithm::Pgas).unwrap();
         assert_eq!(refine.method, FitAlgorithm::Pgas, "pgas method");
         assert_eq!(refine.best_loglik, Some(-56.7), "pgas best_loglik");
-        assert_eq!(refine.best_chain, Some(1), "pgas best_chain");
+        assert_eq!(refine.best_chain, Some(ChainIndex(1)), "pgas best_chain");
 
         std::fs::remove_dir_all(&tmp).ok();
     }

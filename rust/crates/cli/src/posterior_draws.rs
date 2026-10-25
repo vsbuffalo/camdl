@@ -91,6 +91,7 @@ pub fn resolve_posterior_draws(
             if !draws_path.is_file() {
                 return Err(no_draws_for_stage(want, chosen.method));
             }
+            crate::chain_index::refuse_one_based_layout(&chosen.stage_dir)?;
             return Ok(PosteriorDrawsRef {
                 stage: chosen.method.as_str().to_string(),
                 draws_path,
@@ -100,9 +101,12 @@ pub fn resolve_posterior_draws(
             });
         }
 
-        // No selector: the last leaf that wrote a posterior cloud.
+        // No selector: the last leaf that wrote a posterior cloud. A leaf whose
+        // chain directories count from 1 is refused here, before any reader
+        // follows a draw's `chain` key into `chain_<key>/` (gh#990).
         let chosen = with_draws.last().ok_or_else(|| no_posterior_error(fit_ref, &view))?;
         let draws_path = chosen.stage_dir.join(DRAWS_FILE);
+        crate::chain_index::refuse_one_based_layout(&chosen.stage_dir)?;
         return Ok(PosteriorDrawsRef {
             stage: chosen.method.as_str().to_string(),
             draws_path,

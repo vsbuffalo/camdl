@@ -4,6 +4,7 @@
 //! obs_loglik construction from IR observation model, chain execution,
 //! chain-agreement (Â) computation, and MAD-based auto rw_sd calibration.
 
+use crate::chain_index::ChainIndex;
 use crate::fit::loglik_eval;
 use crate::params_resolver::resolved_bounds;
 use sim::{
@@ -140,12 +141,11 @@ pub struct FitRunConfig {
 /// winner's θ̂ / SE read from
 /// `loglik_eval.per_chain[overall_winner_idx]`.
 pub struct ChainResults {
+    /// `(chain index, result)` for every chain that ran, in chain order.
     pub results: Vec<(usize, IF2Result)>,
-    /// The winner as a **0-based chain index** — the in-memory id every
-    /// runner works in. Every artifact that names a chain writes the 1-based
-    /// number instead (`fit_state.toml`, `run.json`, `chain_N/`, the stderr
-    /// lines), so a writer adds one here at its boundary (gh#912).
-    pub best_chain: usize,
+    /// The winner — the same number `fit_state.toml`, `run.json`, the
+    /// `chain_N/` directory and the stderr lines carry (gh#912, gh#990).
+    pub best_chain: ChainIndex,
     pub best_loglik: f64,
     pub chain_agreement: HashMap<String, f64>,
     pub loglik_eval: super::loglik_eval::LoglikEvalOutcome,
@@ -761,7 +761,7 @@ pub fn redraw_chain_start_for(
         priors: &priors,
     };
     super::chain_starts::redraw_chain_start(&ctx, starts, n_chains, chain_id, seed, attempt)
-        .map_err(|e| format!("starts = {}: redraw for chain {}: {}", starts.rule.spelled(), chain_id + 1, e))
+        .map_err(|e| format!("starts = {}: redraw for chain {}: {}", starts.rule.spelled(), ChainIndex(chain_id), e))
 }
 
 /// The ESS a refused particle filter reached, when its refusal carries one.
@@ -826,12 +826,12 @@ pub fn preflight_spread_starts(
                                     "  chain {}: \x1b[31m✗ refused\x1b[0m — none of {} starts drawn \
                                      under `starts = {}` could be scored by the filter (last: {}); \
                                      see chain_starts.tsv for every attempt",
-                                    chain_id + 1, MAX_START_ATTEMPTS, starts.rule.spelled(), reason);
+                                    ChainIndex(chain_id), MAX_START_ATTEMPTS, starts.rule.spelled(), reason);
                                 return Ok((Some(current), rejected, true));
                             }
                             eprintln!(
                                 "  chain {}: start {} of {} refused by the filter ({}); drawing another",
-                                chain_id + 1, attempt + 1, MAX_START_ATTEMPTS, reason);
+                                ChainIndex(chain_id), attempt + 1, MAX_START_ATTEMPTS, reason);
                             attempt += 1;
                             current = redraw_chain_start_for(
                                 config, estimate, starts, n_chains, chain_id, seed, attempt,
@@ -840,7 +840,7 @@ pub fn preflight_spread_starts(
                         Err(other) => {
                             return Err(format!(
                                 "chain {} start pre-flight failed with structural error: {}",
-                                chain_id + 1, other));
+                                ChainIndex(chain_id), other));
                         }
                     }
                 }
@@ -1990,8 +1990,9 @@ fn run_one_chain(
     // lets the `Fn` closure mutate the BufWriter.
     let trace_writer: Option<std::cell::RefCell<std::io::BufWriter<std::fs::File>>>
         = stage_dir.and_then(|dir| {
-            let chain_dir = format!("{}/chain_{}", dir, chain_id + 1);
+            let chain_dir = ChainIndex(chain_id).dir_in(std::path::Path::new(dir));
             if std::fs::create_dir_all(&chain_dir).is_err() { return None; }
+            let chain_dir = chain_dir.to_string_lossy().into_owned();
             let path = format!("{}/parameter_traces.tsv", chain_dir);
             std::fs::File::create(&path).ok().map(|f| {
                 use std::io::Write;
@@ -2096,7 +2097,7 @@ pub fn run_chains_with_per_chain_params(
     let bars: Vec<crate::progress::Task> = (0..config.n_chains)
         .map(|chain_id| reporter.task(
             config.if2_config.n_iterations as u64,
-            format!("chain {}", chain_id + 1), "it"))
+            format!("chain {}", ChainIndex(chain_id)), "it"))
         .collect();
 
     // Preflight transform report
@@ -2152,13 +2153,13 @@ pub fn run_chains_with_per_chain_params(
                     // support at a named measurement — so there is no
                     // `StreamAttempt` to carry.
                     collector.push(DiagnosticKind::BadInit {
-                        // 1-based, like the stderr line below and every other
-                        // artifact naming a chain (gh#781).
-                        chain_id: chain_id + 1, params, reason: reason.clone(),
+                        // The chain's number, as the stderr line below and
+                        // every other artifact name it (gh#990).
+                        chain_id, params, reason: reason.clone(),
                         attempts: Vec::new(),
                     });
                     eprintln!("  chain {}: \x1b[31m✗ skipped\x1b[0m — {} ({})",
-                        chain_id + 1, label, reason);
+                        ChainIndex(chain_id), label, reason);
                     // The bar is cleared in the post-loop finish; the skip
                     // is already loud on stderr above.
                     None
@@ -2168,7 +2169,7 @@ pub fn run_chains_with_per_chain_params(
                 // there is no survivor to fall back to. Fail loudly.
                 Err(other) => super::abandon_stage(
                     heartbeat,
-                    format!("chain {} error: {:?}", chain_id + 1, other),
+                    format!("chain {} error: {:?}", ChainIndex(chain_id), other),
                 ),
             }
         })
@@ -2224,14 +2225,14 @@ pub fn run_chains_with_per_chain_params(
                         config.seed + *chain_id as u64 * 1000 + it.iteration as u64,
                     ).map_err(|e| format!(
                         "if2 clean-eval: structural error at chain {} iteration {}: {}",
-                        *chain_id + 1, it.iteration, e))?;
+                        ChainIndex(*chain_id), it.iteration, e))?;
                 }
             }
             // Overwrite final_loglik with the true loglik
             let true_ll = result.iterations.last()
                 .map(|it| it.loglik).unwrap_or(f64::NEG_INFINITY);
             result.final_loglik = true_ll;
-            eprint!("\r  chain {}: ll={:.1}    ", *chain_id + 1, true_ll);
+            eprint!("\r  chain {}: ll={:.1}    ", ChainIndex(*chain_id), true_ll);
         }
         eprintln!();
     }
@@ -2288,7 +2289,7 @@ pub fn run_chains_with_per_chain_params(
     // store it on `ChainResults` — readers that need it go to
     // `loglik_eval.per_chain[overall_winner_idx]`.
     eprintln!("\nbest chain: {} (loglik={:.2} ± {:.2})",
-        best_chain + 1, best_loglik, best_se);
+        best_chain, best_loglik, best_se);
     if config.n_chains > 1 {
         let logliks: Vec<f64> = loglik_eval_outcome.per_chain.iter()
             .map(|s| s.loglik).collect();
@@ -2431,7 +2432,7 @@ impl ChainResults {
     /// scout/refine/validate to populate `FitState.chain_eval_logliks`
     /// for the compound scout-convergence gate.
     pub fn chain_eval_logliks(&self) -> Vec<f64> {
-        let mut v: Vec<(usize, f64)> = self.loglik_eval.per_chain.iter()
+        let mut v: Vec<(ChainIndex, f64)> = self.loglik_eval.per_chain.iter()
             .map(|s| (s.chain_id, s.loglik)).collect();
         v.sort_by_key(|(id, _)| *id);
         v.into_iter().map(|(_, ll)| ll).collect()
@@ -2440,13 +2441,12 @@ impl ChainResults {
     /// The chain numbers of [`Self::chain_eval_logliks`], in the same order.
     /// Reported rather than reconstructed from the position: IF2 drops
     /// PF-degenerate chains, so `per_chain` is a subset and its index is not
-    /// a chain number. 1-based, because this is written to `fit_state.toml`
-    /// and printed by `fit summary`: it must name the `chain_N/` directory
-    /// and match the `best ll=… (chain N)` line, while `ChainScore::chain_id`
-    /// is the 0-based in-memory index (gh#912, gh#972).
-    pub fn chain_eval_ids(&self) -> Vec<usize> {
-        let mut v: Vec<usize> = self.loglik_eval.per_chain.iter()
-            .map(|s| s.chain_id + 1).collect();
+    /// a chain number. Written to `fit_state.toml` and printed by
+    /// `fit summary`, where each names a `chain_N/` directory (gh#912,
+    /// gh#972, gh#990).
+    pub fn chain_eval_ids(&self) -> Vec<ChainIndex> {
+        let mut v: Vec<ChainIndex> = self.loglik_eval.per_chain.iter()
+            .map(|s| s.chain_id).collect();
         v.sort_unstable();
         v
     }
@@ -2454,7 +2454,7 @@ impl ChainResults {
     /// Per-chain clean-eval standard errors in chain-id order, parallel
     /// to `chain_eval_logliks`.
     pub fn chain_eval_ses(&self) -> Vec<f64> {
-        let mut v: Vec<(usize, f64)> = self.loglik_eval.per_chain.iter()
+        let mut v: Vec<(ChainIndex, f64)> = self.loglik_eval.per_chain.iter()
             .map(|s| (s.chain_id, s.se)).collect();
         v.sort_by_key(|(id, _)| *id);
         v.into_iter().map(|(_, se)| se).collect()
@@ -2485,7 +2485,7 @@ impl ChainResults {
 /// for a real IF2 + PF run. Tested in `tests::winner_summary_*`.
 fn select_winner_summary(
     outcome: &loglik_eval::LoglikEvalOutcome,
-) -> (usize, f64, f64) {
+) -> (ChainIndex, f64, f64) {
     let s = &outcome.per_chain[outcome.overall_winner_idx];
     (s.chain_id, s.loglik, s.se)
 }
@@ -3057,8 +3057,8 @@ pub fn auto_rw_sd(
 
     if n_good < n_chains / 2 {
         // Report which chains diverged and their parameters
-        let diverged: Vec<usize> = good_chains.iter().enumerate()
-            .filter(|(_, &g)| !g).map(|(i, _)| i + 1).collect();
+        let diverged: Vec<ChainIndex> = good_chains.iter().enumerate()
+            .filter(|(_, &g)| !g).map(|(i, _)| ChainIndex(i)).collect();
         return Err(format!(
             "No consensus across chains ({}/{} good). Divergent chains: {:?}\n\
              The likelihood surface may be multimodal or scout iterations are too few.\n\
@@ -3068,8 +3068,8 @@ pub fn auto_rw_sd(
     }
 
     if n_good < n_chains {
-        let _diverged: Vec<usize> = good_chains.iter().enumerate()
-            .filter(|(_, &g)| !g).map(|(i, _)| i + 1).collect();
+        let _diverged: Vec<ChainIndex> = good_chains.iter().enumerate()
+            .filter(|(_, &g)| !g).map(|(i, _)| ChainIndex(i)).collect();
         eprintln!("warning: {}/{} chains diverged ({:?}), excluded from rw_sd calibration",
             n_chains - n_good, n_chains, _diverged);
     }
@@ -3133,7 +3133,8 @@ pub fn write_chain_outputs(
     use std::io::Write;
 
     for (chain_id, result) in results {
-        let chain_dir = format!("{}/chain_{}", dir, chain_id + 1);
+        let chain = ChainIndex(*chain_id);
+        let chain_dir = chain.dir_in(std::path::Path::new(dir)).to_string_lossy().into_owned();
         std::fs::create_dir_all(&chain_dir)
             .map_err(|e| format!("cannot create {}: {}", chain_dir, e))?;
 
@@ -3173,14 +3174,14 @@ pub fn write_chain_outputs(
         // chain's θ̂ is the IF2 final-iteration mean either way; what
         // clean-eval changes is the *loglik* attached to that θ̂.
         let chain_score = loglik_eval.and_then(|ce|
-            ce.per_chain.iter().find(|s| s.chain_id == *chain_id));
+            ce.per_chain.iter().find(|s| s.chain_id == chain));
 
         // Final params TOML (all params, not just estimated).
         let toml_path = format!("{}/final_params.toml", chain_dir);
         let mut f = std::fs::File::create(&toml_path)
             .map_err(|e| format!("cannot write {}: {}", toml_path, e))?;
         writeln!(f, "# {}", crate::version::VERSION).unwrap();
-        writeln!(f, "# Chain {} final parameters", chain_id + 1).unwrap();
+        writeln!(f, "# Chain {} final parameters", chain).unwrap();
         let header_ll = chain_score.map(|s| s.loglik).unwrap_or(result.final_loglik);
         if let Some(s) = chain_score {
             writeln!(f, "# loglik = {:.2} ± {:.2} (clean-eval re-score of IF2 final-iter mean)",
@@ -3216,7 +3217,7 @@ pub fn write_chain_outputs(
             writeln!(f, "[provenance]").unwrap();
             writeln!(f, "loglik = {:.6}", s.loglik).unwrap();
             writeln!(f, "se = {:.6}", s.se).unwrap();
-            writeln!(f, "chain = {}", chain_id + 1).unwrap();
+            writeln!(f, "chain = {}", chain).unwrap();
         }
     }
     Ok(())
@@ -3253,7 +3254,7 @@ pub fn write_clean_eval_tsv(
         let ess_min_step_str = s.filter_stats.ess_min_step
             .map(|i| i.to_string()).unwrap_or_else(|| "-1".into());
         write!(f, "{}\t{:.6}\t{:.6}\t{:.2}\t{:.2}\t{}\t{}",
-            s.chain_id + 1, s.loglik, s.se,
+            s.chain_id, s.loglik, s.se,
             s.filter_stats.ess_mean, s.filter_stats.ess_min,
             ess_min_step_str, s.filter_stats.n_neg_inf_increments).unwrap();
         for spec in if2_params {
@@ -3281,7 +3282,7 @@ pub fn write_run_root_final_params(
     let mut f = std::fs::File::create(&path)
         .map_err(|e| format!("cannot write {}: {}", path, e))?;
     writeln!(f, "# {}", crate::version::VERSION).unwrap();
-    writeln!(f, "# winner: chain={}", s.chain_id + 1).unwrap();
+    writeln!(f, "# winner: chain={}", s.chain_id).unwrap();
     writeln!(f, "# loglik = {:.2} ± {:.2} (clean-eval re-score of IF2 final-iter mean)",
         s.loglik, s.se).unwrap();
     writeln!(f).unwrap();
@@ -3302,7 +3303,7 @@ pub fn write_run_root_final_params(
     writeln!(f, "[provenance]").unwrap();
     writeln!(f, "loglik = {:.6}", s.loglik).unwrap();
     writeln!(f, "se = {:.6}", s.se).unwrap();
-    writeln!(f, "chain = {}", s.chain_id + 1).unwrap();
+    writeln!(f, "chain = {}", s.chain_id).unwrap();
     Ok(())
 }
 
@@ -3330,7 +3331,7 @@ pub fn write_diagnostics(dir: &str, results: &[(usize, IF2Result)]) -> Result<()
     for (chain_id, result) in results {
         for it in &result.iterations {
             let loglik_str = if it.loglik.is_finite() { format!("{:.2}", it.loglik) } else { "NA".into() };
-            writeln!(f, "{}\t{}\t{}\t{:.2}", chain_id + 1, it.iteration, loglik_str, it.if2_perturbed_loglik).unwrap();
+            writeln!(f, "{}\t{}\t{}\t{:.2}", ChainIndex(*chain_id), it.iteration, loglik_str, it.if2_perturbed_loglik).unwrap();
         }
     }
     Ok(())
@@ -3658,7 +3659,7 @@ mod tests {
         let outcome = run_loglik_eval_with_scorer(&results, &cfg, 0, scorer).unwrap();
 
         let (best_chain, best_ll, best_se) = select_winner_summary(&outcome);
-        assert_eq!(best_chain, 1,
+        assert_eq!(best_chain, ChainIndex(1),
             "clean-eval must pick chain 1 despite chain 0's higher in-run loglik");
         assert!((best_ll - (-50.0)).abs() < 1e-12);
         assert!(best_se.abs() < 1e-12, "deterministic scorer → SE = 0");
@@ -3771,7 +3772,7 @@ mod tests {
         ).unwrap();
 
         // Read back and verify
-        let content = std::fs::read_to_string(dir.join("chain_1/final_params.toml")).unwrap();
+        let content = std::fs::read_to_string(dir.join("chain_0/final_params.toml")).unwrap();
         let parsed: HashMap<String, f64> = content.lines()
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
             .filter_map(|l| {
@@ -3801,13 +3802,13 @@ mod tests {
         let outcome = LoglikEvalOutcome {
             per_chain: vec![
                 ChainScore {
-                    chain_id: 0,
+                    chain_id: ChainIndex(0),
                     theta: vec![0.10, 0.20],
                     loglik: -100.0, se: 0.5,
                     filter_stats: FilterStats::failed(),
                 },
                 ChainScore {
-                    chain_id: 1,
+                    chain_id: ChainIndex(1),
                     theta: vec![0.30, 0.40],
                     loglik: -50.0, se: 0.4,
                     filter_stats: FilterStats::failed(),
@@ -3835,13 +3836,13 @@ mod tests {
         assert_eq!(lines.len(), 1 + 2, "1 header + 2 chain rows");
         assert_eq!(lines[0],
             "chain\tloglik\tse\tess_mean\tess_min\tess_min_step\tn_neg_inf_incr\tbeta\tgamma");
-        assert!(lines[1].starts_with("1\t-100.000000\t0.500000"),
-            "chain 1 prefix: {}", lines[1]);
+        assert!(lines[1].starts_with("0\t-100.000000\t0.500000"),
+            "chain 0 prefix: {}", lines[1]);
         // Params use shortest round-trippable Display (gh#266), not fixed
         // `{:.6}` — so a small-magnitude param can't be truncated to 0.
         assert!(lines[1].ends_with("\t0.1\t0.2"),
-            "chain 1 param suffix: {}", lines[1]);
-        assert!(lines[2].starts_with("2\t-50.000000\t0.400000"),
+            "chain 0 param suffix: {}", lines[1]);
+        assert!(lines[2].starts_with("1\t-50.000000\t0.400000"),
             "chain 2 prefix: {}", lines[2]);
         assert!(lines[2].ends_with("\t0.3\t0.4"),
             "chain 2 param suffix: {}", lines[2]);
@@ -3858,9 +3859,9 @@ mod tests {
 
         let outcome = LoglikEvalOutcome {
             per_chain: vec![
-                ChainScore { chain_id: 0, theta: vec![0.10], loglik: -100.0, se: 0.3,
+                ChainScore { chain_id: ChainIndex(0), theta: vec![0.10], loglik: -100.0, se: 0.3,
                     filter_stats: FilterStats::failed() },
-                ChainScore { chain_id: 1, theta: vec![0.42], loglik: -50.0, se: 0.2,
+                ChainScore { chain_id: ChainIndex(1), theta: vec![0.42], loglik: -50.0, se: 0.2,
                     filter_stats: FilterStats::failed() },
             ],
             overall_winner_idx: 1,
@@ -3925,7 +3926,7 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.join("final_params.toml")).unwrap();
         // Header records overall winner chain.
-        assert!(content.contains("# winner: chain=2"),
+        assert!(content.contains("# winner: chain=1"),
             "header missing or wrong: {}", content);
         // Provenance moved under [provenance] table — top-level keys
         // are parameters only so the file is loadable via the standard
@@ -3933,7 +3934,7 @@ mod tests {
         // under the right scope.
         assert!(content.contains("[provenance]"),
             "expected [provenance] table; got: {}", content);
-        assert!(content.contains("chain = 2"));
+        assert!(content.contains("chain = 1"));
         // The estimated-param value is the overall winner's θ (0.42),
         // NOT chain 0's 0.10.
         assert!(content.contains("beta = 0.42"),
@@ -3978,7 +3979,7 @@ mod tests {
 
         let outcome = LoglikEvalOutcome {
             per_chain: vec![
-                ChainScore { chain_id: 5, theta: vec![87.668938],
+                ChainScore { chain_id: ChainIndex(5), theta: vec![87.668938],
                     loglik: -6235.11, se: 2.19,
                     filter_stats: FilterStats::failed() },
             ],
@@ -4089,9 +4090,9 @@ mod tests {
         // ([0.30, 0.40]) — that divergence is what the test discriminates.
         let loglik_eval = LoglikEvalOutcome {
             per_chain: vec![
-                ChainScore { chain_id: 0, theta: vec![0.10, 0.20],
+                ChainScore { chain_id: ChainIndex(0), theta: vec![0.10, 0.20],
                     loglik: -110.0, se: 0.5, filter_stats: FilterStats::failed() },
-                ChainScore { chain_id: 1, theta: vec![0.31, 0.41],
+                ChainScore { chain_id: ChainIndex(1), theta: vec![0.31, 0.41],
                     loglik: -49.0,  se: 0.4, filter_stats: FilterStats::failed() },
             ],
             overall_winner_idx: 1,
@@ -4102,7 +4103,7 @@ mod tests {
         chain_agreement.insert("gamma".to_string(), 1.06);
         let cr = ChainResults {
             results: vec![(0, if2_chain0), (1, if2_chain1)],
-            best_chain: 1,
+            best_chain: ChainIndex(1),
             best_loglik: -49.0,
             chain_agreement,
             loglik_eval,
@@ -4117,7 +4118,7 @@ mod tests {
              the GH #16 silent-wrong-answer is back.");
 
         // Pre-fix path for reference: what `&best.mle` of best_chain returns.
-        let best = &cr.results.iter().find(|(id, _)| *id == cr.best_chain).unwrap().1;
+        let best = &cr.results.iter().find(|(id, _)| ChainIndex(*id) == cr.best_chain).unwrap().1;
         assert_eq!(&best.mle, &vec![0.30, 0.40],
             "sanity: chain 1's IF2 mle is [0.30, 0.40] (different \
              from clean-eval winner [0.31, 0.41]) — this is what \
@@ -4135,15 +4136,15 @@ mod tests {
     /// and the per_chain order is scrambled — position-based labels and a
     /// missing sort would both fail too.
     #[test]
-    fn chain_eval_ids_are_one_based_chain_numbers() {
+    fn chain_eval_ids_are_the_chain_numbers_every_artifact_uses() {
         use crate::fit::loglik_eval::{ChainScore, LoglikEvalOutcome, FilterStats};
         let score = |chain_id: usize, loglik: f64| ChainScore {
-            chain_id, theta: vec![0.1], loglik, se: 0.1,
+            chain_id: ChainIndex(chain_id), theta: vec![0.1], loglik, se: 0.1,
             filter_stats: FilterStats::failed(),
         };
         let cr = ChainResults {
             results: vec![],
-            best_chain: 2,
+            best_chain: ChainIndex(2),
             best_loglik: -40.0,
             chain_agreement: HashMap::new(),
             loglik_eval: LoglikEvalOutcome {
@@ -4151,8 +4152,8 @@ mod tests {
                 overall_winner_idx: 0,
             },
         };
-        assert_eq!(cr.chain_eval_ids(), vec![1, 3],
-            "chain indices 0 and 2 are chains 1 and 3 in every artifact");
+        assert_eq!(cr.chain_eval_ids(), vec![ChainIndex(0), ChainIndex(2)],
+            "chains 0 and 2 ran; chain 1 was dropped, and the ids say so (gh#990)");
         assert_eq!(cr.chain_eval_logliks(), vec![-45.0, -40.0],
             "logliks stay parallel to the ids");
     }
@@ -4582,7 +4583,7 @@ dt = 1.0
             camdl_version: None,
             best_loglik: -60.2,
             initial_loglik: f64::NEG_INFINITY,
-            best_chain: 1,
+            best_chain: ChainIndex(1),
             n_chains: 2,
             n_good_chains: None,
             start_values: Default::default(),

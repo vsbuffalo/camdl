@@ -371,7 +371,7 @@ impl InitProvenance {
         // out-of-order Vec<ChainStart> still produces a well-formed
         // index-by-chain_id output. Empty starts yield an empty Vec.
         let n_chains = cs.starts.iter()
-            .map(|c| c.chain_id + 1).max().unwrap_or(0);
+            .map(|c| c.chain_id + 1).max().unwrap_or(0); // a count, not a label
         let mut chains: Vec<HashMap<String, ChainStartProvenance>> =
             vec![HashMap::new(); n_chains];
         for chain in &cs.starts {

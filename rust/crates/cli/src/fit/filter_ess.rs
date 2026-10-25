@@ -42,6 +42,8 @@
 
 use serde::{Deserialize, Serialize};
 use sim::inference::diagnostic::DiagnosticKind;
+
+use crate::chain_index::ChainIndex;
 use sim::inference::pgas::WeightCollapse;
 use std::path::Path;
 
@@ -82,9 +84,9 @@ pub struct ObsFilterEss {
 /// One chain's profile — the rows of [`FILTER_ESS_TSV`] for that chain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChainFilterEss {
-    /// Zero-based, as the stage numbers chains internally; written one-based
-    /// to match `chain_<n>/`.
-    pub chain_id: usize,
+    /// The chain's number, as written to the `chain` column and as its
+    /// `chain_<n>/` directory is named.
+    pub chain_id: ChainIndex,
     pub by_obs: Vec<ObsFilterEss>,
 }
 
@@ -189,7 +191,7 @@ impl FilterEssAccum {
             if wc.ess_by_obs.len() != n_obs {
                 return Err(format!(
                     "filter ESS profile of chain {} has {} entries for {} observations",
-                    chain_id + 1,
+                    ChainIndex(chain_id),
                     wc.ess_by_obs.len(),
                     n_obs
                 ));
@@ -249,7 +251,10 @@ impl FilterEssAccum {
         let per_chain: Vec<ChainFilterEss> = self
             .chains
             .iter()
-            .map(|c| ChainFilterEss { chain_id: c.chain_id, by_obs: profile(&c.sum, &c.min, &c.n) })
+            .map(|c| ChainFilterEss {
+                chain_id: ChainIndex(c.chain_id),
+                by_obs: profile(&c.sum, &c.min, &c.n),
+            })
             .collect();
 
         let means: Vec<f64> = pooled.iter().map(|o| o.mean).collect();
@@ -308,7 +313,7 @@ impl FilterEssStage {
             row("all", o)?;
         }
         for c in &self.per_chain {
-            let label = (c.chain_id + 1).to_string();
+            let label = c.chain_id.to_string();
             for o in &c.by_obs {
                 row(&label, o)?;
             }
@@ -566,11 +571,11 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "chain\tobs\ttime\tess_mean\tess_min\tn_sweeps");
-        // Pooled: two observations; chain 1: two; chain 2: one (obs 1 unscored).
+        // Pooled: two observations; chain 0: two; chain 1: one (obs 1 unscored).
         assert_eq!(lines.len(), 1 + 2 + 2 + 1);
         assert_eq!(lines[1], "all\t0\t0\t150.0000\t100.0000\t2");
         assert_eq!(lines[2], "all\t1\t10\t4.0000\t4.0000\t1");
-        assert_eq!(lines[3], "1\t0\t0\t100.0000\t100.0000\t1");
-        assert_eq!(lines[5], "2\t0\t0\t200.0000\t200.0000\t1");
+        assert_eq!(lines[3], "0\t0\t0\t100.0000\t100.0000\t1");
+        assert_eq!(lines[5], "1\t0\t0\t200.0000\t200.0000\t1");
     }
 }

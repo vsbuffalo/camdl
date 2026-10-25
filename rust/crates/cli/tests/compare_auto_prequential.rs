@@ -492,7 +492,7 @@ fn elpd_of(json_stdout: &str, name: &str) -> f64 {
 
 #[test]
 fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
-    // gh#417/gh#418: `--exclude-chains @a:2` must drop chain 2 from @a's posterior
+    // gh#417/gh#418: `--exclude-chains @a:1` must drop chain 2 from @a's posterior
     // BEFORE deriving its plug-in θ̂ — scoring the SAME subset a `predict` would
     // band (predict/summary already do — gh#409) — while leaving every OTHER fit
     // whole. Inject a stuck minority chain into @a's cloud: excluding it moves
@@ -516,8 +516,8 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
         );
     }
 
-    // Overwrite @a's cloud with two chains: chain 1 (0-based 0) mixed at
-    // beta≈0.35; chain 2 (0-based 1) stuck at beta≈0.90 (a fast epidemic).
+    // Overwrite @a's cloud with two chains: chain 0 mixed at beta≈0.35;
+    // chain 1 stuck at beta≈0.90 (a fast epidemic).
     // Columns are this model's draws.tsv order — estimated (beta, gamma) then
     // fixed (N0, I0, rho, k); the keyed loader maps by name, so what matters is
     // that the stuck chain carries a materially different beta.
@@ -550,11 +550,11 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
 
     // Per-fit: drop @a's stuck chain, leave @b untouched.
     let mut sub_args = common.to_vec();
-    sub_args.extend_from_slice(&["--exclude-chains", "@a:2"]);
+    sub_args.extend_from_slice(&["--exclude-chains", "@a:1"]);
     let sub = run(&bin, &tmp, &sub_args);
     assert!(
         sub.status.success(),
-        "compare --exclude-chains @a:2 failed:\nstderr={}",
+        "compare --exclude-chains @a:1 failed:\nstderr={}",
         String::from_utf8_lossy(&sub.stderr)
     );
     let sub_out = String::from_utf8_lossy(&sub.stdout);
@@ -569,7 +569,7 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     // @b was not named → byte-identical: the token bound per-fit, not cohort-wide.
     assert!(
         (e_b_all - e_b_sub).abs() < 1e-9,
-        "@b was not named in --exclude-chains @a:2, so its elpd must be unchanged \
+        "@b was not named in --exclude-chains @a:1, so its elpd must be unchanged \
          (per-fit binding, not cohort-wide): all={e_b_all}, subset={e_b_sub}"
     );
 
@@ -577,7 +577,7 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     let sub_err = String::from_utf8_lossy(&sub.stderr);
     assert!(
         sub_err.contains("--exclude-chains") && sub_err.contains("fit '@a'"),
-        "compare --exclude-chains @a:2 must warn, naming fit @a:\nstderr={sub_err}"
+        "compare --exclude-chains @a:1 must warn, naming fit @a:\nstderr={sub_err}"
     );
 
     // Stage 4.1: under the MIXTURE, the stuck chain's draws are components
@@ -599,7 +599,7 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     let healthy = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
         "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4",
         "--replicates", "1", "--allow-mixed-provenance",
-        "--exclude-chains", "@a:2"]);
+        "--exclude-chains", "@a:1"]);
     assert!(healthy.status.success(),
         "dropping the sick chain must make the mixture derivable:\nstderr={}",
         String::from_utf8_lossy(&healthy.stderr));

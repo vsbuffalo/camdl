@@ -297,7 +297,7 @@ fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
     assert_eq!(state.get("n_chains").and_then(|v| v.as_integer()), Some(2), "{state_raw}");
 
     // Acceptance 4: both chains produced a trace with posterior draws.
-    for chain in 1..=2 {
+    for chain in 0..2 {
         let trace = stage_dir.join(format!("chain_{chain}/trace.tsv"));
         assert!(trace.exists(), "{} must exist", trace.display());
         let lines = std::fs::read_to_string(&trace).unwrap()

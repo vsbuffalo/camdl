@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sim::inference::convergence::{ConvergenceError, RhatDriver, RhatRefusal};
 
+use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 
 /// One stage of a fit, typed by method. The variant carries the
@@ -69,9 +70,9 @@ pub enum GateVerdict {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct If2StageResult {
     pub best_loglik: f64,
-    /// The winning chain as `fit_state.toml` stores it: a **1-based chain
-    /// number** naming a `chain_N/` directory in the stage dir (gh#912).
-    pub best_chain: usize,
+    /// The winning chain as `fit_state.toml` stores it: the number of a
+    /// `chain_N/` directory in the stage dir (gh#912, gh#990).
+    pub best_chain: ChainIndex,
     /// Winner θ̂ from clean-eval. Estimated parameters only — fixed
     /// params live elsewhere (e.g. `final_params.toml` carries both).
     pub theta_hat: BTreeMap<String, f64>,
@@ -776,10 +777,9 @@ fn default_thin() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NloptStageResult {
     pub best_loglik: f64,
-    /// The winning chain as `fit_state.toml` stores it: a **1-based chain
-    /// number**, matching the `chain` column of `chain_results.tsv` beside
-    /// it (gh#912).
-    pub best_chain: usize,
+    /// The winning chain as `fit_state.toml` stores it, matching the `chain`
+    /// column of `chain_results.tsv` beside it (gh#912, gh#990).
+    pub best_chain: ChainIndex,
     /// Winner θ̂ — estimated parameters only. Fixed params live in
     /// `mle_params.toml` (full vector with provenance).
     pub theta_hat: BTreeMap<String, f64>,
@@ -1621,7 +1621,7 @@ mod tests {
             camdl_version: Some("0.1.0+test".into()),
             best_loglik: -3804.9,
             initial_loglik: -7000.0,
-            best_chain: 1,
+            best_chain: ChainIndex(1),
             n_chains: 4,
             n_good_chains: Some(4),
             start_values,
@@ -1660,7 +1660,7 @@ mod tests {
         let r = If2StageResult::load(dir).unwrap();
         assert_eq!(r.n_chains, 4);
         assert_eq!(r.n_iter, 50);
-        assert_eq!(r.best_chain, 1);
+        assert_eq!(r.best_chain, ChainIndex(1));
         assert!((r.best_loglik - (-3804.9)).abs() < 1e-9);
         // theta_hat restricted to estimated params (those with Â).
         assert_eq!(r.theta_hat.len(), 2);
