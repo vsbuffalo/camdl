@@ -407,10 +407,12 @@ Select a scenario at the CLI:
 camdl simulate model.camdl --params p.toml --scenario with_sia --seed 42
 ```
 
-Or run all scenarios across many seeds:
+Or run several scenarios across many seeds in one grid — every cell lands in the
+store, and a `--sweep` adds a parameter grid to it:
 
 ```bash
-camdl batch run experiment.toml --parallel 8
+camdl simulate model.camdl --params p.toml --scenario baseline,with_sia --seeds 1:100
+camdl simulate model.camdl --params p.toml --scenario baseline,with_sia --sweep beta=lin(0.2,0.6,5) --seeds 1:50
 ```
 
 ---

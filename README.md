@@ -227,12 +227,12 @@ start from the first's result by handle
 ```text
 model.camdl ──→ camdlc ──→ model.ir.json
                                 │
-          ┌──────────┬──────────┼───────────┐
-          ▼          ▼          ▼           ▼
-    camdl simulate  camdl fit  camdl batch  camdl compare
-          │          │          │           │
-          ▼          ▼          ▼           ▼
-     trajectory   MLE / posterior  sweep   elpd table
+          ┌──────────┬──────────┴───────────┐
+          ▼          ▼                      ▼
+    camdl simulate  camdl fit            camdl compare
+          │          │                      │
+          ▼          ▼                      ▼
+  trajectory / sweep  MLE / posterior    elpd table
 ```
 
 More, in one table:
@@ -357,7 +357,7 @@ Every camdl binary ships its own version-matched guides offline — run
 | [`docs/runtimes.md`](docs/runtimes.md)                         | Simulation backend details                       |
 | [`docs/camdl-data-spec.md`](docs/camdl-data-spec.md)           | IR schema and data model                         |
 | [`docs/camdl-inference-spec.md`](docs/camdl-inference-spec.md) | Fitting workflow specification                   |
-| [`docs/camdl-run-spec.md`](docs/camdl-run-spec.md)             | Run-system / batch / CAS specification           |
+| [`docs/camdl-run-spec.md`](docs/camdl-run-spec.md)             | Run-system / sweeps / CAS specification          |
 | [`AGENTS.md`](AGENTS.md)                                       | Briefing for AI coding agents working with camdl |
 
 **Using camdl from a downstream project with an AI coding agent?** Start with
@@ -398,7 +398,7 @@ rust/
                        ODE) + propensity evaluator + inference
                        (PF, IF2, PGAS+NUTS, PMMH, obs_loglik, prequential)
   crates/io/           TSV read/write
-  crates/cli/          camdl: simulate, batch, fit, pfilter, profile,
+  crates/cli/          camdl: simulate, fit, pfilter, profile,
                        survey, data, lineage, list, show, cat, compare,
                        label, check, inspect, docs, mre, dev (compile,
                        doctest, eval, reindex)

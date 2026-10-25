@@ -15,10 +15,9 @@ transform. A few commands delegate to the compiler.
 
 ### Produce simulation artifacts
 
-| Command                  | Produces                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------ |
-| `simulate` (alias `sim`) | One forward trajectory (+ optional synthetic observations, event log).         |
-| `batch run`              | Many trajectories over a grid — see [Scenario sweeps](#scenario-sweeps-batch). |
+| Command                  | Produces                                                                                                                                                                 |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `simulate` (alias `sim`) | One forward trajectory (+ optional synthetic observations, event log), or a grid of them — see [Sweeps and scenario grids](#sweeps-and-scenario-grids-simulate---sweep). |
 
 ### Produce inference artifacts
 
@@ -44,7 +43,6 @@ transform. A few commands delegate to the compiler.
 | `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (the caveat is printed with the table); not a leave-future-out forecast score. |
 | `label`                                            | Set a display label on any run.                                                                                                                                                       |
 | `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                      |
-| `batch status`                                     | Completion of a sweep.                                                                                                                                                                |
 | `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
 | `data split`                                       | Split a data TSV into train/holdout.                                                                                                                                                  |
 | `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |
@@ -171,36 +169,44 @@ unconverged fit launders its multi-modality into this one, and
 multi-chain sampler writes `chain_starts.tsv`, the record of where each chain
 actually began.
 
-### Scenario sweeps: batch
+### Sweeps and scenario grids: `simulate --sweep`
 
-`batch run` is forward simulation only — **no inference**. It runs `simulate`
-across the Cartesian product of a parameter sweep (or a space-filling design) ×
-scenarios × seed replicates, with optional synthetic-observation sampling:
-
-```toml
-[config]
-model = "model.camdl"
-backend = "chain_binomial"
-
-[[scenario]]
-name = "intervention"
-enable = ["school_closure"]
-
-[sweep]
-beta = { linspace = [0.2, 0.6, 5] }
-
-[design.sensitivity] # alternative to a grid: LHS / Sobol / random
-method = "lhs"
-n = 200
-```
+A grid is forward simulation only — **no inference**. `simulate` runs the
+Cartesian product of its parameter points × scenarios × replicates (or explicit
+seeds) into the store, one leaf per cell plus one combined `ensemble.tsv`. The
+parameter points are a _design_ you choose (`--sweep PARAM=GRID`, repeatable, or
+`--sweep-file FILE`) or a _sample_ (`--draws`); the two are refused together.
 
 ```bash
-camdl batch run sweep.toml
-camdl batch run sweep.toml --dry-run           # preview the resolved grid
-camdl batch status sweep.toml
+# five beta values × two scenarios × fifty seeds, with common random numbers
+camdl simulate sirv.camdl --params params.toml \
+    --scenario baseline,with_vaccination --sweep beta=lin(0.2,0.6,5) --seeds 1:50
+
+# two swept parameters form the name-sorted Cartesian product
+camdl simulate sir.camdl --params p.toml --sweep beta=0.2,0.3 --sweep gamma=0.1,0.2 --replicates 10
+
+# design points from a TSV (header = parameters, one row per point)
+camdl simulate sir.camdl --params p.toml --sweep-file design.tsv --replicates 5
+
+# plan against the store without running: every cell a hit or a miss
+camdl simulate sirv.camdl --params params.toml --sweep beta=lin(0.2,0.6,5) --seeds 1:50 --dry-run
+
+# the observations of every cell as a dataset: one TSV per stream under synth/
+camdl simulate sirv.camdl --params params.toml --sweep beta=lin(0.2,0.6,5) --seeds 1:50 --obs-dir synth
 ```
 
-Use `batch` to explore _forward_ behavior under interventions and parameter
+Every design point at a given replicate shares one random stream, so paired
+differences across points are low-variance and adding a point leaves the others
+unchanged (for independent noise per point, run one invocation per point with
+its own `--seed`). The combined table and the observation tables carry
+`point_id`, one `sweep:<param>` column per swept parameter, and `seed` — the
+pairing key across points. A scenario that sets or scales a swept parameter, or
+a `--param` on one, is refused. A second run of the same grid reads every cell
+the store holds back instead of re-simulating it; `--force` recomputes. The arm
+of an ad-hoc run is labelled from its flags (`baseline+school_closure` for
+`--enable school_closure`, `baseline;beta=0.3` for `--param beta=0.3`).
+
+Use a sweep to explore _forward_ behavior under interventions and parameter
 ranges. To estimate parameters from data, use `fit`.
 
 ### Model comparison
@@ -269,9 +275,9 @@ streams that differ (gh#570).
 
 ## The boundaries, stated plainly
 
-- **`simulate` and `batch` go forward; `fit` goes backward.** Simulation maps
-  parameters → data; fitting maps data → parameters. Batch is many forward runs,
-  never an inference.
+- **`simulate` goes forward; `fit` goes backward.** Simulation maps parameters →
+  data; fitting maps data → parameters. A sweep is many forward runs, never an
+  inference.
 - **`survey` and `profile` are about the likelihood _surface_, not a fit.**
   Survey samples it broadly to check identifiability; profile traces it along
   one axis. Both can precede or contextualize a fit; neither produces a

@@ -181,8 +181,7 @@ integration pass, or use `make test-integration` which builds first.
 drifted runtime/compiler pair. In development it false-reds: the `camdlc` on
 PATH (usually the shared `~/.local/bin/camdlc`) goes stale the moment a parallel
 checkout runs `make install` at another commit, and the cargo acceptance tests
-(`compile_once`, `acceptance_batch_*`) then abort with _"camdlc version
-mismatch"_.
+(`compile_once`, `acceptance_*`) then abort with _"camdlc version mismatch"_.
 
 **`make test` handles this for you.** `test-rust` prepends the freshly-built
 `camdlc` to PATH and skips the handshake, so `camdl` resolves the compiler under
@@ -251,17 +250,19 @@ otherwise.
 
 ### L7 — Cross-language integration
 
-`tests/test_ocaml_to_rust.sh`. Compiles every `.camdl` fixture with `camdlc`,
-feeds the IR to `camdl batch run`, checks exit status. Invoked via
-`make test-integration`. Catches:
+`tests/test_ocaml_to_rust.sh`. Compiles every `.camdl` golden with `camdlc`,
+feeds the IR to `camdl simulate` on each backend, then runs eight golden models
+as `simulate --sweep … --replicates` grids into a fresh store, checks the leaf
+count through `camdl list`, and runs each grid again to check the store reads
+every cell back. Invoked via `make test-integration`. Catches:
 
 - OCaml emits IR that Rust can't deserialise (schema drift).
-- Rust `batch run` rejects a shape the OCaml compiler happily emits.
-- CLI surface renames (the `simulate batch` → `batch run` rename in 2026-04-20
-  broke this script until we updated the invocation).
+- Rust `simulate` rejects a shape the OCaml compiler happily emits.
+- CLI surface renames (a verb rename in 2026-04-20 broke this script until we
+  updated the invocation).
 
-Fixtures live in `tests/fixtures/exp_*.toml`. Each is a batch sweep config
-pointing at an `ocaml/golden/*.camdl`.
+The fixtures are the golden models themselves: `ocaml/golden/<name>.camdl` with
+its `<name>.params.toml`; the grid flags live in the script.
 
 ### L8 — Book build (external repo)
 

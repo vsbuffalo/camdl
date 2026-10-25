@@ -50,8 +50,8 @@ not along directory boundaries:
 
 - **`engine`** — simulation backends (Gillespie, ODE, chain-binomial),
   propensity evaluator, intervention processing, obs sampling + shared plumbing.
-  Reviews of simulate, scenarios, sweep batches, or any "does the forward
-  simulation compute the right thing" question land here.
+  Reviews of simulate, scenarios, sweeps, or any "does the forward simulation
+  compute the right thing" question land here.
 
 - **`compiler`** — OCaml DSL frontend (`ocaml/lib/`, `ocaml/bin/`),
   stratification expansion, IR emission, OCaml tests, golden DSL fixtures, and
@@ -65,10 +65,10 @@ not along directory boundaries:
 ### Shared plumbing
 
 A handful of CLI files are duplicated into both `inference` and `engine`:
-`cas.rs`, `run_meta.rs`, `run_paths.rs`, `hashing.rs`, `browse.rs`, `batch.rs`,
-`main.rs`, `serve.rs`, `util.rs`, `version.rs`, and `cli/tests/`. These form a
-"plumbing" layer — cache invariants, directory layout, run.json schema, CLI
-dispatch — used by both fit and simulate codepaths.
+`cas.rs`, `run_meta.rs`, `run_paths.rs`, `hashing.rs`, `browse.rs`, `main.rs`,
+`serve.rs`, `util.rs`, `version.rs`, and `cli/tests/`. These form a "plumbing"
+layer — cache invariants, directory layout, run.json schema, CLI dispatch — used
+by both fit and simulate codepaths.
 
 We considered making this its own `cli` subsystem. Rejected because
 cross-cutting refactors of the plumbing (2026-04-19 unified output tree, for

@@ -1508,7 +1508,7 @@ its own segment, named by its stem, with its own `--label`. A method reads a
 stored fit only through a `starts` handle, and every multi-chain sampler writes
 `chain_starts.tsv`, the record of where each chain actually began. An IF2 leaf's
 `mle_params.toml` is a standard params file with provenance hashing that feeds
-directly into `camdl simulate` and `camdl batch run`.
+directly into `camdl simulate`.
 
 ```bash
 camdl fit run    scout.toml --seed 1 --label scout

@@ -4174,29 +4174,20 @@ observation model definitions.
 
 The cadence and the columns can also be set per run, without editing the model
 — useful for exploratory runs and for large stratified/spatial models whose
-`flow_*` columns dominate the output. The `simulate` flags and `batch.toml`'s
-`[output]` section are the same option set (one shared definition), so the
-surface is identical. (Only `simulate` and `batch.toml` write trajectories, so
-the view applies there; `fit.toml` has no trajectory output.)
+`flow_*` columns dominate the output. These are `simulate` flags. (Only
+`simulate` writes trajectories, so the view applies there; `fit.toml` has no
+trajectory output.)
 
-| Flag                | `[output]` key       | Effect                                                                                                                            |
-| ------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `--output-every N`  | `every = N`          | One row every `N` time-units, overriding the model's `output { every }`. A plain number in the model's `time_unit` (like `--dt`). |
-| `--no-flows`        | `no_flows = true`    | Drop every `flow_*` column.                                                                                                       |
-| `--columns A,B,…`   | `columns = ["A","B"]`| Restrict to this allow-list of output column names (compartments and/or `flow_<name>`); emitted order follows the model.          |
+| Flag                | Effect                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--output-every N`  | One row every `N` time-units, overriding the model's `output { every }`. A plain number in the model's `time_unit` (like `--dt`). |
+| `--no-flows`        | Drop every `flow_*` column.                                                                                                       |
+| `--columns A,B,…`   | Restrict to this allow-list of output column names (compartments and/or `flow_<name>`); emitted order follows the model.          |
 
 ```bash
 # weekly latent state, no flow columns — on a 23-patch spatial run the
 # patch×patch flow columns are ~93% of the output
 camdl simulate polio.camdl --draws prior -n 100 --output-every 7 --no-flows
-```
-
-```toml
-# batch.toml
-[output]
-every    = 7
-no_flows = true
-# columns = ["S", "I_c", "I_v", "R"]
 ```
 
 These overrides participate in run identity. `--output-every` rewrites the
@@ -4206,9 +4197,7 @@ distinct, reproducible artifact — a content-addressed leaf cannot share a
 `run_id` with the full one. (Introducing this view bumps the `config` schema
 version, so all sim `run_id`s shift once — a deliberate, versioned turnover;
 existing cached sims re-run on next use.) An unknown `--columns` name is a hard
-error that lists the valid columns. (The
-`[design.*]` batch path honors `every` but not `no_flows` / `columns` yet, and
-rejects the latter loudly.)
+error that lists the valid columns.
 
 ### 16.4 Derived quantities (`quantities {}`)
 
@@ -4790,8 +4779,8 @@ per-run alternative is the CLI: leave `simulate { to }` literal and pass
 ## 19. Content-Addressable Output
 
 Outputs are stored in a **content-addressed store** under an `output_dir` you
-choose, partitioned by artifact kind (`sims/` for `simulate` and `batch`
-trajectories, `fits/` for inference stages, and so on):
+choose, partitioned by artifact kind (`sims/` for `simulate` trajectories,
+`fits/` for inference stages, and so on):
 
 ```
 {output_dir}/
@@ -5051,20 +5040,25 @@ Evaluates time-dependent expressions (forcing functions, parameters, math
 expressions) at a time grid without simulation. Expressions that reference
 compartment state produce an error.
 
-### 21.4 Batch simulation
+### 21.4 Sweeps and scenario grids
 
 ```bash
-camdl batch run     BATCH.toml [--parallel N] [--force] [--dry-run]
-camdl batch status  BATCH.toml
+camdl simulate MODEL --params P.toml --sweep PARAM=GRID [--sweep PARAM=GRID …] \
+    [--scenario A,B] [--replicates N | --seeds SPEC] [--obs-dir DIR] [--force] [--dry-run]
+camdl simulate MODEL --params P.toml --sweep-file DESIGN.tsv [--replicates N]
 camdl list              [RESULTS_DIR]          # browse cached runs
 camdl show  <short-hash>
 camdl cat   <short-hash> [--stream NAME]
 ```
 
-Batch parameter sweeps, scenario comparisons, and posterior-predictive checks.
-Sensitivity analysis (Sobol indices) is out of scope for the CLI; compute it
-with R's `sensitivity` package or Python's `SALib` on the batch output. See the
-Run Specification (`camdl-run-spec.md` §5) for details.
+Parameter sweeps (a deterministic grid, the design axis), scenario comparisons,
+and posterior-predictive checks (`--draws`). Every design point at a replicate
+shares one random stream, so the grid runs with common random numbers; a second
+run of the same grid reads the cells the store holds back. Sensitivity analysis
+(Sobol indices) is out of scope for the CLI: generate the design in R or Python,
+run it with `--sweep-file`, and compute the indices with R's `sensitivity`
+package or Python's `SALib` on `ensemble.tsv`. See the Run Specification
+(`camdl-run-spec.md` §5) for details.
 
 ### 21.5 Inference
 

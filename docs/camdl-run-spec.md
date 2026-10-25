@@ -1,10 +1,10 @@
 # camdl Run System Specification
 
 **Version:** 0.5-draft\
-**Date:** 2026-08-11
+**Date:** 2026-10-24
 
 > **Scope:** This spec describes camdl's run system: forward simulation (single
-> runs, multi-cell ensembles, and `batch run` sweeps), inference pipelines
+> runs, multi-cell ensembles and `--sweep` grids), inference pipelines
 > (`fit.toml`), parameter sweeps, predictive workflows, and the
 > content-addressed store that holds every result together with its provenance.
 
@@ -53,7 +53,6 @@ algorithm explores and which it treats as known constants.
 model.camdl      → what the model IS (structure, priors, scenarios)
 params.toml      → a point m ∈ M (concrete parameter values)
 fit.toml         → how inference RUNS (what to estimate, priors, data, one method)
-batch TOML       → how a batch RUNS (sweep/design/scenarios/seeds)
 ```
 
 The `.camdl` file owns structure. It also owns two things that are easy to
@@ -66,12 +65,12 @@ outside a preset.
 | Model structure       | `.camdl` only                               | never                                              |
 | Parameter names/types | `.camdl` only                               | never                                              |
 | Parameter values (M)  | `.camdl` default, params TOML, `[fixed]`    | draw/sweep point, scenario, `--param`/`--fixed`    |
-| Scenarios (σ)         | `.camdl scenarios { }`                      | CLI `--enable`/`--disable`, batch `[[scenario]]`   |
+| Scenarios (σ)         | `.camdl scenarios { }`                      | CLI `--enable`/`--disable`                         |
 | Interventions         | `.camdl` only                               | scenarios and `--enable`/`--disable` toggle them   |
 | Priors                | `.camdl` `~`, `fit.toml [estimate.p.prior]` | fit.toml wins over the model                       |
-| Backend / `dt`        | CLI, batch `[config]`, fit.toml `[method]`  | `--backend` / `--dt` on the simulate-side commands |
-| Seeds                 | CLI, batch `[config.seeds]`, `fit_seeds`    | `--seed` / `--seeds`                               |
-| Sweep / design        | CLI `--sweep`, batch `[sweep]`/`[design.*]` | never                                              |
+| Backend / `dt`        | CLI, fit.toml `[method]`                    | `--backend` / `--dt` on the simulate-side commands |
+| Seeds                 | CLI, `fit_seeds`                            | `--seed` / `--seeds`                               |
+| Sweep / design        | CLI `--sweep` / `--sweep-file`              | never                                              |
 | Estimate vs fixed     | `fit.toml` only                             | `fit run --sweep` varies a `[fixed]` parameter     |
 | Which method runs     | `fit.toml [method]`                         | never — a second method is a second file           |
 
@@ -82,8 +81,8 @@ parameter and the sources that were consulted.
 
 ### 1.3 Precedence Chains
 
-Parameter resolution for the simulate-side commands (`simulate`, `batch run`,
-`pfilter`, `survey`, `profile`, `lineage`) is a single function,
+Parameter resolution for the simulate-side commands (`simulate`, `pfilter`,
+`survey`, `profile`, `lineage`) is a single function,
 `params_resolver::resolve_parameters`, which is the only writer of
 `model.parameters[i].value` outside the IR layer. It layers six tiers, last
 wins:
@@ -125,15 +124,13 @@ parameter is recorded in `fit.meta.json`.
 
 ### 1.4 Core Design Rules
 
-**One job type behind both front-ends.** `camdl simulate` and `camdl batch run`
-build the same `SimulateJob` (`sim_job.rs`) and hand it to one engine
-(`engine::run_job`), which plans the `param-point × scenario × seed-slot` grid
-and drives it through a `RunSink`. The two commands differ only in their sink:
-`simulate` writes per-cell store leaves plus a combined wide-format mirror;
-`batch run` writes per-cell store leaves only. `SimulateJob` deliberately has no
-serde derive — the front-ends each parse their own surface (clap args, batch
-TOML) and converge on the resolved struct, rather than sharing a second wire
-schema that would drift from the batch TOML's own versioned form.
+**One job type behind the verb.** `camdl simulate` builds a `SimulateJob`
+(`sim_job.rs`) and hands it to one engine (`engine::run_job`), which plans the
+`param-point × scenario × seed-slot` grid and drives it through a `RunSink`;
+`fit predict` builds the same job for its free-forward replay. `simulate`'s sink
+writes per-cell store leaves plus a combined wide-format mirror. `SimulateJob`
+deliberately has no serde derive — the CLI parses its own surface (clap args)
+and lowers to the resolved struct, so there is no second wire schema to drift.
 
 **Every parameter choice is accounted for, but a model default is a legal
 source.** In `fit.toml` the rule is exhaustive and enforced: every model
@@ -145,13 +142,14 @@ parameter declared with a default therefore runs without a params file, and the
 recorded provenance says `model_default`.
 
 **Sweeps are orthogonal to everything.** A sweep is "run this thing at multiple
-parameter values," and it works on both sides. `batch run` takes `[sweep]` (a
-deterministic grid) or `[design.*]` (space-filling), mutually exclusive.
-`fit run --sweep NAME=SPEC` varies a `[fixed]` parameter, where SPEC is
-`V1,V2,…` | `lin(min,max,n)` | `log10(min,max,n)`; sweeping a parameter that is
-in `[estimate]`, or not in `[fixed]`, is an error. On the simulate side, sweeps
-compose with scenarios and seeds by Cartesian product, provided the scenario
-does not touch a swept parameter (that is refused; see §3.6).
+parameter values," and it works on both sides. `simulate --sweep NAME=GRID`
+(repeatable) or `--sweep-file FILE` varies a model parameter over a
+deterministic grid — the design axis (§5.5). `fit run --sweep NAME=SPEC` varies
+a `[fixed]` parameter, where SPEC is `V1,V2,…` | `lin(min,max,n)` |
+`log10(min,max,n)`; sweeping a parameter that is in `[estimate]`, or not in
+`[fixed]`, is an error. On the simulate side, sweeps compose with scenarios and
+seeds by Cartesian product, provided the scenario does not touch a swept
+parameter (that is refused; see §3.6).
 
 **Draws and sweeps are different operations.** A sweep is a deterministic grid
 the user designed; draws are samples from a distribution (posterior, prior, or
@@ -189,7 +187,6 @@ project/
 ├── data/            # observation TSVs, lookup tables
 ├── params/          # parameter-point TOMLs
 ├── fits/            # fit.toml configs
-├── batches/         # batch TOML manifests
 └── results/         # the content-addressed store (see below)
 ```
 
@@ -763,11 +760,11 @@ recomputes it today. The manifest is an exact set over the leaf's whole subtree,
 except reserved files and _declared children_: a declared child subdirectory
 (`obs/`) is a boundary, recognized and not recursed into.
 
-**Which commands skip on a cache hit.** `batch run`, `fit run`, and `profile`
-consult `lookup` and skip the computation on a `Hit` (unless `--force`).
-`camdl simulate` does not: it runs every planned cell and relies on the commit
-being idempotent, because its combined wide-format mirror needs every cell's
-rows.
+**Which commands skip on a cache hit.** `fit run` and `profile` consult `lookup`
+and skip the computation on a `Hit` (unless `--force`). A multi-cell
+`camdl simulate` skips a cell the store already holds under the exact rule of
+§4.4 and reads its `traj.tsv` back for the combined mirror; a lone `simulate`
+runs its cell and relies on the commit being idempotent.
 
 ### 2.4 Simulation Result Layout
 
@@ -817,19 +814,6 @@ count, so three replicates and four replicates are different ensembles
 (count-in-the-key), and the ensemble `deps` on the N `sim` leaves it was built
 from. Its path label is `cells-n{N}`.
 
-`camdl batch run` writes the same per-cell `sim` leaves and no ensemble, plus
-`model.ir.json`, `model.render.json`, and `model.graph.json` at the **output
-root** (not under `sims/`).
-
-**The `model` label differs by entry point.** `simulate` labels the model level
-with the `.camdl` source stem; `batch run` labels it with the stem of the
-_compiled IR path_, which is the IR cache's 64-hex filename, or `camdl_{pid}`
-when the IR cache is bypassed. The same model, params, scenario and seed
-therefore produce the same `run_id` at two (or more) different paths depending
-on how the run was launched, and `camdl show <run_id>` reports those paths as an
-ambiguous match that no longer prefix can resolve. Until the two entry points
-agree on the label, address such a run by its leaf path.
-
 ### 2.5 Per-leaf metadata
 
 Every leaf directory contains exactly one `run.json`, the serialized
@@ -866,9 +850,6 @@ aspirational.
 `<root>/.staging/` holds in-flight atomic commits (§2.3.1). Entries left behind
 by a crash are inert debris; they are never read.
 
-`camdl batch run` additionally archives `model.ir.json`, `model.render.json`,
-and `model.graph.json` at the store root.
-
 ---
 ## 3. Core Types
 
@@ -882,16 +863,15 @@ confusion:
 
 | Family              | Purpose                                                | Lives in                                                      |
 | ------------------- | ------------------------------------------------------ | ------------------------------------------------------------- |
-| **Surface types**   | Parse one front end: clap args or a TOML document       | `rust/crates/cli/src/args/`, `rust/crates/cli/src/batch.rs`     |
-| **Engine input**    | The resolved job both front ends converge on            | `rust/crates/cli/src/sim_job.rs`                                |
+| **Surface types**   | Parse the CLI surface: clap args                        | `rust/crates/cli/src/args/`                                     |
+| **Engine input**    | The resolved job the surface lowers to                  | `rust/crates/cli/src/sim_job.rs`                                |
 | **Identity values** | Hashed, per-level digests of the fully-resolved inputs  | `rust/crates/runid/src/inputs.rs`                               |
 
 The pipeline is:
 
 ```text
-camdl simulate <args>  ─┐
-                        ├─→  SimulateJob  ─→  engine::run_job  ─→  per-cell SimRun
-camdl batch run <toml> ─┘     (resolved)        (cell grid)          (resolved θ, σ, seed)
+camdl simulate <args>  ─→  SimulateJob  ─→  engine::run_job  ─→  per-cell SimRun
+                            (resolved)        (cell grid)          (resolved θ, σ, seed)
                                                                             │
                                           runid identity values  ←──────────┘
                                           (ModelDigest, SimConfig, ResolvedParams,
@@ -900,11 +880,9 @@ camdl batch run <toml> ─┘     (resolved)        (cell grid)          (resolv
                                         five LevelIds  →  run_id  →  store path
 ```
 
-The surface types are deliberately **not** shared between the CLI and the batch
-TOML, and `SimulateJob` deliberately has no serde derives. The property that
-matters is that both front ends *converge on the same resolved struct*, not that
-they share a wire format — a shared serde representation would create a second,
-drifting schema alongside batch's existing TOML.
+`SimulateJob` deliberately has no serde derives: the surface *lowers to one
+resolved struct*, and a wire format for that struct would be a second schema to
+keep in step with the flags.
 
 ### 3.1 SimulateJob — the resolved engine input
 
@@ -913,10 +891,9 @@ drifting schema alongside batch's existing TOML.
 ```rust
 #[derive(Debug, Clone)]
 pub struct SimulateJob {
-    /// Resolved IR/`.camdl` path (already anchored to the config dir for
-    /// batch; verbatim for the CLI).
+    /// Resolved IR/`.camdl` path, verbatim from the CLI.
     pub model: String,
-    /// `--params` / `[config].params` files, applied in order.
+    /// `--params` files, applied in order.
     pub params_files: Vec<String>,
     pub backend: ForwardBackend,
     pub dt: f64,
@@ -930,7 +907,7 @@ pub struct SimulateJob {
     /// S layer.
     pub seeds: Seeds,
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell
-    /// (M layer, highest precedence). Empty for batch.
+    /// (M layer, highest precedence).
     pub cli_overrides: Vec<(String, f64)>,
     /// `--param-vec PREFIX=FILE` entries (CLI only).
     pub set_vec_entries: Vec<(String, String)>,
@@ -946,8 +923,8 @@ pub struct SimulateJob {
 It carries no output directory, no `--force`, no label, and no GeoJSON path:
 those are write-side concerns owned by the sink, not by the job. `camdl
 simulate` builds one in `main.rs` and always sets `parallel: 1` (its combined
-wide-format output is order-sensitive); `camdl batch run` builds one in
-`batch.rs` and passes the manifest's thread count.
+wide-format output is order-sensitive); `fit predict` builds one for its
+free-forward replay and passes its own thread count.
 
 The engine that consumes it is `rust/crates/cli/src/engine.rs`:
 
@@ -960,9 +937,8 @@ pub fn run_job(job: &SimulateJob, sink: &mut dyn RunSink) -> Result<(), String>;
 product `scenario × param-point × replicate`, in exactly that iteration order —
 and `run_job` runs them (sequentially, or via Rayon when `parallel > 1`) and
 merges each into a `RunSink` in canonical order. `simulate` supplies a sink that
-accumulates a combined wide-format TSV; `batch run` supplies one that commits a
-content-addressed leaf per cell. The two produce byte-identical leaves for the
-same cell.
+commits a content-addressed leaf per cell and accumulates the combined
+wide-format TSV.
 
 Per-cell seeds are order-independent by construction, so parallelism never
 perturbs a trajectory:
@@ -1014,8 +990,7 @@ CLI mapping:
 
 These four flags are mutually exclusive at the clap level. All of them are
 *mirrors*: the observation draws are also written into the run's leaf under
-`obs/{obs_hash8}-{obs_seed}/`. In a batch manifest the equivalent switch is
-`[obs] enabled = true`, which writes only the leaf copy.
+`obs/{obs_hash8}-{obs_seed}/`.
 
 ### 3.2 ParamSource — where parameter vectors come from
 
@@ -1054,7 +1029,7 @@ Which front end produces which variant:
 | Variant  | Produced by                                                              |
 | -------- | ------------------------------------------------------------------------ |
 | `Point`  | `simulate` with no `--draws` (`--replicates N` sets the count)            |
-| `Sweep`  | `batch run` — the manifest's `[sweep]` grid, or a `[design.*]` block       |
+| `Sweep`  | `simulate --sweep …` / `--sweep-file FILE` — the design axis (§5.5)        |
 | `Draws`  | `simulate --draws …` (all four sources of §3.4)                           |
 
 `explicit_file` is what distinguishes a user-authored draws file from generated
@@ -1065,9 +1040,8 @@ colliding parameter, both sources, and the fix (the diagnostic is shown in
 §3.6). Over generated draws the same overlap is allowed: a scenario applied to
 prior, uniform, or posterior draws is the counterfactual those runs exist for.
 The check is `engine::check_scenario_coordinate_collision`, reached from
-`engine::run_job` and from the batch job constructor (so `batch run --dry-run`
-and `batch status` refuse it too); `fit predict --sweep` words its own check
-with the same formatter.
+`engine::run_job` and from `simulate --dry-run` (so a dry run refuses what the
+run would); `fit predict --sweep` words its own check with the same formatter.
 
 This is collision policy, not precedence. The resolution order of §1.3 still
 places a scenario above a draw row or sweep point, and that order is what
@@ -1076,35 +1050,15 @@ values the user listed.
 
 ### 3.3 Sweep specification
 
-There are two sweep surfaces, and they are different types with different
-syntax. Neither is reachable from `camdl simulate`.
+One sweep grammar serves every verb that takes a grid.
 
-**Batch manifest `[sweep]`** — `rust/crates/cli/src/batch.rs` (private to the
-module). One entry per swept parameter; the section expands to the Cartesian
-product, with keys sorted for a deterministic point order.
-
-```toml
-[sweep]
-vacc_eff = [0.1, 0.3, 0.5]                              # explicit list
-beta     = { linspace = { min = 0.1, max = 0.9, n = 9 } }
-kappa    = { logspace = { min = 0.001, max = 0.1, n = 5 } }
-R0       = { range = { min = 1.0, max = 5.0, step = 0.5 } }
-```
-
-`linspace` and `logspace` are endpoint-inclusive and collapse to `[min]` at
-`n = 1`; `logspace` interpolates geometrically between `min` and `max` (the
-values, not their exponents). `range` walks `min` upward by `step` while
-`x <= max`, with `step` defaulting to `1.0`.
-
-A spec is refused when the manifest is read, never expanded into something
-other than it says: a key its form does not have (so
-`{ range = [0.1, 0.3], step = 0.1 }` is an error, not a one-point sweep), a
-`range` written as an array, an empty list, `n = 0`, a non-finite value, a
-non-positive `logspace` bound, a `range` whose `max` is below its `min`, and a
-`step` that is not positive and finite (gh#594).
-
-**CLI `--sweep NAME=SPEC`** — `rust/crates/cli/src/args/types.rs`, used by
-`camdl profile`, `camdl fit run`, and `camdl fit predict`.
+**`--sweep NAME=SPEC`** — `rust/crates/cli/src/args/types.rs`, used by
+`camdl simulate`, `camdl profile`, `camdl fit run` and `camdl fit predict`.
+`simulate` and `fit predict` share one expansion (`rust/crates/cli/src/sweep.rs`):
+several `--sweep` flags form the Cartesian product **sorted by parameter name**,
+the first name varying slowest, and `point_id` is a point's 0-based position in
+it, so the two verbs give the same `point_id` for the same flags. `simulate`
+also reads a grid from a file, `--sweep-file FILE` (§5.5).
 
 ```rust
 pub struct SweepSpec { pub name: String, pub grid: Grid }
@@ -1201,20 +1155,8 @@ Surfaces:
 | `simulate --seed 42`          | `Seeds::Single(42)` (default `1`)             |
 | `simulate --seeds 1:100`      | `Seeds::Explicit([1..=100])`                  |
 | `simulate --seeds 1,2,42`     | `Seeds::Explicit([1, 2, 42])`                 |
-| batch `[config] seeds = {…}`  | `Seeds::Explicit(SeedsSection::resolve())`    |
 
-`--seed` and `--seeds` conflict, as do `--seeds` and `--replicates`. The batch
-manifest's seed table lives under `[config]` and is a table, never a bare
-integer (`rust/crates/cli/src/batch.rs`, `SeedsSection`):
-
-```toml
-[config]
-seeds = { list = [42, 137, 256] }   # explicit list
-seeds = { n = 1000 }                # start..start+n, start defaults to 1
-seeds = { n = 100, start = 500 }    # 500..600
-seeds = { from = 1, to = 1000 }     # inclusive range
-# omitted entirely                  → [1]
-```
+`--seed` and `--seeds` conflict, as do `--seeds` and `--replicates`.
 
 ### 3.6 ScenarioRef — the σ layer
 
@@ -1272,8 +1214,8 @@ absence of any scenario patch, and it hashes to the real digest of the empty
 delta rather than to a literal zero.
 
 A scenario whose `set` or `scale` touches a swept parameter — directly, or
-through a preset it composes — is refused before any cell runs, by `batch run`,
-`batch run --dry-run`, and `batch status` alike. Precedence alone (§1.3) would
+through a preset it composes — is refused before any cell runs, by
+`simulate --sweep` and its `--dry-run` alike. Precedence alone (§1.3) would
 let the scenario override every sweep value, so the sweep would not vary that
 parameter:
 
@@ -1393,8 +1335,8 @@ overflow a path component.
 **Step 5 — write.** Every CAS write goes through one seam,
 `resolve::begin_resolved_write`, which derives the path from the resolved
 identity, builds the `RunRecord` in exactly one place, and dispatches to either
-an atomic commit (the whole artifact set handed over at once — the simulate and
-batch path) or a streaming claim that the caller writes into and finalizes (the
+an atomic commit (the whole artifact set handed over at once — the simulate
+path) or a streaming claim that the caller writes into and finalizes (the
 fit path). Cache validity is `FsCasStore::lookup`, which requires an identity
 match, a current schema, `status = Completed`, and an exact-set file check;
 anything else is a `Miss`, a `Stale(reason)`, or a `Collision` on a
@@ -1407,11 +1349,10 @@ wide-format TSV as its own artifact kind, `SimEnsemble`, under
 per-cell list *and the explicit cell count*, so three replicates and four
 replicates are different ensembles; the ensemble's `deps` carry one
 `ArtifactRef` per cell leaf, pinned to that cell's `traj.tsv` digest.
-## 4. Single-Run Simulation (No Batch File)
+## 4. Single-Run Simulation
 
 The `.camdl` file plus a parameter TOML is a complete, self-contained
-specification for running a model. No batch file or fit config is needed for
-exploration.
+specification for running a model. No fit config is needed for exploration.
 
 ### 4.1 Basic CLI
 
@@ -1518,8 +1459,8 @@ exit 1 with a one-line message.
 files in order → draw row or sweep point → scenario `set`/`scale` (preset or
 inline) → `--param`. A scenario that `set`s a parameter therefore overrides a
 value coming from generated `--draws`; only `--param` beats a scenario. A
-scenario touching a parameter that a `--draws <file>` column or a batch
-`[sweep]` varies is refused rather than resolved (§3.2). See §5.4.
+scenario touching a parameter that a `--draws <file>` column or a `--sweep`
+varies is refused rather than resolved (§3.2). See §5.4.
 
 ### 4.3 Parameter and Model Inputs
 
@@ -1649,12 +1590,20 @@ t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_wa
 
 The bytes in the store leaf's `traj.tsv` are the same table without that header.
 
-**Re-running does not skip.** `camdl simulate` re-simulates every cell on every
+**Re-running.** A lone `camdl simulate` re-simulates its cell on every
 invocation and re-commits the identical leaf; the commit is idempotent, so the
-store does not grow, but the CPU cost is paid again. There is no cache-hit
-short-circuit and no "cached" banner on this path, and `--force` therefore has
-no observable effect on `simulate`. `camdl batch run` **does** skip committed
-leaves (§5.6), and `--force` is meaningful there.
+store does not grow. A multi-cell run skips the cells the store already holds
+and reads their `traj.tsv` back for the combined outputs, reporting
+`N of M cells read from the store; simulated K`. A cell is held only when every
+requested artifact is present: the leaf's own files and, when observations are
+requested, the exact `obs/<hash8>-<obs_seed>/` subtree with every stream file
+and its `obs.json` — a leaf holding another cadence's subtree is a miss. A leaf
+is found by its hashes, not its label, so a renamed model file or a relabelled
+arm is still a hit. `--force` recomputes every cell (the displaced leaves are
+quarantined, not deleted); `--quantities-out` recomputes every cell too, since
+the quantities are a sidecar over the in-memory trajectory. `--dry-run` on a
+multi-cell run prints every cell as `[hit ]` or `[miss]` with its leaf path and
+the counts, and writes nothing.
 
 **Layout.** Five factored levels under `<output-dir>/sims/`:
 
@@ -1717,8 +1666,7 @@ whose `seed` column is the pairing key across design points. `draw` is the
 0-based draw index.
 
 `--parallel` is accepted by `camdl simulate` but not honoured — the simulate
-grid always runs sequentially. Use `camdl batch run --parallel N` for a
-parallel grid.
+grid runs sequentially (`main.rs` builds its job with `parallel: 1`).
 
 ### 4.5 `camdl list` / `show` / `cat` / `label` — the primary access path
 
@@ -1944,8 +1892,8 @@ also written into the leaf under `obs/<obs-hash>-<obs-seed>/<stream>.tsv`
 alongside an `obs.json`, so they are reachable with `camdl cat <id> --stream
 <name>` without keeping the loose files.
 
-These writers — `--obs`, `--obs-dir`, the store's `obs/` subtree, `batch run`'s
-`[obs]`, and a generated quantity that reduces `observations.<stream>` — draw
+These writers — `--obs`, `--obs-dir`, the store's `obs/` subtree, and a
+generated quantity that reduces `observations.<stream>` — draw
 every stream from the model alone, with no data columns. So a stream whose
 likelihood reads a data column is refused by name before any cell runs,
 including a ratio stream's `n` that `--design-from` writes from the model: a
@@ -1957,17 +1905,16 @@ The observation RNG is seeded independently of the process RNG, so adding
 `--obs` does not change the trajectory.
 ---
 
-## 5. Ensembles and Batch Simulation
+## 5. Ensembles and Sweeps
 
-Two entry points share one engine. `camdl simulate` covers a grid expressed
-entirely in flags (scenarios × draws/replicates × seeds); `camdl batch run`
-covers a grid declared in a TOML manifest, which additionally supports Cartesian
-`[sweep]` grids and space-filling `[design.*]` blocks. Both build a
-`SimulateJob` and hand it to `engine::run_job`, and both write the same
-five-level leaves, so `camdl list` / `show` / `cat` browse them uniformly.
-
-There is no `--sweep` flag on `camdl simulate` and no `--batch` flag; a sweep is
-a batch manifest.
+One engine behind every grid. `camdl simulate` covers a grid expressed entirely
+in flags: scenarios × parameter points × replicates or seeds, where the
+parameter points are a sample (`--draws`) or a design (`--sweep` /
+`--sweep-file`, §5.5). It builds a `SimulateJob`, hands it to `engine::run_job`,
+and writes one five-level `sim` leaf per cell, so `camdl list` / `show` / `cat`
+browse every cell uniformly; a multi-cell run also writes one `SimEnsemble` leaf
+holding the combined table (§4.4). A grid the store already holds is read back,
+not re-simulated.
 
 ### 5.1 CLI Invocations
 
@@ -1999,10 +1946,19 @@ camdl simulate sir_priors.camdl --draws posterior --fit results/fits/sir-8a3f12b
 # ── Record the sampled parameter vectors ─────────────────
 camdl simulate sir_priors.camdl --draws uniform -n 5 --draws-out draws_uniform.tsv
 
-# ── From a batch manifest ────────────────────────────────
-camdl batch run batches/scenario_comparison.toml --parallel 8
-camdl batch run batches/scenario_comparison.toml --dry-run
-camdl batch status batches/scenario_comparison.toml
+# ── Deterministic grid over a parameter (the design axis) ─
+camdl simulate sirv.camdl --params params.toml \
+    --scenario baseline,with_vaccination --sweep beta=lin(0.2,0.6,5) --seeds 1:50
+
+# ── Two swept parameters: the name-sorted Cartesian product ─
+camdl simulate sir_basic.camdl --params params.toml \
+    --sweep beta=0.2,0.3 --sweep gamma=0.1,0.2 --replicates 10
+
+# ── Design points from a file (one row per point) ─────────
+camdl simulate sir_basic.camdl --params params.toml --sweep-file design.tsv --replicates 5
+
+# ── Plan the grid against the store without running ───────
+camdl simulate sirv.camdl --params params.toml --sweep beta=lin(0.2,0.6,5) --seeds 1:50 --dry-run
 ```
 
 `-n` / `--n-draws` sets the draw count for `--draws prior|uniform` (there is no
@@ -2048,15 +2004,15 @@ is not an error: the scenario wins and every draw resolves to the same θ. See
 ### 5.2 CLI ↔ Type Mapping
 
 `camdl simulate` parses into `args::SimulateArgs` (clap) and lowers to
-`sim_job::SimulateJob`; `camdl batch run` deserializes `batch::ExperimentToml`
-and lowers to the same `SimulateJob`. From there neither the engine nor the
-store knows which front-end produced the job.
+`sim_job::SimulateJob`; `fit predict` builds the same job for its free-forward
+replay. From there neither the engine nor the store knows which verb produced
+the job.
 
 ```rust
-/// The resolved engine input. Both front-ends converge here.
+/// The resolved engine input.
 pub struct SimulateJob {
     pub model: String,                 // resolved IR or .camdl path
-    pub params_files: Vec<String>,     // --params / [config].params, applied in order
+    pub params_files: Vec<String>,     // --params, applied in order
     pub backend: ForwardBackend,       // gillespie | chain_binomial | ode
     pub dt: f64,
     pub integrator: Option<IntegratorArg>,   // --integrator rk4|rk45
@@ -2073,7 +2029,7 @@ pub struct SimulateJob {
 pub enum ParamSource {
     /// One point, run `replicates` times. `simulate` with no --draws.
     Point { replicates: usize },
-    /// Cartesian grid of swept values. Only `batch run` [sweep]/[design.*].
+    /// Design points: --sweep (name-sorted Cartesian product) or --sweep-file rows.
     Sweep { points: Vec<IndexMap<String, f64>>, replicates: usize },
     /// Pre-resolved draws. `explicit_file` is Some only for --draws <file.tsv>,
     /// which is what gates the scenario-collision error (§5.1).
@@ -2087,7 +2043,7 @@ pub enum ParamSource {
 pub enum ScenarioRef {
     /// A `scenarios {}` preset in the model file.
     Named(String),
-    /// An inline patch (a batch `[[scenario]]` carrying enable/disable/params).
+    /// An inline patch (the ad-hoc arm: --enable/--disable/--param).
     Inline { name: String, enable: Vec<String>, disable: Vec<String>,
              params: IndexMap<String, f64> },
 }
@@ -2095,7 +2051,7 @@ pub enum ScenarioRef {
 pub enum Seeds {
     /// One base seed; replicates derive seeds by XOR-mixing.
     Single(u64),
-    /// An explicit list (`--seeds`, batch `[config].seeds`), used verbatim.
+    /// An explicit list (`--seeds`), used verbatim.
     Explicit(Vec<u64>),
 }
 
@@ -2106,9 +2062,8 @@ pub enum ObsOutput { None, File(PathBuf), Dir(PathBuf), OnlyFile(PathBuf), OnlyD
 `--scenario` accepts a comma-separated list or repetition; both expand to the
 same `Vec<ScenarioRef>`.
 
-Output shape is supplied by the front-end as an `engine::RunSink`: `simulate`
-composes a store sink with a combined-TSV mirror sink; `batch run` uses the
-store sink alone.
+Output shape is supplied by the verb as an `engine::RunSink`: `simulate`
+composes the store sink with a combined-TSV mirror sink.
 
 ### 5.3 Total Runs Calculation
 
@@ -2117,16 +2072,17 @@ Total runs = |param_points| × |scenarios| × |seed slots|
 
 where |param_points| =
   Point:   1
-  Sweep:   product of |sweep_i.expand()| over swept parameters
+  Sweep:   the number of design points (the name-sorted Cartesian product of
+           the --sweep grids, or the rows of --sweep-file)
   Draws:   number of draw rows
 
 and |seed slots| =
-  --seeds / [config].seeds given:  the explicit seed count
+  --seeds given:   the explicit seed count
   otherwise:                       `replicates` (default 1), seeds derived from --seed
 
 and |scenarios| =
   none specified:  1 (implicit baseline)
-  otherwise:       the number of --scenario names or [[scenario]] entries
+  otherwise:       the number of --scenario names
 ```
 
 `--seeds` and `--replicates` are mutually exclusive; with `--seeds` the
@@ -2143,9 +2099,10 @@ sits at a higher precedence tier than the draw/sweep point (§4.2), so:
 > A parameter that a scenario `set`s takes the scenario's value, discarding the
 > sweep point or draw row for that parameter.
 
-This matters because the implicit scenario is `baseline`, and if the model
-declares a preset named `baseline` that pins parameters, that preset applies
-even though no `--scenario` was given. The failure is silent and total:
+This matters when a preset that pins parameters is selected — the implicit arm
+of a run with no `--scenario` applies no preset, but `--scenario baseline` on a
+model whose `baseline` preset sets parameters applies those values over every
+draw. The failure is silent and total:
 
 ```bash
 # sir_basic.camdl's `baseline` preset sets beta, gamma, N0, I0.
@@ -2155,245 +2112,138 @@ camdl simulate sir_basic.camdl --scenario baseline --draws uniform -n 3 --backen
 produces three leaves with three distinct `run_id`s and three **byte-identical**
 trajectories. Dropping `--scenario baseline` gives three different trajectories.
 
-For user-authored coordinates this cannot happen: a batch `[sweep]`, a
-`[design.*]` block, or a `--draws <file>` whose parameters the effective
-scenario sets or scales is refused before any cell runs (§3.2, §3.6). Generated
-draws stay allowed, because a scenario over them is the intended counterfactual,
-so for them the rule remains practical: when drawing a parameter, the scenario
-in force must not `set` it unless discarding the draws for that parameter is
-what you mean. Compare two cells' `traj.tsv` to check.
+For user-authored coordinates this cannot happen: a `--sweep` grid, a
+`--sweep-file`, or a `--draws <file>` whose parameters the effective scenario
+sets or scales is refused before any cell runs (§3.2, §3.6). Generated draws
+stay allowed, because a scenario over them is the intended counterfactual, so
+for them the rule remains practical: when drawing a parameter, the scenario in
+force must not `set` it unless discarding the draws for that parameter is what
+you mean. Compare two cells' `traj.tsv` to check.
 
-### 5.5 Batch TOML Reference
+### 5.5 The design axis: `--sweep` and `--sweep-file`
 
-The manifest is a `[config]` table plus optional `[[scenario]]`, `[sweep]` or
-`[design.*]`, `[obs]`, and `[output]` sections. Unknown keys are a hard error.
+A _design point_ is a parameter value the modeller chose; a _draw_ is a sample
+from a measure. `simulate` keeps the two apart: `--draws` builds the sample axis
+and pools its cells into a band, `--sweep` / `--sweep-file` build the design
+axis and keep every point distinct. The two are refused together.
 
-```toml
-[config]
-model = "seir_vaccine.camdl" # .camdl source or a compiled .ir.json (required)
-params = "params.toml" # optional base parameter TOML
-geo = "geo/" # optional
-backend = "chain_binomial" # gillespie | chain_binomial | ode
-dt = 1.0
-output_dir = "results"
-parallel = 4 # 0 = all cores
-seeds = { n = 5 } # see below
-```
+**`--sweep PARAM=GRID`**, repeatable. GRID is a comma list (`beta=0.2,0.3,0.6`),
+`lin(min,max,n)` or `log10(min,max,n)`; an indexed parameter is named
+underscore-joined (`beta_north`), and its column is `sweep:beta_north`. Several
+`--sweep` flags form the Cartesian product **sorted by parameter name**, the
+first name varying slowest; `point_id` is a point's 0-based position in that
+product, and `fit predict --sweep` gives the same `point_id` for the same flags.
+A parameter named twice, or one the model does not declare, is refused before
+anything runs.
 
-`seeds` accepts exactly one of:
+**`--sweep-file FILE`**: a TSV whose header names model parameters and whose
+rows are design points, `point_id` the 0-based row. A column naming no model
+parameter is refused with the parameter list; a file with zero rows is refused;
+a duplicate row is refused naming both lines. `--sweep-file` and `--sweep` are
+mutually exclusive. The file enters the ensemble's record by content digest.
 
-```toml
-seeds = { n = 1000 } # 1..=1000 (or start..start+n-1 with `start`)
-seeds = { n = 100, start = 500 }
-seeds = { from = 1, to = 100 }
-seeds = { list = [1, 2, 42] }
-```
+**Seeds and common random numbers.** Every design point at a given replicate
+shares one process seed: with `--replicates 2`, point 0 and point 1 of replicate
+0 run on the same random stream, as do their replicate-1 cells. So a parameter
+the dynamics do not read gives byte-identical trajectories across points, paired
+differences across points are low-variance, and adding a point leaves the
+others' trajectories unchanged. For independent noise per point, run one
+invocation per point with a distinct `--seed`. The pairing key is the `seed`
+column of the combined and observation tables.
 
-with `{ }` (or an absent `seeds`) meaning the single seed `1`.
+**Refusals.** A scenario whose `set` or `scale` touches a swept parameter —
+directly or through a preset it composes — is refused (§3.6), on the run and the
+dry run alike; so is a `--param` on a swept parameter, since `--param` outranks
+every tier and the sweep would not vary it; so is `--sweep` with `--draws` or
+`--design-from`.
 
-**Scenario comparison.** Each `[[scenario]]` name is resolved against the
-model's `scenarios {}` presets: a bare name matching a preset routes through the
-preset; a name carrying inline `enable`/`disable`/`params` is an ad-hoc
-scenario; a bare name matching nothing is an error.
+**Labels and records.** Each cell's `params` level is labelled by the swept
+values, `beta=0.2` in `run.json` and `beta_0.2-<h8>` in the path, two swept
+parameters as `beta=0.3_rho=0.5`; the arm label is the preset's name, or derived
+from the flags for an ad-hoc arm (`baseline`, `baseline+vaccination` for
+`--enable vaccination`, `baseline;beta=0.3` for `--param beta=0.3`). The
+ensemble leaf's `run.json` carries the resolved design — its source, the point
+count (`n_points`, in place of a sample's `n_draws`) and each swept parameter's
+values, name-sorted — so the grid declaration lives with the results.
 
-```toml
-# batches/scenario_comparison.toml
-[config]
-model = "seir_vaccine.camdl"
-params = "params.toml"
-backend = "chain_binomial"
-dt = 1.0
-output_dir = "results"
-parallel = 4
-seeds = { n = 5 }
+**Columns.** Under a sweep the combined `ensemble.tsv` (and `-o` mirror) leads
+with `replicate`, `point_id`, one `sweep:<param>` column per swept parameter
+(shortest round-trip rendering, so `0.1234567` reads back exactly) and `seed`,
+then the time columns; there is no `draw` column. Observation tables under
+`--obs-dir` / `--obs-only-dir` / `--obs` / `--obs-only` carry the same four
+leading columns before the stream's own. `quantities {}` under a sweep are
+banded per (design point, scenario), never across points; one replicate per
+point gives a point-mode row per group.
 
-[[scenario]]
-name = "baseline" # a model preset
-
-[[scenario]]
-name = "with_sia" # a model preset
-
-[[scenario]]
-name = "high_coverage" # ad-hoc: inline patches, name is a label
-enable = ["sia_round_1"]
-params = { vacc_frac = 0.95 }
-
-# 3 scenarios × 5 seeds = 15 runs
-```
-
-```bash
-camdl batch run batches/scenario_comparison.toml
-```
-
-```
-   cached IR for seir_vaccine.camdl (52996338)
-Done: 15/15 runs completed. Leaves under results/sims/
-```
-
-An unresolvable scenario stops the run before any cell:
-
-```
-error: scenario 'sweep_arm' is not a model preset and defines no inline enable/disable/params.
-  Available model presets: 'baseline', 'high_r0'.
-  Fix: use one of the listed presets, add enable/disable/params to define an ad-hoc scenario, or use
-  'baseline' for the unmodified model.
-```
-
-**Cartesian sweep.** `[sweep]` maps a parameter name to a list or a generator.
-Keys are sorted before expansion, so the point order is deterministic.
-
-```toml
-# batches/r0_gamma_sweep.toml
-[config]
-model = "sir_basic.camdl"
-params = "sir_params.toml"
-seeds = { n = 3 }
-output_dir = "results_sweep"
-
-[[scenario]]
-name = "sweep_arm" # ad-hoc, so it does not pin beta/gamma (§5.4)
-params = { I0 = 10 }
-
-[sweep]
-beta = [0.2, 0.3, 0.4, 0.5]
-gamma = { linspace = { min = 0.05, max = 0.2, n = 3 } }
-# 4 × 3 = 12 points × 1 scenario × 3 seeds = 36 runs
-```
-
-The four `[sweep]` value forms:
-
-```toml
-p = [0.1, 0.3, 0.5] # explicit list
-p = { linspace = { min = 0.1, max = 0.9, n = 9 } } # n linearly-spaced, endpoints inclusive
-p = { logspace = { min = 0.001, max = 0.1, n = 5 } } # n log-spaced, endpoints inclusive; min > 0
-p = { range = { min = 1.0, max = 5.0, step = 0.5 } } # min, min+step, … ≤ max; step defaults to 1.0
-```
-
-**Space-filling design.** `[design.NAME]` replaces `[sweep]` (the two are
-mutually exclusive) and generates points by `sobol`, `lhs`, or `random` over
-per-parameter ranges, optionally on a `log`/`logit` scale, optionally weighted
-by a `prior`.
-
-```toml
-# batches/design_lhs.toml
-[config]
-model = "sir_basic.camdl"
-params = "sir_params.toml"
-seeds = { list = [1, 2] }
-output_dir = "results_design"
-parallel = 2
-
-[[scenario]]
-name = "explore"
-params = { N0 = 1000 }
-
-[design.wide]
-method = "lhs"
-n = 6
-
-[design.wide.parameters]
-beta = { range = { min = 0.1, max = 0.6 }, transform = "log" }
-gamma = { range = { min = 0.05, max = 0.3 } }
-
-[obs]
-enabled = false
-
-[output]
-no_flows = true
-```
+**Observations as a dataset.** `--obs-dir DIR` writes one TSV per observation
+stream, stacked over every cell with the columns above; that directory is the
+dataset a modeller then hands to `pfilter --data cases=DIR/cases.tsv` or to a
+fit, and the same draws also land in each leaf's `obs/` subtree. There is no
+path-less observation flag: the destination is the product.
 
 ```bash
-camdl batch run batches/design_lhs.toml
+camdl simulate ocaml/golden/sir_basic.camdl --params ocaml/golden/sir_basic.params.toml \
+    --sweep beta=0.2,0.5 --replicates 2 --dry-run --output-dir results
 ```
 
 ```
-Design 'wide': method=lhs n=6 parameters=2
-  Generated 6 parameter points
-  Wrote results_design/designs/wide/parameter_points.tsv
-Design 'wide' complete: 12/12 cells. Leaves under results_design/sims/.
+2 design points × 2 replicates = 4 runs
+camdl simulate (dry run)
+
+  model: ocaml/golden/sir_basic.camdl
+  backend: chain_binomial
+  dt: 1
+  sweep: beta = [0.2, 0.5]
+  design: 2 design point(s)
+  seed: 1
+  replicates: 2
+  scenario: (baseline)
+
+Parameters (3):
+  I0    =             10  ocaml/golden/sir_basic.params.toml
+  N0    =           1000  ocaml/golden/sir_basic.params.toml
+  gamma =       0.100000  ocaml/golden/sir_basic.params.toml
+
+  total: 2 design points × 2 replicates = 4 runs
+
+store: results
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/baseline-037ee3b0/seed_1-06cbd6b3
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/baseline-037ee3b0/seed_5871781006564002452-f483e20c
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/baseline-037ee3b0/seed_1-06cbd6b3
+  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/baseline-037ee3b0/seed_5871781006564002452-f483e20c
+  0 cache hits → read back, 4 misses → would simulate
+(dry run — no simulation, no files written.)
 ```
 
-The generated points are archived as
-`<output_dir>/designs/<name>/parameter_points.tsv`; the simulation cells are
-ordinary `sims/` leaves and dedupe against identical non-design runs.
-
-Declaring both sections is refused:
-
-```
-error: [sweep] and [design.*] are mutually exclusive.
-  [sweep] — deterministic grid for specific parameter values
-  [design.*] — space-filling for sensitivity/VOI analysis
-  Use one or the other in a single experiment file.
-```
-
-**Synthetic observations for the whole grid.** `[obs] enabled = true` samples
-every run's observation streams into the leaf's `obs/` subtree. There is no
-per-file path option — the leaves are the output. A model with no
-`observations {}` block is an error rather than a silent no-op.
-
-```toml
-[config]
-model = "sir_two_patch_long_obs.camdl"
-seeds = { from = 1, to = 3 }
-output_dir = "results_obs"
-
-[[scenario]]
-name = "baseline"
-
-[obs]
-enabled = true
-```
-
-Each leaf then carries
-`obs/<obs-hash>-<obs-seed>/{cases_urban.tsv,
-cases_rural.tsv, obs.json}` beside
-`traj.tsv`.
-
-**Column view.** `[output]` takes the same three keys as the `simulate` flags
-and applies them to every cell:
-
-```toml
-[output]
-every = 7 # like --output-every
-no_flows = true # like --no-flows
-columns = ["S", "I"] # like --columns
-```
-
-**CLI overrides.** `camdl batch run` accepts `--output-dir`, `--parallel`,
-`--dry-run`, `--force`, and `--allow-degenerate-rates`; the first two override
-the manifest's values.
+The two seed segments are shared by both `beta` points — the common random
+numbers above — and `beta` is absent from the parameter list because the sweep
+supplies it per cell.
 
 ### 5.6 Execution Flow
 
-`camdl batch run`:
+A multi-cell `camdl simulate`:
 
-1. Parses the manifest (unknown keys are fatal) and resolves the model to IR,
-   compiling the `.camdl` if needed.
-2. Loads `[config].params`. A params file that carries an inference-provenance
-   header is checked against its recorded content hash and the result reported;
-   a header-less file is loaded silently.
-3. Resolves the seed list, every `[[scenario]]` against the model's presets, and
-   the `[output]` column view.
-4. Expands `[sweep]` or `[design.*]` into parameter points and builds the
-   `param-point × scenario × seed` grid.
-5. Classifies each cell against the store: a committed leaf with the same
-   `run_id` is skipped unless `--force`. `--dry-run` stops here and prints the
-   scenario table, the point list with each value's provenance, the hit/miss
-   counts, and the leaf paths.
-6. Runs the remaining cells on a scoped rayon pool sized by `--parallel` (`0` =
-   all cores), then merges results in canonical order — parallelism never
-   perturbs a trajectory, because each cell's seed is derived from its
-   coordinates, not from iteration order.
-7. Writes `traj.tsv` + `run.json` (+ `obs/` when enabled) per leaf. There is no
-   batch manifest file; the per-leaf `run.json` records are the index, with
-   `<root>/index.json` as a derived, rebuildable lookup cache.
-8. Archives `model.ir.json` at `<output_dir>/`, plus `model.render.json` and
-   `model.graph.json` when the manifest pointed at `.camdl` source.
-
-`camdl batch status <manifest>` re-resolves every cell's identity the same way
-and reports how many leaves are already committed, listing the remaining cells.
-It requires `[config].model` to be a compiled `.ir.json`; against a `.camdl`
-source it reports `(cannot parse model …: IR JSON parse error …)` and no counts.
+1. Parses the flags, resolves the model to IR (compiling the `.camdl` if
+   needed), loads `--params`, and resolves every `--scenario` against the
+   model's presets (or derives the ad-hoc arm from `--enable` / `--disable` /
+   `--param`).
+2. Expands the parameter axis — the draws of `--draws`, or the design points of
+   `--sweep` / `--sweep-file` — and builds the `param-point × scenario × seed`
+   grid. A scenario touching a user-authored coordinate is refused here.
+3. Classifies each cell against the store under the exact rule of §4.4.
+   `--dry-run` stops here and prints the plan, each cell as a hit or a miss with
+   its leaf path, and the counts.
+4. Runs the cells the store does not hold, sequentially, in canonical
+   `scenario → point → replicate` order (each cell's seed is derived from its
+   coordinates, so no ordering can perturb a trajectory), and reads the held
+   cells back.
+5. Writes `traj.tsv` + `run.json` (+ `obs/` when observations were requested)
+   per leaf, the `SimEnsemble` leaf with the combined table and the resolved
+   design, and the `-o` / `--obs*` mirrors. There is no grid-level manifest
+   file; the per-leaf `run.json` records are the index, with `<root>/index.json`
+   as a derived, rebuildable lookup cache.
+6. Reports `N of M cells read from the store; simulated K` and where the leaves
+   landed.
 
 ## 6. FitConfig — the inference type
 
@@ -4252,8 +4102,8 @@ if the field did not exist.
 - `seed` — `Seed`. Only `process_seed` is hashed; `base_seed` is
   `#[run_input(provenance)]`. Hashing the derived per-cell seed rather than the
   user's `--seed` is what stops a lone run and a sweep cell from aliasing.
-  Label: `seed_{n}` — note this renders the _process_ seed on the simulate/batch
-  path, so a multi-replicate run shows segments like `seed_5871781006564002452`.
+  Label: `seed_{n}` — note this renders the _process_ seed, so a multi-replicate
+  run shows segments like `seed_5871781006564002452`.
 
 **`FitStage` levels** (`fit::cas::resolve_fit_stage`):
 
@@ -4378,12 +4228,13 @@ recomputed on any read path today.
 
 **What a cache hit actually saves.**
 
-- `camdl batch run` skips the simulation itself: `CasSink::should_run` returns
-  `false` on a `Hit` and the cell is never computed.
-- `camdl simulate` **always recomputes every cell** — `SimSink` deliberately
-  does not override `should_run`, because the combined mirror needs every cell's
-  rows. What the hit saves is the write: `commit_atomic` sees an
-  `AlreadyCompleted` leaf and discards the freshly staged bytes.
+- A multi-cell `camdl simulate` skips the simulation itself: `SimSink` defers to
+  `CasSink::should_run`, which returns `false` on a hit under the exact rule of
+  §4.4, and the cell's `traj.tsv` (and stored observations) are read back for
+  the combined outputs instead.
+- A lone `camdl simulate` recomputes its cell. What the hit saves is the write:
+  `commit_atomic` sees an `AlreadyCompleted` leaf and discards the freshly
+  staged bytes.
 
 Consequences of that second rule, which are load-bearing for anyone reasoning
 about the store:
@@ -4657,14 +4508,13 @@ written with the same atomic tmp+rename+fsync ordering as `run.json`, and
 A malformed, absent, or version-mismatched `index.json` is a clean miss, never
 an error. `camdl dev reindex [ROOT]` rebuilds it from a fresh walk.
 
-### 9.7 Enumerating a batch — no manifest file
+### 9.7 Enumerating a grid — no manifest file
 
-There is no batch-level `manifest.json`. Each completed cell is independently a
+There is no grid-level `manifest.json`. Each completed cell is independently a
 content-addressed `run.json` leaf under `sims/` (the system of record). To
-enumerate a sweep, walk those leaves or read the derived `index.json` (§9.6).
-`camdl list` and `camdl batch status` both do this live; `batch status` re-plans
-the sweep from the batch TOML and reports, per cell, whether `store.lookup` on
-its resolved identity is already a `Hit`.
+enumerate a grid, walk those leaves or read the derived `index.json` (§9.6).
+`camdl list` does this live; `simulate --dry-run` re-plans the grid from its
+flags and reports, per cell, whether the store already holds it.
 
 A multi-cell `simulate` additionally writes one `SimEnsemble` leaf holding the
 combined wide-format TSV, with a `deps` edge to each cell's `traj.tsv`.
@@ -6073,10 +5923,7 @@ Accepted on every subcommand:
 
 ```
 camdl
-├── simulate MODEL              forward simulation
-├── batch
-│   ├── run FILE                sweep from a TOML manifest
-│   └── status FILE             completion status of a sweep
+├── simulate MODEL              forward simulation (single run, ensemble, sweep)
 ├── fit
 │   ├── run CONFIG              run the [method] of a fit.toml
 │   ├── summary FIT             R̂ / gate verdict / MLE table for one fit
@@ -6168,7 +6015,15 @@ Ensemble
                               dir (posterior), or [fixed] backfill (file)
   -n, --n-draws N             number of draws (required for uniform/prior)
   --draws-out PATH            write the sampled parameter vectors as a TSV
-  --parallel N                concurrent runs (env CAMDL_PARALLEL)
+  --sweep PARAM=GRID          the DESIGN axis (repeatable): a comma list,
+                              lin(min,max,n) or log10(min,max,n); several flags form
+                              the name-sorted Cartesian product. Refused with --draws,
+                              with a --param on a swept parameter, and with a scenario
+                              that sets or scales one (§5.5)
+  --sweep-file FILE           design points from a TSV: header = parameters, one row
+                              per point. Refused with --sweep and --draws
+  --parallel N                accepted, not honoured: cells run sequentially (§4.4;
+                              env CAMDL_PARALLEL)
 
 Trajectory output
   -o, --output FILE           plain-TSV mirror IN ADDITION to the store leaf
@@ -6215,24 +6070,9 @@ Store
   --cas                       no-op, accepted for compatibility (CAS is the default)
 ```
 
-There is **no** `--sweep` on `simulate`; parameter sweeps are `camdl batch run`
-(manifest) or `camdl fit run --sweep` (over fixed params).
-
-### `camdl batch`
-
-```
-camdl batch run FILE
-  --output-dir DIR            override output_dir from the manifest (env CAMDL_OUTPUT_DIR)
-  --parallel N                override the manifest's thread count (env CAMDL_PARALLEL)
-  --dry-run                   print the resolved sweep grid without running
-  --force                     re-run even if output exists
-  --allow-degenerate-rates    as on simulate
-
-camdl batch status FILE       completed vs pending runs for a sweep manifest
-```
-
-There is no `--resume` flag: resume-by-cache is the default, and `--force`
-overrides it.
+There is no `--resume` flag: a multi-cell run reads back the cells the store
+already holds by default, and `--force` overrides it. `camdl fit run --sweep`
+sweeps a `[fixed]` parameter of a fit (§7.3).
 
 ### `camdl fit run CONFIG`
 
@@ -6522,18 +6362,13 @@ camdl dev eval MODEL --expr "a,b"
 camdl dev compile / camdl dev doctest      (see "Compiler passthroughs")
 ```
 
-### Batch TOML stability
+### Sensitivity analysis
 
-**Batch TOML is v1 and will change.** Its field names (`[config]`,
-`[[scenario]]`, `[sweep]`) are standalone and pre-date the v2 run-system types
-(`SimulateJob`, `SweepSpec`, `Seeds` in `rust/crates/cli/src/fit/config_v2.rs`).
-A future version will align the schema with v2. **External tooling should not
-assume the current field names survive unchanged.** Open an issue if you're
-writing such tooling and need a migration window.
-
-Sensitivity analysis (Sobol indices and similar) is not a camdl concern. Run
-`camdl batch run` to produce the output tree, then compute indices with R's
-`sensitivity` package or Python's `SALib`.
+Sensitivity analysis (Sobol indices and similar) is not a camdl concern, and
+camdl generates no space-filling designs. Generate the design in R or Python,
+run it with `camdl simulate --sweep-file design.tsv`, and compute the indices
+over `ensemble.tsv` (every row carries its `point_id` and `sweep:<param>`
+values) with R's `sensitivity` package or Python's `SALib`.
 
 ---
 
