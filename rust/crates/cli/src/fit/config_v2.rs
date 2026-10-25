@@ -2261,6 +2261,14 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
                  and cannot be resumed; they run again."
                     .to_string(),
             ),
+            "rho" => Some(
+                "`rho` was removed with correlated pseudo-marginal PMMH: `pmmh` runs \
+                 the bootstrap particle filter with independent likelihood \
+                 evaluations, as it did with `rho` unset. Delete the line. PMMH fits \
+                 stored before the removal are not reused and cannot be resumed; they \
+                 run again."
+                    .to_string(),
+            ),
             _ => None,
         };
         if let Some(why) = retired {
@@ -3818,6 +3826,21 @@ cooling = 0.7
         assert!(err.contains("`tempering`") && err.contains("removed") && err.contains("elete"),
             "must say the key was removed and to delete the line; got: {err}");
         let without = stale_tempering.replace("tempering = [1.0]\n", "");
+        assert!(parse(&without).is_ok(),
+            "the same file without the line must parse: {:?}", parse(&without).err());
+
+        // `rho` left with correlated pseudo-marginal PMMH (proposal
+        // 2026-10-24 §5.6). Same contract: the message says the key was
+        // removed and that the fix is to delete the line; the same file
+        // without the line parses.
+        let stale_rho = format!(
+            "{base}[method]\nalgorithm = \"pmmh\"\nbackend = \"chain_binomial\"\n\
+             chains = 1\nparticles = 100\niterations = 50\nburn_in = 10\nrho = 0.99\n"
+        );
+        let err = parse(&stale_rho).expect_err("`rho` under [method] is not a key");
+        assert!(err.contains("`rho`") && err.contains("removed") && err.contains("elete"),
+            "must say the key was removed and to delete the line; got: {err}");
+        let without = stale_rho.replace("rho = 0.99\n", "");
         assert!(parse(&without).is_ok(),
             "the same file without the line must parse: {:?}", parse(&without).err());
     }
@@ -7011,8 +7034,10 @@ decibans_thresh = 100.0
         let stage = make_pmmh_stage(1000);
         let payload_str = serde_json::to_string(&stage.identity_payload()).unwrap();
         // Updated with the `[stages]` → `[method]` split — see the PGAS golden
-        // above for the reason.
-        let expected = r#"{"adapt":true,"adapt_start":300,"algorithm":"pmmh","backend":"chain_binomial","burn_in":200,"chains":4,"particles":100,"rho":null,"starts":"uniform_unconstrained","thin":2}"#;
+        // above for the reason. Moved again when correlated pseudo-marginal
+        // PMMH was removed: the `rho` key left the payload, so every PMMH
+        // leaf re-keys — the release notes' Run-identity entry.
+        let expected = r#"{"adapt":true,"adapt_start":300,"algorithm":"pmmh","backend":"chain_binomial","burn_in":200,"chains":4,"particles":100,"starts":"uniform_unconstrained","thin":2}"#;
         assert_eq!(payload_str, expected,
             "PMMH identity_payload byte format drifted — see \
              pgas_identity_payload_byte_stable for context.");

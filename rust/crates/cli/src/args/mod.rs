@@ -797,6 +797,10 @@ pub struct FitRunArgs {
     // its own message.
     #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
     pub _removed_tempering: Option<String>,
+    // `--rho` went with correlated pseudo-marginal PMMH; same shape, its own
+    // message.
+    #[arg(long = "rho", value_name = "F", hide = true)]
+    pub _removed_rho: Option<String>,
 
     /// User-supplied display label for this fit (1–64 chars after
     /// trim; allowed: letters, digits, spaces, commas, dot,
@@ -1858,6 +1862,10 @@ pub struct ProfileArgs {
     pub _removed_mle: Option<String>,
     #[arg(long = "params", value_name = "TOML", hide = true)]
     pub _removed_params: Option<String>,
+    // `--pmmh-rho` went with correlated pseudo-marginal PMMH; same shape, its
+    // own message (answered in `cmd_profile` before any file is read).
+    #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
+    pub _removed_pmmh_rho: Option<String>,
 
     /// Cooling schedule
     #[arg(long, default_value_t = 0.95)]

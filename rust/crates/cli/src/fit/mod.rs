@@ -277,6 +277,18 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         );
         std::process::exit(1);
     }
+    // Correlated pseudo-marginal PMMH was removed; `--rho` is trapped the same
+    // way.
+    if let Some(raw) = a._removed_rho.as_deref() {
+        eprintln!(
+            "error: --rho is no longer accepted on `camdl fit run`: correlated \
+             pseudo-marginal PMMH was removed, and `pmmh` runs the bootstrap particle \
+             filter with independent likelihood evaluations. Drop `--rho {raw}`; a \
+             `rho = ...` line under [method] must be deleted too. PMMH fits stored \
+             before the removal are not reused and cannot be resumed; they run again."
+        );
+        std::process::exit(1);
+    }
     let fit_path              = a.config.to_string_lossy().into_owned();
     let base_seed             = a.seed.unwrap_or(1);
     let force                 = a.force;

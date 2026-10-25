@@ -282,6 +282,19 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         eprintln!("error: {msg}");
         std::process::exit(2);
     }
+    // Correlated pseudo-marginal PMMH was removed; `--pmmh-rho` is trapped so
+    // a stale script is answered with the fix rather than clap's "unexpected
+    // argument".
+    if let Some(raw) = a._removed_pmmh_rho.as_deref() {
+        eprintln!(
+            "error: --pmmh-rho is no longer accepted on `camdl profile`: correlated \
+             pseudo-marginal PMMH was removed, and `--algorithm pmmh` runs the bootstrap \
+             particle filter with independent likelihood evaluations. Drop \
+             `--pmmh-rho {raw}`. Profile runs stored before the removal are not reused; \
+             they run again."
+        );
+        std::process::exit(1);
+    }
     // `--fixed NAME=VALUE` → `fixed_cli`, `--fixed-file <toml>`
     // (repeatable, layered) → `fixed_files`. Both feed into the
     // unified resolver; the fit.toml [fixed] block is still
@@ -2116,7 +2129,7 @@ mod tests {
             "algorithm": "if2",
             "if2": { "particles": 30usize, "iterations": 5usize,
                      "cooling": 0.7, "dt": 1.0, "starts": 1usize },
-            "pmmh": { "steps": 0usize, "particles": 0usize, "rho": None::<f64> },
+            "pmmh": { "steps": 0usize, "particles": 0usize },
             "rw_sd": rw_sd,
             "rw_sd_auto": false,
             "init": init,
