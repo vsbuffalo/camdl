@@ -94,7 +94,20 @@ pub fn write_mle_params(
     metadata: &MleMetadata,
 ) -> Result<(), String> {
     use std::io::Write;
-    let content_hash = mle_params_tamper_hash(all_params);
+    // The hash covers the values as the file holds them. `format_param_value`
+    // writes ten decimals, so a hash over the unrounded `f64` would declare a
+    // value no reader of the file can recompute, and a check against it
+    // would call every real fit's file edited.
+    let as_written: std::collections::BTreeMap<String, f64> = all_params
+        .iter()
+        .map(|(k, v)| {
+            let written = crate::fit::runner::format_param_value(*v);
+            written.parse::<f64>().map(|read_back| (k.clone(), read_back)).map_err(|_| {
+                format!("cannot write {}: `{}` formats to {:?}, which is not a number", path, k, written)
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    let content_hash = mle_params_tamper_hash(&as_written);
     let mut f = std::fs::File::create(path)
         .map_err(|e| format!("cannot write {}: {}", path, e))?;
 
@@ -279,5 +292,46 @@ mod tests {
             mle_params_tamper_hash(&params2),
             "different values must produce different hashes"
         );
+    }
+
+    /// The declared `content_hash` is recomputable from the file: the file
+    /// holds `format_param_value`'s ten decimals, so the hash must cover the
+    /// values as written, not the unrounded estimate.
+    #[test]
+    fn content_hash_is_over_the_values_as_written() {
+        let dir = crate::test_support::unique_temp_dir("mle_params_as_written");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mle_params.toml");
+        let path_s = path.to_string_lossy().into_owned();
+        // Thirteen decimals: more than the file carries.
+        let params: std::collections::BTreeMap<String, f64> =
+            [("beta".to_string(), 0.4321098765432_f64), ("gamma".to_string(), 0.2)].into();
+        let meta = MleMetadata {
+            input_hash: "deadbeef".into(),
+            model_path: "sir.camdl".into(),
+            model_identity: "f00d".into(),
+            data_hashes: vec![],
+            seed: 1,
+            method: "if2".into(),
+            best_chain_index: 0,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            dt: 1.0,
+            loglik: -12.5,
+            loglik_sd: 0.0,
+            n_particles: 100,
+            ess_at_mle: None,
+            timestamp: "2026-10-24T00:00:00Z".into(),
+        };
+        write_mle_params(&path_s, &params, &meta).unwrap();
+        let declared = read_mle_provenance(&path_s).unwrap().unwrap().content_hash;
+        let read_back: std::collections::BTreeMap<String, f64> =
+            crate::util::load_params_toml(&path_s).unwrap().into_iter().collect();
+        assert_eq!(read_back["beta"], 0.4321098765, "the file holds ten decimals");
+        assert_eq!(
+            mle_params_tamper_hash(&read_back),
+            declared,
+            "the declared hash must be the hash of the values the file holds"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
