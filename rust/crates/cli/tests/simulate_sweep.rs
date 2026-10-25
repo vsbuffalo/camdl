@@ -316,6 +316,56 @@ fn sweep_conflicts_are_refused_by_name() {
     assert!(fx.leaves().is_empty(), "a refused run writes no leaf");
 }
 
+/// A model whose transmission rate is spelled like an indexed parameter,
+/// `beta_north`, so `--param-vec beta=FILE` with a row `north` sets it.
+const VEC_MODEL: &str = r#"
+time_unit = 'days
+
+compartments { S, I, R }
+
+let N = S + I + R
+
+parameters {
+  beta_north : rate in [0.01, 5.0]
+  gamma      : rate in [0.01, 5.0]
+}
+
+transitions {
+  infection : S --> I  @ beta_north * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+
+init { S = 990  I = 10  R = 0 }
+
+simulate { from = 0 'days  to = 10 'days }
+"#;
+
+/// A `--param-vec` row naming a swept parameter is refused like a `--param`
+/// on one: the two share a rank above every other tier, so the sweep would
+/// not vary it while its columns said otherwise. A row on another parameter
+/// composes with the sweep.
+#[test]
+fn param_vec_on_a_swept_parameter_is_refused() {
+    let fx = Fixture::new();
+    std::fs::write(fx.path("m.camdl"), VEC_MODEL).unwrap();
+    std::fs::write(fx.path("p.toml"), "beta_north = 0.4\ngamma = 0.2\n").unwrap();
+    let vec = fx.write("v.tsv", "north\t0.3\n");
+    assert_refused(
+        &fx.simulate(&["--sweep", "beta_north=0.2,0.3", "--param-vec", "beta=v.tsv"]),
+        "--param-vec on a swept parameter",
+        &[
+            "parameter `beta_north` is both swept and pinned by `--param-vec beta=v.tsv` (row `north` = 0.3)",
+            "would not vary `beta_north`",
+        ],
+    );
+    assert!(fx.leaves().is_empty(), "a refused run writes no leaf");
+    assert_ok(
+        &fx.simulate(&["--sweep", "gamma=0.1,0.2", "--param-vec", &format!("beta={vec}"), "--seed", "4"]),
+        "a param-vec row on an unswept parameter beside a sweep",
+    );
+    assert_eq!(fx.leaves().len(), 2, "both design points ran");
+}
+
 /// Test 6 — `--sweep-file` refusals: an unknown column (with the parameter
 /// list), zero rows, a duplicate row (both line numbers named).
 #[test]
