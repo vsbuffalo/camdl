@@ -122,22 +122,40 @@ fn seed_label(r: &RunRecord) -> String {
         .unwrap_or_default()
 }
 
+/// The one stderr line for a fit leaf the view cannot read and skips, so a
+/// stored fit that `fit summary` / `fit table` / `fit predict` leave out says
+/// why instead of vanishing.
+fn skipped_leaf_line(dir: &Path, why: &str) -> String {
+    format!("warning: skipping fit leaf {}: {why}", dir.display())
+}
+
 /// Build a [`FitStageView`] from a fit-stage leaf record + its directory.
-/// Returns `None` when the record is not a `FitStage` or its `inputs` lacks a
-/// parseable `method`.
-fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Option<FitStageView> {
+/// Errs, with the reason, when the record is not a `FitStage` or its `inputs`
+/// lacks a `method` this camdl knows — a leaf written by a removed algorithm
+/// (`nuts` on the ODE backend) is the case that matters. The caller says so
+/// on stderr ([`skipped_leaf_line`]) rather than dropping the leaf silently.
+fn stage_view_from_record(seg: &Path, dir: &Path, rec: &RunRecord) -> Result<FitStageView, String> {
     if rec.kind != ArtifactKind::FitStage {
-        return None;
+        return Err("not a fit-stage record".into());
     }
-    let inputs = rec.inputs.as_object()?;
-    let method: FitAlgorithm = inputs
-        .get("method")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())?;
+    let inputs = rec
+        .inputs
+        .as_object()
+        .ok_or_else(|| "its run.json has no `inputs` object".to_string())?;
+    let method: FitAlgorithm = match inputs.get("method") {
+        None => return Err("its run.json records no `method`".into()),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|_| {
+            format!(
+                "it records method {v}, which this camdl does not know (a method \
+                 removed since the fit ran is read by the camdl that wrote it)"
+            )
+        })?,
+    };
     let backend: InferenceBackend = inputs
         .get("backend")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or(InferenceBackend::ChainBinomial);
-    Some(FitStageView {
+    Ok(FitStageView {
         stage_dir: dir.to_path_buf(),
         method,
         method_hash: rec
@@ -246,7 +264,13 @@ impl FitView {
 
         let stages: Vec<FitStageView> = leaves
             .iter()
-            .filter_map(|(dir, r)| stage_view_from_record(seg, dir, r))
+            .filter_map(|(dir, r)| match stage_view_from_record(seg, dir, r) {
+                Ok(v) => Some(v),
+                Err(why) => {
+                    eprintln!("{}", skipped_leaf_line(dir, &why));
+                    None
+                }
+            })
             .collect();
 
         Some(FitView {
@@ -273,6 +297,32 @@ impl FitView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A leaf whose run.json names an algorithm this camdl does not know (a
+    /// stored NUTS-on-ODE fit, after that method's removal) is skipped with a
+    /// line naming the leaf and the reason, not dropped silently.
+    #[test]
+    fn a_leaf_with_an_unknown_algorithm_is_skipped_with_a_reason() {
+        let dir = std::env::temp_dir().join(format!(
+            "camdl_unknown_algo_{}_{}", std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let leaf = dir.join("nuts-1fb03eee").join("seed_1-06cbd6b3");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let rec: RunRecord = serde_json::from_str(&format!(
+            r#"{{"format_version":1,"kind":"fit_stage","run_id":"{run_id}","hash_version":1,"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"method","label":"nuts","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"nuts","backend":"ode","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-07-07T00:00:00Z","argv":["camdl","fit","run"]}}}}"#,
+            run_id = "ab".repeat(32),
+        ))
+        .unwrap();
+        let why = stage_view_from_record(&dir, &leaf, &rec)
+            .expect_err("`nuts` is not a FitAlgorithm any more");
+        let line = skipped_leaf_line(&leaf, &why);
+        assert!(line.starts_with("warning: skipping fit leaf "), "{line}");
+        assert!(line.contains(&leaf.display().to_string()), "names the leaf: {line}");
+        assert!(line.contains("\"nuts\"") && line.contains("does not know"),
+            "names the method and the reason: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
     use crate::run_meta::{write_fit_sidecar, FitSidecar};
 
     /// Write a realistic two-method CAS fit segment under `seg` — the shape

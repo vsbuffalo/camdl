@@ -201,8 +201,9 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `fit.toml` or `--algorithm` that still names `nuts` is refused with that
   instruction. Stored NUTS fits are no longer read: their leaves record `nuts`
   as their method, which this camdl does not recognise, so `fit summary`,
-  `fit table` and `fit predict` do not see them; read one with a camdl built at
-  the `archive/ode-nuts` tag. The forward-sensitivity gradient, `nl-lbfgs` and
+  `fit table` and `fit predict` skip them, printing one line per skipped leaf
+  that names it and the reason; read one with a camdl built at the
+  `archive/ode-nuts` tag. The forward-sensitivity gradient, `nl-lbfgs` and
   PGAS's NUTS move are unchanged.
 
 - **`camdl batch` was removed.** `batch run MANIFEST.toml` and `batch status`
