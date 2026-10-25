@@ -23,6 +23,7 @@ mod browse;
 mod check_update;   // `camdl check-update` — GitHub release-availability check
 mod sampling;
 mod sim_job;       // SimulateJob / ParamSource / Seeds / ScenarioRef / ObsOutput (run-spec §3)
+mod sweep;         // the design axis: --sweep / --sweep-file expansion, checks, the resolved design
 mod engine;        // run_job: the single engine behind simulate + batch run (run-spec §3.1)
 mod cas_sink;      // CasSink: the content-addressed store sink shared by simulate + batch run
 mod batch;
@@ -1090,6 +1091,53 @@ fn run_simulate(a: &args::SimulateArgs) {
         m
     };
 
+    // ── The design axis: `--sweep PARAM=GRID` / `--sweep-file FILE` ─────────
+    //
+    // Resolved once, against the model as the run reads it, into the design
+    // points (name-sorted `(param, value)` lists, `point_id` = position) and
+    // the resolved design the ensemble record carries. A swept name must be a
+    // declared parameter, named once; a `--param` on a swept parameter is
+    // refused here because `--param` outranks every tier, so the sweep would
+    // not vary that parameter (the gh#571 shape). A scenario that sets or
+    // scales a swept parameter is refused by the engine's coordinate guard
+    // (gh#572), on the run and on the dry run alike.
+    let design: Option<(Vec<crate::sweep::DesignPoint>, crate::sim_ensemble_cas::ResolvedDesign)> =
+        if !a.sweep.is_empty() {
+            crate::sweep::check_swept_names(&a.sweep, &model_to).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            Some((
+                crate::sweep::expand_sweep_specs(&a.sweep),
+                crate::sweep::design_from_specs(&a.sweep),
+            ))
+        } else if let Some(file) = a.sweep_file.as_deref() {
+            let f = crate::sweep::read_sweep_file(file, &model_to).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            Some((f.points, f.design))
+        } else {
+            None
+        };
+    if let Some((points, _)) = &design {
+        let swept: std::collections::BTreeSet<&str> =
+            points.iter().flat_map(|pt| pt.iter().map(|(k, _)| k.as_str())).collect();
+        for p in &a.model_overrides.param {
+            if swept.contains(p.name.as_str()) {
+                eprintln!(
+                    "error: parameter `{0}` is both swept and pinned by `--param {0}={1}`.\n  \
+                     A `--param` outranks every other tier, so the sweep would not vary `{0}`: \
+                     every design point would run at {1} while its label and `sweep:{0}` \
+                     column said otherwise.\n  \
+                     Fix: drop `--param {0}=…`, or remove `{0}` from the sweep.",
+                    p.name, p.value
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let to_was_anchored = to_is_anchored;
     let t_end_override: Option<f64> = match a.to.as_deref() {
         None => None,
@@ -1682,10 +1730,21 @@ fn run_simulate(a: &args::SimulateArgs) {
     let n_draws = draws.len();
 
     let n_scenarios = scenario_list.len();
-    let total_runs = n_draws * replicates * n_scenarios;
+    // The parameter-point axis is EITHER the design (sweep points) OR the
+    // sample (draws); clap refuses both flags together.
+    let n_points = match &design {
+        Some((points, _)) => points.len(),
+        None => n_draws,
+    };
+    let total_runs = n_points * replicates * n_scenarios;
     if total_runs > 1 {
         let parts: Vec<String> = [
-            if n_draws > 1 { Some(format!("{} draws", n_draws)) } else { None },
+            match &design {
+                Some(_) if n_points > 1 => Some(format!("{} design points", n_points)),
+                Some(_) => None,
+                None if n_draws > 1 => Some(format!("{} draws", n_draws)),
+                None => None,
+            },
             if n_scenarios > 1 { Some(format!("{} scenarios", n_scenarios)) } else { None },
             if replicates > 1 { Some(format!("{} replicates", replicates)) } else { None },
         ].iter().flatten().cloned().collect();
@@ -1719,11 +1778,20 @@ fn run_simulate(a: &args::SimulateArgs) {
         scenario_names.iter().map(|n| ScenarioRef::Named(n.clone())).collect()
     };
 
-    // ParamSource: --draws yields Draws rows; otherwise a single Point run
-    // `replicates` times. With explicit --seeds the seed-list length is the
-    // replicate count (the engine ignores `Point.replicates` then), so passing
-    // `replicates` is correct in both cases.
-    let source = if let Some(ref src) = draws_path {
+    // ParamSource: --sweep / --sweep-file yields the design points; --draws
+    // yields Draws rows; otherwise a single Point run `replicates` times. With
+    // explicit --seeds the seed-list length is the replicate count (the engine
+    // ignores the variant's `replicates` then), so passing `replicates` is
+    // correct in every case.
+    let source = if let Some((points, _)) = &design {
+        ParamSource::Sweep {
+            points: points
+                .iter()
+                .map(|pt| pt.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                .collect(),
+            replicates,
+        }
+    } else if let Some(ref src) = draws_path {
         let rows: Vec<indexmap::IndexMap<String, f64>> = draws.iter()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .collect();
@@ -1828,6 +1896,7 @@ fn run_simulate(a: &args::SimulateArgs) {
             &scenario_list, &seeds, &draws_path,
             n_draws, replicates, total_runs,
             &obs_path, &obs_dir, &obs_only,
+            design.as_ref().map(|(_, d)| d),
         );
         return;
     }
@@ -2093,7 +2162,9 @@ fn run_simulate(a: &args::SimulateArgs) {
             crate::status::step("storing",
                 format!("ensemble \u{b7} {} cells ({})",
                     total_runs, crate::status::human_bytes(bytes.len() as u64)));
-            write_sim_ensemble(&sink.cas, bytes, &cas_root, label_arg.clone());
+            write_sim_ensemble(
+                &sink.cas, bytes, &cas_root, label_arg.clone(), design.as_ref().map(|(_, d)| d),
+            );
         }
     }
 
@@ -2688,6 +2759,10 @@ fn write_sim_ensemble(
     combined_bytes: &[u8],
     cas_root: &str,
     label: Option<String>,
+    // The resolved `--sweep` / `--sweep-file` design of a sweep job: keyed
+    // into the `grid` level and recorded in `run.json`, so the grid
+    // declaration lives with the results. `None` for every other job.
+    design: Option<&crate::sim_ensemble_cas::ResolvedDesign>,
 ) {
     // Build the cell list from the committed leaves. A cell without a resolved
     // run_id failed identity resolution (already on `errors`, which aborted
@@ -2721,7 +2796,7 @@ fn write_sim_ensemble(
         backend: cas.backend,
         dt: cas.dt,
         cells: &cells,
-        design: None,
+        design,
     };
     let resolved = match crate::sim_ensemble_cas::resolve_sim_ensemble(&ctx) {
         Ok(r) => r,
@@ -2743,19 +2818,28 @@ fn write_sim_ensemble(
         s.dedup();
         s.len()
     };
-    let n_draws = {
+    let n_point_ids = {
         let mut d: Vec<usize> = cells.iter().map(|c| c.point_id).collect();
         d.sort_unstable();
         d.dedup();
         d.len()
     };
-    let inputs = serde_json::json!({
+    let mut inputs = serde_json::json!({
         "n_cells": cells.len(),
         "scenarios": scenarios,
         "n_scenarios": scenarios.len(),
         "n_seeds": n_seeds,
-        "n_draws": n_draws,
     });
+    // The point axis is named for what it is: the design of a sweep job, with
+    // its `n_points`, or the draw count of a draws job. After the manifest is
+    // gone the record is the only place "β = lin(0.2, 0.6, 5)" survives.
+    match design {
+        Some(d) => {
+            inputs["n_points"] = serde_json::json!(n_point_ids);
+            inputs["design"] = serde_json::to_value(d).unwrap_or(serde_json::Value::Null);
+        }
+        None => inputs["n_draws"] = serde_json::json!(n_point_ids),
+    }
 
     let deps = crate::sim_ensemble_cas::ensemble_deps(&cells);
     let resolved_artifact = crate::resolve::ResolvedArtifact {
@@ -4548,6 +4632,7 @@ fn print_dry_run(
     obs_path: &Option<String>,
     obs_dir: &Option<String>,
     obs_only: &Option<String>,
+    design: Option<&crate::sim_ensemble_cas::ResolvedDesign>,
 ) {
     let d = style::dim;
     let b = style::bold;
@@ -4559,6 +4644,24 @@ fn print_dry_run(
     eprintln!("  {} {}", d("model:"), ir_path);
     eprintln!("  {} {}", d("backend:"), backend);
     eprintln!("  {} {}", d("dt:"), dt);
+
+    // The design axis: what the grid declaration resolved to.
+    let swept_names: Vec<String> = match design {
+        Some(crate::sim_ensemble_cas::ResolvedDesign::Sweep { params, n_points }) => {
+            for p in params {
+                let vals: Vec<String> = p.values.iter().map(|v| v.to_string()).collect();
+                eprintln!("  {} {} = [{}]", d("sweep:"), p.name, vals.join(", "));
+            }
+            eprintln!("  {} {} design point(s)", d("design:"), n_points);
+            params.iter().map(|p| p.name.clone()).collect()
+        }
+        Some(crate::sim_ensemble_cas::ResolvedDesign::File { params, digest, n_points }) => {
+            eprintln!("  {} {} design point(s) over {} (file digest {})",
+                d("sweep-file:"), n_points, params.join(", "), &digest[..8]);
+            params.clone()
+        }
+        None => Vec::new(),
+    };
 
     if seeds.len() > 1 {
         eprintln!("  {} {}:{} ({} seeds)", d("seeds:"), seeds[0], seeds[seeds.len()-1], seeds.len());
@@ -4664,6 +4767,12 @@ fn print_dry_run(
                     }
                 }
 
+                // A swept parameter varies per design point: listed above,
+                // not here with one value.
+                for name in &swept_names {
+                    provs.remove(name);
+                }
+
                 // Print
                 let max_name_len = provs.keys().map(|k| k.len()).max().unwrap_or(0);
                 eprintln!("Parameters ({}):", provs.len());
@@ -4690,7 +4799,13 @@ fn print_dry_run(
     // Total runs
     if total_runs > 1 {
         eprintln!();
+        let n_design_points = match design {
+            Some(crate::sim_ensemble_cas::ResolvedDesign::Sweep { n_points, .. })
+            | Some(crate::sim_ensemble_cas::ResolvedDesign::File { n_points, .. }) => *n_points,
+            None => 1,
+        };
         let parts: Vec<String> = [
+            if n_design_points > 1 { Some(format!("{} design points", n_design_points)) } else { None },
             if n_draws > 1 { Some(format!("{} draws", n_draws)) } else { None },
             if scenarios.len() > 1 { Some(format!("{} scenarios", scenarios.len())) } else { None },
             if seeds.len() > 1 { Some(format!("{} seeds", seeds.len())) } else { None },

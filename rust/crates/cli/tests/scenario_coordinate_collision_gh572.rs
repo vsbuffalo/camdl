@@ -112,6 +112,18 @@ mu = [0.2, 0.3, 0.4]
             .expect("spawn camdl")
     }
 
+    /// `simulate m.camdl --params p.toml --backend ode --output-dir out --sweep
+    /// mu=0.2,0.3,0.4 --scenario <scenario> <flags…>` — the same three-point
+    /// `mu` sweep as the manifest, on `simulate`'s design axis.
+    fn simulate_sweep(&self, scenario: &str, flags: &[&str]) -> Output {
+        let mut args = vec![
+            "simulate", "m.camdl", "--params", "p.toml", "--backend", "ode",
+            "--output-dir", "out", "--sweep", "mu=0.2,0.3,0.4", "--scenario", scenario,
+        ];
+        args.extend_from_slice(flags);
+        self.camdl(&args)
+    }
+
     /// `batch <sub> <manifest> <flags…>` — `batch run` / `batch status`.
     fn batch(&self, sub: &str, flags: &[&str]) -> Output {
         let manifest = self.path("batch.toml").to_string_lossy().into_owned();
@@ -120,9 +132,11 @@ mu = [0.2, 0.3, 0.4]
         self.camdl(&args)
     }
 
-    /// Every directory under the output root holding a `run.json`.
+    /// Every `Sim` leaf under the output root (`out/sims/`; a multi-cell
+    /// `simulate` also writes an ensemble leaf under `out/ensembles/`, which
+    /// is not a computation).
     fn leaves(&self) -> Vec<PathBuf> {
-        run_leaves(&self.path("out"))
+        run_leaves(&self.path("out").join("sims"))
     }
 }
 
@@ -159,11 +173,17 @@ fn assert_refused(out: &Output, what: &str, lines: &[&str]) {
 
 /// `batch run`, `batch run --dry-run` and `batch status` all refuse the
 /// manifest with the same diagnostic, and nothing is written to the store.
+/// `simulate --sweep` and `simulate --sweep --dry-run` refuse the same grid
+/// the same way (proposal 2026-10-24-batch-to-simulate §6 test 5).
 fn assert_every_batch_command_refuses(scenario: &str, lines: &[&str]) {
     let fx = Fixture::new(scenario);
     for (sub, flags) in [("run", &["--dry-run"][..]), ("status", &[][..]), ("run", &[][..])] {
         let what = format!("{scenario} / batch {sub} {}", flags.join(" "));
         assert_refused(&fx.batch(sub, flags), &what, lines);
+    }
+    for flags in [&["--dry-run"][..], &[][..]] {
+        let what = format!("{scenario} / simulate --sweep {}", flags.join(" "));
+        assert_refused(&fx.simulate_sweep(scenario, flags), &what, lines);
     }
     assert!(fx.leaves().is_empty(), "{scenario}: a refused sweep must write no leaf");
 }
@@ -221,6 +241,13 @@ fn sweep_under_a_scenario_on_another_parameter_runs_every_point() {
     let run = fx.batch("run", &[]);
     assert!(run.status.success(), "batch run must succeed; stderr:\n{}", stderr(&run));
     assert_eq!(fx.leaves().len(), 3, "three sweep points are three computations");
+    // The same grid through `simulate --sweep` plans and runs, and lands on the
+    // same three leaves (one identity per point, found by hash).
+    let dry = fx.simulate_sweep("pin_nu", &["--dry-run"]);
+    assert!(dry.status.success(), "simulate --sweep --dry-run must plan; stderr:\n{}", stderr(&dry));
+    let run = fx.simulate_sweep("pin_nu", &[]);
+    assert!(run.status.success(), "simulate --sweep must succeed; stderr:\n{}", stderr(&run));
+    assert_eq!(fx.leaves().len(), 3, "simulate --sweep over the same grid adds no leaf");
     let status = fx.batch("status", &[]);
     assert!(status.status.success(), "status must report; stderr:\n{}", stderr(&status));
     assert!(
