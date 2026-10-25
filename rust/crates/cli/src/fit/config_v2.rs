@@ -2842,8 +2842,8 @@ impl Problem {
         // gh#531: this used to cite `--output-dir` as the command-line case.
         // `fit run` has no such flag — `FitRunArgs` carries no `output_dir`,
         // and both call sites pass `output_root(None, config.output_dir…)`.
-        // The flag exists on `simulate` and `batch run`, neither of which
-        // loads a fit.toml, so it documented a precedence layer unreachable
+        // The flag exists on `simulate`, which does not load a fit.toml, so
+        // it documented a precedence layer unreachable
         // from here.
         if let Some(dir) = &mut self.output_dir {
             *dir = crate::util::resolve_relative_to_toml(toml_path, dir);

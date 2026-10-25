@@ -20,7 +20,7 @@
 //!    wrong path.
 //!
 //! Writes use the same atomic tmp + rename + fsync ordering as the store's
-//! `run.json` (see `runid::store`), so a concurrent `batch`/`fit` process can
+//! `run.json` (see `runid::store`), so a concurrent `simulate`/`fit` process can
 //! neither observe nor produce a torn `index.json`. A malformed or absent
 //! `index.json` is a clean miss (fall back to the walk), never a panic.
 

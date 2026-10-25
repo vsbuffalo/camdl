@@ -4,7 +4,7 @@
 //! leaf `run_id`.
 //!
 //! A multi-cell `simulate` writes one per-cell [`Sim`](runid::ArtifactKind::Sim)
-//! leaf (byte-identical to `batch run`) AND a combined wide-format trajectory
+//! leaf AND a combined wide-format trajectory
 //! TSV that interleaves every cell with `replicate`/`scenario`/`draw` columns.
 //! That combined TSV is the *ensemble* artifact: a derived view over the N
 //! leaves. Its identity must be a pure function of everything that determines

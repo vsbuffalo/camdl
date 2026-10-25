@@ -177,6 +177,20 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   carries the key, or a script that still passes either flag, is refused with
   that instruction.
 
+- **`camdl batch` was removed.** `batch run MANIFEST.toml` and `batch status`
+  are gone. The one capability behind them — a deterministic grid of a
+  parameter, run with common random numbers into the store and resumable — is
+  `camdl simulate --sweep PARAM=GRID` (repeatable; a comma list,
+  `lin(min,max,n)` or `log10(min,max,n)`) and `--sweep-file FILE`, composed with
+  `--scenario`, `--replicates` / `--seeds`, `--parallel`, `--force` and
+  `--dry-run` (which now reports every cell as a store hit or miss). Migration:
+  `[config]` becomes the `simulate` flags, each `[[scenario]]` a
+  `--scenario NAME` (an ad-hoc arm is `--param` / `--enable` / `--disable`),
+  `[sweep] beta = [0.2, 0.3]` becomes `--sweep beta=0.2,0.3`,
+  `[config.seeds] n = 50` becomes `--seeds 1:50`, `[obs] enabled = true` becomes
+  `--obs-dir DIR`, and a `[design.*]` block is generated externally and passed
+  as `--sweep-file`.
+
 ## Run identity
 
 - **Every stored PGAS fit, every stored PMMH fit and every stored
@@ -237,9 +251,9 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
 ## CLI
 
-- **Content-addressed run management:** `simulate` / `batch` / `fit` / `profile`
-  / `survey` write to a keyed store; browse with `list`, `show`, `cat`,
-  `reindex`, and `compare` (prequential elpd / CRPS / PIT).
+- **Content-addressed run management:** `simulate` / `fit` / `profile` /
+  `survey` write to a keyed store; browse with `list`, `show`, `cat`, `reindex`,
+  and `compare` (prequential elpd / CRPS / PIT).
 - **`camdl docs <topic>`** — embedded, version-matched usage guides (workflow,
   fit-toml, concepts, diagnosing-fits, language, language-changes) served
   offline.

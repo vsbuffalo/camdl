@@ -289,7 +289,7 @@ fn scenario_delta_re_keys_only_the_scenario_level() {
     assert_ne!(base.run_id, withvax.run_id);
 }
 
-// ── gh#241 PR F: input-surface differential harness (sim/batch) ───────────────
+// ── gh#241 PR F: input-surface differential harness ───────────────────────────
 //
 // The identity guarantee made executable: a SEMANTIC input mutation MUST re-key
 // the `run_id`; a PRESENTATION / provenance mutation MUST NOT. This complements
@@ -722,7 +722,7 @@ fn cas_identity_pins() {
         // base parameter map rebuilt beside them. The other five kinds hash no
         // ensemble level. (A real `sim` leaf also re-keys where its resolved
         // values differ from the old base map — a scenario that sets values, a
-        // draw shadowed by `--param`, a batch cell over model defaults — but
+        // draw shadowed by `--param`, a grid cell over model defaults — but
         // this fixture hands `resolve_trajectory` its params directly.)
         //
         // gh#583 (item F) then moved `fit` ALONE: the fit level's canonical

@@ -804,8 +804,7 @@ fn scenario_param_actions(
 /// commands exist to run.
 #[derive(Debug, Clone, Copy)]
 pub enum UserCoordinate<'a> {
-    /// A `[sweep]` / `--sweep` grid (also a `[design.*]` block, whose points
-    /// the batch front end runs as a sweep).
+    /// A `--sweep` / `--sweep-file` grid.
     Sweep,
     /// A `--draws <file.tsv>` the user authored.
     DrawsFile(&'a std::path::Path),

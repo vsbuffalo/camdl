@@ -1,7 +1,7 @@
 //! `run_job` — the single simulation engine over [`SimulateJob`].
 //!
-//! Both `camdl simulate` (`main::run_simulate`) and `camdl batch run`
-//! (`batch::cmd_batch_run`) build a [`SimulateJob`] and hand it here. This
+//! `camdl simulate` (`main::run_simulate`) and `fit predict`'s free-forward
+//! replay build a [`SimulateJob`] and hand it here. This
 //! is the run-spec §3.1 convergence: the multi-run logic — cell
 //! expansion, the determinism-critical seed arithmetic, per-cell
 //! [`SimRun`] construction, and simulation — lives in exactly one place.
@@ -24,7 +24,7 @@
 //!
 //! Per-cell `process_seed` depends only on `(explicit_seeds, base_seed,
 //! point_idx, rep, total_runs)` — never on the scenario or on iteration
-//! order — so a parallel sink (batch) and a sequential one (simulate)
+//! order — so a parallel grid and a sequential one
 //! produce identical per-cell trajectories. The grid is built first; cells
 //! run in `scenario → point → rep` index order (sequential) or via Rayon
 //! (parallel), and the sink merges results in that canonical order. The
@@ -41,8 +41,8 @@ use crate::util::{self, SimRun, SEED_MIX_OBS};
 
 /// Derive the process seed for one cell, reproducing `main.rs:833-841`.
 ///
-/// * `explicit_seeds` — `Some(&[..])` when `--seeds` / batch `seeds`
-///   listed seeds explicitly. Then the `rep` index selects directly.
+/// * `explicit_seeds` — `Some(&[..])` when `--seeds` listed seeds
+///   explicitly. Then the `rep` index selects directly.
 /// * `total_runs == 1` — a lone run uses `base_seed` untouched.
 /// * otherwise — XOR-mix `point_idx` and `rep` into `base_seed`.
 ///
@@ -115,14 +115,14 @@ pub struct Grid {
 /// The engine plans the grid, runs every cell (sequentially or via Rayon),
 /// then calls [`RunSink::merge_cell`] for each in canonical
 /// `scenario → point → rep` order. A sink that writes independent per-cell
-/// artifacts (batch's CAS tree) does its filesystem work inside
+/// artifacts (the content-addressed store) does its filesystem work inside
 /// `merge_cell`; a sink that builds combined output (simulate's
 /// wide-format TSV) accumulates and flushes in `on_finish`.
 pub trait RunSink {
     /// Called once before any cell runs.
     fn on_start(&mut self, _grid: &Grid) {}
     /// Whether a planned cell should be simulated. Default `true`. A
-    /// content-addressed sink (batch's CAS tree) returns `false` for a
+    /// content-addressed sink returns `false` for a
     /// cache hit so the engine skips the (expensive) simulation; `on_skip`
     /// then records the cached cell. Called in canonical order, before the
     /// simulation phase, so per-cell seed indices are unaffected.
@@ -207,7 +207,7 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
 
 /// Drive the full `scenario × param-point × replicate` grid for `job`,
 /// merging each completed cell into `sink` in canonical order. The single
-/// engine behind `simulate` and `batch run`.
+/// engine behind `simulate`.
 ///
 /// When `job.parallel > 1` the simulation phase runs cells via Rayon; the
 /// merge phase is always in-order. Per-cell seeds are order-independent
@@ -371,9 +371,9 @@ pub(crate) fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
 /// (`--draws posterior|prior|uniform`, `explicit_file: None`) are not checked:
 /// a scenario over generated draws is the counterfactual those runs exist for.
 ///
-/// Called by [`run_job`], the one execution entry point, and by the batch job
-/// constructor, so `batch run --dry-run` and `batch status` — which plan cells
-/// without executing — refuse the same manifests `batch run` does.
+/// Called by [`run_job`], the one execution entry point, and by
+/// `simulate --dry-run`, which plans cells without executing, so a dry run
+/// refuses the same grid the run does.
 pub fn check_scenario_coordinate_collision(job: &SimulateJob) -> Result<(), String> {
     use crate::params_resolver::{coordinate_values, scenario_coordinate_collision, UserCoordinate};
     use crate::sim_job::ParamSource;

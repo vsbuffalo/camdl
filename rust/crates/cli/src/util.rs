@@ -527,8 +527,8 @@ pub(crate) fn camdlc_emit_deps(
 
 // ─── IR path resolver ────────────────────────────────────────────────────────
 
-/// Resolve a path that appears inside a config file (fit.toml, batch.toml,
-/// etc.) against the config's directory — matching the convention used by
+/// Resolve a path that appears inside a config file (fit.toml and the like)
+/// against the config's directory — matching the convention used by
 /// Cargo, pyproject.toml, package.json, and most other tooling. Absolute
 /// input paths pass through unchanged. Closes a class of footguns where
 /// running `camdl fit run subdir/fit.toml` and `camdl fit run fit.toml`
@@ -1094,7 +1094,7 @@ mod single_flight {
 ///
 /// `needs_state_grad` decides whether the compile emits the WrtPop state-Jacobian
 /// (gh#439 A2). Only `fit --method nuts` on the `ode` backend reads it, so the
-/// simulate / batch / predict paths pass `false` (lean IR, `--no-state-grad`) and
+/// simulate / predict paths pass `false` (lean IR, `--no-state-grad`) and
 /// the fit path passes `true` iff any stage is nuts+ode. The bit is folded into
 /// the cache key, so a lean entry is never reused for a nuts+ode fit.
 pub fn resolve_ir_path(path: &str, needs_state_grad: bool) -> Result<(String, Option<std::path::PathBuf>), String> {
@@ -1331,8 +1331,8 @@ pub fn delegate_to_camdlc(args: &[&str]) -> Result<(), String> {
 /// Deliberately the same test `resolve_ir_path` applies (`ends_with`, not an
 /// extension parse), so the two cannot disagree about what a model path is.
 ///
-/// Lives here rather than in `batch.rs` because both `batch run` (gh#496) and
-/// `fit run` (gh#536) need it; a second copy is how they drift apart.
+/// Lives beside `resolve_ir_path` so the two cannot drift apart; the render
+/// archives of `fit run` and `fit predict` (gh#496, gh#536) are the callers.
 pub fn model_is_camdl_source(model_path: &str) -> bool {
     model_path.ends_with(".camdl")
 }

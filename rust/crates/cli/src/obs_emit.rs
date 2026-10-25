@@ -401,7 +401,7 @@ fn check_streams_round_trip(streams: &[&ObservationModel]) -> Result<(), String>
 pub(crate) enum ColumnSupply {
     /// None. The writer draws every stream from the model alone and hands the
     /// sampler an empty aux slice: `simulate --obs` / `--obs-dir`, the store's
-    /// per-leaf `obs/` subtree (`simulate` and `batch run`'s `[obs]`), and a
+    /// per-leaf `obs/` subtree, and a
     /// generated quantity that reduces `observations.<stream>`.
     Nothing,
     /// The design-preserving emitter ([`simulate_dataset`]): it also writes a

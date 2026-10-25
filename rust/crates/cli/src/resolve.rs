@@ -1,4 +1,4 @@
-//! The `Resolve` bridge for `simulate`/`batch`: map already-resolved CLI
+//! The `Resolve` bridge for `simulate`: map already-resolved CLI
 //! inputs into the `runid` identity types — `TrajectoryInput`, the factored
 //! `LevelId`s, and the leaf `run_id`.
 //!
@@ -336,8 +336,8 @@ pub enum WriteMode {
 /// What the caller wants done about an artifact that already exists.
 ///
 /// Every command has a `--force`-shaped flag, and before this type each one
-/// decided for itself what that meant: batch recomputed and had its bytes
-/// discarded at commit, fit and survey hard-errored with `AlreadyCompleted`,
+/// decided for itself what that meant: the grid writer recomputed and had its
+/// bytes discarded at commit, fit and survey hard-errored with `AlreadyCompleted`,
 /// pfilter and profile had no force at all, and simulate threaded a flag
 /// nothing ever read. One meaning now, in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

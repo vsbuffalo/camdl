@@ -1,7 +1,6 @@
-//! Content-addressable storage helpers shared between `camdl simulate`
-//! (content-addressed by default, one leaf per cell) and `camdl batch run`
-//! (bulk experiments). Both write through the same per-cell `CasSink`, so a
-//! `simulate` leaf is byte-identical to the `batch` leaf for the same cell.
+//! Content-addressable storage helpers behind `camdl simulate`
+//! (content-addressed by default, one leaf per cell, written through the
+//! per-cell `CasSink`).
 //!
 //! The on-disk store is the `runid` factored layout, rooted at `results/`
 //! (the default output root). A leaf's path is one `{label}-{hash8}` segment
