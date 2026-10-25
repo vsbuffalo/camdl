@@ -108,9 +108,11 @@ grid is `lin` with `n` computed.
 design points. A column that names no model parameter is refused with the
 parameter list; a file with zero rows is refused; a duplicate row is refused
 (decision D-E of the accepted proposal), which also answers what happens when a
-generated design repeats a point. Nothing else about the file is specified here;
-the coordinate-kind proposal's `label`, `point_id` and provenance columns belong
-to its rewrite and are not pre-empted.
+generated design repeats a point. `--sweep` and `--sweep-file` are mutually
+exclusive: their composition (a file grid crossed with a flag grid) is not
+specified, so it is refused rather than given a silent shape. Nothing else about
+the file is specified here; the coordinate-kind proposal's `label`, `point_id`
+and provenance columns belong to its rewrite and are not pre-empted.
 
 **`point_id`** is the 0-based position of the design point in the name-sorted
 product, or its 0-based row in the sweep file, as the accepted proposal's D-C
@@ -241,25 +243,38 @@ is its five level hashes alone ("the label is provenance, the hash is identity",
 (`resolve.rs:387-396`) and `CasSink::should_run`, find a leaf by building that
 path from the current labels and looking there. A leaf whose label changed while
 its content did not is therefore a miss although the store holds it: today,
-renaming a model file (the model level's label is the file stem), a params file
-or a scenario preset orphans every stored run of it, and the derived label would
-orphan every existing ad-hoc leaf the same way, while the same resolved arm
-reached through a preset and through flags would be stored twice under two
-names. The store gains one lookup, `runid::find_leaf(root, kind, levels)`, that
-walks the levels and at each one takes the child directory whose segment ends in
-that level's `hash8` (or its `~hash16`/`~full64` escalation), whatever label
-precedes it, then verifies identity from the leaf's own record exactly as
-`lookup` does now; among several candidates the one whose identity verifies
-wins, exact label preferred; a short-hash collision with a different identity is
-a miss and falls into the existing escalation on commit. Both reuse checks and
-`--force`'s displacement use it. New leaves are still written at `store_path`
-under the current label, so browsing is unchanged, and a leaf written under
-`baseline-<h8>` is found and reused by a run that now labels the arm
-`baseline+vaccination`. The second place is the ensemble grid level, below.
+renaming a model file (the model level's label is the file stem) orphans every
+stored run of it, and the derived label would orphan every existing ad-hoc leaf
+the same way, while the same resolved arm reached through a preset and through
+flags would be stored twice under two names. Two renames this does _not_ cover,
+because they are not label changes: renaming a scenario preset re-keys the model
+level, since a preset's `name` enters the whole-IR model digest
+(`rust/crates/runid/src/ir_hash.rs`, `impl ContentAddressed for Preset` writes
+`name`), so every leaf of that model is a genuine miss; and renaming a params
+file moves no label at all, the params level being labelled by the point's
+values (`params_path_label`), not the file. The store gains one lookup,
+`runid::find_leaf(root, kind, levels)`, that walks the levels and at each one
+takes the child directory whose segment ends in that level's `hash8` (or its
+`~hash16`/`~full64` escalation), whatever label precedes it, then verifies
+identity from the leaf's own record exactly as `lookup` does now; among several
+candidates the one whose identity verifies wins, exact label preferred; a
+short-hash collision with a different identity is a miss and falls into the
+existing escalation on commit. Both reuse checks and `--force`'s displacement
+use it. New leaves are still written at `store_path` under the current label, so
+browsing is unchanged, and a leaf written under `baseline-<h8>` is found and
+reused by a run that now labels the arm `baseline+vaccination`. The second place
+is the ensemble grid level, below.
 
 **Store.** Each cell is a `Sim` leaf exactly as `simulate` and `batch` write one
 today, through `CasSink`, with the leaf's parameter label naming the swept
-values (`beta=0.3`, or `beta=0.3_gamma=0.1`, `params_path_label`).
+values (`beta=0.3`, or `beta=0.3_gamma=0.1`, `params_path_label`). Re-use
+applies to the trajectory and observation outputs; a run that asks for
+`--quantities-out` simulates every cell, because the quantities are a
+regenerated sidecar over the in-memory trajectory and the stored `traj.tsv`
+writes real-compartment values at four decimals, so it cannot stand in for it;
+the dry-run view says so in one line
+(`quantities requested: N cells
+recomputed`).
 
 **Combined outputs.** Three kinds of file label cells today and all three would
 call a design point a draw. The demonstration on 2026-10-24 (SIRS model, release
@@ -486,14 +501,19 @@ New, red before the flags and green after:
     path, `run.json` and the store listing; `--param beta=0.3` and
     `--param beta=.3` both give `baseline;beta=0.3`; plain `simulate` still
     gives `baseline`; the leaf identities are unchanged by the label, and a leaf
-    written under `baseline-<h8>` before this PR is a hit for the relabelled
-    run.
-11. A leaf is found by hash, not by name: simulate, rename the scenario preset
-    in the model file, simulate again, every cell a hit and zero simulated; the
-    same after renaming the model file; a store that renamed nothing has the
-    same hits as before. In the `runid` crate: `find_leaf` on two directories
-    with one `hash8` returns the one whose identity verifies, and returns none
-    when neither does.
+    written under `baseline-<h8>` before this PR is a hit for the relabelled run
+    — within one engine build: the model level folds the engine version
+    (`VERSION_SHORT`), so a leaf written by any other build is a miss on the
+    model level whatever its labels, and the before/after is shown on a store
+    relabelled to the pre-PR shape under one binary.
+11. A leaf is found by hash, not by name: simulate, rename the model file,
+    simulate again, every cell a hit and zero simulated; the same for a scenario
+    directory relabelled on disk under a fixed identity (the shape a
+    pre-derived-label store has for an ad-hoc arm); a store that renamed nothing
+    has the same hits as before. (Renaming a scenario preset is not a label
+    change, see §3 "Arm labels", so it is not a case here.) In the `runid`
+    crate: `find_leaf` on two directories with one `hash8` returns the one whose
+    identity verifies, and returns none when neither does.
 12. `camdl batch` exits with clap's unknown-subcommand error
     (`cas_integration.rs:1069` already asserts this); no source line matches
     `cmd_batch_run`, `ExperimentToml`, `BatchArgs`, `CasSink::probe` or
