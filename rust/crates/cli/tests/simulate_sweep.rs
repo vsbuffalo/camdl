@@ -215,6 +215,45 @@ fn sweep_file_rows_are_design_points() {
     assert_eq!(labels, vec!["beta=0.3_rho=0.5", "beta=0.3_rho=0.9"]);
 }
 
+/// Decision D-C of the coordinate-kind proposal: a sweep file's own `point_id`
+/// column names the points. Its ids are the written ones — in the combined
+/// table, the observation tables and the ensemble record's design — while the
+/// rows keep their position for everything else, and the leaves stay labelled
+/// by value.
+#[test]
+fn sweep_file_point_id_column_is_the_written_id() {
+    let fx = Fixture::new();
+    let f = fx.write("ids.tsv", "point_id\trho\n3\t0.5\n7\t0.9\n12\t0.7\n");
+    assert_ok(
+        &fx.simulate(&["--sweep-file", &f, "--seed", "3", "-o", "c.tsv", "--obs-dir", "synth"]),
+        "sweep-file with a point_id column",
+    );
+    let (header, rows) = table(&fx.path("c.tsv"));
+    assert_eq!(&header[..4], ["replicate", "point_id", "sweep:rho", "seed"], "{header:?}");
+    assert_eq!(distinct(&column(&header, &rows, "point_id")), vec!["12", "3", "7"], "the file's ids, not 0..2");
+    // Each id carries its own row's value.
+    let pid = column(&header, &rows, "point_id");
+    let rho = column(&header, &rows, "sweep:rho");
+    let at = |id: &str| rho[pid.iter().position(|p| *p == id).unwrap()].to_string();
+    assert_eq!((at("3"), at("7"), at("12")), ("0.5".into(), "0.9".into(), "0.7".into()));
+    let (header, rows) = table(&fx.path("synth").join("cases.tsv"));
+    assert_eq!(header, ["replicate", "point_id", "sweep:rho", "seed", "time", "cases"]);
+    assert_eq!(distinct(&column(&header, &rows, "point_id")), vec!["12", "3", "7"], "the observation table carries the same ids");
+    // The ensemble record names the parameters and the written ids.
+    let ens = run_leaves(&fx.path("out").join("ensembles"));
+    assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
+    let rec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ens[0].join("run.json")).unwrap()).unwrap();
+    let design = &rec["inputs"]["design"];
+    assert_eq!(design["source"], "file", "{design}");
+    assert_eq!(design["params"], serde_json::json!(["rho"]), "`point_id` is not a parameter: {design}");
+    assert_eq!(design["point_ids"], serde_json::json!([3, 7, 12]), "{design}");
+    assert_eq!(rec["inputs"]["n_points"], 3);
+    let mut labels: Vec<String> = fx.leaves().iter().map(|l| level_label(l, "params")).collect();
+    labels.sort();
+    assert_eq!(labels, vec!["rho=0.5", "rho=0.7", "rho=0.9"], "leaves are labelled by value, not id");
+}
+
 /// Test 5 — every conflict is refused with a message naming it.
 #[test]
 fn sweep_conflicts_are_refused_by_name() {
@@ -295,6 +334,20 @@ fn sweep_file_refusals() {
         &fx.simulate(&["--sweep-file", &dup]),
         "duplicate row",
         &["line 4 repeats the design point of line 2 (beta=0.2)"],
+    );
+    // A `point_id` column: a repeated id and a non-integer id are refused
+    // naming the row.
+    let dup_id = fx.write("i.tsv", "point_id\tbeta\n4\t0.2\n4\t0.3\n");
+    assert_refused(
+        &fx.simulate(&["--sweep-file", &dup_id]),
+        "repeated point_id",
+        &["line 3 repeats point_id 4 of line 2"],
+    );
+    let bad_id = fx.write("b.tsv", "point_id\tbeta\n1.5\t0.2\n");
+    assert_refused(
+        &fx.simulate(&["--sweep-file", &bad_id]),
+        "non-integer point_id",
+        &["line 2, column `point_id`: '1.5' is not a non-negative integer"],
     );
     assert!(fx.leaves().is_empty(), "a refused run writes no leaf");
 }

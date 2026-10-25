@@ -86,20 +86,34 @@ pub fn design_from_specs(specs: &[SweepSpec]) -> ResolvedDesign {
     ResolvedDesign::Sweep { params, n_points }
 }
 
-/// A `--sweep-file` read and checked: its design points in file order and the
-/// resolved design to record (which names the header's parameters).
+/// The `--sweep-file` header column that names the design points instead of
+/// a parameter (decision D-C of the coordinate-kind proposal): its value on a
+/// row is the `point_id` the row is written under.
+pub const POINT_ID_COLUMN: &str = "point_id";
+
+/// A `--sweep-file` read and checked: its design points in file order, each
+/// with the id it is written under, and the resolved design to record (the
+/// header's parameters, the file digest and the ids).
 #[derive(Debug)]
 pub struct SweepFile {
-    pub points: Vec<DesignPoint>,
+    /// `(point_id, point)` per row, in file order. The id is the row's own
+    /// `point_id` cell when the file has that column, else its 0-based row;
+    /// the row position stays the engine's index either way (the design never
+    /// enters the seed, decision D-B). The point is the row's name-sorted
+    /// values.
+    pub points: Vec<(usize, DesignPoint)>,
     pub design: ResolvedDesign,
 }
 
 /// Read a `--sweep-file`: a TSV whose header names model parameters and whose
-/// rows are design points, `point_id` being the 0-based row. Refused: a column
+/// rows are design points. An optional `point_id` column gives each row the
+/// id it is written under (in the combined and observation tables and in the
+/// ensemble record); without it the id is the 0-based row. Refused: a column
 /// that names no model parameter (with the parameter list), a file with zero
-/// rows, a duplicate row (both line numbers named, decision D-E), and a cell
-/// that is not a number. The file enters the design by its content digest,
-/// never its path.
+/// rows, a duplicate row (both line numbers named, decision D-E), a cell that
+/// is not a number, and a `point_id` that is not a non-negative integer or
+/// repeats an earlier row's. The file enters the design by its content
+/// digest, never its path.
 pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("cannot read --sweep-file {}: {}", path.display(), e))?;
@@ -109,12 +123,22 @@ pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, Stri
     let header = lines
         .next()
         .ok_or_else(|| format!("--sweep-file {} is empty", path.display()))?;
-    let params: Vec<String> = header
+    let columns: Vec<String> = header
         .split('\t')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
+    // `point_id` names the points, not a parameter: its column is read for
+    // the ids and leaves the parameter list.
+    let id_col: Option<usize> = columns.iter().position(|c| c == POINT_ID_COLUMN);
+    let param_cols: Vec<(usize, &str)> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| *c != POINT_ID_COLUMN)
+        .map(|(i, c)| (i, c.as_str()))
+        .collect();
+    let params: Vec<String> = param_cols.iter().map(|(_, c)| c.to_string()).collect();
     if params.is_empty() {
         return Err(format!("--sweep-file {}: the header names no parameter", path.display()));
     }
@@ -124,38 +148,44 @@ pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, Stri
     if !unknown.is_empty() {
         return Err(format!(
             "--sweep-file {}: column(s) {} name no model parameter.\n  \
-             The header must name model parameters; this model declares: {}.",
+             The header must name model parameters (plus an optional `{}` column); \
+             this model declares: {}.",
             path.display(),
             unknown.iter().map(|u| format!("`{u}`")).collect::<Vec<_>>().join(", "),
+            POINT_ID_COLUMN,
             model_params.join(", ")
         ));
     }
-    let distinct: BTreeSet<&str> = params.iter().map(|s| s.as_str()).collect();
-    if distinct.len() != params.len() {
+    let distinct: BTreeSet<&str> = columns.iter().map(|s| s.as_str()).collect();
+    if distinct.len() != columns.len() {
         return Err(format!(
-            "--sweep-file {}: a parameter is named by more than one column",
+            "--sweep-file {}: a column is named more than once",
             path.display()
         ));
     }
 
-    let mut points: Vec<DesignPoint> = Vec::new();
+    let mut points: Vec<(usize, DesignPoint)> = Vec::new();
     // Line number (1-based, header is line 1) of each row seen so far, keyed
     // by the row's exact values, for the duplicate diagnostic.
     let mut seen: Vec<(Vec<u64>, usize)> = Vec::new();
+    // Line number of each `point_id` seen so far, for the repeated-id
+    // diagnostic.
+    let mut seen_ids: Vec<(usize, usize)> = Vec::new();
     for (i, line) in lines.enumerate() {
         let line_no = i + 2;
         if line.trim().is_empty() {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
-        if fields.len() < params.len() {
+        if fields.len() < columns.len() {
             return Err(format!(
                 "--sweep-file {} line {}: expected {} column(s), got {}",
-                path.display(), line_no, params.len(), fields.len()
+                path.display(), line_no, columns.len(), fields.len()
             ));
         }
         let mut point: DesignPoint = Vec::with_capacity(params.len());
-        for (name, field) in params.iter().zip(&fields) {
+        for (col, name) in &param_cols {
+            let field = fields[*col];
             let v: f64 = field.parse().map_err(|_| format!(
                 "--sweep-file {} line {}, column `{}`: cannot parse '{}' as a number",
                 path.display(), line_no, name, field
@@ -166,7 +196,7 @@ pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, Stri
                     path.display(), line_no, name, field
                 ));
             }
-            point.push((name.clone(), v));
+            point.push((name.to_string(), v));
         }
         point.sort_by(|a, b| a.0.cmp(&b.0));
         let key: Vec<u64> = point.iter().map(|(_, v)| v.to_bits()).collect();
@@ -182,7 +212,28 @@ pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, Stri
             ));
         }
         seen.push((key, line_no));
-        points.push(point);
+        let point_id: usize = match id_col {
+            Some(col) => {
+                let field = fields[col];
+                let id: usize = field.parse().map_err(|_| format!(
+                    "--sweep-file {} line {}, column `{}`: '{}' is not a non-negative integer",
+                    path.display(), line_no, POINT_ID_COLUMN, field
+                ))?;
+                if let Some((_, first)) = seen_ids.iter().find(|(seen_id, _)| *seen_id == id) {
+                    return Err(format!(
+                        "--sweep-file {}: line {} repeats point_id {} of line {}.\n  \
+                         A point_id names one design point; two rows cannot share it.\n  \
+                         Fix: give each row a distinct point_id, or drop the column to \
+                         number the rows from 0.",
+                        path.display(), line_no, id, first
+                    ));
+                }
+                seen_ids.push((id, line_no));
+                id
+            }
+            None => points.len(),
+        };
+        points.push((point_id, point));
     }
     if points.is_empty() {
         return Err(format!(
@@ -191,9 +242,10 @@ pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, Stri
         ));
     }
     let design = ResolvedDesign::File {
-        params: params.clone(),
+        params,
         digest: runid::ContentHash::digest_bytes(&bytes).to_hex(),
         n_points: points.len(),
+        point_ids: points.iter().map(|(id, _)| *id).collect(),
     };
     Ok(SweepFile { points, design })
 }
@@ -289,19 +341,74 @@ mod tests {
         assert_eq!(
             f.points,
             vec![
-                vec![("beta".to_string(), 0.2), ("gamma".to_string(), 0.1)],
-                vec![("beta".to_string(), 0.3), ("gamma".to_string(), 0.1)],
+                (0, vec![("beta".to_string(), 0.2), ("gamma".to_string(), 0.1)]),
+                (1, vec![("beta".to_string(), 0.3), ("gamma".to_string(), 0.1)]),
             ],
-            "rows are points in file order; each point's pairs are name-sorted"
+            "rows are points in file order, written under their 0-based row; each point's pairs are name-sorted"
         );
         match f.design {
-            ResolvedDesign::File { params, digest, n_points } => {
+            ResolvedDesign::File { params, digest, n_points, point_ids } => {
                 assert_eq!(params, vec!["gamma", "beta"]);
                 assert_eq!(n_points, 2);
+                assert_eq!(point_ids, vec![0, 1]);
                 assert_eq!(digest.len(), 64, "the file enters by content digest");
             }
             other => panic!("expected a file design, got {other:?}"),
         }
+    }
+
+    /// Decision D-C: a `point_id` column names the points instead of a
+    /// parameter. Its values become the written ids, in the points and in the
+    /// recorded design; the row position is unchanged.
+    #[test]
+    fn read_sweep_file_honours_a_point_id_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = model_with(&["beta", "gamma"]);
+        let p = write(dir.path(), "ids.tsv", "beta\tpoint_id\tgamma\n0.2\t3\t0.1\n0.3\t7\t0.1\n0.4\t12\t0.1\n");
+        let f = read_sweep_file(&p, &m).unwrap();
+        let ids: Vec<usize> = f.points.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![3, 7, 12], "the file's ids are the written ids, in row order");
+        assert_eq!(
+            f.points[1].1,
+            vec![("beta".to_string(), 0.3), ("gamma".to_string(), 0.1)],
+            "the `point_id` column is not a parameter"
+        );
+        match f.design {
+            ResolvedDesign::File { params, point_ids, n_points, .. } => {
+                assert_eq!(params, vec!["beta", "gamma"], "the design names the parameters only");
+                assert_eq!(point_ids, vec![3, 7, 12], "and records the ids the points were written under");
+                assert_eq!(n_points, 3);
+            }
+            other => panic!("expected a file design, got {other:?}"),
+        }
+        // Without the column the id is the 0-based row, as before.
+        let p = write(dir.path(), "rows.tsv", "beta\n0.2\n0.3\n");
+        let f = read_sweep_file(&p, &m).unwrap();
+        assert_eq!(f.points.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![0, 1]);
+        match f.design {
+            ResolvedDesign::File { point_ids, .. } => assert_eq!(point_ids, vec![0, 1]),
+            other => panic!("expected a file design, got {other:?}"),
+        }
+    }
+
+    /// A repeated id, a non-integer id and a negative id are each refused
+    /// naming the row; an id is a label, so two rows cannot share one.
+    #[test]
+    fn read_sweep_file_refuses_a_repeated_or_malformed_point_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = model_with(&["beta", "gamma"]);
+        let e = read_sweep_file(&write(dir.path(), "dup.tsv", "point_id\tbeta\n3\t0.2\n3\t0.3\n"), &m)
+            .unwrap_err();
+        assert!(e.contains("line 3 repeats point_id 3 of line 2"), "{e}");
+        let e = read_sweep_file(&write(dir.path(), "frac.tsv", "point_id\tbeta\n1.5\t0.2\n"), &m)
+            .unwrap_err();
+        assert!(e.contains("line 2") && e.contains("'1.5'") && e.contains("non-negative integer"), "{e}");
+        let e = read_sweep_file(&write(dir.path(), "neg.tsv", "point_id\tbeta\n-1\t0.2\n"), &m)
+            .unwrap_err();
+        assert!(e.contains("line 2") && e.contains("'-1'"), "{e}");
+        // A file whose only column is `point_id` names no parameter.
+        let e = read_sweep_file(&write(dir.path(), "only.tsv", "point_id\n0\n"), &m).unwrap_err();
+        assert!(e.contains("names no parameter"), "{e}");
     }
 
     #[test]

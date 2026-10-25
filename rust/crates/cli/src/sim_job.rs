@@ -140,11 +140,12 @@ pub enum ParamSource {
     /// `replicates` times (each replicate a distinct XOR-mixed seed when
     /// `Seeds::Single`). `simulate --replicates N` (no `--draws`) sets this.
     Point { replicates: usize },
-    /// Deterministic grid: Cartesian product of swept values. Each point
-    /// overrides the corresponding key in the base params, run `replicates`
-    /// times. `simulate --sweep` / `--sweep-file` set this; with `--seeds`
-    /// the explicit list drives replication and `replicates` tracks its length.
-    Sweep { points: Vec<IndexMap<String, f64>>, replicates: usize },
+    /// Deterministic grid: the design points of `--sweep` (the name-sorted
+    /// Cartesian product) or `--sweep-file` (the rows), each carrying the id
+    /// it is written under. Each point overrides the corresponding key in the
+    /// base params, run `replicates` times; with `--seeds` the explicit list
+    /// drives replication and `replicates` tracks its length.
+    Sweep { points: Vec<SweepPoint>, replicates: usize },
     /// Pre-resolved parameter draws (posterior file / prior / uniform).
     /// Each row is a complete (or override) parameter vector.
     Draws {
@@ -164,6 +165,16 @@ pub enum ParamSource {
     },
 }
 
+/// One design point of a sweep job: the `point_id` it is written under (a
+/// sweep file's own column, else its 0-based position in the design) and the
+/// parameter values it sets. The id travels with its values so a cell cannot
+/// be written under another point's id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SweepPoint {
+    pub point_id: usize,
+    pub overrides: IndexMap<String, f64>,
+}
+
 impl ParamSource {
     /// The ordered list of per-cell parameter-override maps. For `Point`
     /// this is a single empty map (base params unchanged).
@@ -171,9 +182,26 @@ impl ParamSource {
         match self {
             ParamSource::Point { .. } => vec![IndexMap::new()],
             ParamSource::Sweep { points, .. } => {
-                if points.is_empty() { vec![IndexMap::new()] } else { points.clone() }
+                if points.is_empty() {
+                    vec![IndexMap::new()]
+                } else {
+                    points.iter().map(|p| p.overrides.clone()).collect()
+                }
             }
             ParamSource::Draws { rows, .. } => rows.clone(),
+        }
+    }
+
+    /// The id the point at position `point_idx` of [`Self::param_points`] is
+    /// written under: a sweep point's own `point_id`; the position itself for
+    /// a draw or the single point. Mirrors `param_points`' empty-sweep case
+    /// (one position, 0, with no point to read an id from).
+    pub fn point_id(&self, point_idx: usize) -> usize {
+        match self {
+            ParamSource::Sweep { points, .. } => {
+                points.get(point_idx).map(|p| p.point_id).unwrap_or(point_idx)
+            }
+            ParamSource::Point { .. } | ParamSource::Draws { .. } => point_idx,
         }
     }
 

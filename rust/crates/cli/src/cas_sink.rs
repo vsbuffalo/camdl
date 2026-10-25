@@ -92,10 +92,11 @@ pub(crate) struct RunEntry {
     pub(crate) traj_digest: Option<runid::ContentHash>,
     /// The scenario label (display: the ensemble's `run.json` summary and the
     /// combined TSV's `scenario` column — never the `grid` digest), the
-    /// resolved process seed, and the cell's 0-based position on the
-    /// parameter-point axis: the design index of a sweep cell, the draw index
-    /// of a `--draws` cell. `(point_id, process_seed)` plus the cell `run_id`
-    /// are what the ensemble's `grid` digest sorts over.
+    /// resolved process seed, and the id the cell is written under on the
+    /// parameter-point axis: a sweep cell's `point_id` (a sweep file's own
+    /// column, else the 0-based design index), the draw index of a `--draws`
+    /// cell. `(point_id, process_seed)` plus the cell `run_id` are what the
+    /// ensemble's `grid` digest sorts over.
     pub(crate) scenario: String,
     pub(crate) process_seed: u64,
     pub(crate) point_id: usize,
@@ -518,7 +519,7 @@ impl crate::engine::RunSink for CasSink {
             traj_digest,
             scenario: name,
             process_seed: spec.process_seed,
-            point_id: spec.point_idx,
+            point_id: spec.point_id,
             params_level,
         });
     }
@@ -744,7 +745,7 @@ impl crate::engine::RunSink for CasSink {
             traj_digest: Some(traj_digest),
             scenario: name,
             process_seed: spec.process_seed,
-            point_id: spec.point_idx,
+            point_id: spec.point_id,
             params_level: params_level_hash(&rt),
         });
         Ok(())
@@ -1102,6 +1103,7 @@ mod tests {
         crate::engine::CellSpec {
             run_idx: 0,
             point_idx: 0,
+            point_id: 0,
             scenario: crate::sim_job::ScenarioRef::Inline {
                 name: "baseline".to_string(),
                 enable: vec![],
@@ -1182,6 +1184,7 @@ mod tests {
         crate::engine::CellSpec {
             run_idx: 0,
             point_idx: 0,
+            point_id: 0,
             scenario: crate::sim_job::ScenarioRef::Inline {
                 name: "baseline".to_string(),
                 enable: vec![],
