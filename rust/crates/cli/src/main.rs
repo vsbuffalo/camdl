@@ -1262,7 +1262,12 @@ fn run_simulate(a: &args::SimulateArgs) {
             Ok(Some(p)) => p,
             Ok(None) => continue,
             Err(e) => {
-                eprintln!("error: cannot read the [provenance] block of {pf}: {e}");
+                eprintln!(
+                    "error: cannot read the [provenance] block of {pf}: {e}\n  \
+                     Re-run the fit to rewrite the block, or remove the [provenance] block \
+                     from {pf} to run the file as plain params (no backend or dt is matched \
+                     from it, and no fit lineage is recorded)."
+                );
                 std::process::exit(1);
             }
         };

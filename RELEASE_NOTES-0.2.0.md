@@ -105,6 +105,18 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **`simulate --params` refuses a fit-written `mle_params.toml` whose values no
+  longer match its declared `content_hash`, and every file written by an earlier
+  fit is refused.** The fit writer hashed the unrounded estimates while the file
+  holds ten decimals, so no earlier file's hash was ever verifiable; the writer
+  now hashes the values as written, and `simulate --params` checks them. A
+  mismatch is refused with the two remedies in the message. Migration: re-run
+  the fit and use the `mle_params.toml` it writes, or remove the `[provenance]`
+  block from the old file to run its values knowingly (as a plain params file:
+  no backend or dt is matched from it and no fit lineage is recorded). A
+  `[provenance]` block that fails to parse is likewise an error with the same
+  remedies, not a missing block.
+
 - **Observation block reshaped (gh#171).** The measurement model is now written
   with `~` (as priors are), data binds **by name** via a required `columns {}`
   block, and the emission cadence is renamed `emit_schedule` (simulate-only).
@@ -213,6 +225,11 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   identity whether an arm was named by a preset or derived from
   `--enable`/`--disable`/`--param`. Renaming a preset still re-keys, because a
   preset's name is part of the model's content digest.
+- **Every stored `--sweep-file` ensemble re-keys once.** The resolved design of
+  a sweep-file job now records the written `point_id` of every row (the file's
+  own column when present, else the 0-based row), and the grid level keys each
+  cell on that written id, so the identity names what the ensemble's rows say.
+  Cells are reused; the ensemble is rebuilt from them.
 
 ## Language (DSL)
 
