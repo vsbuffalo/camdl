@@ -2787,6 +2787,12 @@ pub struct CellInitState {
 /// Apply a CLI integrator-method override (gh#166) to the model in place.
 /// Method-only: forcing rk45 PRESERVES the model's tolerances if it declared
 /// them (else runtime defaults); forcing rk4 drops them. No-op when `method` is
+/// The parameter a `--param-vec PREFIX=FILE` row names: `PREFIX_key`, the
+/// underscore-joined spelling every CLI surface uses for an indexed parameter.
+pub fn param_vec_name(prefix: &str, key: &str) -> String {
+    format!("{}_{}", prefix, key)
+}
+
 /// Expand `--param-vec PREFIX=FILE` entries into concrete `(PREFIX_key, val)`
 /// pairs, validating each name against the model's parameter set.
 ///
@@ -2802,7 +2808,7 @@ pub fn resolve_param_vec_entries(
     for (prefix, file) in set_vec_entries {
         let entries = load_keyed_tsv(file)?;
         for (key, val) in entries {
-            let full_name = format!("{}_{}", prefix, key);
+            let full_name = param_vec_name(prefix, &key);
             if !model_param_set.contains(full_name.as_str()) {
                 return Err(format!(
                     "--param-vec {}: unknown parameter '{}'", prefix, full_name));

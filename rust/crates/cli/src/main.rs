@@ -1112,6 +1112,32 @@ fn run_simulate(a: &args::SimulateArgs) {
                 std::process::exit(1);
             }
         }
+        // `--param-vec PREFIX=FILE` is `--param`'s bulk form and shares its
+        // tier (`util::resolve_run_parameters_typed`), so a row that names a
+        // swept parameter would override the sweep the same way, silently.
+        // Each file is read here, before anything runs, with the engine's own
+        // reader; a file it cannot read fails now with that reader's message.
+        for (prefix, file) in &set_vec_entries {
+            let rows = util::load_keyed_tsv(file).unwrap_or_else(|e| {
+                eprintln!("error: --param-vec {prefix}: {e}");
+                std::process::exit(1);
+            });
+            for (key, value) in rows {
+                let name = util::param_vec_name(prefix, &key);
+                if swept.contains(name.as_str()) {
+                    eprintln!(
+                        "error: parameter `{name}` is both swept and pinned by \
+                         `--param-vec {prefix}={file}` (row `{key}` = {value}).\n  \
+                         A `--param-vec` row shares `--param`'s rank above every other tier, so \
+                         the sweep would not vary `{name}`: every design point would run at \
+                         {value} while its label and `sweep:{name}` column said otherwise.\n  \
+                         Fix: drop the `{key}` row from {file} (or the `--param-vec {prefix}=…` \
+                         flag), or remove `{name}` from the sweep."
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     let to_was_anchored = to_is_anchored;
