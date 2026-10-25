@@ -82,38 +82,42 @@ print(s[0]['name'] if s else '')
     fi
 done
 
-# ── Batch pipeline tests ─────────────────────────────────────────────────────
+# ── Store pipeline tests ─────────────────────────────────────────────────────
 #
-# Previously named `experiment` — the subcommand was renamed to
-# `batch run` on 2026-04-17 (commit 4d1291b). The `summarize`
-# sub-subcommand was removed at the same time (see
-# docs/dev/proposals/2026-04-16-cas-simulate.md); trajectory aggregation
-# now lives in `camdl list` / `camdl cat`.
+# The one end-to-end multi-model store run in the gate: eight golden models,
+# each run as a `simulate --sweep … --replicates` grid into a fresh store, the
+# cell count checked through the browse surface, then the same grid run again
+# to check that resume reads every cell back from the store and simulates none
+# (proposal docs/dev/proposals/2026-10-24-batch-to-simulate.md §6).
 
-run_batch_test() {
-    local fixture="$1"        # e.g. tests/fixtures/exp_sir_basic.toml
-    local expected_runs="$2"  # e.g. 50
-    local name
-    name=$(basename "$fixture" .toml)
+run_store_test() {
+    local name="$1"            # golden model stem, e.g. sir_basic
+    local expected_runs="$2"   # cells = sweep points × scenarios × replicates
+    shift 2                    # the rest: this model's simulate flags
 
-    local outdir
-    outdir=$(mktemp -d /tmp/camdl_batch_XXXXXX)
-    trap "rm -rf '$outdir'" RETURN
+    local model="$GOLDEN/$name.camdl"
+    local params="$GOLDEN/$name.params.toml"
+    local outdir tmperr
+    outdir=$(mktemp -d /tmp/camdl_store_XXXXXX)
+    tmperr=$(mktemp /tmp/camdl_store_err_XXXXXX)
+    trap "rm -rf '$outdir' '$tmperr'" RETURN
 
-    # run
-    # gh#audit-C6: --allow-degenerate-rates for the same reason as the
+    # run. gh#audit-C6: --allow-degenerate-rates for the same reason as the
     # per-backend simulate loop above (sir_five_age has empty-stratum
-    # divisors that the new strict-mode would reject).
-    if ! "$CAMDL" batch run "$fixture" --output-dir "$outdir" --parallel 2 \
-            --allow-degenerate-rates > /dev/null; then
-        echo "FAIL [batch run] $name"; FAIL=$((FAIL+1)); return
+    # divisors that strict mode would reject). --parallel 2 as the grid ran
+    # before this test moved onto `simulate`; `simulate` plans its cells
+    # sequentially whatever the flag says (run-spec §4.4), so the flag is
+    # carried for the day it is honoured, not exercised today.
+    if ! "$CAMDL" simulate "$model" --params "$params" "$@" \
+            --output-dir "$outdir" --parallel 2 --allow-degenerate-rates \
+            > /dev/null 2>"$tmperr"; then
+        echo "FAIL [simulate] $name"; cat "$tmperr"; FAIL=$((FAIL+1)); return
     fi
 
-    # check completed run count. manifest.json was retired with the CAS
-    # store (gh#147); count the per-cell sim leaves the batch wrote via the
-    # browse surface instead. `list --format json` emits one JSON object per
-    # run as NDJSON (plus a trailing `[]`), so count the object lines; `--all`
-    # lifts the default 50-row limit (some fixtures run 60).
+    # check the cell count: one `sim` leaf per cell, counted through the browse
+    # surface. `list --format json` emits one JSON object per run as NDJSON
+    # (plus a trailing `[]`), so count the object lines; `--all` lifts the
+    # default 50-row limit (some grids run 60).
     local completed
     completed=$("$CAMDL" list --root "$outdir" --kind sim --all --format json 2>/dev/null \
         | python3 -c "import sys, json; print(sum(1 for l in sys.stdin if l.strip() and isinstance(json.loads(l), dict)))")
@@ -122,24 +126,44 @@ run_batch_test() {
         FAIL=$((FAIL+1)); return
     fi
 
-    # resume is a no-op (re-run without --force, check it succeeds)
-    if ! "$CAMDL" batch run "$fixture" --output-dir "$outdir" --parallel 2 \
-            --allow-degenerate-rates > /dev/null; then
-        echo "FAIL [resume] $name"; FAIL=$((FAIL+1)); return
+    # resume: the same grid again, without --force, must succeed and read
+    # every cell back from the store — "N of N cells read from the store;
+    # simulated 0" on stderr.
+    if ! "$CAMDL" simulate "$model" --params "$params" "$@" \
+            --output-dir "$outdir" --parallel 2 --allow-degenerate-rates \
+            > /dev/null 2>"$tmperr"; then
+        echo "FAIL [resume] $name"; cat "$tmperr"; FAIL=$((FAIL+1)); return
+    fi
+    if ! grep -qE "read from the store; simulated 0([^0-9]|$)" "$tmperr"; then
+        echo "FAIL [resume] $name: the second run did not read every cell back"
+        cat "$tmperr"; FAIL=$((FAIL+1)); return
     fi
 
-    echo "PASS [batch] $name"
+    echo "PASS [store] $name"
     PASS=$((PASS+1))
 }
 
-run_batch_test tests/fixtures/exp_malaria.toml               60
-run_batch_test tests/fixtures/exp_sir_basic.toml             50
-run_batch_test tests/fixtures/exp_seir_erlang.toml           40
-run_batch_test tests/fixtures/exp_sir_five_age.toml          40
-run_batch_test tests/fixtures/exp_sir_patches_5.toml         40
-run_batch_test tests/fixtures/exp_seir_vaccine.toml          30
-run_batch_test tests/fixtures/exp_seir_vaccine_seasonal.toml 30
-run_batch_test tests/fixtures/exp_polio_spatial_5.toml       45
+# Each grid keeps the cell count the retired manifest ran. A preset that
+# `set`s a parameter refuses a sweep over it (gh#572), so the models whose
+# presets pin every parameter sweep under the implicit arm, with the base
+# values from the params file; `with_sia` only enables interventions, so it
+# composes with a sweep.
+run_store_test malaria_two_species   60 --backend gillespie \
+    --sweep beta_BH=0.15,0.3 --sweep beta_AH=0.1,0.2 --replicates 15
+run_store_test sir_basic             50 --backend gillespie \
+    --sweep beta=0.2,0.5 --replicates 25
+run_store_test seir_erlang           40 --backend gillespie \
+    --sweep beta=0.3,0.45 --sweep sigma=0.2,0.6 --replicates 10
+run_store_test sir_five_age          40 --backend chain_binomial --dt 1.0 \
+    --sweep beta=0.2,0.4 --replicates 20
+run_store_test sir_patches_5         40 --backend chain_binomial --dt 0.5 \
+    --sweep gamma=0.07,0.2 --replicates 20
+run_store_test seir_vaccine          30 --backend chain_binomial --dt 1.0 \
+    --scenario with_sia --sweep vacc_frac=0.0,0.8 --replicates 15
+run_store_test seir_vaccine_seasonal 30 --backend chain_binomial --dt 1.0 \
+    --scenario with_sia --sweep vacc_frac=0.0,0.8 --replicates 15
+run_store_test polio_spatial_5       45 --backend chain_binomial --dt 1.0 \
+    --scenario with_sia --sweep kappa=0.0,0.01,0.05 --replicates 15
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
