@@ -460,9 +460,10 @@ seed = 1
 timestamp = "2026-03-30T14:30:00Z"
 best_loglik = -3891.2
 initial_loglik = -4523.7
-# The chain that reached best_loglik, numbered from 1 — the number of the
-# `chain_N/` directory beside this file, so `chain_4/` is that chain's output.
-best_chain = 4
+# The chain that reached best_loglik, counted from 0 like every chain index —
+# the number of the `chain_N/` directory beside this file, so `chain_3/` is
+# that chain's output.
+best_chain = 3
 n_chains = 8
 n_good_chains = 6
 
@@ -583,7 +584,7 @@ The final output of inference. A valid params.toml with provenance in comments:
 # Data: data/london_cases.tsv (hash: f9e2b047)
 # Fit: fit.toml (hash: b2c4d6e8)
 # Seed: 1
-# Stage: validate, chain 2
+# Stage: validate, chain 1
 # Log-likelihood: -3804.9 (sd: 5.2, N=10000)
 # ESS at MLE: mean=3842, min=1205
 # Timestamp: 2026-03-30T14:30:00Z
@@ -732,7 +733,7 @@ camdl fit run scout.toml [--seed 1]
 (mild contraction — find basins, don't converge), rw_sd from fit.toml or auto
 from bounds (`/20` for log, `/6` for logit).
 
-**Seeded chains:** When `[estimate]` parameters have `start` values, chain 1
+**Seeded chains:** When `[estimate]` parameters have `start` values, chain 0
 starts near those values (jittered by rw_sd). Remaining chains start from random
 positions within bounds. Controlled by `start_chains` in `[scout]` (default 1
 when any start exists).

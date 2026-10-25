@@ -661,15 +661,15 @@ ribbon geometry is unreliable — the same caution as `camdl survey` above.
 This matters more than any tool recommendation: the store is only as useful as
 your ability to read what it wrote.
 
-**Chain ids are 1-based everywhere you type them and 0-based inside
-`draws.tsv`.** The `chain_N/` directories, the per-chain table in
-`camdl fit summary`, and `--exclude-chains 3,5` are all **1-based**. The `chain`
-column _inside_ `draws.tsv` is **0-based**, because it is the join key to
-`trajectories.tsv`. User chain `k` is the rows whose `chain` field is `k - 1`.
-Get this wrong and you drop the wrong chain or mislabel a trace, and **nothing
-errors** — the numbers quietly describe a different chain. (Spec:
-`docs/camdl-run-spec.md` §10.3; gh#666 is open on surfacing it to someone who
-only ever opens the TSV.)
+**Every chain id counts from 0, everywhere.** The `chain_N/` directories, the
+per-chain table in `camdl fit summary`, `--exclude-chains 3,5`, `best_chain`,
+and the `chain` column inside `draws.tsv` and `trajectories.tsv` all carry the
+same number: chain `k` is `chain_k/`, and its draws are the rows whose `chain`
+field is `k`. There is no second base, so no `k - 1` anywhere. (Spec:
+`docs/camdl-run-spec.md` §2, "One index base"; gh#990.) A leaf written by a
+camdl from before this rule — `chain_1/` with no `chain_0/` — is refused by
+`fit summary`, `fit predict` and `fit run --resume` rather than read shifted;
+re-run the fit.
 
 **Read `run.json`'s `output_schema` rather than reverse-engineering a header.**
 Each leaf's `run.json` declares, for every tabular file that leaf wrote, which

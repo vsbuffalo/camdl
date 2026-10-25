@@ -117,6 +117,23 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `[provenance]` block that fails to parse is likewise an error with the same
   remedies, not a missing block.
 
+- **Every chain index a fit shows counts from 0 (gh#990).** The `chain_N/`
+  directories, the progress and refusal lines, `chain_starts.tsv`'s `chain_id`,
+  `fit_state.toml`'s `best_chain` and `chain_eval_ids`, `run.json`'s
+  `inputs.best_chain`, `mle_params.toml`'s `[provenance] chain`, every
+  `fit summary` table, `--exclude-chains`, `fit predict --by-chain`'s `chain`
+  column, `progress.json`'s per-chain rows and `cross_chain_compat.json`'s
+  `chains` are numbered `0 … N-1`, the same numbers as the `chain` column of
+  `draws.tsv` and `trajectories.tsv`, which already counted from 0 and do not
+  change. Migration: every consumer that joins on a chain number shifts by one
+  (`--exclude-chains 3,5` now names the chains that were `4,6`; a script that
+  opened `chain_<c+1>/` for a `draws.tsv` row with `chain = c` opens
+  `chain_<c>/`). A fit written before this release (`chain_1/` with no
+  `chain_0/`) is refused by `fit summary`, `fit predict`, `fit table`, `compare`
+  and `fit run --resume` with a message naming the change; re-run the fit. Also
+  closes gh#978, gh#979, gh#981 and gh#913, which were the same two-base
+  conversion at four more sites.
+
 - **Observation block reshaped (gh#171).** The measurement model is now written
   with `~` (as priors are), data binds **by name** via a required `columns {}`
   block, and the emission cadence is renamed `emit_schedule` (simulate-only).
