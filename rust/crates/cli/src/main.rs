@@ -1259,6 +1259,31 @@ fn run_simulate(a: &args::SimulateArgs) {
             Ok(Some(p)) => p,
             Ok(None) | Err(_) => continue,
         };
+        // The block's `content_hash` is a tamper hash over the parameter
+        // values the fit wrote. Values edited since no longer describe the
+        // fit's estimate while the block still claims they do — it would
+        // still match the backend and record the fit as this run's upstream —
+        // so an edited file is refused, not simulated.
+        match crate::fit::provenance::verify_content_hash(pf, &prov.content_hash) {
+            Ok(crate::fit::provenance::ContentVerification::Valid) => {}
+            Ok(crate::fit::provenance::ContentVerification::Modified { declared, computed }) => {
+                eprintln!(
+                    "error: params file {pf} was edited after the fit that produced it.\n  \
+                     Its [provenance] block declares content_hash = \"{declared}\", but the \
+                     parameter values in the file now hash to \"{computed}\".\n  \
+                     To simulate the fit's estimate, re-run the fit and use the \
+                     mle_params.toml it writes.\n  \
+                     To run the edited values knowingly, remove the [provenance] block from \
+                     {pf}: the file is then a plain params file (no backend or dt is matched \
+                     from it, and no fit lineage is recorded)."
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         from_fit_hash = prov.fit_hash.clone();
         from_fit_params_file = Some(pf.clone());
 

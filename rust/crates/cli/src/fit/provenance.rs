@@ -195,6 +195,44 @@ pub fn read_mle_provenance(path: &str) -> Result<Option<MleProvenance>, String> 
     Ok(w.provenance)
 }
 
+/// Whether the parameter values in a fit-written params file still hash to
+/// the `content_hash` its `[provenance]` block declares.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentVerification {
+    Valid,
+    /// The values were edited after the block was written: `declared` is the
+    /// block's hash, `computed` the hash of the values now in the file.
+    Modified { declared: String, computed: String },
+}
+
+/// Recompute the tamper hash over the file's top-level numeric parameters —
+/// the values `write_mle_params` hashed into `content_hash` — and compare it
+/// with `declared`, the hash of the `[provenance]` block the caller has read.
+/// The scope is the parameter values only: editing a provenance field does
+/// not invalidate the hash, editing a value does. A `[provenance]` table is
+/// skipped exactly as `util::load_params_toml` skips it.
+pub fn verify_content_hash(path: &str, declared: &str) -> Result<ContentVerification, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path, e))?;
+    let table: toml::Table = contents.parse()
+        .map_err(|e| format!("parse error in {}: {}", path, e))?;
+    let params: std::collections::BTreeMap<String, f64> = table
+        .into_iter()
+        .filter(|(k, _)| k != "provenance")
+        .filter_map(|(k, v)| match v {
+            toml::Value::Float(f) => Some((k, f)),
+            toml::Value::Integer(i) => Some((k, i as f64)),
+            _ => None,
+        })
+        .collect();
+    let computed = mle_params_tamper_hash(&params);
+    Ok(if computed == declared {
+        ContentVerification::Valid
+    } else {
+        ContentVerification::Modified { declared: declared.to_string(), computed }
+    })
+}
+
 // `file_content_hash` moved to `crate::hashing::file_hash`; callers
 // now use the canonical name directly.
 
@@ -268,6 +306,60 @@ mod tests {
         // pinned on both sides of the round trip.
         let prov = read_mle_provenance(&path.to_string_lossy()).unwrap().unwrap();
         assert_eq!(prov.method, "if2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file a fit writes verifies; a value edited afterwards is reported
+    /// against the declared hash; an edited provenance field is not a value
+    /// edit.
+    #[test]
+    fn verify_content_hash_tells_an_edited_value_from_an_unedited_file() {
+        let dir = crate::test_support::unique_temp_dir("mle_params_verify");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mle_params.toml");
+        let path_s = path.to_string_lossy().into_owned();
+        let params: std::collections::BTreeMap<String, f64> =
+            [("beta".to_string(), 0.3), ("gamma".to_string(), 0.1)].into();
+        let meta = MleMetadata {
+            input_hash: "deadbeef".into(),
+            model_path: "sir.camdl".into(),
+            model_identity: "f00d".into(),
+            data_hashes: vec![],
+            seed: 1,
+            method: "if2".into(),
+            best_chain_index: 0,
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            dt: 1.0,
+            loglik: -12.5,
+            loglik_sd: 0.0,
+            n_particles: 100,
+            ess_at_mle: None,
+            timestamp: "2026-10-24T00:00:00Z".into(),
+        };
+        write_mle_params(&path_s, &params, &meta).unwrap();
+        let prov = read_mle_provenance(&path_s).unwrap().unwrap();
+        assert_eq!(
+            verify_content_hash(&path_s, &prov.content_hash).unwrap(),
+            ContentVerification::Valid,
+            "the file a fit writes verifies against its own block"
+        );
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("beta = 0.3\n"), "{text}");
+        std::fs::write(&path, text.replace("beta = 0.3\n", "beta = 0.35\n")).unwrap();
+        match verify_content_hash(&path_s, &prov.content_hash).unwrap() {
+            ContentVerification::Modified { declared, computed } => {
+                assert_eq!(declared, prov.content_hash);
+                assert_eq!(computed, mle_params_tamper_hash(
+                    &[("beta".to_string(), 0.35), ("gamma".to_string(), 0.1)].into()));
+                assert_ne!(declared, computed);
+            }
+            other => panic!("an edited value must be reported, got {other:?}"),
+        }
+
+        // Only the values are hashed: a provenance field may be corrected.
+        std::fs::write(&path, text.replace("model = \"sir.camdl\"", "model = \"sir_v2.camdl\"")).unwrap();
+        assert_eq!(verify_content_hash(&path_s, &prov.content_hash).unwrap(), ContentVerification::Valid);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

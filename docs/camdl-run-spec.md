@@ -352,7 +352,10 @@ per-stream `[provenance.data]` path+hash entries, `seed`, `method`, 1-indexed
 `chain`, `log_likelihood`, `loglik_sd`, `n_particles`, and optional
 `ess_mean`/`ess_min`. `camdl simulate --params` reads `backend`/`dt` back to
 warn when a downstream simulation would run under different dynamics than the
-fit.
+fit, and refuses the file when its parameter values no longer hash to
+`content_hash` (they were edited after the fit), naming the file: re-run the
+fit, or remove the `[provenance]` block to run the edited values as a plain
+params file.
 
 #### 2.2.1 `fit.meta.json` — fit-level sidecar
 
@@ -4851,7 +4854,8 @@ A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
 `{name}={value:.12}\0` pairs, truncated to 8 hex — so a hand-edited parameter
-value is detectable. It is not a content hash of the file.
+value is detectable; `camdl simulate --params` checks it and refuses an edited
+file (§2.2). It is not a content hash of the file.
 
 ### 10.7 A refused chain's `bad_init` record
 
