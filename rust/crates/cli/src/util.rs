@@ -409,13 +409,12 @@ pub(crate) fn run_camdlc(camdl_path: &str) -> Result<String, String> {
 ///
 /// `needs_state_grad` selects whether camdlc emits the WrtPop state-Jacobian
 /// (`rate_state_grad` / `projection_state_grad`, gh#439). It is consumed only by
-/// the ODE forward-sensitivity gradient (`fit --method nuts` on the `ode`
-/// backend); every other path — `simulate`, IF2, PMMH, PF, PGAS, `mh` — never
-/// reads it. When `false` we pass `--no-state-grad`, which skips the WrtPop
+/// the ODE forward-sensitivity gradient (`nl-lbfgs` on the `ode` backend); every
+/// other path — `simulate`, IF2, PMMH, PF, PGAS, `mh` — never reads it. When `false` we pass `--no-state-grad`, which skips the WrtPop
 /// autodiff pass and leaves both maps empty (often 95%+ of the IR on
 /// mean-field-coupled models). The IR-cache key folds this bit (`ir_cache_key`),
-/// so a lean-compiled entry is never served to a nuts+ode fit (which needs the
-/// Jacobian) and vice-versa.
+/// so a lean-compiled entry is never served to an nl-lbfgs+ode fit (which needs
+/// the Jacobian) and vice-versa.
 ///
 /// `quantities` is an optional vocabulary file whose `quantities { }` block
 /// REPLACES the model's own (proposal 2026-08-19). It is passed to camdlc by
@@ -474,7 +473,7 @@ pub(crate) fn run_camdlc_compile(
         cmd.env("CAMDL_NO_LICM", "1");
     }
     // gh#439 A2: skip the WrtPop state-Jacobian when no downstream consumer reads
-    // it. Only nuts+ode does; the runtime passes `needs_state_grad = false` for
+    // it. Only nl-lbfgs+ode does; the runtime passes `needs_state_grad = false` for
     // every other path, shrinking the IR (`--no-state-grad` leaves
     // `rate_state_grad` / `projection_state_grad` empty). This is IR-affecting, so
     // the resolved bit is folded into the IR-cache key (`ir_cache_key`) — a flip

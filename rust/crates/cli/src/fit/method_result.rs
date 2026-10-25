@@ -33,7 +33,6 @@ pub enum MethodResult {
     If2(If2StageResult),
     Pgas(PgasStageResult),
     Pmmh(PmmhStageResult),
-    Nuts(NutsStageResult),
     #[serde(rename = "nl-sbplx", alias = "nl-bobyqa", alias = "nl-lbfgs")]
     Nlopt(NloptStageResult),
 }
@@ -105,13 +104,12 @@ pub struct EssSummary {
 }
 
 /// Posterior convergence + efficiency diagnostics, shared by every Bayesian
-/// sampler (PGAS, PMMH, mh, NUTS). Every sampler computes these the same way
+/// sampler (PGAS, PMMH, mh). Every sampler computes these the same way
 /// — per-param rank-normalized R̂ and bulk/tail ESS via
 /// [`crate::fit::runner::compute_rhat_ess`]
 /// — and every renderer reads the same accessors below. Adding a new Bayesian
 /// method means *filling this struct*, not re-deriving efficiency metrics per
-/// method (the divergence that let a per-method allowlist drop `mh`, and that
-/// leaves `nuts` unable to report ESS at all until it fills this too).
+/// method (the divergence that let a per-method allowlist drop `mh`).
 ///
 /// One convergence statistic, in the three states it can actually be in.
 ///
@@ -811,23 +809,6 @@ pub struct PmmhStageResult {
     pub map_loglik: f64,
 }
 
-/// NUTS-stage result: gradient-based Bayesian posterior on the ODE marginal
-/// likelihood (gh#275). Same shared [`PosteriorDiagnostics`] as PGAS/PMMH — so
-/// it reports ESS/iteration + ESS/second through the same accessors — plus the
-/// nuts-specific MAP (best-draw) loglik and divergence count.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NutsStageResult {
-    pub diagnostics: PosteriorDiagnostics,
-    pub posterior_mean: BTreeMap<String, f64>,
-    pub posterior_q025: BTreeMap<String, f64>,
-    pub posterior_q975: BTreeMap<String, f64>,
-    pub map_loglik: f64,
-    /// Divergent transitions summed across chains — the headline NUTS
-    /// health diagnostic (a divergence means the leapfrog integrator left the
-    /// typical set; more than a handful invalidates the posterior geometry).
-    pub n_divergent: usize,
-}
-
 /// Errors loading a `MethodResult` from a stage directory.
 #[derive(Debug)]
 pub enum MethodResultError {
@@ -852,7 +833,7 @@ impl std::fmt::Display for MethodResultError {
             MethodResultError::UnknownMethod { method, stage_dir } => write!(
                 f,
                 "unknown fit-stage method `{}` at {} (expected if2, pgas, \
-                 pmmh, mh, nuts, nl-sbplx, nl-bobyqa, or nl-lbfgs)",
+                 pmmh, mh, nl-sbplx, nl-bobyqa, or nl-lbfgs)",
                 method,
                 stage_dir.display()
             ),
@@ -878,7 +859,7 @@ impl MethodResult {
     pub fn has_result(algo: crate::run_meta::FitAlgorithm) -> bool {
         use crate::run_meta::FitAlgorithm as A;
         match algo {
-            A::If2 | A::Pgas | A::Pmmh | A::Mh | A::Nuts
+            A::If2 | A::Pgas | A::Pmmh | A::Mh
             | A::NlSbplx | A::NlBobyqa | A::NlLbfgs => true,
             A::Pfilter => false,
         }
@@ -906,7 +887,6 @@ impl MethodResult {
                 };
                 Ok(MethodResult::Pmmh(PmmhStageResult::load(stage_dir, algo)?))
             }
-            "nuts" => Ok(MethodResult::Nuts(NutsStageResult::load(stage_dir)?)),
             "nl-sbplx" | "nl-bobyqa" | "nl-lbfgs" => Ok(MethodResult::Nlopt(
                 NloptStageResult::load(stage_dir, method)?,
             )),
@@ -1318,47 +1298,6 @@ impl PmmhStageResult {
     }
 }
 
-// ── NutsStageResult ─────────────────────────────────────────────────
-
-impl NutsStageResult {
-    pub fn load(stage_dir: &Path) -> Result<Self, MethodResultError> {
-        let inputs = read_stage_inputs(stage_dir)?;
-        let n_chains = inputs_n_chains(&inputs);
-        let wall_time_secs = inputs.get("wall_time_seconds").and_then(|v| v.as_f64());
-        let summary =
-            read_summary_json(stage_dir, &crate::run_meta::FitAlgorithm::Nuts.summary_filename())?;
-        let thin = summary.get("thin").and_then(|v| v.as_u64()).map(|t| t as usize).unwrap_or(1);
-        let n_divergent = summary.get("n_divergent").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-        let conv = ConvergenceMaps::read(&summary);
-        // Parameter identity is the UNION of every diagnostic key plus every
-        // recorded refusal — never "whichever map happened to be non-empty".
-        // A fit whose R̂ could not be computed still has parameters (gh#611 /
-        // review blocker 1); deriving the list from a diagnostic map made such
-        // a fit report none at all.
-        let est_names: Vec<String> = conv.param_names();
-        let (n_samples, posterior_mean, posterior_q025, posterior_q975) =
-            posterior_summaries(stage_dir, &est_names);
-
-        // MAP loglik = best-draw marginal loglik, persisted to fit_state.toml
-        // by the nuts runner (`best_loglik`).
-        let map_loglik = FitState::load(&stage_dir.to_string_lossy())
-            .map(|s| s.best_loglik)
-            .unwrap_or(f64::NEG_INFINITY);
-
-        Ok(NutsStageResult {
-            diagnostics: posterior_diagnostics(
-                stage_dir, conv.per_param(), n_samples, thin, wall_time_secs, n_chains,
-            ),
-            posterior_mean,
-            posterior_q025,
-            posterior_q975,
-            map_loglik,
-            n_divergent,
-        })
-    }
-}
-
 // ── shared helpers ──────────────────────────────────────────────────
 
 /// The convergence half of a stage summary, read once.
@@ -1493,7 +1432,7 @@ fn read_typed_map<T: serde::de::DeserializeOwned>(
 /// Extract a `{ "<param>": f64 }` object from a summary value into a
 /// `BTreeMap`. Non-finite entries (a NaN ESS serialized as JSON `null`) are
 /// dropped — `v.as_f64()` yields `None`, so an ungated diagnostic reads as
-/// absent rather than poisoning the map. Shared by the PGAS/PMMH/NUTS loaders'
+/// absent rather than poisoning the map. Shared by the PGAS/PMMH loaders'
 /// `rhat` + `ess` extraction.
 fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64> {
     summary
@@ -1508,7 +1447,7 @@ fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64>
 }
 
 /// Read a stage's summary JSON (`pgas_summary.json` /
-/// `pmmh_summary.json` / `nuts_summary.json`) into a serde value. These files
+/// `pmmh_summary.json` / `mh_summary.json`) into a serde value. These files
 /// are written by the runners and persist scalar diagnostics that aren't in
 /// fit_state.toml.
 ///
@@ -1978,88 +1917,6 @@ mod tests {
         assert!((r.diagnostics.max_rhat().unwrap() - 1.03).abs() < 1e-9);
     }
 
-    #[test]
-    fn loads_nuts_stage_result() {
-        let tmp = tempdir("nuts");
-        let dir = tmp.path();
-        // run.json with method=nuts AND wall_time_seconds — nuts gets wall-time
-        // from the stage-dispatch wrapper uniformly with pgas/pmmh, so the
-        // loader reads ESS/second off it too. (write_stage_run omits wall-time,
-        // so this test writes its own record to exercise that path.)
-        let rec = serde_json::json!({
-            "format_version": 1,
-            "kind": "fit_stage",
-            "run_id": "deadbeef".repeat(8),
-            "hash_version": 1,
-            "ir_version": "0.7",
-            "engine_version": "0.1.0+test",
-            "levels": [
-                {"name": "fit",   "label": "fit",   "hash": "f00d".repeat(16), "schema_version": 1},
-                {"name": "method", "label": "nuts", "hash": "1fb03eee00000000000000000000000000000000000000000000000000000000", "schema_version": 1},
-                {"name": "seed",  "label": "seed_1", "hash": "06cbd6b300000000000000000000000000000000000000000000000000000000", "schema_version": 1}
-            ],
-            "status": "completed",
-            "artifacts": {},
-            "inputs": {
-                "method": "nuts",
-                "backend": "ode",
-                "seed": 1,
-                "n_chains": 2,
-                "wall_time_seconds": 8.0
-            },
-            "provenance": {"created_at": "2026-04-27T00:00:00Z", "argv": ["camdl"]}
-        });
-        std::fs::write(dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
-        // nuts_summary.json exactly as `write_nuts_summary` emits it.
-        std::fs::write(
-            dir.join("nuts_summary.json"),
-            serde_json::to_string(&serde_json::json!({
-                "schema": crate::run_meta::FIT_SUMMARY_SCHEMA,
-                "method": "nuts",
-                "n_chains": 2,
-                "rhat": {"beta": 1.01, "gamma": 1.03},
-                "ess": {"beta": 300.0, "gamma": 150.0},
-                "n_divergent": 2,
-                "thin": 1
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        // draws.tsv exactly as `write_nuts_draws` emits it (chain/draw key cols
-        // + estimated params + the fixed `N0`). 4 rows across 2 chains.
-        std::fs::write(
-            dir.join("draws.tsv"),
-            "chain\tdraw\tbeta\tgamma\tN0\n\
-             0\t0\t2.0\t0.5\t1000\n\
-             0\t1\t2.2\t0.4\t1000\n\
-             1\t0\t1.9\t0.6\t1000\n\
-             1\t1\t2.1\t0.5\t1000\n",
-        )
-        .unwrap();
-        // fit_state.toml supplies the MAP loglik (best-draw marginal loglik).
-        synthetic_if2_state().save(&dir.to_string_lossy()).unwrap();
-
-        let r = NutsStageResult::load(dir).unwrap();
-        assert_eq!(r.diagnostics.n_chains, 2);
-        assert_eq!(r.diagnostics.n_samples, 4);
-        assert_eq!(r.n_divergent, 2);
-        assert!((r.diagnostics.max_rhat().unwrap() - 1.03).abs() < 1e-9);
-        // min-param ESS is gamma (150) → ESS/iter = 150 / (4 draws × thin 1).
-        assert!((r.diagnostics.ess_per_iter().unwrap() - 150.0 / 4.0).abs() < 1e-9);
-        // wall-time from run.json inputs → ESS/sec = 150 / 8.0 s.
-        assert!((r.diagnostics.ess_per_sec().unwrap() - 150.0 / 8.0).abs() < 1e-9);
-        // MAP loglik reads fit_state.toml best_loglik.
-        assert!((r.map_loglik - (-3804.9)).abs() < 1e-9);
-        // posterior_mean averages the draws.tsv beta column.
-        assert!((r.posterior_mean["beta"] - (2.0 + 2.2 + 1.9 + 2.1) / 4.0).abs() < 1e-9);
-        // A fixed column is carried for replay, not summarised as a posterior.
-        assert!(!r.posterior_mean.contains_key("N0"));
-
-        // And it dispatches through the public entry point on the "nuts" tag.
-        let via = MethodResult::load_from(dir, "nuts").unwrap();
-        assert!(matches!(via, MethodResult::Nuts(_)));
-    }
-
     /// gh#590: `has_result` and `load_from` must agree on every algorithm —
     /// `true` exactly where `load_from` has an arm (so an empty leaf fails
     /// with a load error, not `UnknownMethod`), `false` exactly where it
@@ -2068,7 +1925,7 @@ mod tests {
     fn has_result_agrees_with_load_from() {
         use crate::run_meta::FitAlgorithm as A;
         let tmp = tempdir("has_result");
-        for algo in [A::If2, A::Pgas, A::Pmmh, A::Mh, A::Nuts, A::Pfilter,
+        for algo in [A::If2, A::Pgas, A::Pmmh, A::Mh, A::Pfilter,
                      A::NlSbplx, A::NlBobyqa, A::NlLbfgs] {
             let unknown = matches!(
                 MethodResult::load_from(tmp.path(), algo.as_str()),

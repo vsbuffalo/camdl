@@ -3167,7 +3167,7 @@ open interval (0, 1) — a rate, coverage, or positivity given directly as a fra
 rather than a `k`-of-`n` count (which is `beta_binomial`). It is mean-linked with the
 same shape mapping (`alpha = mean · concentration`, `beta = (1 − mean) · concentration`);
 `mean` and `concentration` are both differentiable, so `beta` is usable under
-gradient-based inference (`nuts`) as well as the gradient-free methods.
+gradient-based inference (PGAS's NUTS move, `nl-lbfgs`) as well as the gradient-free methods.
 
 ### 12.2.1 Diagnostic-test likelihood sugar
 

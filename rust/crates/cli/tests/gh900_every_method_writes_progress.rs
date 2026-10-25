@@ -4,8 +4,8 @@
 //! `progress.json` is the one artifact a watcher can read while a stage runs,
 //! and the gh#278 contract is that a consumer decides liveness from its
 //! freshness. Two things broke that. `Heartbeat::mcmc` was constructed in
-//! exactly one place, `pgas.rs`, so PMMH, `mh`, NUTS, IF2 and the two NLopt
-//! MLEs wrote no file at all and a five-hour fit was indistinguishable from a
+//! exactly one place, `pgas.rs`, so PMMH, `mh`, IF2 and the NLopt MLEs
+//! wrote no file at all and a five-hour fit was indistinguishable from a
 //! dead one. And PGAS wrote its terminal state from the end of its happy path,
 //! so every other exit left the last periodic `running` record on disk — which
 //! `RunLiveness` reserves for an *uncaught* death (SIGKILL, panic), not for a
@@ -105,8 +105,8 @@ fn fit_run(dir: &Path, tag: &str, fit_toml: String) -> Run {
 // ── Claim 1: every method ends `done` ────────────────────────────────────────
 
 /// SIR with a daily prevalence count. Runs on both backends the methods below
-/// need: chain-binomial for PGAS / PMMH / IF2, the ODE skeleton for NUTS and the
-/// three NLopt MLEs.
+/// need: chain-binomial for PGAS / PMMH / IF2, the ODE skeleton for the NLopt
+/// MLEs.
 const SIR: &str = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -167,13 +167,6 @@ n_replicates = 2
 [method.dt_check]
 enabled = false
 "#,
-        "nuts" => r#"algorithm = "nuts"
-backend   = "ode"
-chains    = 1
-warmup    = 10
-samples   = 10
-starts    = "single"
-"#,
         "nl-sbplx" => r#"algorithm = "nl-sbplx"
 backend   = "ode"
 chains    = 1
@@ -220,7 +213,7 @@ fn every_method_leaves_a_terminal_progress_record() {
         .unwrap();
     assert!(sim.status.success(), "data gen: {}", String::from_utf8_lossy(&sim.stderr));
 
-    for method in ["pgas", "pmmh", "if2", "nuts", "nl-sbplx", "nl-lbfgs"] {
+    for method in ["pgas", "pmmh", "if2", "nl-sbplx", "nl-lbfgs"] {
         let run = fit_run(
             dir,
             method,

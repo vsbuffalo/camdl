@@ -448,7 +448,6 @@ fn sampler_source_verdict(leaf: &Path) -> Option<String> {
     let diag = match &typed {
         MethodResult::Pgas(r) => &r.diagnostics,
         MethodResult::Pmmh(r) => &r.diagnostics,
-        MethodResult::Nuts(r) => &r.diagnostics,
         _ => return None,
     };
     match diag.max_rhat_status() {

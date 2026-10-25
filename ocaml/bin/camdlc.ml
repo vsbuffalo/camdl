@@ -15,7 +15,7 @@ Flags (compile):
   --no-dim-check     disable dimensional analysis (only for a confirmed false positive)
   --no-state-grad    skip the state-Jacobian (rate_state_grad); smaller IR for
                      forward sim + gradient-free fits (IF2/PMMH/PF/MH), but the
-                     IR can't be fit with `nuts` on the ODE backend
+                     IR can't be fit with `nl-lbfgs` on the ODE backend
   --quantities FILE  compile with FILE's `quantities { }` block in place of the
                      model's own (a reporting vocabulary; FILE may contain
                      nothing else). Replaces, never merges.
@@ -192,7 +192,7 @@ let () =
        ), " skip the state-Jacobian (rate_state_grad/projection_state_grad); \
            shrinks the IR for forward simulation and gradient-free fits \
            (IF2/PMMH/PF/MH). A model compiled this way cannot be fit with \
-           `nuts` on the ODE backend");
+           `nl-lbfgs` on the ODE backend");
       ("-o", Arg.String set_output,
        "FILE  write IR JSON to FILE instead of stdout");
       ("--output", Arg.String set_output,

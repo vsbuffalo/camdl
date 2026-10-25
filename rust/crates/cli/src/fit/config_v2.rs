@@ -224,7 +224,7 @@ impl FitConfig {
              run. It is a complete problem for `simulate --fit`, `pfilter --fit`, \
              `survey --fit` and `profile --fit`; to fit it, add\n  \
              [method]\n  \
-             algorithm = \"pgas\"          # if2 | pgas | pmmh | mh | nuts | pfilter | nl-sbplx | nl-bobyqa\n  \
+             algorithm = \"pgas\"          # if2 | pgas | pmmh | mh | pfilter | nl-sbplx | nl-bobyqa | nl-lbfgs\n  \
              backend   = \"chain_binomial\"\n  \
              ...\n  \
              See `camdl docs fit-toml`."
@@ -1186,50 +1186,6 @@ pub enum Algorithm {
         record_prequential: bool,
     },
 
-    /// NUTS on the deterministic ODE marginal likelihood (gh#275 Phase 2) — a
-    /// gradient-based Bayesian sampler using forward sensitivities (`det_grad`).
-    /// Deterministic-likelihood, `ode`-only; on a stochastic backend gradient-NUTS
-    /// lives inside `pgas`. Leaner than `PGAS` — no particles, no CSMC;
-    /// just NUTS warm-up (dual-averaging step size) and sampling.
-    #[serde(rename = "nuts")]
-    Nuts {
-        backend: crate::run_meta::InferenceBackend,
-        chains: usize,
-        /// NUTS warm-up (adaptation) iterations — the step size adapts via dual
-        /// averaging; these draws are discarded. Default 500.
-        #[serde(default = "default_nuts_warmup")]
-        warmup: usize,
-        /// Posterior draws KEPT per chain (post-warm-up). Default 500.
-        #[serde(default = "default_nuts_samples")]
-        samples: usize,
-        /// Maximum NUTS tree depth (Hoffman & Gelman 2014). Default 10.
-        #[serde(default = "default_max_tree_depth")]
-        max_tree_depth: usize,
-        /// Target mean acceptance for dual averaging (Stan default 0.8).
-        #[serde(default = "default_target_accept")]
-        target_accept: f64,
-        /// NUTS mass matrix: `false` = diagonal (Stan's default `diag_e`;
-        /// rescales each parameter by its warm-up posterior variance), `true` =
-        /// dense (`dense_e`; full covariance, also absorbs parameter
-        /// correlations at O(d²) cost and needs more warm-up to estimate). The
-        /// warm-up adapts the metric from the sample moments — on an anisotropic
-        /// posterior this takes far larger steps at the same acceptance and
-        /// frees wide-posterior parameters that identity mass leaves stuck.
-        #[serde(default = "default_nuts_dense_mass")]
-        dense_mass: bool,
-        /// Coarse RK4 step for the *unscored* warm-up `[t_start, first_obs)` on
-        /// the ODE gradient path (gh#396 follow-on). `None` (default) or a value
-        /// `<= dt` disables it — the whole trajectory integrates at `dt`. A larger
-        /// value takes big steps on the transient (state + sensitivity together,
-        /// so the NUTS gradient stays consistent with the coarsely-computed value),
-        /// cutting the per-gradient cost of a model whose origin is long before the
-        /// data. Prevalence (state-scored) streams only in this release; an
-        /// incidence stream is refused (its first bin would be coarsened). Identity-
-        /// defining: it changes the scored trajectory, so it re-keys the run.
-        #[serde(default)]
-        burnin_dt: Option<f64>,
-    },
-
     /// NLopt Sbplx (subspace-searching simplex) — deterministic MLE on the
     /// ODE-skeleton likelihood. Default for ODE-backend MLE; robust to
     /// boundary non-smoothness. Phase 1 of the ODE-inference proposal.
@@ -1395,8 +1351,8 @@ impl Method {
         // named below.
         //
         // What is subtracted, and why:
-        //  - the EXTENSION DIMENSION (PGAS `sweeps`, PMMH/Mh `iterations`,
-        //    Nuts `samples`): a resumed run extends a base run, so the two
+        //  - the EXTENSION DIMENSION (PGAS `sweeps`, PMMH/Mh `iterations`):
+        //    a resumed run extends a base run, so the two
         //    must share a prefix identity; the length is folded separately
         //    by `cas_target_length`.
         //  - PGAS `n_trajectories`: an output-shaping count, folded by
@@ -1413,7 +1369,6 @@ impl Method {
         match self.algorithm {
             Algorithm::PGAS { .. } => self.payload_minus(&["sweeps", "n_trajectories"]),
             Algorithm::PMMH { .. } | Algorithm::Mh { .. } => self.payload_minus(&["iterations"]),
-            Algorithm::Nuts { .. } => self.payload_minus(&["samples"]),
             Algorithm::IF2 { .. }
             | Algorithm::PFilter { .. }
             | Algorithm::NlSbplx(_)
@@ -1491,7 +1446,6 @@ impl Algorithm {
             Algorithm::PGAS     { .. } => FitAlgorithm::Pgas,
             Algorithm::PMMH     { .. } => FitAlgorithm::Pmmh,
             Algorithm::Mh       { .. } => FitAlgorithm::Mh,
-            Algorithm::Nuts     { .. } => FitAlgorithm::Nuts,
             Algorithm::PFilter  { .. } => FitAlgorithm::Pfilter,
             Algorithm::NlSbplx  { .. } => FitAlgorithm::NlSbplx,
             Algorithm::NlBobyqa { .. } => FitAlgorithm::NlBobyqa,
@@ -1509,14 +1463,13 @@ impl Algorithm {
             | Algorithm::PGAS    { backend, .. }
             | Algorithm::PMMH    { backend, .. }
             | Algorithm::Mh      { backend, .. }
-            | Algorithm::Nuts    { backend, .. }
             | Algorithm::PFilter { backend, .. } => *backend,
             Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) => c.backend,
         }
     }
 
     pub fn requires_priors(&self) -> bool {
-        matches!(self, Algorithm::PGAS { .. } | Algorithm::PMMH { .. } | Algorithm::Mh { .. } | Algorithm::Nuts { .. })
+        matches!(self, Algorithm::PGAS { .. } | Algorithm::PMMH { .. } | Algorithm::Mh { .. })
     }
 
     pub fn chains(&self) -> usize {
@@ -1525,7 +1478,6 @@ impl Algorithm {
             Algorithm::PGAS { chains, .. } => *chains,
             Algorithm::PMMH { chains, .. } => *chains,
             Algorithm::Mh { chains, .. } => *chains,
-            Algorithm::Nuts { chains, .. } => *chains,
             Algorithm::PFilter { .. } => 1,
             Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) => c.chains,
         }
@@ -1543,7 +1495,6 @@ impl Algorithm {
             Algorithm::PGAS { sweeps, .. } => *sweeps as u64,
             Algorithm::PMMH { iterations, .. } => *iterations as u64,
             Algorithm::Mh { iterations, .. } => *iterations as u64,
-            Algorithm::Nuts { samples, .. } => *samples as u64,
             Algorithm::PFilter { .. }
             | Algorithm::NlSbplx(_)
             | Algorithm::NlBobyqa(_)
@@ -1605,10 +1556,6 @@ impl Algorithm {
                 // addresses.
                 if let Some(b) = cli.binomial { *binomial = b; }
                 if cli.no_ancestor_sampling { *ancestor_sampling = false; }
-            }
-            Algorithm::Nuts { max_tree_depth, dense_mass, .. } => {
-                if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
-                if cli.diagonal_mass { *dense_mass = false; }
             }
             Algorithm::PMMH { adapt, adapt_start, .. } => {
                 if cli.no_adapt { *adapt = false; }
@@ -1785,10 +1732,6 @@ fn default_max_tree_depth() -> usize { 10 }
 fn default_csmc_sweeps_per_nuts() -> usize { 1 }
 fn default_n_trajectories() -> usize { 200 }
 fn default_dense_mass() -> bool { true }
-/// NUTS-on-ODE defaults to a *diagonal* metric (Stan's `diag_e`): cheaper and
-/// needs less warm-up than dense, and sufficient for scale-spread anisotropy.
-/// Opt into dense (`dense_mass = true`) for a correlated posterior.
-fn default_nuts_dense_mass() -> bool { false }
 fn default_use_nuts() -> bool { true }
 fn default_ancestor_sampling() -> bool { true }
 /// The `skip_serializing_if` predicate for `Algorithm::PGAS::ancestor_sampling`.
@@ -1796,13 +1739,9 @@ fn default_ancestor_sampling() -> bool { true }
 /// absence in a stored payload must mean AS-on permanently, whatever the
 /// default may later become — see the field's doc comment.
 fn ancestor_sampling_is_on(b: &bool) -> bool { *b }
-fn default_nuts_warmup() -> usize { 500 }
-fn default_nuts_samples() -> usize { 500 }
-fn default_target_accept() -> f64 { 0.8 }
 
 /// Validate a `burnin_dt` coarse warm-up step (gh#396 follow-on) against the
-/// fit-wide `dt` and the observation streams. Shared by the `nuts` (gradient) and
-/// `mh` (deterministic) ODE paths — the soundness rules are identical: coarsening
+/// fit-wide `dt` and the observation streams, for the `mh` ODE path: coarsening
 /// is valid only for a prevalence (state-scored) fit with a genuine unscored
 /// warm-up window and a step LARGER than `dt`. Returns the effective step: `dt`
 /// (off) for `None` / `== dt`; the validated `b` otherwise. The `events`/`balance`
@@ -2009,6 +1948,28 @@ fn detect_relocated_config_backend(contents: &str) -> Result<(), String> {
              a real-data fit.\n  See `camdl docs fit-toml`."
                 .into(),
         );
+    }
+    Ok(())
+}
+
+/// Refuse `algorithm = "nuts"` under `[method]` before the strict parse, so the
+/// user gets the same steer as the `--algorithm` boundary
+/// ([`super::methods::NUTS_STEER`]) instead of serde's bare "unknown variant".
+fn detect_nuts_algorithm(contents: &str) -> Result<(), String> {
+    let value: toml::Value = match toml::from_str(contents) {
+        Ok(v) => v,
+        // Malformed TOML surfaces from the strict parse with its own message.
+        Err(_) => return Ok(()),
+    };
+    let algorithm = value
+        .get("method")
+        .and_then(|m| m.get("algorithm"))
+        .and_then(toml::Value::as_str);
+    if algorithm == Some("nuts") {
+        return Err(format!(
+            "[method]: unknown algorithm \"nuts\".\n  {}\n  See `camdl docs fit-toml`.",
+            super::methods::NUTS_STEER.replace('\n', "\n  ")
+        ));
     }
     Ok(())
 }
@@ -2305,6 +2266,7 @@ impl FitConfig {
         detect_removed_fit_starts(contents)?;
         detect_relocated_config_backend(contents)?;
         detect_removed_condition_from(contents)?;
+        detect_nuts_algorithm(contents)?;
         let wire: FitConfigWire = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
         // gh#241 (C3): catch typo'd method keys serde silently drops.
@@ -2360,10 +2322,9 @@ impl FitConfig {
     }
 
     /// gh#439 A2: does the method read the WrtPop state-Jacobian
-    /// (`rate_state_grad` / `projection_state_grad`)? The two `ode`-backend
-    /// gradient cells do — `nuts` (Bayesian) and `nl-lbfgs` (MLE), both driven
-    /// by the ODE forward-sensitivity gradient (`ode_grad::det_grad`). Every
-    /// other (algorithm, backend) cell — IF2, PGAS, PMMH, `mh`, `nl-sbplx`,
+    /// (`rate_state_grad` / `projection_state_grad`)? The one `ode`-backend
+    /// gradient cell does — `nl-lbfgs` (MLE), driven by the ODE
+    /// forward-sensitivity gradient (`ode_grad::det_grad`). Every other (algorithm, backend) cell — IF2, PGAS, PMMH, `mh`, `nl-sbplx`,
     /// `nl-bobyqa`, the particle filter — is gradient-free with respect to the
     /// state, so the model can compile lean (`camdlc --no-state-grad`), dropping
     /// the dense ~O(G^3) Jacobian that dominates coupled-model IR. Consumed by
@@ -2373,10 +2334,8 @@ impl FitConfig {
     pub fn needs_state_grad(&self) -> bool {
         use crate::run_meta::{FitAlgorithm, InferenceBackend};
         self.inference.method.as_ref().is_some_and(|m| {
-            matches!(
-                m.algorithm.method_kind(),
-                FitAlgorithm::Nuts | FitAlgorithm::NlLbfgs
-            ) && m.algorithm.backend() == InferenceBackend::Ode
+            m.algorithm.method_kind() == FitAlgorithm::NlLbfgs
+                && m.algorithm.backend() == InferenceBackend::Ode
         })
     }
 
@@ -2617,9 +2576,9 @@ impl FitConfig {
             Ok(()) => Ok(()),
             Err(e) => Err(format!(
                 "[method]: `algorithm = \"nl-lbfgs\"` optimizes the ODE marginal \
-                 likelihood using its gradient, and the gradient capability gate \
-                 refuses this model. The gate is shared with `nuts`, the other \
-                 method that takes this gradient, and names it in its reason:\n\n  \
+                 likelihood using its gradient, and the gradient capability check \
+                 refuses this model. The check's reason below still names `nuts`, \
+                 the removed ODE sampler, for the same requirement (gh#917):\n\n  \
                  {e}\n\n  \
                  `algorithm = \"nl-sbplx\"` optimizes the same ODE marginal \
                  likelihood without a gradient, and has no such requirement."
@@ -2630,7 +2589,7 @@ impl FitConfig {
     /// gh#75: Validate that every estimated parameter has a prior available
     /// from at least one source — either this fit toml's
     /// `[estimate.<name>.prior]` block, or the model IR's `~` syntax —
-    /// when the method is Bayesian (PGAS / PMMH / MH / NUTS).
+    /// when the method is Bayesian (PGAS / PMMH / MH).
     ///
     /// This mirrors the gh#73 precedence chain used in `camdl profile`,
     /// extending it to `camdl fit run`. Without the IR fallback, every
@@ -3759,6 +3718,31 @@ cooling = 0.7
     /// dropped (neither applied nor reaching the method identity hash). A
     /// post-parse pass must reject it with an error naming the table and
     /// key; a valid method (including optional keys) still parses.
+    /// `algorithm = "nuts"` is refused as an unknown algorithm with the steer
+    /// to PGAS's NUTS move and the ODE sampler, on either backend; the same
+    /// file with `mh` validates.
+    #[test]
+    fn nuts_algorithm_is_refused_with_the_steer() {
+        for backend in ["ode", "chain_binomial"] {
+            let src = format!(
+                "[model]\ncamdl = \"models/sir.camdl\"\n\
+                 [data.observations]\ncases = \"data/cases.tsv\"\n\
+                 [estimate]\nbeta = {{ bounds = [0.01, 2.0] }}\n\
+                 [fixed]\nN0 = 1000\n\
+                 [method]\nalgorithm = \"nuts\"\nbackend = \"{backend}\"\nchains = 2\n"
+            );
+            let err = parse(&src).expect_err("`nuts` is not an algorithm");
+            assert!(err.contains("unknown algorithm \"nuts\""), "{backend}: {err}");
+            assert!(err.contains("use_nuts") && err.contains("algorithm = \"pgas\""),
+                "{backend}: names PGAS's NUTS move: {err}");
+            assert!(err.contains("algorithm = \"mh\""), "{backend}: names the ODE sampler: {err}");
+            if backend == "ode" {
+                let mh = src.replace("algorithm = \"nuts\"", "algorithm = \"mh\"\niterations = 10");
+                parse(&mh).unwrap_or_else(|e| panic!("the same file with mh validates: {e}"));
+            }
+        }
+    }
+
     #[test]
     fn method_rejects_unknown_keys() {
         let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
@@ -5947,9 +5931,8 @@ cooling = 0.70
         assert_eq!(resolved["I0"], 50.0); // inline overrides from_file
     }
 
-    /// gh#439 A2: `needs_state_grad` is true for exactly the two ODE gradient
-    /// cells — `nuts` and `nl-lbfgs`, the consumers of the WrtPop
-    /// state-Jacobian — and false for every other (algorithm, backend)
+    /// gh#439 A2: `needs_state_grad` is true for exactly the one ODE gradient
+    /// cell — `nl-lbfgs`, the consumer of the WrtPop state-Jacobian — and false for every other (algorithm, backend)
     /// combination, including the near-misses `mh` on `ode` (Bayesian on the
     /// ODE backend, but gradient-free) and `nl-sbplx` on `ode` (deterministic
     /// MLE on the ODE backend, but derivative-free); both must compile lean.
@@ -5965,21 +5948,14 @@ cooling = 0.70
             FitConfig::from_toml_str(&toml_str).unwrap_or_else(|e| panic!("parse {stage:?}: {e}"))
         };
 
-        // nuts + ode → the sole state-Jacobian consumer (true).
-        assert!(
-            cfg("[method]\nalgorithm = \"nuts\"\nbackend = \"ode\"\nchains = 2")
-                .needs_state_grad(),
-            "nuts+ode drives the ODE forward-sensitivity gradient — needs the Jacobian"
-        );
-
-        // nl-lbfgs + ode → the same forward-sensitivity gradient, used for MLE
-        // rather than sampling (true). Without this the model compiles lean and
+        // nl-lbfgs + ode → the forward-sensitivity gradient, used for MLE
+        // (true). Without this the model compiles lean and
         // the gradient preflight refuses every nl-lbfgs fit as
         // "--no-state-grad".
         assert!(
             cfg("[method]\nalgorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 2")
                 .needs_state_grad(),
-            "nl-lbfgs+ode drives the same ODE forward-sensitivity gradient as nuts"
+            "nl-lbfgs+ode drives the ODE forward-sensitivity gradient — needs the Jacobian"
         );
 
         // mh + ode → gradient-free Bayesian on the ODE backend → lean (false).
@@ -7261,9 +7237,9 @@ cooling = 0.7
             "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 100\nsweeps = 10\n",
             "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 100\niterations = 10\n",
             "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 10\n",
-            "algorithm = \"nuts\"\nbackend = \"ode\"\nchains = 2\n",
             "algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 4\n",
             "algorithm = \"nl-bobyqa\"\nbackend = \"ode\"\nchains = 4\n",
+            "algorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 4\n",
             "algorithm = \"pfilter\"\nbackend = \"chain_binomial\"\nparticles = 100\n",
         ] {
             let cfg = parse(&format!("{base}[method]\n{body}starts = \"single\"\n"))

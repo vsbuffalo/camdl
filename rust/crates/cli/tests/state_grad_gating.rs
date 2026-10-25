@@ -1,7 +1,7 @@
 //! gh#439 A2: the runtime drives state-Jacobian emission by method.
 //!
 //! The WrtPop state-Jacobian (`rate_state_grad` / `projection_state_grad`) is
-//! read only by `fit --method nuts` on the `ode` backend (the ODE
+//! read only by `nl-lbfgs` on the `ode` backend (the ODE
 //! forward-sensitivity gradient). Every other path — `simulate`, IF2, PMMH, PF,
 //! PGAS, `mh` — compiles lean (`camdlc --no-state-grad`), dropping a map that
 //! reaches 95%+ of the IR on mean-field-coupled models.

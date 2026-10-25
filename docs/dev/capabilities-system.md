@@ -148,7 +148,7 @@ convergence. Examples:
 
 - `(pgas, ode)` → "the CSMC step needs stochastic process variance to refresh
   the trajectory between θ updates. Under ODE all particles produce identical
-  trajectories per θ, so the CSMC step is degenerate." Suggests `mh`/`nuts`.
+  trajectories per θ, so the CSMC step is degenerate." Suggests `mh`.
 - `(if2, ode)` → "collapses to a noisy gradient-free hill-climber." Suggests
   `nl-sbplx`/`nl-bobyqa`.
 - `(nl-sbplx, chain_binomial)` → "the single-trajectory loglik is a noisy
@@ -157,9 +157,10 @@ convergence. Examples:
 
 Note `mh` is now **registered** as the ODE-Bayesian method (Beta — direct
 Metropolis-Hastings on the deterministic ODE marginal likelihood; landed
-`590e80da`, dispatched in `fit/mod.rs`). `nuts` (the planned gradient-based
-ODE-Bayesian method) is still only a _suggested_ answer in `rejection_reason`
-and **not yet registered** — asking for it today hits a bespoke rejection.
+`590e80da`, dispatched in `fit/mod.rs`). `nuts` is not registry vocabulary on
+any backend: `parse_combo` and the fit.toml loader refuse it as an unknown
+algorithm with `methods::NUTS_STEER`, which points at PGAS's NUTS move
+(`use_nuts`) and at `mh`.
 
 **Enforcement.** `validate_combo` is called at config-load / pre-flight, both
 hard aborts:
@@ -249,12 +250,12 @@ same backend by another**. Representative confirmed cases:
   (`methods.rs::validate_perturb_only_at_t0`, called once from
   `FitConfigV2::validate`). The flag is an IF2 schedule — "perturb at t=0 only"
   — and IF2 is the only algorithm that perturbs at all, so under `pgas`, `pmmh`,
-  `mh`, `nuts` or the nlopt family it is parsed, hashed, and read nowhere.
-  **This one is checked against the whole fit, not per stage**, and it is the
-  exception worth remembering on this axis: `[estimate]` is global to the fit
-  while the algorithm is per stage, so the flag is a property of the fit. An
-  if2-scout → pgas-posterior pipeline is accepted (one stage reads it, the other
-  ignores it); a fit with no `if2` stage anywhere is refused, because there the
+  `mh` or the nlopt family it is parsed, hashed, and read nowhere. **This one is
+  checked against the whole fit, not per stage**, and it is the exception worth
+  remembering on this axis: `[estimate]` is global to the fit while the
+  algorithm is per stage, so the flag is a property of the fit. An if2-scout →
+  pgas-posterior pipeline is accepted (one stage reads it, the other ignores
+  it); a fit with no `if2` stage anywhere is refused, because there the
   declaration genuinely does nothing. A `pfilter`-only fit is tolerated —
   `pfilter` estimates nothing, so the flag is no more inert than the `rw_sd`
   beside it.

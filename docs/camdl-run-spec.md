@@ -1111,7 +1111,7 @@ is refused up front if none of them sets it. This is space-filling exploration
 for model debugging, not a prior.
 
 `--draws posterior --fit <fit results dir>` reads the draws the fit's sampler
-(PGAS / PMMH / MH / NUTS) wrote — the method leaf's `draws.tsv`, which is
+(PGAS / PMMH / MH) wrote — the method leaf's `draws.tsv`, which is
 post-warm-up and thinned and carries every model parameter. Resolution is by
 artifact, not by method name: a leaf has a posterior iff it wrote a
 `draws.tsv`, so an optimizer-only fit (IF2 / NLopt) resolves to an error rather
@@ -2386,7 +2386,7 @@ Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
 | -------------------- | ------------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bounds`             | `[lo, hi]`                           | the model's `in [lo, hi]`     | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                    |
 | `start`              | float                                | model value, else bounds draw | The base point: where `starts = "single"` puts every chain, and what a spread rule draws around. A sourced point rule (`from_mle`, `from_params`) replaces it.                                                                                                                                                        |
-| `prior`              | inline table                         | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`/`nuts`.                                                                                                                                                                                                                                       |
+| `prior`              | inline table                         | the model's `~` declaration   | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`.                                                                                                                                                                                                                                              |
 | `transform`          | `"log"` \| `"logit"` \| `"identity"` | derived from the param's type | Inference-scale transform. Also sets the clamp box IF2 keeps particles inside.                                                                                                                                                                                                                                        |
 | `perturb_only_at_t0` | bool                                 | `false`                       | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Read by `if2` and inert for every other method, so a problem's IF2 file and its PGAS file can share the key. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
 | `rw_sd`              | float                                | auto-scaled from bounds       | IF2 per-parameter random-walk SD, on the natural scale.                                                                                                                                                                                                                                                               |
@@ -2489,7 +2489,6 @@ for `camdl fit methods`, the runtime banners, and the invalid-pair error.
 | `nl-bobyqa` | `ode`            | beta   | inference  | NLopt BOBYQA → deterministic MLE. Faster, fails at bounds.                                            |
 | `nl-lbfgs`  | `ode`            | beta   | inference  | NLopt L-BFGS with the forward-sensitivity gradient → deterministic MLE; needs a differentiable model. |
 | `mh`        | `ode`            | beta   | inference  | Gradient-free MH on the ODE marginal likelihood → posterior.                                          |
-| `nuts`      | `ode`            | beta   | inference  | NUTS via forward sensitivities on the ODE marginal → posterior.                                       |
 
 The `ode`-backend samplers fit the deterministic marginal likelihood
 `p(y | θ, ODE skeleton)`, not the stochastic `p(y | θ)` — a different
@@ -2549,19 +2548,6 @@ deterministic ODE evaluation, so it carries no `particles`.
 | `adapt_start` | `300`   |                                                                                                                                                                                   |
 | `burnin_dt`   | none    | Coarse RK4 step for the unscored warm-up `[t_start, first_obs)`. `< dt` is refused and `= dt` is off; prevalence-scored streams, `rk4`, no `balance`/`events`. Identity-defining. |
 
-**`nuts`** — `chains` required.
-
-| key              | default | meaning                                                                   |
-| ---------------- | ------- | ------------------------------------------------------------------------- |
-| `warmup`         | `500`   | Step-size adaptation draws, discarded.                                    |
-| `samples`        | `500`   | Posterior draws kept per chain.                                           |
-| `max_tree_depth` | `10`    |                                                                           |
-| `target_accept`  | `0.8`   | Dual-averaging target (Stan's default).                                   |
-| `dense_mass`     | `false` | Diagonal metric by default (Stan's `diag_e`); `true` for full covariance. |
-| `burnin_dt`      | none    | As for `mh`; the state and its sensitivities are coarsened together.      |
-
-`nuts` has no `burn_in`/`thin` — `warmup` is the discard.
-
 **`pfilter`** — `particles` required. No `chains` (it is always one); `starts`
 names the one point it scores — the base point, or the point a sourced rule such
 as `{ from_mle = "@scout" }` names.
@@ -2588,13 +2574,14 @@ the same point.
 `nl-sbplx` and `nl-bobyqa` are derivative-free: one objective evaluation is one
 ODE solve. `nl-lbfgs` is the gradient method — one objective evaluation is one
 _augmented_ solve carrying `∂x/∂θ` alongside the state, returning the
-log-likelihood and its gradient together (the same forward-sensitivity machinery
-`nuts` uses, `sim::inference::ode_grad::det_grad`). The budget and the progress
-step count that unit for all three.
+log-likelihood and its gradient together (the forward-sensitivity gradient,
+`sim::inference::ode_grad::det_grad`). The budget and the progress step count
+that unit for all three.
 
 Because it takes a gradient, `nl-lbfgs` accepts only a **differentiable model**
-— the same capability gate `nuts` runs, listed under `nuts` above. The
-difference is when it fires: for `nl-lbfgs` it is checked at config validation,
+— the gradient capability check refuses an unsupported rate or observation
+gradient, an adaptive `rk45` integrator, a scheduled effect, or an initial
+condition the gradient path cannot seed. It is checked at config validation,
 before any leaf is claimed, and the refusal names `nl-sbplx` as the
 derivative-free alternative on the same likelihood. If the gradient later turns
 out not to be computable at some θ the search reaches, that chain fails with the
@@ -2788,10 +2775,10 @@ Per-algorithm leaf contents: IF2 writes `mle_params.toml`, `final_params.toml`,
 `diagnostics.tsv`, `chain_evaluations.tsv`, and
 `chain_N/{final_params.toml, parameter_traces.tsv}`. The samplers write
 `draws.tsv`, `<algorithm>_summary.json` (`pgas_summary.json`,
-`pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json`), and
-`chain_N/trace.tsv`; PGAS and PMMH also write `chain_N/resume_state.bin`. The
-NLopt optimizers write `mle_params.toml` and `chain_results.tsv`. A `pfilter`
-method with `record_prequential` writes `prequential.{tsv,json}`.
+`pmmh_summary.json`, `mh_summary.json`), and `chain_N/trace.tsv`; PGAS and PMMH
+also write `chain_N/resume_state.bin`. The NLopt optimizers write
+`mle_params.toml` and `chain_results.tsv`. A `pfilter` method with
+`record_prequential` writes `prequential.{tsv,json}`.
 
 Every `<algorithm>_summary.json` carries `schema = "camdl.fit-summary/v2"`, and
 every reader requires it: a file without the tag, or with a tag this camdl does
@@ -3177,11 +3164,11 @@ un-overridden one — with the exception noted after the table.
 | ------------------------- | ------------------------------- | --------- |
 | `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh` | gate      |
 | `--cooling-target-iters`  | `cooling_target_iters`          | IF2       |
-| `--max-tree-depth <N>`    | `max_tree_depth`                | PGAS/NUTS |
+| `--max-tree-depth <N>`    | `max_tree_depth`                | PGAS      |
 | `--trajectory-warmup <N>` | `trajectory_warmup`             | PGAS      |
 | `--csmc-sweeps-per-nuts`  | `csmc_sweeps_per_nuts`          | PGAS      |
 | `--n-trajectories <N>`    | `n_trajectories`                | PGAS      |
-| `--diagonal-mass`         | `dense_mass = false`            | PGAS/NUTS |
+| `--diagonal-mass`         | `dense_mass = false`            | PGAS      |
 | `--no-nuts`               | `use_nuts = false`              | PGAS      |
 | `--no-adapt`              | `adapt = false`                 | PMMH/MH   |
 | `--adapt-start <N>`       | `adapt_start`                   | PMMH/MH   |
@@ -3766,12 +3753,6 @@ Rhat:
   beta         Rhat=1.105 ~ ESS=NaN
   gamma        Rhat=1.051 ✓ ESS=18
 ```
-
-`nuts` is the gradient-based sibling of `mh` on this backend (`warmup` +
-`samples` instead of `iterations` + `burn_in`). It requires a differentiable
-model: the capability gate refuses an unsupported rate or observation gradient,
-an adaptive `rk45` integrator, a scheduled effect, or an initial condition the
-gradient path cannot seed.
 
 ### 8.4 Shared fixed parameters and a train/holdout split
 
@@ -4663,18 +4644,17 @@ Per-method differences that matter to a consumer:
 | ------ | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | PGAS   | the draw's true 0-based **sweep index**, so it joins `trajectories.tsv` on `(chain, sweep)` | all columns `{:.17e}`                                                                                          |
 | PMMH   | a within-chain **row index** (no latent path is saved, so nothing to join to)               | estimated columns copied verbatim from the trace (shortest round-trippable `Display`); fixed columns `{:.17e}` |
-| NUTS   | a within-chain row index                                                                    | `{:.17e}`, **estimated parameters only** — no fixed columns                                                    |
 
 Because PGAS and PMMH carry fixed parameters as constant columns, their file is
 a complete parameter specification: a posterior-predictive run needs no
-companion `--params`. A NUTS `draws.tsv` is not self-contained.
+companion `--params`.
 
 ### 10.4 Sampler traces (`chain_N/trace.tsv`, `chain_N/parameter_traces.tsv`)
 
 One file per chain, streamed during sampling (header flushed immediately, rows
 batched, so a live tail works). `chain_N` is 1-based.
 
-PGAS, PMMH and NUTS write `chain_N/trace.tsv` via the shared
+PGAS, PMMH and MH write `chain_N/trace.tsv` via the shared
 `fit::trace_writer::TraceWriter`:
 
 ```
@@ -4838,7 +4818,7 @@ An optimizer leaf (IF2, NLopt) additionally holds:
 | `chain_evaluations.tsv`        | per-chain loglik evaluation summary                                                                                                                                                                                                                       |
 | `diagnostics.tsv`              | per-parameter convergence diagnostics                                                                                                                                                                                                                     |
 
-A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
+A sampler leaf (PGAS, PMMH, MH) additionally holds:
 
 | file                        | content                                                                                                                                                                                                                                                                                                                                                                                                  |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -4849,7 +4829,7 @@ A sampler leaf (PGAS, PMMH, NUTS, MH) additionally holds:
 | `chain_N/trajectories.json` | the matching manifest (`format`, `version`, `method`, `granularity`, `n_chains`, `n_draws`, `columns`, `model_hash`, `conditioned`, `calendar`, …)                                                                                                                                                                                                                                                       |
 | `latent_convergence.tsv`    | PGAS only, ≥ 2 chains — per (substep, trajectory column): `status` (`constant`/`frozen_disagree`/`mixed`), chain-mean range, R̂ and ESS over the saved paths; binned in `pgas_summary.json`; written at run end, or by `fit summary` from `chain_N/trajectories.tsv` when absent (gh#822)                                                                                                                 |
 | `filter_ess.tsv`            | PGAS only — per (chain, observation): mean and minimum filter ESS over the retained post-burn-in sweeps and the sweep count, with a pooled `chain = all` block first; the `filter_ess` block of `pgas_summary.json` carries the summary (particle count, starvation bar, min / 10% / median of the mean profile, starved observations worst first). Omitted when no sweep scored an observation (gh#685) |
-| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json`, `nuts_summary.json` — one file per algorithm, deliberately never shared; each names its algorithm under `method` and carries `schema = "camdl.fit-summary/v2"`, which every reader requires                                                                                                                                                 |
+| `<algorithm>_summary.json`  | `pgas_summary.json`, `pmmh_summary.json`, `mh_summary.json` — one file per algorithm, deliberately never shared; each names its algorithm under `method` and carries `schema = "camdl.fit-summary/v2"`, which every reader requires                                                                                                                                                                      |
 | `diagnostics.json`          | R̂ / ESS / divergence diagnostics, and one `bad_init` record per refused chain — see below                                                                                                                                                                                                                                                                                                                |
 
 The `mle_params.toml` `content_hash` is a _tamper_ hash — SHA-256 over
@@ -4963,10 +4943,10 @@ never the name.
 Two producers emit a schema today. A `sim` leaf declares `traj.tsv` (table role
 `trajectory`, unrecognized columns defaulting to `state`). A completed fit leaf
 declares `draws.tsv` (role `posterior_cloud`) plus one entry per per-chain trace
-filename — `trace.tsv` for PGAS/PMMH/MH/NUTS, `parameter_traces.tsv` for
-IF2/nlopt — read from the first chain directory with a readable file, so an
-early crashed chain does not drop the entry. Both are best-effort: an unreadable
-file is omitted rather than failing the run.
+filename — `trace.tsv` for PGAS/PMMH/MH, `parameter_traces.tsv` for IF2/nlopt —
+read from the first chain directory with a readable file, so an early crashed
+chain does not drop the entry. Both are best-effort: an unreadable file is
+omitted rather than failing the run.
 
 `pfilter`, `survey`, `profile`, `sim_ensemble`, and the `fit predict` outputs
 declare no schema. Of the vocabulary above, the column roles `dimension`,
@@ -5034,13 +5014,12 @@ replicate of one fixed point — neither an MCMC phase nor a search, so it
 publishes no counter rather than one labelled with a phase it is not in. For the
 rest, `step` of `total` counts:
 
-| method                              | one step is                                            | `total`            | `phase`                             |
-| ----------------------------------- | ------------------------------------------------------ | ------------------ | ----------------------------------- |
-| `pgas`                              | one sweep                                              | `sweeps`           | `burn_in` → `sampling` at `burn_in` |
-| `pmmh`, `mh`                        | one MCMC iteration                                     | `iterations`       | `burn_in` → `sampling` at `burn_in` |
-| `nuts`                              | one iteration, warm-up and sampling counted end to end | `warmup + samples` | `burn_in` → `sampling` at `warmup`  |
-| `if2`                               | one cooling iteration                                  | `iterations`       | `optimizing`                        |
-| `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs` | one objective evaluation                               | `max_evals`        | `optimizing`                        |
+| method                              | one step is              | `total`      | `phase`                             |
+| ----------------------------------- | ------------------------ | ------------ | ----------------------------------- |
+| `pgas`                              | one sweep                | `sweeps`     | `burn_in` → `sampling` at `burn_in` |
+| `pmmh`, `mh`                        | one MCMC iteration       | `iterations` | `burn_in` → `sampling` at `burn_in` |
+| `if2`                               | one cooling iteration    | `iterations` | `optimizing`                        |
+| `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs` | one objective evaluation | `max_evals`  | `optimizing`                        |
 
 `step` is the furthest **any** chain has reached, and it never moves backward.
 
@@ -5334,7 +5313,7 @@ Two chains, resolved by the same code (`rust/crates/cli/src/fit/runner.rs:2744`
 `resolve_prior`) but with a **different tier-3**. The difference is deliberate
 and load-bearing.
 
-`camdl fit run`, sampler methods (`pgas`, `pmmh`, `mh`, `nuts`):
+`camdl fit run`, sampler methods (`pgas`, `pmmh`, `mh`):
 
 ```
 1. fit.toml [estimate.<p>.prior] = { <dist> = { ... } }   → source "fit.toml"
@@ -5387,7 +5366,7 @@ sources `fit_toml`, `model_ir`, `flat_explicit`, `flat_fallback`.
 
 | Stage algorithm                     | Prior used?                                                                          |
 | ----------------------------------- | ------------------------------------------------------------------------------------ |
-| `pgas`, `pmmh`, `mh`, `nuts`        | Yes — the prior density enters the acceptance ratio; a missing prior is a hard error |
+| `pgas`, `pmmh`, `mh`                | Yes — the prior density enters the acceptance ratio; a missing prior is a hard error |
 | `if2`                               | No — iterated filtering is maximum likelihood; the code never reads a prior          |
 | `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs` | No — deterministic MLE                                                               |
 | `pfilter`                           | No — likelihood evaluation only                                                      |
@@ -5779,7 +5758,7 @@ regular schedule's step divides obs intervals.
 
 The value path reads `snap.int_state.counts`, which the ODE backend produced by
 rounding (`x.max(0.0).round()`, `rust/crates/sim/src/ode.rs:762`). The gradient
-path (`nuts`) reads the **unrounded** continuous state instead
+path (`nl-lbfgs`) reads the **unrounded** continuous state instead
 (`multi_stream_obs.rs:1424`). At small counts the two therefore score slightly
 different likelihood surfaces for the same model and data; at large `N` the
 difference is sub-nat.
@@ -5897,10 +5876,9 @@ is to move `simulate.from` back or drop the rows the model cannot cover. Under
 instead. There is no zero-width bin to reason about: a row's period is never
 inferred from its neighbours.
 
-**The startup block prints the pairing — for three of the algorithms.** `pgas`,
-`pmmh`, and `nuts` print each stream's projection kind and likelihood family
-before running, and warn when a `neg_binomial` is paired with a snapshot
-projection:
+**The startup block prints the pairing — for two of the algorithms.** `pgas` and
+`pmmh` print each stream's projection kind and likelihood family before running,
+and warn when a `neg_binomial` is paired with a snapshot projection:
 
 ```
 ── method: pgas ──
@@ -6128,7 +6106,7 @@ Post-fit audit
 Per-algorithm overrides
   --decibans-thresh DB        gate's inter-chain loglik-spread floor
   --cooling-target-iters N    IF2 cooling target
-  --max-tree-depth N          NUTS depth ceiling
+  --max-tree-depth N          PGAS NUTS depth ceiling
   --trajectory-warmup N       CSMC-only sweeps before parameter updates
   --csmc-sweeps-per-nuts N    CSMC trajectory updates per parameter update
   --n-trajectories N          posterior trajectories saved

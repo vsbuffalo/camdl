@@ -11,9 +11,7 @@ use crate::inference::MultiStreamObsModel;
 /// Runs `OdeSim` once, then sums `MultiStreamObsModel::log_likelihood_*` over
 /// each obs time. Snapshot states are rounded to integer counts at snapshot
 /// time (per the ODE backend's standard `to_states` path) — at typhoid-class N
-/// the rounding-induced loglik change is sub-nat and well below NLopt's xtol;
-/// Phase 3 (NUTS) will revisit this with a real-valued obs eval to avoid
-/// integer-boundary discontinuities.
+/// the rounding-induced loglik change is sub-nat and well below NLopt's xtol.
 ///
 /// Callers pre-build `obs_model` and pass it in so the per-eval cost is one ODE
 /// solve + one obs scoring pass, with no per-call obs-model reconstruction.

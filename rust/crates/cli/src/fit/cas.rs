@@ -771,36 +771,35 @@ mod tests {
         assert_eq!(h200, stage_config_hash(&pgas_stage(200)).unwrap());
     }
 
-    fn nuts_stage(burnin_dt: Option<f64>) -> Method {
+    fn mh_ode_stage(burnin_dt: Option<f64>) -> Method {
         let burnin_line = match burnin_dt {
             Some(b) => format!("burnin_dt = {b}\n"),
             None => String::new(),
         };
         method(&format!(
-            "algorithm = \"nuts\"\n\
+            "algorithm = \"mh\"\n\
              backend = \"ode\"\n\
              chains = 4\n\
-             warmup = 300\n\
-             samples = 300\n\
+             iterations = 600\n\
              {burnin_line}"
         ))
     }
 
     /// `burnin_dt` (coarse warm-up step) changes the coarsely-integrated transient
-    /// → the scored trajectory → the draws, so two nuts stages differing ONLY in it
+    /// → the scored trajectory → the draws, so two `mh` stages differing ONLY in it
     /// must produce DISTINCT stage hashes (count-in-the-key). Without listing it in
     /// the identity payload it would be swept into `..` and two fits at different
     /// `burnin_dt` would collide on one `run_id`, serving the first's posterior for
     /// the second — a silent-wrong answer.
     #[test]
-    fn burnin_dt_changes_the_nuts_stage_identity() {
-        let off = stage_config_hash(&nuts_stage(None)).unwrap();
-        let on7 = stage_config_hash(&nuts_stage(Some(7.0))).unwrap();
-        let on14 = stage_config_hash(&nuts_stage(Some(14.0))).unwrap();
-        assert_ne!(off, on7, "setting burnin_dt must re-key the nuts stage");
+    fn burnin_dt_changes_the_mh_ode_stage_identity() {
+        let off = stage_config_hash(&mh_ode_stage(None)).unwrap();
+        let on7 = stage_config_hash(&mh_ode_stage(Some(7.0))).unwrap();
+        let on14 = stage_config_hash(&mh_ode_stage(Some(14.0))).unwrap();
+        assert_ne!(off, on7, "setting burnin_dt must re-key the mh stage");
         assert_ne!(on7, on14, "distinct burnin_dt values must produce distinct stage hashes");
         // No spurious sensitivity: off is stable and hashes identically each time.
-        assert_eq!(off, stage_config_hash(&nuts_stage(None)).unwrap());
+        assert_eq!(off, stage_config_hash(&mh_ode_stage(None)).unwrap());
     }
 
     /// The deterministic compute identity is stable: re-resolving the same

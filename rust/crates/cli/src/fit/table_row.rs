@@ -21,7 +21,7 @@ use crate::fit::fit_tree::{self, StageNode};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
     EssSummary, GateVerdict, If2StageResult, MethodResult, MethodResultError,
-    NutsStageResult, PgasStageResult, PmmhStageResult,
+    PgasStageResult, PmmhStageResult,
 };
 
 /// Schema discriminator. Field additions are non-breaking under a
@@ -108,7 +108,7 @@ pub struct TableRow {
     pub ess_at_mle: Option<EssSummary>,
     /// Rank-normalized **bulk** ESS per parameter — the cross-chain statistic
     /// of Vehtari et al. (2021), not a per-chain or summed one. Every Bayesian
-    /// stage fills it (PGAS, PMMH, mh, NUTS); `None` on a non-Bayesian stage.
+    /// stage fills it (PGAS, PMMH, mh); `None` on a non-Bayesian stage.
     /// Parameters with no bulk ESS are omitted rather than carrying a NaN.
     pub ess_posterior: Option<BTreeMap<String, f64>>,
     /// ESS/iteration — the algorithm-comparison metric: min-parameter ESS per raw
@@ -282,7 +282,6 @@ impl MethodView {
             MethodResult::If2(if2) => Self::from_if2(if2),
             MethodResult::Pgas(pgas) => Self::from_pgas(pgas),
             MethodResult::Pmmh(pmmh) => Self::from_pmmh(pmmh),
-            MethodResult::Nuts(nuts) => Self::from_nuts(nuts),
             MethodResult::Nlopt(nl) => Self::from_nlopt(nl),
         }
     }
@@ -366,26 +365,6 @@ impl MethodView {
             max_chain_agreement: None,
             max_rhat: d.max_rhat(),
             acceptance_rate: Some(r.acceptance_rate),
-            ess_at_mle: None,
-            ess_posterior: Some(d.ess_per_param()),
-            ess_per_iter: d.ess_per_iter(),
-            ess_per_sec: d.ess_per_sec(),
-            params: r.posterior_mean.clone(),
-        }
-    }
-
-    fn from_nuts(r: &NutsStageResult) -> Self {
-        let d = &r.diagnostics;
-        Self {
-            converged: d.converged_at(
-                crate::fit::method_result::RHAT_CONVERGED_THRESHOLD),
-            gate_verdict: "n/a".into(),
-            best_loglik: Some(r.map_loglik),
-            max_chain_agreement: None,
-            max_rhat: d.max_rhat(),
-            // NUTS realized-acceptance is a dual-averaging target statistic, not
-            // an M-H accept rate — omit it here rather than mislabel it as one.
-            acceptance_rate: None,
             ess_at_mle: None,
             ess_posterior: Some(d.ess_per_param()),
             ess_per_iter: d.ess_per_iter(),

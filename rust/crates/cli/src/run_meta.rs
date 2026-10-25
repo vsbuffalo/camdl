@@ -80,7 +80,6 @@ pub enum FitAlgorithm {
     #[serde(rename = "pgas")]     Pgas,
     #[serde(rename = "pmmh")]     Pmmh,
     #[serde(rename = "mh")]       Mh,
-    #[serde(rename = "nuts")]     Nuts,
     #[serde(rename = "pfilter")]  Pfilter,
     #[serde(rename = "nl-sbplx")] NlSbplx,
     #[serde(rename = "nl-bobyqa")] NlBobyqa,
@@ -96,7 +95,6 @@ impl FitAlgorithm {
             FitAlgorithm::Pgas     => "pgas",
             FitAlgorithm::Pmmh     => "pmmh",
             FitAlgorithm::Mh       => "mh",
-            FitAlgorithm::Nuts     => "nuts",
             FitAlgorithm::Pfilter  => "pfilter",
             FitAlgorithm::NlSbplx  => "nl-sbplx",
             FitAlgorithm::NlBobyqa => "nl-bobyqa",
@@ -106,7 +104,7 @@ impl FitAlgorithm {
 
     /// The per-stage convergence-summary filename a Bayesian sampler writes into
     /// its stage dir: `<algorithm>_summary.json`. The single source of this
-    /// naming convention — written by the pgas / pmmh / mh / nuts runners, read
+    /// naming convention — written by the pgas / pmmh / mh runners, read
     /// back by `read_convergence` and the `MethodResult` loaders. Deterministic
     /// mh-ODE shares the PMMH runner but gets its OWN file (`mh_summary.json`),
     /// not the misleading `pmmh_summary.json`.
@@ -123,7 +121,7 @@ impl FitAlgorithm {
     pub fn is_posterior_sampler(self) -> bool {
         matches!(
             self,
-            FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh | FitAlgorithm::Nuts
+            FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Mh
         )
     }
 
@@ -845,7 +843,7 @@ mod tests {
         assert!(why.contains("Gelman"), "the refusal says what the old numbers were: {why}");
 
         let other = serde_json::json!({ "schema": "camdl.fit-summary/v99" });
-        let why = check_fit_summary_schema(&other, "nuts_summary.json")
+        let why = check_fit_summary_schema(&other, "mh_summary.json")
             .expect_err("a tag this camdl does not read is refused too");
         assert!(why.contains("v99") && why.contains(FIT_SUMMARY_SCHEMA), "{why}");
     }
@@ -899,7 +897,6 @@ mod tests {
         assert_eq!(FitAlgorithm::Pgas.summary_filename(), "pgas_summary.json");
         assert_eq!(FitAlgorithm::Pmmh.summary_filename(), "pmmh_summary.json");
         assert_eq!(FitAlgorithm::Mh.summary_filename(), "mh_summary.json");
-        assert_eq!(FitAlgorithm::Nuts.summary_filename(), "nuts_summary.json");
         // mh and pmmh must not collide on disk.
         assert_ne!(
             FitAlgorithm::Mh.summary_filename(),

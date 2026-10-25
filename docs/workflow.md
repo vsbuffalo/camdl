@@ -99,13 +99,13 @@ sweeps = 300
 ```
 
 - **One `[method]` per file.** `algorithm` (`if2` | `pgas` | `pmmh` | `pfilter`
-  | `mh` | `nuts` | `nl-sbplx` | `nl-bobyqa`) picks the method. Everything above
-  it is the problem, which every reader loads (`simulate
-  --draws prior --fit`,
-  `pfilter --fit`, `survey --fit`, `profile --fit`). A second way of fitting the
-  same problem — an `if2` point estimate beside this posterior, say — is a
-  second file with the same problem half:
-  `camdl fit new --from fit.toml fit-if2.toml`, then edit `[method]`.
+  | `mh` | `nl-sbplx` | `nl-bobyqa` | `nl-lbfgs`) picks the method. Everything
+  above it is the problem, which every reader loads
+  (`simulate
+  --draws prior --fit`, `pfilter --fit`, `survey --fit`,
+  `profile --fit`). A second way of fitting the same problem — an `if2` point
+  estimate beside this posterior, say — is a second file with the same problem
+  half: `camdl fit new --from fit.toml fit-if2.toml`, then edit `[method]`.
 - **Chains start apart by default.** `starts` says where the chains begin; when
   omitted it is `from_prior` (one draw per chain from the priors) whenever every
   estimated parameter has one, else `uniform_unconstrained`. A warm start from a
@@ -114,12 +114,12 @@ sweeps = 300
   "@base" }` keeps R̂ meaningful;
   `starts = { from_mle = "@mle" }` puts every chain at one point and R̂ is then
   reported as not assessed.
-- **Priors** for a `pgas`/`pmmh`/`mh`/`nuts` method must be explicit — declared
-  here in `[estimate].prior` or in the model (a `~` declaration); it refuses
-  implicit flat. Menu: `log_normal {mu,sigma}` · `normal {mean,sd}` ·
-  `beta {alpha,beta}` · `uniform` · `half_normal`.
+- **Priors** for a `pgas`/`pmmh`/`mh` method must be explicit — declared here in
+  `[estimate].prior` or in the model (a `~` declaration); it refuses implicit
+  flat. Menu: `log_normal {mu,sigma}` · `normal {mean,sd}` · `beta {alpha,beta}`
+  · `uniform` · `half_normal`.
 - The stochastic-process methods run `chain_binomial` (needed for chain-binomial
-  process noise and `balance`); `mh`, `nuts` and the NLopt optimizers run `ode`.
+  process noise and `balance`); `mh` and the NLopt optimizers run `ode`.
 - Full schema — every section, every method field, `starts`, transforms,
   holdout: `camdl docs fit-toml`.
 

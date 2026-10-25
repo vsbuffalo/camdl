@@ -448,38 +448,36 @@ where it fails.
 
 ---
 
-## Gradient-based ODE fitting
+## Fitting on the ODE backend
 
 The ODE backend is a fitting backend, not only a forward simulator. Integrating
 the mean-field skeleton gives one trajectory per parameter point, so the
 deterministic likelihood `p(y | θ, ODE skeleton)` evaluates directly — no
-particle filter — and `camdl fit` samples the posterior on it two ways:
-
-- **`mh`** — gradient-free adaptive Metropolis-Hastings. Robust default; runs on
-  any ODE model the backend can integrate.
-- **`nuts`** — the No-U-Turn Sampler driven by **symbolic forward
-  sensitivities**. The compiler differentiates the rate and observation
-  expressions source-to-source and carries `∂x/∂θ` through fixed-step `rk4`, so
-  the gradient is exact — no finite differences. NUTS moves through the
-  correlated, ridge-shaped posteriors that stall gradient-free MH.
+particle filter. `camdl fit` samples the posterior on it with **`mh`**,
+gradient-free adaptive Metropolis-Hastings, which runs on any ODE model the
+backend can integrate, and finds its maximum with the NLopt optimisers:
+`nl-sbplx` and `nl-bobyqa` without a gradient, and **`nl-lbfgs`** with one.
 
 ```toml
 [method]
-algorithm = "nuts" # or "mh" for the gradient-free sampler
+algorithm = "mh" # or "nl-lbfgs" for the gradient-based MLE
 backend = "ode"
 chains = 4
-warmup = 500
-samples = 500
+iterations = 5000
+burn_in = 1000
 ```
 
-`nuts` needs a **differentiable model**: the capability gate refuses — naming
-the reason — an undifferentiable rate/observation gradient, an adaptive `rk45`
-integrator, a scheduled `interventions {}` / `events {}` effect, or an initial
-condition its ∂init/∂θ seed cannot express; fit those with gradient-free `mh` or
-the stochastic-process methods instead. This targets a different statistical
-object than the stochastic backends — `p(y | θ, ODE skeleton)` rather than
-`p(y | θ)` — so see `camdl docs inference` (the ODE-backend fitting section) for
-when to pick which. Both samplers are `[beta]`.
+`nl-lbfgs` takes its gradient from **symbolic forward sensitivities**: the
+compiler differentiates the rate and observation expressions source-to-source
+and carries `∂x/∂θ` through fixed-step `rk4`, so the gradient is exact — no
+finite differences. It needs a **differentiable model**: the capability check
+refuses — naming the reason — an undifferentiable rate/observation gradient, an
+adaptive `rk45` integrator, a scheduled `interventions {}` / `events {}` effect,
+or an initial condition its ∂init/∂θ seed cannot express; fit those with
+`nl-sbplx` instead. The ODE backend targets a different statistical object than
+the stochastic backends — `p(y | θ, ODE skeleton)` rather than `p(y | θ)` — so
+see `camdl docs inference` (the ODE-backend fitting section) for when to pick
+which. `mh` and `nl-lbfgs` are `[beta]`.
 
 ---
 

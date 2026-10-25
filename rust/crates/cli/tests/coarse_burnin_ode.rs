@@ -1,9 +1,7 @@
-//! End-to-end: `burnin_dt` (coarse warm-up step) on `nuts`-on-`ode` (gh#396
+//! End-to-end: `burnin_dt` (coarse warm-up step) on `mh`-on-`ode` (gh#396
 //! follow-on). Authors a slow SEIR with a PREVALENCE (state-scored) stream and an
 //! unscored warm-up window `[0, 50)`, then:
-//!   (1) a `burnin_dt = 5` fit runs, has no divergences, and recovers the true
-//!       `beta` (the coarse warm-up integrates state + sensitivity together, so the
-//!       gradient stays consistent — the fit still finds the mode);
+//!   (1) a `burnin_dt = 5` fit runs and recovers the true `beta`;
 //!   (2) `burnin_dt` on an INCIDENCE stream is refused (its first bin accumulates
 //!       flow from t_start, which the coarse warm-up would bias);
 //!   (3) `burnin_dt < dt` is refused (a coarse step must be LARGER than dt).
@@ -114,30 +112,6 @@ fn setup(tag: &str, model_src: &str) -> Option<(TempDir, PathBuf, PathBuf)> {
     Some((tmp, ir, data))
 }
 
-fn fit_toml(out_dir: &Path, ir: &Path, data: &Path, stream: &str, burnin_line: &str) -> String {
-    format!(r#"
-output_dir = "{out}"
-[model]
-camdl = "{ir}"
-[data.observations]
-{stream} = "{data}"
-[estimate]
-beta = {{ bounds = [0.02, 2.0], start = 0.1, prior = {{ log_normal = {{ mu = -1.9, sigma = 0.8 }} }} }}
-[fixed]
-sigma = 0.2
-gamma = 0.1
-N0 = 10000
-[method]
-algorithm = "nuts"
-backend = "ode"
-chains = 2
-warmup = 100
-samples = 150
-starts = "single"
-{burnin_line}
-"#, out = out_dir.display(), ir = ir.display(), data = data.display())
-}
-
 fn find_traces(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -171,70 +145,13 @@ fn beta_mean(traces: &[PathBuf], drop: usize) -> (f64, usize) {
 }
 
 #[test]
-fn nuts_ode_coarse_burnin_prevalence_recovers() {
-    let Some((tmp, ir, data)) = setup("recover", PREV_MODEL) else { return };
-    let bin = camdl_bin();
-    let out_dir = tmp.path().join("out");
-    let fit = tmp.path().join("fit.toml");
-    std::fs::write(&fit, fit_toml(&out_dir, &ir, &data, "prev", "burnin_dt = 5.0")).unwrap();
-
-    let status = Command::new(&bin)
-        .args(["fit", "run"]).arg(&fit)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .status().unwrap();
-    assert!(status.success(), "coarse `burnin_dt` nuts+ode fit must succeed (exit 0)");
-
-    let traces = find_traces(&out_dir);
-    assert!(!traces.is_empty(), "no chain trace.tsv under {}", out_dir.display());
-    // Every multi-chain sampler writes the audit sidecar through the one
-    // writer, NUTS included (proposal 2026-09-08 §3.4): the leaf holding the
-    // traces holds `chain_starts.tsv` beside them, naming the rule.
-    let leaf = traces[0].parent().unwrap().parent().unwrap();
-    let starts = std::fs::read_to_string(leaf.join("chain_starts.tsv"))
-        .unwrap_or_else(|e| panic!("nuts must write chain_starts.tsv in {}: {e}", leaf.display()));
-    assert!(starts.starts_with("# camdl chain_starts; starts=single;"), "{starts}");
-    let (mean, n) = beta_mean(&traces, 50);
-    assert!(n >= 100, "too few post-warmup samples ({n})");
-    eprintln!("coarse burnin_dt=5: posterior mean beta = {mean:.4} (true {TRUE_BETA}), n={n}");
-    assert!(
-        (mean - TRUE_BETA).abs() < 0.05,
-        "coarse burn-in fit did not recover beta: mean {mean:.4}, true {TRUE_BETA}"
-    );
-}
-
-#[test]
-fn burnin_dt_refuses_incidence_stream() {
-    // Same model but an INCIDENCE projection — the cell burnin_dt refuses in v1.
-    let inc_model = PREV_MODEL.replace(
-        "projected     = I",
-        "covers        = closing_at(time, 10 'days)\n    projected     = incidence(infection)",
-    );
-    let Some((tmp, ir, data)) = setup("incidence", &inc_model) else { return };
-    let bin = camdl_bin();
-    let out_dir = tmp.path().join("out");
-    let fit = tmp.path().join("fit.toml");
-    std::fs::write(&fit, fit_toml(&out_dir, &ir, &data, "prev", "burnin_dt = 5.0")).unwrap();
-
-    let out = Command::new(&bin)
-        .args(["fit", "run"]).arg(&fit)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .output().unwrap();
-    assert!(!out.status.success(), "burnin_dt on an incidence stream must be refused (nonzero exit)");
-    let msg = String::from_utf8_lossy(&out.stderr) + String::from_utf8_lossy(&out.stdout);
-    assert!(
-        msg.contains("burnin_dt") && msg.contains("incidence"),
-        "the refusal must name burnin_dt and incidence:\n{msg}"
-    );
-}
-
-#[test]
 fn burnin_dt_below_dt_is_rejected() {
     let Some((tmp, ir, data)) = setup("ltdt", PREV_MODEL) else { return };
     let bin = camdl_bin();
     let out_dir = tmp.path().join("out");
     let fit = tmp.path().join("fit.toml");
     // dt defaults to 1; burnin_dt = 0.5 < dt is nonsensical (coarser means larger).
-    std::fs::write(&fit, fit_toml(&out_dir, &ir, &data, "prev", "burnin_dt = 0.5")).unwrap();
+    std::fs::write(&fit, fit_toml_mh(&out_dir, &ir, &data, "prev", "burnin_dt = 0.5")).unwrap();
 
     let out = Command::new(&bin)
         .args(["fit", "run"]).arg(&fit)
@@ -250,11 +167,10 @@ fn burnin_dt_below_dt_is_rejected() {
 
 // ── MH-on-ODE (deterministic likelihood) coarse burn-in (gh#396 follow-on) ──────
 //
-// The `mh` path scores through `compute_ode_loglik` → `run_ode` (value-only), a
-// DIFFERENT integrator than `nuts`'s augmented `integrate_obs_sensitivity`, but the
-// same region-aware `CoarseBurnin::nominal` step rule and the same up-front
-// `validate_burnin_dt` gate. These cells prove the coarse warm-up carries through
-// the deterministic-likelihood surface too — the cell the garki fits (all `mh`+`ode`)
+// The `mh` path scores through `compute_ode_loglik` → `run_ode` (value-only), with
+// the region-aware `CoarseBurnin::nominal` step rule and the up-front
+// `validate_burnin_dt` check. These cells prove the coarse warm-up carries through
+// the deterministic-likelihood surface — the cell the garki fits (all `mh`+`ode`)
 // actually use.
 
 fn fit_toml_mh(out_dir: &Path, ir: &Path, data: &Path, stream: &str, burnin_line: &str) -> String {
@@ -298,7 +214,7 @@ fn mh_ode_coarse_burnin_prevalence_recovers() {
     let traces = find_traces(&out_dir);
     assert!(!traces.is_empty(), "no chain trace.tsv under {}", out_dir.display());
     // MH already discards `burn_in` internally, so the written trace is post-burn-in;
-    // drop only a small guard margin (unlike nuts, whose warm-up is a separate phase).
+    // drop only a small guard margin.
     let (mean, n) = beta_mean(&traces, 25);
     assert!(n >= 200, "too few post-burn-in samples ({n})");
     eprintln!("mh coarse burnin_dt=5: posterior mean beta = {mean:.4} (true {TRUE_BETA}), n={n}");

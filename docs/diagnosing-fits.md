@@ -67,10 +67,10 @@ three digits. Green test, wrong model.
 
 The general rule: **a self-consistency test cannot see a defect its two halves
 share; a cross-path comparison can.** Two paths that are supposed to compute the
-same quantity — `mh` and `nuts` on one model and one dataset — disagree when one
-of them is wrong, and that disagreement is the only signal a shared defect
-leaves. Keep running the self-consistency test first; reach for the cross-path
-check when it passes and you still do not believe the fit.
+same quantity — `nl-sbplx` and `nl-lbfgs` on one model and one dataset —
+disagree when one of them is wrong, and that disagreement is the only signal a
+shared defect leaves. Keep running the self-consistency test first; reach for
+the cross-path check when it passes and you still do not believe the fit.
 
 ## 2. "Looks fittable" ≠ "is fittable"
 

@@ -1,8 +1,8 @@
 # Inference in camdl
 
-How the particle filter, IF2, PGAS, and NUTS work — including gradient-based and
-gradient-free Bayesian fitting on the ODE backend — what the diagnostics mean,
-and how the inference pipeline fits together.
+How the particle filter, IF2, PGAS, and NUTS work — including maximum-likelihood
+and Bayesian fitting on the ODE backend — what the diagnostics mean, and how the
+inference pipeline fits together.
 
 ---
 
@@ -123,8 +123,8 @@ the trajectory convergence problem that plagues random starts.
 These four methods all target the **stochastic-process** likelihood
 $p(y \mid \theta)$ on the chain-binomial backend. The ODE backend fits a
 different statistical object — the deterministic marginal likelihood — with its
-own two Bayesian samplers, gradient-free `mh` and gradient-based `nuts`; see
-**Gradient-based and gradient-free fitting on the ODE backend**, below.
+own methods: the NLopt optimizers for an MLE and gradient-free `mh` for a
+posterior; see **Fitting on the ODE backend**, below.
 
 ## The particle filter
 
@@ -1253,7 +1253,7 @@ the posterior source.
 
 ---
 
-## Gradient-based and gradient-free fitting on the ODE backend
+## Fitting on the ODE backend
 
 Everything above targets the **stochastic-process** likelihood
 $p(y_{1:T} \mid \theta)$ — the integral over latent trajectories that the
@@ -1278,8 +1278,8 @@ demographic stochasticity is negligible and running a particle filter would be
 structurally redundant.
 
 Two things can be asked of this likelihood: where its maximum is, and what the
-posterior around it looks like. Three NLopt optimizers answer the first and two
-samplers answer the second; all five are `[beta]`.
+posterior around it looks like. Three NLopt optimizers answer the first and the
+`mh` sampler answers the second; all four are `[beta]`.
 
 **Maximum likelihood: `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`.** Each runs a local
 NLopt algorithm on `p(y | θ, ODE)` inside the `[estimate]` box, from as many
@@ -1289,9 +1289,12 @@ trust region) are **derivative-free**: they learn the local shape by evaluating
 the likelihood at neighbouring points, so one objective evaluation is one ODE
 solve, and a search in `d` dimensions needs many of them before it can take a
 confident step. `nl-lbfgs` is **gradient-based**: each evaluation integrates the
-augmented `(x, ∂x/∂θ)` system once — the same forward sensitivities `nuts` uses
-— and returns the log-likelihood together with its exact gradient, so the
-direction to move in is read off rather than sampled for.
+augmented `(x, ∂x/∂θ)` system once — **forward sensitivities**, carrying
+$\partial x / \partial \theta$ alongside the state through fixed-step RK4, with
+the rate and observation derivatives differentiated source-to-source by the
+compiler (the same machinery behind PGAS's `rate_grad`; see "NUTS gradient
+proposals" above) — and returns the log-likelihood together with its exact
+gradient, so the direction to move in is read off rather than sampled for.
 
 The trade is one of cost per step against number of steps. A gradient evaluation
 costs more than a value evaluation, and more as the number of estimated
@@ -1305,50 +1308,28 @@ the same log-likelihood to six decimals. On a two-parameter SIR the counts were
 integrate; reach for `nl-lbfgs` when the search itself is the bottleneck and the
 model is differentiable.
 
-**Bayesian posteriors: `mh` and `nuts`.**
-
-**`mh` — gradient-free.** Adaptive Metropolis-Hastings on the deterministic
+**Bayesian posteriors: `mh`.** Adaptive Metropolis-Hastings on the deterministic
 marginal. It needs no gradient, so it runs on any ODE model the backend can
 integrate, and it is the robust default for identifiable or low-dimensional
 posteriors. It will _diagnose_ a difficult posterior — a weakly-identified ridge
 shows up as low effective sample size — but random-walk MH mixes poorly
 _through_ a curved ridge: adaptive covariance corrects a rotated Gaussian, not a
-banana. When MH is the bottleneck, that low ESS is the signal to reach for the
-gradient sampler.
-
-**`nuts` — gradient-based.** The No-U-Turn Sampler (Hoffman & Gelman 2014) on
-the same deterministic likelihood, using its gradient. The gradient is
-**symbolic**: the OCaml compiler differentiates the rate and observation
-expressions source-to-source (the same machinery behind PGAS's `rate_grad`; see
-"NUTS gradient proposals" above) and propagates it through the integrator by
-**forward sensitivities** — carrying $\partial x / \partial \theta$ alongside
-the state through fixed-step RK4. No runtime autodiff, no finite differences.
-NUTS then samples
-$p(\theta \mid y) \propto p(y \mid \theta, \text{ODE})\,\pi(\theta)$ directly —
-no CSMC, no discrete-event approximation, no Gibbs-sweep coupling — so it moves
-through the correlated, moderate-dimension posteriors that stall `mh`. This is a
-simpler statistical setup than the NUTS-inside-PGAS of the stochastic path:
-there NUTS proposes $\theta$ inside a Gibbs sweep conditioned on a sampled
-trajectory; here it samples the marginal $p(\theta \mid y)$ outright.
-
-**When to use which.** Start with `mh`; it carries no differentiability
-requirement and diagnoses the posterior geometry cheaply. Switch to `nuts` when
-MH mixing is the bottleneck — correlated or ridge-shaped posteriors at moderate
-dimension. On a **stochastic** backend neither applies: the marginal likelihood
-is an intractable integral with no closed-form gradient, so use `pgas` (which
-runs NUTS-on-θ inside a Gibbs sweep) or `pmmh`. Requesting an invalid pair — say
-`nuts` on `chain_binomial`, or `pgas` on `ode` — fails at config load with a
-message naming the right alternative.
+banana. camdl has no gradient-based sampler on the ODE backend; on a
+**stochastic** backend the marginal likelihood is an intractable integral with
+no closed-form gradient, and the gradient sampler is the NUTS move inside `pgas`
+(`use_nuts`, on by default), conditioned on a sampled trajectory. Requesting an
+invalid pair — say `pgas` on `ode` — fails at config load with a message naming
+the right alternative, and `algorithm = "nuts"` is refused on every backend with
+a message pointing at `pgas` and `mh`.
 
 ### The differentiability requirement
 
-`nuts` and `nl-lbfgs` both need a closed-form gradient of the whole likelihood,
-so they accept only a **differentiable model**. One capability gate answers for
-both — there is no second list to drift — and it refuses, with a message naming
-the reason, a model that has:
+`nl-lbfgs` needs a closed-form gradient of the whole likelihood, so it accepts
+only a **differentiable model**. One capability check answers for it, and it
+refuses, with a message naming the reason, a model that has:
 
 - a rate or observation term whose gradient the compiler cannot emit (a
-  live-but-undifferentiated coefficient — see the NUTS-refusal list in
+  live-but-undifferentiated coefficient — see the gradient-refusal list in
   `camdl docs features`);
 - an **adaptive integrator** (`rk45`) — its step sequence is data-dependent, so
   the sensitivities have no fixed step to propagate through; use fixed-step
@@ -1385,15 +1366,6 @@ These are methods like any other: pick the algorithm and set `backend = "ode"`.
 The Bayesian ones additionally need a prior on every estimated parameter (see
 "Priors and precedence"); the MLE ones do not read priors at all.
 
-```toml
-[method]
-algorithm = "nuts" # gradient-based; needs a differentiable model
-backend = "ode"
-chains = 4
-warmup = 500 # step-size adaptation draws (discarded)
-samples = 500 # posterior draws kept per chain
-```
-
 The MLE methods take `chains` (independent multi-start optimizations),
 `tolerance` (NLopt's `xtol_rel`) and `max_evals` (per-chain evaluation budget),
 and no prior:
@@ -1407,7 +1379,7 @@ starts = "uniform_unconstrained" # a spread rule; `single` collapses to one chai
 ```
 
 Gradient-free `mh` takes `iterations` (total MCMC steps) with an optional
-`burn_in`, in place of NUTS's `warmup` / `samples`:
+`burn_in`:
 
 ```toml
 [method]
@@ -1550,8 +1522,8 @@ How chain (or per-cell) starting points are drawn. Set under `[method]` with the
 `starts` key, or overridden on the CLI with `fit run --starts <spec>`;
 `camdl profile --starts <spec>` takes the same rules for its per-cell starts,
 and `--n-starts <N>` says how many chains are drawn from them. Honoured by every
-method: **IF2**, **PGAS**, **PMMH**, **mh**, **nuts**, **NLopt** (`nl-sbplx`,
-`nl-bobyqa`, `nl-lbfgs`), and **profile**.
+method: **IF2**, **PGAS**, **PMMH**, **mh**, **NLopt** (`nl-sbplx`, `nl-bobyqa`,
+`nl-lbfgs`), and **profile**.
 
 ```toml
 [method]

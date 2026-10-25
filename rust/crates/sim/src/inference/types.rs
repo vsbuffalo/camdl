@@ -689,7 +689,7 @@ mod tests {
     fn a_value_at_the_declared_bound_stays_in_support() {
         // `to_transformed` clamps into [lo, hi] and takes ln, so every z the
         // sampler can be INITIALISED at must carry a finite log-Jacobian —
-        // otherwise `run_ode_nuts`'s "posterior is not finite at the initial
+        // otherwise a sampler's "posterior is not finite at the initial
         // parameters" probe would reject a legal start.
         //
         // This is why the saturation test is in z-space (z ∉ [ln lo, ln hi])

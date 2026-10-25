@@ -27,7 +27,7 @@ use crate::fit::gating::AgreementBand;
 use crate::fit::fit_tree::{self, DataKind};
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
-    If2StageResult, MaxRhat, MethodResult, MinEss, NutsStageResult, ParamConvergence,
+    If2StageResult, MaxRhat, MethodResult, MinEss, ParamConvergence,
     PgasStageResult, PmmhStageResult, PosteriorDiagnostics, RhatBand, RHAT_CONVERGED_THRESHOLD,
     Stat,
 };
@@ -119,11 +119,8 @@ fn apply_selection_to_typed(
         MethodResult::Pmmh(r) => {
             recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
         }
-        MethodResult::Nuts(r) => {
-            recompute_over_subset(&mut r.diagnostics, &mut r.posterior_mean, stage_dir, selection)
-        }
         _ => Err(
-            "--exclude-chains applies only to Bayesian methods (PGAS / PMMH / NUTS)".to_string(),
+            "--exclude-chains applies only to Bayesian methods (PGAS / PMMH / MH)".to_string(),
         ),
     }
 }
@@ -212,11 +209,11 @@ pub fn cmd_fit_summary(args: &FitSummaryArgs) {
         Some(raw) => match ChainSelection::parse_exclude(raw) {
             Ok(sel) => {
                 let has_bayesian = selected.iter().any(|s| {
-                    matches!(s.method.as_str(), "pgas" | "pmmh" | "nuts" | "mh")
+                    matches!(s.method.as_str(), "pgas" | "pmmh" | "mh")
                 });
                 if !has_bayesian {
                     eprintln!(
-                        "error: --exclude-chains needs a Bayesian method (PGAS / PMMH / NUTS) to \
+                        "error: --exclude-chains needs a Bayesian method (PGAS / PMMH / MH) to \
                          subset; this fit's selected method(s) have no posterior chains"
                     );
                     std::process::exit(1);
@@ -579,7 +576,7 @@ fn format_text(
         if let Some(sel) = selection {
             if matches!(
                 typed,
-                MethodResult::Pgas(_) | MethodResult::Pmmh(_) | MethodResult::Nuts(_)
+                MethodResult::Pgas(_) | MethodResult::Pmmh(_)
             ) {
                 match apply_selection_to_typed(&mut typed, &resolved.stage_dir, sel) {
                     Ok(info) => {
@@ -651,14 +648,6 @@ fn format_text(
                     fmt.bayesian_block(&lead, &resolved.stage, "pmmh", &resolved.stage_dir, BayesianView::Pmmh(pmmh), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.stage, selection).as_ref())
                 );
                 prev_loglik = Some(pmmh.map_loglik);
-                prev_stage_name = Some(resolved.stage.clone());
-            }
-            MethodResult::Nuts(nuts) => {
-                print!(
-                    "{}",
-                    fmt.bayesian_block(&lead, &resolved.stage, "nuts", &resolved.stage_dir, BayesianView::Nuts(nuts), subset_info.as_ref(), ll_kind, forkability(dir, &resolved.stage, selection).as_ref())
-                );
-                prev_loglik = Some(nuts.map_loglik);
                 prev_stage_name = Some(resolved.stage.clone());
             }
             MethodResult::Nlopt(r) => {
@@ -781,7 +770,6 @@ fn format_latex(dir: &str, stages: &[ResolvedStage], strict: bool, selection: Op
 enum BayesianView<'a> {
     Pgas(&'a PgasStageResult),
     Pmmh(&'a PmmhStageResult),
-    Nuts(&'a NutsStageResult),
 }
 
 // ── Formatting layer ────────────────────────────────────────────────
@@ -1160,7 +1148,7 @@ impl StageFacts {
             _ => Vec::new(),
         };
         // PGAS is the one Bayesian stage that writes latent paths, so for PMMH
-        // / NUTS there is nothing to read and nothing to omit.
+        // / MH there is nothing to read and nothing to omit.
         if !is_pgas {
             return Self { logliks, scores, saved_paths: None, latent: None, n_chains_with_paths: 0 };
         }
@@ -1658,7 +1646,7 @@ impl Formatter {
         s
     }
 
-    /// Bayesian (PGAS / PMMH / NUTS) stage block.
+    /// Bayesian (PGAS / PMMH / MH) stage block.
     ///
     /// Reading order is the whole design: what ran, then the verdict, then the
     /// estimates, then the diagnostics that qualify them. Convergence detail
@@ -1695,9 +1683,6 @@ impl Formatter {
                 Some(r.acceptance_rate),
                 Some(r.map_loglik),
             ),
-            // nuts realized-acceptance is a dual-averaging target, not an M-H
-            // accept rate — omit it rather than mislabel; MAP loglik does apply.
-            BayesianView::Nuts(r) => (&r.diagnostics, &r.posterior_mean, None::<f64>, Some(r.map_loglik)),
         };
         let is_pgas = matches!(view, BayesianView::Pgas(_));
         let facts = StageFacts::gather(stage_dir, ll_kind, is_pgas);
@@ -2095,7 +2080,7 @@ impl Formatter {
     ///
     /// `kind` decides WHICH trace column is compared, by name: `obs_ll`
     /// (`log p(y | X, θ)`) for PGAS, `log_likelihood` (`log p(y | θ)`) for
-    /// pmmh / mh / nuts (gh#667). For PGAS the complete-data target and its
+    /// pmmh / mh (gh#667). For PGAS the complete-data target and its
     /// transition term are shown alongside — the sampler's own objective, and
     /// the term whose spread makes a flat-ridge diagnosis obvious — but they
     /// are never ranked on. When no per-chain traces exist, says so rather
@@ -2783,7 +2768,7 @@ fn build_summary_doc(
         if let Some(sel) = selection {
             if matches!(
                 typed,
-                Some(MethodResult::Pgas(_)) | Some(MethodResult::Pmmh(_)) | Some(MethodResult::Nuts(_))
+                Some(MethodResult::Pgas(_)) | Some(MethodResult::Pmmh(_))
             ) {
                 if let Some(t) = typed.as_mut() {
                     // Same authority as the text path: the class comes from the
@@ -2835,18 +2820,15 @@ fn build_summary_doc(
                 r
             }
             (Some(MethodResult::Pgas(_)), _)
-            | (Some(MethodResult::Pmmh(_)), _)
-            | (Some(MethodResult::Nuts(_)), _) => {
+            | (Some(MethodResult::Pmmh(_)), _) => {
                 let r = bayesian_stage_report(
                     &resolved.stage,
                     &resolved.method,
                     typed.clone(),
                     &cal,
                 );
-                match &typed {
-                    Some(MethodResult::Pmmh(p)) => prev_loglik = Some(p.map_loglik),
-                    Some(MethodResult::Nuts(p)) => prev_loglik = Some(p.map_loglik),
-                    _ => {}
+                if let Some(MethodResult::Pmmh(p)) = &typed {
+                    prev_loglik = Some(p.map_loglik);
                 }
                 r
             }
@@ -2937,7 +2919,6 @@ fn bayesian_stage_report(
     let (n_chains, best_loglik) = match &method_result {
         Some(MethodResult::Pgas(r)) => (r.diagnostics.n_chains, None),
         Some(MethodResult::Pmmh(r)) => (r.diagnostics.n_chains, Some(r.map_loglik)),
-        Some(MethodResult::Nuts(r)) => (r.diagnostics.n_chains, Some(r.map_loglik)),
         _ => (0, None),
     };
     // Date-annotate instant-kind posterior means (keyed off the
@@ -2950,7 +2931,6 @@ fn bayesian_stage_report(
     let param_dates: BTreeMap<String, String> = match &method_result {
         Some(MethodResult::Pgas(r)) => dates_from(&r.posterior_mean),
         Some(MethodResult::Pmmh(r)) => dates_from(&r.posterior_mean),
-        Some(MethodResult::Nuts(r)) => dates_from(&r.posterior_mean),
         _ => BTreeMap::new(),
     };
     let loglik_type = method_result.as_ref().map(crate::fit::loglik::LoglikType::from);
@@ -3256,24 +3236,6 @@ fn render_md_stage(stage: &MethodReport) -> String {
                 p.diagnostics.ess_tail_cell(name, "—"), p.diagnostics.rhat_cell(name, "—")));
         }
         s.push('\n');
-    } else if let Some(MethodResult::Nuts(p)) = &stage.method_result {
-        s.push_str(&format!(
-            "### Posterior summary (NUTS, max R̂ = {}, divergences = {})\n\n",
-            max_rhat_cell(&p.diagnostics), p.n_divergent
-        ));
-        s.push_str("| param | mean | q025 | q975 | ESS bulk | ESS tail | R̂ |\n|---|---|---|---|---|---|---|\n");
-        for (name, mean) in &p.posterior_mean {
-            let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
-            let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "—".into());
-            let ess = p.diagnostics.ess_cell(name, "—");
-            let mean_cell = match stage.param_dates.get(name) {
-                Some(date) => format!("{:.6} ({})", mean, date),
-                None => format!("{:.6}", mean),
-            };
-            s.push_str(&format!("| `{}` | {} | {} | {} | {} | {} | {} |\n", name, mean_cell, q025, q975, ess,
-                p.diagnostics.ess_tail_cell(name, "—"), p.diagnostics.rhat_cell(name, "—")));
-        }
-        s.push('\n');
     }
 
     // IF2 parameter table.
@@ -3485,29 +3447,6 @@ fn render_latex_stage(stage: &MethodReport) -> String {
             s.push_str(&format!(
                 "\\texttt{{{}}} & {} & {} & {} & {} \\\\\n",
                 escape_latex(name), mean_cell, ess,
-                p.diagnostics.ess_tail_cell(name, "---"),
-                p.diagnostics.rhat_cell(name, "---"),
-            ));
-        }
-        s.push_str("\\bottomrule\n\\end{tabular}\n\n");
-    } else if let Some(MethodResult::Nuts(p)) = &stage.method_result {
-        s.push_str(&format!(
-            "Posterior summary (max $\\hat R$ = {}; divergences = {}):\n\n",
-            max_rhat_cell(&p.diagnostics), p.n_divergent
-        ));
-        s.push_str("\\begin{tabular}{lrrrrrr}\n\\toprule\n");
-        s.push_str("Parameter & Mean & $q_{0.025}$ & $q_{0.975}$ & ESS bulk & ESS tail & $\\hat R$ \\\\\n\\midrule\n");
-        for (name, mean) in &p.posterior_mean {
-            let q025 = p.posterior_q025.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
-            let q975 = p.posterior_q975.get(name).copied().map(|v| format!("{:.4}", v)).unwrap_or_else(|| "---".into());
-            let ess = p.diagnostics.ess_cell(name, "---");
-            let mean_cell = match stage.param_dates.get(name) {
-                Some(date) => format!("{:.6} ({})", mean, date),
-                None => format!("{:.6}", mean),
-            };
-            s.push_str(&format!(
-                "\\texttt{{{}}} & {} & {} & {} & {} & {} & {} \\\\\n",
-                escape_latex(name), mean_cell, q025, q975, ess,
                 p.diagnostics.ess_tail_cell(name, "---"),
                 p.diagnostics.rhat_cell(name, "---"),
             ));
@@ -4894,7 +4833,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A stage whose summary carries no `trajectories` block (PMMH / NUTS, or a
+    /// A stage whose summary carries no `trajectories` block (PMMH / MH, or a
     /// PGAS run predating gh#727) renders nothing rather than a row of dashes.
     #[test]
     fn saved_path_table_is_empty_without_the_block() {
@@ -5161,7 +5100,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A stage that saves no latent paths — PMMH here, and NUTS the same — has
+    /// A stage that saves no latent paths — PMMH here, and MH the same — has
     /// no `latent paths` section at all, rather than one saying it has nothing.
     /// The remaining three still read as a layout.
     #[test]

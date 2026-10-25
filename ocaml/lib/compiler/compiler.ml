@@ -327,7 +327,7 @@ let no_dim_check = ref false
 (** Suppress emission of the state-Jacobian — the WrtPop maps
     [rate_state_grad] (∂rate/∂compartment) and [projection_state_grad]
     (∂projection/∂compartment). These are consumed ONLY by the ODE
-    forward-sensitivity gradient (`fit --method nuts` on the ODE backend);
+    forward-sensitivity gradient (`nl-lbfgs` on the ODE backend);
     forward `simulate`, IF2, PMMH, and the bootstrap particle filter never
     read them. On a model with global/mean-field coupling the state-Jacobian
     is a dense one-entry-per-stratum map per coupled transition and dominates

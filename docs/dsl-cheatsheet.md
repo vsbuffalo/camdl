@@ -388,8 +388,8 @@ before assuming the language doesn't do something — it usually does.
   coverage, positivity); `beta_binomial` remains the `k`-of-`n` count family.
   Support is the **open** interval — an observed exact `0` or `1` scores `-inf`,
   so keep the predicted mean off the boundary. Differentiable (usable under
-  `nuts`). No new reserved word: `beta` is a likelihood only in `~` position,
-  distinct from the `beta` _prior_.
+  PGAS's NUTS move and `nl-lbfgs`). No new reserved word: `beta` is a likelihood
+  only in `~` position, distinct from the `beta` _prior_.
 - **`via` dwell laws** (gh#313) — non-exponential residence times on a draining
   transition: `E --> I via erlang(stages = 3, rate = sigma)` and
   `via hyper_erlang(branch(...), ...)`. Replaces the `@ rate` clause (a

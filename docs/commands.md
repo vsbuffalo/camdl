@@ -21,11 +21,11 @@ transform. A few commands delegate to the compiler.
 
 ### Produce inference artifacts
 
-| Command   | Produces                                                                                                                                                                                                             |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fit run` | Fit a `fit.toml`'s problem with its one `[method]` — an MLE (`if2`, the NLopt optimizers), a posterior (`pgas`, `pmmh`, `mh`, `nuts`) or a filter evaluation (`pfilter`), with its diagnostics. The production path. |
-| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation).                                                                                                                              |
-| `profile` | A profile-likelihood curve — parallel IF2 over a grid of one focal parameter.                                                                                                                                        |
+| Command   | Produces                                                                                                                                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fit run` | Fit a `fit.toml`'s problem with its one `[method]` — an MLE (`if2`, the NLopt optimizers), a posterior (`pgas`, `pmmh`, `mh`) or a filter evaluation (`pfilter`), with its diagnostics. The production path. |
+| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation).                                                                                                                      |
+| `profile` | A profile-likelihood curve — parallel IF2 over a grid of one focal parameter.                                                                                                                                |
 
 ### Produce diagnostic artifacts
 

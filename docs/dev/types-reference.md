@@ -72,7 +72,7 @@ Inference }` is the only fit-config
 schema; `Inference` holds the one
 `Method
 { algorithm: Algorithm, starts: Option<ChainStarts> }`, and `Algorithm`
-is the tagged enum (`IF2` / `PGAS` / `PMMH` / `Mh` / `Nuts` / `PFilter` /
-NLopt). `ChainStarts` (`fit/starts.rs`) is `Spread` or `Point`. The fit identity
-hashes the problem alone (so a second method file shares it); a sourced `starts`
-folds its source's content into the method leaf's `deps`.
+is the tagged enum (`IF2` / `PGAS` / `PMMH` / `Mh` / `PFilter` / NLopt).
+`ChainStarts` (`fit/starts.rs`) is `Spread` or `Point`. The fit identity hashes
+the problem alone (so a second method file shares it); a sourced `starts` folds
+its source's content into the method leaf's `deps`.

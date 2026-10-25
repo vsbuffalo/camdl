@@ -76,7 +76,6 @@ pub mod pmmh;
 // measured log L-hat spread and the acceptance ceiling it implies (gh#764).
 pub mod pf_noise;
 pub mod pgas;
-pub mod nuts;  // gh#275 Phase 2: nuts on ode
 pub mod trace_writer;
 pub mod synthetic;
 pub mod gating;
@@ -136,8 +135,7 @@ fn gate_run_method_against_model(
         // postdates gh#447, which is why the original guard never considered
         // it.
         let burnin_dt = match stage {
-            config_v2::Algorithm::Mh { burnin_dt, .. }
-            | config_v2::Algorithm::Nuts { burnin_dt, .. } => *burnin_dt,
+            config_v2::Algorithm::Mh { burnin_dt, .. } => *burnin_dt,
             _ => None,
         };
         for (label, step) in [("dt", Some(dt)), ("burnin_dt", burnin_dt)] {
@@ -180,8 +178,6 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5
 ///   roster rides along so the artifact can say "1 of 24 sampling" from its
 ///   first write (gh#751).
 /// - PMMH and `mh` — one MCMC iteration, split the same way.
-/// - NUTS — one warm-up or sampling iteration, counted end to end, so `warmup`
-///   is the burn-in boundary and `warmup + samples` the total.
 /// - IF2 — one cooling iteration; a search, so a single `optimizing` phase.
 /// - `nl-sbplx` / `nl-bobyqa` / `nl-lbfgs` — one objective evaluation against
 ///   `max_evals`. The gradient method counts the same unit: one `det_grad`
@@ -214,8 +210,6 @@ fn stage_heartbeat(
                 dir, o.burn_in as u64, o.n_steps as u64, HEARTBEAT_INTERVAL, 0)),
             Err(_) => io::HeartbeatGuard::inert(),
         },
-        A::Nuts { warmup, samples, .. } => held(io::Heartbeat::mcmc(
-            dir, *warmup as u64, (warmup + samples) as u64, HEARTBEAT_INTERVAL, 0)),
         A::IF2 { iterations, .. } =>
             held(io::Heartbeat::optimizing(dir, *iterations as u64, HEARTBEAT_INTERVAL)),
         A::NlSbplx(c) | A::NlBobyqa(c) | A::NlLbfgs(c) =>
@@ -415,13 +409,13 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // source bytes (identity is unchanged by the hoist). The temp IR persists
     // for the process — `resolve_ir_path`'s returned path is not a drop guard.
     //
-    // gh#439 A2: only `nuts` on the `ode` backend reads the WrtPop state-Jacobian
-    // (`rate_state_grad` / `projection_state_grad`, via the ODE forward-sensitivity
-    // gradient in `ode_grad::det_grad`). Otherwise compile lean
+    // gh#439 A2: only `nl-lbfgs` on the `ode` backend reads the WrtPop
+    // state-Jacobian (`rate_state_grad` / `projection_state_grad`, via the ODE
+    // forward-sensitivity gradient in `ode_grad::det_grad`). Otherwise compile lean
     // (`--no-state-grad`), which omits the dense ~O(G^3) Jacobian that dominates
     // coupled-model IR. The bit is folded into the IR-cache key, so a lean entry is
-    // never reused for a nuts+ode fit (and run identity is gradient-independent, so
-    // lean vs full share the same model digest).
+    // never reused for an nl-lbfgs+ode fit (and run identity is gradient-independent,
+    // so lean vs full share the same model digest).
     let needs_state_grad = config.needs_state_grad();
     let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(&config.problem.model.camdl, needs_state_grad)
         .unwrap_or_else(|e| {
@@ -1569,27 +1563,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 stage_best_loglik = Some(fs.best_loglik);
                 stage_best_chain = Some(fs.best_chain);
             }
-            Algorithm::Nuts { .. } => {
-                // Gradient-based Bayesian sampling of the deterministic ODE
-                // marginal likelihood (gh#275 Phase 2) via `det_grad` + NUTS.
-                let nuts_opts = nuts::NutsStageOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
-                nuts::run_stage(
-                    &sweep_config,
-                    &method,
-                    &stage_dir,
-                    nuts_opts,
-                    seed, force,
-                    a.resume.is_some(),
-                    &resolved_starts,
-                    &heartbeat,
-                ).unwrap_or_else(|e| {
-                    abandon_stage(&heartbeat, format!("error running nuts: {e}"))
-                });
-                let fs = load_stage_result_or_exit(&heartbeat, stage_name, &stage_dir);
-                stage_best_loglik = Some(fs.best_loglik);
-                stage_best_chain = Some(fs.best_chain);
-            }
             Algorithm::NlSbplx(nl_cfg)
             | Algorithm::NlBobyqa(nl_cfg)
             | Algorithm::NlLbfgs(nl_cfg) => {
@@ -1839,8 +1812,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations }),
             Algorithm::Mh { chains, iterations, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "iterations": iterations }),
-            Algorithm::Nuts { chains, warmup, samples, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "warmup": warmup, "samples": samples }),
             Algorithm::PFilter { particles, replicates, .. } =>
                 serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
             Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) =>

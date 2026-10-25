@@ -82,7 +82,7 @@ the synthetic block records the truth a recovery check reads.
 | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bounds = [lo, hi]`                          | search range. _Optional_ — defaults to the model's `parameters { p : rate in [lo,hi] }` range; a `fit.toml` `bounds` may only **narrow** it, never loosen.                                                                  |
 | `start = X`                                  | the base starting value. Optional — defaults to the model's declared value, else a draw from bounds. See "Where a chain starts" below.                                                                                      |
-| `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh`/`mh`/`nuts` method; `if2` ignores it. See "Priors" below.                                                                                                              |
+| `prior = { … }`                              | prior distribution. **Required** for a `pgas`/`pmmh`/`mh` method; `if2` ignores it. See "Priors" below.                                                                                                                     |
 | `transform = "log" \| "logit" \| "identity"` | inference-scale transform. Optional — inferred from the parameter's declared type if omitted.                                                                                                                               |
 | `perturb_only_at_t0 = true`                  | an initial-state parameter (e.g. `s0`, `i0`) — perturbed at t=0 only, never at an observation. It is an IF2 perturbation schedule: `if2` reads it and every other method ignores it, so a shared problem half can carry it. |
 | `rw_sd = X`                                  | IF2 per-parameter random-walk SD. Optional — auto-scaled from bounds. Ignored by every other method.                                                                                                                        |
@@ -95,8 +95,8 @@ fixed.
 `backend` the simulator it fits against: `chain_binomial` for the
 stochastic-process methods (`if2`, `pgas`, `pmmh`, `pfilter` — the ones that
 need chain-binomial process noise and `balance`), or `ode` for the
-deterministic-likelihood methods (`nl-sbplx` / `nl-bobyqa` MLE and the Bayesian
-`mh` / `nuts`). Each algorithm is valid on exactly one backend —
+deterministic-likelihood methods (`nl-sbplx` / `nl-bobyqa` / `nl-lbfgs` MLE and
+the Bayesian `mh`). Each algorithm is valid on exactly one backend —
 `camdl fit methods` lists the pairs, and an invalid pair is rejected at load.
 `starts` says where the chains begin (below). There is no map of named stages
 and no execution order: a file declares one method, and a pipeline is two files
@@ -215,7 +215,7 @@ the run's dependencies, so a regenerated upstream re-keys the fits that started
 from it. `fit run --starts <spec>` overrides the file with the same spellings
 (`--starts from_prior`, `--starts from_mle=@mle`).
 
-Every multi-chain sampler (`if2`, `pgas`, `pmmh`, `mh`, `nuts`) writes a
+Every multi-chain sampler (`if2`, `pgas`, `pmmh`, `mh`) writes a
 `chain_starts.tsv` recording where every chain actually began, before any
 perturbation, and names the rule that supplied those values. That file, not the
 config, is the authority on what a run did — a fit started with `from_mle`
@@ -330,39 +330,40 @@ the default `starts` from `from_prior` to `uniform_unconstrained`.
 
 ## Method algorithms
 
-| `algorithm`              | backend          | role                                              | key fields                                                                                     |
-| ------------------------ | ---------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50)          |
-| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `max_tree_depth`)                        |
-| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                            |
-| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                                      |
-| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                             |
-| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`, `burnin_dt`)              |
-| `nuts`                   | `ode`            | gradient NUTS (forward sensitivities) → posterior | `chains`, `warmup`, `samples` (+ `max_tree_depth`, `target_accept`, `dense_mass`, `burnin_dt`) |
+| `algorithm`              | backend          | role                                              | key fields                                                                            |
+| ------------------------ | ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50) |
+| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `max_tree_depth`)               |
+| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                   |
+| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                             |
+| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                    |
+| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`, `burnin_dt`)     |
+| `nl-lbfgs`               | `ode`            | NLopt L-BFGS (forward-sensitivity gradient) → MLE | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                    |
 
-The `ode`-backend Bayesian samplers (`mh`, `nuts`) fit the **deterministic
-marginal likelihood** `p(y | θ, ODE skeleton)` rather than the stochastic
-`p(y | θ)` — a different statistical object, appropriate for equilibrium or
-large-population models. `nuts` requires a differentiable model (the capability
-gate refuses an undifferentiable gradient, an adaptive `rk45` integrator, a
-scheduled effect, or an initial condition the gradient path cannot seed); `mh`
-is gradient-free and carries no such requirement. See `camdl docs inference`
-(the ODE-backend fitting section) for when to pick which.
+The `ode`-backend methods fit the **deterministic marginal likelihood**
+`p(y | θ, ODE skeleton)` rather than the stochastic `p(y | θ)` — a different
+statistical object, appropriate for equilibrium or large-population models. `mh`
+is the Bayesian sampler there and is gradient-free. `nl-lbfgs` requires a
+differentiable model (the capability check refuses an undifferentiable gradient,
+an adaptive `rk45` integrator, a scheduled effect, or an initial condition the
+gradient path cannot seed); `nl-sbplx` and `nl-bobyqa` carry no such
+requirement. See `camdl docs inference` (the ODE-backend fitting section) for
+when to pick which.
 
 ```toml
-# A gradient-based Bayesian fit on the ODE skeleton.
+# A Bayesian fit on the ODE skeleton.
 [method]
-algorithm = "nuts" # or "mh" for the gradient-free sampler (`iterations` + `burn_in`)
+algorithm = "mh"
 backend = "ode"
 chains = 4
-warmup = 500 # step-size adaptation draws (discarded)
-samples = 500 # posterior draws kept per chain
+iterations = 5000
+burn_in = 1000
 ```
 
 Common to every method: `starts` (above), and the `dt_check` sub-table where the
 method runs a dt-convergence audit.
 
-### Coarse warm-up step (`burnin_dt`, `mh`/`nuts` on `ode`)
+### Coarse warm-up step (`burnin_dt`, `mh` on `ode`)
 
 A model often starts well before its first observation so that the transient
 settles — years of warm-up before a few months of data. Nothing in that span is
@@ -376,19 +377,17 @@ switches back to `dt` at the first observation:
 dt = 1.0
 
 [method]
-algorithm = "mh" # or "nuts"
+algorithm = "mh"
 backend = "ode"
 chains = 4
 iterations = 20000
 burnin_dt = 7.0 # coarse RK4 step on the unscored warm-up only
 ```
 
-Under `nuts` the parameter sensitivities are integrated on the same coarse grid
-as the state, so the gradient stays the gradient of the likelihood actually
-evaluated. On the Garki `ctl_bb` mosquito model (`mh`, `dt = 1`) `burnin_dt = 7`
-cut the per-evaluation cost 3.5× with a negligible change in log-likelihood. The
-coarse step does change the warm-up trajectory, so check that the fitted
-posterior agrees with a run at `burnin_dt` unset before relying on it.
+On the Garki `ctl_bb` mosquito model (`mh`, `dt = 1`) `burnin_dt = 7` cut the
+per-evaluation cost 3.5× with a negligible change in log-likelihood. The coarse
+step does change the warm-up trajectory, so check that the fitted posterior
+agrees with a run at `burnin_dt` unset before relying on it.
 
 It is off by default; `burnin_dt = dt` is also off. A fit is refused, naming
 `burnin_dt`, when:

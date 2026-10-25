@@ -57,7 +57,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         slug: "inference",
         aliases: &["fit", "fitting", "mcmc"],
-        summary: "Fitting: particle filter, IF2, PGAS, ODE gradient sampling (nuts/mh), profiles, diagnostics",
+        summary: "Fitting: particle filter, IF2, PGAS, ODE fitting (mh, NLopt), profiles, diagnostics",
         body: include_str!("../../../../docs/inference.md"),
     },
     Topic {

@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::fit::method_result::MethodResult;
 use crate::run_meta::FitAlgorithm;
 
-/// The marginal samplers' (`pmmh` / `mh` / `nuts`) per-iteration
+/// The marginal samplers' (`pmmh` / `mh`) per-iteration
 /// `log p(y | θ)` column in `chain_N/trace.tsv`.
 pub const TRACE_COL_LOG_LIKELIHOOD: &str = "log_likelihood";
 
@@ -186,7 +186,6 @@ impl From<FitAlgorithm> for LoglikType {
             FitAlgorithm::Pfilter => LoglikType::Marginal,
             // Deterministic ODE-skeleton marginals.
             FitAlgorithm::Mh
-            | FitAlgorithm::Nuts
             | FitAlgorithm::NlSbplx
             | FitAlgorithm::NlBobyqa
             | FitAlgorithm::NlLbfgs => LoglikType::OdeMarginal,
@@ -202,9 +201,6 @@ impl From<&MethodResult> for LoglikType {
             MethodResult::If2(_) => LoglikType::If2,
             MethodResult::Pgas(_) => LoglikType::CompleteData,
             MethodResult::Pmmh(_) => LoglikType::Marginal,
-            // nuts samples the deterministic ODE marginal likelihood (same kind
-            // as mh-on-ode / the NLopt ODE optimizer).
-            MethodResult::Nuts(_) => LoglikType::OdeMarginal,
             MethodResult::Nlopt(_) => LoglikType::OdeMarginal,
         }
     }

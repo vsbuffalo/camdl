@@ -189,6 +189,20 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   carries the key, or a script that still passes either flag, is refused with
   that instruction.
 
+- **NUTS on the ODE backend was removed.** `algorithm = "nuts"` (with
+  `backend = "ode"`) and its keys `warmup`, `samples`, `target_accept`,
+  `max_tree_depth`, `dense_mass` and `burnin_dt` under it are gone, on every
+  backend. Migration: sample an ODE model with `algorithm = "mh"` (gradient-free
+  adaptive Metropolis-Hastings, which also takes `burnin_dt`), or take its
+  gradient-based maximum likelihood with `algorithm = "nl-lbfgs"`; on
+  `chain_binomial`, NUTS is PGAS's parameter move (`use_nuts`, on by default). A
+  `fit.toml` or `--algorithm` that still names `nuts` is refused with that
+  instruction. Stored NUTS fits are no longer read: their leaves record `nuts`
+  as their method, which this camdl does not recognise, so `fit summary`,
+  `fit table` and `fit predict` do not see them; read one with a camdl built at
+  the `archive/ode-nuts` tag. The forward-sensitivity gradient, `nl-lbfgs` and
+  PGAS's NUTS move are unchanged.
+
 - **`camdl batch` was removed.** `batch run MANIFEST.toml` and `batch status`
   are gone. The one capability behind them — a deterministic grid of a
   parameter, run with common random numbers into the store and resumable — is

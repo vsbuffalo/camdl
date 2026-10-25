@@ -975,8 +975,8 @@ pub(crate) fn resolve_comp_grad_map(
     // `total += drate/dx_j * S[j, p]` in `ode::sensitivity_derivs`, and floating-
     // point addition is not associative. `CompGradMap` iteration is `HashMap`
     // iteration, whose order Rust seeds per process, so without this sort the
-    // forward-sensitivity gradient — and every consumer of `det_grad`, i.e. `nuts`
-    // on the `ode` backend and the gradient MLE — differed in its last bits from
+    // forward-sensitivity gradient — and every consumer of `det_grad`, i.e. the
+    // gradient MLE `nl-lbfgs` on the `ode` backend — differed in its last bits from
     // run to run, and a rerun of a published posterior did not reproduce it.
     out.sort_by_key(|(comp_idx, _)| *comp_idx);
     Ok(ResolvedCompGradMap(out))
@@ -993,8 +993,8 @@ pub(crate) fn resolve_comp_grad_map(
 ///   a `debug_assert!` (so a regression surfaces in tests) and fall back to
 ///   `0.0` in release. P5 makes this unreachable-by-construction.
 ///
-/// The observation likelihood arguments, the σ² overdispersion term, and a
-/// future ODE-NUTS `det_grad` all route through THIS function, so the emitted
+/// The observation likelihood arguments, the σ² overdispersion term, and the
+/// ODE `det_grad` all route through THIS function, so the emitted
 /// gradient is turned into a number in exactly one place — the obs/σ²/ODE cells
 /// cannot fork (proposal §4.3, §10).
 #[inline]
