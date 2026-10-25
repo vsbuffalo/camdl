@@ -995,6 +995,14 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 eprintln!("error: --resume base '{}' not found (run_id prefix or leaf path)", r);
                 std::process::exit(1);
             });
+            // A base whose chain directories count from 1 would hand chain k
+            // the state of chain k - 1 and find none for the last chain.
+            // Refused here, naming the base, before a new leaf is claimed or
+            // any chain state is copied into one (gh#990).
+            if let Err(e) = crate::chain_index::refuse_one_based_layout(&base) {
+                eprintln!("error: --resume: {e}");
+                std::process::exit(1);
+            }
             if let Some(dep) = cas::cas_dep_from_dir(&base) {
                 deps.push(dep);
             }

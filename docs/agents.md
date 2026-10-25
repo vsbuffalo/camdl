@@ -668,7 +668,8 @@ same number: chain `k` is `chain_k/`, and its draws are the rows whose `chain`
 field is `k`. There is no second base, so no `k - 1` anywhere. (Spec:
 `docs/camdl-run-spec.md` §2, "One index base"; gh#990.) A leaf written by a
 camdl from before this rule — `chain_1/` with no `chain_0/` — is refused by
-`fit summary`, `fit predict` and `fit run --resume` rather than read shifted;
+`fit summary`, `fit predict`, `fit table --quantity`, `compare`,
+`simulate --draws posterior` and `fit run --resume` rather than read shifted;
 re-run the fit.
 
 **Read `run.json`'s `output_schema` rather than reverse-engineering a header.**

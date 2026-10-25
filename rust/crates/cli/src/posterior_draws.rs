@@ -48,6 +48,46 @@ pub struct PosteriorDrawsRef {
 
 const DRAWS_FILE: &str = "draws.tsv";
 
+/// Why [`resolve_posterior_draws`] returned no cloud.
+///
+/// Several readers have a fallback for a fit without a posterior — `compare`
+/// scores an optimizer fit at its single winner, `fit table --quantity` renders
+/// `—` — and before this type they took it on *any* error. That turned a
+/// refusal (a leaf whose chain directories count from 1, gh#990) or an
+/// unknown stage name into a silent point-estimate answer. The two cases are
+/// distinct values so a caller can fall back on the first and must propagate
+/// the second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PosteriorDrawsError {
+    /// The fit has no posterior cloud: no stage (or not the named stage)
+    /// wrote `draws.tsv` — an optimizer fit, or a sampler that has not
+    /// finished. The point-estimate fallback is the right answer.
+    NoPosterior(String),
+    /// Anything else — not a directory, an unknown stage name, a leaf refused
+    /// for its chain numbering. Never a reason to fall back.
+    Other(String),
+}
+
+impl std::fmt::Display for PosteriorDrawsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PosteriorDrawsError::NoPosterior(m) | PosteriorDrawsError::Other(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<PosteriorDrawsError> for String {
+    fn from(e: PosteriorDrawsError) -> String {
+        e.to_string()
+    }
+}
+
+/// [`crate::chain_index::refuse_one_based_layout`], as a resolution failure
+/// that is not "no posterior".
+fn refuse_old_layout(stage_dir: &Path) -> Result<(), PosteriorDrawsError> {
+    crate::chain_index::refuse_one_based_layout(stage_dir).map_err(PosteriorDrawsError::Other)
+}
+
 /// Resolve a fit reference to its canonical posterior draws.
 ///
 /// `fit_ref` is a path to a fit results directory — either the segment
@@ -55,18 +95,22 @@ const DRAWS_FILE: &str = "draws.tsv";
 /// (in label order) that wrote a `draws.tsv` is chosen; `stage` names one
 /// leaf by its label instead — an internal selector, used by the readers that
 /// render one leaf's stanza. Errors (never guesses) when the directory holds
-/// no posterior draws or the named leaf has none.
+/// no posterior draws or the named leaf has none
+/// ([`PosteriorDrawsError::NoPosterior`]), and for every other failure,
+/// including a leaf refused for its chain numbering
+/// ([`PosteriorDrawsError::Other`]).
 pub fn resolve_posterior_draws(
     fit_ref: &str,
     stage: Option<&str>,
-) -> Result<PosteriorDrawsRef, String> {
+) -> Result<PosteriorDrawsRef, PosteriorDrawsError> {
+    use PosteriorDrawsError::{NoPosterior, Other};
     let dir = Path::new(fit_ref);
     if !dir.is_dir() {
-        return Err(format!(
+        return Err(Other(format!(
             "not a fit results directory: {fit_ref}\n  \
              pass the fit directory, e.g. results/fits/<stem>-<hash>/ \
              (the path `camdl fit run` printed)"
-        ));
+        )));
     }
 
     // Segment case: the fit-level view enumerates the method leaves in label
@@ -82,16 +126,16 @@ pub fn resolve_posterior_draws(
         if let Some(want) = stage {
             let chosen = view.stages.iter().find(|s| s.method.as_str() == want).ok_or_else(|| {
                 let names: Vec<&str> = view.stages.iter().map(|s| s.method.as_str()).collect();
-                format!(
+                Other(format!(
                     "no method named '{want}' in {fit_ref}\n  available methods: {}",
                     names.join(", ")
-                )
+                ))
             })?;
             let draws_path = chosen.stage_dir.join(DRAWS_FILE);
             if !draws_path.is_file() {
-                return Err(no_draws_for_stage(want, chosen.method));
+                return Err(NoPosterior(no_draws_for_stage(want, chosen.method)));
             }
-            crate::chain_index::refuse_one_based_layout(&chosen.stage_dir)?;
+            refuse_old_layout(&chosen.stage_dir)?;
             return Ok(PosteriorDrawsRef {
                 stage: chosen.method.as_str().to_string(),
                 draws_path,
@@ -104,9 +148,9 @@ pub fn resolve_posterior_draws(
         // No selector: the last leaf that wrote a posterior cloud. A leaf whose
         // chain directories count from 1 is refused here, before any reader
         // follows a draw's `chain` key into `chain_<key>/` (gh#990).
-        let chosen = with_draws.last().ok_or_else(|| no_posterior_error(fit_ref, &view))?;
+        let chosen = with_draws.last().ok_or_else(|| NoPosterior(no_posterior_error(fit_ref, &view)))?;
         let draws_path = chosen.stage_dir.join(DRAWS_FILE);
-        crate::chain_index::refuse_one_based_layout(&chosen.stage_dir)?;
+        refuse_old_layout(&chosen.stage_dir)?;
         return Ok(PosteriorDrawsRef {
             stage: chosen.method.as_str().to_string(),
             draws_path,
@@ -121,6 +165,7 @@ pub fn resolve_posterior_draws(
     // `run.json` when it has one.
     let draws_path = dir.join(DRAWS_FILE);
     if draws_path.is_file() {
+        refuse_old_layout(dir)?;
         let stage = std::fs::read(dir.join("run.json"))
             .ok()
             .and_then(|b| serde_json::from_slice::<runid::RunRecord>(&b).ok())
@@ -135,11 +180,11 @@ pub fn resolve_posterior_draws(
         });
     }
 
-    Err(format!(
+    Err(NoPosterior(format!(
         "no posterior draws under {fit_ref}\n  \
          expected a Bayesian fit (PGAS / PMMH / MH) that wrote {DRAWS_FILE}; \
          found no fit stages there"
-    ))
+    )))
 }
 
 impl PosteriorDrawsRef {
@@ -384,6 +429,8 @@ mod tests {
             ("nl-sbplx", "nl-sbplx", None),
         ]);
         let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PosteriorDrawsError::NoPosterior(_)), "{err:?}");
+        let err = err.to_string();
         assert!(err.contains("no stage"), "actionable error, got: {err}");
         assert!(err.contains("--params-only"), "points to the optimizer workflow: {err}");
         fs::remove_dir_all(&tmp).ok();
@@ -413,6 +460,8 @@ mod tests {
             ("pgas", "pgas", Some(TWO_DRAWS)),
         ]);
         let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("if2")).unwrap_err();
+        assert!(matches!(err, PosteriorDrawsError::NoPosterior(_)), "{err:?}");
+        let err = err.to_string();
         assert!(err.contains("no posterior draws") || err.contains("optimizer"), "got: {err}");
         fs::remove_dir_all(&tmp).ok();
     }
@@ -426,10 +475,14 @@ mod tests {
         let seg = fixture_segment(&tmp, &[("pgas", "pgas", None)]);
 
         let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
+        assert!(matches!(err, PosteriorDrawsError::NoPosterior(_)), "{err:?}");
+        let err = err.to_string();
         assert!(!err.contains("optimizer"), "a pgas stage is not an optimizer: {err}");
         assert!(err.contains(DRAWS_FILE), "names the missing posterior draws: {err}");
 
         let err2 = resolve_posterior_draws(seg.to_str().unwrap(), Some("pgas")).unwrap_err();
+        assert!(matches!(err2, PosteriorDrawsError::NoPosterior(_)), "{err2:?}");
+        let err2 = err2.to_string();
         assert!(!err2.contains("optimizer"), "named pgas stage is not an optimizer: {err2}");
         assert!(err2.contains(DRAWS_FILE), "named stage names the missing draws: {err2}");
         fs::remove_dir_all(&tmp).ok();
@@ -440,6 +493,8 @@ mod tests {
         let tmp = crate::test_support::unique_temp_dir("pdraws_badstage");
         let seg = fixture_segment(&tmp, &[("pgas", "pgas", Some(TWO_DRAWS))]);
         let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("nope")).unwrap_err();
+        assert!(matches!(err, PosteriorDrawsError::Other(_)), "an unknown name is not 'no posterior': {err:?}");
+        let err = err.to_string();
         assert!(err.contains("no method named 'nope'"), "got: {err}");
         fs::remove_dir_all(&tmp).ok();
     }
@@ -457,9 +512,32 @@ mod tests {
         fs::remove_dir_all(&tmp).ok();
     }
 
+    /// gh#990: a leaf whose chain directories count from 1 is refused as
+    /// `Other`, never as `NoPosterior` — the variant callers fall back on —
+    /// on the segment path and on a leaf passed directly.
+    #[test]
+    fn a_one_based_leaf_is_refused_not_reported_as_no_posterior() {
+        let tmp = crate::test_support::unique_temp_dir("pdraws_onebased");
+        let seg = fixture_segment(&tmp, &[("pgas", "pgas", Some(TWO_DRAWS))]);
+        let leaf = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap()
+            .draws_path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(leaf.join("chain_1")).unwrap();
+        fs::create_dir_all(leaf.join("chain_2")).unwrap();
+        for target in [seg.as_path(), leaf.as_path()] {
+            let err = resolve_posterior_draws(target.to_str().unwrap(), None).unwrap_err();
+            match &err {
+                PosteriorDrawsError::Other(m) => assert!(m.contains("gh#990"), "{m}"),
+                other => panic!("{}: expected the gh#990 refusal, got {other:?}", target.display()),
+            }
+        }
+        fs::remove_dir_all(&tmp).ok();
+    }
+
     #[test]
     fn errors_when_not_a_directory() {
         let err = resolve_posterior_draws("/no/such/dir/at/all", None).unwrap_err();
+        assert!(matches!(err, PosteriorDrawsError::Other(_)), "{err:?}");
+        let err = err.to_string();
         assert!(err.contains("not a fit results directory"), "got: {err}");
     }
 

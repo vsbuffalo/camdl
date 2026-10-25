@@ -316,11 +316,6 @@ pub fn run_stage(
     let resume_states: Vec<Option<PMMHResumeState>> = if resume {
         let mut states = Vec::with_capacity(n_chains);
         let mut any_failed = false;
-        // A leaf numbered from 1 would hand chain k the state of chain k - 1
-        // and find none for the last chain: refused by name (gh#990).
-        if let Err(e) = crate::chain_index::refuse_one_based_layout(stage_dir) {
-            super::abandon_stage(heartbeat, format!("error: --resume: {e}"));
-        }
         for chain in ChainIndex::all(n_chains) {
             let path: PathBuf = chain.dir_in(stage_dir).join("resume_state.bin");
             match std::fs::read(&path) {

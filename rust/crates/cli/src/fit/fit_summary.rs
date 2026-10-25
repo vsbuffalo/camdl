@@ -748,6 +748,7 @@ fn forkability(
     selection: Option<&ChainSelection>,
 ) -> Option<crate::fit::joint::JointEnsemble> {
     crate::posterior_draws::resolve_posterior_draws(dir, Some(stage))
+        .map_err(String::from)
         .map(|p| p.with_selection(selection.cloned()))
         .and_then(|p| crate::fit::joint::resolve_joint(&p))
         .ok()
@@ -2773,6 +2774,14 @@ fn build_summary_doc(
     let mut advised = false;
     for resolved in stages {
         let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
+        // The same refusal the text loop makes, before anything is read: the
+        // per-chain rows and the `--exclude-chains` advisory would otherwise
+        // label chain_N/ as chain N while draws.tsv keys it N - 1 (gh#990).
+        if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.stage_dir) {
+            eprintln!("warning: cannot load {} ({}): {}", stage_dir_str, resolved.method, e);
+            failures.push(LoadFailure { leaf: stage_dir_str.clone(), reason: e });
+            continue;
+        }
         let typed_loaded = MethodResult::load_from(&resolved.stage_dir, &resolved.method);
         // Same warning the text formatter prints. `.ok()` alone left a machine
         // reader with an empty `stages` array and nothing at all saying why

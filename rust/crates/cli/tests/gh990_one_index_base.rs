@@ -15,9 +15,10 @@
 //!
 //! The third test is the migration guard: a leaf written by a camdl that
 //! numbered its directories from 1 (`chain_1/`, `chain_2/`, no `chain_0/`)
-//! is refused by every reader that addresses a chain by name — `fit summary`,
-//! `fit predict`, `fit run --resume` — rather than read with every chain
-//! shifted by one.
+//! is refused by every reader that addresses a chain by name or reads its
+//! posterior cloud — `fit summary` (text, json, md), `fit predict`,
+//! `fit table --quantity`, `compare`, `fit run --resume` — rather than read
+//! with every chain shifted by one.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -356,7 +357,22 @@ fn a_leaf_with_one_based_chain_directories_is_refused_not_misread() {
             "{what} must say why the leaf is refused and cite the change:\n{e}");
     };
     refused(camdl(dir, &["fit", "summary", &seg_s]), "fit summary");
+    // The json/md/latex document is built by a second loop; it refuses too,
+    // including under `--exclude-chains`, whose advisory would otherwise label
+    // chains by directory number.
+    refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "json"]), "fit summary --format json");
+    refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "md"]), "fit summary --format md");
+    refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "json", "--exclude-chains", "1"]),
+        "fit summary --format json --exclude-chains 1");
     refused(camdl(dir, &["fit", "predict", &seg_s, "--horizon", "free_forward"]), "fit predict");
+    // `fit table --quantity` and `compare` fall back to a point estimate when a
+    // fit has no posterior cloud; the refusal must not be taken for that.
+    let fits = dir.join("results").join("fits").to_string_lossy().into_owned();
+    refused(camdl(dir, &["fit", "table", &fits, "--quantity", "anything"]),
+        "fit table --quantity");
+    refused(camdl(dir, &["compare", &seg_s, &seg_s]), "compare");
+    // `--draws 1` scores the plug-in point, the path with the winner fallback.
+    refused(camdl(dir, &["compare", &seg_s, &seg_s, "--draws", "1"]), "compare --draws 1");
 
     // `--resume` addresses `chain_N/resume_state.bin` by name: refused too.
     let run_json: serde_json::Value =
@@ -364,6 +380,28 @@ fn a_leaf_with_one_based_chain_directories_is_refused_not_misread() {
     let run_id = run_json["run_id"].as_str().expect("run_id").to_string();
     std::fs::write(dir.join("longer.toml"), format!("{}{}", problem(dir), pgas_method(12)))
         .unwrap();
-    refused(camdl(dir, &["fit", "run", "longer.toml", "--seed", "1", "--no-progress",
-        "--resume", &run_id]), "fit run --resume");
+    let out = camdl(dir, &["fit", "run", "longer.toml", "--seed", "1", "--no-progress",
+        "--resume", &run_id]);
+    let e = String::from_utf8_lossy(&out.stderr).to_string();
+    refused(out, "fit run --resume");
+    // The message names the leaf the user resumed from, and the refusal comes
+    // before any chain state is copied: no `resume_state.bin` exists outside
+    // the base leaf.
+    assert!(e.contains(&leaf.display().to_string()),
+        "the refusal names the base leaf {}:\n{e}", leaf.display());
+    let mut stray = Vec::new();
+    let mut stack = vec![dir.join("results")];
+    while let Some(d) = stack.pop() {
+        for ent in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "resume_state.bin")
+                && !p.starts_with(&leaf)
+            {
+                stray.push(p);
+            }
+        }
+    }
+    assert!(stray.is_empty(), "the refused resume copied chain state into a new leaf: {stray:?}");
 }

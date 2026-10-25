@@ -43,11 +43,15 @@ position in a vector that IF2 has already dropped PF-degenerate chains from
 opened `chain_<k>/` for the chain `fit summary` called `k` opens the same
 directory, because both moved together; a script that opened `chain_<c+1>/` for
 a `draws.tsv` row with `chain = c` now opens `chain_<c>/`. A stored fit written
-before this change — `chain_1/ … chain_N/` with no `chain_0/` — is refused by
-`fit summary`, `fit predict`, `fit table`, `compare` and `fit run --resume` with
-a message naming this change, rather than read with every chain shifted; re-run
-the fit. `progress.json`'s `numbering` and `cross_chain_compat.json`'s
-`chain_numbering` now read
+before this change — `chain_1/ … chain_N/` with no `chain_0/` — is refused with
+a message naming this change, rather than read with every chain shifted, by
+`fit summary` (every `--format`), `fit predict`, `fit table --quantity`,
+`compare` when it derives the fit's prequential (an explicit `prequential.json`
+is read as given), `simulate --draws posterior`, and `fit run --resume`, which
+refuses the base leaf before any chain state is copied; re-run the fit. A plain
+`fit table` without `--quantity` reads no chain and lists the fit as before.
+`progress.json`'s `numbering` and `cross_chain_compat.json`'s `chain_numbering`
+now read
 `counted from 0, matching the chain_N/ directories
 and draws.tsv's chain column`.
 

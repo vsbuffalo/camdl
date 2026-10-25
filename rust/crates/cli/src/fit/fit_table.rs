@@ -136,8 +136,25 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             let Some(fit_dir) = dir_by_hash.get(r.fit_hash.as_str()).copied() else {
                 continue;
             };
+            // Does this fit carry a posterior cloud? Resolved once per fit
+            // through the artifact authority. "No cloud" renders `—`; any
+            // other failure — a leaf refused for counting its chains from 1
+            // (gh#990), whose `quantities-excl<ids>/` addresses and cloud
+            // would be read under the wrong chain numbers — fails the table.
+            let has_cloud = match crate::posterior_draws::resolve_posterior_draws(
+                &fit_dir.to_string_lossy(), None,
+            ) {
+                Ok(_) => true,
+                Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => false,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
             for name in &args.quantities {
-                if let Some(median) = resolve_quantity_median(fit_dir, name, selection.as_ref()) {
+                if let Some(median) =
+                    resolve_quantity_median(fit_dir, name, selection.as_ref(), has_cloud)
+                {
                     r.quantities.insert(name.clone(), median);
                 }
             }
@@ -394,7 +411,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 ///   1. **Read existing**: if the sidecar `selection` addresses is present,
 ///      return the `fitted` row's `q50`.
 ///   2. **Derive on demand**: else, if the fit carries a posterior
-///      cloud (method `pgas` / `pmmh`), spawn `camdl fit predict
+///      cloud (`has_cloud`, from `resolve_posterior_draws`), spawn `camdl fit predict
 ///      <fit_dir> --horizon free_forward` (the single source of truth
 ///      for the simulate-per-draw + quantity-evaluation loop) and
 ///      re-read the file.
@@ -412,6 +429,7 @@ fn resolve_quantity_median(
     fit_dir: &std::path::Path,
     name: &str,
     selection: Option<&crate::chain_selection::ChainSelection>,
+    has_cloud: bool,
 ) -> Option<f64> {
     // The sidecar this cell reads is the one the SELECTION addresses (gh#795):
     // `quantities/` for the full cloud, `quantities-excl<ids>/` for a subset.
@@ -435,7 +453,7 @@ fn resolve_quantity_median(
     // sampler that also writes `draws.tsv` — rendering `—` for a quantity that
     // exists. An optimizer fit (IF2/NLopt) has no cloud, so `fit predict` would
     // refuse it anyway; skip the spawn.
-    if crate::posterior_draws::resolve_posterior_draws(&fit_dir.to_string_lossy(), None).is_err() {
+    if !has_cloud {
         return None;
     }
 
