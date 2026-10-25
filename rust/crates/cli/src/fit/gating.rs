@@ -21,6 +21,7 @@ use std::path::Path;
 
 use super::config_v2::GateConfig;
 use super::state::FitState;
+use crate::chain_index::ChainIndex;
 use crate::evidence::NATS_TO_DB;
 
 /// Soft threshold: params between this and `gate.a_thresh` get a
@@ -135,7 +136,11 @@ pub enum ScoutGateVerdict {
         delta_db: f64,
         threshold_db: f64,
         sigma_max: f64,
-        chain_logliks: Vec<f64>,
+        /// `(chain, clean-eval loglik)` for every chain that reached the
+        /// eval, the chain carried from `FitState::chain_eval_ids` so the
+        /// refusal names the chain whose `chain_N/` holds it, not a row
+        /// position (gh#978).
+        chain_logliks: Vec<(ChainIndex, f64)>,
     },
 }
 
@@ -218,8 +223,11 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
 
     // Step 2 — decibans-spread check on clean-eval logliks. Skipped
     // when the scout is pre-§Proposal 1 and didn't write the new fields.
+    // The ids are required alongside: a per-chain verdict that cannot name
+    // its chains would name the wrong ones (gh#978).
     if scout.chain_eval_logliks.len() >= 2
         && scout.chain_eval_ses.len() == scout.chain_eval_logliks.len()
+        && scout.chain_eval_ids.len() == scout.chain_eval_logliks.len()
     {
         let hi = scout.chain_eval_logliks.iter().cloned()
             .fold(f64::NEG_INFINITY, f64::max);
@@ -237,7 +245,8 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
                 delta_db,
                 threshold_db,
                 sigma_max,
-                chain_logliks: scout.chain_eval_logliks.clone(),
+                chain_logliks: scout.chain_eval_ids.iter().copied()
+                    .zip(scout.chain_eval_logliks.iter().copied()).collect(),
             };
         }
     }
@@ -247,13 +256,14 @@ pub fn check_scout_convergence(scout: &FitState, gate: &GateConfig) -> ScoutGate
 
 /// Render the DecibansSpread verdict as a human error message.
 /// Names the spread, the threshold (and which limb of `max(...)` it
-/// came from), and the per-chain logliks in nats and decibans so the
-/// user can see whether one chain is the obvious outlier.
+/// came from), and the per-chain logliks in nats and decibans — each
+/// against its own chain number — so the user can see whether one chain
+/// is the obvious outlier and open the right `chain_N/` (gh#978).
 pub fn format_decibans_spread_verdict(
     delta_db: f64,
     threshold_db: f64,
     sigma_max: f64,
-    chain_logliks: &[f64],
+    chain_logliks: &[(ChainIndex, f64)],
 ) -> String {
     let se_floor_db = 8.0 * sigma_max * NATS_TO_DB;
     let floor_source = if se_floor_db >= threshold_db {
@@ -268,13 +278,12 @@ pub fn format_decibans_spread_verdict(
          Δℓ = {:.2} dB > threshold = {:.2} dB ({})\n\n  \
          Per-chain clean logliks (nats / dB from worst):\n",
         delta_db, threshold_db, floor_source);
-    let lo = chain_logliks.iter().cloned().fold(f64::INFINITY, f64::min);
-    let mut sorted: Vec<(usize, f64)> = chain_logliks.iter().enumerate()
-        .map(|(i, &v)| (i, v)).collect();
+    let lo = chain_logliks.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+    let mut sorted: Vec<(ChainIndex, f64)> = chain_logliks.to_vec();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    for (i, ll) in &sorted {
+    for (chain, ll) in &sorted {
         msg.push_str(&format!("    chain {:<2}  ℓ = {:>9.2}  ({:+.2} dB from worst)\n",
-            i + 1, ll, (ll - lo) * NATS_TO_DB));
+            chain, ll, (ll - lo) * NATS_TO_DB));
     }
 
     // Name the chains DRIVING the spread, so the fix points at a chain index —
@@ -289,12 +298,11 @@ pub fn format_decibans_spread_verdict(
         msg.push_str(&format!(
             "\n  Outlier chains (|modified z| > {:.1} on per-chain clean loglik): {}\n",
             super::chain_diagnostics::CHAIN_LOGLIK_OUTLIER_MODZ, flagged.join(", ")));
-    } else if let Some((worst_i, _)) = chain_logliks.iter().enumerate()
-        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+    } else if let Some((worst, _)) = chain_logliks.iter()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     {
         msg.push_str(&format!(
-            "\n  Chain driving the spread (lowest clean loglik): chain {}\n",
-            worst_i + 1));
+            "\n  Chain driving the spread (lowest clean loglik): chain {worst}\n"));
     }
 
     msg.push_str("\n  Pick one:\n    \
@@ -481,7 +489,7 @@ mod tests {
             input_hash: None, camdl_version: None,
             best_loglik,
             initial_loglik: f64::NEG_INFINITY,
-            best_chain: 1,
+            best_chain: ChainIndex(1),
             n_chains: chain_logliks.len().max(1),
             n_good_chains: None,
             start_values: Default::default(),
@@ -627,6 +635,7 @@ mod tests {
             -60.0,
         );
         s.chain_eval_logliks = vec![-60.0, -60.0 - 100.0 / NATS_TO_DB];
+        s.chain_eval_ids = vec![ChainIndex(0), ChainIndex(1)];
         s.chain_eval_ses = vec![0.5, 0.5];   // 8·0.5·NATS_TO_DB ≈ 17.4 dB < 30 dB
 
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
@@ -658,6 +667,7 @@ mod tests {
             -60.0,
         );
         s.chain_eval_logliks = vec![-60.0, -60.0 - 100.0 / NATS_TO_DB];
+        s.chain_eval_ids = vec![ChainIndex(0), ChainIndex(1)];
         s.chain_eval_ses = vec![5.0, 5.0];   // 8·5·NATS_TO_DB ≈ 173.7 dB
 
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
@@ -687,18 +697,23 @@ mod tests {
     /// gh#406: the DecibansSpread message must NAME the outlier chain, not just
     /// report the aggregate spread. A single clear low outlier among six chains
     /// clears the modified-z threshold, so the "Outlier chains" line names it.
+    /// `(chain, loglik)` pairs for contiguous chains counted from 0.
+    fn indexed(logliks: &[f64]) -> Vec<(ChainIndex, f64)> {
+        logliks.iter().enumerate().map(|(i, &v)| (ChainIndex(i), v)).collect()
+    }
+
     #[test]
     fn decibans_message_names_a_clear_outlier_chain() {
-        // Five chains near -60, chain 6 stuck at -300 (index 5 → "chain 6").
-        let chain_logliks = vec![-60.0, -61.0, -59.0, -60.5, -60.2, -300.0];
+        // Five chains near -60, chain 5 stuck at -300.
+        let chain_logliks = indexed(&[-60.0, -61.0, -59.0, -60.5, -60.2, -300.0]);
         let msg = format_decibans_spread_verdict(240.0, 30.0, 0.5, &chain_logliks);
         assert!(
             msg.contains("Outlier chains"),
             "message must flag the outlier chain, not just the spread:\n{msg}"
         );
         assert!(
-            msg.contains("Outlier chains (|modified z| > 3.5 on per-chain clean loglik): chain 6"),
-            "message must name chain 6 as the outlier:\n{msg}"
+            msg.contains("Outlier chains (|modified z| > 3.5 on per-chain clean loglik): chain 5"),
+            "message must name chain 5 as the outlier:\n{msg}"
         );
     }
 
@@ -707,12 +722,13 @@ mod tests {
     /// not. Good chains carry realistic jitter (real chain means never coincide).
     #[test]
     fn decibans_message_names_both_co_stuck_chains() {
-        // Four good (jittered) near -60, two stuck near -400 (chains 5 and 6).
-        let chain_logliks = vec![-60.0, -61.0, -59.0, -60.5, -400.0, -401.0];
+        // Four good (jittered) near -60, two stuck near -400 (chains 4 and 5).
+        let chain_logliks = indexed(&[-60.0, -61.0, -59.0, -60.5, -400.0, -401.0]);
         let msg = format_decibans_spread_verdict(340.0, 30.0, 0.5, &chain_logliks);
         assert!(msg.contains("Outlier chains"), "both co-stuck chains must be flagged:\n{msg}");
-        assert!(msg.contains("chain 5"), "must name chain 5:\n{msg}");
-        assert!(msg.contains("chain 6"), "must name chain 6:\n{msg}");
+        let outliers = msg.lines().find(|l| l.contains("Outlier chains")).unwrap();
+        assert!(outliers.contains("chain 4"), "must name chain 4:\n{msg}");
+        assert!(outliers.contains("chain 5"), "must name chain 5:\n{msg}");
         assert!(
             !msg.contains("Chain driving the spread"),
             "the fallback must NOT fire when robust outliers are found:\n{msg}"
@@ -724,7 +740,7 @@ mod tests {
     /// names the single worst chain driving the low end — always actionable.
     #[test]
     fn decibans_message_fallback_names_worst_on_smooth_spread() {
-        let chain_logliks = vec![-60.0, -70.0, -80.0, -90.0, -100.0, -110.0];
+        let chain_logliks = indexed(&[-60.0, -70.0, -80.0, -90.0, -100.0, -110.0]);
         let scores = super::super::chain_diagnostics::chain_loglik_mod_zscores(&chain_logliks);
         assert!(
             scores.iter().all(|s| !s.is_outlier),
@@ -733,9 +749,48 @@ mod tests {
         );
         let msg = format_decibans_spread_verdict(150.0, 30.0, 0.5, &chain_logliks);
         assert!(
-            msg.contains("Chain driving the spread (lowest clean loglik): chain 6"),
-            "fallback must name the worst chain (-110 → chain 6):\n{msg}"
+            msg.contains("Chain driving the spread (lowest clean loglik): chain 5"),
+            "fallback must name the worst chain (-110 → chain 5):\n{msg}"
         );
         assert!(!msg.contains("Outlier chains"), "no robust outlier line on a smooth spread:\n{msg}");
+    }
+
+    /// gh#978: the refusal names chains by their id, not by their position in
+    /// `chain_eval_logliks`. IF2 drops PF-degenerate chains before the
+    /// loglik-eval, so once any chain is missing a position is not a chain,
+    /// and the user who opens the named `chain_N/` reads the wrong one.
+    #[test]
+    fn decibans_refusal_names_the_low_chain_by_its_id_not_its_position() {
+        let mut s = make_state(&[("beta", 1.001)], &[], &[-60.0, -60.0], -60.0);
+        // Chain 1 died in the filter; the chains that reached the eval are 0 and 2.
+        s.chain_eval_ids = vec![ChainIndex(0), ChainIndex(2)];
+        s.chain_eval_logliks = vec![-60.0, -300.0];
+        s.chain_eval_ses = vec![0.5, 0.5];
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        let msg = match check_scout_convergence(&s, &gate) {
+            ScoutGateVerdict::DecibansSpread {
+                delta_db, threshold_db, sigma_max, chain_logliks,
+            } => format_decibans_spread_verdict(delta_db, threshold_db, sigma_max, &chain_logliks),
+            other => panic!("expected DecibansSpread, got {other:?}"),
+        };
+        assert!(
+            msg.contains("lowest clean loglik): chain 2"),
+            "the low chain is chain 2 (its directory is chain_2/), not row 1:\n{msg}"
+        );
+        assert!(
+            !msg.contains("chain 1"),
+            "chain 1 never reached the eval and must not be named:\n{msg}"
+        );
+    }
+
+    /// Without the ids the per-chain leg cannot name its chains, so it does
+    /// not run: no verdict is better than one that names the wrong chain.
+    #[test]
+    fn decibans_leg_needs_the_chain_ids() {
+        let mut s = make_state(&[("beta", 1.001)], &[], &[-60.0, -60.0], -60.0);
+        s.chain_eval_logliks = vec![-60.0, -300.0];
+        s.chain_eval_ses = vec![0.5, 0.5];
+        let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
+        assert!(matches!(check_scout_convergence(&s, &gate), ScoutGateVerdict::Ok));
     }
 }

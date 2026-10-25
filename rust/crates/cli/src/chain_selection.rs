@@ -19,16 +19,15 @@
 //! ## Parse at the boundary
 //!
 //! The CLI string `"3,5"` is parsed ONCE, by [`ChainSelection::parse_exclude`],
-//! into a validated set of 1-based chain ids. Downstream holds the typed
+//! into a validated set of chain ids. Downstream holds the typed
 //! [`ChainSelection`] and never re-parses a string.
 //!
-//! ## 1-based UI, 0-based file
+//! ## One base
 //!
-//! Chains are named 1-based everywhere the user sees them (`chain_N/` dirs, the
-//! per-chain summary table, `--exclude-chains 3,5`). The `chain` column IN
-//! `draws.tsv` is 0-based (it is the join key to `trajectories.tsv`;
-//! `fit/pgas.rs`). This module owns the single conversion: a user id `k` matches
-//! a draw row whose `chain` field is `k - 1`.
+//! A chain id here is a [`ChainIndex`]: the number of the `chain_N/` directory,
+//! of the per-chain summary table, and of the `chain` column in `draws.tsv`,
+//! all counted from 0 (gh#990). A user id `k` matches a draw row whose `chain`
+//! field is `k`; there is no conversion to own.
 //!
 //! ## Loaded gun (why the guardrails)
 //!
@@ -41,34 +40,35 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::chain_index::ChainIndex;
 use crate::KeyedDraw;
 
-/// A validated, 1-based set of MCMC chain ids to DROP from a posterior cloud.
+/// A validated set of MCMC chain ids to DROP from a posterior cloud.
 ///
 /// Constructed only through [`ChainSelection::parse_exclude`] (the boundary
-/// parser) — its existence proves the ids are positive integers and the set is
-/// non-empty. Whether the ids actually exist in a given fit is checked at apply
-/// time (that needs the fit's chain set), by [`ChainSelection::apply_keyed`].
+/// parser) — its existence proves the ids are non-negative integers and the
+/// set is non-empty. Whether the ids actually exist in a given fit is checked
+/// at apply time (that needs the fit's chain set), by
+/// [`ChainSelection::apply_keyed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainSelection {
-    /// 1-based chain ids to exclude. Non-empty by construction.
-    excluded: BTreeSet<usize>,
+    /// Chain ids to exclude. Non-empty by construction.
+    excluded: BTreeSet<ChainIndex>,
 }
 
 /// What a chain selection actually did to a cloud — the provenance record.
 ///
-/// All ids are 1-based (the user-facing convention). `n_total` is the number of
-/// distinct chains that were present BEFORE filtering, so `kept.len() +
-/// (excluded that were present) == n_total`. Stamped into `predictive.json` and
-/// printed in the `fit summary` header so a chain-subset artifact is never
-/// mistakable for a full-cloud one.
+/// `n_total` is the number of distinct chains that were present BEFORE
+/// filtering, so `kept.len() + (excluded that were present) == n_total`.
+/// Stamped into `predictive.json` and printed in the `fit summary` header so a
+/// chain-subset artifact is never mistakable for a full-cloud one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubsetInfo {
-    /// Chains dropped (1-based, sorted). Exactly the requested exclusion set —
+    /// Chains dropped (sorted). Exactly the requested exclusion set —
     /// validated to be present, so every id here really was in the fit.
-    pub excluded: Vec<usize>,
-    /// Chains retained (1-based, sorted).
-    pub kept: Vec<usize>,
+    pub excluded: Vec<ChainIndex>,
+    /// Chains retained (sorted).
+    pub kept: Vec<ChainIndex>,
     /// Distinct chains present before filtering (`kept.len() + excluded.len()`).
     pub n_total: usize,
 }
@@ -76,9 +76,9 @@ pub struct SubsetInfo {
 impl ChainSelection {
     /// Parse `--exclude-chains 3,5` → the drop set `{3, 5}`.
     ///
-    /// Rejects (hard error, never a silent shrug): an empty list, a non-integer
-    /// token, and `0` (chains are 1-based, so `0` is always a mistake). A
-    /// repeated id collapses into the set — `3,3` means "drop chain 3".
+    /// Rejects (hard error, never a silent shrug): an empty list and a
+    /// non-integer token. A repeated id collapses into the set — `3,3` means
+    /// "drop chain 3".
     pub fn parse_exclude(raw: &str) -> Result<Self, String> {
         let mut excluded = BTreeSet::new();
         for tok in raw.split(',') {
@@ -86,20 +86,15 @@ impl ChainSelection {
             if t.is_empty() {
                 return Err(format!(
                     "--exclude-chains: empty chain id in '{raw}' \
-                     (expected a comma-separated list of 1-based ids, e.g. 3,5)"
+                     (expected a comma-separated list of chain ids counted from 0, e.g. 3,5)"
                 ));
             }
-            let id: usize = t.parse().map_err(|_| {
+            let id: ChainIndex = t.parse().map_err(|_| {
                 format!(
                     "--exclude-chains: '{t}' is not a chain id \
-                     (expected a positive integer, e.g. 3,5)"
+                     (expected a non-negative integer, e.g. 3,5)"
                 )
             })?;
-            if id == 0 {
-                return Err(
-                    "--exclude-chains: chain ids are 1-based; 0 is not a valid chain".to_string(),
-                );
-            }
             excluded.insert(id);
         }
         if excluded.is_empty() {
@@ -149,11 +144,11 @@ impl ChainSelection {
     /// This is THE chain filter — the single definition every read-side consumer
     /// shares. Steps, in order:
     ///
-    /// 1. Determine the present chain set from the rows (distinct `chain + 1`,
-    ///    1-based). A cloud with no `chain` column (an old param-only
+    /// 1. Determine the present chain set from the rows (the distinct `chain`
+    ///    keys). A cloud with no `chain` column (an old param-only
     ///    `draws.tsv`) cannot be chain-selected → hard error.
     /// 2. Every requested id must be present → else `chain 7 not in this fit
-    ///    (chains 1..6)`.
+    ///    (chains 0..5)`.
     /// 3. Drop the rows of the excluded chains.
     /// 4. An empty result (every chain excluded) → hard error.
     ///
@@ -162,14 +157,14 @@ impl ChainSelection {
         &self,
         draws: Vec<KeyedDraw>,
     ) -> Result<(Vec<KeyedDraw>, SubsetInfo), String> {
-        // 1. Present chains (1-based). A `None` chain means the file has no
-        // `chain` column, so no chain can be named — refuse rather than silently
-        // treat the whole cloud as one nameless chain.
-        let mut present: BTreeSet<usize> = BTreeSet::new();
+        // 1. Present chains. A `None` chain means the file has no `chain`
+        // column, so no chain can be named — refuse rather than silently treat
+        // the whole cloud as one nameless chain.
+        let mut present: BTreeSet<ChainIndex> = BTreeSet::new();
         for d in &draws {
             match d.chain {
                 Some(c) => {
-                    present.insert(c + 1);
+                    present.insert(ChainIndex(c));
                 }
                 None => {
                     return Err(
@@ -183,11 +178,11 @@ impl ChainSelection {
         }
 
         // 2. Validate every requested id is present.
-        let present_hi = present.iter().copied().max().unwrap_or(0);
+        let present_hi = present.iter().copied().max().unwrap_or(ChainIndex(0));
         for &id in &self.excluded {
             if !present.contains(&id) {
                 return Err(format!(
-                    "--exclude-chains: chain {id} not in this fit (chains 1..{present_hi})"
+                    "--exclude-chains: chain {id} not in this fit (chains 0..{present_hi})"
                 ));
             }
         }
@@ -197,8 +192,7 @@ impl ChainSelection {
             .into_iter()
             .filter(|d| {
                 // Every row has Some(chain) here (step 1 refused None).
-                let one_based = d.chain.map(|c| c + 1).unwrap_or(0);
-                !self.excluded.contains(&one_based)
+                !d.chain.is_some_and(|c| self.excluded.contains(&ChainIndex(c)))
             })
             .collect();
 
@@ -209,8 +203,9 @@ impl ChainSelection {
             );
         }
 
-        let excluded: Vec<usize> = self.excluded.iter().copied().collect();
-        let kept: Vec<usize> = present.iter().copied().filter(|c| !self.excluded.contains(c)).collect();
+        let excluded: Vec<ChainIndex> = self.excluded.iter().copied().collect();
+        let kept: Vec<ChainIndex> =
+            present.iter().copied().filter(|c| !self.excluded.contains(c)).collect();
         let info = SubsetInfo {
             excluded,
             kept,
@@ -459,12 +454,12 @@ mod tests {
 
     #[test]
     fn parse_basic_list() {
-        // Parse produces the canonical drop set; apply it to a 5-chain cloud and
+        // Parse produces the canonical drop set; apply it to a 6-chain cloud and
         // read the concrete excluded ids back off the provenance record.
         let sel = ChainSelection::parse_exclude("3,5").unwrap();
-        let draws: Vec<KeyedDraw> = (0..5).map(|c| kd(c, 0, 0.1)).collect();
+        let draws: Vec<KeyedDraw> = (0..6).map(|c| kd(c, 0, 0.1)).collect();
         let (_, info) = sel.apply_keyed(draws).unwrap();
-        assert_eq!(info.excluded, vec![3, 5]);
+        assert_eq!(info.excluded, vec![ChainIndex(3), ChainIndex(5)]);
     }
 
     #[test]
@@ -476,10 +471,15 @@ mod tests {
         );
     }
 
+    /// Chains count from 0 (gh#990), so `0` names the first chain.
     #[test]
-    fn parse_rejects_zero() {
-        let e = ChainSelection::parse_exclude("0").unwrap_err();
-        assert!(e.contains("1-based"), "0 rejected with a 1-based hint: {e}");
+    fn parse_accepts_zero_as_the_first_chain() {
+        let sel = ChainSelection::parse_exclude("0").unwrap();
+        let draws: Vec<KeyedDraw> = (0..2).map(|c| kd(c, 0, 0.1)).collect();
+        let (kept, info) = sel.apply_keyed(draws).unwrap();
+        assert_eq!(info.excluded, vec![ChainIndex(0)]);
+        assert_eq!(info.kept, vec![ChainIndex(1)]);
+        assert!(kept.iter().all(|d| d.chain == Some(1)));
     }
 
     #[test]
@@ -495,35 +495,35 @@ mod tests {
     }
 
     #[test]
-    fn apply_drops_the_named_chain_1based() {
-        // 0-based chains 0,1,2 → 1-based 1,2,3. Exclude 3 → drop chain 0-based 2.
+    fn apply_drops_the_named_chain() {
+        // The id a user types is the `chain` key of the rows it drops.
         let draws = vec![
             kd(0, 0, 0.1), kd(0, 1, 0.11),
             kd(1, 0, 0.2), kd(1, 1, 0.21),
-            kd(2, 0, 9.0), kd(2, 1, 9.1), // the outlier chain (1-based 3)
+            kd(2, 0, 9.0), kd(2, 1, 9.1), // the outlier chain
         ];
-        let sel = ChainSelection::parse_exclude("3").unwrap();
+        let sel = ChainSelection::parse_exclude("2").unwrap();
         let (kept, info) = sel.apply_keyed(draws).unwrap();
-        assert_eq!(kept.len(), 4, "chain 3 (2 rows) dropped");
-        assert!(kept.iter().all(|d| d.chain != Some(2)), "no 0-based chain 2 rows remain");
-        assert_eq!(info.excluded, vec![3]);
-        assert_eq!(info.kept, vec![1, 2]);
+        assert_eq!(kept.len(), 4, "chain 2 (2 rows) dropped");
+        assert!(kept.iter().all(|d| d.chain != Some(2)), "no chain 2 rows remain");
+        assert_eq!(info.excluded, vec![ChainIndex(2)]);
+        assert_eq!(info.kept, vec![ChainIndex(0), ChainIndex(1)]);
         assert_eq!(info.n_total, 3);
     }
 
     #[test]
     fn apply_errors_on_absent_chain_with_range() {
-        let draws = vec![kd(0, 0, 0.1), kd(1, 0, 0.2)]; // chains 1..2
+        let draws = vec![kd(0, 0, 0.1), kd(1, 0, 0.2)]; // chains 0..1
         let sel = ChainSelection::parse_exclude("7").unwrap();
         let e = sel.apply_keyed(draws).unwrap_err();
         assert!(e.contains("chain 7 not in this fit"), "names the bad id: {e}");
-        assert!(e.contains("chains 1..2"), "states the valid range: {e}");
+        assert!(e.contains("chains 0..1"), "states the valid range: {e}");
     }
 
     #[test]
     fn apply_errors_when_all_excluded() {
-        let draws = vec![kd(0, 0, 0.1), kd(1, 0, 0.2)]; // chains 1,2
-        let sel = ChainSelection::parse_exclude("1,2").unwrap();
+        let draws = vec![kd(0, 0, 0.1), kd(1, 0, 0.2)]; // chains 0,1
+        let sel = ChainSelection::parse_exclude("0,1").unwrap();
         let e = sel.apply_keyed(draws).unwrap_err();
         assert!(e.contains("empty posterior"), "refuses an empty cloud: {e}");
     }
@@ -534,7 +534,7 @@ mod tests {
         let draws = vec![
             KeyedDraw { chain: None, draw: None, params: HashMap::from([("beta".to_string(), 0.1)]) },
         ];
-        let sel = ChainSelection::parse_exclude("1").unwrap();
+        let sel = ChainSelection::parse_exclude("0").unwrap();
         let e = sel.apply_keyed(draws).unwrap_err();
         assert!(e.contains("no `chain` column"), "refuses a keyless cloud: {e}");
     }
@@ -591,11 +591,12 @@ mod tests {
 
     #[test]
     fn subset_info_json_and_csv() {
-        let info = SubsetInfo { excluded: vec![3, 5], kept: vec![1, 2, 4, 6], n_total: 6 };
+        let c = |v: &[usize]| v.iter().map(|&i| ChainIndex(i)).collect::<Vec<_>>();
+        let info = SubsetInfo { excluded: c(&[3, 5]), kept: c(&[0, 1, 2, 4]), n_total: 6 };
         assert_eq!(info.excluded_csv(), "3,5");
         let j = info.to_json();
         assert_eq!(j["excluded"], serde_json::json!([3, 5]));
-        assert_eq!(j["kept"], serde_json::json!([1, 2, 4, 6]));
+        assert_eq!(j["kept"], serde_json::json!([0, 1, 2, 4]));
         assert_eq!(j["n_total"], serde_json::json!(6));
     }
 
@@ -618,8 +619,8 @@ mod tests {
         // single value, the 0%-acceptance deadlock. `sigma` is pinned: constant
         // at one value across every chain, because the model fixes it.
         let mut text = String::from("chain\tdraw\tbeta\tfrozen\tsigma\n");
-        // Three chains written; chain 3 (1-based) is excluded, so the scored
-        // subset is chains 0 and 1 — `ChainSelection` has no empty form.
+        // Three chains written; chain 2 is excluded, so the scored subset is
+        // chains 0 and 1 — `ChainSelection` has no empty form.
         for chain in 0..3 {
             for draw in 0..40 {
                 let beta = 0.3 + 0.01 * ((draw * 7 + chain * 3) % 11) as f64;
@@ -628,7 +629,7 @@ mod tests {
             }
         }
         std::fs::write(&draws, text).unwrap();
-        let keep_all = ChainSelection::parse_exclude("3").expect("drop the spare chain");
+        let keep_all = ChainSelection::parse_exclude("2").expect("drop the spare chain");
 
         // Estimated = beta + frozen. `sigma` is pinned and must not appear at
         // all — not in the R̂ map, and not as a refusal either.

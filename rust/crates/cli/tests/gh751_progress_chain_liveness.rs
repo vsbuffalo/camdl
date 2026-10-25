@@ -168,13 +168,13 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
         "every chain reported, so none is left as `not_started`:\n{progress:#}"
     );
 
-    // Each row is flat, 1-based, and a refusal carries its short tag.
+    // Each row is flat, numbered from 0, and a refusal carries its short tag.
     let rows = chains["chains"].as_array().expect("per-chain rows");
     assert_eq!(rows.len(), 6);
     let mut refused_ids: Vec<u64> = Vec::new();
     for r in rows {
         let id = r["chain"].as_u64().unwrap();
-        assert!((1..=6).contains(&id), "1-based chain id: {r:#}");
+        assert!((0..6).contains(&id), "chain id counts from 0: {r:#}");
         match r["status"].as_str().unwrap() {
             "refused" => {
                 assert_eq!(r["reason"], "non_finite_start", "{r:#}");
@@ -192,7 +192,8 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
     // comparisons below are equalities — an artifact that needed `+ 1` to line
     // up with its neighbour is the defect, not the fixture.
     assert_eq!(
-        chains["numbering"], "1-based, matching the chain_N/ directories",
+        chains["numbering"],
+        "counted from 0, matching the chain_N/ directories and draws.tsv's chain column",
         "the file explains its own chain column:\n{progress:#}"
     );
     let diagnostics = read_json(&leaf.join("diagnostics.json"));

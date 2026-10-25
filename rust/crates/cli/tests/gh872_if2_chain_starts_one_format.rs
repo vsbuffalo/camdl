@@ -206,10 +206,10 @@ starts    = \"uniform_unconstrained\"
 
     let if2_ids = column(&if2_cols, &if2_rows, "chain_id");
     let pgas_ids = column(&pgas_cols, &pgas_rows, "chain_id");
-    assert_eq!(if2_ids, ["1", "2"],
+    assert_eq!(if2_ids, ["0", "1"],
         "chain ids in the IF2 stage's chain_starts.tsv are {if2_ids:?}; the \
-         column is 1-based on every stage that writes this file — the number \
-         of the `chain_N/` directory beside it (gh#781) — and a stage that \
+         column counts from 0 on every stage that writes this file — the number \
+         of the `chain_N/` directory beside it (gh#781, gh#990) — and a stage that \
          numbers differently hands an off-by-one to anyone joining two.");
     assert_eq!(if2_ids, pgas_ids,
         "the IF2 stage numbers its chains {if2_ids:?} and the PGAS stage \
@@ -220,7 +220,7 @@ starts    = \"uniform_unconstrained\"
     // names its chain and no two rows may share a value.
     let if2_sources = column(&if2_cols, &if2_rows, "source");
     assert_eq!(if2_sources,
-        ["uniform_unconstrained:chain-1", "uniform_unconstrained:chain-2"],
+        ["uniform_unconstrained:chain-0", "uniform_unconstrained:chain-1"],
         "the IF2 stage's per-chain sources are {if2_sources:?}; the stage drew \
          each chain its own point under `starts = \"uniform_unconstrained\"`, and \
          the file has to say so — under the same chain numbers the `chain_id` \

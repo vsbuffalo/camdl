@@ -2940,8 +2940,8 @@ mod tests {
         let all = posterior_mean_params_toml(&pref).unwrap();
         assert_eq!(beta_of(&all), 5.0, "all-chain θ̂ pools both chains");
 
-        // Drop the stuck chain 2 → mean beta = 1.0 over the retained chain.
-        let sel = ChainSelection::parse_exclude("2").unwrap();
+        // Drop the stuck chain 1 → mean beta = 1.0 over the retained chain.
+        let sel = ChainSelection::parse_exclude("1").unwrap();
         let sub =
             posterior_mean_params_toml(&pref.clone().with_selection(Some(sel))).unwrap();
         assert_eq!(beta_of(&sub), 1.0, "subset θ̂ is the mean over the retained chain");

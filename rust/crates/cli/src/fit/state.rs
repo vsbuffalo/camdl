@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 // unchanged.
 use std::collections::BTreeMap;
 
+use crate::chain_index::ChainIndex;
 use crate::fit::config_v2::{LoglikEvalConfig, GateConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -31,14 +32,12 @@ pub struct FitState {
     pub camdl_version: Option<String>,
     pub best_loglik: f64,
     pub initial_loglik: f64,
-    /// The chain that produced `best_loglik`, as a **1-based chain number** —
-    /// the number of the `chain_N/` directory beside this file, the number
-    /// the method's own stderr line prints, and the number
-    /// `mle_params.toml`'s `[provenance] chain` carries. Every method writes
-    /// it that way; the writers add one to their 0-based internal index at
-    /// the boundary, so `chain_<best_chain>/` can be opened with no
-    /// arithmetic and `0` is not a value this field takes (gh#781, gh#912).
-    pub best_chain: usize,
+    /// The chain that produced `best_loglik`: the number of the `chain_N/`
+    /// directory beside this file, the number the method's own stderr line
+    /// prints, and the number `mle_params.toml`'s `[provenance] chain`
+    /// carries — one number, counted from 0 like every chain index (gh#990),
+    /// so `chain_<best_chain>/` opens with no arithmetic.
+    pub best_chain: ChainIndex,
     pub n_chains: usize,
     pub n_good_chains: Option<usize>,
     pub start_values: BTreeMap<String, f64>,
@@ -86,19 +85,17 @@ pub struct FitState {
     pub chain_eval_logliks: Vec<f64>,
 
     /// The chains `chain_eval_logliks` and `chain_eval_ses` belong to,
-    /// parallel to both, as **1-based chain numbers** — the same numbering as
-    /// `best_chain` and the `chain_N/` directories, not the 0-based
-    /// `ChainScore::chain_id` they are converted from (gh#972). Written
-    /// because those two are built by `ChainResults::chain_eval_logliks`,
-    /// which sorts by chain id and then DISCARDS it — and IF2 drops
-    /// PF-degenerate chains before that point, so a position in the vector is
-    /// not a chain number. Without this the
-    /// summary's per-chain table labelled row `i` as "chain i + 1", which put
-    /// the `<- selected` marker on the wrong chain whenever any chain had been
+    /// parallel to both — the same numbers as `best_chain` and the `chain_N/`
+    /// directories. Written because those two are built by
+    /// `ChainResults::chain_eval_logliks`, which sorts by chain id and then
+    /// DISCARDS it — and IF2 drops PF-degenerate chains before that point, so
+    /// a position in the vector is not a chain number. Without this the
+    /// summary's per-chain table labelled rows by position, which put the
+    /// `<- selected` marker on the wrong chain whenever any chain had been
     /// dropped. Empty in fit_state files written before this field existed;
     /// the table is omitted rather than mislabelled when it is missing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chain_eval_ids: Vec<usize>,
+    pub chain_eval_ids: Vec<ChainIndex>,
 
     /// Per-chain clean-eval standard errors, parallel to
     /// `chain_eval_logliks`. `max(SE)` drives the SE-aware decibans
@@ -185,7 +182,12 @@ pub struct FitState {
 }
 
 impl FitState {
+    /// Read `<dir>/fit_state.toml`. A leaf whose chain directories count from
+    /// 1 is refused first (gh#990): its `best_chain` and `chain_eval_ids`
+    /// are in the old base too, and reading them as the current one would
+    /// name the wrong chain everywhere this file is rendered.
     pub fn load(dir: &str) -> Result<Self, String> {
+        crate::chain_index::refuse_one_based_layout(std::path::Path::new(dir))?;
         let path = format!("{}/fit_state.toml", dir);
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {}", path, e))?;
@@ -258,7 +260,7 @@ mod tests {
             camdl_version: Some("0.1.0+test".into()),
             best_loglik: -123.45,
             initial_loglik: -200.0,
-            best_chain: 1,
+            best_chain: ChainIndex(1),
             n_chains: 2,
             n_good_chains: Some(2),
             start_values: BTreeMap::from([("beta".into(), 0.8)]),
@@ -269,7 +271,7 @@ mod tests {
             perturb_only_at_t0_params: vec!["s0".into()],
             chain_logliks: vec![-130.0, -123.45],
             chain_eval_logliks: vec![-128.7, -123.1],
-            chain_eval_ids: vec![1, 2],
+            chain_eval_ids: vec![ChainIndex(0), ChainIndex(1)],
             chain_eval_ses: vec![1.5, 0.8],
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),

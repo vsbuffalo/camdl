@@ -19,6 +19,7 @@
 //! is preserved in git history at commit `d45c932` for context.
 
 use crate::args::{FitSummaryArgs, FitSummaryFormat};
+use crate::chain_index::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::evidence::NATS_TO_DB;
 use crate::fit::config_diff::ConfigDiff;
@@ -139,7 +140,7 @@ fn chain_selection_advisory(
 ) {
     use super::chain_diagnostics as cd;
     if let Some(means) = cd::read_chain_mean_logliks(stage_dir, kind) {
-        let scores = cd::chain_loglik_mod_zscores(&means.scored);
+        let scores = cd::chain_loglik_mod_zscores(&means.scored_by_chain());
         let outliers = cd::outlier_labels(&scores);
         if !outliers.is_empty() {
             eprintln!(
@@ -552,6 +553,14 @@ fn format_text(
     for resolved in stages {
         let lead = std::mem::take(&mut version_lead);
         let stage_dir_str = resolved.stage_dir.to_string_lossy().into_owned();
+        // A leaf whose chain directories count from 1 is refused before
+        // anything on it is read: its per-chain table would label chain_N/ as
+        // chain N while its draws.tsv keys the same chain N - 1 (gh#990).
+        if let Err(e) = crate::chain_index::refuse_one_based_layout(&resolved.stage_dir) {
+            eprintln!("warning: cannot load {} ({}): {}", stage_dir_str, resolved.method, e);
+            failures.push(LoadFailure { leaf: stage_dir_str.clone(), reason: e });
+            continue;
+        }
         let mut typed = match MethodResult::load_from(&resolved.stage_dir, &resolved.method) {
             Ok(r) => r,
             Err(e) => {
@@ -1155,7 +1164,7 @@ impl StageFacts {
         let logliks = cd::read_chain_mean_logliks(stage_dir, ll_kind);
         let scores = match &logliks {
             Some(m) if !m.scored_column_absent && m.scored.len() >= 2 => {
-                cd::chain_loglik_mod_zscores(&m.scored)
+                cd::chain_loglik_mod_zscores(&m.scored_by_chain())
             }
             _ => Vec::new(),
         };
@@ -2206,7 +2215,7 @@ impl Formatter {
                     format!("{:>7}", "—")
                 };
                 let path_cells = if show_paths {
-                    match paths.get(&(sc.chain as u64)) {
+                    match paths.get(&(sc.chain.0 as u64)) {
                         Some((n_saved, n_forkable)) => format!(" {:>7} {:>10}", n_saved, n_forkable),
                         None => format!(" {:>7} {:>10}", "—", "—"),
                     }
@@ -2706,7 +2715,9 @@ pub struct ParameterReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainReport {
-    pub chain_id: usize,
+    /// The chain's number — the `chain_N/` directory it names (gh#990), read
+    /// from `FitState::chain_eval_ids`, never from the row position (gh#981).
+    pub chain_id: ChainIndex,
     pub clean_loglik: f64,
     pub clean_se: f64,
     pub is_winner: bool,
@@ -3052,17 +3063,25 @@ fn if2_stage_report(
         .filter_map(|p| p.estimate_date.clone().map(|d| (p.name.clone(), d)))
         .collect();
 
-    // Chains
+    // Chains. Labelled by `chain_eval_ids`, as the text table is: IF2 drops
+    // PF-degenerate chains before the loglik-eval, so a row's position is not
+    // a chain once any chain is missing. Without the ids (a fit_state written
+    // before they existed) the table is omitted rather than mislabelled
+    // (gh#981).
     let n = state.chain_eval_logliks.len();
     let best_idx = state.chain_eval_logliks.iter().enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i);
-    let chains: Vec<ChainReport> = (0..n).map(|i| ChainReport {
-        chain_id: i + 1,
-        clean_loglik: state.chain_eval_logliks[i],
-        clean_se: state.chain_eval_ses.get(i).copied().unwrap_or(f64::NAN),
-        is_winner: Some(i) == best_idx,
-    }).collect();
+    let chains: Vec<ChainReport> = if state.chain_eval_ids.len() == n {
+        (0..n).map(|i| ChainReport {
+            chain_id: state.chain_eval_ids[i],
+            clean_loglik: state.chain_eval_logliks[i],
+            clean_se: state.chain_eval_ses.get(i).copied().unwrap_or(f64::NAN),
+            is_winner: Some(i) == best_idx,
+        }).collect()
+    } else {
+        Vec::new()
+    };
 
     // Provenance
     let final_path = format!("{}/final_params.toml", stage_dir);
@@ -3977,7 +3996,7 @@ mod tests {
             camdl_version: Some(version::VERSION_SHORT.into()),
             best_loglik: -3804.9,
             initial_loglik: -7891.0,
-            best_chain: 1,
+            best_chain: ChainIndex(1),
             n_chains: 8,
             n_good_chains: Some(8),
             start_values: start,
@@ -3991,7 +4010,7 @@ mod tests {
                 -3810.5, -3805.1, -3812.0, -3808.7,
                 -3804.9, -3811.2, -3809.0, -3807.6,
             ],
-            chain_eval_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            chain_eval_ids: ChainIndex::all(8).collect(),
             chain_eval_ses: vec![1.5, 1.2, 1.8, 1.4, 1.1, 1.6, 1.3, 1.5],
             resolved_gate: Some(GateConfig::default()),
             resolved_loglik_eval: Some(LoglikEvalConfig::default()),
@@ -4002,7 +4021,7 @@ mod tests {
         }
     }
 
-    /// The per-chain loglik-eval table labelled row `i` as "chain i + 1".
+    /// The per-chain loglik-eval table labelled row `i` as chain `i`.
     /// `ChainResults::chain_eval_logliks` sorts by chain id and then discards
     /// it, and IF2 drops PF-degenerate chains before that point, so on a fit
     /// where a chain was dropped the positions are not chain numbers -- and
@@ -4013,23 +4032,23 @@ mod tests {
     fn the_loglik_eval_table_names_chains_not_row_positions() {
         let fmt = plain_formatter();
         let mut state = synthetic_fit_state();
-        // Chains 2, 5 and 7 died in the filter and never reached the eval.
-        state.chain_eval_ids = vec![1, 3, 4, 6, 8];
+        // Chains 1, 4 and 6 died in the filter and never reached the eval.
+        state.chain_eval_ids = [0, 2, 3, 5, 7].map(ChainIndex).to_vec();
         state.chain_eval_logliks = vec![-3810.5, -3812.0, -3808.7, -3804.9, -3807.6];
         state.chain_eval_ses = vec![1.5, 1.8, 1.4, 1.1, 1.5];
         let out = fmt.chain_loglik_eval_table(&state);
 
-        for id in ["    1 ", "    3 ", "    4 ", "    6 ", "    8 "] {
+        for id in ["    0 ", "    2 ", "    3 ", "    5 ", "    7 "] {
             assert!(out.contains(id), "surviving chain {id:?} must be named:\n{out}");
         }
-        assert!(!out.contains("    5 "), "chain 5 died and must not appear:\n{out}");
+        assert!(!out.contains("    4 "), "chain 4 died and must not appear:\n{out}");
 
-        // The best loglik (-3804.9) is chain 6, the FOURTH row. Keyed on
-        // position the marker would have said chain 4.
+        // The best loglik (-3804.9) is chain 5, the FOURTH row. Keyed on
+        // position the marker would have said chain 3.
         let marked: Vec<&str> = out.lines().filter(|l| l.contains("selected")).collect();
         assert_eq!(marked.len(), 1, "exactly one chain is selected:\n{out}");
-        assert!(marked[0].trim_start().starts_with("6 "),
-            "the marker belongs to chain 6, not row position 4:\n{}", marked[0]);
+        assert!(marked[0].trim_start().starts_with("5 "),
+            "the marker belongs to chain 5, not row position 3:\n{}", marked[0]);
     }
 
     /// A fit_state written before `chain_eval_ids` existed carries none. The
@@ -4045,6 +4064,39 @@ mod tests {
             "the omission is stated and explained:\n{out}");
         assert!(!out.contains("selected"),
             "and no chain is marked on evidence we cannot attribute:\n{out}");
+    }
+
+    /// gh#981: the json / md / latex per-chain table is built from the same
+    /// `chain_eval_ids` the text table reads, not from row positions, so on a
+    /// fit where a chain was dropped the `selected` marker names the chain
+    /// whose `chain_N/` directory holds the reported estimate.
+    #[test]
+    fn the_structured_chain_table_names_chains_not_row_positions() {
+        let mut state = synthetic_fit_state();
+        // Chains 1, 4 and 6 died in the filter and never reached the eval.
+        state.chain_eval_ids = [0, 2, 3, 5, 7].map(ChainIndex).to_vec();
+        state.chain_eval_logliks = vec![-3810.5, -3812.0, -3808.7, -3804.9, -3807.6];
+        state.chain_eval_ses = vec![1.5, 1.8, 1.4, 1.1, 1.5];
+        let report = if2_stage_report(
+            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+        let ids: Vec<ChainIndex> = report.chains.iter().map(|c| c.chain_id).collect();
+        assert_eq!(ids, [0, 2, 3, 5, 7].map(ChainIndex).to_vec(),
+            "rows carry the surviving chains' own numbers");
+        let selected: Vec<ChainIndex> =
+            report.chains.iter().filter(|c| c.is_winner).map(|c| c.chain_id).collect();
+        assert_eq!(selected, vec![ChainIndex(5)], "the best loglik (-3804.9) is chain 5, not row 3");
+    }
+
+    /// gh#981, the other half: without the ids the structured table is
+    /// omitted, as the text table is, rather than labelled by position.
+    #[test]
+    fn the_structured_chain_table_is_omitted_without_ids_rather_than_mislabelled() {
+        let mut state = synthetic_fit_state();
+        state.chain_eval_ids = Vec::new();
+        let report = if2_stage_report(
+            "scout", "/nonexistent", &state, None, None, None, &CalendarContext::default());
+        assert!(report.chains.is_empty(),
+            "no ids, no rows — a position is not a chain number: {:?}", report.chains);
     }
 
     #[test]
@@ -4504,8 +4556,8 @@ mod tests {
     }
 
     /// gh#406: the per-chain loglik table names the stuck chain in a Bayesian
-    /// summary. Six-chain stage dir (five near -50, chain 6 stuck at -300) with
-    /// per-chain traces + a draws.tsv manifest → the table flags chain 6 and the
+    /// summary. Six-chain stage dir (five near -50, chain 5 stuck at -300) with
+    /// per-chain traces + a draws.tsv manifest → the table flags chain 5 and the
     /// nudge fires.
     #[test]
     fn bayesian_chain_loglik_table_names_the_stuck_chain() {
@@ -4520,13 +4572,13 @@ mod tests {
             std::fs::write(cd.join("trace.tsv"), body).unwrap();
         };
         // Good chains carry realistic jitter (distinct means ≈ -50) so the robust
-        // MAD is non-zero; chain 6 is the lone stuck chain at ≈ -300.
-        write_trace(1, "3\t-50.0\t-52.0\n4\t-50.0\t-52.0\n5\t-50.0\t-52.0\n"); // mean -50.0
-        write_trace(2, "3\t-50.5\t-52.0\n4\t-50.5\t-52.0\n5\t-50.5\t-52.0\n"); // mean -50.5
-        write_trace(3, "3\t-49.5\t-51.0\n4\t-49.5\t-51.0\n5\t-49.5\t-51.0\n"); // mean -49.5
-        write_trace(4, "3\t-50.2\t-52.0\n4\t-50.2\t-52.0\n5\t-50.2\t-52.0\n"); // mean -50.2
-        write_trace(5, "3\t-49.8\t-51.0\n4\t-49.8\t-51.0\n5\t-49.8\t-51.0\n"); // mean -49.8
-        write_trace(6, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // stuck -300
+        // MAD is non-zero; chain 5 is the lone stuck chain at ≈ -300.
+        write_trace(0, "3\t-50.0\t-52.0\n4\t-50.0\t-52.0\n5\t-50.0\t-52.0\n"); // mean -50.0
+        write_trace(1, "3\t-50.5\t-52.0\n4\t-50.5\t-52.0\n5\t-50.5\t-52.0\n"); // mean -50.5
+        write_trace(2, "3\t-49.5\t-51.0\n4\t-49.5\t-51.0\n5\t-49.5\t-51.0\n"); // mean -49.5
+        write_trace(3, "3\t-50.2\t-52.0\n4\t-50.2\t-52.0\n5\t-50.2\t-52.0\n"); // mean -50.2
+        write_trace(4, "3\t-49.8\t-51.0\n4\t-49.8\t-51.0\n5\t-49.8\t-51.0\n"); // mean -49.8
+        write_trace(5, "3\t-300.0\t-302.0\n4\t-301.0\t-303.0\n5\t-299.0\t-301.0\n"); // stuck -300
         let mut draws = String::from("chain\tdraw\tbeta\n");
         for c in 0..6 {
             for d in 0..3 {
@@ -4539,20 +4591,20 @@ mod tests {
         let table = chain_table(&fmt, &dir, 6, LoglikType::Marginal);
         assert!(table.contains("── chains "), "the section rule is present:\n{table}");
         assert!(table.contains("← outlier"), "stuck chain must be flagged:\n{table}");
-        assert!(table.contains("chains disagree (chain 6"), "nudge must name chain 6:\n{table}");
+        assert!(table.contains("chains disagree (chain 5"), "nudge must name chain 5:\n{table}");
         // The stuck chain's mean must reflect the post-burn-in draws (≈ -300),
         // not the stripped warm-up (≈ -900).
-        assert!(table.contains("-300.00"), "chain 6 mean ≈ -300 (warm-up stripped):\n{table}");
+        assert!(table.contains("-300.00"), "chain 5 mean ≈ -300 (warm-up stripped):\n{table}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /// gh#667: a PGAS stage's per-chain table ranks on `obs_ll`
     /// (`log p(y | X, θ)`), not on the `log_complete_data_ll` target. The
-    /// fixture is built so the two rankings disagree: chain 3 has a hugely
+    /// fixture is built so the two rankings disagree: chain 2 has a hugely
     /// concentrated latent path (a high complete-data value) with an ordinary
-    /// data fit, chain 6 fits the data ≈450 nats worse with an ordinary
-    /// complete-data value. The table must flag chain 6 and leave chain 3 clean,
+    /// data fit, chain 5 fits the data ≈450 nats worse with an ordinary
+    /// complete-data value. The table must flag chain 5 and leave chain 2 clean,
     /// while still SHOWING the complete-data target and its transition term.
     #[test]
     fn pgas_chain_table_ranks_on_obs_ll_and_shows_the_split() {
@@ -4568,7 +4620,7 @@ mod tests {
             (-3000.0, -1400.0),
         ];
         for (i, (trans, obs)) in chains.iter().enumerate() {
-            let cd = dir.join(format!("chain_{}", i + 1));
+            let cd = dir.join(format!("chain_{i}"));
             std::fs::create_dir_all(&cd).unwrap();
             let complete = trans + obs;
             let mut body = String::from(
@@ -4598,23 +4650,23 @@ mod tests {
             .filter(|l| l.contains("← outlier"))
             .map(|l| l.split_whitespace().next().unwrap_or(""))
             .collect();
-        assert_eq!(flagged, vec!["6"],
-            "only chain 6 (the bad DATA fit) may be flagged:\n{table}");
-        assert!(table.contains("chains disagree (chain 6"),
-            "the nudge must name chain 6:\n{table}");
+        assert_eq!(flagged, vec!["5"],
+            "only chain 5 (the bad DATA fit) may be flagged:\n{table}");
+        assert!(table.contains("chains disagree (chain 5"),
+            "the nudge must name chain 5:\n{table}");
 
         // …and the ranked column is obs_ll, not the complete-data target.
         assert!(table.contains("-1400.00"),
-            "chain 6's scored value is its obs_ll (-1400.00):\n{table}");
+            "chain 5's scored value is its obs_ll (-1400.00):\n{table}");
         assert!(table.contains("-952.00"),
-            "chain 1's scored value is its obs_ll (-952.00):\n{table}");
+            "chain 0's scored value is its obs_ll (-952.00):\n{table}");
 
         // The complete-data target and its latent-path term stay VISIBLE — they
         // are the sampler's own objective, just not the ranking key.
         assert!(table.contains("-4400.00"),
-            "chain 6's complete-data target must still be shown:\n{table}");
+            "chain 5's complete-data target must still be shown:\n{table}");
         assert!(table.contains("-1751.70"),
-            "chain 3's complete-data target must still be shown:\n{table}");
+            "chain 2's complete-data target must still be shown:\n{table}");
         assert!(table.contains("-800.00"),
             "chain 3's transition_ll must still be shown:\n{table}");
 
@@ -4630,11 +4682,11 @@ mod tests {
     fn missing_obs_ll_still_runs_the_degeneracy_screen() {
         let dir = crate::test_support::unique_temp_dir("summary_chain_no_obs");
         std::fs::create_dir_all(&dir).unwrap();
-        for c in 1..=3 {
+        for c in 0..3 {
             let cd = dir.join(format!("chain_{c}"));
             std::fs::create_dir_all(&cd).unwrap();
-            // No obs_ll / transition_ll columns at all. Chain 3 is degenerate.
-            let rows = if c == 3 {
+            // No obs_ll / transition_ll columns at all. Chain 2 is degenerate.
+            let rows = if c == 2 {
                 "0\t-77.0\t-inf\n1\t-77.0\t-inf\n"
             } else {
                 "0\t-77.0\t-79.0\n1\t-77.0\t-79.0\n"
@@ -4656,8 +4708,8 @@ mod tests {
             "the missing comparison column is named, not silently substituted:\n{table}");
         assert!(!table.contains("← outlier"),
             "nothing may be ranked without the comparison column:\n{table}");
-        assert!(table.contains("DEGENERATE") && table.contains("chain 3"),
-            "the -inf screen still names chain 3:\n{table}");
+        assert!(table.contains("DEGENERATE") && table.contains("chain 2"),
+            "the -inf screen still names chain 2:\n{table}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4677,11 +4729,11 @@ mod tests {
                 "step\tlog_likelihood\tlog_posterior\n1\t-900.0\t-905.0\n{kept}");
             std::fs::write(cd.join("trace.tsv"), body).unwrap();
         };
-        write_trace(1, "2\t-50.0\t-52.0\n3\t-50.5\t-52.5\n4\t-49.5\t-51.5\n");
-        write_trace(2, "2\t-50.2\t-52.2\n3\t-50.1\t-52.1\n4\t-49.9\t-51.9\n");
-        // Chain 3: stuck — two of three retained rows carry -inf as the
+        write_trace(0, "2\t-50.0\t-52.0\n3\t-50.5\t-52.5\n4\t-49.5\t-51.5\n");
+        write_trace(1, "2\t-50.2\t-52.2\n3\t-50.1\t-52.1\n4\t-49.9\t-51.9\n");
+        // Chain 2: stuck — two of three retained rows carry -inf as the
         // CURRENT state (the gh#607 shape).
-        write_trace(3, "2\t-inf\t-inf\n3\t-inf\t-inf\n4\t-60.0\t-62.0\n");
+        write_trace(2, "2\t-inf\t-inf\n3\t-inf\t-inf\n4\t-60.0\t-62.0\n");
         let mut draws = String::from("chain\tdraw\tbeta\n");
         for c in 0..3 {
             for d in 0..3 {
@@ -4696,7 +4748,7 @@ mod tests {
             "the stuck chain's mean renders -inf, not the missing-data dash:\n{table}");
         assert!(table.contains("DEGENERATE"),
             "the stuck chain gets the loud flag:\n{table}");
-        assert!(table.contains("chain 3") && table.contains("66.7%")
+        assert!(table.contains("chain 2") && table.contains("66.7%")
                 && table.contains("(2/3)"),
             "the flag names the chain and the -inf fraction:\n{table}");
         assert!(table.contains("--exclude-chains"),
@@ -4734,7 +4786,7 @@ mod tests {
     fn bayesian_chain_table_flags_point_mass_chain() {
         let dir = crate::test_support::unique_temp_dir("summary_point_mass");
         std::fs::create_dir_all(&dir).unwrap();
-        for c in 1..=3 {
+        for c in 0..3 {
             let cd = dir.join(format!("chain_{c}"));
             std::fs::create_dir_all(&cd).unwrap();
             std::fs::write(cd.join("trace.tsv"), format!(
@@ -4754,7 +4806,7 @@ mod tests {
         let table = chain_table(&fmt, &dir, 3, LoglikType::Marginal);
         assert!(table.contains("point-mass"),
             "the frozen chain gets the loud flag:\n{table}");
-        assert!(table.contains("chain 3") && table.contains("across 3 retained"),
+        assert!(table.contains("chain 2") && table.contains("across 3 retained"),
             "the flag names the chain and the draw count:\n{table}");
         assert!(table.contains("--exclude-chains"),
             "the flag names the explicit fix:\n{table}");
@@ -5119,10 +5171,10 @@ mod tests {
     fn the_chains_table_carries_the_path_counts_in_the_same_row() {
         let dir = crate::test_support::unique_temp_dir("summary_chains_merged");
         std::fs::create_dir_all(&dir).unwrap();
-        // (transition_ll, obs_ll); chain 3 fits the data far worse.
+        // (transition_ll, obs_ll); chain 2 fits the data far worse.
         let chains = [(-2832.6, -952.0), (-2933.0, -952.8), (-3000.0, -1400.0)];
         for (i, (trans, obs)) in chains.iter().enumerate() {
-            let cd = dir.join(format!("chain_{}", i + 1));
+            let cd = dir.join(format!("chain_{i}"));
             std::fs::create_dir_all(&cd).unwrap();
             let complete = trans + obs;
             let mut body = String::from(
@@ -5142,20 +5194,20 @@ mod tests {
             }
         }
         std::fs::write(dir.join("draws.tsv"), draws).unwrap();
-        write_traj_summary(&dir, 40, 1, &[(1, 10, 10), (2, 10, 8), (3, 10, 10)]);
+        write_traj_summary(&dir, 40, 1, &[(0, 10, 10), (1, 10, 8), (2, 10, 10)]);
 
         let fmt = plain_formatter();
         let out = chain_table(&fmt, &dir, 3, LoglikType::CompleteData);
         assert_eq!(section_of(&out, SECTION_CHAINS), concat!(
 "  chain         obs ll    mod-z   transition ll    complete ll   paths   forkable   flag\n",
-"      1        -952.00     0.67        -2832.60       -3784.60      10         10   \n",
-"      2        -952.80     0.00        -2933.00       -3885.80      10          8   \n",
-"      3       -1400.00  -377.05        -3000.00       -4400.00      10         10   ← outlier\n",
+"      0        -952.00     0.67        -2832.60       -3784.60      10         10   \n",
+"      1        -952.80     0.00        -2933.00       -3885.80      10          8   \n",
+"      2       -1400.00  -377.05        -3000.00       -4400.00      10         10   ← outlier\n",
 "  2 of 30 written paths cannot be joined to a posterior draw\n",
 "  a path is written on every 40 retained draw (thin 1), so every one should\n",
 "  be joinable; the shortfall is paths that were written outside this leaf's\n",
 "  retained set or skipped as incoherent records\n",
-"  ⚠ chains disagree (chain 3 — obs_ll far from the rest) — is a parameter\n",
+"  ⚠ chains disagree (chain 2 — obs_ll far from the rest) — is a parameter\n",
 "  weakly identified? Inspect its per-chain posterior.\n",
         ));
         std::fs::remove_dir_all(&dir).ok();
@@ -5283,7 +5335,7 @@ mod tests {
         let dir = crate::test_support::unique_temp_dir("summary_excl_scope");
         std::fs::create_dir_all(&dir).unwrap();
         for (i, ll) in [-50.0_f64, -50.2, -300.0].iter().enumerate() {
-            let cd = dir.join(format!("chain_{}", i + 1));
+            let cd = dir.join(format!("chain_{i}"));
             std::fs::create_dir_all(&cd).unwrap();
             let mut body = String::from("sweep\tlog_likelihood\tlog_posterior\n");
             for sw in 0..5 {
@@ -5291,17 +5343,21 @@ mod tests {
             }
             std::fs::write(cd.join("trace.tsv"), body).unwrap();
         }
-        let info = SubsetInfo { excluded: vec![3], kept: vec![1, 2], n_total: 3 };
+        let info = SubsetInfo {
+            excluded: vec![ChainIndex(2)],
+            kept: vec![ChainIndex(0), ChainIndex(1)],
+            n_total: 3,
+        };
         let fmt = plain_formatter();
         let facts = StageFacts::gather(&dir, LoglikType::Marginal, false);
         let section = fmt.chains_section(&dir, 2, &facts, Some(&info));
 
-        assert!(section.contains("including the excluded 3"),
+        assert!(section.contains("including the excluded 2"),
             "the table must say whose rows it is still showing:\n{section}");
         assert!(section.contains("the outlier score is over all of them"),
             "and that the score was not recomputed over the subset:\n{section}");
-        assert!(section.lines().any(|l| l.trim_start().starts_with("3 ")),
-            "chain 3 keeps its row — dropping it would hide the evidence for \
+        assert!(section.lines().any(|l| l.trim_start().starts_with("2 ")),
+            "chain 2 keeps its row — dropping it would hide the evidence for \
              the exclusion:\n{section}");
         assert!(!section.contains("found traces for 3 of 2 chains"),
             "and the unfiltered/retained mismatch must not render as a count \
@@ -5954,7 +6010,7 @@ mod tests {
     #[test]
     fn recompute_over_subset_drops_outlier_and_fixes_rhat() {
         let dir = crate::test_support::unique_temp_dir("summary_subset_recompute");
-        write_outlier_draws(&dir, 4, 40, 3); // chains 1..4; chain 4 (0-based 3) stuck
+        write_outlier_draws(&dir, 4, 40, 3); // chains 0..3; chain 3 stuck
 
         // Ground truth: over ALL four chains R̂ is large (the outlier disagrees).
         let all: Vec<Vec<f64>> = {
@@ -5971,7 +6027,7 @@ mod tests {
             .rhat;
         assert!(rhat_all > 1.5, "over all chains the outlier inflates R̂: {rhat_all}");
 
-        // Recompute over the subset (drop chain 4).
+        // Recompute over the subset (drop chain 3).
         let mut diag = PosteriorDiagnostics {
             per_param: crate::fit::method_result::per_param_from_maps(
                 BTreeMap::from([("beta".to_string(), rhat_all)]),
@@ -5984,11 +6040,11 @@ mod tests {
             n_chains: 4,
         };
         let mut mean = BTreeMap::from([("beta".to_string(), 0.475)]); // mixed (incl. outlier)
-        let sel = ChainSelection::parse_exclude("4").unwrap();
+        let sel = ChainSelection::parse_exclude("3").unwrap();
         let info = recompute_over_subset(&mut diag, &mut mean, &dir, &sel).unwrap();
 
-        assert_eq!(info.kept, vec![1, 2, 3]);
-        assert_eq!(info.excluded, vec![4]);
+        assert_eq!(info.kept, vec![ChainIndex(0), ChainIndex(1), ChainIndex(2)]);
+        assert_eq!(info.excluded, vec![ChainIndex(3)]);
         assert_eq!(info.n_total, 4);
         assert_eq!(diag.n_chains, 3, "n_chains is now the retained count");
         assert_eq!(diag.n_samples, 120, "3 retained chains × 40 draws");
@@ -6049,7 +6105,7 @@ mod tests {
     fn synthetic_if2_result() -> MethodResult {
         MethodResult::If2(If2StageResult {
             best_loglik: -3804.9,
-            best_chain: 1,
+            best_chain: ChainIndex(1),
             theta_hat: BTreeMap::new(),
             max_chain_agreement: 1.04,
             gate_verdict: crate::fit::method_result::GateVerdict::Pass,

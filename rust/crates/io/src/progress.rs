@@ -113,10 +113,12 @@ pub enum RunState {
 /// How the `chain` field of a [`ChainStatus`] is numbered. Stated in the
 /// artifact so a consumer holding only `progress.json` can map a row to a
 /// directory. It agrees with `pgas_summary.json`'s `chain_numbering`, with
-/// `chain_starts.tsv`'s `chain_id` column and with `diagnostics.json`'s
-/// `bad_init` records: every artifact that names a chain names it the same
-/// way, so joining two of them takes no arithmetic (gh#781).
-pub const CHAIN_NUMBERING: &str = "1-based, matching the chain_N/ directories";
+/// `chain_starts.tsv`'s `chain_id` column, with `diagnostics.json`'s
+/// `bad_init` records and with `draws.tsv`'s `chain` column: every artifact
+/// that names a chain names it the same way, counted from 0, so joining two
+/// of them takes no arithmetic (gh#781, gh#990).
+pub const CHAIN_NUMBERING: &str =
+    "counted from 0, matching the chain_N/ directories and draws.tsv's chain column";
 
 /// Why a chain did not run.
 ///
@@ -208,7 +210,7 @@ impl ChainLiveness {
                         ChainState::Completed => live.completed += 1,
                         ChainState::Refused { .. } => live.refused += 1,
                     }
-                    live.chains.push(ChainStatus { chain: i as u64 + 1, state: *state });
+                    live.chains.push(ChainStatus { chain: i as u64, state: *state });
                 }
             }
         }
@@ -411,8 +413,8 @@ impl Heartbeat {
         Self::spawn(dir, PhaseRule::Fixed(Phase::Profiling), total, interval, 0)
     }
 
-    /// Report what `chain` (0-based, the index the sampler works in; the
-    /// artifact renders it 1-based) is doing (gh#751).
+    /// Report what `chain` (counted from 0, the number the artifact renders)
+    /// is doing (gh#751).
     ///
     /// Called when a worker picks the chain up, when it is refused, and when it
     /// finishes — three times per chain, never on the sweep path. A chain that
@@ -638,14 +640,14 @@ mod tests {
         assert_eq!(live.completed, 0);
         assert_eq!(live.not_started, 0);
         assert_eq!(live.chains.len(), 24);
-        // 1-based, so the eighth slot is chain 8 and matches `chain_8/`.
+        // Counted from 0, so the eighth slot is chain 7 and matches `chain_7/`.
         let sampling: Vec<u64> = live
             .chains
             .iter()
             .filter(|c| c.state == ChainState::Running)
             .map(|c| c.chain)
             .collect();
-        assert_eq!(sampling, vec![8], "the chain id is 1-based: chain_8/");
+        assert_eq!(sampling, vec![7], "the chain id counts from 0: chain_7/");
         assert_eq!(live.numbering, CHAIN_NUMBERING);
     }
 
@@ -664,7 +666,7 @@ mod tests {
         let live = ChainLiveness::of(&slots);
         assert_eq!((live.running, live.refused, live.not_started), (1, 1, 2));
         let ids: Vec<u64> = live.chains.iter().map(|c| c.chain).collect();
-        assert_eq!(ids, vec![1, 2], "chains 3 and 4 have said nothing, so no row");
+        assert_eq!(ids, vec![0, 1], "chains 2 and 3 have said nothing, so no row");
     }
 
     /// The artifact's shape, which is the part a dashboard or `make watch`
@@ -687,7 +689,7 @@ mod tests {
         assert_eq!(v["chains"]["total"], 2);
         assert_eq!(v["chains"]["completed"], 1);
         assert_eq!(v["chains"]["refused"], 1);
-        assert_eq!(v["chains"]["chains"][0]["chain"], 1);
+        assert_eq!(v["chains"]["chains"][0]["chain"], 0);
         assert_eq!(v["chains"]["chains"][0]["status"], "completed");
         assert_eq!(v["chains"]["chains"][1]["status"], "refused");
         assert_eq!(

@@ -193,7 +193,7 @@ fn col<'a>(header: &[String], row: &'a [String], name: &str) -> &'a str {
 fn read_paths(stage: &Path) -> (Vec<Vec<Vec<Vec<f64>>>>, Vec<String>) {
     let mut chains = Vec::new();
     let mut columns: Option<Vec<String>> = None;
-    for c in 1..=CHAINS {
+    for c in 0..CHAINS {
         let (header, rows) = read_tsv(&stage.join(format!("chain_{c}/trajectories.tsv")));
         // The id and time columns lead: `chain draw time t_start t_stop`
         // (+ `date date_start date_stop` under a calendar); the rest are the

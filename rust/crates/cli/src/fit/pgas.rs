@@ -4,6 +4,7 @@
 //! updates (θ | X) with conditional SMC trajectory updates (X | θ, y).
 //! Outputs per-chain trace files, convergence diagnostics, and summary.
 
+use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::loglik::LoglikType;
 use crate::fit::runner::{FitRunConfig, StageConvergence};
@@ -156,7 +157,7 @@ pub(crate) struct SavedPathCounts {
     /// in the artifact). Recorded rather than left implicit in the row order: a
     /// chain refused at its start (gh#607) never reaches this list, so the
     /// rows are the SURVIVORS and their positions are not their ids.
-    pub chain_id: Vec<usize>,
+    pub chain_id: Vec<ChainIndex>,
     /// Written paths, one entry per chain in `results` order.
     pub n_saved: Vec<usize>,
     /// Of those, the ones whose sweep is also a retained draw.
@@ -176,11 +177,11 @@ impl SavedPathCounts {
         let mut chain_id = Vec::with_capacity(retained.len());
         let mut n_saved = Vec::with_capacity(retained.len());
         let mut n_forkable = Vec::with_capacity(retained.len());
-        for (chain_id_0, retained_sweeps) in retained {
+        for (chain, retained_sweeps) in retained {
             let kept: std::collections::HashSet<usize> =
                 retained_sweeps.iter().copied().collect();
-            let saved = saved_sweeps.get(*chain_id_0).map(Vec::as_slice).unwrap_or(&[]);
-            chain_id.push(chain_id_0 + 1);
+            let saved = saved_sweeps.get(*chain).map(Vec::as_slice).unwrap_or(&[]);
+            chain_id.push(ChainIndex(*chain));
             n_saved.push(saved.len());
             n_forkable.push(saved.iter().filter(|s| kept.contains(s)).count());
         }
@@ -432,9 +433,13 @@ pub fn run_stage(
     let resume_states: Vec<Option<ChainResumeState>> = if resume {
         let mut states = Vec::with_capacity(n_chains);
         let mut any_failed = false;
-        for chain_id in 0..n_chains {
-            let path: PathBuf = stage_dir.join(format!("chain_{}", chain_id + 1))
-                .join("resume_state.bin");
+        // A leaf numbered from 1 would hand chain k the state of chain k - 1
+        // and find none for the last chain: refused by name (gh#990).
+        if let Err(e) = crate::chain_index::refuse_one_based_layout(stage_dir) {
+            super::abandon_stage(heartbeat, format!("error: --resume: {e}"));
+        }
+        for chain in ChainIndex::all(n_chains) {
+            let path: PathBuf = chain.dir_in(stage_dir).join("resume_state.bin");
             match std::fs::read(&path) {
                 Ok(data) => match bincode::deserialize::<ChainResumeState>(&data) {
                     Ok(state) => {
@@ -447,21 +452,21 @@ pub fn run_stage(
                                 (the 2026-08-23 subtractive-identity change re-keyed \
                                 every pgas/pmmh/mh/nuts stage). Re-run from scratch \
                                 with --force.",
-                                chain_id + 1));
+                                chain));
                         }
-                        eprintln!("  chain {}: resuming from sweep {}", chain_id + 1, state.completed_sweeps);
+                        eprintln!("  chain {}: resuming from sweep {}", chain, state.completed_sweeps);
                         states.push(Some(state));
                     }
                     Err(e) => {
                         eprintln!("error: cannot deserialize resume state for chain {}: {}. \
-                            Resume state format may have changed — re-run with --force.", chain_id + 1, e);
+                            Resume state format may have changed — re-run with --force.", chain, e);
                         any_failed = true;
                         states.push(None);
                     }
                 }
                 Err(_) => {
                     eprintln!("error: no resume state file for chain {} ({})",
-                        chain_id + 1, path.display());
+                        chain, path.display());
                     any_failed = true;
                     states.push(None);
                 }
@@ -512,8 +517,8 @@ pub fn run_stage(
         traj_plan.n_draws, thin);
 
     // Pre-create chain directories (must happen before parallel spawn)
-    for chain_id in 0..n_chains {
-        let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
+    for chain in ChainIndex::all(n_chains) {
+        let chain_dir = chain.dir_in(stage_dir);
         std::fs::create_dir_all(&chain_dir)
             .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
     }
@@ -588,7 +593,7 @@ pub fn run_stage(
     // log-likelihood the sampler already reports each sweep — no new compute.
     let reporter = crate::progress::Reporter::new();
     let bars: Vec<crate::progress::Task> = (0..n_chains)
-        .map(|chain_id| reporter.task(n_sweeps as u64, format!("chain {}", chain_id + 1), "sweeps"))
+        .map(|chain_id| reporter.task(n_sweeps as u64, format!("chain {}", ChainIndex(chain_id)), "sweeps"))
         .collect();
 
     // gh#278: the run's liveness/progress heartbeat, built by the runner
@@ -639,8 +644,9 @@ pub fn run_stage(
     // `PFDegenerate`.
     let all_results: Vec<Result<Option<(usize, Vec<PGASSweep>, Vec<f64>)>, String>> =
         super::chain_fanout::run_chains(n_chains, |chain_id| {
+            let chain = ChainIndex(chain_id);
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
-            let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
+            let chain_dir = chain.dir_in(stage_dir);
             let task = &bars[chain_id];
             // gh#751. HERE, at the top of the closure, is the moment a worker
             // picked this chain up — a chain still queued behind the pool has
@@ -1045,7 +1051,7 @@ pub fn run_stage(
                     });
                     eprintln!(
                         "  chain {}: start {} of {} refused ({}); drawing another",
-                        chain_id + 1, attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
+                        chain, attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
                         reason);
                     attempt += 1;
                     let cs = super::runner::redraw_chain_start_for(
@@ -1108,12 +1114,12 @@ pub fn run_stage(
                             ))
                             .collect();
                     collector.push(DiagnosticKind::BadInit {
-                        // 1-based, like the stderr line below and every other
-                        // artifact naming a chain (gh#781).
-                        chain_id: chain_id + 1, params, reason: reason.clone(), attempts,
+                        // The chain's number, as the stderr line below and
+                        // every other artifact name it (gh#990).
+                        chain_id, params, reason: reason.clone(), attempts,
                     });
                     eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
-                        chain_id + 1, reason);
+                        chain, reason);
                     // gh#751: and in `progress.json`, where a watcher sees it
                     // now rather than when the stage ends. The short tag is the
                     // machine-readable half of the same finding the `BadInit`
@@ -1126,7 +1132,7 @@ pub fn run_stage(
                     return Ok(None);
                 }
                 Err(e) => {
-                    return Err(format!("pgas chain {} error: {}", chain_id + 1, e));
+                    return Err(format!("pgas chain {} error: {}", chain, e));
                 }
             } };
 
@@ -1152,7 +1158,7 @@ pub fn run_stage(
                 write_trajectories_tsv(
                     &tsv_path, &draws, traj_columns, date_origin,
                     &traj_model_hash, "pgas", Granularity::Substep,
-                ).map_err(|e| format!("pgas chain {}: {}", chain_id + 1, e))?;
+                ).map_err(|e| format!("pgas chain {}: {}", chain, e))?;
 
                 let manifest = TrajManifest {
                     method: "pgas".to_string(),
@@ -1187,13 +1193,13 @@ pub fn run_stage(
                 // The writer above already validated every draw's shape, so a
                 // refusal here is a defect, not a data condition.
                 let flat = super::latent_convergence::ChainPaths::from_draws(&draws, traj_columns)
-                    .map_err(|e| format!("pgas chain {}: {}", chain_id + 1, e))?;
+                    .map_err(|e| format!("pgas chain {}: {}", chain, e))?;
                 chain_paths.lock().unwrap()[chain_id] = flat;
             }
 
             let chain_elapsed = chain_start.elapsed();
             eprintln!("  chain {} done: {:.1}s, acceptance: [{}]",
-                chain_id + 1,
+                chain,
                 chain_elapsed.as_secs_f64(),
                 config.estimated_params.iter().zip(&result.acceptance_rates)
                     .map(|(p, &r)| format!("{}={:.0}%", p.name, r * 100.0))
@@ -1352,7 +1358,7 @@ pub fn run_stage(
                 collector.push(d);
             }
         }
-        eprintln!("  chain {}: {}", chain_id + 1, summary.join(" "));
+        eprintln!("  chain {}: {}", ChainIndex(chain_id), summary.join(" "));
     }
 
     if n_chains > 1 {
@@ -1637,11 +1643,7 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik: best_sweep.log_complete_data_ll,
         initial_loglik: f64::NEG_INFINITY,
-        // gh#912: `best_chain.0` is the 0-based chain id the sampler runs on;
-        // the stored value is the 1-based chain NUMBER, so it names the
-        // `chain_N/` directory beside this file and matches the stderr line
-        // below. The one is added here, at the boundary.
-        best_chain: best_chain.0 + 1,
+        best_chain: ChainIndex(best_chain.0),
         n_chains,
         // gh#607: `None` unless a chain was skipped, so a healthy fit's
         // `fit_state.toml` is unchanged. Same convention as PMMH.
@@ -1763,7 +1765,7 @@ pub fn run_stage(
     let wall_secs = elapsed.as_secs_f64();
     eprintln!("\npgas complete in {:.1}s: {}/", wall_secs, stage_dir.display());
     eprintln!("  best complete-data ll: {:.1} (chain {})",
-        best_sweep.log_complete_data_ll, best_chain.0 + 1);
+        best_sweep.log_complete_data_ll, ChainIndex(best_chain.0));
 
     // gh#278: clean terminal — all output (pgas_summary.json with R̂/ESS,
     // diagnostics.json, draws.tsv) is written above, so the heartbeat's `Done`
@@ -1806,7 +1808,7 @@ fn write_cross_chain_compat(
     let draws: Vec<ChainDraw<'_>> = all_results.iter()
         .filter_map(|(chain_id, _, _)| {
             chain_final_draw.get(*chain_id)?.as_ref().map(|(params, traj)| ChainDraw {
-                chain: chain_id + 1,
+                chain: ChainIndex(*chain_id),
                 params,
                 trajectory: traj,
             })
@@ -2359,8 +2361,8 @@ mod tests {
         let counts = SavedPathCounts::measure(&retained, &saved_sweeps);
         assert_eq!(
             counts.chain_id,
-            vec![2, 4],
-            "the surviving chains' own ids, matching chain_2/ and chain_4/"
+            vec![ChainIndex(1), ChainIndex(3)],
+            "the surviving chains' own ids, matching chain_1/ and chain_3/"
         );
         // And the counts are read from each survivor's OWN slot, not from the
         // row's position — chain 4 wrote one path, chain 2 wrote two. A

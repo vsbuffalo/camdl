@@ -45,12 +45,11 @@
 //!
 //! ## Chain numbering
 //!
-//! `chains` is **1-based**, matching the `chain_N/` directories the reader is
-//! looking at while reading this file and `chain_starts.tsv`'s `chain_id`
-//! column — not the 0-based `chain` key inside `draws.tsv` /
-//! `trajectories.tsv`, which is a join key between those two files. The
-//! convention is stated in the artifact itself (`chain_numbering`) so no
-//! consumer has to infer it.
+//! `chains` carries each chain's number: the `chain_N/` directory the reader
+//! is looking at while reading this file, `chain_starts.tsv`'s `chain_id`
+//! column and the `chain` key inside `draws.tsv` / `trajectories.tsv` all
+//! count from 0 (gh#990). The convention is stated in the artifact itself
+//! (`chain_numbering`) so no consumer has to infer it.
 //!
 //! ## Which chains appear
 //!
@@ -65,6 +64,7 @@ use serde::{Deserialize, Serialize};
 
 use sim::compiled_model::CompiledModel;
 use sim::error::SimError;
+use crate::chain_index::ChainIndex;
 use sim::inference::multi_stream_obs::MultiStreamObsModel;
 use sim::inference::particle_filter::Observation;
 use sim::inference::pgas::{complete_data_loglik, ObsAtSubstep, PGASTrajectory};
@@ -77,8 +77,8 @@ use sim::inference::pgas::{complete_data_loglik, ObsAtSubstep, PGASTrajectory};
 /// exchangeable. The producer takes both from the chain's state at the end
 /// of the final sweep, which is one instant.
 pub struct ChainDraw<'a> {
-    /// 1-based chain id, matching the `chain_N/` output directory.
-    pub chain: usize,
+    /// The chain's number, matching the `chain_N/` output directory.
+    pub chain: ChainIndex,
     /// The full model parameter vector (estimated and fixed alike), natural
     /// scale — the vector `complete_data_loglik` expects.
     pub params: &'a [f64],
@@ -89,10 +89,10 @@ pub struct ChainDraw<'a> {
 /// The `cross_chain_compat.json` artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossChainCompat {
-    /// Chain ids in `M`'s row and column order. 1-based (see
+    /// Chain ids in `M`'s row and column order (see
     /// [`Self::chain_numbering`]). Always describes `M`'s actual rows: a chain
     /// that never sampled is absent from both.
-    pub chains: Vec<usize>,
+    pub chains: Vec<ChainIndex>,
     /// `M[i][j] = log p(x_j | θ_i)` in nats — row `i` is chain `chains[i]`'s
     /// parameters scoring every chain's path.
     #[serde(rename = "M")]
@@ -104,8 +104,7 @@ pub struct CrossChainCompat {
     /// Which draw per chain each row/column was computed at.
     pub draw: String,
     /// How to read `chains` — stated in the file so a consumer never has to
-    /// guess between the 1-based `chain_N/` directories and the 0-based `chain`
-    /// column in `draws.tsv`.
+    /// guess.
     pub chain_numbering: String,
     /// `mean(diag) − mean(offdiag)`, in nats. Large and positive is the
     /// signature of each chain being pinned to its own path.
@@ -124,7 +123,8 @@ pub const TERMS: &str = "transition + initial_state";
 pub const DRAW: &str = "final sweep (θ and x taken from the same sweep)";
 
 /// What [`CrossChainCompat::chain_numbering`] says.
-pub const CHAIN_NUMBERING: &str = "1-based, matching the chain_N/ directories";
+pub const CHAIN_NUMBERING: &str =
+    "counted from 0, matching the chain_N/ directories and draws.tsv's chain column";
 
 impl CrossChainCompat {
     /// Score every chain's path under every chain's parameters.
@@ -181,7 +181,7 @@ impl CrossChainCompat {
     /// that would emit an artifact a consumer cannot index — the last because
     /// both derived numbers need an off-diagonal to exist, so the artifact
     /// would have to carry a `NaN` a reader has to special-case.
-    pub fn from_matrix(chains: Vec<usize>, m: Vec<Vec<f64>>) -> Self {
+    pub fn from_matrix(chains: Vec<ChainIndex>, m: Vec<Vec<f64>>) -> Self {
         let k = chains.len();
         assert!(k >= 2, "cross-chain matrix needs at least two chains, got {k}");
         assert_eq!(m.len(), k, "cross-chain matrix has {} rows for {k} chains", m.len());
@@ -394,7 +394,7 @@ mod tests {
             .map(|(&(_, _, seed), p)| path_at(&model, p, seed))
             .collect();
         let draws: Vec<ChainDraw<'_>> = chains.iter().zip(&params).zip(&paths)
-            .map(|((&(id, _, _), p), x)| ChainDraw { chain: id, params: p, trajectory: x })
+            .map(|((&(id, _, _), p), x)| ChainDraw { chain: ChainIndex(id), params: p, trajectory: x })
             .collect();
         let compat = CrossChainCompat::compute(&model, &draws, &obs, DT, &obs_model, &map)
             .expect("compute")
@@ -412,7 +412,7 @@ mod tests {
         //      θ₁      θ₂
         // x₁  -10.0   -50.0     (row = the parameters doing the scoring)
         // x₂   -3.0   -20.0
-        let c = CrossChainCompat::from_matrix(vec![1, 2], vec![
+        let c = CrossChainCompat::from_matrix(vec![ChainIndex(0), ChainIndex(1)], vec![
             vec![-10.0, -50.0],
             vec![-3.0, -20.0],
         ]);
@@ -421,7 +421,7 @@ mod tests {
             "diagonal_dominance = mean(diag) − mean(offdiag); got {}", c.diagonal_dominance);
         assert!((c.asymmetry - 47.0).abs() < 1e-12,
             "asymmetry = max |M[i][j] − M[j][i]| = |−50 − (−3)|; got {}", c.asymmetry);
-        assert_eq!(c.chains, vec![1, 2]);
+        assert_eq!(c.chains, vec![ChainIndex(0), ChainIndex(1)]);
         assert!(c.includes_initial_state);
         assert_eq!(c.terms, TERMS);
     }
@@ -434,7 +434,7 @@ mod tests {
         let (obs, obs_model, map) = observed(&model);
         let p = params_at(&model, 0.3);
         let x = path_at(&model, &p, 7);
-        let draws = vec![ChainDraw { chain: 1, params: &p, trajectory: &x }];
+        let draws = vec![ChainDraw { chain: ChainIndex(0), params: &p, trajectory: &x }];
         assert!(
             CrossChainCompat::compute(&model, &draws, &obs, DT, &obs_model, &map)
                 .expect("compute").is_none(),
@@ -472,7 +472,7 @@ mod tests {
             .map(|(i, p)| path_at(&model, p, 100 + i as u64))
             .collect();
         let draws: Vec<ChainDraw<'_>> = (0..2)
-            .map(|i| ChainDraw { chain: i + 1, params: &params[i], trajectory: &paths[i] })
+            .map(|i| ChainDraw { chain: ChainIndex(i), params: &params[i], trajectory: &paths[i] })
             .collect();
         let c = CrossChainCompat::compute(&model, &draws, &obs, DT, &obs_model, &map)
             .expect("compute").expect("two chains");
@@ -530,10 +530,10 @@ mod tests {
     #[test]
     fn a_displaced_chain_raises_diagonal_dominance() {
         // Three chains agreeing to within 1% on beta, each with its own path.
-        let (_, near) = matrix_for(&[(1, 0.300, 21), (2, 0.303, 22), (3, 0.297, 23)]);
+        let (_, near) = matrix_for(&[(0, 0.300, 21), (1, 0.303, 22), (2, 0.297, 23)]);
         // The same first two chains; the third displaced to a beta four times
         // larger, with the path that beta actually produces.
-        let (_, split) = matrix_for(&[(1, 0.300, 21), (2, 0.303, 22), (3, 1.200, 23)]);
+        let (_, split) = matrix_for(&[(0, 0.300, 21), (1, 0.303, 22), (2, 1.200, 23)]);
 
         eprintln!("near-identical: dominance {:.1} nats, asymmetry {:.1} nats",
             near.diagonal_dominance, near.asymmetry);
@@ -541,7 +541,8 @@ mod tests {
             split.diagonal_dominance, split.asymmetry);
 
         for c in [&near, &split] {
-            assert_eq!(c.chains, vec![1, 2, 3], "chains must describe M's actual rows");
+            assert_eq!(c.chains, ChainIndex::all(3).collect::<Vec<_>>(),
+                "chains must describe M's actual rows");
             assert_eq!(c.m.len(), 3);
             for row in &c.m {
                 assert_eq!(row.len(), 3, "M must be square");
@@ -586,14 +587,14 @@ mod tests {
     // ── The artifact ─────────────────────────────────────────────────────
 
     /// The on-disk shape a downstream reader (camdl-scope) parses: the keys,
-    /// the 1-based chain numbering, and `M` indexable by `chains`' positions.
+    /// the chain numbering, and `M` indexable by `chains`' positions.
     #[test]
     fn the_artifact_states_its_conventions() {
-        let (_, c) = matrix_for(&[(1, 0.30, 31), (2, 0.60, 32)]);
+        let (_, c) = matrix_for(&[(0, 0.30, 31), (1, 0.60, 32)]);
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
-        assert_eq!(v["chains"], serde_json::json!([1, 2]),
-            "chain ids are 1-based, matching the chain_N/ directories");
+        assert_eq!(v["chains"], serde_json::json!([0, 1]),
+            "chain ids count from 0, matching the chain_N/ directories");
         assert_eq!(v["includes_initial_state"], serde_json::json!(true));
         assert_eq!(v["terms"], serde_json::json!(TERMS));
         assert_eq!(v["draw"], serde_json::json!(DRAW));

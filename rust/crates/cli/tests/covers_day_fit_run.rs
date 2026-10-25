@@ -16,7 +16,7 @@
 //!
 //! The observable: the stage's `filter_ess.tsv` has one row per observation
 //! boundary the driver scored, with its time, and the saved path in
-//! `chain_1/trajectories.tsv` runs to the last boundary the driver stepped to.
+//! `chain_0/trajectories.tsv` runs to the last boundary the driver stepped to.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -233,7 +233,7 @@ fn assert_pgas_walks_the_declared_boundaries(form: &Form) {
 
     let (header, rows) = read_tsv(&stage.join("filter_ess.tsv"));
     let scored: BTreeSet<u32> = rows.iter()
-        .filter(|r| col(&header, r, "chain") == "1")
+        .filter(|r| col(&header, r, "chain") == "0")
         .map(|r| col(&header, r, "time").parse::<f64>().expect("time parses").round() as u32)
         .collect();
     let labels: BTreeSet<u32> = form.labels.iter().copied().collect();
@@ -243,7 +243,7 @@ fn assert_pgas_walks_the_declared_boundaries(form: &Form) {
          a driver rebuilt from the labels would walk {labels:?}", form.tag
     );
 
-    let (h, paths) = read_tsv(&stage.join("chain_1/trajectories.tsv"));
+    let (h, paths) = read_tsv(&stage.join("chain_0/trajectories.tsv"));
     let last_t = paths.iter()
         .map(|r| col(&h, r, "time").parse::<f64>().expect("time parses"))
         .fold(f64::NEG_INFINITY, f64::max);

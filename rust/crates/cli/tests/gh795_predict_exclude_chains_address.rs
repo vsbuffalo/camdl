@@ -5,7 +5,7 @@
 //! "Post-hoc chain exclusion BIASES the posterior toward the retained mode").
 //! Before this fix the excluded set reached `predictive.json` as a
 //! `chain_selection` stamp but never reached the artifact's location, so
-//! `fit predict --exclude-chains 4` replaced the run's canonical predictive
+//! `fit predict --exclude-chains 3` replaced the run's canonical predictive
 //! with a three-chain one, and a second exclusion replaced that. A reader —
 //! `camdl-scope`, or a person — then rendered a cherry-picked subset as the
 //! posterior predictive of the fit, with nothing in the run directory saying so.
@@ -127,8 +127,8 @@ thin = 1
 /// Draws per chain in the controlled cloud.
 const DRAWS_PER_CHAIN: usize = 30;
 
-/// A controlled 4-chain cloud: chains 0,1,2 (the user's 1,2,3) tight around a
-/// slow epidemic, chain 3 (the user's 4) a stuck outlier at a fast one. The
+/// A controlled 4-chain cloud: chains 0,1,2 tight around a slow epidemic,
+/// chain 3 a stuck outlier at a fast one. The
 /// per-chain phase shift gives non-identical sequences with the same mean.
 fn build_cloud() -> String {
     let mut s = String::from("chain\tdraw\tbeta\tgamma\tN0\tI0\trho\tk\n");
@@ -294,8 +294,8 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
         "the pooled cloud is all 4 chains × 30 draws"
     );
 
-    // 2. Drop the outlier chain 4. This must NOT be the pooled address.
-    assert_ok(&f.predict(&bin, Some("4")), "predict --exclude-chains 4");
+    // 2. Drop the outlier chain 3. This must NOT be the pooled address.
+    assert_ok(&f.predict(&bin, Some("3")), "predict --exclude-chains 3");
     assert_eq!(
         f.read("predictive/weekly_cases.tsv"),
         pooled_tsv,
@@ -308,28 +308,28 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
         pooled_json,
         "…nor the pooled manifest"
     );
-    let excl4_tsv = f.read("predictive-excl4/weekly_cases.tsv");
+    let excl3_tsv = f.read("predictive-excl3/weekly_cases.tsv");
     assert_eq!(
-        free_forward_n_draws(&excl4_tsv),
+        free_forward_n_draws(&excl3_tsv),
         BTreeSet::from([90]),
         "the subset cloud is 3 chains × 30 draws"
     );
 
     // 3. A second, different exclusion. All three artifacts coexist.
-    assert_ok(&f.predict(&bin, Some("2,4")), "predict --exclude-chains 2,4");
+    assert_ok(&f.predict(&bin, Some("1,3")), "predict --exclude-chains 1,3");
     assert_eq!(
         f.read("predictive/weekly_cases.tsv"),
         pooled_tsv,
         "the pooled predictive survives the second exclusion too"
     );
     assert_eq!(
-        f.read("predictive-excl4/weekly_cases.tsv"),
-        excl4_tsv,
+        f.read("predictive-excl3/weekly_cases.tsv"),
+        excl3_tsv,
         "…and so does the FIRST exclusion's artifact — the reporter ran five \
          exclusions and each overwrote the last"
     );
     assert_eq!(
-        free_forward_n_draws(&f.read("predictive-excl2,4/weekly_cases.tsv")),
+        free_forward_n_draws(&f.read("predictive-excl1,3/weekly_cases.tsv")),
         BTreeSet::from([60]),
         "two chains remain"
     );
@@ -341,8 +341,8 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
         "the pooled manifest records no selection"
     );
     for (name, excluded, kept) in [
-        ("predictive-excl4.json", vec![4], vec![1, 2, 3]),
-        ("predictive-excl2,4.json", vec![2, 4], vec![1, 3]),
+        ("predictive-excl3.json", vec![3], vec![0, 1, 2]),
+        ("predictive-excl1,3.json", vec![1, 3], vec![0, 2]),
     ] {
         let j: serde_json::Value = serde_json::from_str(&f.read(name)).unwrap();
         let cs = j
@@ -367,7 +367,7 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
         "the pooled quantities table survives the exclusions"
     );
     assert!(
-        f.exists("quantities-excl4/peak.tsv") && f.exists("quantities-excl2,4/peak.tsv"),
+        f.exists("quantities-excl3/peak.tsv") && f.exists("quantities-excl1,3/peak.tsv"),
         "each exclusion writes its own quantities table, got {:?}",
         f.artifact_names()
     );
@@ -382,12 +382,12 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
     let shown = String::from_utf8_lossy(&out.stdout);
     for expected in [
         "predictive/weekly_cases.tsv",
-        "predictive-excl4/weekly_cases.tsv",
-        "predictive-excl2,4/weekly_cases.tsv",
+        "predictive-excl3/weekly_cases.tsv",
+        "predictive-excl1,3/weekly_cases.tsv",
         "predictive.json",
-        "predictive-excl4.json",
-        "predictive-excl2,4.json",
-        "quantities-excl4/peak.tsv",
+        "predictive-excl3.json",
+        "predictive-excl1,3.json",
+        "quantities-excl3/peak.tsv",
     ] {
         assert!(
             shown.contains(expected),
@@ -403,16 +403,16 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
             "{a} must be listed before {b}; got:\n{shown}"
         );
     };
-    order("predictive/weekly_cases.tsv", "predictive-excl2,4/weekly_cases.tsv");
-    order("\n  predictive.json", "predictive-excl2,4.json");
+    order("predictive/weekly_cases.tsv", "predictive-excl1,3/weekly_cases.tsv");
+    order("\n  predictive.json", "predictive-excl1,3.json");
 
     // …and the name `show` prints is a name `cat --stream` takes, so the
     // discovery loop closes: no keyed artifact is listed but unreachable.
-    let out = run(&bin, &f.tmp, &["cat", &seg, "--stream", "predictive-excl4/weekly_cases.tsv"]);
-    assert_ok(&out, "camdl cat --stream predictive-excl4/weekly_cases.tsv");
+    let out = run(&bin, &f.tmp, &["cat", &seg, "--stream", "predictive-excl3/weekly_cases.tsv"]);
+    assert_ok(&out, "camdl cat --stream predictive-excl3/weekly_cases.tsv");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        excl4_tsv,
+        excl3_tsv,
         "cat must return the keyed artifact's own bytes"
     );
 
@@ -426,11 +426,11 @@ fn the_address_is_the_normalised_set_not_the_string() {
     let bin = require_binary();
     let f = setup(&bin, "normalised");
 
-    assert_ok(&f.predict(&bin, Some("2,4")), "predict --exclude-chains 2,4");
+    assert_ok(&f.predict(&bin, Some("1,3")), "predict --exclude-chains 1,3");
     let after_first = f.artifact_names();
-    let canonical = f.read("predictive-excl2,4/weekly_cases.tsv");
+    let canonical = f.read("predictive-excl1,3/weekly_cases.tsv");
 
-    for spelling in ["4,2", "2,4,2", " 4 , 2 "] {
+    for spelling in ["3,1", "1,3,1", " 3 , 1 "] {
         assert_ok(
             &f.predict(&bin, Some(spelling)),
             &format!("predict --exclude-chains {spelling}"),
@@ -442,7 +442,7 @@ fn the_address_is_the_normalised_set_not_the_string() {
              same address, not a second one"
         );
         assert_eq!(
-            f.read("predictive-excl2,4/weekly_cases.tsv"),
+            f.read("predictive-excl1,3/weekly_cases.tsv"),
             canonical,
             "`{spelling}` rewrites the same artifact (a correct collision)"
         );
@@ -476,14 +476,14 @@ fn without_the_flag_the_artifact_names_are_the_historical_ones() {
     // `observed/` is the fit's DATA, identical under any selection, so it never
     // moves — a keyed copy would be a pointless duplicate of the same bytes.
     let observed = f.read("observed/weekly_cases.tsv");
-    assert_ok(&f.predict(&bin, Some("4")), "predict --exclude-chains 4");
+    assert_ok(&f.predict(&bin, Some("3")), "predict --exclude-chains 3");
     assert_eq!(
         f.read("observed/weekly_cases.tsv"),
         observed,
         "the observed half does not depend on the chain selection"
     );
     assert!(
-        !f.seg.join("observed-excl4").exists(),
+        !f.seg.join("observed-excl3").exists(),
         "…so it is not keyed either"
     );
 

@@ -154,11 +154,11 @@ pub enum DiagnosticKind {
     /// diagnostic (e.g. "ESS collapsed at obs 7 after 0.4s") so
     /// the user can tell which init was pathological.
     BadInit {
-        /// **1-based**, matching the `chain_N/` directories, the stderr
-        /// refusal, `chain_starts.tsv`'s `chain_id` column and
-        /// `progress.json`'s per-chain rows (gh#781). The samplers count
-        /// chains from zero internally and add one when they build this
-        /// record, which is the artifact a reader joins the others against.
+        /// The chain's number, counted from 0 like every chain index camdl
+        /// shows (gh#990): the same number as the `chain_N/` directory, the
+        /// stderr refusal, `chain_starts.tsv`'s `chain_id` column,
+        /// `progress.json`'s per-chain rows and `draws.tsv`'s `chain` column,
+        /// so this record joins the others with no arithmetic.
         chain_id: usize,
         /// Estimated parameter name → starting value on the natural
         /// scale, exactly as offered to the inference engine.

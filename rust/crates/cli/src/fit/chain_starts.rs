@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 
 use sim::inference::prior::{Density, Prior};
 use sim::inference::types::EstimatedParam;
+
+use crate::chain_index::ChainIndex;
 use sim::rng::StatefulRng;
 
 use crate::params_resolver::ResolvedParameters;
@@ -1088,9 +1090,8 @@ fn read_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
 /// One row of `chain_starts.tsv`.
 #[derive(Debug, Clone)]
 pub struct ChainStartRecord {
-    /// 0-based, as the producer counts chains. The writer renders it 1-based,
-    /// which is what the file's `chain_id` column holds (gh#781).
-    pub chain_id: usize,
+    /// The chain's number, as the file's `chain_id` column holds it (gh#990).
+    pub chain_id: ChainIndex,
     /// 0-based attempt index within the chain's bounded retry (gh#887).
     pub attempt: usize,
     /// `accepted` (the start the chain ran from), `rejected` (a draw the
@@ -1118,10 +1119,10 @@ impl DrawnStarts {
         for (chain_id, specs) in per_chain.iter().enumerate() {
             for r in self.rejected.iter().filter(|r| r.chain_id == chain_id) {
                 rows.push(ChainStartRecord {
-                    chain_id,
+                    chain_id: ChainIndex(chain_id),
                     attempt: r.attempt,
                     status: "rejected",
-                    source: source_label(&self.rule, chain_id),
+                    source: source_label(&self.rule, ChainIndex(chain_id)),
                     values: base_specs
                         .iter()
                         .map(|s| r.values.get(&s.name).copied().unwrap_or(s.initial))
@@ -1132,10 +1133,10 @@ impl DrawnStarts {
             }
             let refused = self.refused.contains(&chain_id);
             rows.push(ChainStartRecord {
-                chain_id,
+                chain_id: ChainIndex(chain_id),
                 attempt: self.attempts_before(chain_id),
                 status: if refused { "refused" } else { "accepted" },
-                source: source_label(&self.rule, chain_id),
+                source: source_label(&self.rule, ChainIndex(chain_id)),
                 values: specs.iter().map(|s| s.initial).collect(),
                 ess: None,
                 reason: String::new(),
@@ -1150,14 +1151,14 @@ impl DrawnStarts {
 /// not, because that suffix reads as independent draws that happen to
 /// coincide (gh#871).
 ///
-/// `chain_id` is the 0-based index the producer works in; the suffix is the
-/// 1-based number the `chain_id` column, the `chain_N/` directories and every
-/// stderr line use, so the two columns of one row agree (gh#781).
-pub fn source_label(rule: &ChainStarts, chain_id: usize) -> String {
+/// The suffix is the chain's number — the `chain_id` column, the `chain_N/`
+/// directory and every stderr line use the same one — so the two columns of
+/// one row agree (gh#781, gh#990).
+pub fn source_label(rule: &ChainStarts, chain: ChainIndex) -> String {
     if rule.is_point() {
         rule.tag().to_string()
     } else {
-        format!("{}:chain-{}", rule.tag(), chain_id + 1)
+        format!("{}:chain-{}", rule.tag(), chain)
     }
 }
 
@@ -1191,7 +1192,7 @@ pub fn write_chain_starts_tsv(
     let tmp = path.with_extension("tsv.tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
-        let n_chains = records.iter().map(|r| r.chain_id + 1).max().unwrap_or(0);
+        let n_chains = records.iter().map(|r| r.chain_id.0 + 1).max().unwrap_or(0);
         let n_retried = records.iter().filter(|r| r.status == "rejected").count();
         // Comment header — stable, machine-parseable.
         writeln!(f, "# camdl chain_starts; starts={}; chains={}; kind={}; retried={}",
@@ -1202,9 +1203,10 @@ pub fn write_chain_starts_tsv(
         writeln!(f, "# perturbs its swarm before the first filter pass, so \
             a per-chain trace opens on")?;
         writeln!(f, "# values that have already moved.")?;
-        writeln!(f, "# chain_id is 1-based: that chain's outputs are under \
+        writeln!(f, "# chain_id counts from 0: that chain's outputs are under \
             chain_<chain_id>/, and it is")?;
-        writeln!(f, "# the number every stderr refusal and diagnostic uses.")?;
+        writeln!(f, "# the number every stderr refusal, diagnostic and \
+            draws.tsv row uses.")?;
         writeln!(f, "# status: accepted = the start the chain ran from; \
             rejected = a draw the filter")?;
         writeln!(f, "# could not score, so a fresh one was drawn (gh#887); \
@@ -1221,10 +1223,8 @@ pub fn write_chain_starts_tsv(
         cols.push("reason".to_string());
         writeln!(f, "{}", cols.join("\t"))?;
         for rec in records {
-            // 1-based on the way out (gh#781): the producer counts chains from
-            // zero, every artifact a reader joins this against counts from one.
             let mut fields = vec![
-                (rec.chain_id + 1).to_string(), rec.attempt.to_string(),
+                rec.chain_id.to_string(), rec.attempt.to_string(),
                 rec.status.to_string(), rec.source.clone(),
             ];
             for v in &rec.values {
@@ -1611,8 +1611,10 @@ mod tests {
             vec![],
         );
         let rows = drawn.records(&base_specs);
-        let shape: Vec<(usize, usize, &str)> = rows.iter().map(|r| (r.chain_id, r.attempt, r.status)).collect();
-        assert_eq!(shape, vec![(0, 0, "accepted"), (1, 0, "rejected"), (1, 1, "accepted")]);
+        let shape: Vec<(ChainIndex, usize, &str)> = rows.iter().map(|r| (r.chain_id, r.attempt, r.status)).collect();
+        assert_eq!(shape, vec![
+            (ChainIndex(0), 0, "accepted"), (ChainIndex(1), 0, "rejected"), (ChainIndex(1), 1, "accepted"),
+        ]);
         assert_eq!(rows[1].values, vec![0.99]);
         assert_eq!(rows[1].ess, Some(1.02));
         assert_eq!(rows[2].values, vec![0.42], "the accepted row is the redraw");
@@ -1627,14 +1629,14 @@ mod tests {
         assert!(text.starts_with("# camdl chain_starts; starts=lhs; chains=2; kind=spread; retried=1\n"), "{text}");
         let header = text.lines().find(|l| !l.starts_with('#')).unwrap();
         assert_eq!(header, "chain_id\tattempt\tstatus\tsource\tbeta\tess\treason");
-        assert!(text.contains("2\t0\trejected\tlhs:chain-2\t0.99\t1.020\tEssCollapsed at obs_window=3"), "{text}");
-        assert!(text.contains("2\t1\taccepted\tlhs:chain-2\t0.42\t\t\n"), "{text}");
+        assert!(text.contains("1\t0\trejected\tlhs:chain-1\t0.99\t1.020\tEssCollapsed at obs_window=3"), "{text}");
+        assert!(text.contains("1\t1\taccepted\tlhs:chain-1\t0.42\t\t\n"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
 
         // A chain whose last attempt failed too is `refused`.
         let refused = drawn.clone().with_retry_outcome(vec![None, None], vec![], vec![1]);
         let rows = refused.records(&base_specs);
-        assert_eq!(rows.iter().find(|r| r.chain_id == 1).unwrap().status, "refused");
+        assert_eq!(rows.iter().find(|r| r.chain_id == ChainIndex(1)).unwrap().status, "refused");
     }
 
     #[test]
@@ -2047,20 +2049,20 @@ mod tests {
             ChainStarts::uniform_unconstrained(),
             ChainStarts::from_prior(),
         ] {
-            let got: Vec<String> = (0..3).map(|i| source_label(&rule, i)).collect();
-            assert_eq!(got, vec![format!("{rule}:chain-1"),
-                                 format!("{rule}:chain-2"),
-                                 format!("{rule}:chain-3")],
+            let got: Vec<String> = ChainIndex::all(3).map(|i| source_label(&rule, i)).collect();
+            assert_eq!(got, vec![format!("{rule}:chain-0"),
+                                 format!("{rule}:chain-1"),
+                                 format!("{rule}:chain-2")],
                 "{rule} draws each chain its own point, so each row names its \
-                 chain — by the same 1-based number the `chain_id` column of \
-                 the same row carries (gh#781)");
+                 chain — by the same number the `chain_id` column of the same \
+                 row carries (gh#781, gh#990)");
         }
         for rule in [
             ChainStarts::Point(Point::Declared),
             ChainStarts::Point(Point::FromMle { source: super::super::starts::Handle("@up".into()) }),
             ChainStarts::Point(Point::FromParams { path: "p.toml".into() }),
         ] {
-            let got: Vec<String> = (0..3).map(|i| source_label(&rule, i)).collect();
+            let got: Vec<String> = ChainIndex::all(3).map(|i| source_label(&rule, i)).collect();
             assert_eq!(got, vec![rule.to_string(); 3],
                 "{rule} puts every chain at one point, so no row may claim \
                  a draw of its own");
@@ -2080,12 +2082,12 @@ mod tests {
         let rule = ChainStarts::Point(Point::FromMle {
             source: super::super::starts::Handle("@up".into()),
         });
-        let accepted = |chain_id: usize| ChainStartRecord {
+        let accepted = |chain_id: ChainIndex| ChainStartRecord {
             chain_id, attempt: 0, status: "accepted",
             source: source_label(&rule, chain_id), values: vec![0.25],
             ess: None, reason: String::new(),
         };
-        let records = vec![accepted(0), accepted(1)];
+        let records = vec![accepted(ChainIndex(0)), accepted(ChainIndex(1))];
         write_chain_starts_tsv(dir.path(), &base, &rule, &records).unwrap();
         let txt = std::fs::read_to_string(dir.path().join("chain_starts.tsv")).unwrap();
         let header = txt.lines().next().unwrap();
@@ -2094,8 +2096,8 @@ mod tests {
         let body: Vec<&str> = txt.lines().filter(|l| !l.starts_with('#')).collect();
         assert!(header.ends_with("retried=0"), "{header}");
         assert_eq!(body[0], "chain_id\tattempt\tstatus\tsource\tbeta\tess\treason");
-        assert_eq!(body[1], "1\t0\taccepted\tfrom_mle\t0.25\t\t");
-        assert_eq!(body[2], "2\t0\taccepted\tfrom_mle\t0.25\t\t");
+        assert_eq!(body[1], "0\t0\taccepted\tfrom_mle\t0.25\t\t");
+        assert_eq!(body[2], "1\t0\taccepted\tfrom_mle\t0.25\t\t");
     }
 
     /// gh#781: the file's `chain_id` is the number the reader already has —
@@ -2118,10 +2120,10 @@ mod tests {
             },
         ];
         let rule = ChainStarts::uniform_unconstrained();
-        let records: Vec<ChainStartRecord> = (0..3).map(|chain_id| ChainStartRecord {
+        let records: Vec<ChainStartRecord> = ChainIndex::all(3).map(|chain_id| ChainStartRecord {
             chain_id, attempt: 0, status: "accepted",
             source: source_label(&rule, chain_id),
-            values: vec![0.1 * (chain_id as f64 + 1.0)],
+            values: vec![0.1 * (chain_id.0 as f64 + 1.0)],
             ess: None, reason: String::new(),
         }).collect();
         write_chain_starts_tsv(dir.path(), &base, &rule, &records).unwrap();
@@ -2133,15 +2135,14 @@ mod tests {
             .map(|l| l.split('\t').collect())
             .collect();
         let ids: Vec<&str> = rows.iter().map(|r| r[0]).collect();
-        assert_eq!(ids, ["1", "2", "3"],
-            "chain_id must name the chain_N/ directory the reader opens, \
-             not the producer's 0-based index:\n{txt}");
+        assert_eq!(ids, ["0", "1", "2"],
+            "chain_id must name the chain_N/ directory the reader opens:\n{txt}");
         for row in &rows {
             assert_eq!(row[3], format!("uniform_unconstrained:chain-{}", row[0]),
                 "the `source` suffix and the `chain_id` column of one row must \
                  name the same chain:\n{txt}");
         }
-        assert!(txt.contains("# chain_id is 1-based"),
+        assert!(txt.contains("# chain_id counts from 0"),
             "the header states the file's own convention:\n{txt}");
     }
 }

@@ -190,8 +190,8 @@ fn pgas_resume_writes_distinct_leaf_with_base_untouched_and_dep() {
         .output().expect("spawn");
     assert!(r1.status.success(), "first PGAS run failed: {}", String::from_utf8_lossy(&r1.stderr));
     let (base_id, base_dir, _) = post_leaf(&out, &[]);
-    assert!(base_dir.join("chain_1/resume_state.bin").exists(),
-        "base must write chain_1/resume_state.bin");
+    assert!(base_dir.join("chain_0/resume_state.bin").exists(),
+        "base must write chain_0/resume_state.bin");
     let base_before = snapshot(&base_dir);
 
     // Run 2: 16 sweeps, --resume <base run_id>. Distinct leaf; base read-only.
@@ -252,7 +252,7 @@ fn pgas_trace_loglik_column_names_complete_data() {
     assert!(r.status.success(), "PGAS run failed: {}", String::from_utf8_lossy(&r.stderr));
 
     let (_, base_dir, _) = post_leaf(&out, &[]);
-    let trace = base_dir.join("chain_1/trace.tsv");
+    let trace = base_dir.join("chain_0/trace.tsv");
     let text = std::fs::read_to_string(&trace).expect("read trace.tsv");
     let header = text.lines().next().expect("trace has a header line");
     let cols: Vec<&str> = header.split('\t').collect();
@@ -300,7 +300,7 @@ fn pgas_trace_emits_nuts_diagnostics() {
     assert!(r.status.success(), "PGAS run failed: {}", String::from_utf8_lossy(&r.stderr));
 
     let (_, base_dir, _) = post_leaf(&out, &[]);
-    let trace = base_dir.join("chain_1/trace.tsv");
+    let trace = base_dir.join("chain_0/trace.tsv");
     let text = std::fs::read_to_string(&trace).expect("read trace.tsv");
     let mut lines = text.lines();
     let header = lines.next().expect("trace has a header line");

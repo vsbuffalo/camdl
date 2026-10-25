@@ -7,7 +7,7 @@
 //! MEAN; this pins what a downstream reader (`camdl-scope`) actually finds:
 //!
 //! * the file exists for a PGAS stage, with the documented keys;
-//! * `chains` is 1-based, matching the `chain_N/` directories beside it, and
+//! * `chains` numbers the chains as the `chain_N/` directories beside it do, and
 //!   describes `M`'s actual rows;
 //! * the DIAGONAL agrees with what the sampler itself recorded for that chain's
 //!   final sweep — `transition_ll + initial_state_ll` in `chain_N/trace.tsv`.
@@ -182,8 +182,8 @@ fn run_fit(bin: &Path, fit: &Path) {
 /// One chain's `trace.tsv` as a header plus one row of fields per sweep. The
 /// callback that writes it fires on EVERY sweep, so the last row is the final
 /// sweep — the one the matrix's diagonal is computed at.
-fn trace(stage: &Path, chain_1based: usize) -> (Vec<String>, Vec<Vec<String>>) {
-    let path = stage.join(format!("chain_{chain_1based}/trace.tsv"));
+fn trace(stage: &Path, chain: usize) -> (Vec<String>, Vec<Vec<String>>) {
+    let path = stage.join(format!("chain_{chain}/trace.tsv"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
@@ -192,7 +192,7 @@ fn trace(stage: &Path, chain_1based: usize) -> (Vec<String>, Vec<Vec<String>>) {
     let rows: Vec<Vec<String>> = lines
         .map(|l| l.split('\t').map(String::from).collect::<Vec<_>>())
         .collect();
-    assert!(!rows.is_empty(), "chain {chain_1based} wrote no trace rows");
+    assert!(!rows.is_empty(), "chain {chain} wrote no trace rows");
     for r in &rows {
         assert_eq!(r.len(), header.len(), "trace row width must match the header");
     }
@@ -253,13 +253,13 @@ fn pgas_writes_the_cross_chain_compatibility_matrix() {
     assert!(v["draw"].as_str().expect("draw is a string").contains("sweep"),
         "the artifact must say which draw it was computed at; got {:?}", v["draw"]);
     let numbering = v["chain_numbering"].as_str().expect("chain_numbering is a string");
-    assert!(numbering.contains("1-based") && numbering.contains("chain_"),
+    assert!(numbering.contains("counted from 0") && numbering.contains("chain_"),
         "the artifact must state its chain numbering; got {numbering:?}");
 
-    // ── `chains` describes M's actual rows, 1-based ───────────────────────
+    // ── `chains` describes M's actual rows ────────────────────────────────
     let chains: Vec<usize> = serde_json::from_value(v["chains"].clone()).expect("chains");
-    assert_eq!(chains, vec![1, 2, 3],
-        "chain ids must be the 1-based `chain_N/` names, not the 0-based draws.tsv key");
+    assert_eq!(chains, vec![0, 1, 2],
+        "chain ids are the `chain_N/` names, which are also draws.tsv's chain key");
     for &c in &chains {
         assert!(stage.join(format!("chain_{c}")).is_dir(),
             "chains names chain {c}, but there is no chain_{c}/ directory beside the artifact");

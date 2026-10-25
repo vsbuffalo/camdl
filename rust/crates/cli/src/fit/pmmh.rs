@@ -4,6 +4,7 @@
 //! filter as an unbiased likelihood estimator. Outputs per-chain trace files,
 //! convergence diagnostics (R̂, ESS), and a summary JSON.
 
+use crate::chain_index::ChainIndex;
 use crate::fit::state::FitState;
 use crate::fit::pf_noise;
 use crate::fit::loglik::LoglikType;
@@ -315,9 +316,13 @@ pub fn run_stage(
     let resume_states: Vec<Option<PMMHResumeState>> = if resume {
         let mut states = Vec::with_capacity(n_chains);
         let mut any_failed = false;
-        for chain_id in 0..n_chains {
-            let path: PathBuf = stage_dir.join(format!("chain_{}", chain_id + 1))
-                .join("resume_state.bin");
+        // A leaf numbered from 1 would hand chain k the state of chain k - 1
+        // and find none for the last chain: refused by name (gh#990).
+        if let Err(e) = crate::chain_index::refuse_one_based_layout(stage_dir) {
+            super::abandon_stage(heartbeat, format!("error: --resume: {e}"));
+        }
+        for chain in ChainIndex::all(n_chains) {
+            let path: PathBuf = chain.dir_in(stage_dir).join("resume_state.bin");
             match std::fs::read(&path) {
                 Ok(data) => match bincode::deserialize::<PMMHResumeState>(&data) {
                     Ok(state) => {
@@ -330,21 +335,21 @@ pub fn run_stage(
                                 (the 2026-08-23 subtractive-identity change re-keyed \
                                 every pgas/pmmh/mh/nuts stage). Re-run from scratch \
                                 with --force.",
-                                chain_id + 1));
+                                chain));
                         }
-                        eprintln!("  chain {}: resuming from step {}", chain_id + 1, state.completed_steps);
+                        eprintln!("  chain {}: resuming from step {}", chain, state.completed_steps);
                         states.push(Some(state));
                     }
                     Err(e) => {
                         eprintln!("error: cannot deserialize resume state for chain {}: {}. \
-                            Resume state format may have changed — re-run with --force.", chain_id + 1, e);
+                            Resume state format may have changed — re-run with --force.", chain, e);
                         any_failed = true;
                         states.push(None);
                     }
                 }
                 Err(_) => {
                     eprintln!("error: no resume state file for chain {} ({})",
-                        chain_id + 1, path.display());
+                        chain, path.display());
                     any_failed = true;
                     states.push(None);
                 }
@@ -377,12 +382,12 @@ pub fn run_stage(
     // no longer branches on mode.
     let reporter = crate::progress::Reporter::new();
     let bars: Vec<crate::progress::Task> = (0..n_chains)
-        .map(|chain_id| reporter.task(n_steps as u64, format!("chain {}", chain_id + 1), "it"))
+        .map(|chain_id| reporter.task(n_steps as u64, format!("chain {}", ChainIndex(chain_id)), "it"))
         .collect();
 
     // Pre-create chain directories
-    for chain_id in 0..n_chains {
-        let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
+    for chain in ChainIndex::all(n_chains) {
+        let chain_dir = chain.dir_in(stage_dir);
         std::fs::create_dir_all(&chain_dir)
             .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
     }
@@ -435,7 +440,7 @@ pub fn run_stage(
                     Err(e) if e.is_structural() => {
                         return Err(format!(
                             "chain {} init-eval failed with structural error: {}",
-                            chain_id + 1, e));
+                            ChainIndex(chain_id), e));
                     }
                     Ok(ll) if !ll.is_finite() => {
                         // gh#334: a −∞ init means the start θ predicts a
@@ -458,7 +463,7 @@ pub fn run_stage(
                              acceptance rate stays 0%, propose a better start (a \
                              multi-start `init`, or adjust the start toward a θ that \
                              sustains the epidemic).",
-                            chain_id + 1);
+                            ChainIndex(chain_id));
                     }
                     _ => {
                         // Ok(finite) or a recoverable Err (ruled-out θ) — MH
@@ -490,7 +495,7 @@ pub fn run_stage(
                         });
                         eprintln!(
                             "  chain {}: start {} of {} refused by the filter ({}); drawing another",
-                            chain_id + 1, attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
+                            ChainIndex(chain_id), attempt + 1, super::chain_starts::MAX_START_ATTEMPTS,
                             reason);
                         attempt += 1;
                         let cs = super::runner::redraw_chain_start_for(
@@ -536,13 +541,13 @@ pub fn run_stage(
                         // a named measurement: nothing re-scored an observation
                         // here, so there is no `StreamAttempt` to carry.
                         collector.push(DiagnosticKind::BadInit {
-                            // 1-based, like the stderr line below and every
-                            // other artifact naming a chain (gh#781).
-                            chain_id: chain_id + 1, params, reason: reason.clone(),
+                            // The chain's number, as the stderr line below and
+                            // every other artifact name it (gh#990).
+                            chain_id, params, reason: reason.clone(),
                             attempts: Vec::new(),
                         });
                         eprintln!("  chain {}: \x1b[31m✗ BadInit\x1b[0m — {}",
-                            chain_id + 1, reason);
+                            ChainIndex(chain_id), reason);
                         // The bar is cleared in the post-loop finish; the skip
                         // is already loud on stderr above.
                         return Ok(None);
@@ -556,7 +561,7 @@ pub fn run_stage(
                         // as a ruled-out θ). `collect` short-circuits.
                         return Err(format!(
                             "chain {} init-eval failed with structural error: {}",
-                            chain_id + 1, other));
+                            ChainIndex(chain_id), other));
                     }
                     Ok(_) => {
                         // Finite (or even -inf-but-not-degenerate)
@@ -630,7 +635,7 @@ pub fn run_stage(
             let accepted_count = AtomicUsize::new(0);
 
             // Streaming trace: use TraceWriter with append mode when resuming
-            let chain_dir = stage_dir.join(format!("chain_{}", chain_id + 1));
+            let chain_dir = ChainIndex(chain_id).dir_in(stage_dir);
             let _ = std::fs::create_dir_all(&chain_dir);
             let trace_path = chain_dir.join("trace.tsv");
             let trace_path_str = trace_path.to_string_lossy().into_owned();
@@ -702,7 +707,7 @@ pub fn run_stage(
                 &config.param_names,
                 &pmmh_config, eval_loglik.as_ref(), chain_seed,
                 Some(&progress_cb), resume_states[chain_id].clone(), config_hash.clone(),
-            ).map_err(|e| format!("chain {} failed with structural error: {}", chain_id + 1, e))?;
+            ).map_err(|e| format!("chain {} failed with structural error: {}", ChainIndex(chain_id), e))?;
 
             // Final metric (MAP ll + acceptance) on the bar; the driver clears
             // it after the fan-out (`Task::finish` consumes, so it can't run
@@ -772,7 +777,7 @@ pub fn run_stage(
         } else {
             "\x1b[32m✓\x1b[0m"
         };
-        eprintln!("  chain {}: {:.1}% {}", chain_id + 1, result.acceptance_rate * 100.0, status);
+        eprintln!("  chain {}: {:.1}% {}", ChainIndex(*chain_id), result.acceptance_rate * 100.0, status);
         if let Some(d) = sim::inference::diagnostic::acceptance_diagnostic(
             result.acceptance_rate, None, kernel)
         {
@@ -911,10 +916,7 @@ pub fn run_stage(
         camdl_version: Some(crate::version::VERSION_SHORT.into()),
         best_loglik: map_result.map_loglik,
         initial_loglik: ll_mean,
-        // gh#912: `map_chain` is the 0-based chain id; the stored value is the
-        // 1-based chain NUMBER, so it names the `chain_N/` directory beside
-        // this file and matches the `MAP loglik: … (chain N)` line below.
-        best_chain: *map_chain + 1,
+        best_chain: ChainIndex(*map_chain),
         n_chains,
         // gh#110. Surface "ran K of N chains" through fit_state so
         // downstream consumers (fit_summary, the book chapters) can
@@ -986,9 +988,8 @@ pub fn run_stage(
 
         // Read each chain's trace.tsv and extract param columns
         let mut n_draws = 0usize;
-        for chain_id in 0..n_chains {
-            let trace_path = stage_dir.join(format!("chain_{}", chain_id + 1))
-                .join("trace.tsv");
+        for chain in ChainIndex::all(n_chains) {
+            let trace_path = chain.dir_in(stage_dir).join("trace.tsv");
             if let Ok(content) = std::fs::read_to_string(&trace_path) {
                 let mut lines = content.lines();
                 let header = lines.next().unwrap_or("");
@@ -1023,9 +1024,8 @@ pub fn run_stage(
                         }
                     }).collect();
                     vals.extend(fixed_vals.iter().map(|v| format!("{:.17e}", v)));
-                    // 0-based `chain`, matching trajectories.tsv's key convention
-                    // (PMMH saves no path today, but keep the key consistent).
-                    writeln!(f, "{}\t{}\t{}", chain_id, draw_idx, vals.join("\t")).unwrap();
+                    // The chain's number, the same one its directory carries.
+                    writeln!(f, "{}\t{}\t{}", chain, draw_idx, vals.join("\t")).unwrap();
                     draw_idx += 1;
                     n_draws += 1;
                 }
@@ -1042,7 +1042,7 @@ pub fn run_stage(
 
     eprintln!("\n{}", completion_line(
         stage_name, is_ode_mh, elapsed.as_secs_f64(), n_chains, n_steps, stage_dir));
-    eprintln!("  MAP loglik: {:.1} (chain {})", map_result.map_loglik, map_chain + 1);
+    eprintln!("  MAP loglik: {:.1} (chain {})", map_result.map_loglik, ChainIndex(*map_chain));
 
     Ok(())
 }
@@ -1105,7 +1105,7 @@ fn write_summary(
         "steps_per_chain": results.first().map(|(_, r)| r.n_steps).unwrap_or(0),
         "acceptance_rate": acceptance_rates,
         "map_loglik": map_result.map_loglik,
-        "map_chain": map_chain + 1,
+        "map_chain": ChainIndex(*map_chain),
         "map_params": map_params,
         // n_samples (kept) × thin = raw sampling iterations → ESS/iteration.
         "thin": thin,

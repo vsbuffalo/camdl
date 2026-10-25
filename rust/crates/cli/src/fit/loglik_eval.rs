@@ -40,6 +40,7 @@
 //! is preserved as the original design record but no longer
 //! reflects the implementation.
 
+use crate::chain_index::ChainIndex;
 use crate::evidence;
 use crate::fit::config_v2::{LoglikEvalConfig, CombineMode};
 use crate::fit::runner::{self, FitRunConfig};
@@ -163,7 +164,9 @@ impl FilterStats {
 /// aggregates filter health across the same replicates.
 #[derive(Debug, Clone)]
 pub struct ChainScore {
-    pub chain_id: usize,
+    /// The chain this score belongs to — the number of its `chain_N/`
+    /// directory and of every artifact that names it (gh#990).
+    pub chain_id: ChainIndex,
     /// IF2 final-iteration parameter means — the chain's MLE estimate
     /// in the IF2 framework (Ionides et al. 2015).
     pub theta: Vec<f64>,
@@ -250,7 +253,7 @@ where
     for (chain_id, if2) in results.iter() {
         if if2.iterations.is_empty() {
             return Err(format!(
-                "run_loglik_eval: chain {} has no IF2 iterations", chain_id));
+                "run_loglik_eval: chain {} has no IF2 iterations", ChainIndex(*chain_id)));
         }
         // The IF2 estimator: final-iteration parameter means.
         // Matches pomp's coef(mif2_out).
@@ -270,7 +273,7 @@ where
         let filter_stats = FilterStats::aggregate(&per_rep_stats);
 
         per_chain.push(ChainScore {
-            chain_id: *chain_id,
+            chain_id: ChainIndex(*chain_id),
             theta,
             loglik,
             se,

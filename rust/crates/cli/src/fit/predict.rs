@@ -21,6 +21,7 @@ use indexmap::IndexMap;
 
 use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
+use crate::chain_index::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
 use crate::fit::failures::{DeterministicFailure, Site};
 use crate::posterior_draws;
@@ -123,10 +124,10 @@ pub enum ChainLabel {
     /// Every retained chain, pooled — what the file carries with no
     /// `--by-chain`, and what a reader who does nothing gets.
     All,
-    /// One chain's draws alone. Carried 0-based; rendered 1-based to match the
-    /// `chain_N/` directories, the `fit summary` per-chain table and
-    /// `--exclude-chains`.
-    One(usize),
+    /// One chain's draws alone, by the number its `chain_N/` directory, the
+    /// `fit summary` per-chain table, `--exclude-chains` and `draws.tsv`'s
+    /// `chain` column all carry (gh#990).
+    One(ChainIndex),
 }
 
 impl ChainLabel {
@@ -134,7 +135,7 @@ impl ChainLabel {
     pub fn as_cell(&self) -> String {
         match self {
             ChainLabel::All => "all".to_string(),
-            ChainLabel::One(c) => (c + 1).to_string(),
+            ChainLabel::One(c) => c.to_string(),
         }
     }
 }
@@ -705,6 +706,15 @@ impl FitResult {
         selection: Option<ChainSelection>,
     ) -> Result<FitResult, String> {
         let seg_str = segment.to_str().ok_or("fit path is not valid UTF-8")?;
+        // A leaf whose chain directories count from 1 is refused here, before
+        // the cloud is resolved: the `Err` arm below reads any resolution
+        // failure as "no posterior cloud, so a point-estimate fit", and the
+        // refusal must not be mistaken for that (gh#990).
+        if let Some(view) = crate::fit::fit_view::FitView::read(segment) {
+            for s in view.stages.iter().filter(|s| s.method.is_posterior_sampler()) {
+                crate::chain_index::refuse_one_based_layout(&s.stage_dir)?;
+            }
+        }
         match posterior_draws::resolve_posterior_draws(seg_str, None) {
             Ok(pref) => {
                 let pref = pref.with_selection(selection);
@@ -992,16 +1002,15 @@ impl ConditionedSource {
         // path, and requiring `inc_<stream>` here would refuse a file that has
         // none.
         let columns = io::trajectories::TrajColumnSpec::from_model(model, &[]);
-        // Group the keys by the file that holds them. The on-disk chain dir is
-        // 1-based (`chain_{N+1}`); the in-file `chain` column is the 0-based key.
+        // Group the keys by the file that holds them: the in-file `chain` key
+        // is the number of the `chain_N/` directory (gh#990).
         let mut by_chain: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
         for key in per_draw.iter().flatten() {
             by_chain.entry(key.0).or_default().push(*key);
         }
         let mut paths = std::collections::HashMap::new();
         for (chain, keys) in by_chain {
-            let traj_path =
-                stage_dir.join(format!("chain_{}", chain + 1)).join("trajectories.tsv");
+            let traj_path = ChainIndex(chain).dir_in(stage_dir).join("trajectories.tsv");
             let read = io::trajectories::read_trajectories(&traj_path, &columns, &keys)
                 .map_err(|e| {
                     format!(
@@ -2483,7 +2492,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             // denominator by the number of chains.
             for (chain, chain_rows) in &s.per_chain {
                 sections.push(PredictiveSection {
-                    chain: ChainLabel::One(*chain),
+                    chain: ChainLabel::One(ChainIndex(*chain)),
                     scenario: cell.scenario.clone(),
                     sweep: cell.sweep.clone(),
                     horizon: Horizon::FreeForward,
@@ -2513,7 +2522,7 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             // chain's share of the subsample when some of its draws degenerated.
             for (chain, chain_rows) in &s.per_chain {
                 sections.push(PredictiveSection {
-                    chain: ChainLabel::One(*chain),
+                    chain: ChainLabel::One(ChainIndex(*chain)),
                     scenario: crate::args::FITTED.to_string(),
                     sweep: Vec::new(),
                     horizon: Horizon::OneStepAhead,
@@ -3057,7 +3066,7 @@ fn assemble_predictive(
                         time: t,
                         stratum: stratum.clone(),
                         quantiles: band(&chain_draws).map_err(|e| {
-                            format!("stream '{source}' at t={t}, chain {}: {e}", chain + 1)
+                            format!("stream '{source}' at t={t}, chain {}: {e}", ChainIndex(chain))
                         })?,
                         mean_conv: None,
                         pred_conv: None,
@@ -3381,7 +3390,7 @@ fn pool_one_step_draws(
                 "fit predict: one_step horizon -- chain {} contributed no band: all \
                  {n_offered} of its replayed draws degenerated. It is omitted from the \
                  per-chain rows rather than banded over nothing.",
-                id + 1
+                ChainIndex(*id)
             );
         } else {
             eprintln!(
@@ -3389,7 +3398,7 @@ fn pool_one_step_draws(
                  {n_offered} draws it was given ({} degenerated); its rows report \
                  n_draws = {n_pooled}, so a narrower band there may be a thinner \
                  sample rather than a more certain chain.",
-                id + 1,
+                ChainIndex(*id),
                 n_offered - n_pooled,
             );
         }
@@ -3673,7 +3682,7 @@ fn one_step_bands(
                         time: t,
                         stratum: stratum.clone(),
                         quantiles: band(cc).map_err(|e| {
-                            format!("stream '{source}' (one_step) at t={t}, chain {}: {e}", c + 1)
+                            format!("stream '{source}' (one_step) at t={t}, chain {}: {e}", ChainIndex(c))
                         })?,
                         mean_conv: None,
                         pred_conv: None,
@@ -4580,7 +4589,8 @@ mod tests {
             without.lines().next().unwrap()
         );
 
-        let per_chain = PredictiveSection { chain: ChainLabel::One(2), n_draws: 20, ..pooled };
+        let per_chain =
+            PredictiveSection { chain: ChainLabel::One(ChainIndex(2)), n_draws: 20, ..pooled };
         // Rebuild the pooled section (it was consumed by the struct update).
         let pooled = PredictiveSection {
             chain: ChainLabel::All,
@@ -4596,9 +4606,8 @@ mod tests {
         let lines: Vec<&str> = with.trim_end().lines().collect();
         assert!(lines[0].starts_with("chain\tscenario\t"), "chain leads: {}", lines[0]);
         assert!(lines[1].starts_with("all\tfitted\t"), "the pooled row is `all`: {}", lines[1]);
-        // 0-based internally, 1-based in the artifact — matching `chain_N/` and
-        // `--exclude-chains`.
-        assert!(lines[2].starts_with("3\tfitted\t"), "chain 2 renders as 3: {}", lines[2]);
+        // The chain's number, as `chain_N/` and `--exclude-chains` carry it.
+        assert!(lines[2].starts_with("2\tfitted\t"), "chain 2 renders as 2: {}", lines[2]);
         // A per-chain section reports its own denominator, not the pooled one.
         let hdr: Vec<&str> = lines[0].split('\t').collect();
         let n = hdr.iter().position(|h| *h == "n_draws").unwrap();
@@ -4627,10 +4636,10 @@ mod tests {
         };
         let pooled_only = render_predictive_tsv_sections(&[], &[mk(ChainLabel::All)]);
         let with_chain =
-            render_predictive_tsv_sections(&[], &[mk(ChainLabel::All), mk(ChainLabel::One(0))]);
+            render_predictive_tsv_sections(&[], &[mk(ChainLabel::All), mk(ChainLabel::One(ChainIndex(0)))]);
         let stripped: String = with_chain
             .lines()
-            .filter(|l| !l.starts_with("1\t")) // drop the per-chain rows
+            .filter(|l| !l.starts_with("0\t")) // drop the per-chain rows
             .map(|l| l.split_once('\t').unwrap().1) // drop the `chain` cell
             .map(|l| format!("{l}\n"))
             .collect();
@@ -4664,7 +4673,7 @@ mod tests {
         let tsv = render_predictive_tsv_sections(
             &[],
             &[PredictiveSection {
-                chain: ChainLabel::One(0),
+                chain: ChainLabel::One(ChainIndex(0)),
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
                 horizon: Horizon::FreeForward,
@@ -4684,10 +4693,10 @@ mod tests {
     }
 
     #[test]
-    fn chain_label_renders_one_based_and_pooled_as_all() {
+    fn chain_label_renders_the_chain_number_and_pooled_as_all() {
         assert_eq!(ChainLabel::All.as_cell(), "all");
-        assert_eq!(ChainLabel::One(0).as_cell(), "1");
-        assert_eq!(ChainLabel::One(7).as_cell(), "8");
+        assert_eq!(ChainLabel::One(ChainIndex(0)).as_cell(), "0");
+        assert_eq!(ChainLabel::One(ChainIndex(7)).as_cell(), "7");
     }
 
     #[test]

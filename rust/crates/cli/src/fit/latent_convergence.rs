@@ -56,6 +56,7 @@ use sim::inference::convergence::{
     MIN_DRAWS_FOR_INFORMATIVE_ESS,
 };
 use super::fit_summary::display_width;
+use crate::chain_index::ChainIndex;
 use sim::inference::pgas::{PositionBins, RENEWAL_BINS};
 use sim::state::Flows;
 use std::path::Path;
@@ -74,9 +75,9 @@ pub const LATENT_CONVERGENCE_TSV: &str = "latent_convergence.tsv";
 /// structures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChainPaths {
-    /// The chain's label as its directory and the per-chain tables carry it
-    /// (`chain_N`, 1-based).
-    pub chain: usize,
+    /// The chain's number, as its `chain_N/` directory and the per-chain
+    /// tables carry it.
+    pub chain: ChainIndex,
     pub n_draws: usize,
     pub n_substeps: usize,
     pub n_cols: usize,
@@ -149,7 +150,7 @@ impl ChainPaths {
             }
         }
         let times = first.path.snapshots.iter().map(|s| s.t).collect();
-        Ok(Some(ChainPaths { chain: first.chain + 1, n_draws: draws.len(), n_substeps, n_cols, times, values }))
+        Ok(Some(ChainPaths { chain: ChainIndex(first.chain), n_draws: draws.len(), n_substeps, n_cols, times, values }))
     }
 
     /// Read one chain's saved paths back from its `trajectories.tsv`, with
@@ -188,9 +189,9 @@ impl ChainPaths {
         // One entry per saved draw, in file order; the draw index only has to
         // change to start a new path (the writer emits each path contiguously).
         let mut draws: Vec<(usize, Vec<f64>, Vec<f64>)> = Vec::new();
-        // The file's `chain` column is the 0-based id the writer received;
-        // the label is the 1-based one its directory carries.
-        let mut chain: Option<usize> = None;
+        // The file's `chain` column is the chain's number — the one its
+        // directory carries (gh#990).
+        let mut chain: Option<ChainIndex> = None;
         for (lineno, line) in lines.enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -215,11 +216,11 @@ impl ChainPaths {
                 format!("{}: row {} `chain`: {e}", path.display(), lineno + 1)
             })?;
             match chain {
-                None => chain = Some(c + 1),
-                Some(prev) if prev != c + 1 => {
+                None => chain = Some(ChainIndex(c)),
+                Some(prev) if prev != ChainIndex(c) => {
                     return Err(format!(
-                        "{}: row {} is chain {c}, the file's first row chain {}",
-                        path.display(), lineno + 1, prev - 1
+                        "{}: row {} is chain {c}, the file's first row chain {prev}",
+                        path.display(), lineno + 1
                     ));
                 }
                 Some(_) => {}
@@ -254,7 +255,7 @@ impl ChainPaths {
     /// `[draw][substep][column]`.
     #[cfg(test)]
     pub fn from_values(
-        chain: usize,
+        chain: ChainIndex,
         n_draws: usize,
         n_substeps: usize,
         n_cols: usize,
@@ -337,9 +338,9 @@ pub struct LatentBin {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LatentConvergence {
     pub n_chains: usize,
-    /// Which chains, by their `chain_N` label — a refused start has no saved
+    /// Which chains, by their `chain_N` number — a refused start has no saved
     /// path and is not among them.
-    pub chain_ids: Vec<usize>,
+    pub chain_ids: Vec<ChainIndex>,
     /// Draws used per chain — the smallest saved count across chains; each
     /// chain keeps its first `n_draws` (the convention
     /// `super::row_convergence::partition_by_chain` uses, for the same reason:
@@ -377,7 +378,7 @@ impl std::fmt::Display for LatentError {
                     (raise n_trajectories)"
             ),
             LatentError::ShapeMismatch { chain, what } => {
-                write!(f, "latent-path convergence: chain {} {what}", chain + 1)
+                write!(f, "latent-path convergence: chain {chain} {what}")
             }
             LatentError::NonFinite { substep, column } => write!(
                 f, "latent-path convergence: non-finite value in `{column}` at substep {substep}"
@@ -469,7 +470,7 @@ pub fn latent_convergence(
             });
         }
     }
-    let chain_ids: Vec<usize> = chains.iter().map(|c| c.chain).collect();
+    let chain_ids: Vec<ChainIndex> = chains.iter().map(|c| c.chain).collect();
     let chain_n_saved: Vec<usize> = chains.iter().map(|c| c.n_draws).collect();
     let n_draws = chain_n_saved.iter().copied().min().unwrap_or(0);
     if n_draws < 4 {
@@ -889,7 +890,7 @@ mod tests {
                     }
                 }
                 let times = (0..n_substeps).map(|s| s as f64).collect();
-                ChainPaths::from_values(c + 1, n_draws, n_substeps, n_cols, times, values)
+                ChainPaths::from_values(ChainIndex(c), n_draws, n_substeps, n_cols, times, values)
             })
             .collect()
     }
@@ -1275,7 +1276,7 @@ mod tests {
         ])).unwrap();
         let (block, cols) = ChainPaths::from_trajectories_tsv(&p).unwrap().unwrap();
         assert_eq!(cols, vec!["S".to_string(), "flow_a".to_string()]);
-        assert_eq!(block.chain, 4, "the file's 0-based chain id, labelled as its `chain_N` directory");
+        assert_eq!(block.chain, ChainIndex(3), "the file's chain id, the number of its `chain_N` directory");
         assert_eq!((block.n_draws, block.n_substeps, block.n_cols), (2, 3, 2));
         assert_eq!(block.times, vec![0.0, 0.5, 1.0]);
         assert_eq!(block.value(0, 2, 0), 6.0);
@@ -1315,9 +1316,9 @@ mod tests {
             let d = dir.path().join(format!("chain_{n}"));
             std::fs::create_dir(&d).unwrap();
             let rows: Vec<(f64, [f64; 2])> = rows.iter().map(|(t, v)| (*t, [v[0] * s, v[1]])).collect();
-            // The writer puts the 0-based id in the file under a 1-based dir.
+            // The file's `chain` key is the directory's number (gh#990).
             std::fs::write(d.join("trajectories.tsv"),
-                traj_tsv(n - 1, &[(5, &rows), (6, &rows), (7, &rows), (8, &rows)])).unwrap();
+                traj_tsv(n, &[(5, &rows), (6, &rows), (7, &rows), (8, &rows)])).unwrap();
         }
         std::fs::create_dir(dir.path().join("chain_3")).unwrap();
         std::fs::write(dir.path().join("chain_3/trace.tsv"), "sweep\tloglik\n").unwrap();
@@ -1328,10 +1329,10 @@ mod tests {
         assert_eq!(cols, vec!["S".to_string(), "flow_a".to_string()]);
         let first_s: Vec<f64> = chains.iter().map(|c| c.value(0, 1, 0)).collect();
         assert_eq!(first_s, vec![2.0, 4.0, 20.0], "chain_1, chain_2, chain_10");
-        let labels: Vec<usize> = chains.iter().map(|c| c.chain).collect();
-        assert_eq!(labels, vec![1, 2, 10]);
+        let labels: Vec<ChainIndex> = chains.iter().map(|c| c.chain).collect();
+        assert_eq!(labels, [1, 2, 10].map(ChainIndex).to_vec());
         let lc = latent_convergence(&chains, &cols).unwrap();
-        assert_eq!(lc.chain_ids, vec![1, 2, 10]);
+        assert_eq!(lc.chain_ids, [1, 2, 10].map(ChainIndex).to_vec());
         assert!(lc.report().contains("3 chain(s) [1, 2, 10]"), "{}", lc.report());
         assert_eq!(lc.summary_block()["chain_ids"], serde_json::json!([1, 2, 10]));
 

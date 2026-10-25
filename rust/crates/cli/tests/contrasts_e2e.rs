@@ -49,11 +49,11 @@ fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     None
 }
 
-/// The first `chain_1/trajectories.tsv` under `results/fits/` — the fit's saved
+/// The first `chain_0/trajectories.tsv` under `results/fits/` — the fit's saved
 /// smoothed paths. Recursive, since the stage/seed nesting under a fit dir varies.
 fn find_chain_traj(root: &Path) -> Option<PathBuf> {
     fn walk(dir: &Path) -> Option<PathBuf> {
-        let hit = dir.join("chain_1").join("trajectories.tsv");
+        let hit = dir.join("chain_0").join("trajectories.tsv");
         if hit.is_file() {
             return Some(hit);
         }
