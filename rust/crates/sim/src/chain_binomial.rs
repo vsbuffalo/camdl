@@ -57,18 +57,6 @@ pub struct StepScratch {
     pending_deltas: Vec<(usize, i64)>,
     handled: Vec<bool>,
     probs: Vec<(usize, f64)>,
-    /// When set, overrides the next `gamma_multiplier()` call in `step_one`.
-    /// Used by correlated pseudo-marginal MCMC to inject pre-drawn Gamma
-    /// noise for correlation across MCMC steps.
-    pub gamma_override: Option<f64>,
-    /// When non-empty, provides standard normal z-values for the total-exit
-    /// binomial draw in each source group. `step_one` transforms z to a
-    /// binomial count via normal approximation (large np) or inverse CDF
-    /// (small np). Consumed in source-group order.
-    /// Used by CPM-MCMC for correlated binomial draws.
-    pub binomial_z_values: Vec<f64>,
-    /// Current index into binomial_z_values. Incremented as z-values are consumed.
-    pub binomial_z_idx: usize,
     /// Gamma multipliers actually used during step_one, in source-group order.
     /// Populated by step_one for each overdispersed source group encountered.
     /// Used by PGAS to record the gamma drawn at each substep for transition
@@ -106,9 +94,6 @@ impl StepScratch {
             draws: Vec::with_capacity(n_tr),
             pending_deltas: Vec::with_capacity(n_tr * 2),
             handled: vec![false; n_tr],
-            gamma_override: None,
-            binomial_z_values: Vec::new(),
-            binomial_z_idx: 0,
             gamma_used: Vec::new(),
             event_deltas: crate::effects::EffectDeltas::default(),
             effect_batch: crate::schedule::EffectBatch::default(),
@@ -677,7 +662,7 @@ pub fn step_one(
                 // competing-risk draw (Step 2/3) does not run. This branch
                 // consumes NO rng, so a source group with no deterministic
                 // member is byte-identical to before it existed (CRN preserved:
-                // `binomial_z_idx` and every draw are untouched here).
+                // every draw is untouched here).
                 let count = ((rate * dt).round() as i64).clamp(0, n_src) as u64;
                 for &(local, delta) in &model.transition_stoich[tr_idx] {
                     scratch.pending_deltas.push((local, delta * count as i64));
@@ -688,8 +673,7 @@ pub fn step_one(
             }
             let effective = match &scratch.draws[tr_idx] {
                 ResolvedDraw::Overdispersed(sigma_sq) => {
-                    let g = scratch.gamma_override.take()
-                        .unwrap_or_else(|| rng.gamma_multiplier(*sigma_sq, dt));
+                    let g = rng.gamma_multiplier(*sigma_sq, dt);
                     scratch.gamma_used.push(g);
                     per_capita * g
                 }
@@ -705,17 +689,7 @@ pub fn step_one(
         // gh#audit-H3: stable (p, q) primitive (q discarded here).
         let (p_total, _q) = crate::inference::numerics::prob_q_from_rate_dt(total_rate, dt);
         let p_total = p_total.clamp(0.0, 1.0);
-        let mut n_events = if scratch.binomial_z_idx < scratch.binomial_z_values.len() {
-            // CPM: use pre-drawn z-value for correlated binomial. The normal →
-            // count transform lives with the rest of the correlated-PF
-            // transforms so the transition kernel and the initial-state draw
-            // cannot disagree about which regime applies at a given (n, p).
-            let z = scratch.binomial_z_values[scratch.binomial_z_idx];
-            scratch.binomial_z_idx += 1;
-            crate::inference::correlated_pf::binomial_from_normal(n_src as u64, p_total, z)
-        } else {
-            rng.binomial(n_src as u64, p_total)
-        };
+        let mut n_events = rng.binomial(n_src as u64, p_total);
 
         debug_assert!(n_events <= n_src as u64,
             "n_exit ({}) > n_src ({}) at source compartment {}",

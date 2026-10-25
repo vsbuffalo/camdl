@@ -110,7 +110,6 @@ fn profile_pmmh_smoke_writes_mle_and_algorithm_block() {
             // post-burn-in samples — still a fast smoke run (gh#102).
             "--pmmh-steps", "150",
             "--pmmh-particles", "100",
-            "--pmmh-rho", "0.99",
             "--n-starts", "1",
             "--rw-sd", "auto",
             "--fixed", "sigma=0.2", "--fixed", "gamma=0.1",
@@ -170,10 +169,6 @@ fn profile_pmmh_smoke_writes_mle_and_algorithm_block() {
             "algorithm.steps mismatch: {:?}", alg);
         assert_eq!(alg.get("particles").and_then(|v| v.as_u64()), Some(100),
             "algorithm.particles mismatch: {:?}", alg);
-        let rho_v = alg.get("rho").and_then(|v| v.as_f64())
-            .expect("algorithm.rho should be a finite float");
-        assert!((rho_v - 0.99).abs() < 1e-12,
-            "algorithm.rho expected 0.99, got: {}", rho_v);
     }
 }
 
@@ -451,7 +446,6 @@ fn profile_pmmh_reported_loglik_matches_saved_mle_params() {
             "--algorithm", "pmmh",
             "--pmmh-steps", "1000",
             "--pmmh-particles", "1500",
-            "--pmmh-rho", "0.99",
             "--n-starts", "1",
             "--rw-sd", "auto",
             "--fixed", "N0=1000.0",

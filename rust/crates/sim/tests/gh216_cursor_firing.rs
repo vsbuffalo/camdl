@@ -11,8 +11,7 @@
 //! at a time `round(t/dt)` snapped to the WRONG step — a silent likelihood error
 //! whose firing instant moved when the observation streams moved (day 35 → 37).
 //!
-//! These tests pin the fixed behaviour across PF / IF2 / correlated-PF and the
-//! PGAS producer:
+//! These tests pin the fixed behaviour across PF / IF2 and the PGAS producer:
 //!   - Test 1 (invariance): the intervention's firing INSTANT is invariant to
 //!     which observation streams are present — it fires at its own time
 //!     regardless of an added off-grid observation. RED before the fix (the
@@ -52,7 +51,6 @@ use ir::{
 use sim::{
     compiled_model::CompiledModel,
     inference::{
-        correlated_pf::{bootstrap_filter_correlated, PFRandomState},
         if2::{run_if2, EstimatedParam, IF2Config, Transform},
         multi_stream_obs::{dense_cells, BoundObs, MultiStreamObsModel, StreamProjection, StreamSpec, StreamTimes},
         obs_loglik::poisson_logpmf,
@@ -331,44 +329,6 @@ fn if2_firing_invariant_to_offgrid_obs_stream() {
     );
 }
 
-/// Correlated-PF: the firing is correct under off-grid obs. CPM requires uniform
-/// observation windows, so the obs are uniformly spaced (3.5, 7.0 — 4 substeps
-/// each, the on-grid intervention at 4 re-tiles within a window without changing
-/// the count). The intervention fires exactly once at day 4, so the final `M = 10`
-/// (a double-fire would give 20, a missed fire 0). RED before the fix (stopgap);
-/// GREEN after.
-#[test]
-fn correlated_pf_firing_correct_under_offgrid_obs() {
-    let compiled = Arc::new(firing_model(
-        InterventionSchedule::AtTimes(vec![FIRE_TIME]),
-        InterventionKind::Scenario,
-    ));
-    let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled.clone());
-
-    let off_grid_times = [3.5, 7.0];
-    let (obs, _data) = obs_on_m(&off_grid_times);
-    let config = smc_config();
-    let n_source_groups = compiled.source_groups.len();
-    let mut rng = StatefulRng::new(7);
-    // obs at [3.5, 7.0] from t_start=0 at dt=1: four substeps each (the second
-    // window's last step is clipped at 7.0), and the on-grid intervention at
-    // day 4 re-tiles within a window without changing the count.
-    let steps_per_obs = sim::inference::correlated_pf::cpm_steps_per_obs(
-        &off_grid_times, config.t_start, config.dt);
-    assert_eq!(steps_per_obs, vec![4, 4]);
-    let randoms = PFRandomState::draw_fresh(
-        config.n_particles, &steps_per_obs, n_source_groups,
-        compiled.init_noise_width, &mut rng);
-    let res = bootstrap_filter_correlated(&process, &obs, &params, &config, &randoms, 42)
-        .expect("off-grid obs + on-grid intervention must now FIT under correlated-PF (gh#216 fix)");
-    let final_m = res.final_states.as_ref().unwrap()[0].counts[1];
-    assert_eq!(
-        final_m, TRANSFER as i64,
-        "correlated-PF: intervention must fire EXACTLY ONCE at day 4 (final M=10, not 0 or 20)"
-    );
-}
-
 /// IF2, EVENT arm (gh#216 events / PR#218 #4): the same off-grid firing
 /// invariance via the perturbed loglik, with an always-active EVENT instead of a
 /// scheduled intervention. Events are now cursor-keyed like interventions
@@ -404,80 +364,6 @@ fn if2_event_firing_invariant_to_offgrid_obs_stream() {
         (res.last_loglik - expected).abs() < 1e-6,
         "IF2 event: must fire at day 4 regardless of the off-grid 3.5 obs \
          (loglik {} vs fired-at-4 {})", res.last_loglik, expected
-    );
-}
-
-/// A scheduled intervention firing strictly inside a window whose START is off
-/// the dt grid re-anchors the drift-free substep clock, which gives that window
-/// one more substep than the observation grid alone predicts. The noise block
-/// is sized from the grid (the draw happens in `run_pmmh`, before any model is
-/// in scope), so the filter refuses the run rather than reading past the block
-/// and falling through to fresh per-particle RNG.
-///
-/// obs at [3.5, 6.5], dt=1, intervention at day 4: window 1 is three substeps
-/// on the grid alone, four once the clock re-anchors at day 4.
-#[test]
-fn correlated_pf_refuses_a_window_the_intervention_lengthens() {
-    let compiled = Arc::new(firing_model(
-        InterventionSchedule::AtTimes(vec![FIRE_TIME]),
-        InterventionKind::Scenario,
-    ));
-    let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled.clone());
-
-    let times = [3.5, 6.5];
-    let (obs, _data) = obs_on_m(&times);
-    let config = smc_config();
-    let steps_per_obs = sim::inference::correlated_pf::cpm_steps_per_obs(
-        &times, config.t_start, config.dt);
-    assert_eq!(steps_per_obs, vec![4, 3], "sized from the observation grid alone");
-
-    let mut rng = StatefulRng::new(7);
-    let randoms = PFRandomState::draw_fresh(
-        config.n_particles, &steps_per_obs, compiled.source_groups.len(),
-        compiled.init_noise_width, &mut rng);
-    let err = match bootstrap_filter_correlated(&process, &obs, &params, &config, &randoms, 42) {
-        Ok(_) => panic!("a window lengthened by an intervention must be refused"),
-        Err(e) => e,
-    };
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("takes 4 substeps") && msg.contains("sized for 3"),
-        "the refusal must name the walked and sized substep counts; got: {msg}",
-    );
-}
-
-/// Correlated-PF, EVENT arm: an always-active event fires exactly once at day 4
-/// under off-grid (uniform) obs — final `M = 10`, not 0 (missed) or 20 (double).
-#[test]
-fn correlated_pf_event_firing_correct_under_offgrid_obs() {
-    let compiled = Arc::new(firing_model(
-        InterventionSchedule::AtTimes(vec![FIRE_TIME]),
-        InterventionKind::Event,
-    ));
-    let params = compiled.default_params.clone();
-    let process = ChainBinomialProcess::new(compiled.clone());
-
-    let off_grid_times = [3.5, 7.0];
-    let (obs, _data) = obs_on_m(&off_grid_times);
-    let config = smc_config();
-    let n_source_groups = compiled.source_groups.len();
-    let mut rng = StatefulRng::new(7);
-    // obs at [3.5, 7.0] from t_start=0 at dt=1: four substeps each (the second
-    // window's last step is clipped at 7.0), and the on-grid intervention at
-    // day 4 re-tiles within a window without changing the count.
-    let steps_per_obs = sim::inference::correlated_pf::cpm_steps_per_obs(
-        &off_grid_times, config.t_start, config.dt);
-    assert_eq!(steps_per_obs, vec![4, 4]);
-    let randoms = PFRandomState::draw_fresh(
-        config.n_particles, &steps_per_obs, n_source_groups,
-        compiled.init_noise_width, &mut rng);
-    let res = bootstrap_filter_correlated(&process, &obs, &params, &config, &randoms, 42)
-        .expect("off-grid obs + always-active event must fit under correlated-PF");
-    let final_m = res.final_states.as_ref().unwrap()[0].counts[1];
-    assert_eq!(
-        final_m, TRANSFER as i64,
-        "correlated-PF event: must fire EXACTLY ONCE at day 4 (final M=10, not 0 or 20)"
     );
 }
 

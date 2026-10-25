@@ -427,33 +427,21 @@ impl FitRunConfig {
         };
 
         // (algorithm × obs-alignment) support gate — the fit-dispatch seam.
-        // Converts today's SILENT fallbacks into clean errors: `exact` + PGAS
-        // would silently snap to a uniform grid; `exact` + off-grid correlated
-        // PMMH would silently fall back to fresh RNG, decorrelating the CPM
-        // estimator (#17). For valid runs the default resolves to today's
-        // behaviour ("exact where supported"), so nothing changes; threading the
-        // resolved policy into the filters is Stage 3. (Fires per build; cheap.)
+        // Converts a SILENT fallback into a clean error: `exact` + PGAS would
+        // silently snap to a uniform grid. For valid runs the default resolves
+        // to today's behaviour ("exact where supported"), so nothing changes;
+        // threading the resolved policy into the filters is Stage 3. (Fires per
+        // build; cheap.)
         {
             use crate::run_meta::FitAlgorithm;
-            let t_start = compiled.model.simulation.t_start;
-            let obs_on_grid = observations.iter().all(|o| {
-                let k = ((o.time - t_start) / dt).round();
-                ((t_start + k * dt) - o.time).abs() < 1e-9
-            });
             if let Some(algorithm) = algorithm {
                 if matches!(
                     algorithm.method_kind(),
                     FitAlgorithm::If2 | FitAlgorithm::Pgas | FitAlgorithm::Pmmh | FitAlgorithm::Pfilter
                 ) {
-                    let correlated = matches!(
-                        algorithm,
-                        crate::fit::config_v2::Algorithm::PMMH { rho: Some(_), .. }
-                    );
                     crate::fit::methods::resolve_obs_alignment(
                         algorithm.method_kind(),
-                        correlated,
                         fit.config.obs_alignment,
-                        obs_on_grid,
                     )
                     .map_err(|e| format!("{} method: {e}", algorithm.method_name()))?;
                 }

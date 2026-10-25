@@ -285,12 +285,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // collected once so the method identity can see all of them. Applied to
     // the in-memory method below, before the CAS claim — the dispatch sites
     // no longer override anything, so there is no route around the key.
-    if let Some(r) = a.rho {
-        if !(0.0..1.0).contains(&r) {
-            eprintln!("error: --rho must be in [0, 1). Got: {}", r);
-            std::process::exit(1);
-        }
-    }
     let cli_overrides = crate::fit::config_v2::CliStageOverrides {
         max_tree_depth:       a.max_tree_depth,
         trajectory_warmup:    a.trajectory_warmup,
@@ -301,7 +295,6 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         no_ancestor_sampling: a.no_ancestor_sampling,
         no_adapt:             a.no_adapt,
         adapt_start:          a.adapt_start,
-        rho:                  a.rho,
         cooling_target_iters: a.cooling_target_iters,
         decibans_thresh:      a.decibans_thresh,
         no_dt_check:          a.no_dt_check,
@@ -1534,8 +1527,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // MAP, R̂/ESS, trace output); `pmmh::run_stage` swaps the PF
                 // likelihood for `compute_ode_loglik` when the algorithm is the
                 // Mh variant. `PmmhStageOpts::from_algorithm` parses the Mh
-                // fields with `n_particles = 0` / `rho = None` (the
-                // deterministic path uses neither).
+                // fields with `n_particles = 0` (the deterministic path has
+                // no filter).
                 let pmmh_opts = pmmh::PmmhStageOpts::from_algorithm(&method.algorithm)
                     .unwrap_or_else(|e| abandon_stage(&heartbeat, format!("error: {e}")));
                 // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by

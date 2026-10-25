@@ -1115,20 +1115,13 @@ pub enum Algorithm {
         /// Default: 300.
         #[serde(default = "default_pmmh_adapt_start")]
         adapt_start: usize,
-        /// Crank-Nicolson correlation for correlated pseudo-marginal
-        /// MCMC (Deligiannidis et al. 2018). `None` = vanilla PMMH
-        /// with independent PF evaluations. `Some(0.99)` = CPM with
-        /// ρ=0.99 (recommended when CPM is enabled). Default: None.
-        #[serde(default)]
-        rho: Option<f64>,
     },
 
     /// Metropolis-Hastings on the deterministic ODE marginal likelihood
     /// (`p(y|θ, ODE_skeleton)` via `compute_ode_loglik`). Reuses the PMMH
     /// chain/adaptive-proposal/diagnostics machinery, swapping the
     /// particle-filter likelihood for the deterministic ODE evaluation —
-    /// so it carries neither `particles` (no PF) nor `rho` (no correlated
-    /// pseudo-marginal noise to re-use). Bayesian posteriors on ODE /
+    /// so it carries no `particles` (no PF). Bayesian posteriors on ODE /
     /// equilibrium models without gradients.
     #[serde(rename = "mh")]
     Mh {
@@ -1617,10 +1610,9 @@ impl Algorithm {
                 if let Some(d) = cli.max_tree_depth { *max_tree_depth = d; }
                 if cli.diagonal_mass { *dense_mass = false; }
             }
-            Algorithm::PMMH { adapt, adapt_start, rho, .. } => {
+            Algorithm::PMMH { adapt, adapt_start, .. } => {
                 if cli.no_adapt { *adapt = false; }
                 if let Some(s) = cli.adapt_start { *adapt_start = s; }
-                if let Some(r) = cli.rho { *rho = Some(r); }
             }
             Algorithm::Mh { adapt, adapt_start, dt_check, backend, .. } => {
                 if cli.no_adapt { *adapt = false; }
@@ -1682,7 +1674,6 @@ pub struct CliStageOverrides {
     pub no_ancestor_sampling: bool,
     pub no_adapt: bool,
     pub adapt_start: Option<usize>,
-    pub rho: Option<f64>,
     /// `--cooling-target-iters` (IF2): iterations over which the cooling
     /// fraction is reached. Changes the perturbation schedule and therefore
     /// the MLE.
@@ -2439,16 +2430,15 @@ impl FitConfig {
 
         // ic_free / conditioning support check (F1). `ic_free = true` is
         // honored only by the cells that BOTH drop y₁ from the accumulated
-        // loglik AND give the swarm spread at t=0. PGAS, the ODE-MLE
-        // optimizers, and correlated PMMH score every obs unconditionally;
-        // `pfilter` / plain `pmmh` do condition, but only have the spread when
-        // the MODEL declares an `init { }` law — hence `init_law` here.
+        // loglik AND give the swarm spread at t=0. PGAS and the ODE-MLE
+        // optimizers score every obs unconditionally; `pfilter` / `pmmh` do
+        // condition, but only have the spread when the MODEL declares an
+        // `init { }` law — hence `init_law` here.
         // Running ic_free without either property would silently compute the
         // UNCONDITIONAL likelihood while the banner claims conditioning.
         if self.problem.ic_free.unwrap_or(false) {
-            let correlated = matches!(algorithm, Algorithm::PMMH { rho: Some(_), .. });
             if let Err(msg) =
-                super::methods::validate_ic_free(algorithm.method_kind(), correlated, init_law)
+                super::methods::validate_ic_free(algorithm.method_kind(), init_law)
             {
                 return Err(format!("[method]: {}", msg));
             }
@@ -3203,7 +3193,7 @@ sweeps     = 10
         method(&cfg)
     }
 
-    /// A `pmmh` method, for `--no-adapt` / `--adapt-start` / `--rho`.
+    /// A `pmmh` method, for `--no-adapt` / `--adapt-start`.
     fn pmmh_method() -> Method {
         let cfg = parse(r#"
 [model]
@@ -3379,8 +3369,6 @@ starts     = "{starts}"
              CliStageOverrides { no_adapt: true, ..Default::default() }),
             ("--adapt-start", pmmh_method(),
              CliStageOverrides { adapt_start: Some(42), ..Default::default() }),
-            ("--rho", pmmh_method(),
-             CliStageOverrides { rho: Some(0.9), ..Default::default() }),
             // The 2026-08-23 batch: found applied at the dispatch site,
             // after the CAS claim, exactly like the thirteen above.
             ("--cooling-target-iters", scout_method("single"),
@@ -6246,9 +6234,9 @@ cases = "data/cases.tsv"
     // ── ic_free / conditioning support check (F1) ──────────────────────────
     //
     // `ic_free = true` needs an algorithm that drops y₁ from the accumulated
-    // loglik AND a swarm whose particles differ in x₀. PGAS, the ODE-MLE
-    // optimizers and correlated PMMH score every obs unconditionally, for every
-    // model. `pfilter` and plain `pmmh` DO drop y₁, and their bootstrap PF
+    // loglik AND a swarm whose particles differ in x₀. PGAS and the ODE-MLE
+    // optimizers score every obs unconditionally, for every model. `pfilter`
+    // and `pmmh` DO drop y₁, and their bootstrap PF
     // draws x₀ per particle — so they have the spread exactly when the MODEL's
     // `init { }` declares a law, and not when it computes every compartment
     // from an expression (gh#732). `validate()` therefore takes that model fact
@@ -6415,38 +6403,6 @@ chains = 1
             .expect_err("ic_free=true on an ODE-MLE stage must be rejected (compute_ode_loglik ignores conditioning)");
         assert!(err.contains("ic_free"), "error must name ic_free: {err}");
         assert!(err.contains("nl-sbplx"), "error must name the offending algorithm: {err}");
-    }
-
-    #[test]
-    fn ic_free_with_correlated_pmmh_stage_is_rejected() {
-        let src = r#"ic_free = true
-[model]
-camdl = "models/sir.camdl"
-
-[data.observations]
-cases = "data/cases.tsv"
-
-[estimate]
-beta = { bounds = [0.01, 2.0] }
-
-[fixed]
-N0 = 1000
-I0 = 5
-gamma = 0.1
-
-[method]
-algorithm = "pmmh"
-backend = "chain_binomial"
-chains = 1
-particles = 500
-iterations = 100
-rho = 0.99
-"#;
-        let config = parse(src).unwrap();
-        let err = config
-            .validate(&ic_free_model_params(), InitLaw::Absent)
-            .expect_err("ic_free=true on a correlated PMMH stage must be rejected");
-        assert!(err.contains("ic_free"), "error must name ic_free: {err}");
     }
 
     /// gh#732. Plain PMMH (no `rho`) wraps the bootstrap particle filter,
@@ -6850,7 +6806,7 @@ decibans_thresh = 100.0
                 backend: crate::run_meta::InferenceBackend::ChainBinomial,
                 chains: 4, particles: 100, iterations,
                 burn_in: Some(200), thin: Some(2),
-                adapt: true, adapt_start: 300, rho: None,
+                adapt: true, adapt_start: 300,
             },
             starts: Some(ChainStarts::uniform_unconstrained()),
         }
@@ -7073,10 +7029,6 @@ decibans_thresh = 100.0
         let mut s = make_pmmh_stage(1000);
         if let Algorithm::PMMH { ref mut adapt_start, .. } = s.algorithm { *adapt_start = 1000; }
         assert_ne!(base.identity_payload(), s.identity_payload(), "adapt_start");
-
-        let mut s = make_pmmh_stage(1000);
-        if let Algorithm::PMMH { ref mut rho, .. } = s.algorithm { *rho = Some(0.99); }
-        assert_ne!(base.identity_payload(), s.identity_payload(), "rho");
     }
 
     fn if2_method(algorithm: Algorithm) -> Method {

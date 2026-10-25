@@ -602,16 +602,15 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
   Converted times need not land on the integrator step `dt`. What happens then
   is a declared, per-algorithm choice (`fit.toml [backend]`, alongside `dt`):
   `exact` steps to the observation time with a shortened final substep, `snap`
-  rounds onto the `dt` grid. `pfilter`, `if2` and plain `pmmh` default to
-  `exact` and reject `snap`; `pgas` uses a uniform grid and therefore `snap`,
-  and rejects `exact` naming the algorithms that support it; correlated `pmmh`
-  requires on-grid observations and errors off-grid. Nothing falls back
-  silently. Where snapping applies the rule is nearest — `round(t / dt)` — with
-  on-grid meaning within `1e-9`, and interventions and events map to steps
-  through the same `round(t / dt)`, so a snapped observation and an intervention
-  at the same instant land on the same step. The one hard error common to all is
-  two distinct observations mapping to the _same_ step (obs spacing `< dt`) — a
-  real data/`dt` mismatch.
+  rounds onto the `dt` grid. `pfilter`, `if2` and `pmmh` default to `exact` and
+  reject `snap`; `pgas` uses a uniform grid and therefore `snap`, and rejects
+  `exact` naming the algorithms that support it. Nothing falls back silently.
+  Where snapping applies the rule is nearest — `round(t / dt)` — with on-grid
+  meaning within `1e-9`, and interventions and events map to steps through the
+  same `round(t / dt)`, so a snapped observation and an intervention at the same
+  instant land on the same step. The one hard error common to all is two
+  distinct observations mapping to the _same_ step (obs spacing `< dt`) — a real
+  data/`dt` mismatch.
 
 ## Getting dates back out
 

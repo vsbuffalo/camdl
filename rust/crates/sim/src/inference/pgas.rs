@@ -1232,8 +1232,8 @@ pub struct SubstepGrid {
 
 /// Build the substep grid over `[t_start, last_obs]` under the alignment policy.
 /// The Exact arm materializes the shared [`Schedule::substeps`] walk — the SAME
-/// drift-free inner walk the bootstrap PF / IF2 / correlated-PF iterate (gh#233:
-/// one walk, two consumers) — instead of hand-rolling a second tiling. The
+/// drift-free inner walk the bootstrap PF / IF2 iterate (gh#233: one walk, two
+/// consumers) — instead of hand-rolling a second tiling. The
 /// `Schedule` is the single source of truth for where boundaries fall; the
 /// negligible-step floor is the shared `schedule::MIN_STEP_EPS` (was PGAS's own
 /// `GRID_STEP_EPS = 1e-12`, unified down).
@@ -1277,9 +1277,9 @@ pub fn build_substep_grid(
             let schedule =
                 Schedule::new(dt, last_obs, dt, StepPolicy::Exact, Vec::new(), effect_times.to_vec())
                     .with_obs(obs_times);
-            // PGAS materializes the SAME inner walk the bootstrap PF / IF2 /
-            // correlated-PF iterate (`Schedule::substeps`), instead of hand-rolling
-            // a second copy (gh#233 — one walk, two consumers). We loop obs windows
+            // PGAS materializes the SAME inner walk the bootstrap PF / IF2
+            // iterate (`Schedule::substeps`), instead of hand-rolling a second
+            // copy (gh#233 — one walk, two consumers). We loop obs windows
             // and collect each window's drift-free substeps into the flat grid; the
             // obs lands on the window's last substep, effects on the substep the
             // iterator signals via `fired`. The effect cursor carries monotonically

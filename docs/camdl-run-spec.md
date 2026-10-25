@@ -2440,23 +2440,23 @@ Three properties govern the whole surface:
 Every key a `fit.toml` accepts at the top level. Anything else fails at load
 with the serde list quoted in §6.9.
 
-| key              | type            | required  | default                | meaning                                                                                                                                                                                                                                                                                                                                         |
-| ---------------- | --------------- | --------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `[model]`        | table           | **yes**   | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                                                                                                                                                                                                                                     |
-| `[data]`         | table           | one of    | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                                                                                                                                                                                                                           |
-| `[synthetic]`    | table           | one of    | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                                                                                                                                                                                                                               |
-| `[estimate]`     | table of tables | **yes**   | —                      | The free parameters. See §6.3.                                                                                                                                                                                                                                                                                                                  |
-| `[fixed]`        | table           | **yes**   | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                         |
-| `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                        |
-| `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                           |
-| `output_dir`     | string          | no        | `results`              | Output root. Anchored at the `fit.toml`. Not part of the fit identity.                                                                                                                                                                                                                                                                          |
-| `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                   |
-| `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                |
-| `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                        |
-| `enable`         | list of strings | no        | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                                                                                                                                   |
-| `disable`        | list of strings | no        | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                                                                                                                                    |
-| `ic_free`        | bool            | no        | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/plain `pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — a `perturb_only_at_t0 = true` parameter. |
-| `[provenance]`   | table           | no        | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                                     |
+| key              | type            | required  | default                | meaning                                                                                                                                                                                                                                                                                                                                   |
+| ---------------- | --------------- | --------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[model]`        | table           | **yes**   | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                                                                                                                                                                                                                               |
+| `[data]`         | table           | one of    | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                                                                                                                                                                                                                     |
+| `[synthetic]`    | table           | one of    | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                                                                                                                                                                                                                         |
+| `[estimate]`     | table of tables | **yes**   | —                      | The free parameters. See §6.3.                                                                                                                                                                                                                                                                                                            |
+| `[fixed]`        | table           | **yes**   | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                   |
+| `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                  |
+| `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                     |
+| `output_dir`     | string          | no        | `results`              | Output root. Anchored at the `fit.toml`. Not part of the fit identity.                                                                                                                                                                                                                                                                    |
+| `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                             |
+| `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                          |
+| `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                  |
+| `enable`         | list of strings | no        | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                                                                                                                             |
+| `disable`        | list of strings | no        | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                                                                                                                              |
+| `ic_free`        | bool            | no        | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/`pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — a `perturb_only_at_t0 = true` parameter. |
+| `[provenance]`   | table           | no        | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                               |
 
 `[config]` (`FitBackendConfig`, `config_v2.rs:294`):
 
@@ -2665,17 +2665,16 @@ restarting mid-schedule is statistically incoherent.
 
 **`pmmh`** — `chains`, `particles`, `iterations` required.
 
-| key           | default | meaning                                                                              |
-| ------------- | ------- | ------------------------------------------------------------------------------------ |
-| `burn_in`     | `5000`  | Must be `< iterations`.                                                              |
-| `thin`        | `10`    |                                                                                      |
-| `adapt`       | `true`  | Haario adaptive Metropolis on the proposal SDs.                                      |
-| `adapt_start` | `300`   | MCMC step at which adaptation begins.                                                |
-| `rho`         | none    | Crank–Nicolson correlation for correlated pseudo-marginal MCMC; must be in `[0, 1)`. |
+| key           | default | meaning                                         |
+| ------------- | ------- | ----------------------------------------------- |
+| `burn_in`     | `5000`  | Must be `< iterations`.                         |
+| `thin`        | `10`    |                                                 |
+| `adapt`       | `true`  | Haario adaptive Metropolis on the proposal SDs. |
+| `adapt_start` | `300`   | MCMC step at which adaptation begins.           |
 
 **`mh`** — `chains`, `iterations` required. Reuses the PMMH chain and
 adaptive-proposal machinery with the particle-filter likelihood swapped for the
-deterministic ODE evaluation, so it carries neither `particles` nor `rho`.
+deterministic ODE evaluation, so it carries no `particles`.
 
 | key           | default | meaning                                                                                                                                                                           |
 | ------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -2739,22 +2738,19 @@ no direction to search in there.
 
 **Observation alignment.** `[config] obs_alignment` is resolved per algorithm
 (`methods.rs:516`). `if2` and `pfilter` step exactly to observation times and
-reject `"snap"`. `pgas` uses a uniform grid and rejects `"exact"`. Plain `pmmh`
-is exact; correlated `pmmh` (`rho` set) pre-draws one block of random numbers
-per observation window, each sized at that window's own substeps, so an
-irregular grid is fine — a daily reporting series with a day of no reporting
-included — but the observation times must walk forward from `t_start`. The ODE
-algorithms score on the integrator grid and reject the key entirely.
+reject `"snap"`. `pgas` uses a uniform grid and rejects `"exact"`. `pmmh` is
+exact. The ODE algorithms score on the integrator grid and reject the key
+entirely.
 
 **IC-free support.** `ic_free = true` is honored by `if2`, and by `pfilter` /
-plain `pmmh` on a model whose `init { }` declares a law
-(`methods.rs::validate_ic_free`). `pgas`, correlated `pmmh` and the ODE
-algorithms score every observation unconditionally, so the combination is
-rejected rather than allowed to compute the unconditional likelihood under a
-banner claiming otherwise. `pfilter` / plain `pmmh` on a _deterministic_
-`init { }` are rejected for the other reason: their bootstrap filter draws x₀
-per particle, but every such draw returns the same state, so the first reweight
-has nothing to discriminate between (gh#732).
+`pmmh` on a model whose `init { }` declares a law
+(`methods.rs::validate_ic_free`). `pgas` and the ODE algorithms score every
+observation unconditionally, so the combination is rejected rather than allowed
+to compute the unconditional likelihood under a banner claiming otherwise.
+`pfilter` / `pmmh` on a _deterministic_ `init { }` are rejected for the other
+reason: their bootstrap filter draws x₀ per particle, but every such draw
+returns the same state, so the first reweight has nothing to discriminate
+between (gh#732).
 
 ### 6.6 Chain starts: `starts`
 
@@ -3312,21 +3308,20 @@ check, `--dt-check-strict` tightens its threshold (0.5 nats for chain_binomial,
 overridden run is a distinct artifact rather than a cache hit on the
 un-overridden one — with the exception noted after the table.
 
-| flag                      | overrides                          | algorithm |
-| ------------------------- | ---------------------------------- | --------- |
-| `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh`    | gate      |
-| `--cooling-target-iters`  | `cooling_target_iters`             | IF2       |
-| `--max-tree-depth <N>`    | `max_tree_depth`                   | PGAS/NUTS |
-| `--trajectory-warmup <N>` | `trajectory_warmup`                | PGAS      |
-| `--csmc-sweeps-per-nuts`  | `csmc_sweeps_per_nuts`             | PGAS      |
-| `--n-trajectories <N>`    | `n_trajectories`                   | PGAS      |
-| `--diagonal-mass`         | `dense_mass = false`               | PGAS/NUTS |
-| `--no-nuts`               | `use_nuts = false`                 | PGAS      |
-| `--no-adapt`              | `adapt = false`                    | PMMH/MH   |
-| `--adapt-start <N>`       | `adapt_start`                      | PMMH/MH   |
-| `--rho <F>`               | `rho` (correlated pseudo-marginal) | PMMH      |
-| `--record-ancestry`       | `record_ancestry = true`           | PFilter   |
-| `--record-prequential`    | `record_prequential = true`        | PFilter   |
+| flag                      | overrides                       | algorithm |
+| ------------------------- | ------------------------------- | --------- |
+| `--decibans-thresh <DB>`  | `[method.gate].decibans_thresh` | gate      |
+| `--cooling-target-iters`  | `cooling_target_iters`          | IF2       |
+| `--max-tree-depth <N>`    | `max_tree_depth`                | PGAS/NUTS |
+| `--trajectory-warmup <N>` | `trajectory_warmup`             | PGAS      |
+| `--csmc-sweeps-per-nuts`  | `csmc_sweeps_per_nuts`          | PGAS      |
+| `--n-trajectories <N>`    | `n_trajectories`                | PGAS      |
+| `--diagonal-mass`         | `dense_mass = false`            | PGAS/NUTS |
+| `--no-nuts`               | `use_nuts = false`              | PGAS      |
+| `--no-adapt`              | `adapt = false`                 | PMMH/MH   |
+| `--adapt-start <N>`       | `adapt_start`                   | PMMH/MH   |
+| `--record-ancestry`       | `record_ancestry = true`        | PFilter   |
+| `--record-prequential`    | `record_prequential = true`     | PFilter   |
 
 The boolean overrides are one-way: they can switch a setting off, and switching
 it back means editing the TOML.
@@ -6275,7 +6270,6 @@ Per-algorithm overrides
   --no-nuts                   use_nuts = false — MH-within-Gibbs for θ|X (one-way)
   --no-adapt                  adapt = false — lock proposal SDs (one-way)
   --adapt-start N             step at which proposal-SD adaptation begins
-  --rho F                     Crank-Nicolson correlation, [0, 1)
   --record-ancestry           record ancestor indices for smoothing paths
   --record-prequential        record per-step predictive samples for `camdl compare`
 ```
@@ -6367,7 +6361,7 @@ mirror).
 --cooling F                 (default 0.95)          --rw-sd SPEC
 --algorithm NAME            per-cell algorithm (default if2); pair with --backend
 --backend NAME              chain_binomial (default) or ode
---pmmh-steps N / --pmmh-particles N / --pmmh-rho F      (PMMH only; 500/500/0.99)
+--pmmh-steps N / --pmmh-particles N                     (PMMH only; 500/500)
 --fit PATH                  fit.toml supplying priors, bounds and the fixed list
 --suppress-warnings         silence the flat-prior fallback warning
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)

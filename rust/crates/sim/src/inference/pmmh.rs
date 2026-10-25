@@ -20,7 +20,6 @@ use serde::{Serialize, Deserialize};
 use crate::rng::StatefulRng;
 use crate::error::SimError;
 use super::types::{EstimatedParam, restore_z_values};
-use super::particle_filter::Observation;
 pub use super::prior::Prior;
 
 // ── Configuration ──────────────────────────────────────────────────
@@ -30,11 +29,6 @@ pub struct PMMHConfig {
     pub n_steps: usize,
     pub n_particles: usize,
     pub dt: f64,
-    /// Start of the inference window — the left edge of the first observation
-    /// window `[t_start, obs(0)]`. Only correlated PMMH reads it, to size that
-    /// window's block of pre-drawn noise; it must match the `t_start` the
-    /// particle filter runs at (`SMCConfig::t_start`).
-    pub t_start: f64,
     /// Initial proposal SD on the transformed scale (diagonal: one per estimated param).
     pub proposal_sd: Vec<f64>,
     /// Enable adaptive Metropolis (Haario et al. 2001).
@@ -66,18 +60,6 @@ pub struct PMMHConfig {
     pub thin: usize,
     /// Discard first `burn_in` steps from output.
     pub burn_in: usize,
-    /// Crank-Nicolson correlation for correlated pseudo-marginal.
-    /// None = vanilla PMMH (independent PF evaluations).
-    /// Some(0.99) = CPM with ρ=0.99 (recommended).
-    pub rho: Option<f64>,
-    /// Number of source groups in the model (for sizing binomial noise).
-    /// Set by the CLI from model.source_groups.len().
-    pub n_source_groups: usize,
-    /// Standard normals one particle's initial-state draw consumes (for sizing
-    /// the correlated vector's init block). Set by the CLI from
-    /// `CompiledModel::init_noise_width`; `0` for a model whose `init { }` is
-    /// entirely deterministic, which is every model that has no law to draw.
-    pub init_noise_width: usize,
 }
 
 impl super::traits::InferenceConfig for PMMHConfig {
@@ -159,8 +141,6 @@ pub struct PMMHResumeState {
     pub n_accepted: usize,
     /// Adaptive proposal state (None if adapt=false).
     pub adaptive: Option<AdaptiveProposal>,
-    /// CPM random state (None if rho=None).
-    pub current_randoms: Option<super::correlated_pf::PFRandomState>,
     /// MAP parameter values.
     pub map_params: Vec<f64>,
     /// MAP log-likelihood.
@@ -522,8 +502,8 @@ mod adaptive_scale_tests {
 /// PMMH wraps a Metropolis-Hastings loop around a black-box likelihood
 /// estimator. It doesn't need to know how the PF is constructed — only that
 /// `eval_loglik(params, seed) -> Result<log L̂(θ)>` returns an unbiased estimate.
-/// This decoupling means PMMH works with any likelihood estimator (vanilla
-/// PF, correlated PF, importance sampling, etc.) without code changes.
+/// This decoupling means PMMH works with any likelihood estimator (bootstrap
+/// PF, importance sampling, etc.) without code changes.
 ///
 /// `eval_loglik` runs a particle filter at the given params and returns
 /// `Ok(log L̂(θ))` — where `Ok(-∞)` is a legitimate "θ ruled out" result the
@@ -534,11 +514,6 @@ mod adaptive_scale_tests {
 /// Built in the CLI layer from `run_quick_pfilter`. Takes `(full_params, pf_seed)`.
 ///
 /// `on_step` optional progress callback: `(step, loglik, accepted)`.
-/// Correlated PF evaluator for CPM-MCMC.
-/// Takes (params, randoms) → `Ok(loglik)` / `Err(structural)`, same contract.
-pub type CorrelatedEvalFn<'a> = dyn Fn(&[f64], &super::correlated_pf::PFRandomState)
-    -> Result<f64, SimError> + 'a;
-
 // `param_names`: full parameter names, parallel to `base_params` (positional,
 // not subset to estimated params). Used to build the name → value env for
 // hierarchical prior resolution. Wave 2 / #3 Gate 3a. When no hierarchical
@@ -549,9 +524,7 @@ pub fn run_pmmh(
     base_params: &[f64],
     param_names: &[String],
     config: &PMMHConfig,
-    observations: &[Observation],
     eval_loglik: &dyn Fn(&[f64], u64) -> Result<f64, SimError>,
-    eval_loglik_correlated: Option<&CorrelatedEvalFn>,
     seed: u64,
     on_step: Option<&dyn Fn(usize, f64, bool, &[f64])>,
     resume_from: Option<PMMHResumeState>,
@@ -569,24 +542,11 @@ pub fn run_pmmh(
             "param_names must be aligned with base_params for hierarchical priors");
     }
 
-    use super::correlated_pf::PFRandomState;
-
-    // CPM sizing: one noise block per observation window, sized at that
-    // window's own substep count, derived from the observation times, t_start
-    // and dt rather than from config fields. The same function the correlated
-    // filter strides its rows with, so the two cannot disagree about where a
-    // given (window, particle, substep) draw lives — which is the whole basis
-    // of the method: the same random reused at the same slot across iterations.
-    let obs_times: Vec<f64> = observations.iter().map(|o| o.time).collect();
-    let steps_per_obs =
-        super::correlated_pf::cpm_steps_per_obs(&obs_times, config.t_start, config.dt);
-
     let start_step;
     let mut current_params: Vec<f64>;
     let mut current_transformed: Vec<f64>;
     let mut current_ll: f64;
     let mut current_log_prior: f64;
-    let mut current_randoms: Option<PFRandomState>;
     let mut map_log_posterior: f64;
     let mut map_params: Vec<f64>;
     let mut map_loglik: f64;
@@ -602,7 +562,6 @@ pub fn run_pmmh(
         n_accepted = state.n_accepted;
         current_ll = state.current_ll;
         current_log_prior = state.current_log_prior;
-        current_randoms = state.current_randoms;
         adaptive = state.adaptive;
         map_params = state.map_params;
         map_loglik = state.map_loglik;
@@ -630,22 +589,8 @@ pub fn run_pmmh(
             .map(|p| p.to_transformed(current_params[p.index]))
             .collect();
 
-        // CPM random state (if correlated mode)
-        current_randoms = config.rho.map(|_| {
-            PFRandomState::draw_fresh(
-                config.n_particles, &steps_per_obs,
-                config.n_source_groups, config.init_noise_width, &mut rng,
-            )
-        });
-
         // Initial PF evaluation
-        current_ll = if let (Some(ref randoms), Some(eval_corr)) =
-            (&current_randoms, &eval_loglik_correlated)
-        {
-            eval_corr(&current_params, randoms)?
-        } else {
-            eval_loglik(&current_params, seed.wrapping_add(0))?
-        };
+        current_ll = eval_loglik(&current_params, seed.wrapping_add(0))?;
         {
             let env = crate::inference::hierarchical::NamedParams {
                 names: param_names,
@@ -754,20 +699,9 @@ pub fn run_pmmh(
                 .sum()
         };
 
-        // Evaluate PF: correlated or independent
-        let proposed_randoms: Option<PFRandomState>;
-        let proposed_ll;
-        if let (Some(rho), Some(ref cur_rand), Some(eval_corr)) =
-            (config.rho, &current_randoms, &eval_loglik_correlated)
-        {
-            let pr = cur_rand.correlate(rho, &mut rng);
-            proposed_ll = eval_corr(&proposed_params, &pr)?;
-            proposed_randoms = Some(pr);
-        } else {
-            let pf_seed = seed.wrapping_add(step as u64 + 1);
-            proposed_ll = eval_loglik(&proposed_params, pf_seed)?;
-            proposed_randoms = None;
-        };
+        // Evaluate the PF at the proposal
+        let pf_seed = seed.wrapping_add(step as u64 + 1);
+        let proposed_ll = eval_loglik(&proposed_params, pf_seed)?;
 
         // Jacobian correction
         let proposed_log_jacobian: f64 = if2_params.iter()
@@ -801,9 +735,6 @@ pub fn run_pmmh(
             current_ll = proposed_ll;
             current_log_prior = proposed_log_prior;
             current_log_jacobian = proposed_log_jacobian;
-            if proposed_randoms.is_some() {
-                current_randoms = proposed_randoms;
-            }
             n_accepted += 1;
             // gh#audit-M4. Track post-burn-in acceptances separately
             // so the reported acceptance_rate excludes the warm-up
@@ -932,7 +863,6 @@ pub fn run_pmmh(
         current_log_prior,
         n_accepted,
         adaptive,
-        current_randoms,
         map_params: map_params.clone(),
         map_loglik,
         map_log_posterior,

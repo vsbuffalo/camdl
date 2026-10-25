@@ -181,7 +181,6 @@ fn run_profile_pmmh(
         // we get ~100 post-burn samples → enough for Rhat at K>=3.
         "--pmmh-steps".into(), "200".into(),
         "--pmmh-particles".into(), "30".into(),
-        "--pmmh-rho".into(), "0.99".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
         "--n-starts".into(), format!("{}", starts),
@@ -461,7 +460,6 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
         "--algorithm".into(), "pmmh".into(),
         "--pmmh-steps".into(), "150".into(),
         "--pmmh-particles".into(), "2".into(),
-        "--pmmh-rho".into(), "0.0".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
         "--n-starts".into(), "3".into(),

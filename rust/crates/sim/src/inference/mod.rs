@@ -27,7 +27,6 @@ pub mod chain_binomial_process;
 pub mod prior;
 pub mod hierarchical;
 pub mod pmmh;
-pub mod correlated_pf;
 pub mod pgas;
 pub mod pgas_grad;
 pub mod pgas_init;  // gh#784 — X₀ from an unconditional SMC pass

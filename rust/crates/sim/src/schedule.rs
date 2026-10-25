@@ -263,7 +263,7 @@ impl Schedule {
         )
     }
 
-    /// EXACT inference schedule (bootstrap PF / IF2 / correlated-PF): no output
+    /// EXACT inference schedule (bootstrap PF / IF2): no output
     /// snapshots (inference scores observations, it does not record a trajectory),
     /// scheduled-effect boundaries from `effects`, observation boundaries from
     /// `obs`. Built via [`crate::intervention::ExactInferenceTimeline::build`],
@@ -479,13 +479,13 @@ impl Schedule {
     /// fired_effect)` for each substep up to the boundary `cursor` points at (its
     /// current obs). The step size is [`Schedule::substep`]; `t0` is **drift-free**
     /// (`substep_time(window_start, s)`, re-anchored at each effect landing) — the
-    /// canonical substep-time convention the bootstrap PF / IF2 / correlated PF and
-    /// PGAS now share (gh#233 finished the deferred task #14 here).
+    /// canonical substep-time convention the bootstrap PF / IF2 and PGAS now
+    /// share (gh#233 finished the deferred task #14 here).
     ///
     /// This is the single shared primitive behind those inner loops AND the PGAS
     /// grid (the consolidation seam — one walk, two consumers). Each driver keeps
-    /// its OWN body over the iterator — death-on-recoverable-error, pre-drawn-noise
-    /// injection, the IF2 θ-perturbation, the PGAS grid materialization — because
+    /// its OWN body over the iterator — death-on-recoverable-error, the IF2
+    /// θ-perturbation, the PGAS grid materialization — because
     /// those genuinely differ; only the walk is shared. `cursor` is taken by value
     /// (`Copy`): the iterator walks within the window the caller positioned it at
     /// and never mutates the caller's cursor, so the CRN invariant (N particles,
@@ -617,8 +617,8 @@ impl Schedule {
 /// (`t += step_dt`, O(s) drift). `window_start` re-anchors to each EXACT
 /// effect-boundary time the walk lands on (and to the window's `t_start` at
 /// construction); `s` is the within-anchor index. This is the SAME walk PGAS
-/// materializes ([`crate::inference::pgas`]), so the bootstrap PF / IF2 /
-/// correlated-PF proposal and the PGAS transition density sample
+/// materializes ([`crate::inference::pgas`]), so the bootstrap PF / IF2
+/// proposal and the PGAS transition density sample
 /// time-inhomogeneous forcing at identical times — there is one walk, not two.
 /// See docs/dev/proposals/2026-06-05-substep-time-sdt-convention.md.
 pub struct Substeps<'a> {

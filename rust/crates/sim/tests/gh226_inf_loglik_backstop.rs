@@ -42,7 +42,6 @@ fn mu_param() -> EstimatedParam {
 /// surface is supplied by the closure, so particle count / step count are tiny.
 fn small_config() -> PMMHConfig {
     PMMHConfig {
-        t_start: 0.0,
         n_steps: 20,
         n_particles: 10,
         dt: 1.0,
@@ -52,8 +51,6 @@ fn small_config() -> PMMHConfig {
         adapt_stop: 0,
         thin: 1,
         burn_in: 0,
-        rho: None,
-        n_source_groups: 0, init_noise_width: 0,
     }
 }
 
@@ -71,8 +68,8 @@ fn all_inf_surface_is_degenerate_and_flagged() {
     let eval_inf = |_: &[f64], _: u64| -> Result<f64, SimError> { Ok(f64::NEG_INFINITY) };
 
     let result = run_pmmh(
-        &if2_params, &priors, &base_params, &[], &cfg, &[],
-        &eval_inf, None, 42, None, None, String::new(),
+        &if2_params, &priors, &base_params, &[], &cfg,
+        &eval_inf, 42, None, None, String::new(),
     )
     .expect("run_pmmh still returns Ok for a degenerate all-(-inf) surface (raw sampler result)");
 
@@ -101,8 +98,8 @@ fn finite_surface_reaches_a_finite_anchor() {
     let eval_finite = |_: &[f64], _: u64| -> Result<f64, SimError> { Ok(-42.0) };
 
     let result = run_pmmh(
-        &if2_params, &priors, &base_params, &[], &cfg, &[],
-        &eval_finite, None, 42, None, None, String::new(),
+        &if2_params, &priors, &base_params, &[], &cfg,
+        &eval_finite, 42, None, None, String::new(),
     )
     .expect("run_pmmh returns Ok for a finite surface");
 

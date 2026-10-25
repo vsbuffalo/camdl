@@ -239,7 +239,6 @@ fn run_profile(
         // post-burn-in samples — still a fast smoke run (gh#102).
         "--pmmh-steps".into(), "120".into(),
         "--pmmh-particles".into(), "30".into(),
-        "--pmmh-rho".into(), "0.99".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
         "--n-starts".into(), "1".into(),

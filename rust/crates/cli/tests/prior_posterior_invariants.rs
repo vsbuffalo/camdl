@@ -162,16 +162,6 @@ cooling    = 0.5
             "--algorithm", "pmmh",
             "--pmmh-steps", "200",
             "--pmmh-particles", "100",
-            // rho = 0.0 = the PLAIN bootstrap PF. The correlated PF (rho > 0)
-            // returns -inf on this sharp, high-count NegBinomial likelihood — a
-            // real bug filed in docs/dev/notes/2026-06-08-correlated-pf-degenerate-loglik.md
-            // (localized: at rho=0.0 final_loglik is finite, at rho>=0.5 it is
-            // -inf, everything else equal). This test pins the *prior-sum*
-            // invariant, which is filter-agnostic (the gap = log_posterior -
-            // loglik is exactly the prior contribution regardless of the filter),
-            // so it runs on the working plain PF. Do NOT raise rho here to "test
-            // correlation" — that re-buries the correlated-PF bug behind -inf.
-            "--pmmh-rho", "0.0",
             "--n-starts", "1",
             "--rw-sd", "auto",
             "--output", &out_tsv.to_string_lossy(),

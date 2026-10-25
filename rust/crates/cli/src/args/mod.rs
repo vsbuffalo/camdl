@@ -918,12 +918,6 @@ pub struct FitRunArgs {
     #[arg(long, value_name = "N")]
     pub adapt_start: Option<usize>,
 
-    /// Override [method.rho] (Crank-Nicolson correlation for
-    /// correlated pseudo-marginal MCMC). Set to a value in [0, 1).
-    ///
-    #[arg(long, value_name = "F")]
-    pub rho: Option<f64>,
-
     // ── PFilter-specific algorithm overrides  ───────
 
     /// Override [method.record_ancestry] to true (record
@@ -1918,18 +1912,9 @@ pub struct ProfileArgs {
     pub pmmh_steps: usize,
 
     /// PMMH only: particles per PF evaluation. Default 500 is the
-    /// standard PMMH range; CPM (rho > 0) keeps MCMC mixing high
-    /// without needing 1000+.
+    /// standard PMMH range.
     #[arg(long, default_value_t = 500, value_name = "N")]
     pub pmmh_particles: usize,
-
-    /// PMMH only: Crank-Nicolson correlation for correlated
-    /// pseudo-marginal (CPM-MCMC). Default 0.99 gives strong PF
-    /// correlation and excellent MH mixing. Pass `0.0` (or any
-    /// value ≤ 0) to disable CPM and run vanilla PMMH with
-    /// independent PF draws.
-    #[arg(long, default_value_t = 0.99, value_name = "FLOAT")]
-    pub pmmh_rho: f64,
 }
 
 // ─── survey ───────────────────────────────────────────────────────────────────

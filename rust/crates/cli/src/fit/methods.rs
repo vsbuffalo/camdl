@@ -96,8 +96,7 @@ pub const METHODS: &[InferenceMethod] = &[
         status_note:
             "Acceptance rates degrade for long observation series \
              (T > 500); prefer PGAS — the default Bayesian path — on long \
-             chain-binomial series. Correlated pseudo-marginal (rho config) \
-             helps but has limits on discrete-state models.",
+             chain-binomial series.",
     },
     InferenceMethod {
         algorithm: FitAlgorithm::Pfilter,
@@ -501,56 +500,27 @@ pub enum ObsAlignment {
 
 /// The single `(algorithm × obs-alignment)` support gate at the fit-dispatch seam.
 /// Returns the resolved alignment, or a clean error for an unsupported
-/// combination — converting today's *silent* fallbacks into loud errors:
-/// `exact` + PGAS silently snaps to a uniform grid, and `exact` + off-grid
-/// correlated-PMMH silently falls back to fresh RNG (decorrelating the CPM
-/// estimator). The threading of the resolved alignment into the filters'
-/// `Schedule` policy, and the unimplemented modes (PF-snap, PGAS-exact), are
-/// Stage 3; today this is the validation seam.
+/// combination — converting a *silent* fallback into a loud error: `exact` +
+/// PGAS silently snaps to a uniform grid. The threading of the resolved
+/// alignment into the filters' `Schedule` policy, and the unimplemented modes
+/// (PF-snap, PGAS-exact), are Stage 3; today this is the validation seam.
 ///
 /// * `requested = None` is the default: "exact where the algorithm supports it".
-/// * `correlated` — a PMMH run with `rho` set (CPM); its pre-drawn-noise layout
-///   assumes a fixed substep count per observation window, so `exact` requires
-///   on-grid obs.
-/// * `obs_on_grid` — every observation time is an integer multiple of `dt`.
 pub fn resolve_obs_alignment(
     algorithm: FitAlgorithm,
-    correlated: bool,
     requested: Option<ObsAlignment>,
-    obs_on_grid: bool,
 ) -> Result<ObsAlignment, String> {
     use FitAlgorithm as A;
     use ObsAlignment::{Exact, Snap};
     match algorithm {
-        // Exact-steppers: land exactly on any obs. No `snap` inference path exists.
-        A::If2 | A::Pfilter => match requested {
+        // Exact-steppers: land exactly on any obs. No `snap` inference path
+        // exists. PMMH is one too — its likelihood is the bootstrap PF.
+        A::If2 | A::Pfilter | A::Pmmh => match requested {
             None | Some(Exact) => Ok(Exact),
             Some(Snap) => Err(format!(
                 "{algorithm}: obs_alignment = \"snap\" is not implemented — it steps \
                  exactly to observation times. Use \"exact\" (the default)."
             )),
-        },
-        A::Pmmh => match (requested, correlated, obs_on_grid) {
-            // Plain PMMH (no `rho`) is the bootstrap PF: exact on any obs.
-            (None | Some(Exact), false, _) => Ok(Exact),
-            // Correlated PMMH (CPM, `rho` set): exact only on-grid.
-            (None | Some(Exact), true, true) => Ok(Exact),
-            (None, true, false) => Err(
-                "pmmh with rho (correlated pseudo-marginal): observations are off the \
-                 dt grid, but the correlated-PF noise layout assumes a fixed substep \
-                 count per observation window. Put observations on the dt grid, or \
-                 unset rho (plain PMMH steps exactly to any obs)."
-                    .into(),
-            ),
-            (Some(Exact), true, false) => Err(
-                "pmmh: obs_alignment = \"exact\" with rho (correlated) requires \
-                 on-grid observations — the correlated-PF noise layout assumes a \
-                 fixed substep count per observation window."
-                    .into(),
-            ),
-            (Some(Snap), _, _) => {
-                Err("pmmh: obs_alignment = \"snap\" is not implemented.".into())
-            }
         },
         // PGAS uses a uniform grid; exact-PGAS is planned but not yet built.
         A::Pgas => match requested {
@@ -611,7 +581,7 @@ pub enum InitLaw {
 /// `sim/tests/gh364_if2_per_particle_initial_state.rs`) — which is what a
 /// `perturb_only_at_t0 = true` parameter buys, and it buys it under IF2 only.
 ///
-/// `pfilter` and plain `pmmh` have property 1 always and property 2 **only for
+/// `pfilter` and `pmmh` have property 1 always and property 2 **only for
 /// a model that declares an `init { }` law** (gh#732). Both run the bootstrap
 /// particle filter, which draws x₀ per particle from that particle's own RNG
 /// stream. Under a law those draws differ; under a deterministic `init { }`
@@ -625,19 +595,11 @@ pub enum InitLaw {
 ///   * `nl-sbplx` / `nl-bobyqa` / `mh` / `nuts` — score via
 ///     `runner::compute_ode_loglik`, which sums over every obs time with no
 ///     skip.
-///   * `pmmh` **with** `rho` (correlated PMMH) — routes to
-///     `correlated_pf::bootstrap_filter_correlated`, which adds every
-///     increment unconditionally. It has property 2 for a law-bearing model
-///     (each particle draws its own x₀ from its own block of the pre-drawn
-///     correlated vector, gh#772), but property 1 is what decides here and it
-///     does not have it.
 ///
 /// Each is a hard error at config-load time naming its own reason —
-/// converting a silent wrong answer into a loud failure. `correlated` is
-/// `true` for a PMMH stage with `rho` set.
+/// converting a silent wrong answer into a loud failure.
 pub fn validate_ic_free(
     algorithm: FitAlgorithm,
-    correlated: bool,
     init_law: InitLaw,
 ) -> Result<(), String> {
     use FitAlgorithm as A;
@@ -645,20 +607,6 @@ pub fn validate_ic_free(
         // Drops the first increment, and gives each particle its own x₀ drawn
         // from its own perturbed θ — for any model.
         A::If2 => Ok(()),
-        // Correlated PMMH fails property 1 as well, and for a different
-        // reason than the bootstrap-PF cells — say which. Ordered before the
-        // bootstrap-PF arms so `rho` decides first.
-        A::Pmmh if correlated => Err(
-            "ic_free = true is not supported with correlated PMMH (a `pmmh` \
-             stage with `rho` set). The correlated particle filter \
-             (correlated_pf) accumulates every observation's log-likelihood \
-             increment unconditionally, so it would silently compute the \
-             UNCONDITIONAL likelihood while reporting that it conditioned on \
-             y₁.\n\n  \
-             Drop `rho` to run plain PMMH, use `algorithm = if2`, or remove \
-             `ic_free = true`."
-                .into(),
-        ),
         // gh#732. The bootstrap PF draws x₀ per particle, so a declared law
         // gives these two the spread the first reweight needs.
         A::Pfilter | A::Pmmh if init_law == InitLaw::Declared => Ok(()),
@@ -1171,37 +1119,24 @@ mod tests {
     #[test]
     fn obs_alignment_exact_steppers_any_obs() {
         use ObsAlignment::{Exact, Snap};
-        // if2/pfilter are exact on any obs; default and explicit exact both ok.
-        for algo in [FitAlgorithm::If2, FitAlgorithm::Pfilter] {
-            assert_eq!(resolve_obs_alignment(algo, false, None, true), Ok(Exact));
-            assert_eq!(resolve_obs_alignment(algo, false, None, false), Ok(Exact));
-            assert_eq!(resolve_obs_alignment(algo, false, Some(Exact), false), Ok(Exact));
+        // if2/pfilter/pmmh are exact on any obs; default and explicit exact
+        // both ok.
+        for algo in [FitAlgorithm::If2, FitAlgorithm::Pfilter, FitAlgorithm::Pmmh] {
+            assert_eq!(resolve_obs_alignment(algo, None), Ok(Exact));
+            assert_eq!(resolve_obs_alignment(algo, Some(Exact)), Ok(Exact));
             // snap is not implemented for the exact-steppers.
-            assert!(resolve_obs_alignment(algo, false, Some(Snap), true).is_err());
+            assert!(resolve_obs_alignment(algo, Some(Snap)).is_err());
         }
-    }
-
-    #[test]
-    fn obs_alignment_pmmh_is_rho_dependent() {
-        use ObsAlignment::Exact;
-        // Plain PMMH (uncorrelated) = bootstrap PF: exact on any obs.
-        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pmmh, false, None, false), Ok(Exact));
-        // Correlated PMMH (rho set): exact OK on-grid...
-        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pmmh, true, None, true), Ok(Exact));
-        // ...but off-grid + correlated is a CLEAN ERROR (was silent fresh-RNG
-        // decorrelation, #17), under both default and explicit exact.
-        assert!(resolve_obs_alignment(FitAlgorithm::Pmmh, true, None, false).is_err());
-        assert!(resolve_obs_alignment(FitAlgorithm::Pmmh, true, Some(Exact), false).is_err());
     }
 
     #[test]
     fn obs_alignment_pgas_snap_only_exact_is_clean_error() {
         use ObsAlignment::{Exact, Snap};
         // PGAS defaults to snap (its only mode today)...
-        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, false, None, true), Ok(Snap));
-        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, false, Some(Snap), true), Ok(Snap));
+        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, None), Ok(Snap));
+        assert_eq!(resolve_obs_alignment(FitAlgorithm::Pgas, Some(Snap)), Ok(Snap));
         // ...and exact is a CLEAN ERROR (was a silent snap), naming the fix.
-        let err = resolve_obs_alignment(FitAlgorithm::Pgas, false, Some(Exact), true).unwrap_err();
+        let err = resolve_obs_alignment(FitAlgorithm::Pgas, Some(Exact)).unwrap_err();
         assert!(err.contains("not yet implemented"), "should name exact-PGAS as unimplemented: {err}");
         assert!(err.contains("if2") || err.contains("snap"), "should suggest a fix: {err}");
     }
@@ -1210,12 +1145,12 @@ mod tests {
     //
     // `ic_free = true` (IC-free / conditional likelihood) needs BOTH: an
     // algorithm that drops y₁ from the accumulated loglik, and particles that
-    // differ in x₀. PGAS, the ODE algorithms (via `compute_ode_loglik`) and
-    // correlated PMMH (via `bootstrap_filter_correlated`) fail the first for
-    // every model. `pfilter` and plain `pmmh` pass the first always and the
-    // second only when the MODEL declares an `init { }` law — the bootstrap PF
-    // draws x₀ per particle, and a deterministic `init { }` returns the same
-    // state on every draw (gh#732). Those are the four cells below.
+    // differ in x₀. PGAS and the ODE algorithms (via `compute_ode_loglik`)
+    // fail the first for every model. `pfilter` and `pmmh` pass the first
+    // always and the second only when the MODEL declares an `init { }` law —
+    // the bootstrap PF draws x₀ per particle, and a deterministic `init { }`
+    // returns the same state on every draw (gh#732). Those are the four cells
+    // below.
 
     #[test]
     fn ic_free_is_accepted_for_if2_under_either_model() {
@@ -1223,7 +1158,7 @@ mod tests {
         // x₀ from its own θ (gh#364), so its spread does not depend on the
         // model's `init { }`.
         for law in [InitLaw::Absent, InitLaw::Declared] {
-            assert!(validate_ic_free(FitAlgorithm::If2, false, law).is_ok(),
+            assert!(validate_ic_free(FitAlgorithm::If2, law).is_ok(),
                 "if2 must be admitted with init law {law:?}");
         }
     }
@@ -1236,9 +1171,9 @@ mod tests {
     fn ic_free_bootstrap_pf_cells_are_admitted_when_the_model_draws_x0() {
         for algo in [FitAlgorithm::Pfilter, FitAlgorithm::Pmmh] {
             assert!(
-                validate_ic_free(algo, false, InitLaw::Declared).is_ok(),
+                validate_ic_free(algo, InitLaw::Declared).is_ok(),
                 "{algo} with a declared init law must be admitted: {:?}",
-                validate_ic_free(algo, false, InitLaw::Declared)
+                validate_ic_free(algo, InitLaw::Declared)
             );
         }
     }
@@ -1250,7 +1185,7 @@ mod tests {
     #[test]
     fn ic_free_bootstrap_pf_cells_are_refused_on_a_deterministic_init() {
         for algo in [FitAlgorithm::Pfilter, FitAlgorithm::Pmmh] {
-            let err = validate_ic_free(algo, false, InitLaw::Absent).unwrap_err();
+            let err = validate_ic_free(algo, InitLaw::Absent).unwrap_err();
             assert!(err.contains("ic_free"), "{algo}: must name ic_free: {err}");
             assert!(err.contains(algo.as_str()),
                 "{algo}: must name the offending algorithm: {err}");
@@ -1274,7 +1209,7 @@ mod tests {
         // PGAS fails property 1 (it scores every obs), which no `init { }` law
         // changes — so both model shapes are refused.
         for law in [InitLaw::Absent, InitLaw::Declared] {
-            let err = validate_ic_free(FitAlgorithm::Pgas, false, law).unwrap_err();
+            let err = validate_ic_free(FitAlgorithm::Pgas, law).unwrap_err();
             assert!(err.contains("ic_free"), "must name ic_free: {err}");
             assert!(err.contains("pgas"), "must name the offending algorithm: {err}");
             // Points the user at the supported alternative.
@@ -1287,33 +1222,10 @@ mod tests {
         // Both NLopt deterministic optimizers score every obs via
         // compute_ode_loglik — conditioning is silently ignored.
         for algo in [FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa] {
-            let err = validate_ic_free(algo, false, InitLaw::Declared).unwrap_err();
+            let err = validate_ic_free(algo, InitLaw::Declared).unwrap_err();
             assert!(err.contains("ic_free"), "{algo}: must name ic_free: {err}");
             assert!(err.contains(algo.as_str()), "{algo}: must name the algorithm: {err}");
         }
-    }
-
-    #[test]
-    fn ic_free_correlated_pmmh_names_the_correlated_reason() {
-        // Correlated PMMH (rho set) routes to bootstrap_filter_correlated,
-        // which adds every increment unconditionally. That refusal is
-        // independent of the model: `rho` decides before the init law does, so
-        // a declared law does NOT open this cell, and the message must still
-        // be the rho one — a user who unsets `rho` must not be told to unset
-        // it again.
-        for law in [InitLaw::Absent, InitLaw::Declared] {
-            let err = validate_ic_free(FitAlgorithm::Pmmh, true, law).unwrap_err();
-            assert!(err.contains("ic_free"), "must name ic_free: {err}");
-            assert!(
-                err.contains("correlated") || err.contains("rho"),
-                "must name the correlated/rho condition: {err}"
-            );
-        }
-        // …and plain PMMH on the same deterministic model is refused for the
-        // OTHER reason, so the two messages stay distinguishable.
-        let plain = validate_ic_free(FitAlgorithm::Pmmh, false, InitLaw::Absent).unwrap_err();
-        assert!(plain.contains("bootstrap particle filter"),
-            "plain PMMH is refused for the missing t=0 spread, not for rho: {plain}");
     }
 
     #[test]
