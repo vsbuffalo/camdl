@@ -318,6 +318,43 @@ pub enum ScenarioRef {
     },
 }
 
+/// The derived label of `simulate`'s ad-hoc arm — the one arm a run without
+/// `--scenario` has (proposal 2026-10-24-batch-to-simulate §3 "Arm labels").
+///
+/// `baseline` when nothing is overridden; otherwise `baseline` followed by
+/// `+name` for each enabled intervention, `-name` for each disabled one, and
+/// `;param=value` for each `--param`, each group sorted by name and each value
+/// in Rust's shortest round-trip form, so the label is a pure function of the
+/// resolved arm and `beta=.3` and `beta=0.3` give one label:
+/// `baseline+vaccination`, `baseline-sia`, `baseline;beta=0.3`. A derived
+/// label cannot collide with a declared scenario, whose name is an identifier.
+/// The label is provenance — it names the leaf's path segment, its `run.json`
+/// level and the listings — never identity, which the resolved delta hashes.
+pub fn adhoc_arm_label(enable: &[String], disable: &[String], params: &[(String, f64)]) -> String {
+    let mut label = String::from("baseline");
+    let mut enable: Vec<&String> = enable.iter().collect();
+    enable.sort();
+    for e in enable {
+        label.push('+');
+        label.push_str(e);
+    }
+    let mut disable: Vec<&String> = disable.iter().collect();
+    disable.sort();
+    for d in disable {
+        label.push('-');
+        label.push_str(d);
+    }
+    let mut params: Vec<&(String, f64)> = params.iter().collect();
+    params.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, value) in params {
+        label.push(';');
+        label.push_str(name);
+        label.push('=');
+        label.push_str(&value.to_string());
+    }
+    label
+}
+
 impl ScenarioRef {
     /// The display/slug name of this reference.
     pub fn name(&self) -> &str {
@@ -455,6 +492,34 @@ mod tests {
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn adhoc_arm_label_is_a_pure_function_of_the_resolved_arm() {
+        assert_eq!(adhoc_arm_label(&[], &[], &[]), "baseline");
+        assert_eq!(adhoc_arm_label(&names(&["vaccination"]), &[], &[]), "baseline+vaccination");
+        assert_eq!(adhoc_arm_label(&[], &names(&["sia"]), &[]), "baseline-sia");
+        let p = |v: f64| vec![("beta".to_string(), v)];
+        assert_eq!(adhoc_arm_label(&[], &[], &p(0.3)), "baseline;beta=0.3");
+        // `beta=.3` parses to the same f64 as `beta=0.3`: one label.
+        assert_eq!(adhoc_arm_label(&[], &[], &p(".3".parse().unwrap())), "baseline;beta=0.3");
+        // Groups sorted by name, flag order irrelevant.
+        assert_eq!(
+            adhoc_arm_label(
+                &names(&["sia", "vaccination"]),
+                &names(&["closure"]),
+                &[("gamma".to_string(), 0.1), ("beta".to_string(), 2.0)],
+            ),
+            adhoc_arm_label(
+                &names(&["vaccination", "sia"]),
+                &names(&["closure"]),
+                &[("beta".to_string(), 2.0), ("gamma".to_string(), 0.1)],
+            )
+        );
+        assert_eq!(
+            adhoc_arm_label(&names(&["vaccination", "sia"]), &names(&["closure"]), &[("beta".to_string(), 2.0)]),
+            "baseline+sia+vaccination-closure;beta=2"
+        );
     }
 
     #[test]

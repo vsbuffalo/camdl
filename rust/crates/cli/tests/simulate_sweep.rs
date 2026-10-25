@@ -477,3 +477,36 @@ fn quantities_are_grouped_per_design_point_and_scenario() {
     assert_eq!(distinct(&column(&header, &rows, "sweep:rho")), vec!["0.5", "0.9"]);
     assert_eq!(rows.len(), 2);
 }
+
+/// Test 3 (first half) — `--sweep beta=0.2,0.3` and `--sweep beta=0.3,0.2`
+/// are the same cell set (under D-B every point shares the seed) but two
+/// combined files, so two ensemble identities: the design is in the key.
+#[test]
+fn sweep_value_order_is_in_the_ensemble_identity() {
+    fn ensemble_id(fx: &Fixture) -> String {
+        let ens = run_leaves(&fx.path("out").join("ensembles"));
+        assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
+        let rec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ens[0].join("run.json")).unwrap()).unwrap();
+        rec["run_id"].as_str().unwrap().to_string()
+    }
+    let a = Fixture::new();
+    assert_ok(&a.simulate(&["--sweep", "rho=0.2,0.3", "--seed", "9"]), "0.2,0.3");
+    let b = Fixture::new();
+    assert_ok(&b.simulate(&["--sweep", "rho=0.3,0.2", "--seed", "9"]), "0.3,0.2");
+    let c = Fixture::new();
+    assert_ok(&c.simulate(&["--sweep", "rho=0.2,0.3", "--seed", "9"]), "0.2,0.3 again");
+    // The same cells: both stores hold the same two Sim leaves.
+    let ids = |fx: &Fixture| -> Vec<String> {
+        let mut v: Vec<String> = fx.leaves().iter().map(|l| {
+            let rec: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(l.join("run.json")).unwrap()).unwrap();
+            rec["run_id"].as_str().unwrap().to_string()
+        }).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(ids(&a), ids(&b), "the two orders run the same two cells");
+    assert_ne!(ensemble_id(&a), ensemble_id(&b), "but the combined files differ, so the ensembles must");
+    assert_eq!(ensemble_id(&a), ensemble_id(&c), "and the identity is deterministic");
+}
