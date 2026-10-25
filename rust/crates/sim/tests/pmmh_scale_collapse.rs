@@ -132,17 +132,12 @@ fn run_from(
         n_steps,
         n_particles: 0,
         dt: 1.0,
-        // Unused here: the likelihood is a closure, not a particle filter, so
-        // there is no observation grid to size correlated noise against.
-        t_start: 0.0,
         proposal_sd: vec![init_sd; D],
         adapt: true,
         adapt_start: 300, // the shipped default (`default_pmmh_adapt_start`)
         adapt_stop: ADAPT_STOP,
         thin: 1,
         burn_in: 0,
-        rho: None,
-        n_source_groups: 0, init_noise_width: 0,
     };
 
     let recs: RefCell<Vec<Rec>> = RefCell::new(Vec::with_capacity(n_steps));
@@ -156,9 +151,7 @@ fn run_from(
         &base_params,
         &[],
         &config,
-        &[],
         &eval_loglik,
-        None,
         SEED,
         Some(&on_step),
         resume_from,

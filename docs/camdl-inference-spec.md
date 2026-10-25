@@ -388,9 +388,9 @@ case. Two things supply that spread, and either is enough:
   I0 = { bounds = [1, 500], perturb_only_at_t0 = true }
   ```
 
-The stage's algorithm must be `if2`, `pfilter` or plain `pmmh`; `pgas`,
-correlated `pmmh` (`rho` set) and the ODE algorithms accumulate every
-observation unconditionally and are rejected outright.
+The stage's algorithm must be `if2`, `pfilter` or `pmmh`; `pgas` and the ODE
+algorithms accumulate every observation unconditionally and are rejected
+outright.
 
 See `docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md` for
 the mathematical derivation, references (King Nguyen Ionides 2016 JSS, Ionides
@@ -424,8 +424,8 @@ so a multi-cadence model needs nothing extra either.
   observation axis: the incidence accumulator resets at the period's start and
   is read and scored at its stop. The warm-up is the span before the first
   reset. This rides the same hole/reset seam as sparse (`NA`) observations, so
-  every algorithm — bootstrap PF, IF2, correlated-PF, PGAS, PMMH — receives it
-  through the bound observation set.
+  every algorithm — bootstrap PF, IF2, PGAS, PMMH — receives it through the
+  bound observation set.
 - **Domain.** A first period that opens before `simulate.from` is a hard error
   naming both times — that span is never simulated, so the row would be scored
   against flow that does not exist. Opening exactly at `simulate.from` is fine.

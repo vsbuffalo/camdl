@@ -169,15 +169,25 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   flag. A `fit.toml` that still carries the key is refused with that
   instruction. The `LowSwapRate` diagnostic goes with it.
 
+- **Correlated pseudo-marginal PMMH was removed.** The `rho` key under
+  `[method]` for `algorithm = "pmmh"`, the `--rho` flag on `fit run` and the
+  `--pmmh-rho` flag on `profile` are gone; `pmmh` runs the bootstrap particle
+  filter with independent likelihood evaluations, as it did with `rho` unset.
+  Migration: delete the `rho` line and drop the flags. A `fit.toml` that still
+  carries the key, or a script that still passes either flag, is refused with
+  that instruction.
+
 ## Run identity
 
-- **Every stored PGAS fit re-keys.** `tempering` was part of the PGAS method
-  identity, so removing it changes every PGAS leaf's `run_id`: a new PGAS run
-  does not deduplicate against one stored before this change, and an in-flight
-  PGAS fit cannot `--resume` across it (its saved config hash no longer
-  matches). Stored results stay readable; the fits run again. This entry is
-  shared with the correlated-PMMH removal, whose `rho` re-key lands as the same
-  identity change.
+- **Every stored PGAS fit, every stored PMMH fit and every stored
+  `camdl profile` run re-keys.** `tempering` was part of the PGAS method
+  identity and `rho` of the PMMH method identity, and `camdl profile` hashed its
+  PMMH knobs, `rho` included, into the method level of every run whatever its
+  algorithm. Removing the two fields is one identity change: a new PGAS or PMMH
+  fit, or a new profile run of any algorithm, does not deduplicate against one
+  stored before this change, and an in-flight PGAS or PMMH fit cannot `--resume`
+  across it (its saved config hash no longer matches). Stored results stay
+  readable; the fits and profiles run again.
 - **Every stored multi-cell `simulate` ensemble re-keys once.** The ensemble
   leaf (the combined `ensemble.tsv` of a `--replicates` / `--seeds` /
   multi-`--scenario` / `--draws` run) is now keyed on its cells' identities

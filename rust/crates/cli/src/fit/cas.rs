@@ -482,8 +482,8 @@ pub fn config_identity_hash(config: &FitConfig) -> Result<String, String> {
 fn stage_config_hash(method: &Method) -> Result<ContentHash, String> {
     method.starts()?;
     // Gate the Method struct itself: `identity_payload()` already built its
-    // Value via `json!`, which would have nulled any non-finite cooling /
-    // rho — so check the source struct before trusting it.
+    // Value via `json!`, which would have nulled any non-finite cooling —
+    // so check the source struct before trusting it.
     ensure_finite(method)?;
     let v = serde_json::json!({
         "identity": method.identity_payload(),
@@ -547,16 +547,11 @@ pub fn fit_segment_dir(root: &Path, stem: &str, fit_hash: &ContentHash) -> std::
 
 /// The resolved observation-time alignment a method will actually run under,
 /// for the method CAS identity (gh#189). Resolution is the single
-/// `crate::fit::methods::resolve_obs_alignment` gate, fed the algorithm,
-/// whether it is correlated PMMH, and the fit-wide requested
-/// `[config] obs_alignment`. The resolved `Ok` value is independent of whether
-/// observations sit on the `dt` grid (that flag only governs whether a combo
-/// is rejected — never which alignment is returned), so a fixed `true` yields
-/// the alignment without needing the observed-data times here; the runner
-/// still validates on-grid-ness and errors loudly for an unsupported combo.
-/// A non-inference method (or an unsupported combo, which aborts the run
-/// before any output is stored) is keyed as `Snap` — the historical
-/// uniform-grid default — so it never silently aliases an `Exact` run.
+/// `crate::fit::methods::resolve_obs_alignment` gate, fed the algorithm and
+/// the fit-wide requested `[config] obs_alignment`. A non-inference method
+/// (or an unsupported combo, which aborts the run before any output is
+/// stored) is keyed as `Snap` — the historical uniform-grid default — so it
+/// never silently aliases an `Exact` run.
 fn resolved_obs_alignment(algorithm: &Algorithm, problem: &Problem) -> ResolvedObsAlignment {
     use crate::run_meta::FitAlgorithm;
     if !matches!(
@@ -565,12 +560,9 @@ fn resolved_obs_alignment(algorithm: &Algorithm, problem: &Problem) -> ResolvedO
     ) {
         return ResolvedObsAlignment::Snap;
     }
-    let correlated = matches!(algorithm, Algorithm::PMMH { rho: Some(_), .. });
     match crate::fit::methods::resolve_obs_alignment(
         algorithm.method_kind(),
-        correlated,
         problem.config.obs_alignment,
-        /* obs_on_grid = */ true,
     ) {
         Ok(crate::fit::methods::ObsAlignment::Exact) => ResolvedObsAlignment::Exact,
         Ok(crate::fit::methods::ObsAlignment::Snap) | Err(_) => ResolvedObsAlignment::Snap,

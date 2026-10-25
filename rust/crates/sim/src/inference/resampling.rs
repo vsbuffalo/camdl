@@ -25,10 +25,8 @@ pub fn systematic_resample(log_weights: &[f64], rng: &mut StatefulRng) -> Vec<us
 /// a base uniform draw `u0 ∈ [0, 1)`: one uniform, evenly-spaced thresholds,
 /// returning exactly `weights.len()` selected indices.
 ///
-/// Shared by the rng-driven [`systematic_resample`] and the correlated PF's
-/// `systematic_resample_fixed_u` (which supplies a *fixed* `u0` for
-/// common-random-numbers coupling across paired runs) so the two selection
-/// loops can never drift apart.
+/// The selection loop proper; [`systematic_resample`] supplies `u0` from the
+/// resampling stream.
 pub(crate) fn systematic_resample_core(weights: &[f64], u0: f64) -> Vec<usize> {
     let n = weights.len();
     if n == 0 { return vec![]; }

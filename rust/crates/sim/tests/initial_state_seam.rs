@@ -12,7 +12,7 @@
 //! 1. **The draw consumes no randomness when no `init {}` entry declares a
 //!    law.** That is the whole basis for calling the seam split
 //!    value-preserving: every stochastic forward path (chain-binomial,
-//!    Gillespie, the bootstrap and correlated filters, IF2, PGAS's reference
+//!    Gillespie, the bootstrap filter, IF2, PGAS's reference
 //!    walk) hands its own stream to `initial_state_draw`, and if that call
 //!    started consuming for a deterministic model, every one of those
 //!    trajectories would silently shift.

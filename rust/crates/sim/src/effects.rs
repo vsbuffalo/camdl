@@ -341,7 +341,7 @@ pub fn due_effects(
 /// `model.model.interventions`, declaration order preserved.
 ///
 /// This is the ONE place the kind→stage routing lives for every Exact-INFERENCE
-/// caller (bootstrap PF / IF2 / correlated PF / PGAS producer). It replaces the
+/// caller (bootstrap PF / IF2 / PGAS producer). It replaces the
 /// former `due_events` `round(t_end/grid_dt)` event path: once events are
 /// registered on the timeline (`timeline_effects` no longer excludes them), the
 /// integrator LANDS on each event time and the cursor reports it in the batch, so

@@ -176,7 +176,6 @@ struct ProfileIf2Knobs {
 struct ProfilePmmhKnobs {
     steps: usize,
     particles: usize,
-    rho: Option<f64>,
 }
 
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
@@ -254,26 +253,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // PMMH per-cell knobs (ignored when --algorithm is not pmmh).
     let pmmh_steps = a.pmmh_steps;
     let pmmh_particles = a.pmmh_particles;
-    // The CPM correlated-noise machinery belongs to `--algorithm pmmh` only.
-    // For if2 / nl-* the knob is inert — a deterministic (nl-*) or bootstrap-PF
-    // (if2) profile must NOT be dragged through the CPM obs-grid preflight by a
-    // default rho. Per spec, `--pmmh-rho 0.0` (or non-positive) also
-    // disables CPM within pmmh.
-    let is_pmmh = matches!(profile_algo, ProfileAlgo::Pmmh);
-    let pmmh_rho_opt: Option<f64> = if is_pmmh && a.pmmh_rho > 0.0 {
-        // NaN arm explicit: `>= 1.0` alone is false for NaN.
-        if a.pmmh_rho.is_nan() || a.pmmh_rho >= 1.0 {
-            eprintln!(
-                "error: --pmmh-rho = {} must be in [0, 1). Use 0.0 (or negative) \
-                 to disable CPM and run vanilla PMMH.",
-                a.pmmh_rho
-            );
-            std::process::exit(1);
-        }
-        Some(a.pmmh_rho)
-    } else {
-        None
-    };
     let output_tsv_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
     let scenario_name = a.scenario.scenario.clone();
     let label_arg: Option<String> = match a.label.as_deref() {
@@ -302,6 +281,19 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     ) {
         eprintln!("error: {msg}");
         std::process::exit(2);
+    }
+    // Correlated pseudo-marginal PMMH was removed; `--pmmh-rho` is trapped so
+    // a stale script is answered with the fix rather than clap's "unexpected
+    // argument".
+    if let Some(raw) = a._removed_pmmh_rho.as_deref() {
+        eprintln!(
+            "error: --pmmh-rho is no longer accepted on `camdl profile`: correlated \
+             pseudo-marginal PMMH was removed, and `--algorithm pmmh` runs the bootstrap \
+             particle filter with independent likelihood evaluations. Drop \
+             `--pmmh-rho {raw}`. Profile runs stored before the removal are not reused; \
+             they run again."
+        );
+        std::process::exit(1);
     }
     // `--fixed NAME=VALUE` → `fixed_cli`, `--fixed-file <toml>`
     // (repeatable, layered) → `fixed_files`. Both feed into the
@@ -926,22 +918,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `log_likelihood_from_flows_and_counts` directly).
     let obs_times_vec: Vec<f64> = observations.iter().map(|o| o.time).collect();
 
-    // gh#193 preflight: correlated PMMH (CPM, rho > 0) pre-draws one noise
-    // block per observation window, sized at that window's own substeps, so an
-    // irregular grid is fine but one that does not walk forward from t_start is
-    // not. The check is θ-independent (obs grid only), so run it ONCE here and
-    // fail with the actionable message — otherwise a bad grid surfaces as a
-    // silently-swallowed all-(-inf) profile (every per-cell PF eval maps the
-    // filter Err to -inf). See validate_cpm_obs_grid.
-    if pmmh_rho_opt.is_some() {
-        if let Err(e) = sim::inference::correlated_pf::validate_cpm_obs_grid(
-            &obs_times_vec, compiled.model.simulation.t_start, dt,
-        ) {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    }
-
     let obs_model_obj: Arc<MultiStreamObsModel> = {
         // The `ObsStream -> StreamSpec` mapping is the single shared builder
         // (`stream_specs_from_obs_streams`): authoritative per-grid-time cells
@@ -1138,7 +1114,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // No hand-enumerated finiteness tuple here: `canonical_config_hash` gates
     // the WHOLE struct before serializing, so a float field added to either
     // level is covered automatically. The tuple this replaced listed
-    // (cooling, dt, rho, rw_sd) by hand — exclude-by-default applied to
+    // (cooling, dt, rw_sd) by hand — exclude-by-default applied to
     // finiteness, and the same forget-me shape as the literals themselves.
     // 2026-08-23 audit: three per-cell knobs reached the computation but not
     // the key, so a rerun that changed any of them was served the previous
@@ -1166,9 +1142,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             particles: n_particles, iterations: n_iterations,
             cooling, dt, starts: n_starts,
         },
-        pmmh: ProfilePmmhKnobs {
-            steps: pmmh_steps, particles: pmmh_particles, rho: pmmh_rho_opt,
-        },
+        pmmh: ProfilePmmhKnobs { steps: pmmh_steps, particles: pmmh_particles },
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
         init: &init_method,
@@ -1218,9 +1192,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         ProfileAlgo::Nlopt(_) => eprintln!(
             "profile: deterministic ODE MLE per cell (no particle filter)"),
         ProfileAlgo::Pmmh => eprintln!(
-            "profile: PMMH per cell = {} particles × {} MCMC steps (rho = {})",
-            pmmh_particles, pmmh_steps,
-            pmmh_rho_opt.map(|r| r.to_string()).unwrap_or_else(|| "off".into())),
+            "profile: PMMH per cell = {} particles × {} MCMC steps",
+            pmmh_particles, pmmh_steps),
     }
 
     // ── Progress + cache scan ─────────────────────────────────────────
@@ -1570,7 +1543,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     n_steps: pmmh_steps,
                     n_particles: pmmh_particles,
                     dt,
-                    t_start: compiled.model.simulation.t_start,
                     proposal_sd,
                     adapt: true,
                     adapt_start: 50,
@@ -1579,9 +1551,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     adapt_stop: PROFILE_PMMH_BURN_IN,
                     thin: 1,
                     burn_in: PROFILE_PMMH_BURN_IN,
-                    rho: pmmh_rho_opt,
-                    n_source_groups: compiled.source_groups.len(),
-                    init_noise_width: compiled.init_noise_width,
                 };
 
                 // PF process kernel + obs model for this cell. PMMH on
@@ -1612,32 +1581,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     }
                 };
 
-                // Correlated-PF evaluator (only used when rho is set).
-                // Mirrors fit/pmmh.rs's eval_correlated.
-                let eval_correlated: Option<Box<dyn Fn(
-                    &[f64],
-                    &sim::inference::correlated_pf::PFRandomState,
-                ) -> Result<f64, sim::error::SimError>>> = if pmmh_config.rho.is_some() {
-                    let pf_process2 = ChainBinomialProcess::new(compiled.clone());
-                    let pf_obs_model2 = Arc::clone(&obs_model_obj);
-                    let smc_cfg2 = smc_cfg.clone();
-                    let cell_seed = job_seed;
-                    Some(Box::new(move |theta: &[f64], randoms| -> Result<f64, sim::error::SimError> {
-                        match sim::inference::correlated_pf::bootstrap_filter_correlated(
-                            &pf_process2, &*pf_obs_model2, theta,
-                            &smc_cfg2, randoms, cell_seed,
-                        ) {
-                            Ok(r) => Ok(r.log_likelihood),
-                            Err(e) if e.is_structural() => Err(e),
-                            Err(_) => Ok(f64::NEG_INFINITY),
-                        }
-                    }))
-                } else {
-                    None
-                };
-                let eval_corr_ref: Option<&sim::inference::pmmh::CorrelatedEvalFn> =
-                    eval_correlated.as_deref();
-
                 // Profile has no hierarchical prior surface, so
                 // `param_names` can be empty (avoids the
                 // base_params/param_names length check inside run_pmmh
@@ -1652,9 +1595,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                     &params,
                     &[],
                     &pmmh_config,
-                    &observations,
                     &eval_loglik,
-                    eval_corr_ref,
                     job_seed,
                     None,
                     None,
@@ -1820,8 +1761,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 "particles": n_particles, "iterations": n_iterations,
                 "cooling": cooling, "dt": dt }),
             ProfileAlgo::Pmmh => serde_json::json!({
-                "steps": pmmh_steps, "particles": pmmh_particles,
-                "rho": pmmh_rho_opt, "dt": dt }),
+                "steps": pmmh_steps, "particles": pmmh_particles, "dt": dt }),
             ProfileAlgo::Nlopt(_) => serde_json::json!({
                 "tolerance": 1e-4, "max_evals": 1500,
                 "dt": compiled.model.simulation.dt.unwrap_or(dt) }),
@@ -2179,7 +2119,7 @@ mod tests {
             if2: ProfileIf2Knobs {
                 particles: 30, iterations: 5, cooling: 0.7, dt: 1.0, starts: 1,
             },
-            pmmh: ProfilePmmhKnobs { steps: 0, particles: 0, rho: None },
+            pmmh: ProfilePmmhKnobs { steps: 0, particles: 0 },
             rw_sd: &rw_sd,
             rw_sd_auto: false,
             init: &init,
@@ -2189,7 +2129,7 @@ mod tests {
             "algorithm": "if2",
             "if2": { "particles": 30usize, "iterations": 5usize,
                      "cooling": 0.7, "dt": 1.0, "starts": 1usize },
-            "pmmh": { "steps": 0usize, "particles": 0usize, "rho": None::<f64> },
+            "pmmh": { "steps": 0usize, "particles": 0usize },
             "rw_sd": rw_sd,
             "rw_sd_auto": false,
             "init": init,

@@ -2755,7 +2755,7 @@ impl ObservationModel<ParticleState> for MultiStreamObsModel {
     }
 
     // Multi-cadence per-stream incidence bins (Phase 2a). The trait-object
-    // filters (PF / IF2 / correlated-PF) reach these through the trait; PGAS
+    // filters (PF / IF2) reach these through the trait; PGAS
     // calls the inherent methods directly on the concrete type. Both resolve to
     // the same implementations above.
     fn n_interval_streams(&self) -> usize {

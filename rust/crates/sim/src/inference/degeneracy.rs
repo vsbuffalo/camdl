@@ -81,10 +81,8 @@ pub const ESS_COLLAPSE_WINDOWS: usize = 3;
 pub const ITER_BUDGET: u64 = 10_000_000_000; // 1e10 particle-substeps
 
 /// gh#audit-C5/C6, gh#367. The per-particle **death mask** — the single
-/// definition of "one bad particle must not kill the whole evaluation" shared
-/// by the two particle filters
-/// ([`super::particle_filter::bootstrap_filter`] and
-/// [`super::correlated_pf::bootstrap_filter_correlated`]).
+/// definition of "one bad particle must not kill the whole evaluation" for the
+/// bootstrap particle filter ([`super::particle_filter::bootstrap_filter`]).
 ///
 /// The policy has three coupled parts, and they must not drift apart:
 ///
@@ -103,14 +101,13 @@ pub const ITER_BUDGET: u64 = 10_000_000_000; // 1e10 particle-substeps
 /// [`DeathMask::count`] feeds [`check_pf_degeneracy`]'s `AllParticlesDead`
 /// branch: the limit case where the mask has nothing left to absorb.
 ///
-/// gh#367: the correlated PF previously had **no** mask — it propagated any
-/// particle's error out of the whole evaluation, which the PMMH driver maps to
-/// a `−∞` log-likelihood for that θ (`fit/pmmh.rs`: `Err(e) if
-/// e.is_structural() => Err(e), Err(_) => Ok(f64::NEG_INFINITY)`). One
-/// particle's recoverable excursion therefore rejected the entire proposal,
-/// silently biasing correlated PMMH against boundary regions where occasional
-/// particle failure is expected. Routing both filters through this type is
-/// what keeps the policy from being live in one filter and absent in the other.
+/// gh#367: a filter without the mask propagates any particle's error out of
+/// the whole evaluation, which the PMMH driver maps to a `−∞` log-likelihood
+/// for that θ (`fit/pmmh.rs`: `Err(e) if e.is_structural() => Err(e),
+/// Err(_) => Ok(f64::NEG_INFINITY)`). One particle's recoverable excursion
+/// would then reject the entire proposal, silently biasing PMMH against
+/// boundary regions where occasional particle failure is expected. The policy
+/// lives on this type so a filter cannot carry a second, subtly different copy.
 pub struct DeathMask {
     dead: Vec<bool>,
 }

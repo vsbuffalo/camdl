@@ -827,6 +827,10 @@ pub struct FitRunArgs {
     // its own message.
     #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
     pub _removed_tempering: Option<String>,
+    // `--rho` went with correlated pseudo-marginal PMMH; same shape, its own
+    // message.
+    #[arg(long = "rho", value_name = "F", hide = true)]
+    pub _removed_rho: Option<String>,
 
     /// User-supplied display label for this fit (1–64 chars after
     /// trim; allowed: letters, digits, spaces, commas, dot,
@@ -947,12 +951,6 @@ pub struct FitRunArgs {
     /// proposal-SD adaptation begins).
     #[arg(long, value_name = "N")]
     pub adapt_start: Option<usize>,
-
-    /// Override [method.rho] (Crank-Nicolson correlation for
-    /// correlated pseudo-marginal MCMC). Set to a value in [0, 1).
-    ///
-    #[arg(long, value_name = "F")]
-    pub rho: Option<f64>,
 
     // ── PFilter-specific algorithm overrides  ───────
 
@@ -1894,6 +1892,10 @@ pub struct ProfileArgs {
     pub _removed_mle: Option<String>,
     #[arg(long = "params", value_name = "TOML", hide = true)]
     pub _removed_params: Option<String>,
+    // `--pmmh-rho` went with correlated pseudo-marginal PMMH; same shape, its
+    // own message (answered in `cmd_profile` before any file is read).
+    #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
+    pub _removed_pmmh_rho: Option<String>,
 
     /// Cooling schedule
     #[arg(long, default_value_t = 0.95)]
@@ -1948,18 +1950,9 @@ pub struct ProfileArgs {
     pub pmmh_steps: usize,
 
     /// PMMH only: particles per PF evaluation. Default 500 is the
-    /// standard PMMH range; CPM (rho > 0) keeps MCMC mixing high
-    /// without needing 1000+.
+    /// standard PMMH range.
     #[arg(long, default_value_t = 500, value_name = "N")]
     pub pmmh_particles: usize,
-
-    /// PMMH only: Crank-Nicolson correlation for correlated
-    /// pseudo-marginal (CPM-MCMC). Default 0.99 gives strong PF
-    /// correlation and excellent MH mixing. Pass `0.0` (or any
-    /// value ≤ 0) to disable CPM and run vanilla PMMH with
-    /// independent PF draws.
-    #[arg(long, default_value_t = 0.99, value_name = "FLOAT")]
-    pub pmmh_rho: f64,
 }
 
 // ─── survey ───────────────────────────────────────────────────────────────────

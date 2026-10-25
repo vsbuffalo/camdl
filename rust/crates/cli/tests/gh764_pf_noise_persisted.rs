@@ -96,8 +96,7 @@ simulate { from = 0 'days  to = 20 'days }
     (ir_path, data_path)
 }
 
-/// `rho_line` is either empty (plain PMMH) or a `rho = ...` stage key.
-fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, rho_line: &str) -> PathBuf {
+fn write_fit_toml(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
     let toml = format!(r#"
 output_dir = "{out}"
 [model]
@@ -120,12 +119,10 @@ iterations = 40
 burn_in    = 10
 thin       = 1
 starts       = "single"
-{rho}
 "#,
         out  = dir.join("results").display(),
         ir   = ir.display(),
         data = data.display(),
-        rho  = rho_line,
     );
     let p = dir.join("fit.toml");
     std::fs::write(&p, toml).unwrap();
@@ -189,7 +186,7 @@ fn pmmh_persists_the_measured_noise_and_reports_the_acceptance_ceiling() {
     }
     let tmp = tempdir("plain");
     let (ir, data) = write_fixture(tmp.path());
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, "");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data);
     let out = run_fit(&fit_toml);
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
@@ -238,49 +235,4 @@ fn pmmh_persists_the_measured_noise_and_reports_the_acceptance_ceiling() {
         "the target must be stated at this run's own dimension:\n{stderr}");
     assert!(!stderr.contains("PF variance OK"),
         "a hand-tuned band must not bless the run:\n{stderr}");
-}
-
-#[test]
-fn correlated_pmmh_measures_and_persists_under_its_own_scheme() {
-    let bin = camdl_bin();
-    if !bin.exists() || camdlc_bin().is_none() {
-        eprintln!("skip: release camdl / camdlc.exe missing (run `make build`)");
-        return;
-    }
-    // The same fixture and the same seed, twice: the stages differ only in
-    // whether `rho` is set. That is what makes the comparison below a test of
-    // the measurement rather than of the label.
-    let plain_tmp = tempdir("cpm_plain");
-    let (ir, data) = write_fixture(plain_tmp.path());
-    run_fit(&write_fit_toml(plain_tmp.path(), &ir, &data, ""));
-    let plain_sigma = pf_noise_field(&stage_state(&plain_tmp.path().join("results")), "sigma")
-        .expect("plain sigma");
-
-    let tmp = tempdir("cpm");
-    let (ir, data) = write_fixture(tmp.path());
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, "rho = 0.95");
-    let out = run_fit(&fit_toml);
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-    let state = stage_state(&tmp.path().join("results"));
-    let sigma = pf_noise_field(&state, "sigma").expect("sigma");
-    let s = pf_noise_field(&state, "s").expect("s");
-    let rho = pf_noise_field(&state, "rho").expect(
-        "[pf_noise] must record the scheme `s` was measured under — `s` is a \
-         property of the scheme, not only of the model");
-
-    assert_eq!(rho, 0.95);
-    assert!(sigma.is_finite() && sigma > 0.0, "sigma = {sigma}");
-    assert!(s.is_finite() && s > 0.0, "s = {s}");
-    // The evaluations went through the correlated filter with pre-drawn
-    // randoms, not the plain bootstrap filter. If the preflight had called the
-    // plain filter regardless of `rho` — which is the defect fix 3 names — the
-    // two stages would have drawn the same seeds at the same base theta and
-    // reported a bit-identical sigma.
-    assert_ne!(sigma, plain_sigma,
-        "the correlated stage must be measured under its own scheme; sigma \
-         identical to the plain stage's ({plain_sigma}) means the plain \
-         bootstrap filter was used for both");
-    assert!(stderr.contains("correlated evaluations (rho = 0.95)"),
-        "the report must name the scheme it measured under:\n{stderr}");
 }

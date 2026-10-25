@@ -148,7 +148,7 @@ pub fn fire_times_to_steps(times: &[f64], dt: f64) -> std::collections::BTreeSet
 /// Distinct operation from [`time_to_step`]: this is a *count*
 /// (relative substep span), not an absolute step index. Used for
 /// substep-loop bounds and observation-spacing arithmetic in the
-/// PGAS / PMMH / correlated-PF inner loops.
+/// PGAS / PMMH inner loops.
 ///
 /// `t1 ≥ t0` and `dt > 0` are caller responsibilities (debug_asserts).
 /// Returns `usize` because every consumer wants a loop bound.

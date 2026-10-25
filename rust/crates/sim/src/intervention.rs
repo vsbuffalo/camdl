@@ -226,9 +226,8 @@ pub fn all_intervention_times(model: &CompiledModel, params: &[f64]) -> Vec<f64>
 /// Relative tolerance for the on-grid test: a time `t` is "on the dt grid
 /// anchored at `t_start`" when `(t - t_start)/dt` is within `GRID_TOL` of an
 /// integer. `1e-9` matches the schedule-arithmetic epsilon used elsewhere (e.g.
-/// the `Recurring` loop bound in `intervention_fire_times` uses `period * 1e-9`,
-/// and `correlated_pf::cpm_steps_per_obs` works in `interval_steps` at the same
-/// scale); it is tight enough to catch a genuine off-grid observation (a
+/// the `Recurring` loop bound in `intervention_fire_times` uses `period * 1e-9`);
+/// it is tight enough to catch a genuine off-grid observation (a
 /// biweekly ES cadence at `t_start + k·dt + dt/2`) yet loose enough not to flag
 /// a float-rounded on-grid time.
 const GRID_TOL: f64 = 1e-9;
@@ -380,7 +379,7 @@ pub fn guard_attimesexpr_exact(
 }
 
 /// A validated EXACT-inference timeline (gh#233 Layer 2.5): the [`Schedule`] the
-/// bootstrap PF / IF2 / correlated-PF step, plus the [`TimelineEffects`] batches
+/// bootstrap PF / IF2 step, plus the [`TimelineEffects`] batches
 /// the producer fires cursor-keyed. Built ONLY via [`ExactInferenceTimeline::build`],
 /// which runs the exact-inference guards FIRST — so no inference path can
 /// construct a timeline that skipped a guard (the gh#187 class: a forgotten guard

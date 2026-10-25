@@ -15,9 +15,8 @@
 //! - `s` — the standard deviation of the *difference*
 //!   `log L̂(θ') − log L̂(θ)`. This is what enters the Metropolis ratio, so it
 //!   is what governs acceptance. For two independent evaluations at the *same*
-//!   noise level `s = sigma·sqrt(2)`; under correlated pseudo-marginal (`rho`
-//!   set) the two evaluations share most of their randomness and `s` is
-//!   smaller. Neither identity is assumed here — `s` is measured.
+//!   noise level `s = sigma·sqrt(2)`. That identity is not assumed here — `s`
+//!   is measured.
 //! - `d` — the number of estimated parameters.
 //!
 //! `s` is generally *not* `sigma·sqrt(2)` even for plain PMMH, and the reason
@@ -56,14 +55,10 @@
 //!
 //! Each came out of review of the proposal, and each is load-bearing.
 //!
-//! 1. **`s` is measured, never derived from `rho`.** The identity
-//!    `Var = 2·sigma²·(1 − rho_ll)` holds for `rho_ll`, the correlation of the
-//!    log-likelihood *estimates*, which equals the Crank–Nicolson parameter
-//!    only if the estimator is a linear Gaussian functional of the auxiliary
-//!    variables. On a realistic skewed estimator a Crank–Nicolson parameter of
-//!    0.90 induced `rho_ll = 0.81`, and substituting the former understated
-//!    `s` by 36%. [`measure`] therefore evaluates each pair and takes
-//!    `sd(difference)` directly.
+//! 1. **`s` is measured, never derived from `sigma`.** `s = sigma·sqrt(2)`
+//!    holds only where the filter is equally noisy at θ and θ', which the
+//!    measurement above shows it is not. [`measure`] therefore evaluates each
+//!    pair and takes `sd(difference)` directly.
 //! 2. **The ceiling assumes `log L̂` is approximately Gaussian, and the error
 //!    is one-sided.** Under skew the predicted ceiling is *optimistic*, which
 //!    is the wrong direction for a check whose job is to catch collapse. The
@@ -71,16 +66,13 @@
 //!    times (measured relative error: 54% at 1 observation, 9% at 5, under 1%
 //!    at 20), so [`report`] states the assumption alongside the observation
 //!    count instead of presenting the ceiling as unconditional.
-//! 3. **A base-point measurement is a best case.** The correlation a
-//!    correlated-pseudo-marginal run realises also depends on `θ` moving, and
-//!    the achievable correlation degrades with the dimension of the auxiliary
-//!    variable (Deligiannidis, Doucet & Pitt 2018, *JRSS-B* 80(5):839–870), so
-//!    the second evaluation of each pair is taken at a `θ'` drawn from the
-//!    initial proposal rather than at `θ` (see [`draw_proposed_theta`]).
+//! 3. **A base-point measurement is a best case.** The filter's noise level
+//!    varies across the parameter space, so the second evaluation of each pair
+//!    is taken at a `θ'` drawn from the initial proposal rather than at `θ`
+//!    (see [`draw_proposed_theta`]).
 
 use serde::{Deserialize, Serialize};
 
-use sim::inference::correlated_pf::{self, PFRandomState};
 use sim::inference::if2::EstimatedParam;
 use sim::rng::StatefulRng;
 
@@ -111,23 +103,19 @@ const THETA_PRIME_STREAM: u64 = 0x9E37_79B9_7F4A_7C15;
 /// the stage artifact (gh#764).
 ///
 /// Everything here is needed to read `sigma` and `s`: the particle count
-/// because `sigma ∝ 1/sqrt(N)`, the pair count because it sets the standard
-/// error of both spreads, and `rho` because `s` is a property of the scheme
-/// and not only of the model.
+/// because `sigma ∝ 1/sqrt(N)`, and the pair count because it sets the
+/// standard error of both spreads.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PfNoiseCheck {
     /// Standard deviation of a single `log L̂` at the base θ.
     pub sigma: f64,
-    /// Standard deviation of `log L̂(θ') − log L̂(θ)` under this stage's
-    /// scheme — correlated when `rho` is set, independent otherwise.
+    /// Standard deviation of `log L̂(θ') − log L̂(θ)` over independent
+    /// evaluations.
     pub s: f64,
     /// Particles each evaluation used. `sigma` is meaningless without it.
     pub n_particles: usize,
     /// Evaluation pairs behind both spreads.
     pub pairs: usize,
-    /// Crank–Nicolson parameter in force, `None` for plain PMMH.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rho: Option<f64>,
 }
 
 impl PfNoiseCheck {
@@ -238,7 +226,6 @@ pub fn summarize(
     base_lls: &[f64],
     proposed_lls: &[f64],
     n_particles: usize,
-    rho: Option<f64>,
 ) -> Option<PfNoiseCheck> {
     let n = base_lls.len();
     if n < 2 || proposed_lls.len() != n {
@@ -255,7 +242,6 @@ pub fn summarize(
         s: sample_sd(&diffs),
         n_particles,
         pairs: n,
-        rho,
     })
 }
 
@@ -305,89 +291,27 @@ pub fn draw_proposed_theta(
 /// the inference convention: a structural error surfaces, a ruled-out θ is
 /// `Ok(−∞)` (which [`summarize`] then declines to turn into a spread).
 ///
-/// With `rho` unset this is two independent bootstrap filters per pair, so
-/// `s² = sigma_θ² + sigma_θ'²` — equal to `2·sigma²` only where the filter is
-/// equally noisy at both θ. With `rho` set the pair shares
-/// the pre-drawn randoms through a Crank–Nicolson update, exactly as the chain
-/// does, and the per-particle stream seed is held fixed across the pair for
-/// the same reason the chain holds it fixed for the whole run. Measuring the
-/// plain filter for a correlated run would report noise the run does not have:
-/// correlated pseudo-marginal exists to shrink this very spread.
+/// Two independent bootstrap filters per pair, so `s² = sigma_θ² + sigma_θ'²`
+/// — equal to `2·sigma²` only where the filter is equally noisy at both θ.
 pub fn measure(
     config: &FitRunConfig,
     base: &[f64],
     proposed: &[f64],
     n_particles: usize,
     pairs: usize,
-    rho: Option<f64>,
     seed: u64,
 ) -> Result<(Vec<f64>, Vec<f64>), sim::error::SimError> {
-    match rho {
-        None => {
-            // Base-θ seeds stay `seed + i`, the seeds this loop used when it
-            // measured σ alone, so `initial_loglik` is unchanged for every
-            // plain PMMH stage. The θ' evaluations take the block above it.
-            let base_lls = (0..pairs)
-                .map(|i| runner::run_quick_pfilter(config, base, n_particles, seed + i as u64))
-                .collect::<Result<Vec<f64>, _>>()?;
-            let proposed_lls = (0..pairs)
-                .map(|i| runner::run_quick_pfilter(
-                    config, proposed, n_particles, seed + (pairs + i) as u64))
-                .collect::<Result<Vec<f64>, _>>()?;
-            Ok((base_lls, proposed_lls))
-        }
-        Some(rho) => {
-            let process = config.build_process();
-            let obs_model = config.build_obs_model();
-            let smc_config = sim::inference::traits::SMCConfig {
-                n_particles,
-                ..config.smc_config()
-            };
-            let obs_times: Vec<f64> = config.observations.iter().map(|o| o.time).collect();
-            let steps_per_obs = correlated_pf::cpm_steps_per_obs(
-                &obs_times, smc_config.t_start, smc_config.dt);
-            let n_source_groups = config.compiled.source_groups.len();
-
-            let mut rng = StatefulRng::new(seed);
-            let mut base_lls = Vec::with_capacity(pairs);
-            let mut proposed_lls = Vec::with_capacity(pairs);
-            for _ in 0..pairs {
-                let u = PFRandomState::draw_fresh(
-                    n_particles, &steps_per_obs, n_source_groups,
-                    // gh#772 gave the noise block an initial-state row. Size it
-                    // the way the run will size it: a smaller block measures a
-                    // spread the run never sees, and a model whose `init { }`
-                    // draws a compartment would be refused here for a mis-sized
-                    // block.
-                    config.compiled.init_noise_width, &mut rng);
-                base_lls.push(eval_correlated(
-                    &process, &obs_model, base, &smc_config, &u, seed)?);
-                let u_prime = u.correlate(rho, &mut rng);
-                proposed_lls.push(eval_correlated(
-                    &process, &obs_model, proposed, &smc_config, &u_prime, seed)?);
-            }
-            Ok((base_lls, proposed_lls))
-        }
-    }
-}
-
-/// One correlated-filter evaluation under the inference convention (gh#224):
-/// structural errors surface, everything else is a ruled-out θ at `−∞`.
-fn eval_correlated(
-    process: &sim::inference::ChainBinomialProcess,
-    obs_model: &sim::inference::MultiStreamObsModel,
-    params: &[f64],
-    smc_config: &sim::inference::traits::SMCConfig,
-    randoms: &PFRandomState,
-    seed: u64,
-) -> Result<f64, sim::error::SimError> {
-    match correlated_pf::bootstrap_filter_correlated(
-        process, obs_model, params, smc_config, randoms, seed,
-    ) {
-        Ok(r) => Ok(r.log_likelihood),
-        Err(e) if e.is_structural() => Err(e),
-        Err(_) => Ok(f64::NEG_INFINITY),
-    }
+    // Base-θ seeds stay `seed + i`, the seeds this loop used when it
+    // measured σ alone, so `initial_loglik` is unchanged for every
+    // plain PMMH stage. The θ' evaluations take the block above it.
+    let base_lls = (0..pairs)
+        .map(|i| runner::run_quick_pfilter(config, base, n_particles, seed + i as u64))
+        .collect::<Result<Vec<f64>, _>>()?;
+    let proposed_lls = (0..pairs)
+        .map(|i| runner::run_quick_pfilter(
+            config, proposed, n_particles, seed + (pairs + i) as u64))
+        .collect::<Result<Vec<f64>, _>>()?;
+    Ok((base_lls, proposed_lls))
 }
 
 /// Render the preflight report.
@@ -403,11 +327,6 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
     let cross = crossover_s(d);
     let verdict = ceiling_verdict(check.s, se, d);
 
-    let scheme = match check.rho {
-        Some(rho) => format!("correlated evaluations (rho = {:.2})", rho),
-        None => "independent evaluations".to_string(),
-    };
-
     let mut out = String::new();
     out.push_str(&format!(
         "  log L̂ mean = {:.1}, sd σ = {:.2} ({} particles, {} pairs)\n",
@@ -415,8 +334,8 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
     out.push_str(&format!(
         "  log L̂ ratio spread s = {:.2} ±{:.2} (1 SE, ~68%; ±{:.2} for a 95% read)\n",
         check.s, se, 2.0 * se));
-    out.push_str(&format!(
-        "    at base θ against one θ' from the initial proposal, {}\n", scheme));
+    out.push_str(
+        "    at base θ against one θ' from the initial proposal, independent evaluations\n");
     out.push_str(&format!(
         "  acceptance ceiling 2·Φ(-s/2) = {}   target 0.234 + 0.206/d = {:.1}% (d = {})\n",
         percent(ceiling), target * 100.0, d));
@@ -436,7 +355,7 @@ pub fn report(check: &PfNoiseCheck, ll_mean: f64, d: usize, n_obs: usize) -> Str
                  target.\n    {}\n    \
                  Proceeding anyway — a diagnosis, not a refusal, and a conservative \
                  one: a\n    bound below the limit can warn where a root does exist.\n",
-                target * 100.0, cross, remedy(check)));
+                target * 100.0, cross, REMEDY));
         }
         CeilingVerdict::Reachable => {
             out.push_str(&format!(
@@ -472,19 +391,11 @@ fn percent(p: f64) -> String {
     }
 }
 
-/// What actually moves `s` for this stage, named rather than listed.
+/// What actually moves `s`, named rather than listed.
 ///
 /// A longer chain is not on the list: the ceiling is a property of the
 /// estimator, so more steps at the same noise level buy nothing.
-fn remedy(check: &PfNoiseCheck) -> String {
-    match check.rho {
-        Some(rho) => format!(
-            "Raise particles (σ ∝ 1/√N) or raise rho above {:.2}; a longer chain does not \
-             help.", rho),
-        None => "Raise particles (σ ∝ 1/√N), or set `rho` to reuse randomness between \
-                 evaluations;\n    a longer chain does not help.".to_string(),
-    }
-}
+const REMEDY: &str = "Raise particles (σ ∝ 1/√N); a longer chain does not help.";
 
 /// Whether the run is buying precision the acceptance ceiling does not need.
 ///
@@ -494,15 +405,7 @@ fn remedy(check: &PfNoiseCheck) -> String {
 /// clear the target there. This replaces the old "sd < 0.5 → halve particles"
 /// band, whose threshold was a guess and whose advice was unconnected to the
 /// target it was implicitly about.
-///
-/// Withheld under correlated pseudo-marginal. There `s` depends on the
-/// correlation the scheme realises, which itself degrades as the auxiliary
-/// variable grows (Deligiannidis, Doucet & Pitt 2018), so `s ∝ 1/sqrt(N)` does
-/// not hold and the extrapolation would be a claim we have not measured.
 fn halving_hint(check: &PfNoiseCheck, se: f64, cross: f64) -> String {
-    if check.rho.is_some() {
-        return String::new();
-    }
     let s_halved = check.s * std::f64::consts::SQRT_2;
     if s_halved + se * std::f64::consts::SQRT_2 >= cross {
         return String::new();
@@ -610,33 +513,13 @@ mod tests {
     fn independent_pairs_at_equal_noise_give_s_equals_sigma_root_two() {
         let base: Vec<f64> = (0..20).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
         let proposed: Vec<f64> = (0..20).map(|i| if i % 4 < 2 { 1.0 } else { -1.0 }).collect();
-        let c = summarize(&base, &proposed, 1000, None).expect("finite");
+        let c = summarize(&base, &proposed, 1000).expect("finite");
         // The two patterns are orthogonal over their 20 values and have equal
         // spread, so the difference has exactly √2 times the spread of either.
         // (Each is ±1 about a zero mean, so the n−1 sample sd is √(20/19).)
         assert!((c.sigma - (20.0f64 / 19.0).sqrt()).abs() < 1e-12, "σ = {}", c.sigma);
         assert!((c.s - c.sigma * std::f64::consts::SQRT_2).abs() < 1e-12,
             "s = {} should be σ√2 = {}", c.s, c.sigma * std::f64::consts::SQRT_2);
-    }
-
-    /// Sharing randomness shrinks the spread of the difference below
-    /// `σ·√2` — the whole reason the preflight measures under the run's own
-    /// scheme rather than under the plain filter.
-    #[test]
-    fn correlated_pairs_give_a_smaller_s_than_the_plain_filter_would() {
-        let base: Vec<f64> = (0..20).map(|i| (i as f64 * 0.7).sin()).collect();
-        // Proposed tracks base closely: shared randomness, small independent part.
-        let proposed: Vec<f64> = base.iter().enumerate()
-            .map(|(i, b)| b + 0.1 * (i as f64 * 1.9).cos())
-            .collect();
-        let c = summarize(&base, &proposed, 1000, Some(0.9)).expect("finite");
-        // The shared part cancels in the difference, so `s` is a fraction of
-        // `σ` — not merely below the independent bound `σ√2`, which `s = σ`
-        // would also satisfy.
-        assert!(c.s < 0.5 * c.sigma,
-            "correlated s = {} should be well below σ = {}", c.s, c.sigma);
-        assert!(c.s > 0.0, "s = {}", c.s);
-        assert_eq!(c.rho, Some(0.9));
     }
 
     /// A ruled-out θ has no spread. Reporting `NaN` as a measurement would be
@@ -646,19 +529,19 @@ mod tests {
         let base = vec![-10.0; 5];
         let mut proposed = vec![-11.0; 5];
         proposed[2] = f64::NEG_INFINITY;
-        assert!(summarize(&base, &proposed, 100, None).is_none());
-        assert!(summarize(&base[..1], &proposed[..1], 100, None).is_none());
+        assert!(summarize(&base, &proposed, 100).is_none());
+        assert!(summarize(&base[..1], &proposed[..1], 100).is_none());
     }
 
-    fn check_at(s: f64, sigma: f64, rho: Option<f64>) -> PfNoiseCheck {
-        PfNoiseCheck { sigma, s, n_particles: 19_200, pairs: NOISE_PAIRS, rho }
+    fn check_at(s: f64, sigma: f64) -> PfNoiseCheck {
+        PfNoiseCheck { sigma, s, n_particles: 19_200, pairs: NOISE_PAIRS }
     }
 
     /// The defect this replaces: `σ = 2` printed a green "PF variance OK
     /// (target: 1-3)". It must now name the ceiling, the target, and the side.
     #[test]
     fn a_sigma_of_two_is_reported_as_below_the_target_not_as_ok() {
-        let c = check_at(2.0 * std::f64::consts::SQRT_2, 2.0, None);
+        let c = check_at(2.0 * std::f64::consts::SQRT_2, 2.0);
         let out = report(&c, -1234.5, 17, 84);
         assert!(!out.contains("OK"), "must not bless the run: {out}");
         assert!(out.contains("2·Φ(-s/2) = 15.7%"), "ceiling missing: {out}");
@@ -673,7 +556,7 @@ mod tests {
     /// assumption attached — that is the branch skew can mislead.
     #[test]
     fn a_quiet_filter_clears_the_target_and_states_the_assumption() {
-        let c = check_at(0.5 * std::f64::consts::SQRT_2, 0.5, None);
+        let c = check_at(0.5 * std::f64::consts::SQRT_2, 0.5);
         let out = report(&c, -1234.5, 17, 84);
         assert!(out.contains("ceiling above target"), "{out}");
         assert!(out.contains("approximately Gaussian"), "{out}");
@@ -682,23 +565,18 @@ mod tests {
     }
 
     /// The particle-count hint the old banded check gave, now derived: it
-    /// fires only when halving particles would still clear the crossover, and
-    /// it is withheld under a scheme whose `s` does not scale as `1/√N`.
+    /// fires only when halving particles would still clear the crossover.
     #[test]
     fn the_halving_hint_is_derived_from_the_crossover_not_a_band() {
         // σ = 0.5 → doubling s to 1.41 still clears the d = 17 crossover of 2.32.
-        let quiet = check_at(0.5 * std::f64::consts::SQRT_2, 0.5, None);
+        let quiet = check_at(0.5 * std::f64::consts::SQRT_2, 0.5);
         let out = report(&quiet, -1.0, 17, 84);
         assert!(out.contains("Halving particles to 9600"), "{out}");
         // σ = 1.2 → halving would put s at 2.40, past the crossover: no hint,
         // even though the run itself clears the target.
-        let borderline = check_at(1.2 * std::f64::consts::SQRT_2, 1.2, None);
+        let borderline = check_at(1.2 * std::f64::consts::SQRT_2, 1.2);
         let out = report(&borderline, -1.0, 17, 84);
         assert!(out.contains("ceiling above target"), "{out}");
-        assert!(!out.contains("Halving particles"), "{out}");
-        // Under correlated PMMH `s ∝ 1/√N` is not a claim we have measured.
-        let cpm = check_at(0.5, 1.5, Some(0.9));
-        let out = report(&cpm, -1.0, 17, 84);
         assert!(!out.contains("Halving particles"), "{out}");
     }
 
@@ -706,7 +584,7 @@ mod tests {
     /// has to say the direction of the error.
     #[test]
     fn a_short_series_downgrades_the_ceiling_to_an_upper_bound() {
-        let c = check_at(0.5 * std::f64::consts::SQRT_2, 0.5, None);
+        let c = check_at(0.5 * std::f64::consts::SQRT_2, 0.5);
         let out = report(&c, -12.0, 17, 4);
         assert!(out.contains("upper bound"), "{out}");
         assert!(out.contains("reads high"), "{out}");
@@ -717,7 +595,7 @@ mod tests {
     #[test]
     fn a_spread_at_the_crossover_is_unresolved() {
         let s = crossover_s(17);
-        let c = check_at(s, s / std::f64::consts::SQRT_2, None);
+        let c = check_at(s, s / std::f64::consts::SQRT_2);
         assert_eq!(ceiling_verdict(c.s, c.s_standard_error(), 17), CeilingVerdict::Unresolved);
         let out = report(&c, -12.0, 17, 84);
         assert!(out.contains("unresolved"), "{out}");
@@ -732,14 +610,10 @@ mod tests {
     /// which buys nothing against an estimator-level ceiling.
     #[test]
     fn a_vanishing_ceiling_and_its_remedy_are_stated_plainly() {
-        let out = report(&check_at(9.4, 4.07, None), -72.6, 2, 20);
+        let out = report(&check_at(9.4, 4.07), -72.6, 2, 20);
         assert!(out.contains("2·Φ(-s/2) = <0.1%"), "{out}");
         assert!(out.contains("a longer chain does not help"), "{out}");
-        assert!(out.contains("set `rho`"), "{out}");
-        // Under a correlated scheme the remedy is the one that is still open.
-        let cpm = report(&check_at(9.4, 4.07, Some(0.9)), -72.6, 2, 20);
-        assert!(cpm.contains("raise rho above 0.90"), "{cpm}");
-        assert!(!cpm.contains("set `rho`"), "{cpm}");
+        assert!(out.contains("Raise particles"), "{out}");
     }
 
     /// The reported figure is not the `λ → 0` ceiling the formula derives —
@@ -749,10 +623,10 @@ mod tests {
     /// measurement does not have.
     #[test]
     fn the_ceiling_is_reported_as_a_bound_not_as_the_limit() {
-        let below = report(&check_at(2.0 * std::f64::consts::SQRT_2, 2.0, None), -1.0, 17, 84);
-        let above = report(&check_at(0.5 * std::f64::consts::SQRT_2, 0.5, None), -1.0, 17, 84);
+        let below = report(&check_at(2.0 * std::f64::consts::SQRT_2, 2.0), -1.0, 17, 84);
+        let above = report(&check_at(0.5 * std::f64::consts::SQRT_2, 0.5), -1.0, 17, 84);
         let s = crossover_s(17);
-        let at = report(&check_at(s, s / std::f64::consts::SQRT_2, None), -1.0, 17, 84);
+        let at = report(&check_at(s, s / std::f64::consts::SQRT_2), -1.0, 17, 84);
         for (label, out) in [("below", &below), ("above", &above), ("at", &at)] {
             assert!(out.contains("not the λ→0 limit the formula derives"),
                 "{label}: the scope of s must be stated:\n{out}");
@@ -762,14 +636,12 @@ mod tests {
             "the below-target branch must own its false-alarm mode:\n{below}");
     }
 
-    /// The report names the scheme, because `s` is a property of the scheme
-    /// and not only of the model.
+    /// The report says the pairs were independent evaluations, so a reader
+    /// knows which spread `s` is.
     #[test]
     fn the_report_names_the_scheme_it_measured_under() {
-        let plain = report(&check_at(2.0, 1.41, None), -1.0, 6, 30);
+        let plain = report(&check_at(2.0, 1.41), -1.0, 6, 30);
         assert!(plain.contains("independent evaluations"), "{plain}");
-        let cpm = report(&check_at(0.6, 1.41, Some(0.9)), -1.0, 6, 30);
-        assert!(cpm.contains("correlated evaluations (rho = 0.90)"), "{cpm}");
     }
 
     /// `θ'` is the chain's own first move: `z + proposal_sd·N(0,1)` on the

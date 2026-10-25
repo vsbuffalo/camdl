@@ -31,7 +31,6 @@ pub struct PmmhStageOpts {
     pub thin: usize,
     pub adapt: bool,
     pub adapt_start: usize,
-    pub rho: Option<f64>,
 }
 
 pub(crate) const DEFAULT_BURN_IN: usize = 5000;
@@ -44,16 +43,9 @@ impl PmmhStageOpts {
         match algorithm {
             super::config_v2::Algorithm::PMMH {
                 chains, particles, iterations, burn_in, thin,
-                adapt, adapt_start, rho,
+                adapt, adapt_start,
                 ..
             } => {
-                if let Some(r) = rho {
-                    if !(0.0..1.0).contains(r) {
-                        return Err(format!(
-                            "stage rho must be in [0, 1) for correlated \
-                             pseudo-marginal MCMC. Got: {}", r));
-                    }
-                }
                 Ok(PmmhStageOpts {
                     n_chains: *chains,
                     n_particles: *particles,
@@ -62,13 +54,11 @@ impl PmmhStageOpts {
                     thin: thin.unwrap_or(DEFAULT_THIN),
                     adapt: *adapt,
                     adapt_start: *adapt_start,
-                    rho: *rho,
                 })
             }
             // Deterministic-ODE MH reuses the PMMH machinery via `run_stage`'s
-            // `is_ode_mh` seam. It carries neither `particles` (no PF) nor
-            // `rho` (no correlated pseudo-marginal noise), so `n_particles` is
-            // 0 (unused on the deterministic path) and `rho` is None.
+            // `is_ode_mh` seam. It carries no `particles` (no PF), so
+            // `n_particles` is 0 (unused on the deterministic path).
             super::config_v2::Algorithm::Mh {
                 chains, iterations, burn_in, thin,
                 adapt, adapt_start,
@@ -82,7 +72,6 @@ impl PmmhStageOpts {
                     thin: thin.unwrap_or(DEFAULT_THIN),
                     adapt: *adapt,
                     adapt_start: *adapt_start,
-                    rho: None,
                 })
             }
             other => Err(format!(
@@ -136,11 +125,8 @@ pub fn run_stage(
     // chain/adaptive-proposal/diagnostics machinery below is shared with PMMH;
     // the ONLY difference is the per-step likelihood evaluation — the
     // deterministic `compute_ode_loglik` instead of the bootstrap particle
-    // filter. With no PF there is no correlated pseudo-marginal noise, so `rho`
-    // is forced to None (skips the CPM obs-grid preflight and the correlated
-    // evaluator) and the PF-variance preflight is skipped entirely.
+    // filter. With no PF the PF-variance preflight is skipped entirely.
     let is_ode_mh = matches!(method.algorithm, super::config_v2::Algorithm::Mh { .. });
-    let rho: Option<f64> = if is_ode_mh { None } else { pmmh_opts.rho };
 
     // Build FitRunConfig (reuse existing builder). iterations,
     // cooling, cooling_target_iters are IF2-specific and never read
@@ -191,21 +177,6 @@ pub fn run_stage(
     } else {
         ode_dt
     };
-
-    // gh#193 preflight: correlated PMMH (CPM, rho > 0) pre-draws one noise
-    // block per observation window, sized at that window's own substeps, so an
-    // irregular grid is fine but one that does not walk forward from t_start is
-    // not. The check is θ-independent (obs grid only) — run it ONCE here and
-    // surface the actionable message, instead of letting every per-step PF eval
-    // swallow the filter Err into -inf (a silent all-(-inf) chain). See
-    // validate_cpm_obs_grid.
-    // Skipped for ODE-MH (rho is forced None: there is no correlated PF).
-    if rho.is_some() {
-        let obs_times: Vec<f64> = config.observations.iter().map(|o| o.time).collect();
-        sim::inference::correlated_pf::validate_cpm_obs_grid(
-            &obs_times, config.smc_config().t_start, dt,
-        ).map_err(|e| e.to_string())?;
-    }
 
     // Build proposal SDs
     let proposal_sd = build_proposal_sd(&config);
@@ -261,12 +232,12 @@ pub fn run_stage(
         let proposed = pf_noise::draw_proposed_theta(
             &base, &config.estimated_params, &proposal_sd, seed);
         let (base_lls, proposed_lls) = pf_noise::measure(
-            &config, &base, &proposed, n_particles, pf_noise::NOISE_PAIRS, rho, seed,
+            &config, &base, &proposed, n_particles, pf_noise::NOISE_PAIRS, seed,
         ).map_err(|e| format!(
             "pmmh: structural error during PF-noise check at base θ: {}", e))?;
         ll_mean = base_lls.iter().sum::<f64>() / base_lls.len() as f64;
 
-        match pf_noise::summarize(&base_lls, &proposed_lls, n_particles, rho) {
+        match pf_noise::summarize(&base_lls, &proposed_lls, n_particles) {
             Some(check) => {
                 eprint!("{}", pf_noise::report(
                     &check, ll_mean,
@@ -601,7 +572,6 @@ pub fn run_stage(
                 n_steps,
                 n_particles,
                 dt,
-                t_start: config.smc_config().t_start,
                 proposal_sd: proposal_sd.clone(),
                 adapt,
                 adapt_start,
@@ -626,9 +596,6 @@ pub fn run_stage(
                 adapt_stop: burn_in,
                 thin,
                 burn_in,
-                rho,
-                n_source_groups: config.compiled.source_groups.len(),
-                init_noise_width: config.compiled.init_noise_width,
             };
 
             // Build the loglik evaluator closure for this chain. Both branches
@@ -658,30 +625,6 @@ pub fn run_stage(
                         runner::run_quick_pfilter(&config, params, n_particles, pf_seed)
                     })
                 };
-
-            // Correlated PF evaluator (when rho is set)
-            let process = config.build_process();
-            let obs_model_trait = config.build_obs_model();
-            let smc_cfg = config.smc_config();
-            let eval_correlated: Option<Box<dyn Fn(&[f64], &sim::inference::correlated_pf::PFRandomState) -> Result<f64, sim::error::SimError>>> =
-                if pmmh_config.rho.is_some() {
-                    Some(Box::new(move |params: &[f64], randoms: &sim::inference::correlated_pf::PFRandomState| -> Result<f64, sim::error::SimError> {
-                        // gh#224: structural failures surface; a degenerate or
-                        // recoverable correlated-PF run is a ruled-out θ (−∞).
-                        match sim::inference::correlated_pf::bootstrap_filter_correlated(
-                            &process, &obs_model_trait, params, &smc_cfg, randoms, chain_seed,
-                        ) {
-                            Ok(r) => Ok(r.log_likelihood),
-                            Err(e) if e.is_structural() => Err(e),
-                            Err(_) => Ok(f64::NEG_INFINITY),
-                        }
-                    }))
-                } else {
-                    None
-                };
-
-            let eval_corr_ref: Option<&dyn Fn(&[f64], &sim::inference::correlated_pf::PFRandomState) -> Result<f64, sim::error::SimError>> =
-                eval_correlated.as_deref();
 
             let task = &bars[chain_id];
             let accepted_count = AtomicUsize::new(0);
@@ -757,7 +700,7 @@ pub fn run_stage(
             let result = run_pmmh(
                 &config.estimated_params, &priors, &start_vec,
                 &config.param_names,
-                &pmmh_config, &config.observations, eval_loglik.as_ref(), eval_corr_ref, chain_seed,
+                &pmmh_config, eval_loglik.as_ref(), chain_seed,
                 Some(&progress_cb), resume_states[chain_id].clone(), config_hash.clone(),
             ).map_err(|e| format!("chain {} failed with structural error: {}", chain_id + 1, e))?;
 

@@ -318,8 +318,8 @@ pub fn bootstrap_filter<P: ProcessModel<State = ParticleState>>(
     // get marked dead; their log-weight is set to −Inf so resampling
     // kills them. Hard errors (UnknownCompartment, config bugs, etc.)
     // still propagate immediately — they are not particle-specific.
-    // gh#367: the policy lives on `DeathMask` so the correlated PF applies
-    // exactly this one, rather than a second, subtly-different copy.
+    // gh#367: the policy lives on `DeathMask`, the one definition every
+    // filter applies, rather than a second, subtly-different copy here.
     let mut deaths = DeathMask::new(n_particles);
 
     for obs_idx in 0..n_obs {

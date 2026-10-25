@@ -224,9 +224,7 @@ pub const LOG_PROB_FLOOR: f64 = 1e-300;
 /// Interior clamp keeping an IVP / logit-transform probability strictly inside
 /// (0, 1), so the transform and the Binomial(N, p) draw stay finite. Shared by
 /// the logit transform here and the PGAS IVP density/gradient (`pgas.rs`,
-/// `pgas_grad.rs`) — value and gradient MUST use the same value. Distinct in
-/// concept from the correlated-PF base-uniform clamp (`BASE_UNIFORM_EPS`),
-/// which shares the magnitude.
+/// `pgas_grad.rs`) — value and gradient MUST use the same value.
 pub const PROB_FRACTION_EPS: f64 = 1e-10;
 
 /// Reserved stream index for the per-algorithm resampling RNG.
@@ -310,10 +308,8 @@ pub struct ParticleState {
     /// This is the per-TRANSITION, this-interval tally written by `step_one`
     /// (an additive `flows[tr] += count` per substep), blanket-reset by
     /// `reset_flows()` once per observation interval. Its lifecycle is
-    /// UNCHANGED by multi-cadence Phase 2a — the forward/substep path, the
-    /// correlated-PF resampling sort key (`correlated_pf.rs`), and
-    /// `write_final_states` (`pfilter.rs`) all keep reading it exactly as
-    /// before.
+    /// UNCHANGED by multi-cadence Phase 2a — the forward/substep path and
+    /// `write_final_states` (`pfilter.rs`) keep reading it exactly as before.
     pub flow_accumulators: Vec<u64>,
     /// Per-Interval-stream incidence bin (multi-cadence Phase 2a, "Option Z").
     /// One `u64` per incidence (`FlowSum`) observation stream, in the obs

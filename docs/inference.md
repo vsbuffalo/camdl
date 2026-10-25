@@ -683,9 +683,9 @@ in no observation model reaches the likelihood through this path and no other.
 
 The other way to put spread in the swarm at $t = 0$ is to declare the initial
 condition as a law in the model (`init { I ~ poisson(rate = I0) }`), which every
-filter draws per particle. That one works under `pfilter` and plain `pmmh` too,
-where $\theta$ is shared by the whole swarm and the jitter above does not exist.
-See "Initial-state parameters" below.
+filter draws per particle. That one works under `pfilter` and `pmmh` too, where
+$\theta$ is shared by the whole swarm and the jitter above does not exist. See
+"Initial-state parameters" below.
 
 ---
 
@@ -1104,9 +1104,9 @@ init { I ~ poisson(rate = I0)
 With it, PGAS's CSMC draws each particle's own $x_0$ and
 $\log p(x_0 \mid \theta)$ enters the complete-data likelihood as its own term —
 reported per sweep in the `initial_state_ll` column of the chain trace — so the
-MH ratio constrains `I0`. IF2, `pfilter` and `pmmh` — with `rho` or without —
-use the same declaration for the draw alone. Without it the term is exactly
-zero, on every chain and from every start.
+MH ratio constrains `I0`. IF2, `pfilter` and `pmmh` use the same declaration for
+the draw alone. Without it the term is exactly zero, on every chain and from
+every start.
 
 Nothing auto-detects initial-value parameters. PGAS used to: it finite-
 differenced a rounded initial count from the chain's own starting draw and
