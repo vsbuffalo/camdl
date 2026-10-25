@@ -82,13 +82,18 @@ impl Fixture {
 
     fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
+    }    /// A three-replicate run of the fixture into `out`, plus `extra`.
+    fn simulate(&self, extra: &[&str]) -> Output {
+        self.simulate_with("3", "out", extra)
     }
 
-    /// A three-replicate run of the fixture into `out`, plus `extra`.
-    fn simulate(&self, extra: &[&str]) -> Output {
+    /// A `replicates`-replicate run of the fixture into `out_dir`, plus `extra`;
+    /// seed 4 throughout, so the first three cells of a four-replicate run are
+    /// the cells of a three-replicate run.
+    fn simulate_with(&self, replicates: &str, out_dir: &str, extra: &[&str]) -> Output {
         let mut args = vec![
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
-            "--dt", "1", "--seed", "4", "--replicates", "3", "--output-dir", "out",
+            "--dt", "1", "--seed", "4", "--replicates", replicates, "--output-dir", out_dir,
         ];
         args.extend_from_slice(extra);
         Command::new(skip_if_missing_binary())
@@ -179,6 +184,42 @@ fn a_second_identical_run_reads_every_cell_back() {
     assert_eq!(simulated(&forced), None, "--force recomputes every cell; stderr:\n{}", stderr(&forced));
     assert_eq!(std::fs::read(fx.path("c.tsv")).unwrap(), a, "a recompute reproduces the same bytes");
     assert!(fx.path("out").join(".quarantine").is_dir(), "the displaced leaves were quarantined, not deleted");
+}
+
+/// A run that grows a stored grid mixes hits and misses: the three stored
+/// replicates are read back, the fourth is simulated, and the combined file
+/// and the observation table equal those of a fresh four-replicate run byte
+/// for byte, so a read-back row is indistinguishable from a simulated one.
+#[test]
+fn a_run_that_grows_the_grid_mixes_hits_and_misses() {
+    let fx = Fixture::new();
+    assert_ok(&fx.simulate(&["-o", "three.tsv", "--obs-dir", "o3"]), "three replicates");
+    assert_eq!(fx.sim_leaves().len(), 3);
+
+    let dry = fx.simulate_with("4", "out", &["--obs-dir", "mo", "--dry-run"]);
+    assert_ok(&dry, "dry run of the grown grid");
+    let err = stderr(&dry);
+    assert!(err.contains("3 cache hits → read back, 1 misses → would simulate"), "{err}");
+
+    let grown = fx.simulate_with("4", "out", &["-o", "mixed.tsv", "--obs-dir", "mo"]);
+    assert_ok(&grown, "grown run");
+    assert_eq!(simulated(&grown), Some(1), "three hits, one miss; stderr:\n{}", stderr(&grown));
+    assert_eq!(fx.sim_leaves().len(), 4, "one new leaf");
+
+    let fresh = fx.simulate_with("4", "fresh", &["-o", "fresh.tsv", "--obs-dir", "fo"]);
+    assert_ok(&fresh, "fresh four-replicate run");
+    assert_eq!(simulated(&fresh), None, "an empty store simulates every cell; stderr:\n{}", stderr(&fresh));
+
+    assert_eq!(
+        std::fs::read(fx.path("mixed.tsv")).unwrap(),
+        std::fs::read(fx.path("fresh.tsv")).unwrap(),
+        "the mixed run's combined file equals the fresh run's byte for byte"
+    );
+    assert_eq!(
+        std::fs::read(fx.path("mo").join("cases.tsv")).unwrap(),
+        std::fs::read(fx.path("fo").join("cases.tsv")).unwrap(),
+        "the mixed run's observation table equals the fresh run's byte for byte"
+    );
 }
 
 /// Observations make the hit rule exact: a leaf without the requested

@@ -197,8 +197,8 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   rebuilt from the per-cell `Sim` leaves the store already holds, so the cost is
   aggregation, not simulation. Two ensembles of identical cells now share one
   identity whether an arm was named by a preset or derived from
-  `--enable`/`--disable`/`--param`, and renaming a preset no longer re-keys the
-  ensembles that used it.
+  `--enable`/`--disable`/`--param`. Renaming a preset still re-keys, because a
+  preset's name is part of the model's content digest.
 
 ## Language (DSL)
 
