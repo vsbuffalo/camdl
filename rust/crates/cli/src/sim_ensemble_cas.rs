@@ -15,14 +15,21 @@
 //!     deduplicated): which resolved parameter vectors the ensemble ran. Read
 //!     off the cells' identities rather than rebuilt beside them, so it cannot
 //!     describe different values from the ones the cells hashed (gh#583).
-//!   - **grid** — a digest over the SORTED cell list. Each cell contributes
-//!     `(scenario_label, process_seed, draw_idx, sim_run_id)`; the `sim_run_id`
-//!     already encodes that cell's model/config/params/scenario/seed, so a
-//!     changed `--draws` param value (same draw index) re-keys the ensemble.
-//!     The cell COUNT is folded in explicitly (`n_cells`): 3 replicates vs 4
-//!     is a different combined TSV, so a different ensemble (count-in-the-key,
-//!     the n_trajectories collision class). Sorting makes the digest
-//!     order-independent.
+//!   - **grid** — a digest over the SORTED cell list plus the run's resolved
+//!     design. Each cell contributes `(point_id, process_seed, sim_run_id)`;
+//!     the `sim_run_id` already encodes that cell's model/config/params/
+//!     scenario/seed, so a changed `--draws` param value (same draw index)
+//!     re-keys the ensemble, and the arm's label — a display string, not
+//!     identity — is deliberately absent: two ensembles of identical cells
+//!     hash alike whether an arm was named by a preset or derived from flags,
+//!     and renaming a preset re-keys nothing here. The cell COUNT is folded in
+//!     explicitly (`n_cells`): 3 replicates vs 4 is a different combined TSV,
+//!     so a different ensemble (count-in-the-key, the n_trajectories collision
+//!     class). Sorting makes the digest order-independent. The `design` is the
+//!     resolved `--sweep` / `--sweep-file` grid of a sweep job ([`ResolvedDesign`])
+//!     and `None` otherwise; it is what makes `--sweep beta=0.2,0.3` and
+//!     `--sweep beta=0.3,0.2` — the same cell set, two different combined
+//!     files — two ensembles.
 //!
 //! Mirrors [`crate::survey_cas`] / [`crate::pfilter_cas`] for the level/digest
 //! conventions.
@@ -37,11 +44,15 @@ use crate::fit::cas::canonical_config_hash;
 #[derive(Debug, Clone)]
 pub struct EnsembleCell {
     /// The scenario label rendered into the combined TSV's `scenario` column.
+    /// Display only: it enters the ensemble's `run.json` summary, never its
+    /// `grid` digest.
     pub scenario_label: String,
     /// The resolved process seed driving this cell's trajectory.
     pub process_seed: u64,
-    /// The 0-based draw index (the `draw` column; 0 when not a `--draws` run).
-    pub draw_idx: usize,
+    /// The cell's 0-based position on the parameter-point axis: the design
+    /// index of a sweep cell (`point_id`), the draw index of a `--draws` cell,
+    /// 0 for a single point.
+    pub point_id: usize,
     /// The cell's `Sim` leaf `run_id` — its full identity (model/config/params/
     /// scenario/seed). Folding it into `grid` makes a per-draw param change
     /// re-key the ensemble.
@@ -71,6 +82,32 @@ pub struct EnsembleCtx<'a> {
     pub dt: f64,
     /// The full set of cells the run expands to.
     pub cells: &'a [EnsembleCell],
+    /// The resolved design of a sweep job; `None` for every other job.
+    pub design: Option<&'a ResolvedDesign>,
+}
+
+/// The resolved design axis of a `simulate` sweep job: what `--sweep` or
+/// `--sweep-file` expanded to, recorded in the ensemble's `run.json` and
+/// folded into its `grid` identity. Serialized as it is — every field enters
+/// the digest.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ResolvedDesign {
+    /// `--sweep PARAM=GRID`, repeatable. `params` is name-sorted; the design
+    /// points are their Cartesian product with the first name varying slowest,
+    /// so `point_id` is a position in that product.
+    Sweep { params: Vec<SweptParam>, n_points: usize },
+    /// `--sweep-file FILE`: a TSV whose header names parameters and whose rows
+    /// are the design points, `point_id` being the 0-based row. The file enters
+    /// by its content digest, never its path.
+    File { params: Vec<String>, digest: String, n_points: usize },
+}
+
+/// One swept parameter and the values it takes, in grid order.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SweptParam {
+    pub name: String,
+    pub values: Vec<f64>,
 }
 
 use crate::fit::cas::{level, structural_level_hash};
@@ -95,12 +132,15 @@ struct EnsembleConfigLevel<'a> {
     dt: f64,
 }
 
-/// The `grid` level: the sorted cell list plus the explicit count, so N vs
-/// N+1 replicates is a different ensemble.
+/// The `grid` level: the sorted cell list, the explicit count (so N vs N+1
+/// replicates is a different ensemble) and the resolved design (`null` for a
+/// job without one — serialized as it is, so a design-less job and a sweep job
+/// over the same cells are two ensembles).
 #[derive(serde::Serialize)]
 struct EnsembleGridLevel<'a> {
     n_cells: usize,
-    cells: &'a [(&'a str, u64, usize, String)],
+    cells: &'a [(usize, u64, String)],
+    design: Option<&'a ResolvedDesign>,
 }
 
 pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, String> {
@@ -113,23 +153,18 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
     params_levels.sort();
     params_levels.dedup();
 
-    // grid level — the sorted cell list + the explicit cell count. Each cell is
-    // (scenario, seed, draw, sim_run_id); sorting is order-independent. The
-    // count is folded so N vs N+1 replicates is a different ensemble.
-    let mut cells_sorted: Vec<(&str, u64, usize, String)> = ctx
+    // grid level — the sorted cell list + the explicit cell count + the
+    // design. Each cell is (point_id, seed, sim_run_id); sorting is
+    // order-independent. The count is folded so N vs N+1 replicates is a
+    // different ensemble.
+    let mut cells_sorted: Vec<(usize, u64, String)> = ctx
         .cells
         .iter()
-        .map(|c| {
-            (
-                c.scenario_label.as_str(),
-                c.process_seed,
-                c.draw_idx,
-                c.sim_run_id.to_hex(),
-            )
-        })
+        .map(|c| (c.point_id, c.process_seed, c.sim_run_id.to_hex()))
         .collect();
     cells_sorted.sort();
-    let grid_level = EnsembleGridLevel { n_cells: ctx.cells.len(), cells: &cells_sorted };
+    let grid_level =
+        EnsembleGridLevel { n_cells: ctx.cells.len(), cells: &cells_sorted, design: ctx.design };
 
     let model_digest = ModelDigest::from_model(
         ctx.model,
@@ -172,45 +207,57 @@ pub fn ensemble_deps(cells: &[EnsembleCell]) -> Vec<runid::inputs::ArtifactRef> 
 mod tests {
     use super::*;
 
-    fn cell(scenario: &str, seed: u64, draw: usize, rid: u8) -> EnsembleCell {
+    fn cell(scenario: &str, seed: u64, point_id: usize, rid: u8) -> EnsembleCell {
         EnsembleCell {
             scenario_label: scenario.to_string(),
             process_seed: seed,
-            draw_idx: draw,
+            point_id,
             sim_run_id: ContentHash::from_bytes([rid; 32]),
             traj_digest: ContentHash::from_bytes([rid ^ 0xff; 32]),
             params_level: ContentHash::from_bytes([rid ^ 0x0f; 32]),
         }
     }
 
-    /// The `grid` level is `digest_value` over the same blob `resolve` builds;
-    /// unit-testing it pins the collision-freeness of the cell-set identity
-    /// without an `ir::Model` fixture (mirrors `survey_cas::tests`).
-    fn grid_level(cells: &[EnsembleCell]) -> crate::fit::cas::LevelHash {
-        let mut s: Vec<(&str, u64, usize, String)> = cells
-            .iter()
-            .map(|c| (c.scenario_label.as_str(), c.process_seed, c.draw_idx, c.sim_run_id.to_hex()))
-            .collect();
+    /// The `grid` level exactly as `resolve_sim_ensemble` builds it, without an
+    /// `ir::Model` fixture (mirrors `survey_cas::tests`).
+    fn grid_level(cells: &[EnsembleCell], design: Option<&ResolvedDesign>) -> crate::fit::cas::LevelHash {
+        let mut s: Vec<(usize, u64, String)> =
+            cells.iter().map(|c| (c.point_id, c.process_seed, c.sim_run_id.to_hex())).collect();
         s.sort();
-        canonical_config_hash(&serde_json::json!({ "n_cells": cells.len(), "cells": s }), &[]).unwrap()
+        canonical_config_hash(&EnsembleGridLevel { n_cells: cells.len(), cells: &s, design }, &[]).unwrap()
     }
 
-    /// Byte-neutrality of the struct rewrite: `EnsembleGridLevel` /
-    /// `EnsembleConfigLevel` must digest EXACTLY as the `json!` literals they
-    /// replaced — `grid_level` above IS that literal — or every stored
-    /// ensemble leaf silently re-keys.
-    #[test]
-    fn levels_are_byte_identical_to_the_literals_they_replaced() {
-        let cells = [cell("baseline", 1, 0, 1), cell("baseline", 2, 0, 2)];
-        let mut sorted: Vec<(&str, u64, usize, String)> = cells
-            .iter()
-            .map(|c| (c.scenario_label.as_str(), c.process_seed, c.draw_idx, c.sim_run_id.to_hex()))
-            .collect();
-        sorted.sort();
-        let grid = EnsembleGridLevel { n_cells: cells.len(), cells: &sorted };
-        assert_eq!(canonical_config_hash(&grid, &[]).unwrap(), grid_level(&cells),
-            "the grid struct must reproduce the literal's digest");
+    fn beta_design(values: Vec<f64>) -> ResolvedDesign {
+        ResolvedDesign::Sweep {
+            params: vec![SweptParam { name: "beta".to_string(), values }],
+            n_points: 2,
+        }
+    }
 
+    /// The identity pin for the `grid` level (proposal
+    /// 2026-10-24-batch-to-simulate §3 "Ensemble identity", §8). The level is
+    /// `(point_id, process_seed, sim_run_id)` per cell, the count, and the
+    /// design — the arm's label is not in it. These bytes re-keyed every stored
+    /// multi-cell ensemble once; a change here re-keys them again and is a
+    /// release-notes event, never collateral.
+    #[test]
+    fn grid_level_identity_is_pinned() {
+        let cells = [cell("baseline", 1, 0, 1), cell("baseline", 2, 0, 2)];
+        assert_eq!(
+            grid_level(&cells, None).into_inner().to_hex(),
+            "1bb7c8ce76ab09cae24ecbdc22b9ca69cc3defc3844d4295da4232e60fbdba27",
+            "the design-less grid level moved; every stored multi-cell ensemble re-keys"
+        );
+        assert_eq!(
+            grid_level(&cells, Some(&beta_design(vec![0.2, 0.3]))).into_inner().to_hex(),
+            "28ab1670e60b47b6459615cac3d768cbc2c15ab153197e4c87600b05649f9fca",
+            "the sweep grid level moved; every stored sweep ensemble re-keys"
+        );
+    }
+
+    /// The config level digests exactly as the `json!` literal it replaced.
+    #[test]
+    fn config_level_is_byte_identical_to_the_literal_it_replaced() {
         let cfg = EnsembleConfigLevel { backend: "chain_binomial", dt: 1.0 };
         assert_eq!(
             canonical_config_hash(&cfg, &[]).unwrap(),
@@ -229,28 +276,51 @@ mod tests {
             cell("baseline", 3, 0, 3), cell("baseline", 4, 0, 4),
         ];
         assert_ne!(
-            grid_level(&three), grid_level(&four),
+            grid_level(&three, None), grid_level(&four, None),
             "3 vs 4 cells must produce distinct grid hashes (cell count in the key)"
         );
     }
 
-    /// The grid digest is order-independent (sorted) but content-sensitive.
+    /// The grid digest is order-independent (sorted) and content-sensitive,
+    /// and the arm's label is not content: a preset-named arm and a
+    /// flag-derived arm over identical cells are one ensemble.
     #[test]
-    fn grid_is_order_independent_and_content_sensitive() {
+    fn grid_is_order_independent_and_content_sensitive_and_label_free() {
         let a = [cell("baseline", 1, 0, 1), cell("baseline", 2, 0, 2)];
         let a_rev = [cell("baseline", 2, 0, 2), cell("baseline", 1, 0, 1)];
-        assert_eq!(grid_level(&a), grid_level(&a_rev), "cell order must not change the grid hash");
+        assert_eq!(grid_level(&a, None), grid_level(&a_rev, None), "cell order must not change the grid hash");
 
         // A changed per-cell sim_run_id (e.g. a --draws param value changed)
-        // re-keys the grid even at the same (scenario, seed, draw).
+        // re-keys the grid even at the same (point, seed).
         let a_diff = [cell("baseline", 1, 0, 9), cell("baseline", 2, 0, 2)];
-        assert_ne!(grid_level(&a), grid_level(&a_diff),
+        assert_ne!(grid_level(&a, None), grid_level(&a_diff, None),
             "a changed cell sim_run_id must change the grid hash");
 
-        // A changed scenario label re-keys.
-        let a_scen = [cell("vax", 1, 0, 1), cell("baseline", 2, 0, 2)];
-        assert_ne!(grid_level(&a), grid_level(&a_scen),
-            "a changed scenario label must change the grid hash");
+        // A changed point_id re-keys: the same cells laid out differently on
+        // the point axis is a different combined file.
+        let a_pt = [cell("baseline", 1, 1, 1), cell("baseline", 2, 0, 2)];
+        assert_ne!(grid_level(&a, None), grid_level(&a_pt, None),
+            "a changed point_id must change the grid hash");
+
+        // A changed scenario LABEL does not: the cell's run_id already pins the
+        // scenario's content, and the label is display.
+        let a_scen = [cell("baseline+vaccination", 1, 0, 1), cell("vax", 2, 0, 2)];
+        assert_eq!(grid_level(&a, None), grid_level(&a_scen, None),
+            "the arm label is not identity; identical cells under two names are one ensemble");
+    }
+
+    /// The design is in the key: a sweep job and a design-less job over the
+    /// same cells differ, and so do two sweeps whose grids list the same values
+    /// in different orders (the same cell set, two different combined files).
+    #[test]
+    fn design_is_in_the_key() {
+        let cells = [cell("baseline", 1, 0, 1), cell("baseline", 1, 1, 2)];
+        let none = grid_level(&cells, None);
+        let fwd = grid_level(&cells, Some(&beta_design(vec![0.2, 0.3])));
+        let rev = grid_level(&cells, Some(&beta_design(vec![0.3, 0.2])));
+        assert_ne!(none, fwd, "a sweep job must not share an ensemble with a design-less job");
+        assert_ne!(fwd, rev, "`--sweep beta=0.2,0.3` and `--sweep beta=0.3,0.2` are two ensembles");
+        assert_eq!(fwd, grid_level(&cells, Some(&beta_design(vec![0.2, 0.3]))));
     }
 
     /// Deps fold each cell's Sim leaf as a `traj.tsv` edge.

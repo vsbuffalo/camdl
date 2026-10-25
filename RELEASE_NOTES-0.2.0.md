@@ -178,6 +178,17 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   matches). Stored results stay readable; the fits run again. This entry is
   shared with the correlated-PMMH removal, whose `rho` re-key lands as the same
   identity change.
+- **Every stored multi-cell `simulate` ensemble re-keys once.** The ensemble
+  leaf (the combined `ensemble.tsv` of a `--replicates` / `--seeds` /
+  multi-`--scenario` / `--draws` run) is now keyed on its cells' identities
+  alone — per cell the parameter-point index, the process seed and the cell's
+  own `run_id` — plus the run's resolved design; the arm's display label has
+  left the key. Every stored multi-cell ensemble is therefore a miss once and is
+  rebuilt from the per-cell `Sim` leaves the store already holds, so the cost is
+  aggregation, not simulation. Two ensembles of identical cells now share one
+  identity whether an arm was named by a preset or derived from
+  `--enable`/`--disable`/`--param`, and renaming a preset no longer re-keys the
+  ensembles that used it.
 
 ## Language (DSL)
 

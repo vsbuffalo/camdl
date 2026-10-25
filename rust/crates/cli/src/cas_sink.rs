@@ -91,12 +91,15 @@ pub(crate) struct RunEntry {
     /// SHA-256 of the cell's `traj.tsv` (the artifact the ensemble's combined
     /// TSV is derived from). Pins which upstream file the dep consumed.
     pub(crate) traj_digest: Option<runid::ContentHash>,
-    /// Scenario label, resolved process seed, and 0-based draw index — the
-    /// per-cell coordinates the ensemble's `grid` digest sorts over (alongside
-    /// the cell `run_id`).
+    /// The scenario label (display: the ensemble's `run.json` summary and the
+    /// combined TSV's `scenario` column — never the `grid` digest), the
+    /// resolved process seed, and the cell's 0-based position on the
+    /// parameter-point axis: the design index of a sweep cell, the draw index
+    /// of a `--draws` cell. `(point_id, process_seed)` plus the cell `run_id`
+    /// are what the ensemble's `grid` digest sorts over.
     pub(crate) scenario: String,
     pub(crate) process_seed: u64,
-    pub(crate) draw_idx: usize,
+    pub(crate) point_id: usize,
     /// The cell's `params` level hash — the identity of the parameter values
     /// it ran. The ensemble's `params` level is the set of these (see
     /// `sim_ensemble_cas`). `None` only if identity resolution failed.
@@ -501,7 +504,7 @@ impl crate::engine::RunSink for CasSink {
             traj_digest,
             scenario: name,
             process_seed: spec.process_seed,
-            draw_idx: spec.point_idx,
+            point_id: spec.point_idx,
             params_level,
         });
     }
@@ -714,7 +717,7 @@ impl crate::engine::RunSink for CasSink {
             traj_digest: Some(traj_digest),
             scenario: name,
             process_seed: spec.process_seed,
-            draw_idx: spec.point_idx,
+            point_id: spec.point_idx,
             params_level: params_level_hash(&rt),
         });
         Ok(())
