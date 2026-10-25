@@ -1255,9 +1255,16 @@ fn run_simulate(a: &args::SimulateArgs) {
     let mut from_fit_hash: Option<String> = None;
     let mut from_fit_params_file: Option<String> = None;
     for pf in &params_files {
+        // A malformed block is refused, not treated as no block: skipping it
+        // would silently drop the backend match, the tamper check and the
+        // fit lineage the user wrote the block to get.
         let prov = match crate::fit::provenance::read_mle_provenance(pf) {
             Ok(Some(p)) => p,
-            Ok(None) | Err(_) => continue,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!("error: cannot read the [provenance] block of {pf}: {e}");
+                std::process::exit(1);
+            }
         };
         // The block's `content_hash` is a tamper hash over the parameter
         // values the fit wrote. Values edited since no longer describe the

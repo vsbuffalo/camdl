@@ -1224,8 +1224,9 @@ identical to the cache.
 
 ### 9.3 Content Verification
 
-`camdl fit status` checks whether `mle_params.toml` has been modified since the
-fit produced it:
+`camdl simulate --params` checks whether a fit's `mle_params.toml` has been
+modified since the fit produced it, by the `content_hash` its `[provenance]`
+block declares over the parameter values as written:
 
 ```rust
 fn verify_mle_params(path: &str) -> ProvenanceStatus {
@@ -1245,21 +1246,24 @@ fn verify_mle_params(path: &str) -> ProvenanceStatus {
 
 ### 9.4 When Provenance Breaks
 
-If the user edits `mle_params.toml`, the content hash is broken. This is not an
-error — it's information:
+If the user edits `mle_params.toml`, the content hash no longer matches, and
+`camdl simulate --params` refuses the file: the block still claims the values
+are the fit's estimate, would still match the fit's backend and would record the
+fit as the run's upstream, so an edited file is refused rather than simulated:
 
 ```
-mle_params.toml: ⚠ MODIFIED (content hash mismatch)
-  R0: 56.82 → 60.0 (manual edit)
-  All other parameters: unchanged
-  
-  This file has been hand-tuned. Inference provenance no longer applies.
-  To restore: camdl fit run validate.toml
-              ([method] starts = { from_mle = "@refine" })
+error: params file mle_params.toml was edited after the fit that produced it.
+  Its [provenance] block declares content_hash = "746b4b2d…", but the
+  parameter values in the file now hash to "eeb47a77…".
+  To simulate the fit's estimate, re-run the fit and use the mle_params.toml it
+  writes.
+  To run the edited values knowingly, remove the [provenance] block from
+  mle_params.toml: the file is then a plain params file (no backend or dt is
+  matched from it, and no fit lineage is recorded).
 ```
 
-The modified file still works as a params.toml everywhere. The provenance status
-is advisory, not blocking.
+A params file without a `[provenance]` block is never checked. A block that is
+present but malformed is an error, not a missing block.
 
 ---
 
