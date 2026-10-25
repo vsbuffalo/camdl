@@ -21,12 +21,10 @@ mod run_paths;      // canonical output-path helpers
 mod cas;
 mod browse;
 mod check_update;   // `camdl check-update` — GitHub release-availability check
-mod sampling;
 mod sim_job;       // SimulateJob / ParamSource / Seeds / ScenarioRef / ObsOutput (run-spec §3)
 mod sweep;         // the design axis: --sweep / --sweep-file expansion, checks, the resolved design
-mod engine;        // run_job: the single engine behind simulate + batch run (run-spec §3.1)
-mod cas_sink;      // CasSink: the content-addressed store sink shared by simulate + batch run
-mod batch;
+mod engine;        // run_job: the engine behind simulate's cell grid (run-spec §3.1)
+mod cas_sink;      // CasSink: the content-addressed store sink for simulate's cells
 mod eval;
 mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
@@ -147,10 +145,6 @@ pub(crate) enum Command {
     /// Run a forward simulation
     #[command(alias = "sim")]
     Simulate(args::SimulateArgs),
-
-    /// Run a batch sweep or check its status
-    #[command(subcommand)]
-    Batch(BatchCmd),
 
     /// Inference pipeline (MLE, posterior sampling, evaluation)
     #[command(subcommand)]
@@ -342,24 +336,6 @@ pub(crate) enum MreCmd {
     Fit(args::MreFitArgs),
     /// Bundle a forward-simulation reproduction
     Simulate(args::MreSimulateArgs),
-}
-
-#[derive(Subcommand)]
-#[command(arg_required_else_help = true,
-          after_help = colored_help!("\
-Examples:
-  # Run a parameter / scenario sweep declared in a TOML manifest
-  camdl batch run sweep.toml --parallel 8
-
-  # Check completion of a long-running sweep
-  camdl batch status sweep.toml
-
-See `camdl batch <subcommand> --help` for full options."))]
-pub(crate) enum BatchCmd {
-    /// Run a batch sweep from a TOML manifest
-    Run(args::BatchArgs),
-    /// Show status of a batch sweep
-    Status(args::BatchStatusArgs),
 }
 
 #[derive(Subcommand)]
@@ -570,8 +546,6 @@ fn main() {
 
     match cli.command {
         Command::Simulate(a)            => run_simulate(&a),
-        Command::Batch(BatchCmd::Run(a))    => batch::cmd_batch_run(&a),
-        Command::Batch(BatchCmd::Status(a)) => batch::cmd_batch_status(&a),
         Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a),
         Command::Fit(FitCmd::Summary(a))=> fit::cmd_fit_summary(&a),
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a),
@@ -1756,7 +1730,7 @@ fn run_simulate(a: &args::SimulateArgs) {
     // Built before the dry-run branch so a dry run refuses what the run would
     // (a scenario touching a `--draws <file>` column, gh#572).
     //
-    // `simulate` and `batch run` converge on `engine::run_job` (run-spec
+    // `simulate` runs through `engine::run_job` (run-spec
     // §3.1). The wide-format trajectory + combined-obs output shape lives
     // in `StreamSink`; the engine owns the cell loop, seed arithmetic, and
     // per-cell SimRun construction (determinism PIN: tests/determinism_pin.rs).
@@ -1860,8 +1834,8 @@ fn run_simulate(a: &args::SimulateArgs) {
         table_files: base_sim_run.table_files.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         obs: obs_mode,
         // simulate keeps its historical sequential, in-order streaming
-        // (combined wide-format output is order-sensitive). Parallelism is
-        // the batch path's concern.
+        // (combined wide-format output is order-sensitive); `--parallel` is
+        // accepted by `SimulateArgs` and not consulted here (run-spec §4.4).
         parallel: 1,
     };
 
@@ -1955,11 +1929,10 @@ fn run_simulate(a: &args::SimulateArgs) {
     // ── Build the per-cell CAS sink (the system of record) ──────────────────
     //
     // Content-addressed storage is the default. Each engine cell (scenario ×
-    // param-point × replicate) commits its own leaf, byte-identical to the
-    // leaf `camdl batch run` writes for the same (model, config, params,
-    // scenario, process_seed) cell — both go through the SAME `CasSink`
-    // (resolve identity via `resolve::resolve_trajectory`, then
-    // `commit_atomic`, plus the per-cell obs child). The `--output`/`--obs`
+    // param-point × replicate) commits its own leaf through `CasSink`, keyed
+    // on the (model, config, params, scenario, process_seed) cell (resolve
+    // identity via `resolve::resolve_trajectory`, then `commit_atomic`, plus
+    // the per-cell obs child). The `--output`/`--obs`
     // mirror is layered on top by `StreamSink` (below).
     let cas_sink = match build_simulate_cas_sink(
         &base_sim_run,
@@ -2371,7 +2344,7 @@ fn write_quantities_sidecar(q: &SimQuantities) {
 }
 
 /// `RunSink` for `camdl simulate`: writes the per-cell content-addressed
-/// leaf (`cas`, shared with `batch run`) AND the `--output`/`--obs` mirror
+/// leaf (`cas`) AND the `--output`/`--obs` mirror
 /// (`stream`, the combined wide-format TSV). The store is the system of
 /// record; the mirror is the convenience view.
 ///
@@ -2801,9 +2774,10 @@ impl engine::RunSink for SimSink {
 }
 
 /// Build the simulate-side [`crate::cas_sink::CasSink`] so each cell's leaf is
-/// byte-identical to the leaf `batch run` writes for the same logical cell.
+/// keyed on exactly what ran, whichever path (a lone run or a multi-cell
+/// grid) writes it.
 ///
-/// The identity inputs mirror batch exactly:
+/// The identity inputs:
 ///   - `base_model` is the model as `util::load_run_model` loads it for the
 ///     engine (observation anchors substituted, `--integrator` applied; params
 ///     NOT applied), so the model level digest is constant across the grid
@@ -4132,7 +4106,7 @@ fn check_obs_times_on_snapshot_grid(
     let after = snaps.iter().find(|&&s| s > bad);
     // The guidance deliberately states the INVARIANT rather than naming one fix.
     // Observation times reach this check from two unrelated places — a model's
-    // `emit_schedule` (simulate/batch/synthetic) and a loaded data file's time
+    // `emit_schedule` (simulate/synthetic) and a loaded data file's time
     // column (`fit predict`) — and advice that fits one is wrong for the other.
     // Telling a `fit predict` user to "change the emit schedule" is nonsense:
     // there isn't one, and they cannot rewrite their data's dates.

@@ -1,5 +1,5 @@
 //! `camdl list`, `camdl show`, `camdl cat` — browse the content-addressable
-//! store written by `camdl simulate --cas` and `camdl batch run`.
+//! store written by `camdl simulate`.
 //!
 //! All three walk `./results/sims/` by default. For alpha, walk is
 //! unindexed — fast enough for thousands of runs. A persistent index

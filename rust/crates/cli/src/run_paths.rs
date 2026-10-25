@@ -11,10 +11,9 @@
 
 use std::path::PathBuf;
 
-/// Overridden by an explicit CLI `--output-dir` (on `simulate` / `batch run`),
-/// fit.toml `output_dir`, or batch.toml `output_dir` — in that precedence
-/// order. Callers should resolve via [`output_root`] so the three entry points
-/// can't drift.
+/// Overridden by an explicit CLI `--output-dir` (on `simulate`) or fit.toml
+/// `output_dir` — in that precedence order. Callers should resolve via
+/// [`output_root`] so the entry points can't drift.
 ///
 /// gh#531: this said "Default output root: `./output`", three lines above the
 /// constant that says `results/`. Stale since the rename.
@@ -31,8 +30,8 @@ pub const DEFAULT_OUTPUT_ROOT: &str = "results";
 /// > default (`./results`)**.
 ///
 /// The env-var layer makes this function consistent with the
-/// reader-side commands (`list` / `show` / `cat`) and the writers
-/// `simulate --cas` / `batch run`, all of which honor
+/// reader-side commands (`list` / `show` / `cat`) and the writer
+/// `simulate`, all of which honor
 /// `CAMDL_OUTPUT_DIR` via clap's `env = "..."` attribute. Before
 /// this layer existed, `fit run` and `profile` silently ignored
 /// the env var and fell straight through to `DEFAULT_OUTPUT_ROOT`,
@@ -41,7 +40,7 @@ pub const DEFAULT_OUTPUT_ROOT: &str = "results";
 /// `docs/dev/reviews/2026-04-27-output-tree-consistency-review.md`).
 ///
 /// Why env *below* config: project-specific config (fit.toml's
-/// `output_dir`, batch.toml's `output_dir`) is more authoritative
+/// `output_dir`) is more authoritative
 /// than ambient shell state. A user who sets `CAMDL_OUTPUT_DIR` to
 /// keep dev runs separate shouldn't have it silently override an
 /// explicit `output_dir = "results/he2010"` in a fit.toml.
@@ -157,8 +156,8 @@ mod tests {
 
         std::env::set_var("CAMDL_OUTPUT_DIR", "/tmp/from-env");
 
-        // Config (fit.toml's `output_dir`, batch.toml's manifest
-        // setting) is project-specific and more authoritative than
+        // Config (fit.toml's `output_dir`) is project-specific and
+        // more authoritative than
         // ambient shell state. Setting CAMDL_OUTPUT_DIR must NOT
         // silently redirect a fit that explicitly declared
         // `output_dir = "..."` in its toml.

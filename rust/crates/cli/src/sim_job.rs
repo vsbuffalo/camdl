@@ -1,35 +1,14 @@
-//! Scenario-reference resolution shared between `simulate --scenario` and
-//! `batch run` — the load-bearing slice of `docs/camdl-run-spec.md` §3.6
-//! (`ScenarioRef`) that fixes CLI review finding #3 (batch dropping
-//! model `scenarios{}`).
+//! The resolved engine input behind `camdl simulate` — run-spec §3
+//! (`SimulateJob`, `ParamSource`, `Seeds`, `ObsOutput`, `ScenarioRef`) — and
+//! scenario-reference resolution.
 //!
-//! ## Why this module is narrow
-//!
-//! The run-spec §3.1 vision is a single `SimulateJob` type that both the
-//! CLI and the batch TOML deserialize into, dispatched by one `run_job`
-//! engine. Implementing that fully means rerouting the proven `simulate`
-//! per-(scenario, draw, replicate) RNG loop through a new engine. The
-//! determinism contract (CLAUDE.md §"RNG and paired-seed coupling")
-//! makes a wholesale reorder of that draw sequence high-risk, and no test
-//! exercises the reroute beyond "existing tests stay green." The
-//! behavioural unification the CLI review findings demand — batch
-//! honouring model presets, and an obs ensemble in the CAS — does not
-//! require the engine swap. It requires `batch run` to resolve a
-//! `[[scenario]]` reference through the *same* `params_resolver` preset
-//! path `simulate` already uses. That resolution lives here.
-//!
-//! ## Convergence (2026-05-28, this commit)
-//!
-//! The deferral above is now resolved. The run-spec §3 types
-//! (`SimulateJob`, `ParamSource`, `Seeds`, `ObsOutput`) live here, and a
-//! single `crate::engine::run_job` drives the `param-point × scenario ×
-//! seed-slot` cell loop for BOTH `camdl simulate` and `camdl batch run`.
-//! The reroute is byte-safe: the per-cell seed arithmetic, iteration
-//! order, and `SimRun` construction are reproduced exactly (the
-//! determinism PIN in `tests/determinism_pin.rs` is the tripwire), and
-//! each entry point supplies a `crate::engine::RunSink` for its output
-//! shape (combined wide-format TSV for `simulate`; per-cell CAS tree for
-//! `batch run`).
+//! `simulate` lowers its flags into one `SimulateJob`, and `fit predict`
+//! builds one for its free-forward replay; a single `crate::engine::run_job`
+//! drives the `param-point × scenario × seed-slot` cell loop for both. The
+//! per-cell seed arithmetic, iteration order and `SimRun` construction are the
+//! engine's (the determinism PIN in `tests/determinism_pin.rs` is the
+//! tripwire), and each entry point supplies a `crate::engine::RunSink` for its
+//! output shape.
 
 use std::path::PathBuf;
 
@@ -40,26 +19,19 @@ use crate::args::types::ForwardBackend;
 
 // ─── SimulateJob (run-spec §3.1) ──────────────────────────────────────────────
 
-/// Everything needed to run one or more simulations — run-spec §3.1's
-/// "THE type — CLI and file both produce this." `camdl simulate` builds
-/// one from CLI args (`from_cli` in `main.rs`); `camdl batch run`
-/// deserializes its TOML into one (`batch::ExperimentToml::into_job`).
-/// Both then hand it to [`crate::engine::run_job`].
+/// Everything needed to run one or more simulations — run-spec §3.1.
+/// `camdl simulate` builds one from CLI args (`main.rs`) and `fit predict`
+/// builds one for its free-forward replay; both hand it to
+/// [`crate::engine::run_job`].
 ///
-/// Unlike the run-spec sketch (which carries raw `PathBuf` fields and an
-/// untagged `#[serde(flatten)] source`), this is the *resolved* engine
-/// input: the front-ends do their own arg/TOML parsing and populate the
-/// concrete fields. Keeping `SimulateJob` un-derived for serde avoids a
-/// second, drifting wire schema alongside batch's existing v1 TOML — the
-/// run-spec's "CLI and file are the same type" property is satisfied by
-/// both front-ends *converging on this struct*, which is the load-bearing
-/// claim, rather than by sharing a serde representation.
+/// This is the *resolved* engine input: the front end does its own arg
+/// parsing and populates the concrete fields, and the struct carries no
+/// serde derives — there is no wire schema for it to drift from.
 #[derive(Debug, Clone)]
 pub struct SimulateJob {
-    /// Resolved IR/`.camdl` path (already anchored to the config dir for
-    /// batch; verbatim for the CLI).
+    /// Resolved IR/`.camdl` path, verbatim from the CLI.
     pub model: String,
-    /// `--params` / `[config].params` files, applied in order.
+    /// `--params` files, applied in order.
     pub params_files: Vec<String>,
     pub backend: ForwardBackend,
     pub dt: f64,
@@ -73,21 +45,18 @@ pub struct SimulateJob {
     pub scenarios: Vec<ScenarioRef>,
     /// gh#626: the resolved `--to` horizon override (model time), applied to
     /// every cell after the scenario horizon in `resolve_run_model`, and keyed
-    /// into run identity via `ResolvedEntry.t_end`. `None` = no override
-    /// (batch TOML deliberately has no `to` key).
+    /// into run identity via `ResolvedEntry.t_end`. `None` = no override.
     pub t_end_override: Option<f64>,
     /// Times every cell must record a trajectory snapshot at, beyond the
     /// model's own `output { trajectories { … } }` schedule — copied verbatim
     /// onto each cell's [`crate::util::SimRun`], where
     /// `apply_required_output_times` folds them into the schedule and raises
     /// the integration end to reach them. `fit predict` supplies its forecast
-    /// rows' closing boundaries here; empty everywhere else, including the
-    /// batch TOML, which has no key for it.
+    /// rows' closing boundaries here; empty everywhere else.
     pub required_output_times: Vec<f64>,
     /// gh#641: the loaded `--init-state` file. Shared by every cell (it is one
     /// ensemble of states); the replicate index selects the row. `None` = the
-    /// model's own `init {}` (batch TOML deliberately has no key for this —
-    /// a forecast origin is a CLI-only override, like `to`).
+    /// model's own `init {}`.
     pub init_state: Option<std::sync::Arc<InitStateSource>>,
     /// gh#616: the run's resolved observation window, folded ONCE for the
     /// whole job and copied to every cell, so a sweep cannot resolve a
@@ -96,11 +65,11 @@ pub struct SimulateJob {
     /// S layer.
     pub seeds: Seeds,
     /// `--param NAME=VALUE` CLI overrides merged on top of every cell
-    /// (M layer, highest precedence). Empty for batch.
+    /// (M layer, highest precedence).
     pub cli_overrides: Vec<(String, f64)>,
     /// A `--draws prior --fit FIT.toml` config's `[fixed]` block, copied to
     /// every cell's `SimRun::fit_fixed` and resolved at the `fit.toml [fixed]`
-    /// tier (gh#949). Empty for every other source and for batch.
+    /// tier (gh#949). Empty for every other source.
     pub fit_fixed: IndexMap<String, f64>,
     /// `--param-vec PREFIX=FILE` entries (CLI only).
     pub set_vec_entries: Vec<(String, String)>,
@@ -164,8 +133,7 @@ pub struct InitStateSource {
 
 /// Where parameter vectors come from — run-spec §3.2. Exactly one variant
 /// is active per job. The engine expands this into an ordered list of
-/// per-cell parameter-override maps (the "draws" in `simulate`'s loop, the
-/// "sweep points" in batch's loop — unified here).
+/// per-cell parameter-override maps (draws, or design points).
 #[derive(Debug, Clone)]
 pub enum ParamSource {
     /// Single point: base params + CLI overrides. One param-point, run
@@ -174,8 +142,8 @@ pub enum ParamSource {
     Point { replicates: usize },
     /// Deterministic grid: Cartesian product of swept values. Each point
     /// overrides the corresponding key in the base params, run `replicates`
-    /// times. (Batch sweeps drive replication through explicit `seeds`, so
-    /// `replicates` is 1 there; the field keeps the variant symmetric.)
+    /// times. `simulate --sweep` / `--sweep-file` set this; with `--seeds`
+    /// the explicit list drives replication and `replicates` tracks its length.
     Sweep { points: Vec<IndexMap<String, f64>>, replicates: usize },
     /// Pre-resolved parameter draws (posterior file / prior / uniform).
     /// Each row is a complete (or override) parameter vector.
@@ -229,7 +197,7 @@ pub enum Seeds {
     /// A single base seed; replicates derive seeds via XOR-mixing
     /// (`main.rs` historical `seed ^ draw*MIX ^ rep*MIX`).
     Single(u64),
-    /// An explicit list (`--seeds`, batch `seeds = {...}`). Each seed is a
+    /// An explicit list (`--seeds`). Each seed is a
     /// seed-slot used verbatim — "seed N means the same trajectory."
     Explicit(Vec<u64>),
 }
@@ -535,8 +503,8 @@ mod tests {
     #[test]
     fn resolve_inline_matching_preset_name_resolves_as_preset() {
         // An Inline entry with NO patch fields whose name matches a preset
-        // is treated as a pure preset reference (case 1) — this is the
-        // common `[[scenario]] name = "baseline"` batch form.
+        // is treated as a pure preset reference (case 1) — the shape of a
+        // bare arm name that matches a preset.
         let r = resolve_scenario_ref(
             &ScenarioRef::Inline {
                 name: "baseline".into(),

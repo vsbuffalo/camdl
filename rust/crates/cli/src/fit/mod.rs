@@ -249,7 +249,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
     // gh#162: a fit nests Rayon parallelism (chains × particle filter) on the
     // global pool, which otherwise defaults to ALL logical cores regardless of
     // `chains`. Cap it from `--parallel` / CAMDL_PARALLEL (0 = all cores) so the
-    // thread budget is explicit and matches pfilter/profile/survey/batch.
+    // thread budget is explicit and matches pfilter/profile/survey.
     // `build_global` is one-shot per process; ignore the already-initialised
     // Err so re-entry (tests) stays safe. Mirrors pfilter.rs.
     if a.parallel > 0 {
@@ -1058,8 +1058,8 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // downstream verbs (`fit predict`) are self-contained and the run
                 // is portable — they resolve the model from this archive rather
                 // than recompiling the loose `.camdl`, which may have moved. An
-                // artifact addition, identity-neutral (not a hashed level; mirrors
-                // `batch.rs`'s sibling `model.ir.json`). The base model IR is
+                // artifact addition, identity-neutral (not a hashed level; the
+                // sim leaf has its own `model.ir.json`). The base model IR is
                 // structurally identical across sweep cells (a sweep overrides
                 // parameter *values* at resolve time), so one archive per segment.
                 if let Some(ir_src) = config.problem.compiled_ir.as_deref() {
@@ -1086,7 +1086,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                 // `.ir.json` — several tests fit against one. Unguarded, every
                 // such fit printed "parse error in …/sir.ir.json" twice, which
                 // reads as "your compiled IR is malformed" when nothing is
-                // wrong. gh#496 fixed exactly this for `batch run` and reasoned
+                // wrong. gh#496 fixed exactly this for the grid writer and reasoned
                 // that the fit path was safe because `config.model.camdl` "is
                 // source by construction"; it is not. One guard over both
                 // blocks, since they share the precondition.

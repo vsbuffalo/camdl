@@ -1,5 +1,4 @@
-//! `CasSink` — the content-addressed store sink shared by `camdl simulate`
-//! and `camdl batch run`.
+//! `CasSink` — the content-addressed store sink behind `camdl simulate`.
 //!
 //! Each engine cell (scenario × parameter point × replicate) is written as one
 //! `Sim` leaf under `<output>/sims/…` in the factored `runid` layout (model /
@@ -106,15 +105,17 @@ pub(crate) struct RunEntry {
     pub(crate) params_level: Option<runid::ContentHash>,
 }
 
-// ─── CasSink: batch's content-addressed output strategy ───────────────────────
+// ─── CasSink: the content-addressed output strategy ───────────────────────────
 
-/// `RunSink` for `camdl batch run`: writes each cell into the content-addressed
-/// store under `sims/` (the `runid` factored sim layout), resolving each cell's
-/// identity via [`crate::resolve::resolve_trajectory`] so the path, `run.json`
-/// `run_id`, and recorded sweep point match the `simulate` path exactly. Cache
-/// hits are skipped via `should_run` (the engine never simulates them).
+/// `RunSink` over the content-addressed store: writes each cell into `sims/`
+/// (the `runid` factored sim layout), resolving each cell's identity via
+/// [`crate::resolve::resolve_trajectory`] so the path, `run.json` `run_id`
+/// and recorded sweep point are keyed on exactly what ran. Cells the store
+/// already holds are skipped via `should_run` (the engine never simulates
+/// them); `simulate`'s own sink (`main::SimSink`) delegates to it and reads a
+/// skipped cell back for the combined outputs.
 pub(crate) struct CasSink {
-    /// Resolved `[[scenario]]` entries, looked up by name for the
+    /// Resolved scenario arms, looked up by name for the
     /// hash-relevant enable/disable/params delta.
     pub(crate) resolved_scenarios: Vec<ResolvedEntry>,
     pub(crate) model_path: String,
@@ -122,9 +123,8 @@ pub(crate) struct CasSink {
     /// The **base** model — its whole-IR digest is the (constant-across-cells)
     /// model level. Never `cell.model` (which has scenario + sweep applied).
     /// Loaded through the same seam the engine loads from
-    /// (`util::load_run_model` for `simulate`; `load_manifest_model` for
-    /// `batch`, whose cells carry no anchors and no `--integrator`), and it is
-    /// also the model each cell's parameter values are resolved over.
+    /// (`util::load_run_model`), and it is also the model each cell's
+    /// parameter values are resolved over.
     ///
     /// There is deliberately no base parameter map here. A cell's `params`
     /// level is resolved from the cell's own `SimRun` — the object the engine
@@ -146,8 +146,8 @@ pub(crate) struct CasSink {
     /// gh#656: `simulate --emit-every`, the per-stream emission-cadence
     /// override. It sets the emitted times AND (via [`obs_subtree_hash`]) the
     /// obs subtree's address, so two cadences are two artifacts under one
-    /// trajectory leaf. `None` for `batch run`, which has no such key, and for
-    /// every `simulate` without the flag — those key exactly as they always did.
+    /// trajectory leaf. `None` for every `simulate` without the flag — those
+    /// key exactly as they always did.
     pub(crate) emit_every: Option<crate::emit_every::EmitEvery>,
     pub(crate) force: bool,
     pub(crate) total: usize,
@@ -155,13 +155,12 @@ pub(crate) struct CasSink {
     pub(crate) completed_runs: Vec<RunEntry>,
     pub(crate) errors: Vec<String>,
     /// User-supplied display label, recorded on each leaf's
-    /// `RunRecord.provenance.label`. `simulate --label` sets this; batch
-    /// leaves it `None`.
+    /// `RunRecord.provenance.label`. `simulate --label` sets this.
     pub(crate) label: Option<String>,
     /// Upstream-fit lineage recorded on each leaf's `RunRecord.deps`. Set
     /// when `simulate --params` consumes a fit-MLE params file carrying a
     /// `[provenance]` block (so the sim records which fit it came from);
-    /// empty for batch and for standalone (non-fit) params. Provenance only —
+    /// empty for standalone (non-fit) params. Provenance only —
     /// a sim's identity is its factored levels (resolve_trajectory), never
     /// `deps`, so this does not change the sim's run_id or store path.
     pub(crate) fit_dep: Vec<runid::inputs::ArtifactRef>,
@@ -201,7 +200,7 @@ impl CasSink {
 
     /// The store root (`<output>`, the parent of `<output>/sims`).
     ///
-    /// `pub(crate)` for `batch`'s dry-run / status prediction (`CasSink::predict_cells`).
+    /// `pub(crate)` for `simulate --dry-run`'s store view (`main::print_store_view`).
     pub(crate) fn root(&self) -> std::path::PathBuf {
         std::path::Path::new(&self.runs_dir)
             .parent()
@@ -246,7 +245,8 @@ impl CasSink {
     /// it runs the cell. The named scenario's enable/disable/params is the
     /// `scenario` level. `process_seed` is engine-resolved.
     ///
-    /// `pub(crate)` for `batch`'s dry-run / status prediction (`CasSink::predict_cells`).
+    /// `pub(crate)` for `simulate`'s read-back of a stored cell and for the
+    /// `--dry-run` store view (`main::SimSink::read_stored`, `main::print_store_view`).
     pub(crate) fn cell_resolve(
         &self,
         spec: &crate::engine::CellSpec,
@@ -254,7 +254,7 @@ impl CasSink {
         let name = spec.scenario.name();
         let resolved = self.resolved_scenarios.iter()
             .find(|s| s.name == name || s.route.as_deref() == Some(name))
-            .ok_or_else(|| format!("cell scenario '{}' not among resolved batch scenarios", name))?;
+            .ok_or_else(|| format!("cell scenario '{}' not among the resolved scenarios", name))?;
 
         let params: HashMap<String, f64> = crate::util::resolved_parameter_values(
             &crate::util::resolve_run_parameters(&self.base_model, &spec.sim_run)?.model,
@@ -318,8 +318,7 @@ impl CasSink {
             // a re-filtered / re-fitted ensemble under an unchanged model must
             // not serve the cached forecast, and two cells sharing a
             // `process_seed` (`--seeds 7,7`) must not collide while starting
-            // from different rows. `None` for every `batch run` cell (no
-            // `init_state` key — CLI-only, like `to`).
+            // from different rows. `None` for every cell without `--init-state`.
             init_state: spec.sim_run.init_state.as_ref().map(|i| {
                 runid::inputs::InitStateDigest {
                     ensemble: runid::inputs::DataDigest(i.ensemble_digest),
@@ -709,8 +708,7 @@ impl crate::engine::RunSink for CasSink {
             }
             // gh#641: a restarted cell's obs axis begins at the forecast
             // origin, exactly as the `-o`/`--obs` mirror's does. `None` for
-            // every ordinary cell — and for every `batch run` cell, which has
-            // no `init_state` key.
+            // every ordinary cell.
             let restart_origin = spec.sim_run.init_state.as_ref().map(|i| i.origin_t);
             if let Err(e) = write_obs_into_cas(
                 &dest, &cell.model, &cell.traj, spec.process_seed, restart_origin,
@@ -900,8 +898,7 @@ fn write_obs_into_cas(
     process_seed: u64,
     // gh#641: `Some(T)` when this cell was restarted from a filtered state at
     // `T`; the obs axis then begins there, because the trajectory does. `None`
-    // for every ordinary cell. NOTE this function serves `simulate` cells as
-    // well as `batch run` ones — the obs subtree is written for both.
+    // for every ordinary cell.
     restart_origin: Option<f64>,
     // gh#656: the `--emit-every` override — it sets the emitted times AND names
     // the subtree (via `obs_subtree_hash`), so the two cadences coexist under one
@@ -1124,7 +1121,7 @@ mod tests {
     /// DIFFERENT sim run_ids (else a changed `matrix.tsv` silently serves the
     /// stale cached trajectory); identical content → the same run_id
     /// (count-in-the-key for tables). Exercises the shared `CasSink`, so the
-    /// fix covers both `simulate` and `batch`.
+    /// fix covers the lone-run and multi-cell paths alike.
     #[test]
     fn table_content_folds_into_sim_run_id() {
         let dir = tempfile::tempdir().unwrap();

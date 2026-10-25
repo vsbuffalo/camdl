@@ -1,6 +1,6 @@
 // ── Args structs only ─────────────────────────────────────────────────────────
 //
-// The clap subcommand tree (Cli, Command, FitCmd, BatchCmd, DataCmd) lives
+// The clap subcommand tree (Cli, Command, FitCmd, DataCmd) lives
 // in main.rs — it's the canonical, dispatched parser. This module owns
 // only the per-command argument structs (FitRunArgs, SimulateArgs, etc.)
 // referenced by main.rs's tree.
@@ -176,42 +176,33 @@ pub struct SimBackend {
     pub integrator: Option<crate::args::types::IntegratorArg>,
 }
 
-fn is_false(b: &bool) -> bool { !*b }
-
 /// `--output-every` / `--no-flows` / `--columns` — the trajectory output view
-/// (cadence + which columns are written). One struct backs both the `simulate`
-/// CLI flags (flattened into `SimulateArgs`) and `batch.toml`'s `[output]`
-/// section (deserialized) — a single definition, both front doors (the shared
-/// clap+serde pattern; see gh#241). Only `simulate` and `batch.toml` write
-/// trajectories, so the view applies there; `fit.toml` has no trajectory output.
+/// (cadence + which columns are written), flattened into `SimulateArgs`. Only
+/// `simulate` writes trajectories, so the view applies there; `fit.toml` has
+/// no trajectory output.
 ///
 /// `every` overrides the model's `output { every }` schedule, so it rides the
 /// model digest and re-keys only runs that use it. `no_flows` / `columns`
 /// change which columns are written to the content-addressed leaf, so they ride
 /// the `config`-level identity (`runid::inputs::SimConfig`): a non-default view
-/// is a distinct, reproducible artifact. `skip_serializing_if` keeps defaults
-/// out of the fit-identity (canonical-JSON) hash so existing fits don't re-key.
-#[derive(Args, Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+/// is a distinct, reproducible artifact.
+#[derive(Args, Clone, Debug, Default)]
 pub struct OutputView {
     /// Emit one trajectory row every N time-units, overriding the model's
     /// `output { every }`. A plain number in the model's `time_unit` (like
     /// `--dt`); e.g. `--output-every 7` on a daily model writes weekly rows.
     #[arg(long = "output-every", value_name = "N")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every: Option<f64>,
 
     /// Drop every `flow_*` column from the trajectory output — most useful for
     /// stratified/spatial models where inter-stratum flow columns dominate.
     #[arg(long = "no-flows", default_value_t = false)]
-    #[serde(default, skip_serializing_if = "is_false")]
     pub no_flows: bool,
 
     /// Restrict trajectory columns to this comma-separated allow-list of output
     /// column names (compartments and/or `flow_<name>`). Empty = all columns;
     /// emitted order follows the model, not this list.
     #[arg(long = "columns", value_delimiter = ',', value_name = "COL,...")]
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
 }
 
@@ -617,63 +608,6 @@ pub struct SimulateArgs {
     pub reactive_log: Option<PathBuf>,
 }
 
-// ─── batch ────────────────────────────────────────────────────────────────────
-
-#[derive(Args)]
-#[command(after_help = colored_help!("\
-Examples:
-  # Run a batch sweep
-  camdl batch run sweep.toml --parallel 8
-
-  # Dry-run: show the resolved sweep grid without simulating
-  camdl batch run sweep.toml --dry-run
-
-  # Force rerun, ignoring cached outputs
-  camdl batch run sweep.toml --force
-"))]
-pub struct BatchArgs {
-    /// Batch TOML manifest file
-    pub file: PathBuf,
-
-    /// Override output_dir from the manifest
-    #[arg(long, env = "CAMDL_OUTPUT_DIR")]
-    pub output_dir: Option<PathBuf>,
-
-    /// Override parallel thread count
-    #[arg(long, env = "CAMDL_PARALLEL")]
-    pub parallel: Option<usize>,
-
-    /// Print resolved sweep grid without running
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Re-run even if output exists
-    #[arg(long)]
-    pub force: bool,
-
-    /// gh#audit-C6. See InferenceCore.allow_degenerate_rates. Batch
-    /// runs that orchestrate many simulate-style invocations need
-    /// the same opt-in for legacy silent-zero behaviour on rate
-    /// collapse paths.
-    #[arg(long, default_value_t = false)]
-    pub allow_degenerate_rates: bool,
-}
-
-/// `camdl batch status FILE`
-#[derive(Args)]
-#[command(after_help = colored_help!("\
-Examples:
-  # Count completed vs pending runs for a sweep
-  camdl batch status sweep.toml
-
-  # Watch a long-running sweep from another shell
-  watch -n 5 camdl batch status sweep.toml
-"))]
-pub struct BatchStatusArgs {
-    /// Batch TOML manifest file
-    pub file: PathBuf,
-}
-
 // ─── fit ──────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
@@ -752,7 +686,7 @@ pub struct FitRunArgs {
     /// each chain, the particle filter. `0` (the default) uses all logical
     /// cores. Results are bit-identical regardless of this value — it caps the
     /// thread budget / CPU footprint, not the numerics. Mirrors `--parallel`
-    /// on pfilter/profile/survey/batch; also honored via `CAMDL_PARALLEL`.
+    /// on pfilter/profile/survey; also honored via `CAMDL_PARALLEL`.
     #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
     pub parallel: usize,
 
@@ -3083,7 +3017,7 @@ mod tests {
 
     /// Regression: writer-side `DEFAULT_OUTPUT_ROOT` ("results") must
     /// match every reader-side CLI default. Drift here is what
-    /// produced the 2026-04-19 → 2026-04-27 wart where `batch run`
+    /// produced the 2026-04-19 → 2026-04-27 wart where the grid writer
     /// wrote to `./results/` but `list / show / cat` defaulted to
     /// `./output/`, forcing book chapters to pass `--root results`
     /// to every read command. Keep them in lockstep.
