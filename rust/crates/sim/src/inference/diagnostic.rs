@@ -103,10 +103,6 @@ pub enum DiagnosticKind {
         rhat: f64,
         threshold: f64,
     },
-    ChainDiverged {
-        chain_id: usize,
-        n_chains: usize,
-    },
     MultimodalLikelihood {
         ll_spread: f64,
         max_chain_agreement: f64,
@@ -455,9 +451,6 @@ impl DiagnosticKind {
                 format!("rank-normalized split R̂ for '{}' is {:.3} \
                          (threshold {:.3}). Chain estimates have not \
                          converged.", param, rhat, threshold),
-            Self::ChainDiverged { chain_id, n_chains } =>
-                format!("Chain {} of {} diverged from the others (MLE outside 3×MAD).",
-                    chain_id, n_chains),
             Self::MultimodalLikelihood { ll_spread, max_chain_agreement } =>
                 format!("Likelihood surface may be multimodal: \
                          loglik spread={:.1}, max Â={:.2}.", ll_spread, max_chain_agreement),
