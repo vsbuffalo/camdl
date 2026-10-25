@@ -13,6 +13,52 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-10-25 — every chain index a fit shows counts from 0
+
+**What.** A fit's chains are numbered `0 … N-1` on every surface that names one:
+the `chain_N/` directories, the progress and refusal lines, `chain_starts.tsv`'s
+`chain_id`, `fit_state.toml`'s `best_chain` and `chain_eval_ids`, `run.json`'s
+`inputs.best_chain`, `mle_params.toml`'s `[provenance] chain`, every
+`fit summary` table (text, json, md, latex), `--exclude-chains`, the `chain`
+column `fit predict --by-chain` adds, `progress.json`'s per-chain rows and
+`cross_chain_compat.json`'s `chains`. They were numbered from 1, while the
+`chain` column of `draws.tsv` and `trajectories.tsv` — the join key — was
+numbered from 0, and the conversion between the two bases was written by hand at
+every site. The same off-by-one was fixed site by site four times (gh#781,
+gh#823, gh#910, gh#972) and was still open at three more (gh#978, gh#979,
+gh#981, gh#913). With one base there is nothing to convert. `draws.tsv`,
+`trajectories.tsv` and `simulate`'s `draw`, `replicate` and `point_id` columns
+already counted from 0 and do not change (`docs/camdl-run-spec.md` §2, "One
+index base"; gh#990).
+
+Two labelling defects close with it: the scout-convergence refusal, the
+per-chain loglik-eval table of `fit summary --format json|md|latex` and the
+per-chain `chains` table now label every row by the chain's own number, read
+from `chain_eval_ids` or from the `chain_N/` directory, rather than by its
+position in a vector that IF2 has already dropped PF-degenerate chains from
+(gh#978, gh#981, gh#913).
+
+**Migration.** Every consumer that joins on a chain number shifts by one:
+`--exclude-chains 3,5` now names the chains that were `4,6`; a script that
+opened `chain_<k>/` for the chain `fit summary` called `k` opens the same
+directory, because both moved together; a script that opened `chain_<c+1>/` for
+a `draws.tsv` row with `chain = c` now opens `chain_<c>/`. A stored fit written
+before this change — `chain_1/ … chain_N/` with no `chain_0/` — is refused by
+`fit summary`, `fit predict`, `fit table`, `compare` and `fit run --resume` with
+a message naming this change, rather than read with every chain shifted; re-run
+the fit. `progress.json`'s `numbering` and `cross_chain_compat.json`'s
+`chain_numbering` now read
+`counted from 0, matching the chain_N/ directories
+and draws.tsv's chain column`.
+
+**Diagnostic.** `error: --exclude-chains: chain 4 not in this fit (chains 0..3)`
+on a four-chain fit under the old habit of naming the last chain `4`; and, on a
+leaf written before the change:
+`this leaf was written by a camdl that counted chains from 1 (it holds chain_1/
+and no chain_0/) … Re-run the fit`.
+
+---
+
 ## 2026-09-09 — a projection may divide two flow sums; a projection that divides transition rates is refused
 
 **What.** A stream that measures "of this window's events, what fraction were of

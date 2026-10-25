@@ -172,7 +172,7 @@ whether the chains found the same posterior:
 | `from_prior`                      | one draw from the declared priors per chain; base point unused                                                                                    |
 | `uniform_unconstrained`           | Stan-style boundary-avoiding draws on the unconstrained scale; base point unused                                                                  |
 | `lhs`                             | Latin-hypercube stratified over `bounds`; base point unused                                                                                       |
-| `uniform`                         | chain 1 at the base point; the rest uniform within `bounds`                                                                                       |
+| `uniform`                         | chain 0 at the base point; the rest uniform within `bounds`                                                                                       |
 | `{ from_posterior = "<handle>" }` | one row of a stored fit's posterior per chain (or of a draws TSV named directly); a parameter absent from the source falls back to bounds-uniform |
 
 **Point** rules put every chain at one point. R̂ is then _not assessed_ — chains

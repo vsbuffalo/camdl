@@ -496,7 +496,7 @@ pass; the `one_step` horizon leaves both pairs empty, because its cell pools
 over filter particles as well as draws.
 
 `camdl fit predict --by-chain` adds a leading `chain` column — `all` on the
-pooled rows, the 1-based chain id on one additional band per chain, on **both**
+pooled rows, the chain id on one additional band per chain, on **both**
 horizons. The pooled band is unchanged and remains the default object; without
 the flag no `chain` column is written. A per-chain band carries no
 `rhat_*`/`ess_*` cell, because those compare chains, and reports its own chain's
@@ -1751,7 +1751,7 @@ problem), and `methods` — one entry per method leaf:
 
 This is a completed two-chain PGAS leaf. `best_loglik` and `best_chain` are the
 leaf's `run.json` `inputs.best_loglik` / `inputs.best_chain`, printed as
-recorded: `best_chain` is the 1-based chain number (a `chain_N/` directory), and
+recorded: `best_chain` is the chain number (a `chain_N/` directory), and
 `best_loglik` is the value `loglik_type` names — for PGAS the highest
 complete-data log-likelihood of any sweep, not a marginal likelihood, so it does
 not compare with an IF2 or `pfilter` row. Either field is `null` only when the
@@ -2689,7 +2689,7 @@ start with one particle-filter pass before the swarm is perturbed
 (`runner::preflight_spread_starts`); PGAS retries on a start whose complete-data
 log-posterior is still non-finite after the first trajectory update; PMMH
 retries on the init-eval's `PFDegenerate`. Each attempt is announced
-(`chain 1: start 3 of 10 refused (…); drawing another`) and the refusal, when it
+(`chain 0: start 3 of 10 refused (…); drawing another`) and the refusal, when it
 comes, says how many were tried: `none of 10 starts drawn
 under`starts =
 from_posterior
@@ -2703,16 +2703,16 @@ perturbation, and every attempt a retry rejected on the way there — under a
 header naming the rule and counting the rejected draws
 (`# camdl chain_starts;
 starts=from_mle @scout; chains=4; kind=point; retried=0`).
-Its columns are `chain_id` (1-based, the number of the `chain_N/` directory
-beside it and the number every stderr refusal and `bad_init` record uses),
-`attempt` (0-based), `status` (`accepted` — the start the chain ran from;
-`rejected` — a draw the filter could not score, a redraw followed; `refused` —
-the last attempt, also unscoreable, the chain did not run), `source`, one column
-per estimated parameter, then `ess` (the filter's ESS at refusal, blank
-otherwise) and `reason` (blank for an accepted row); one row per attempt in
-(chain, attempt) order, so a healthy run has one `accepted` row per chain at
-attempt 0. That file, not the config, is the authority on what a run did.
-`fit_state.toml` carries the same rule as `chain_init_source` beside
+Its columns are `chain_id` (the number of the `chain_N/` directory beside it and
+the number every stderr refusal and `bad_init` record uses), `attempt`
+(0-based), `status` (`accepted` — the start the chain ran from; `rejected` — a
+draw the filter could not score, a redraw followed; `refused` — the last
+attempt, also unscoreable, the chain did not run), `source`, one column per
+estimated parameter, then `ess` (the filter's ESS at refusal, blank otherwise)
+and `reason` (blank for an accepted row); one row per attempt in (chain,
+attempt) order, so a healthy run has one `accepted` row per chain at attempt 0.
+That file, not the config, is the authority on what a run did. `fit_state.toml`
+carries the same rule as `chain_init_source` beside
 `chain_starts_kind = "spread" | "point"`, and `fit summary` prints both under
 the leaf's identity line:
 
@@ -2764,8 +2764,23 @@ three levels (`cas.rs:1`–`24`):
     <method>-<h8>/                                method level
         <seed_N>-<h8>/                            seed level (the leaf)
             run.json  fit_state.toml  chain_starts.tsv
-            chain_1/ … chain_N/
+            chain_0/ … chain_{N-1}/
 ```
+
+**One index base.** Every index camdl shows a user counts from 0 — this is the
+single rule, stated once here and relied on everywhere below. A fit's chains are
+`0 … N-1` in every place that names one: the `chain_N/` directories, the
+progress and refusal lines, `chain_starts.tsv`'s `chain_id`, `fit_state.toml`'s
+`best_chain` and `chain_eval_ids`, `run.json`'s `inputs.best_chain`,
+`mle_params.toml`'s `[provenance] chain`, every `fit summary` table,
+`--exclude-chains`, the `chain` column of `draws.tsv` and `trajectories.tsv`,
+the `chain` column `fit predict --by-chain` adds, `progress.json`'s per-chain
+rows and `cross_chain_compat.json`'s `chains`. `simulate`'s `replicate`, `draw`
+and `point_id` count from 0 too. Joining any two of these takes no arithmetic,
+and no artifact carries a second base to convert from. A leaf written by a camdl
+that numbered its directories from 1 (`chain_1/` with no `chain_0/`) is refused
+by every reader that addresses a chain by name — `fit summary`, `fit predict`,
+`fit run --resume` — rather than read with every chain shifted by one.
 
 - **`<root>`** is `output_dir` from the `fit.toml` (anchored at the `fit.toml`),
   else `$CAMDL_OUTPUT_DIR` (anchored at the working directory), else `results`
@@ -3141,8 +3156,8 @@ $ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
 # raise `sweeps` in the toml, then extend that leaf
 $ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle \
     --resume results/fits/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-06cbd6b3
+  chain 0: resuming from sweep 100
   chain 1: resuming from sweep 100
-  chain 2: resuming from sweep 100
    stored pgas · …/09_pgas_only-649b2ecc/pgas-05ea6411/seed_1-06cbd6b3/
 ```
 
@@ -3260,7 +3275,7 @@ independently into its own content-addressed fit segment:
 $ camdl fit run fits/01_mle.toml --sweep "rho=0.5,0.6" --sweep "k=5,10"
 sweep: 4 points
 ═══ sweep point 1/4: rho_0.500__k_5.000 ═══
-          best ll=-59.9 (chain 2) in 8.6s
+          best ll=-59.9 (chain 1) in 8.6s
 ═══ sweep point 2/4: rho_0.500__k_10.000 ═══
           best ll=-59.3 (chain 3) in 8.7s
 ═══ sweep point 3/4: rho_0.600__k_5.000 ═══
@@ -3381,7 +3396,7 @@ fit: fits/01_mle.toml (method=if2)
   note: `starts = "uniform_unconstrained"` draws every chain's start, so `[estimate].start` is unused here for: beta, gamma. Use `starts = "single"` to start every chain at the declared values, or drop the `start` entries.
 running 4 chains × 200 particles × 10 iterations, cooling=0.7, dt=1
 
-transforms (chain 1 of 4; chains start at different points — see chain_starts.tsv):
+transforms (chain 0 of 4; chains start at different points — see chain_starts.tsv):
   beta         log     [0.05, 1]  log(0.0934) = -2.37  rw_sd=0.0335 (0.358/step, auto)
   gamma        log     [0.01, 0.5]  log(0.1775) = -1.73  rw_sd=0.0138 (0.078/step, auto)
 
@@ -3393,11 +3408,11 @@ cooling: cf50=0.70, reached at iter 50 (target), over a 10-iteration run × 12 o
   iter  10: rw_sd at 93.1% (run end)
 
 evaluating loglik (every 10 iterations, all 4 chains)...
-  chain 1: ll=-58.4      chain 2: ll=-58.4      chain 3: ll=-58.6      chain 4: ll=-58.5
+  chain 0: ll=-58.4      chain 1: ll=-58.4      chain 2: ll=-58.6      chain 3: ll=-58.5
 
 loglik-eval: re-scoring final-iter θ̂ (4 chains × 8 replicates @ 4000 particles)...
 
-best chain: 2 (loglik=-58.38 ± 0.01)
+best chain: 1 (loglik=-58.38 ± 0.01)
 chain clean logliks: [-58.5, -58.4, -58.6, -58.6]
 
 Â:
@@ -3413,7 +3428,7 @@ dt-convergence at θ̂: PASS  (|Δ_leg1| = 0.65, |Δ_leg2| = 1.16 nats (vs τ = 
   0 error(s), 1 warning(s), 2 info
 
    stored if2 · fits/../results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-06cbd6b3/
-          best ll=-58.4 (chain 2) in 8.5s
+          best ll=-58.4 (chain 1) in 8.5s
 ```
 
 Two things the run says that are worth reading. The `starts` line and its
@@ -3581,8 +3596,8 @@ conditioned trajectory:
     correlations: bet-gam=0.42
   NUTS fully adapted (sweep 50):
     final step_size: 0.172352
-  chain 1 done: 2.7s, acceptance: [beta=92%, gamma=92%]
-  chain 2 done: 2.7s, acceptance: [beta=90%, gamma=90%]
+  chain 0 done: 2.7s, acceptance: [beta=92%, gamma=92%]
+  chain 1 done: 2.7s, acceptance: [beta=90%, gamma=90%]
 
 Rhat / ESS:
   beta         Rhat=2.065 ✗ ESS=NaN
@@ -3759,8 +3774,8 @@ ODE marginal-likelihood check at base θ (deterministic)...
     ✓ weekly_cases     incidence(infection)         NegBinomial
 
 acceptance rates:
-  chain 1: 51.3% ~ high
-  chain 2: 51.7% ~ high
+  chain 0: 51.3% ~ high
+  chain 1: 51.7% ~ high
 
 Rhat:
   beta         Rhat=1.105 ~ ESS=NaN
@@ -4329,7 +4344,7 @@ and is stored in each chain's `resume_state.bin`. PMMH and PGAS refuse to resume
 when it differs:
 
 ```
-error: config hash mismatch for chain 1 — model/data/priors have changed
+error: config hash mismatch for chain 0 — model/data/priors have changed
 since the original run. Cannot resume. Re-run from scratch with --force.
 ```
 
@@ -4430,7 +4445,7 @@ A real `sims/` leaf record (hashes and paths abbreviated):
 ```
 
 A `fits/` method leaf adds `deps` (when its `starts` consumed a source), nests
-artifact keys (`chain_1/trace.tsv`), keys per-chain schema entries under a `{n}`
+artifact keys (`chain_0/trace.tsv`), keys per-chain schema entries under a `{n}`
 wildcard, and carries a populated `inputs`:
 
 ```json
@@ -4450,12 +4465,12 @@ wildcard, and carries a populated `inputs`:
 }
 ```
 
-`inputs.best_chain` is the **1-based chain number** that produced
-`inputs.best_loglik` — the number of a `chain_N/` directory on this leaf, the
-same value the leaf's `fit_state.toml` stores and the method's own stderr line
-prints, so `chain_<best_chain>/` opens with no arithmetic. It is `null` for a
-method with replicates rather than competing chains (`pfilter`). `camdl show`
-and `camdl list --format json` print it as recorded.
+`inputs.best_chain` is the chain number that produced `inputs.best_loglik` — the
+number of a `chain_N/` directory on this leaf, the same value the leaf's
+`fit_state.toml` stores and the method's own stderr line prints, so
+`chain_<best_chain>/` opens with no arithmetic. It is `null` for a method with
+replicates rather than competing chains (`pfilter`). `camdl show` and
+`camdl list --format json` print it as recorded.
 
 **Fields.**
 
@@ -4640,9 +4655,9 @@ chain	draw	beta	gamma	rho	k	N0	I0
 0	500	3.41…e-1	1.02…e-1	6.00…e-1	1.00…e1	1.00…e4	1.00…e1
 ```
 
-- `chain` is **0-based** in every method, matching `PosteriorDraw.chain` in
-  `trajectories.tsv` — the join key. (The on-disk `chain_N/` directory is
-  1-based; the in-file key is not.)
+- `chain` is the chain's number in every method, matching `PosteriorDraw.chain`
+  in `trajectories.tsv` — the join key — and the `chain_N/` directory the
+  chain's trace is under (§2, one index base).
 - Rows are the post-burn-in, thinned set. PGAS writes the set the sim-side
   recorder already retained and re-applies neither burn-in nor thinning; PMMH
   rebuilds the file from each `chain_N/trace.tsv`, dropping rows with
@@ -4672,7 +4687,7 @@ companion `--params`. A NUTS `draws.tsv` is not self-contained.
 ### 10.4 Sampler traces (`chain_N/trace.tsv`, `chain_N/parameter_traces.tsv`)
 
 One file per chain, streamed during sampling (header flushed immediately, rows
-batched, so a live tail works). `chain_N` is 1-based.
+batched, so a live tail works). `N` is the chain's number (§2, one index base).
 
 PGAS, PMMH and NUTS write `chain_N/trace.tsv` via the shared
 `fit::trace_writer::TraceWriter`:
@@ -4821,11 +4836,11 @@ present is listed in `run.json.artifacts` and subject to the exact-set gate.
 
 Common to both families:
 
-| file               | content                                                                                                                                                                                                                                               |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, `best_chain` as the 1-based number of the `chain_N/` directory that won, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge |
-| `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6)                                              |
-| `progress.json`    | the run's liveness/progress heartbeat, written live, and the terminal state it ends on; every method but `pfilter` writes it (§10.10)                                                                                                                 |
+| file               | content                                                                                                                                                                                                                                       |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fit_state.toml`   | θ̂ + run state, with `method` naming the algorithm that wrote it, `best_chain` as the number of the `chain_N/` directory that won, plus `chain_init_source` and `chain_starts_kind`; the artifact a `from_mle` start consumes as a `deps` edge |
+| `chain_starts.tsv` | one row per start attempt — the point each chain ran from, and every draw a retry rejected with its `ess` and `reason` — under a header naming the `starts` rule, its kind and the rejected count (§6.6)                                      |
+| `progress.json`    | the run's liveness/progress heartbeat, written live, and the terminal state it ends on; every method but `pfilter` writes it (§10.10)                                                                                                         |
 
 An optimizer leaf (IF2, NLopt) additionally holds:
 
@@ -4864,10 +4879,10 @@ When a chain cannot start — under a spread rule, when none of its
 its one try — the run skips it and continues (`ran K of N chains` on stderr,
 `n_good_chains` in `fit_state.toml`), every attempt is a row of
 `chain_starts.tsv`, and `diagnostics.json` carries a `bad_init` record for it:
-the chain id (1-based, the number the stderr line, `chain_starts.tsv` and
-`progress.json` all use), the full estimated-parameter vector it was refused at
-(so the refusal is reproducible), a one-line prose `reason` that opens with how
-many starts were tried, and an `attempts` array.
+the chain id (the number the stderr line, `chain_starts.tsv` and `progress.json`
+all use), the full estimated-parameter vector it was refused at (so the refusal
+is reproducible), a one-line prose `reason` that opens with how many starts were
+tried, and an `attempts` array.
 
 `attempts` is the structured half, and it is what downstream tooling should read
 — the prose is rendered from the same values, so parsing the sentence gets you
@@ -4993,10 +5008,10 @@ block for any method that reports per-chain liveness:
     "refused": 23,
     "not_started": 0,
     "chains": [
-      { "chain": 1, "status": "refused", "reason": "non_finite_start" },
-      { "chain": 8, "status": "running" }
+      { "chain": 0, "status": "refused", "reason": "non_finite_start" },
+      { "chain": 7, "status": "running" }
     ],
-    "numbering": "1-based, matching the chain_N/ directories"
+    "numbering": "counted from 0, matching the chain_N/ directories and draws.tsv's chain column"
   }
 }
 ```
@@ -5013,10 +5028,9 @@ not started is neither good nor bad.
 `--parallel` call for opposite responses (respecify, or wait), so a chain that
 has not been picked up by a worker is counted in `not_started` and reports
 nothing. The block is **absent**, not null, for a method that does not report
-per-chain liveness — today every method but PGAS — and `chain` is 1-based here:
-the same numbering `chain_starts.tsv`'s `chain_id` column, the `bad_init`
-records and the `chain_N/` directories use, so joining any two of them takes no
-arithmetic.
+per-chain liveness — today every method but PGAS — and `chain` here is the same
+number `chain_starts.tsv`'s `chain_id` column, the `bad_init` records and the
+`chain_N/` directories use, so joining any two of them takes no arithmetic.
 
 #### Which methods write it, and what a step is
 
@@ -6165,7 +6179,7 @@ camdl fit predict [FIT]
   --horizon free_forward|one_step
   --n-draws N                 posterior subsample cap for both horizons (default 200)
   --seed N                    RNG seed for y_rep sampling (default 1)
-  --exclude-chains IDS        drop 1-based chain ids before banding; always warns
+  --exclude-chains IDS        drop chain ids (counted from 0) before banding; always warns
 ```
 
 ### `camdl pfilter MODEL`
