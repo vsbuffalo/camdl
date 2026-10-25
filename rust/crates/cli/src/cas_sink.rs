@@ -330,6 +330,21 @@ impl CasSink {
         let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
         Ok((rt, dir, rel))
     }
+
+    /// Where the store holds a committed leaf of this identity — found by its
+    /// hashes, whatever labels its path carries ([`runid::find_leaf`]) — or,
+    /// when it holds none, where a new one would land (`store_path` under the
+    /// current labels). Returns the directory and its store-relative path.
+    pub(crate) fn stored_leaf(
+        &self,
+        rt: &crate::resolve::ResolvedTrajectory,
+    ) -> (std::path::PathBuf, String) {
+        let root = self.root();
+        let dir = runid::find_leaf(&root, runid::ArtifactKind::Sim, &rt.levels)
+            .unwrap_or_else(|| runid::store_path(&root, runid::ArtifactKind::Sim, &rt.levels));
+        let rel = dir.strip_prefix(&root).unwrap_or(&dir).to_string_lossy().into_owned();
+        (dir, rel)
+    }
 }
 
 /// Human-readable provenance label for the `params` path level.
@@ -461,9 +476,12 @@ impl crate::engine::RunSink for CasSink {
     fn on_skip(&mut self, spec: &crate::engine::CellSpec) {
         // A cache hit still contributes to a multi-cell ensemble's deps, so
         // recover the leaf's run_id (from the resolve) and its traj.tsv digest
-        // (from the existing leaf's run.json, recorded at first commit).
+        // (from the existing leaf's run.json, recorded at first commit). The
+        // leaf is read where the store holds it — found by hash, so a leaf
+        // written under an earlier label is the one reported and read.
         let (rel, run_id, traj_digest, params_level) = match self.cell_resolve(spec) {
-            Ok((rt, dir, rel)) => {
+            Ok((rt, _, _)) => {
+                let (dir, rel) = self.stored_leaf(&rt);
                 let digest = read_traj_digest(&dir);
                 // Keep an explicit `--label` current even on a pure cache-hit
                 // skip (same reasoning as the commit path; no-op when None).
@@ -492,7 +510,7 @@ impl crate::engine::RunSink for CasSink {
         let spec = &cell.spec;
         let name = spec.scenario.name().to_string();
 
-        let (rt, _dir, rel) = match self.cell_resolve(spec) {
+        let (rt, _dir, _rel) = match self.cell_resolve(spec) {
             Ok(x) => x,
             Err(e) => {
                 self.counter += 1;
@@ -684,6 +702,10 @@ impl crate::engine::RunSink for CasSink {
             }
         }
 
+        // The path the leaf actually landed at: `store_path` for a new leaf,
+        // or the leaf the store already held for this identity under an
+        // earlier label (`begin_resolved_write` finds it by hash).
+        let rel = dest.strip_prefix(&root).unwrap_or(&dest).to_string_lossy().into_owned();
         self.counter += 1;
         self.advance_progress();
         self.completed_runs.push(RunEntry {

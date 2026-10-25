@@ -149,13 +149,12 @@ fn batch_run(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
         "batch run failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    let leaves = leaves_by_scenario(&out.join("sims"));
-    assert_eq!(leaves.len(), scenarios.len(), "one leaf per scenario: {leaves:?}");
-    leaves
+    leaves_by_scenario(&out.join("sims"))
 }
 
-/// Run `simulate --scenario s` once per scenario into one store.
-fn simulate_each(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
+/// Run `simulate --scenario s` once per scenario into one store. Returns the
+/// store's leaves by scenario label and each scenario's `-o` mirror rows.
+fn simulate_each(scenarios: &[&str]) -> (BTreeMap<String, Leaf>, BTreeMap<String, Vec<String>>) {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let (model, params) = write_inputs(tmp.path());
@@ -180,9 +179,20 @@ fn simulate_each(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
             String::from_utf8_lossy(&run.stderr)
         );
     }
-    let leaves = leaves_by_scenario(&out.join("sims"));
-    assert_eq!(leaves.len(), scenarios.len(), "one leaf per scenario: {leaves:?}");
-    leaves
+    let mirrors = scenarios
+        .iter()
+        .map(|s| {
+            let rows = std::fs::read_to_string(tmp.path().join(format!("{s}.tsv")))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .filter(|l| l.split('\t').next().is_some_and(|f| f.parse::<f64>().is_ok()))
+                .map(str::to_string)
+                .collect();
+            (s.to_string(), rows)
+        })
+        .collect();
+    (leaves_by_scenario(&out.join("sims")), mirrors)
 }
 
 /// The premise and the claim for a pair that must NOT share an address: the
@@ -204,6 +214,7 @@ fn assert_distinct(leaves: &BTreeMap<String, Leaf>, a: &str, b: &str) {
 #[test]
 fn batch_scale_only_difference_changes_run_id() {
     let leaves = batch_run(&["halved", "doubled"]);
+    assert_eq!(leaves.len(), 2, "two identities are two leaves: {leaves:?}");
     assert_distinct(&leaves, "halved", "doubled");
 }
 
@@ -212,25 +223,27 @@ fn batch_scale_only_difference_changes_run_id() {
 #[test]
 fn batch_compose_only_difference_changes_run_id() {
     let leaves = batch_run(&["via_half", "via_double"]);
+    assert_eq!(leaves.len(), 2, "two identities are two leaves: {leaves:?}");
     assert_distinct(&leaves, "via_half", "via_double");
 }
 
 /// (c) Negative control. `halved` scales `mu` by 0.5 directly; `via_half`
 /// does it by composing `half`. The effective delta is identical, so the
 /// trajectory is identical, and a content address — a function of content,
-/// not of spelling — must be identical too. The two still land in separate
-/// directories (the path carries the scenario *label*, which is provenance).
+/// not of spelling — must be identical too. One identity is one leaf: the
+/// path carries the scenario *label*, which is provenance, and the store
+/// finds a leaf by its hashes (`runid::find_leaf`), so the second arm is a
+/// hit on the first arm's leaf rather than a second copy under its own name
+/// (proposal 2026-10-24-batch-to-simulate §3 "Arm labels").
 #[test]
 fn batch_same_effective_delta_via_compose_shares_run_id() {
     let leaves = batch_run(&["halved", "via_half"]);
     assert_eq!(
-        leaves["halved"].rows, leaves["via_half"].rows,
-        "premise: the same effective delta must produce the same trajectory"
-    );
-    assert_eq!(
-        leaves["halved"].run_id, leaves["via_half"].run_id,
+        leaves.keys().collect::<Vec<_>>(),
+        vec!["halved"],
         "the same effective scenario delta, spelled directly vs through compose, \
-         must hash to the same run_id"
+         hashes to one run_id and so is one leaf — under the label that wrote it \
+         first, never a second directory: {leaves:?}"
     );
 }
 
@@ -238,11 +251,19 @@ fn batch_same_effective_delta_via_compose_shares_run_id() {
 /// its scenario delta at a separate site from `batch run`.
 #[test]
 fn simulate_scenario_identity_hashes_effective_delta() {
-    let leaves = simulate_each(&["halved", "doubled", "via_half", "via_double"]);
+    let (leaves, mirrors) = simulate_each(&["halved", "doubled", "via_half", "via_double"]);
     assert_distinct(&leaves, "halved", "doubled");
-    assert_distinct(&leaves, "via_half", "via_double");
     assert_eq!(
-        leaves["halved"].run_id, leaves["via_half"].run_id,
-        "simulate: same effective delta must share a run_id"
+        mirrors["halved"], mirrors["via_half"],
+        "premise: the same effective delta must produce the same trajectory"
+    );
+    assert_ne!(mirrors["via_half"], mirrors["via_double"]);
+    // `via_half` and `via_double` ran after `halved` and `doubled`; each found
+    // the leaf its identity already had and wrote no second copy, so the store
+    // holds exactly the two identities, labelled by the arms that wrote them.
+    assert_eq!(
+        leaves.keys().collect::<Vec<_>>(),
+        vec!["doubled", "halved"],
+        "simulate: same effective delta must share a run_id, and so a leaf: {leaves:?}"
     );
 }

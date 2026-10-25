@@ -1551,3 +1551,148 @@ fn mode_b_collision_disambiguates() {
     assert!(matches!(store.lookup(&leaf, &LeafIdentity::new(id(0xaa))), Lookup::Hit(_)));
     cleanup(&root);
 }
+
+// ── find_leaf: a leaf is found by its hashes, whatever its labels ─────────────
+
+/// Five sim levels with the given labels over fixed per-level hashes, and the
+/// `run_id` those hashes compose to.
+fn sim_levels(labels: [&str; 5], hash_bytes: [u8; 5]) -> (Vec<crate::record::LevelId>, ContentHash) {
+    let names = ["model", "config", "params", "scenario", "seed"];
+    let levels: Vec<crate::record::LevelId> = names
+        .iter()
+        .zip(labels)
+        .zip(hash_bytes)
+        .map(|((name, label), b)| crate::record::LevelId {
+            name: name.to_string(),
+            label: label.to_string(),
+            hash: id(b),
+            schema_version: 1,
+        })
+        .collect();
+    let hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
+    (levels, crate::kind::run_id(ArtifactKind::Sim, &hashes))
+}
+
+/// A leaf committed under one set of labels is found by a lookup that carries
+/// other labels for the same hashes — a renamed model file, params file or
+/// scenario preset is a label change, never an identity change.
+#[test]
+fn find_leaf_finds_a_leaf_under_another_label() {
+    let root = tmp_root("find_relabel");
+    let store = FsCasStore::new(&root);
+    let (written, rid) = sim_levels(["sir", "cb-dt1", "base", "baseline", "seed_1"], [1, 2, 3, 4, 5]);
+    let dest = store
+        .commit_atomic(&crate::layout::store_path(&root, ArtifactKind::Sim, &written), record(rid), arts(b"S\n1\n"))
+        .unwrap();
+
+    // Same hashes, every label different.
+    let (asked, rid2) =
+        sim_levels(["sirv", "cb-dt1-renamed", "beta=0.3", "baseline+vaccination", "seed_7"], [1, 2, 3, 4, 5]);
+    assert_eq!(rid, rid2, "labels do not enter the run_id");
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), Some(dest.clone()));
+
+    // The exact label is found too, and returns the same directory.
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &written), Some(dest));
+
+    // A different seed hash is a miss, however the labels read.
+    let (other, _) = sim_levels(["sir", "cb-dt1", "base", "baseline", "seed_1"], [1, 2, 3, 4, 6]);
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &other), None);
+    cleanup(&root);
+}
+
+/// Two directories share one leaf-level `hash8` segment: one holds a leaf of
+/// the asked identity, the other a leaf of a different identity whose record
+/// merely sits under a same-looking name. The one whose identity verifies
+/// wins; when neither verifies the answer is `None`, not the look-alike.
+#[test]
+fn find_leaf_picks_the_directory_whose_identity_verifies() {
+    let root = tmp_root("find_collide");
+    let store = FsCasStore::new(&root);
+    let (ours, rid) = sim_levels(["sir", "cb", "base", "baseline", "seed_1"], [1, 2, 3, 4, 5]);
+    // A look-alike: the same five level hashes in its path (so the same
+    // segments), but a record carrying a different run_id — what a short-hash
+    // collision at the leaf level looks like on disk.
+    let (lookalike, _) = sim_levels(["sir", "cb", "base", "baseline", "seed_x"], [1, 2, 3, 4, 5]);
+    let impostor = id(0xee);
+    store
+        .commit_atomic(&crate::layout::store_path(&root, ArtifactKind::Sim, &lookalike), record(impostor), arts(b"x\n"))
+        .unwrap();
+
+    // Only the look-alike exists: a miss, never the impostor's directory.
+    let (asked, _) = sim_levels(["sir", "cb", "base", "renamed", "seed_1"], [1, 2, 3, 4, 5]);
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), None);
+
+    // Now the real leaf exists beside it, under yet another label.
+    let dest = store
+        .commit_atomic(&crate::layout::store_path(&root, ArtifactKind::Sim, &ours), record(rid), arts(b"S\n1\n"))
+        .unwrap();
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), Some(dest));
+    cleanup(&root);
+}
+
+/// The exact current-label directory is preferred when two directories both
+/// hold a verified leaf of the identity.
+#[test]
+fn find_leaf_prefers_the_exact_label() {
+    let root = tmp_root("find_prefer");
+    let store = FsCasStore::new(&root);
+    let (a, rid) = sim_levels(["sir", "cb", "base", "baseline", "seed_1"], [1, 2, 3, 4, 5]);
+    let (b, _) = sim_levels(["sir", "cb", "base", "with_vax", "seed_1"], [1, 2, 3, 4, 5]);
+    let dest_a = store
+        .commit_atomic(&crate::layout::store_path(&root, ArtifactKind::Sim, &a), record(rid), arts(b"S\n1\n"))
+        .unwrap();
+    let dest_b = store
+        .commit_atomic(&crate::layout::store_path(&root, ArtifactKind::Sim, &b), record(rid), arts(b"S\n1\n"))
+        .unwrap();
+    assert_ne!(dest_a, dest_b);
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &a), Some(dest_a));
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &b), Some(dest_b));
+    cleanup(&root);
+}
+
+/// A leaf the commit path placed at a `~{hash16}` disambiguation (a short-hash
+/// collision with another identity at the base path) is found under another
+/// label too.
+#[test]
+fn find_leaf_finds_a_disambiguated_leaf() {
+    let root = tmp_root("find_disamb");
+    let store = FsCasStore::new(&root);
+    let (levels, rid) = sim_levels(["sir", "cb", "base", "baseline", "seed_1"], [1, 2, 3, 4, 5]);
+    let base = crate::layout::store_path(&root, ArtifactKind::Sim, &levels);
+    // Another identity occupies the base path first.
+    store.commit_atomic(&base, record(id(0xbb)), arts(b"other\n")).unwrap();
+    let dest = store.commit_atomic(&base, record(rid), arts(b"S\n1\n")).unwrap();
+    assert_ne!(dest, base, "the collision escalated to a disambiguated sibling");
+
+    let (asked, _) = sim_levels(["sir", "cb", "base", "renamed", "seed_1"], [1, 2, 3, 4, 5]);
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), Some(dest.clone()));
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &levels), Some(dest));
+    cleanup(&root);
+}
+
+/// Only a `Completed`, exact-set leaf is a find: a `Running` record of the
+/// identity, or one with an orphan file, is `None` — the same verdict
+/// `lookup` gives at the exact path.
+#[test]
+fn find_leaf_verifies_as_lookup_does() {
+    let root = tmp_root("find_verify");
+    let store = FsCasStore::new(&root);
+    let (levels, rid) = sim_levels(["sir", "cb", "base", "baseline", "seed_1"], [1, 2, 3, 4, 5]);
+    let (asked, _) = sim_levels(["sir", "cb", "base", "renamed", "seed_1"], [1, 2, 3, 4, 5]);
+    let dir = crate::layout::store_path(&root, ArtifactKind::Sim, &levels);
+
+    // Running: not a hit.
+    fs::create_dir_all(&dir).unwrap();
+    write_record_direct(&dir, &record(rid)).unwrap();
+    assert!(matches!(store.lookup(&dir, &LeafIdentity::new(rid)), Lookup::Stale(StaleReason::Incomplete)));
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), None);
+
+    // Completed, then an orphan file appears: stale, not a hit.
+    fs::remove_dir_all(&dir).unwrap();
+    let dest = store.commit_atomic(&dir, record(rid), arts(b"S\n1\n")).unwrap();
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), Some(dest.clone()));
+    fs::write(dest.join("stray.txt"), b"x").unwrap();
+    assert!(matches!(store.lookup(&dest, &LeafIdentity::new(rid)), Lookup::Stale(StaleReason::OrphanFiles)));
+    assert_eq!(find_leaf(&root, ArtifactKind::Sim, &asked), None);
+    cleanup(&root);
+}
