@@ -259,7 +259,8 @@ fn expected_pairing(stage: &Path) -> Vec<((usize, usize), (f64, f64), Sir)> {
         .collect()
 }
 
-/// A wide `-o` trajectory mirror, grouped by 1-based `draw`: `draw → [(t, SIR)]`.
+/// A wide `-o` trajectory mirror, grouped by its 0-based `draw` column:
+/// `draw → [(t, SIR)]`. Cell `i` of the forecast is draw `i`.
 fn traj_by_draw(path: &Path) -> BTreeMap<usize, Vec<(f64, Sir)>> {
     let (hdr, rows) = read_tsv(path);
     let di = idx(&hdr, "draw");
@@ -457,25 +458,23 @@ fn each_draw_restores_its_own_terminal_state_under_its_own_theta() {
 
     for (i, ((chain, draw), (beta, gamma), sir)) in expected.iter().enumerate() {
         // X side: cell i's first emitted row IS draw i's terminal latent state.
-        let rows = &by_draw[&(i + 1)];
+        let rows = &by_draw[&i];
         let got = at_time(rows, LAST_OBS)
-            .unwrap_or_else(|| panic!("forecast cell {} has a row at t = {LAST_OBS}", i + 1));
+            .unwrap_or_else(|| panic!("forecast cell {i} has a row at t = {LAST_OBS}"));
         assert_eq!(
             got,
             *sir,
-            "forecast cell {} must restore the terminal state of (chain {chain}, draw \
+            "forecast cell {i} must restore the terminal state of (chain {chain}, draw \
              {draw}) — a mismatch here is the shuffled pairing this feature exists to \
-             prevent",
-            i + 1
+             prevent"
         );
         // θ side: the same cell's parameters are that same draw's parameters.
         let got_beta: f64 = trows[i][bi].parse().unwrap();
         let got_gamma: f64 = trows[i][gi].parse().unwrap();
         assert!(
             (got_beta - beta).abs() < 1e-9 && (got_gamma - gamma).abs() < 1e-9,
-            "forecast cell {} must run at (chain {chain}, draw {draw})'s θ: expected \
-             beta={beta} gamma={gamma}, got beta={got_beta} gamma={got_gamma}",
-            i + 1
+            "forecast cell {i} must run at (chain {chain}, draw {draw})'s θ: expected \
+             beta={beta} gamma={gamma}, got beta={got_beta} gamma={got_gamma}"
         );
     }
 }
