@@ -16,7 +16,7 @@ use crate::hash::{CanonicalHasher, ContentAddressed, ContentHash, HASH_VERSION};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
-    /// A forward-simulation trajectory (`simulate`/`batch`).
+    /// A forward-simulation trajectory (`simulate`).
     Sim,
     /// One stage of a fit pipeline (`fit`/`if2`-desugared).
     FitStage,

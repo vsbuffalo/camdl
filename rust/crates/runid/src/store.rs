@@ -251,7 +251,7 @@ impl FsCasStore {
     ///
     /// The store had no such operation, which is why `--force` meant four
     /// different things at five call sites and "overwrite" at none of them:
-    /// batch recomputed and then had its bytes discarded by the
+    /// the grid writer recomputed and then had its bytes discarded by the
     /// already-completed path, fit and survey died with
     /// `AlreadyCompleted`, and simulate's flag was inert. Forcing routes
     /// through the same collision-aware machinery as everything else — it
@@ -322,7 +322,7 @@ impl FsCasStore {
         // and the second silently overwrites the first (defeating the very
         // guarantee `DivergentRecompute` exists to make), and two augments of
         // DIFFERENT names each write back a snapshot missing the other's
-        // entry, orphaning a file and staleing a completed leaf. `batch`
+        // entry, orphaning a file and staleing a completed leaf. `simulate`
         // augments exactly such a pair (`event_log.tsv`, `reactive_log.tsv`).
         match self.lookup(path, expected) {
             Lookup::Hit(_) => {}
@@ -448,7 +448,7 @@ impl FsCasStore {
     ) -> Result<PathBuf, CasError> {
         // Staging is unique **per attempt** — `{run_id}.{pid}.{nonce}` — so
         // two concurrent commits of the *same* identity (the dedup'd-draw-row
-        // case under batch's rayon) never share a staging dir and clobber each
+        // case under a parallel grid) never share a staging dir and clobber each
         // other's in-flight writes. The proposal's `.staging/{run_id}` named
         // the intent ("unique staging dir, race-safe by rename"); the pid +
         // process-local counter realize it. Orphaned `.staging/*` from a crash
