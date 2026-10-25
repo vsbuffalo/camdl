@@ -12,8 +12,8 @@ The pipeline exists in the filesystem, not in the researcher's head. Any step
 can be rerun. Any result can be traced to its inputs.
 
 **params.toml is the universal interface.** The inference pipeline's final
-output is a params.toml. It feeds directly into `camdl simulate`, `camdl batch`
-(whose `[design.*]` block does space-filling sensitivity). No format conversion.
+output is a params.toml. It feeds directly into `camdl simulate` (and a
+sensitivity design runs through `simulate --sweep-file`). No format conversion.
 One chain from raw data to decision.
 
 **The fixed/free partition is explicit and exhaustive.** Every model parameter
@@ -933,7 +933,7 @@ fit/he2010/ — He et al. 2010 London measles
     mle_params.toml: ✓ content hash matches (a3c1e890)
     fit_record.json: ✓ input hash 7f2c1d3a
 
-  Next: camdl batch run experiment.toml \
+  Next: camdl simulate model.camdl \
           --params <fit_dir>/real/fit_<seed>/validate/mle_params.toml
 ```
 
@@ -1127,15 +1127,16 @@ model.camdl + data.tsv + fit.toml
                                       │
                     ┌─────────────────┤
                     ▼                  ▼
-            design.toml          voi.toml
+            design.tsv           voi.toml
             (params = [mle])     (experiment = ...)
                     │                  │
                     ▼                  ▼
-            camdl batch          (planned; not yet
-            <design.toml>         implemented — today
-                    │             camdl batch [design.*]
-                    ▼             does space-filling
-            sobol_indices.tsv     sensitivity)
+            camdl simulate       (planned; not yet
+            --sweep-file          implemented — today a
+            <design.tsv>          design generated in R or
+                    │             Python runs through
+                    ▼             simulate --sweep-file)
+            sobol_indices.tsv
                     │                  │
                     │                  ▼
                     │              evsi.tsv

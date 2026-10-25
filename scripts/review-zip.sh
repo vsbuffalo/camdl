@@ -63,7 +63,6 @@ CLI_PLUMBING=(
     rust/crates/cli/src/run_meta.rs
     rust/crates/cli/src/run_paths.rs
     rust/crates/cli/src/hashing.rs
-    rust/crates/cli/src/batch.rs
     rust/crates/cli/src/util.rs
     rust/crates/cli/src/version.rs
 )
