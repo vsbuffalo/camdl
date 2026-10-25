@@ -51,9 +51,15 @@ pub struct EnsembleCell {
     pub scenario_label: String,
     /// The resolved process seed driving this cell's trajectory.
     pub process_seed: u64,
-    /// The cell's 0-based position on the parameter-point axis: the design
-    /// index of a sweep cell (`point_id`), the draw index of a `--draws` cell,
-    /// 0 for a single point.
+    /// The id the cell is written under on the parameter-point axis: a sweep
+    /// cell's `point_id` (a sweep file's own column, else the 0-based design
+    /// index), the draw index of a `--draws` cell, 0 for a single point. The
+    /// written id, not the row position, is what the `grid` digest sorts
+    /// over: it is the `point_id` the ensemble's own rows carry, so the
+    /// identity names what the stored bytes say. Two files with the same rows
+    /// and different ids are already two designs through the file digest, so
+    /// no distinctness hangs on the choice, and a file without the column
+    /// hashes exactly as before (written id = row).
     pub point_id: usize,
     /// The cell's `Sim` leaf `run_id` — its full identity (model/config/params/
     /// scenario/seed). Folding it into `grid` makes a per-draw param change
@@ -100,9 +106,11 @@ pub enum ResolvedDesign {
     /// so `point_id` is a position in that product.
     Sweep { params: Vec<SweptParam>, n_points: usize },
     /// `--sweep-file FILE`: a TSV whose header names parameters and whose rows
-    /// are the design points, `point_id` being the 0-based row. The file enters
-    /// by its content digest, never its path.
-    File { params: Vec<String>, digest: String, n_points: usize },
+    /// are the design points. `point_ids` is the id each row was written
+    /// under, in row order: the file's own `point_id` column when it has one,
+    /// else `0..n_points`. The file enters by its content digest, never its
+    /// path.
+    File { params: Vec<String>, digest: String, n_points: usize, point_ids: Vec<usize> },
 }
 
 /// One swept parameter and the values it takes, in grid order.
@@ -254,6 +262,17 @@ mod tests {
             grid_level(&cells, Some(&beta_design(vec![0.2, 0.3]))).into_inner().to_hex(),
             "28ab1670e60b47b6459615cac3d768cbc2c15ab153197e4c87600b05649f9fca",
             "the sweep grid level moved; every stored sweep ensemble re-keys"
+        );
+        let file = ResolvedDesign::File {
+            params: vec!["beta".to_string()],
+            digest: "0".repeat(64),
+            n_points: 2,
+            point_ids: vec![0, 1],
+        };
+        assert_eq!(
+            grid_level(&cells, Some(&file)).into_inner().to_hex(),
+            "6f24d516083b51736a01b71dde45ccd14b440c191a62b4e2e261b373be471211",
+            "the sweep-file grid level moved; every stored sweep-file ensemble re-keys"
         );
     }
 

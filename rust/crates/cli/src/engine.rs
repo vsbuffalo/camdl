@@ -70,11 +70,17 @@ pub fn process_seed_for(
 #[derive(Clone)]
 pub struct CellSpec {
     /// 0-based global run index in canonical order (`scenario → point →
-    /// rep`). Drives the wide-format `replicate` column (`run_idx + 1`).
+    /// rep`). Drives the combined tables' `replicate` column.
     pub run_idx: usize,
-    /// 0-based param-point index (the "draw" / sweep point). Drives the
-    /// wide-format `draw` column (`point_idx + 1`).
+    /// 0-based position on the parameter-point axis (the draw row or the
+    /// design point): the engine's index — a draw's seed index, its origin-
+    /// state row, the quantities group key.
     pub point_idx: usize,
+    /// The id the cell is written under in the combined tables, the
+    /// observation tables and the ensemble record: a sweep file's own
+    /// `point_id` for the row, else `point_idx`
+    /// ([`crate::sim_job::ParamSource::point_id`]).
+    pub point_id: usize,
     /// The scenario reference for this cell.
     pub scenario: ScenarioRef,
     /// The param-point override map for this cell (sweep point / draw row).
@@ -192,6 +198,7 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
                 specs.push(CellSpec {
                     run_idx,
                     point_idx,
+                    point_id: job.source.point_id(point_idx),
                     scenario: scenario.clone(),
                     point_overrides: point_overrides.clone(),
                     process_seed,
@@ -377,17 +384,21 @@ pub(crate) fn effective_scenarios(job: &SimulateJob) -> Vec<ScenarioRef> {
 pub fn check_scenario_coordinate_collision(job: &SimulateJob) -> Result<(), String> {
     use crate::params_resolver::{coordinate_values, scenario_coordinate_collision, UserCoordinate};
     use crate::sim_job::ParamSource;
-    let (coordinate, points) = match &job.source {
-        ParamSource::Sweep { points, .. } => (UserCoordinate::Sweep, points),
-        ParamSource::Draws { rows, explicit_file: Some(path), .. } => {
-            (UserCoordinate::DrawsFile(path), rows)
-        }
+    let (coordinate, varied) = match &job.source {
+        ParamSource::Sweep { points, .. } => (
+            UserCoordinate::Sweep,
+            coordinate_values(
+                points.iter().flat_map(|p| p.overrides.iter().map(|(k, v)| (k.as_str(), *v))),
+            ),
+        ),
+        ParamSource::Draws { rows, explicit_file: Some(path), .. } => (
+            UserCoordinate::DrawsFile(path),
+            coordinate_values(rows.iter().flat_map(|p| p.iter().map(|(k, v)| (k.as_str(), *v)))),
+        ),
         ParamSource::Draws { explicit_file: None, .. } | ParamSource::Point { .. } => {
             return Ok(());
         }
     };
-    let varied =
-        coordinate_values(points.iter().flat_map(|p| p.iter().map(|(k, v)| (k.as_str(), *v))));
     if varied.is_empty() {
         return Ok(());
     }

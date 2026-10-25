@@ -403,10 +403,12 @@ pub struct SimulateArgs {
     pub sweep: Vec<SweepSpec>,
 
     /// Design points from a TSV: the header names model parameters, each row
-    /// is one design point, `point_id` its 0-based row. The DESIGN axis, like
-    /// --sweep (not a sample — a hand grid passed as --draws FILE would be
-    /// pooled into a band). A column naming no model parameter, a file with
-    /// zero rows, and a duplicate row are refused. The file enters the
+    /// is one design point, `point_id` its 0-based row — or, when the file
+    /// has a `point_id` column of distinct non-negative integers, the row's
+    /// own id. The DESIGN axis, like --sweep (not a sample — a hand grid
+    /// passed as --draws FILE would be pooled into a band). A column naming
+    /// no model parameter, a file with zero rows, a duplicate row, and a
+    /// repeated or non-integer point_id are refused. The file enters the
     /// ensemble's record by content digest.
     #[arg(long, value_name = "FILE",
           conflicts_with_all = ["draws", "design_from", "sweep"])]

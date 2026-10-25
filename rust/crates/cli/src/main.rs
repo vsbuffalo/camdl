@@ -1068,21 +1068,23 @@ fn run_simulate(a: &args::SimulateArgs) {
     // ── The design axis: `--sweep PARAM=GRID` / `--sweep-file FILE` ─────────
     //
     // Resolved once, against the model as the run reads it, into the design
-    // points (name-sorted `(param, value)` lists, `point_id` = position) and
-    // the resolved design the ensemble record carries. A swept name must be a
-    // declared parameter, named once; a `--param` on a swept parameter is
-    // refused here because `--param` outranks every tier, so the sweep would
-    // not vary that parameter (the gh#571 shape). A scenario that sets or
-    // scales a swept parameter is refused by the engine's coordinate guard
-    // (gh#572), on the run and on the dry run alike.
-    let design: Option<(Vec<crate::sweep::DesignPoint>, crate::sim_ensemble_cas::ResolvedDesign)> =
+    // points — `(point_id, name-sorted (param, value) list)`, the id being the
+    // point's position for `--sweep` and the file's own `point_id` column (else
+    // the row) for `--sweep-file` — and the resolved design the ensemble record
+    // carries. A swept name must be a declared parameter, named once; a
+    // `--param` on a swept parameter is refused here because `--param`
+    // outranks every tier, so the sweep would not vary that parameter (the
+    // gh#571 shape). A scenario that sets or scales a swept parameter is
+    // refused by the engine's coordinate guard (gh#572), on the run and on the
+    // dry run alike.
+    let design: Option<(Vec<(usize, crate::sweep::DesignPoint)>, crate::sim_ensemble_cas::ResolvedDesign)> =
         if !a.sweep.is_empty() {
             crate::sweep::check_swept_names(&a.sweep, &model_to).unwrap_or_else(|e| {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             });
             Some((
-                crate::sweep::expand_sweep_specs(&a.sweep),
+                crate::sweep::expand_sweep_specs(&a.sweep).into_iter().enumerate().collect(),
                 crate::sweep::design_from_specs(&a.sweep),
             ))
         } else if let Some(file) = a.sweep_file.as_deref() {
@@ -1096,7 +1098,7 @@ fn run_simulate(a: &args::SimulateArgs) {
         };
     if let Some((points, _)) = &design {
         let swept: std::collections::BTreeSet<&str> =
-            points.iter().flat_map(|pt| pt.iter().map(|(k, _)| k.as_str())).collect();
+            points.iter().flat_map(|(_, pt)| pt.iter().map(|(k, _)| k.as_str())).collect();
         for p in &a.model_overrides.param {
             if swept.contains(p.name.as_str()) {
                 eprintln!(
@@ -1772,7 +1774,10 @@ fn run_simulate(a: &args::SimulateArgs) {
         ParamSource::Sweep {
             points: points
                 .iter()
-                .map(|pt| pt.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                .map(|(point_id, pt)| crate::sim_job::SweepPoint {
+                    point_id: *point_id,
+                    overrides: pt.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                })
                 .collect(),
             replicates,
         }
@@ -3116,7 +3121,8 @@ enum PointAxis {
     /// `--draws`: a `draw` column, the 0-based draw index, when the job has
     /// more than one draw.
     Draws,
-    /// `--sweep` / `--sweep-file`: `point_id` (the 0-based design index), one
+    /// `--sweep` / `--sweep-file`: `point_id` (a sweep file's own id for the
+    /// row, else the 0-based design index), one
     /// `sweep:<param>` column per swept parameter in name order, written in
     /// Rust's shortest round-trip form so a value joins exactly against the
     /// grid that produced it, and `seed`, the cell's process seed — the pairing
@@ -3143,7 +3149,9 @@ struct TableShape {
 struct CellCoords {
     run_idx: usize,
     scenario: String,
-    point_idx: usize,
+    /// The id the cell is written under: a sweep point's `point_id`, a draw's
+    /// index.
+    point_id: usize,
     /// The cell's value of each swept parameter, in the axis's name order;
     /// empty off the sweep axis.
     point_values: Vec<f64>,
@@ -3160,7 +3168,7 @@ impl CellCoords {    /// Errs rather than writing a placeholder when a swept par
                 .map(|p| {
                     spec.point_overrides.get(p).copied().ok_or_else(|| format!(
                         "cell {} (point {}) carries no value for swept parameter `{}`",
-                        spec.run_idx, spec.point_idx, p
+                        spec.run_idx, spec.point_id, p
                     ))
                 })
                 .collect::<Result<Vec<f64>, String>>()?,
@@ -3169,7 +3177,8 @@ impl CellCoords {    /// Errs rather than writing a placeholder when a swept par
         Ok(CellCoords {
             run_idx: spec.run_idx,
             scenario: spec.scenario.name().to_string(),
-            point_idx: spec.point_idx,            point_values,
+            point_id: spec.point_id,
+            point_values,
             seed: spec.process_seed,
         })
     }
@@ -3199,11 +3208,11 @@ impl TableShape {
         if self.n_scenarios > 1 { write!(out, "{}\t", c.scenario)?; }
         match &self.axis {
             PointAxis::Sweep { .. } => {
-                write!(out, "{}\t", c.point_idx)?;
+                write!(out, "{}\t", c.point_id)?;
                 for v in &c.point_values { write!(out, "{v}\t")?; }
                 write!(out, "{}\t", c.seed)?;
             }
-            PointAxis::Draws if self.n_points > 1 => write!(out, "{}\t", c.point_idx)?,
+            PointAxis::Draws if self.n_points > 1 => write!(out, "{}\t", c.point_id)?,
             PointAxis::Draws | PointAxis::None => {}
         }
         Ok(())
@@ -5051,9 +5060,14 @@ fn print_dry_run(
             eprintln!("  {} {} design point(s)", d("design:"), n_points);
             params.iter().map(|p| p.name.clone()).collect()
         }
-        Some(crate::sim_ensemble_cas::ResolvedDesign::File { params, digest, n_points }) => {
+        Some(crate::sim_ensemble_cas::ResolvedDesign::File { params, digest, n_points, point_ids }) => {
             eprintln!("  {} {} design point(s) over {} (file digest {})",
                 d("sweep-file:"), n_points, params.join(", "), &digest[..8]);
+            // The file's own ids are worth a line; row numbering is the default.
+            if point_ids.iter().enumerate().any(|(row, id)| row != *id) {
+                let ids: Vec<String> = point_ids.iter().map(|i| i.to_string()).collect();
+                eprintln!("  {} {}", d("point_id:"), ids.join(", "));
+            }
             params.clone()
         }
         None => Vec::new(),

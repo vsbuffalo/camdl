@@ -2137,10 +2137,15 @@ A parameter named twice, or one the model does not declare, is refused before
 anything runs.
 
 **`--sweep-file FILE`**: a TSV whose header names model parameters and whose
-rows are design points, `point_id` the 0-based row. A column naming no model
-parameter is refused with the parameter list; a file with zero rows is refused;
-a duplicate row is refused naming both lines. `--sweep-file` and `--sweep` are
-mutually exclusive. The file enters the ensemble's record by content digest.
+rows are design points, `point_id` the 0-based row. A `point_id` column of
+distinct non-negative integers gives each row the id it is written under instead
+(in the combined and observation tables and in the ensemble record's
+`design.point_ids`); the row position still drives nothing but the engine's own
+order. A column naming no model parameter is refused with the parameter list; a
+file with zero rows is refused; a duplicate row is refused naming both lines; a
+repeated or non-integer `point_id` is refused naming the row. `--sweep-file` and
+`--sweep` are mutually exclusive. The file enters the ensemble's record by
+content digest.
 
 **Seeds and common random numbers.** Every design point at a given replicate
 shares one process seed: with `--replicates 2`, point 0 and point 1 of replicate
