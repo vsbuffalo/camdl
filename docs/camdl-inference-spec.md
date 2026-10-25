@@ -1229,20 +1229,19 @@ modified since the fit produced it, by the `content_hash` its `[provenance]`
 block declares over the parameter values as written:
 
 ```rust
-fn verify_mle_params(path: &str) -> ProvenanceStatus {
-    let content = read_file(path);
-    let declared_hash = extract_content_hash(&content);
-    let current_hash = compute_content_hash(&parse_toml_values(&content));
-    
-    if declared_hash == current_hash {
-        ProvenanceStatus::Valid
-    } else {
-        ProvenanceStatus::Modified {
-            changes: diff_params(declared_hash, current_hash)
-        }
-    }
+// fit/provenance.rs
+pub fn verify_content_hash(path: &str, declared: &str) -> Result<ContentVerification, String>;
+
+pub enum ContentVerification {
+    Valid,
+    Modified { declared: String, computed: String },
 }
 ```
+
+The hash is over every top-level numeric key of the file, name-sorted, each as
+`name=value` with the value in the twelve-decimal form the fit writer and the
+verifier both parse the file into; the `[provenance]` table itself is excluded.
+Only the two hashes are reported, not a per-parameter diff.
 
 ### 9.4 When Provenance Breaks
 

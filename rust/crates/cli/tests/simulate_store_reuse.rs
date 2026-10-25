@@ -222,6 +222,37 @@ fn a_run_that_grows_the_grid_mixes_hits_and_misses() {
     );
 }
 
+/// Store re-use under `--parallel`: two stored replicates are read back while
+/// two new ones are simulated on worker threads, and the combined file and the
+/// observation table equal a fresh serial four-replicate run byte for byte, so
+/// completion order never reaches the output.
+#[test]
+fn a_parallel_run_splices_hits_and_misses_in_canonical_order() {
+    let fx = Fixture::new();
+    assert_ok(&fx.simulate_with("2", "out", &["-o", "two.tsv", "--obs-dir", "o2"]), "two replicates");
+    assert_eq!(fx.sim_leaves().len(), 2);
+
+    let par = fx.simulate_with("4", "out", &["-o", "par.tsv", "--obs-dir", "po", "--parallel", "4"]);
+    assert_ok(&par, "parallel grown run");
+    assert_eq!(simulated(&par), Some(2), "two hits, two misses; stderr:\n{}", stderr(&par));
+    assert_eq!(fx.sim_leaves().len(), 4);
+
+    let serial = fx.simulate_with("4", "fresh", &["-o", "serial.tsv", "--obs-dir", "so", "--parallel", "1"]);
+    assert_ok(&serial, "fresh serial run");
+    assert_eq!(simulated(&serial), None, "stderr:\n{}", stderr(&serial));
+
+    assert_eq!(
+        std::fs::read(fx.path("par.tsv")).unwrap(),
+        std::fs::read(fx.path("serial.tsv")).unwrap(),
+        "the parallel spliced run's combined file equals the serial run's byte for byte"
+    );
+    assert_eq!(
+        std::fs::read(fx.path("po").join("cases.tsv")).unwrap(),
+        std::fs::read(fx.path("so").join("cases.tsv")).unwrap(),
+        "the parallel spliced run's observation table equals the serial run's byte for byte"
+    );
+}
+
 /// Observations make the hit rule exact: a leaf without the requested
 /// `obs/<hash8>-<obs_seed>/` subtree — or holding another cadence's — is
 /// re-simulated and gains the requested subtree; the dataset is written; a
