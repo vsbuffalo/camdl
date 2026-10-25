@@ -4900,6 +4900,15 @@ Four readings, which have different fixes:
 | `projected_max` finite, `n_neg_inf == n_live` | read `neg_inf_causes`; this is a support violation, not a location |
 | `n_dead` near `n_particles`                   | a process-model failure that never reached the observation model   |
 
+Every number in `diagnostics.json`, in a `bad_init` record or any other, is a
+JSON number when finite and the string `"inf"`, `"-inf"` or `"NaN"` when not —
+an R̂ is `"inf"` when every chain sat at its own single value. `null` means a
+field has no value (`projected_max` with no live particle, `param` on a
+chain-level acceptance finding), never a non-finite one. A file written before
+this encoding carries `null` for a non-finite number, which cannot say which of
+the three it was; `fit summary` refuses that entry by name and still reads the
+rest, its `bad_init` records included.
+
 ### 10.8 Generated quantities
 
 `simulate --quantities-out DIR` writes `DIR/quantities/<name>.tsv` plus a

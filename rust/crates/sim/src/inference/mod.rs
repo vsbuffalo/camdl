@@ -33,6 +33,7 @@ pub mod pgas_init;  // gh#784 — X₀ from an unconditional SMC pass
 pub mod nuts;
 pub mod linalg;
 pub mod diagnostic;
+pub mod json_f64;  // non-finite f64 as "inf"/"-inf"/"NaN" in JSON artifacts
 pub mod convergence;  // gh#84 — Vehtari et al. 2021 rank-normalized R̂ / ESS
 pub mod prequential;
 pub mod ode_loglik;
