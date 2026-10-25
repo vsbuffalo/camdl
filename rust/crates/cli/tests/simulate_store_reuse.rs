@@ -251,3 +251,30 @@ fn a_quantities_run_recomputes_every_cell() {
     assert_eq!(simulated(&run), None, "every cell ran; stderr:\n{}", stderr(&run));
     assert!(fx.path("q").join("quantities").join("peak.tsv").is_file());
 }
+
+/// The pre-existing defect commit `c42f5665` fixed, pinned on its own: a leaf
+/// first committed without observations declared no `obs` child in its
+/// `run.json`; a later observation run deduped at commit (record unchanged)
+/// and wrote `obs/<A>/` beside it, so the leaf failed the exact-set check as
+/// `Stale(OrphanFiles)`, and the next observation run at another cadence
+/// reclaimed the directory — wiping `obs/<A>/` before writing `obs/<B>/`.
+/// Sequence: obs-free run; obs run at cadence A; obs run at cadence B; both
+/// subtrees must still be present and both declared under `children.obs`.
+/// Red on the binary before the fix (one subtree survives), green after.
+#[test]
+fn an_earlier_cadences_subtree_survives_a_later_one() {
+    let fx = Fixture::new();
+    assert_ok(&fx.simulate(&[]), "obs-free run");
+    assert_ok(&fx.simulate(&["--obs-only-dir", "a", "--emit-every", "2"]), "obs run, cadence A");
+    assert_ok(&fx.simulate(&["--obs-only-dir", "b"]), "obs run, cadence B");
+    let leaves = fx.sim_leaves();
+    assert_eq!(leaves.len(), 3);
+    for leaf in &leaves {
+        let subtrees = obs_subtrees(leaf);
+        assert_eq!(subtrees.len(), 2, "both cadences under {}: {subtrees:?}", leaf.display());
+        let rec: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
+        let declared = rec["children"]["obs"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(declared, 2, "run.json declares both obs children under {}: {}", leaf.display(), rec["children"]);
+    }
+}
