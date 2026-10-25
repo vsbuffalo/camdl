@@ -1407,9 +1407,9 @@ verb (`2026-10-24-batch-to-simulate.md` §12, decision 3; gh#990). `simulate` is
 converted: `replicate`, `draw` and `point_id` in these tables count from 0, and
 `point_id` was born 0-based (D-C). `fit`'s chain numbers (the `chain_N/`
 directories, the chain labels, the `chain` column of `predictive/*.tsv`,
-`--exclude-chains`) and the draw indices `fit predict` reports are still 1-based
-until gh#990 lands, so a join across verbs on `draw` is unsafe until then. The
-base is not left to each verb.
+`--exclude-chains`) are still 1-based until gh#990 lands. `fit predict` writes
+no `draw` column, so the one cross-verb join hazard is `chain`: a table joined
+on it across verbs is off by one until then. The base is not left to each verb.
 
 **Pairing.** The `seed` column is the pairing key today: under D-B two design
 points at one replicate share a process seed, so a modeller joins on
