@@ -1082,7 +1082,7 @@ two lines:
 
 ```python
 import pandas as pd
-df = pd.read_csv("chain_1/trajectories.tsv", sep="\t", comment="#")
+df = pd.read_csv("chain_0/trajectories.tsv", sep="\t", comment="#")
 band = df.groupby("time")[["S", "E", "I", "R"]].quantile([0.05, 0.5, 0.95])
 ```
 
