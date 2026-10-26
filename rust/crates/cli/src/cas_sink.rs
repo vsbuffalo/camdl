@@ -337,10 +337,8 @@ impl CasSink {
         // tier's value by another's, and the notices this cell's resolution
         // reported.
         if let Some(obj) = rt.display_inputs.as_object_mut() {
-            let provenance: std::collections::BTreeMap<String, crate::run_meta::ParameterProvenance> =
-                resolved_params.params.iter()
-                    .map(|rp| (rp.name.clone(), crate::run_meta::ParameterProvenance::from_resolved(rp)))
-                    .collect();
+            let provenance =
+                crate::run_meta::ParameterProvenance::of_all(&resolved_params.params);
             obj.insert("parameters_provenance".into(),
                 serde_json::to_value(&provenance).map_err(|e| e.to_string())?);
             let notices = crate::params_resolver::notices(&[&resolved_params]);

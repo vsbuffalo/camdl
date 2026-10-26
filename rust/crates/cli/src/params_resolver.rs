@@ -42,6 +42,9 @@
 //!
 //! ```text
 //!   1. Model parameter default (`p.value` from DSL)
+//!   1.5. A single-point `--starts` rule's values (`starts`): the file
+//!        `from_params=FILE` names, or the estimate `from_mle=FIT` names
+//!        (`profile` only)
 //!   2. `fit.toml [fixed]` block (when present)
 //!   3. `--fixed-file <toml>` (each file layered in order; later
 //!      overrides earlier)
@@ -198,6 +201,32 @@ pub enum ValueSource {
     SweepPoint,
     /// A `--fixed NAME=VALUE` CLI flag.
     FixedCli,
+    /// A single-point `--starts` rule's values (tier 1.5), naming where they
+    /// came from.
+    Starts(StartsOrigin),
+}
+
+/// Where a single-point `--starts` rule's values came from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StartsOrigin {
+    /// `--starts from_params=FILE`: a params file the user wrote.
+    Params { path: PathBuf },
+    /// `--starts from_mle=FIT`: a stored fit's point estimate; `fit` is the
+    /// handle as given. Replacing one of these is a warning ([`severity`]).
+    Mle { fit: String },
+}
+
+/// The values of a single-point `--starts` rule (tier 1.5, just above the
+/// model default) and where they came from: `profile --starts
+/// from_params=FILE` or `from_mle=FIT` ([`resolve_parameters_with_starts`]).
+/// They are the base value of every parameter they name, so every tier above
+/// replaces them, and each replacement is reported. A name the model does not
+/// declare is ignored, not refused: the file is a starting point, and a fit's
+/// estimate may carry names a later model dropped.
+#[derive(Debug, Clone, Copy)]
+pub struct StartsValues<'a> {
+    pub origin: &'a StartsOrigin,
+    pub values: &'a [(String, f64)],
 }
 
 impl ValueSource {
@@ -210,6 +239,8 @@ impl ValueSource {
             ValueSource::FixedFile { .. } => "fixed_file",
             ValueSource::SweepPoint      => "sweep_point",
             ValueSource::FixedCli        => "fixed_cli",
+            ValueSource::Starts(StartsOrigin::Params { .. }) => "starts_from_params",
+            ValueSource::Starts(StartsOrigin::Mle { .. })    => "starts_from_mle",
         }
     }
 }
@@ -273,7 +304,8 @@ pub struct ResolveContext {
 /// How loudly to report `o`.
 ///
 /// A warning when the replaced value is a fit's estimate (it came from a
-/// params file carrying a fit `[provenance]` block): the run then simulates
+/// params file carrying a fit `[provenance]` block, or from
+/// `--starts from_mle=FIT`): the run then simulates
 /// something other than the fit's estimate for that parameter, which is the
 /// replacement most likely to be unintended. Every other replacement is one
 /// the user asked for with a flag in this command (`--param`, `--scenario`, a
@@ -282,6 +314,7 @@ pub fn severity(o: &Override, ctx: &ResolveContext) -> Severity {
     match &o.replaced.0 {
         ValueSource::FixedFile { path } if ctx.fit_estimate_files.contains(path) =>
             Severity::Warning,
+        ValueSource::Starts(StartsOrigin::Mle { .. }) => Severity::Warning,
         _ => Severity::Info,
     }
 }
@@ -959,6 +992,16 @@ pub fn scenario_coordinate_collision(
 pub fn resolve_parameters<'a>(
     inputs: ParameterInputs<'a>,
 ) -> Result<ResolvedParameters, ResolveError> {
+    resolve_parameters_with_starts(inputs, None)
+}
+
+/// [`resolve_parameters`], with a single-point `--starts` rule's values at
+/// tier 1.5 ([`StartsValues`]). Only `profile` has such a rule; every other
+/// verb resolves through [`resolve_parameters`].
+pub fn resolve_parameters_with_starts<'a>(
+    inputs: ParameterInputs<'a>,
+    starts: Option<StartsValues<'a>>,
+) -> Result<ResolvedParameters, ResolveError> {
     let mut model = inputs.model.clone();
     let mut warnings: Vec<ResolverWarning> = Vec::new();
 
@@ -1060,6 +1103,21 @@ pub fn resolve_parameters<'a>(
             path: PathBuf::from("(scenario filter)"),
             msg,
         })?;
+
+    // ── Tier 1.5: a single-point `--starts` rule's values ───────────────
+    //
+    // Just above the model default, so every other tier replaces them and
+    // each replacement is recorded. Names the model does not declare are
+    // skipped ([`StartsValues`]).
+    if let Some(starts) = starts {
+        for (name, v) in starts.values {
+            for p in &mut model.parameters {
+                if p.name == *name {
+                    layers.set(p, ValueSource::Starts(starts.origin.clone()), *v);
+                }
+            }
+        }
+    }
 
     // ── Tier 2: fit.toml [fixed] block ──────────────────────────────────
     for (name, &v) in inputs.fit_toml_fixed {
@@ -1420,6 +1478,10 @@ fn origin_phrase(src: &ValueSource, ctx: &ResolveContext) -> String {
         ValueSource::FixedFile { path } => path.display().to_string(),
         ValueSource::SweepPoint => "the draw or sweep point".to_string(),
         ValueSource::FixedCli => "--param/--fixed".to_string(),
+        ValueSource::Starts(StartsOrigin::Params { path }) =>
+            format!("--starts from_params={}", path.display()),
+        ValueSource::Starts(StartsOrigin::Mle { fit }) =>
+            format!("--starts from_mle={fit}, a fit's estimate"),
     }
 }
 
@@ -1442,12 +1504,52 @@ fn value_span(values: &[f64]) -> String {
 /// override line per distinct key, however many cells it occurs in.
 type OverrideKey = (String, ValueSource, ValueSource);
 
+/// What [`notices`] reads from one resolution: its parameters (with their
+/// recorded overrides), its warnings and its context — everything but the
+/// valued model. A caller that resolves many times and reports once
+/// (contrast arms, one resolution per posterior draw) keeps these
+/// ([`ResolvedParameters::into_notice_parts`]) instead of every model copy.
+#[derive(Debug, Clone)]
+pub struct NoticeParts {
+    pub params:   Vec<ResolvedParameter>,
+    pub warnings: Vec<ResolverWarning>,
+    pub context:  ResolveContext,
+}
+
+impl ResolvedParameters {
+    /// The parts of this resolution [`notices`] reads, without the model.
+    pub fn into_notice_parts(self) -> NoticeParts {
+        NoticeParts { params: self.params, warnings: self.warnings, context: self.context }
+    }
+}
+
+/// A borrowed [`NoticeParts`]: the one shape the notice functions read, so a
+/// full resolution and a kept set of parts report identically.
+#[derive(Clone, Copy)]
+struct PartsRef<'a> {
+    params:   &'a [ResolvedParameter],
+    warnings: &'a [ResolverWarning],
+    context:  &'a ResolveContext,
+}
+
+impl<'a> From<&'a ResolvedParameters> for PartsRef<'a> {
+    fn from(r: &'a ResolvedParameters) -> Self {
+        PartsRef { params: &r.params, warnings: &r.warnings, context: &r.context }
+    }
+}
+
+impl<'a> From<&'a NoticeParts> for PartsRef<'a> {
+    fn from(r: &'a NoticeParts) -> Self {
+        PartsRef { params: &r.params, warnings: &r.warnings, context: &r.context }
+    }
+}
+
 /// One `param-override` notice per [`OverrideKey`] across `resolved`, in
 /// first-seen order (cell order, then parameter declaration order, then tier
 /// order). When the values differ by cell, each side reports its range and
 /// the line says how many cells it covers. The severity is the loudest any
 /// cell assigns ([`severity`]).
-fn override_notices(resolved: &[&ResolvedParameters]) -> Vec<(OverrideKey, Notice)> {
+fn override_notices(resolved: &[PartsRef<'_>]) -> Vec<(OverrideKey, Notice)> {
     struct Agg {
         replaced: Vec<f64>,
         by:       Vec<f64>,
@@ -1459,16 +1561,16 @@ fn override_notices(resolved: &[&ResolvedParameters]) -> Vec<(OverrideKey, Notic
     for r in resolved {
         // A key counts once per cell even if (it cannot today) it recurred.
         let mut seen_in_cell: HashSet<OverrideKey> = HashSet::new();
-        for p in &r.params {
+        for p in r.params {
             for o in &p.overrides {
                 let key = (o.name.clone(), o.replaced.0.clone(), o.by.0.clone());
-                let sev = severity(o, &r.context);
+                let sev = severity(o, r.context);
                 let e = agg.entry(key.clone()).or_insert_with(|| Agg {
                     replaced: Vec::new(),
                     by:       Vec::new(),
                     cells:    0,
                     severity: sev,
-                    origin:   origin_phrase(&o.replaced.0, &r.context),
+                    origin:   origin_phrase(&o.replaced.0, r.context),
                 });
                 e.replaced.push(o.replaced.1);
                 e.by.push(o.by.1);
@@ -1496,11 +1598,7 @@ fn override_notices(resolved: &[&ResolvedParameters]) -> Vec<(OverrideKey, Notic
     }).collect()
 }
 
-/// The notices a run's resolutions report: the resolver warnings (each
-/// distinct line once), then one line per distinct override
-/// ([`override_notices`]). One resolution for a single run; one per cell for
-/// a multi-cell run, so a condition every cell shares is reported once.
-pub fn notices(resolved: &[&ResolvedParameters]) -> Notices {
+fn notices_of(resolved: &[PartsRef<'_>]) -> Notices {
     let mut warnings: IndexSet<Notice> = IndexSet::new();
     for r in resolved {
         warnings.extend(r.warnings.iter().map(ResolverWarning::notice));
@@ -1508,6 +1606,15 @@ pub fn notices(resolved: &[&ResolvedParameters]) -> Notices {
     warnings.into_iter()
         .chain(override_notices(resolved).into_iter().map(|(_, n)| n))
         .collect()
+}
+
+/// The notices a run's resolutions report: the resolver warnings (each
+/// distinct line once), then one line per distinct override
+/// ([`override_notices`]). One resolution for a single run; one per cell for
+/// a multi-cell run, so a condition every cell shares is reported once.
+pub fn notices(resolved: &[&ResolvedParameters]) -> Notices {
+    let parts: Vec<PartsRef<'_>> = resolved.iter().map(|r| PartsRef::from(*r)).collect();
+    notices_of(&parts)
 }
 
 /// Emit [`notices`] for `resolved` to stderr. Subcommand wrappers call this
@@ -1525,11 +1632,22 @@ pub fn notices(resolved: &[&ResolvedParameters]) -> Notices {
 ///   recorded overrides, so a line without provenance, or provenance without
 ///   a line, is caught.
 pub fn emit_notices(resolved: &[&ResolvedParameters]) {
-    notices(resolved).emit_stderr();
+    let parts: Vec<PartsRef<'_>> = resolved.iter().map(|r| PartsRef::from(*r)).collect();
+    emit_notices_of(&parts);
+}
+
+/// [`emit_notices`] over kept [`NoticeParts`].
+pub fn emit_notices_from_parts(resolved: &[NoticeParts]) {
+    let parts: Vec<PartsRef<'_>> = resolved.iter().map(PartsRef::from).collect();
+    emit_notices_of(&parts);
+}
+
+fn emit_notices_of(resolved: &[PartsRef<'_>]) {
+    notices_of(resolved).emit_stderr();
 
     if cfg!(debug_assertions) {
         for r in resolved {
-            for p in &r.params {
+            for p in r.params {
                 for w in p.overrides.windows(2) {
                     debug_assert_eq!(w[0].by.1.to_bits(), w[1].replaced.1.to_bits(),
                         "override chain broken for `{}`: {:?}", p.name, p.overrides);
@@ -1552,6 +1670,57 @@ pub fn emit_notices(resolved: &[&ResolvedParameters]) {
         debug_assert_eq!(reported, recorded,
             "override notices and recorded overrides must name the same parameters");
     }
+}
+
+/// The `param-override` notice for `fit predict --sweep`: a swept value
+/// replaces each posterior draw's value for that parameter, inside one draw
+/// row, so the resolver sees one draw/sweep-tier value and records no
+/// override. One info line per swept parameter, naming the replaced draw
+/// values as a range and the swept values as theirs.
+///
+/// `draws` are the posterior draw rows the sweep is folded into;
+/// `sweep_points` the expanded grid (one `(param, value)` list per point). A
+/// parameter whose draws all already equal every swept value replaced
+/// nothing and gets no line, as for any equal-value replacement. A side that
+/// spans several values is a range, and the line then says how many draws it
+/// covers.
+pub fn sweep_over_draws_notices<'a>(
+    draws: impl IntoIterator<Item = &'a IndexMap<String, f64>>,
+    sweep_points: &[Vec<(String, f64)>],
+) -> Notices {
+    let mut swept: IndexMap<&str, Vec<f64>> = IndexMap::new();
+    for point in sweep_points {
+        for (name, v) in point {
+            swept.entry(name.as_str()).or_default().push(*v);
+        }
+    }
+    let mut replaced: IndexMap<&str, Vec<f64>> = IndexMap::new();
+    for d in draws {
+        for name in swept.keys() {
+            if let Some(&v) = d.get(*name) {
+                replaced.entry(*name).or_default().push(v);
+            }
+        }
+    }
+    swept.iter().filter_map(|(name, by)| {
+        let was = replaced.get(name).filter(|w| !w.is_empty())?;
+        if was.iter().all(|w| by.iter().all(|b| b == w)) {
+            return None;
+        }
+        let (was_span, by_span) = (value_span(was), value_span(by));
+        let across = if was_span.contains(" to ") || by_span.contains(" to ") {
+            format!(", across {} draws", was.len())
+        } else {
+            String::new()
+        };
+        Some(Notice {
+            severity: Severity::Info,
+            code: "param-override",
+            message: format!(
+                "--sweep replaced {name} = {was_span} (from the posterior draws) \
+                 with {by_span}{across}"),
+        })
+    }).collect()
 }
 
 
@@ -2447,6 +2616,10 @@ mod tests {
         assert_eq!(ValueSource::FixedFile { path: PathBuf::from("p") }.tag(), "fixed_file");
         assert_eq!(ValueSource::SweepPoint.tag(), "sweep_point");
         assert_eq!(ValueSource::FixedCli.tag(), "fixed_cli");
+        assert_eq!(ValueSource::Starts(StartsOrigin::Params { path: PathBuf::from("p") }).tag(),
+            "starts_from_params");
+        assert_eq!(ValueSource::Starts(StartsOrigin::Mle { fit: "f".into() }).tag(),
+            "starts_from_mle");
     }
 
     #[test]
@@ -2871,15 +3044,21 @@ n_particles = 10
     // rather than built with the resolver's own phrase functions, so a change
     // to either side shows up as a disagreement.
 
-    /// A tier that can set `beta`. `FitEstimate` is a params file carrying a
+    /// A tier that can set `beta`. `StartsParams` and `StartsMle` are a
+    /// single-point `--starts` rule's values (`from_params=FILE`,
+    /// `from_mle=FIT`, tier 1.5); `FitEstimate` is a params file carrying a
     /// fit's `[provenance]` block (a fit's `mle_params.toml` passed back as
     /// `--params`); `ScenarioSet` and `ScenarioScale` are the two halves of
     /// tier 4.
     #[derive(Debug, Clone, Copy, PartialEq)]
-    enum Tier { FitToml, File, FitEstimate, Point, ScenarioSet, ScenarioScale, Cli }
+    enum Tier {
+        StartsParams, StartsMle, FitToml, File, FitEstimate, Point, ScenarioSet,
+        ScenarioScale, Cli,
+    }
 
     impl Tier {
-        const ALL: [Tier; 7] = [
+        const ALL: [Tier; 9] = [
+            Tier::StartsParams, Tier::StartsMle,
             Tier::FitToml, Tier::File, Tier::FitEstimate, Tier::Point,
             Tier::ScenarioSet, Tier::ScenarioScale, Tier::Cli,
         ];
@@ -2887,6 +3066,7 @@ n_particles = 10
         /// Twice the spec §1.3 tier number (3.5 → 7), so the order is integral.
         fn rank(self) -> u8 {
             match self {
+                Tier::StartsParams | Tier::StartsMle => 3,
                 Tier::FitToml => 4,
                 Tier::File | Tier::FitEstimate => 6,
                 Tier::Point => 7,
@@ -2900,7 +3080,8 @@ n_particles = 10
 
     /// Whether `later` replaces `earlier` when both set one parameter:
     /// a higher tier, or a params file listed after another. A scenario's
-    /// `set` and `scale` are one tier-4 value, not a pair.
+    /// `set` and `scale` are one tier-4 value, not a pair, and a run has at
+    /// most one starts rule.
     fn replaces(later: Tier, earlier: Tier) -> bool {
         later.rank() > earlier.rank() || (later.is_file() && earlier.is_file())
     }
@@ -2908,6 +3089,7 @@ n_particles = 10
     /// The tiers stacked onto one parameter, `beta`, in the order pushed.
     struct Stack {
         default: f64,
+        starts: Option<(StartsOrigin, Vec<(String, f64)>)>,
         ftf: IndexMap<String, f64>,
         files: Vec<PathBuf>,
         point: Vec<(String, f64)>,
@@ -2920,6 +3102,7 @@ n_particles = 10
         fn new(default: f64) -> Self {
             Stack {
                 default,
+                starts: None,
                 ftf: IndexMap::new(),
                 files: vec![],
                 point: vec![],
@@ -2934,6 +3117,15 @@ n_particles = 10
         fn push(&mut self, tier: Tier, v: f64) -> ValueSource {
             let beta = || "beta".to_string();
             match tier {
+                Tier::StartsParams | Tier::StartsMle => {
+                    let origin = if tier == Tier::StartsParams {
+                        StartsOrigin::Params { path: PathBuf::from("start.toml") }
+                    } else {
+                        StartsOrigin::Mle { fit: "results/fits/m".into() }
+                    };
+                    self.starts = Some((origin.clone(), vec![(beta(), v)]));
+                    ValueSource::Starts(origin)
+                }
                 Tier::FitToml => { self.ftf.insert(beta(), v); ValueSource::FitTomlFixed }
                 Tier::File => {
                     let path = params_file(&format!("f{}.toml", self.files.len()),
@@ -2968,7 +3160,9 @@ n_particles = 10
             if has_scenario {
                 inputs.scenario = Some("s");
             }
-            resolve_parameters(inputs).expect("resolves")
+            let starts = self.starts.as_ref()
+                .map(|(origin, values)| StartsValues { origin, values });
+            resolve_parameters_with_starts(inputs, starts).expect("resolves")
         }
     }
 
@@ -2976,6 +3170,8 @@ n_particles = 10
     fn expected_origin(tier: Tier, src: &ValueSource) -> String {
         let path = match src { ValueSource::FixedFile { path } => path.display().to_string(), _ => String::new() };
         match tier {
+            Tier::StartsParams => "--starts from_params=start.toml".into(),
+            Tier::StartsMle => "--starts from_mle=results/fits/m, a fit's estimate".into(),
             Tier::FitToml => "fit.toml [fixed]".into(),
             Tier::File => path,
             Tier::FitEstimate => format!("{path}, a fit's estimate"),
@@ -2997,6 +3193,8 @@ n_particles = 10
     /// The `run.json` record of one side of a replacement — written out by hand.
     fn expected_record(tier: Tier, src: &ValueSource, value: f64) -> serde_json::Value {
         let tag = match tier {
+            Tier::StartsParams => "starts_from_params",
+            Tier::StartsMle => "starts_from_mle",
             Tier::FitToml => "fit_toml_fixed",
             Tier::File | Tier::FitEstimate => "fixed_file",
             Tier::Point => "sweep_point",
@@ -3005,7 +3203,11 @@ n_particles = 10
         };
         let mut rec = serde_json::json!({ "source": tag, "value": value });
         match src {
-            ValueSource::FixedFile { path } => { rec["path"] = path.display().to_string().into(); }
+            ValueSource::FixedFile { path }
+            | ValueSource::Starts(StartsOrigin::Params { path }) => {
+                rec["path"] = path.display().to_string().into();
+            }
+            ValueSource::Starts(StartsOrigin::Mle { fit }) => { rec["fit"] = fit.clone().into(); }
             ValueSource::Scenario(n) => { rec["scenario"] = n.clone().into(); }
             _ => {}
         }
@@ -3054,7 +3256,11 @@ n_particles = 10
 
                 // One notice, warning exactly when the replaced value is a
                 // fit's estimate.
-                let severity = if lo == Tier::FitEstimate { Severity::Warning } else { Severity::Info };
+                let severity = if matches!(lo, Tier::FitEstimate | Tier::StartsMle) {
+                    Severity::Warning
+                } else {
+                    Severity::Info
+                };
                 let ns = notices(&[&r]);
                 let ns: Vec<&Notice> = ns.iter().collect();
                 assert_eq!(ns.len(), 1, "{cell}: notices {ns:?}");
@@ -3079,9 +3285,9 @@ n_particles = 10
                 emit_notices(&[&r]);
             }
         }
-        // 5 tier groups of sizes 1, 2, 1, 2, 1 → 19 cross-tier pairs, plus
+        // 6 tier groups of sizes 2, 1, 2, 1, 2, 1 → 33 cross-tier pairs, plus
         // the four orders of two params files (plain or a fit's estimate).
-        assert_eq!(pairs, 23);
+        assert_eq!(pairs, 37);
     }
 
     #[test]
@@ -3159,5 +3365,66 @@ n_particles = 10
             crate::run_meta::ParameterProvenance::from_resolved(beta)).unwrap();
         assert_eq!(rec["overrides"].as_array().map(Vec::len), Some(5));
         emit_notices(&[&r]);
+    }
+
+    // ── A single-point `--starts` rule's values (tier 1.5) ──────────────
+
+    #[test]
+    fn starts_values_supply_an_unset_parameter_and_ignore_undeclared_names() {
+        // `beta` has no model default; the starts file supplies it, so the
+        // resolver does not fire `UnsetRequired`. `delta` is not a model
+        // parameter: a starting point may name one, and it is skipped.
+        let model = mk_model(vec![mk_param("beta", None), mk_param("gamma", Some(0.1))]);
+        let origin = StartsOrigin::Params { path: PathBuf::from("start.toml") };
+        let values = vec![("beta".to_string(), 0.5), ("delta".to_string(), 9.0),
+                          ("gamma".to_string(), 0.2)];
+        let (fcli, ffiles, ftf, fte) = (vec![], vec![], IndexMap::new(), IndexSet::new());
+        let inputs = empty_inputs(&model, &fcli, &ffiles, &ftf, &fte);
+        let r = resolve_parameters_with_starts(
+            inputs, Some(StartsValues { origin: &origin, values: &values })).expect("resolves");
+        let by: HashMap<&str, &ResolvedParameter> =
+            r.params.iter().map(|p| (p.name.as_str(), p)).collect();
+        assert_eq!((by["beta"].value, &by["beta"].source),
+            (0.5, &ValueSource::Starts(origin.clone())));
+        // The file's value beats the model default, and replacing the default
+        // is not an override.
+        assert_eq!((by["gamma"].value, &by["gamma"].source),
+            (0.2, &ValueSource::Starts(origin)));
+        assert!(by["gamma"].overrides.is_empty());
+        assert!(rendered(&[&r]).is_empty());
+    }
+
+    #[test]
+    fn sweep_over_draws_reports_each_swept_parameter_once_as_a_range() {
+        let draw = |k: f64, beta: f64| -> IndexMap<String, f64> {
+            [("k".to_string(), k), ("beta".to_string(), beta)].into_iter().collect()
+        };
+        let draws = [draw(9.5, 0.3), draw(10.5, 0.31), draw(10.0, 0.29)];
+        let points = vec![
+            vec![("k".to_string(), 12.0)],
+            vec![("k".to_string(), 14.0)],
+        ];
+        let ns = sweep_over_draws_notices(draws.iter(), &points);
+        let lines: Vec<String> = ns.iter().map(Notice::render).collect();
+        assert_eq!(lines, vec![
+            "info: --sweep replaced k = 9.5 to 10.5 (from the posterior draws) with 12 to 14, \
+             across 3 draws".to_string(),
+        ]);
+        assert!(ns.iter().all(|n| n.code == "param-override"));
+
+        // One value on each side: no range, no count.
+        let fixed = [draw(10.0, 0.3), draw(10.0, 0.31)];
+        let one = vec![vec![("k".to_string(), 12.0)]];
+        let lines: Vec<String> = sweep_over_draws_notices(fixed.iter(), &one)
+            .iter().map(Notice::render).collect();
+        assert_eq!(lines, vec![
+            "info: --sweep replaced k = 10 (from the posterior draws) with 12".to_string(),
+        ]);
+
+        // A sweep onto the value every draw already has replaces nothing.
+        let same = vec![vec![("k".to_string(), 10.0)]];
+        assert!(sweep_over_draws_notices(fixed.iter(), &same).iter().next().is_none());
+        // No sweep: the one empty point.
+        assert!(sweep_over_draws_notices(fixed.iter(), &[vec![]]).iter().next().is_none());
     }
 }

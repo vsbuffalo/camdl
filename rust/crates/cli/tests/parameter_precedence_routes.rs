@@ -13,7 +13,8 @@
 //!   coordinate adds columns; a scenario is its own identity level) the
 //!   difference is stated and pinned rather than ignored.
 //! - **Each verb reports through the resolver.** A replacement of one tier's
-//!   value by another's prints the resolver's notice; a verb that resolved
+//!   value by another's prints the resolver's notice, once, and is recorded
+//!   in the verb's `run.json` `parameters_provenance`; a verb that resolved
 //!   parameters some other way would print nothing.
 //!
 //! The tier matrix itself (every pair, severity, the record) is unit-tested in
@@ -344,6 +345,21 @@ fn pfilter_reports_a_later_params_file_over_an_earlier_one() {
     let stderr = ok(&out, "pfilter");
     assert_eq!(override_lines(&stderr),
         vec!["info: params file p.toml replaced beta = 0.15 (from base.toml) with 0.3"]);
+    let leaf = one_leaf(&dir.join("pf/pfilters"));
+    let prov = &leaf["inputs"]["parameters_provenance"];
+    assert_eq!(prov["beta"]["value"], 0.3);
+    assert_eq!(prov["beta"]["source"], "fixed_file");
+    assert_eq!(prov["beta"]["overrides"], serde_json::json!([
+        { "replaced": { "source": "fixed_file", "value": 0.15, "path": "base.toml" },
+          "by": { "source": "fixed_file", "value": 0.3, "path": "p.toml" } },
+    ]));
+    // gamma: base.toml's 0.1, then p.toml's equal 0.1 — not an override.
+    assert_eq!(prov["gamma"]["value"], 0.1);
+    assert!(prov["gamma"].get("overrides").is_none(), "{}", prov["gamma"]);
+    assert_eq!(leaf["inputs"]["notices"], serde_json::json!([{
+        "severity": "info", "code": "param-override",
+        "message": "params file p.toml replaced beta = 0.15 (from base.toml) with 0.3",
+    }]));
 }
 
 // ─── dev eval ────────────────────────────────────────────────────────────────
@@ -447,6 +463,106 @@ fn survey_reports_fixed_over_a_scenario_and_fixes_the_winner() {
         vec!["info: --param/--fixed replaced gamma = 0.1 (from scenario `base`) with 0.15"]);
     let leaf = one_leaf(&dir.join("sv"));
     assert_eq!(leaf["inputs"]["fixed"]["gamma"], 0.15);
+    let gamma = &leaf["inputs"]["parameters_provenance"]["gamma"];
+    assert_eq!(gamma["value"], 0.15);
+    assert_eq!(gamma["source"], "fixed_cli");
+    assert_eq!(gamma["overrides"], serde_json::json!([
+        { "replaced": { "source": "scenario", "value": 0.1, "scenario": "base" },
+          "by": { "source": "fixed_cli", "value": 0.15 } },
+    ]));
+    assert_eq!(leaf["inputs"]["notices"].as_array().map(Vec::len), Some(1));
+}
+
+// ─── profile --starts: the starts rule's values are their own tier ─────────
+
+/// Run `profile` on the profile fixture with `extra` flags; returns stderr and
+/// every profile-point leaf's `parameters_provenance`.
+fn profile_run(dir: &Path, store: &str, extra: &[&str]) -> (String, Vec<serde_json::Value>) {
+    let mut argv = vec!["profile", "sir.camdl", "--data", "cases.tsv", "--obs", "cases",
+        "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
+        "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1",
+        "--suppress-warnings"];
+    argv.extend_from_slice(extra);
+    let out = Command::new(binary()).args(&argv).current_dir(dir)
+        .env("CAMDL_OUTPUT_DIR", dir.join(store)).output().expect("spawn");
+    let stderr = ok(&out, &format!("profile {extra:?}"));
+    let provs: Vec<serde_json::Value> = run_jsons(&dir.join(store)).into_iter()
+        .filter(|l| l["inputs"]["provenance"].is_object())
+        .map(|l| l["inputs"]["provenance"]["parameters_provenance"].clone())
+        .collect();
+    assert!(!provs.is_empty(), "no profile-point leaves");
+    (stderr, provs)
+}
+
+#[test]
+fn profile_starts_from_params_is_recorded_as_the_file_not_the_model_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    profile_fixture(dir);
+    std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.2\nN0 = 1000\n").unwrap();
+    let (stderr, provs) = profile_run(dir, "out", &["--starts", "from_params=start.toml"]);
+    assert!(override_lines(&stderr).is_empty(), "{stderr}");
+    for prov in provs {
+        for (name, v) in [("gamma", 0.2), ("N0", 1000.0)] {
+            assert_eq!(prov[name]["value"], v, "{name}");
+            assert_eq!(prov[name]["source"], "starts_from_params", "{name}");
+        }
+    }
+}
+
+#[test]
+fn profile_scenario_over_a_starts_file_is_reported_and_recorded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    profile_fixture(dir);
+    std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.2\nN0 = 1000\n").unwrap();
+    let (stderr, provs) = profile_run(dir, "out",
+        &["--starts", "from_params=start.toml", "--scenario", "base"]);
+    // `base` sets gamma 0.1 over the file's 0.2, and beta and N0 to the
+    // file's own 0.3 and 1000 (equal values, not replacements).
+    assert_eq!(override_lines(&stderr), vec![
+        "info: scenario `base` replaced gamma = 0.2 (from --starts from_params=start.toml) \
+         with 0.1",
+    ]);
+    for prov in provs {
+        assert_eq!(prov["gamma"]["value"], 0.1);
+        assert_eq!(prov["gamma"]["source"], "scenario");
+        assert_eq!(prov["gamma"]["overrides"], serde_json::json!([
+            { "replaced": { "source": "starts_from_params", "value": 0.2, "path": "start.toml" },
+              "by": { "source": "scenario", "value": 0.1, "scenario": "base" } },
+        ]));
+        assert_eq!(prov["N0"]["source"], "scenario");
+        assert!(prov["N0"].get("overrides").is_none(), "{}", prov["N0"]);
+    }
+}
+
+#[test]
+fn profile_replacing_a_from_mle_start_is_a_warning() {
+    // A stored fit's point estimate, planted as a method leaf: `from_mle`
+    // reads its `fit_state.toml` `start_values`.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    profile_fixture(dir);
+    let leaf = dir.join("fitleaf");
+    std::fs::create_dir_all(&leaf).unwrap();
+    std::fs::write(leaf.join("fit_state.toml"),
+        "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+         best_loglik = -20.0\ninitial_loglik = -30.0\nbest_chain = 0\nn_chains = 1\n\n\
+         [start_values]\nbeta = 0.3\ngamma = 0.2\nN0 = 1000\n\n[rw_sd]\n").unwrap();
+    let handle = leaf.to_string_lossy().into_owned();
+    let starts = format!("from_mle={handle}");
+    let (stderr, provs) = profile_run(dir, "out",
+        &["--starts", &starts, "--fixed", "gamma=0.15"]);
+    assert_eq!(override_lines(&stderr), vec![format!(
+        "warning: --param/--fixed replaced gamma = 0.2 (from --starts from_mle={handle}, \
+         a fit's estimate) with 0.15")]);
+    for prov in provs {
+        assert_eq!(prov["gamma"]["overrides"], serde_json::json!([
+            { "replaced": { "source": "starts_from_mle", "value": 0.2, "fit": handle },
+              "by": { "source": "fixed_cli", "value": 0.15 } },
+        ]));
+        assert_eq!(prov["N0"]["source"], "starts_from_mle");
+    }
 }
 
 // ─── From a posterior: simulate --draws posterior and fit predict ───────────
@@ -599,9 +715,124 @@ fn fit_predict_scenario_set_and_one_point_sweep_give_one_band() {
 
     // The scenario replaces the posterior row's k, and says so. A `--sweep`
     // value is written into the draw row itself (`fit/predict.rs`, the same
-    // draw/sweep tier), so it replaces no other tier's value and prints
-    // nothing; its `sweep:k` column is what shows it.
+    // draw/sweep tier), so `fit predict` reports that replacement of the
+    // draws' values itself, once per swept parameter.
     assert_eq!(n_scenario,
         vec!["info: scenario `k_alt` replaced k = 10 (from the draw or sweep point) with 12"]);
-    assert!(n_sweep.is_empty(), "{n_sweep:?}");
+    assert_eq!(n_sweep,
+        vec!["info: --sweep replaced k = 10 (from the posterior draws) with 12"]);
+}
+
+#[test]
+fn fit_predict_sweep_reports_the_replaced_draws_once_as_a_range() {
+    // Two sweep points, each replaying every draw: one line, both ranges.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    posterior_fit(dir);
+    let out = camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "free_forward",
+        "--seed", "3", "--sweep", "beta=0.3,0.4"]);
+    let lines = override_lines(&ok(&out, "fit predict --sweep"));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    let prefix = "info: --sweep replaced beta = ";
+    assert!(line.starts_with(prefix), "{line}");
+    // The posterior's beta varies by draw: a range, then the swept values and
+    // the draw count.
+    let rest = &line[prefix.len()..];
+    let (lo_hi, tail) = rest.split_once(" (from the posterior draws) with 0.3 to 0.4, across ")
+        .unwrap_or_else(|| panic!("{line}"));
+    let (lo, hi) = lo_hi.split_once(" to ").unwrap_or_else(|| panic!("{line}"));
+    let (lo, hi): (f64, f64) = (lo.parse().unwrap(), hi.parse().unwrap());
+    assert!(lo < hi && (0.05..=1.0).contains(&lo) && (0.05..=1.0).contains(&hi), "{line}");
+    assert!(tail.ends_with(" draws"), "{line}");
+}
+
+// ─── contrasts: an arm's scenario over the draws is reported once ───────────
+
+/// The posterior fixture's SIR with an SIA at day 28, a deaths quantity and
+/// one contrast whose `with_sia` arm also sets the dispersion `k`. `fit
+/// predict` runs no `--scenario` here, so the only resolutions under
+/// `with_sia` are the contrast arm's, one per forkable draw.
+const CONTRAST_MODEL: &str = r#"
+time_unit = 'days
+origin     = date("2020-01-01")
+compartments { S, I, R, D, V }
+parameters {
+  beta  : rate         in [0.05, 1.5]  ~ log_normal(mu = -0.5, sigma = 0.5)
+  gamma : rate         in [0.05, 0.5]  ~ log_normal(mu = -1.5, sigma = 0.5)
+  mu    : rate         in [0.0, 0.3]
+  N0    : count
+  I0    : count
+  rho   : probability  in [0.1, 0.9]
+  k     : positive     in [1.0, 100.0]
+}
+let N = S + I + R + D + V
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+  death     : I --> D  @ mu * I
+}
+init { S = N0 - I0  I = I0 }
+interventions {
+  sia : transfer(fraction = 0.6, from = S, to = V) at [origin + 4 'weeks]
+}
+scenarios {
+  no_sia   { disable = [sia] }
+  with_sia { enable  = [sia]  set = { k = 12.0 } }
+}
+observations {
+  weekly_cases {
+    columns       { time : time, weekly_cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    weekly_cases  ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+quantities {
+  total = final(D)
+}
+contrasts {
+  averted = no_sia.quantities.total - with_sia.quantities.total
+}
+simulate { from = 0 'days  to = 80 'days }
+"#;
+
+#[test]
+fn fit_predict_reports_a_contrast_arms_scenario_over_the_draws_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("model.camdl"), CONTRAST_MODEL).unwrap();
+    std::fs::write(dir.join("weekly_cases.tsv"),
+        "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n")
+        .unwrap();
+    std::fs::write(dir.join("fit.toml"), r#"output_dir = "results"
+[model]
+camdl = "model.camdl"
+[data.observations]
+weekly_cases = "weekly_cases.tsv"
+[estimate]
+beta  = { bounds = [0.05, 1.5], start = 0.5 }
+gamma = { bounds = [0.05, 0.5], start = 0.15 }
+[fixed]
+mu  = 0.05
+N0  = 10000
+I0  = 10
+rho = 0.6
+k   = 10.0
+[method]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 100
+sweeps = 30
+burn_in = 10
+thin = 1
+"#).unwrap();
+    ok(&camdl(dir, &["fit", "run", "fit.toml", "--seed", "1"]), "fit run");
+    let stderr = ok(&camdl(dir, &["fit", "predict", "--fit", "fit.toml",
+        "--horizon", "free_forward", "--seed", "3"]), "fit predict");
+    assert!(stderr.contains("contrast 'averted' — fork at"), "the contrast ran: {stderr}");
+    assert_eq!(override_lines(&stderr),
+        vec!["info: scenario `with_sia` replaced k = 10 (from the draw or sweep point) with 12"]);
 }

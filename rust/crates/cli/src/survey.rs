@@ -90,6 +90,10 @@ struct ResolvedSurveyInputs {
     fixed: HashMap<String, f64>,
     /// Named scenario applied (`None` = baseline).
     scenario: Option<String>,
+    /// Each resolved parameter's provenance, with every override, and the
+    /// notices the resolution reported: recorded in `run.json`, never hashed.
+    parameters_provenance: std::collections::BTreeMap<String, crate::run_meta::ParameterProvenance>,
+    notices: crate::notice::Notices,
     /// Per-parameter `[estimate].start =` values from fit.toml when in
     /// fit-aware mode; `None` in inline mode (no fit.toml). Used by
     /// the start-rank diagnostic to flag when the user's seeded
@@ -625,6 +629,8 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
         "model_identity":  model_identity,
         "data_hashes":     resolved.data_hashes,
         "fixed":           resolved.fixed,
+        "parameters_provenance": resolved.parameters_provenance,
+        "notices":         resolved.notices,
     });
     if let Err(e) = write.finalize(inputs_json) {
         eprintln!("warning: finalize survey leaf {}: {}", run_dir.display(), e);
@@ -768,6 +774,9 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             },
         ).map_err(|e| e.to_string())?;
         crate::params_resolver::emit_notices(&[&resolved]);
+        let parameters_provenance =
+            crate::run_meta::ParameterProvenance::of_all(&resolved.params);
+        let notices = crate::params_resolver::notices(&[&resolved]);
         let mut model = resolved.model.clone();
 
         // Apply [estimate].start as a starting-point hint for params
@@ -899,6 +908,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             data_hashes,
             fixed: fixed_resolved.into_iter().collect(),
             scenario: scenario_opt,
+            parameters_provenance,
+            notices,
             estimate_starts: if estimate_starts.is_empty() {
                 None
             } else {
@@ -979,6 +990,9 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             },
         ).map_err(|e| e.to_string())?;
         crate::params_resolver::emit_notices(&[&resolved]);
+        let parameters_provenance =
+            crate::run_meta::ParameterProvenance::of_all(&resolved.params);
+        let notices = crate::params_resolver::notices(&[&resolved]);
         let model = resolved.model.clone();
         let fixed_map: HashMap<String, f64> = fixed_cli_vec.iter().cloned().collect();
 
@@ -1050,6 +1064,8 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
             data_hashes,
             fixed: fixed_map,
             scenario: a.scenario.clone(),
+            parameters_provenance,
+            notices,
             // Inline mode has no fit.toml [estimate].start values.
             estimate_starts: None,
         })

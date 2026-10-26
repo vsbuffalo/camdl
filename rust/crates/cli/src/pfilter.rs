@@ -481,6 +481,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
             "n_particles": n_particles,
             "params": scored.iter().map(|(n, v)| (n.as_str(), *v)).collect::<Vec<_>>(),
             "data_hashes": data_hashes.iter().map(|(n, h)| (n.as_str(), h.as_str())).collect::<Vec<_>>(),
+            // Display, never hashed (the run_id is fixed above from `ctx`): where
+            // each scored value came from, every override of one tier's value by
+            // another's, and the notices the resolution reported.
+            "parameters_provenance":
+                crate::run_meta::ParameterProvenance::of_all(&resolved.params),
+            "notices": crate::params_resolver::notices(&[&resolved]),
         });
         // Streaming write through the one resolved-writer seam (gh#241 PR D).
         // The running record carries Null inputs (the loglik is a post-run

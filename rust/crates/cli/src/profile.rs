@@ -407,17 +407,20 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         },
     ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
 
-    // Starts-rule → resolver bridge: `--starts from_params=<toml>` and
-    // `--starts from_mle=<path>` both load a single-point
-    // parameter file. The user's mental model is that the file's
-    // values are authoritative for the parameters named in it — both
-    // as the resolver's base AND as the chain starting point.
-    // Without this seeding, the resolver fires `UnsetRequired` on any
-    // parameter that has no DSL default + no `[fixed]` entry, even
-    // when the user has explicitly named a file containing the value.
-    // See `seed_params_from_init_method` for the design rationale.
-    seed_params_from_init_method(&mut model_pre.parameters, &init_method)
-        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    // A single-point starts rule (`--starts from_params=<toml>`,
+    // `--starts from_mle=<fit>`) loads one parameter point. Its values are
+    // the base value of every parameter they name — so a parameter the
+    // profile neither fixes nor estimates is HELD at the file's value — and
+    // the chain-start draw below reads the same rule again to start the
+    // estimated (nuisance) parameters there. They enter the resolver as
+    // their own tier, just above the model default
+    // (`ValueSource::Starts`), so a later tier replacing one is reported and
+    // recorded. Without them the resolver would fire `UnsetRequired` on a
+    // parameter with no DSL default even though the user named a file
+    // carrying it. See `starts_values_from_init_method`.
+    let starts_values: Option<(crate::params_resolver::StartsOrigin, Vec<(String, f64)>)> =
+        starts_values_from_init_method(&init_method)
+            .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
 
     // gh#34 [estimate].start fall-back. Apply BEFORE the resolver so
     // that params listed in fit-toml `[estimate]` with an explicit
@@ -525,8 +528,21 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // two data vintages that fork a forcing differently would share a
     // `model_identity`. Re-emitted only when something actually moved, so an
     // unanchored model's bytes are untouched.
+    //
+    // The re-emitted text carries the starts rule's values, as it did when
+    // they were written into `model_pre` before the resolver: they now enter
+    // the resolver as their own tier instead, and are seeded into this copy
+    // only so the model identity of an anchored profile does not move.
     let model_json = if moved_any_anchor {
-        ir::to_string_pretty(&model_pre).unwrap_or_else(|e| {
+        let mut ident_model = model_pre.clone();
+        if let Some((_, values)) = &starts_values {
+            for p in &mut ident_model.parameters {
+                if let Some((_, v)) = values.iter().find(|(n, _)| *n == p.name) {
+                    p.value = p.value.with_value(*v);
+                }
+            }
+        }
+        ir::to_string_pretty(&ident_model).unwrap_or_else(|e| {
             eprintln!("error: re-emitting the anchor-resolved IR: {e}");
             std::process::exit(1);
         })
@@ -556,7 +572,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let fit_toml_estimate: indexmap::IndexSet<String> =
         fit_estimate.keys().cloned().collect();
     let table_files_resolver: HashMap<String, std::path::PathBuf> = HashMap::new();
-    let resolved = crate::params_resolver::resolve_parameters(
+    let resolved = crate::params_resolver::resolve_parameters_with_starts(
         crate::params_resolver::ParameterInputs {
             model: &model_pre,
             scenario: scenario_name.as_deref(),
@@ -572,6 +588,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             fit_toml_estimate: &fit_toml_estimate,
             table_files: &table_files_resolver,
         },
+        starts_values.as_ref().map(|(origin, values)|
+            crate::params_resolver::StartsValues { origin, values }),
     ).unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     crate::params_resolver::emit_notices(&[&resolved]);
     let model = resolved.model.clone();
@@ -1081,12 +1099,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // unified resolver output (populated upstream). Each entry maps a
     // resolved parameter name to the value + source + role + audit
     // fields. NOT part of the CAS hash (provenance is metadata).
-    let parameters_provenance: std::collections::HashMap<
-        String, crate::run_meta::ParameterProvenance> =
-        resolved.params.iter()
-            .map(|rp| (rp.name.clone(),
-                 crate::run_meta::ParameterProvenance::from_resolved(rp)))
-            .collect();
+    let parameters_provenance =
+        crate::run_meta::ParameterProvenance::of_all(&resolved.params);
     // Per-start init provenance, straight from the drawn starts.
     let init_provenance: Option<crate::run_meta::InitProvenance> =
         Some(crate::run_meta::InitProvenance::from_chain_starts(&drawn_starts));
@@ -1100,6 +1114,9 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let run_provenance_json = serde_json::json!({
         "parameters_provenance":
             serde_json::to_value(&parameters_provenance).unwrap_or(serde_json::Value::Null),
+        "notices":
+            serde_json::to_value(crate::params_resolver::notices(&[&resolved]))
+                .unwrap_or(serde_json::Value::Null),
         "init_provenance":
             serde_json::to_value(&init_provenance).unwrap_or(serde_json::Value::Null),
         "suppressed_warnings":
@@ -1950,47 +1967,32 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     }
 }
 
-/// Render a per-start MLE TOML file. Human-readable; also the format
-/// `rewrite_rollup` reads back to reconstruct the rollup.
+/// The values a single-point starts rule supplies, and where they came from:
+/// `--starts from_params=<toml>` reads the file, `--starts from_mle=<fit>` the
+/// stored fit's point estimate (`fit_state.toml` `start_values`). They enter
+/// the resolver at tier 1.5 ([`crate::params_resolver::StartsValues`]),
+/// above the model default and below every other tier, so the file's value
+/// wins over the DSL default and anything the user passes explicitly
+/// (`--fit` `[fixed]`, `--fixed-file`, the scenario, `--fixed`) wins over the
+/// file, with the replacement reported.
 ///
-/// Seed `model.parameters[i].value` from a single-point start rule's file
-/// **before** the resolver runs, so those rules
-/// (`--starts from_params=<toml>` and `--starts from_mle=<handle>`)
-/// deliver their values to Phase 2 (resolver) in addition
-/// to Phase 3 (chain init). Without this bridge, the resolver fires
-/// `UnsetRequired` for any parameter that has no DSL default + no
-/// `[fixed]` entry, even when the user has explicitly named a file
-/// containing the value.
+/// Per-chain-varying rules (`from_prior`, `from_posterior`) and the spread
+/// rules (single, uniform, lhs) have no single point and return `None`; users
+/// of those supply a base value another way (`--fit` with `[estimate].start`,
+/// or `--fixed-file`).
 ///
-/// **File wins (aggressive)**: if the user typed
-/// `--starts from_params=start.toml` with `beta = 0.5`, and the
-/// model's DSL also declares `beta = 0.3` as a default, beta resolves
-/// to 0.5. The user explicitly named the file as authoritative;
-/// silently preferring the DSL default would be a footgun.
-///
-/// **Per-chain-varying init modes** (`from_prior`, `from_posterior`)
-/// don't seed model_pre because there's no single value to seed.
-/// Users of those modes need to also supply a base-value source
-/// (`--fit` with `[estimate].start`, or `--fixed-file`). Documented
-/// behaviour, not a hidden constraint.
-///
-/// Returns `Ok(())` for init modes that don't seed (single, uniform,
-/// lhs, from_prior, from_posterior) — the caller can
-/// blindly call this and let the resolver handle errors downstream.
-///
-/// Takes the parameter slice rather than `&mut Model` because the
-/// helper only ever touches `model.parameters[i].value`. Narrower
-/// surface = simpler tests + less coupling to the rest of the IR.
-fn seed_params_from_init_method(
-    params: &mut [ir::parameter::Parameter],
+/// Sorted by name, so the resolver applies them in a reproducible order.
+fn starts_values_from_init_method(
     init_method: &crate::fit::starts::ChainStarts,
-) -> Result<(), String> {
+) -> Result<Option<(crate::params_resolver::StartsOrigin, Vec<(String, f64)>)>, String> {
     use crate::fit::starts::{ChainStarts, Point};
-    let file_values: HashMap<String, f64> = match init_method {
+    use crate::params_resolver::StartsOrigin;
+    let (origin, values): (StartsOrigin, HashMap<String, f64>) = match init_method {
         ChainStarts::Point(Point::FromParams { path }) => {
-            crate::util::load_params_toml(&path.to_string_lossy())
+            let values = crate::util::load_params_toml(&path.to_string_lossy())
                 .map_err(|e| format!(
-                    "loading the --starts from_params file: {}", e))?
+                    "loading the --starts from_params file: {}", e))?;
+            (StartsOrigin::Params { path: path.clone() }, values)
         }
         ChainStarts::Point(Point::FromMle { source }) => {
             // The stored fit's point estimate, from the leaf the handle names.
@@ -1998,16 +2000,14 @@ fn seed_params_from_init_method(
                 .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
             let state = crate::fit::state::FitState::load(&leaf.to_string_lossy())
                 .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
-            state.start_values.into_iter().collect()
+            (StartsOrigin::Mle { fit: source.0.clone() },
+             state.start_values.into_iter().collect())
         }
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
-    for p in params.iter_mut() {
-        if let Some(&v) = file_values.get(&p.name) {
-            p.value = p.value.with_value(v);
-        }
-    }
-    Ok(())
+    let mut values: Vec<(String, f64)> = values.into_iter().collect();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Some((origin, values)))
 }
 
 /// gh#118: focal-parameter prior contribution at the cell's fixed
@@ -2054,6 +2054,9 @@ fn compute_focal_log_prior_offset(
         .sum()
 }
 
+/// Render a per-start MLE TOML file. Human-readable; also the format
+/// `rewrite_rollup` reads back to reconstruct the rollup.
+///
 /// gh#74 Option B: emits a trailing `[diagnostics]` block holding the
 /// per-start convergence record. Older `mle.toml` files (pre-gh#74)
 /// have no `[diagnostics]` block; the rollup tolerates the absence
@@ -2284,36 +2287,13 @@ mod tests {
     }
 
 
-    // ── seed_params_from_init_method: Phase 3 → Phase 2 bridge ────────
+    // ── starts_values_from_init_method: the starts rule's point ───────
     //
-    // Bug 3 from the post-CLI-UX-rev-2 regression report: the unified
-    // resolver fires `UnsetRequired` when a parameter has no DSL
-    // default + no `[fixed]` entry, even when the user has
-    // explicitly named a single-point init file (`--init from_params
-    // --params <toml>` or `--init from_mle --mle <path>`).
-    //
-    // These tests pin the fix: the helper loads the file BEFORE the
-    // resolver runs and seeds matching parameters' values. File wins
-    // over DSL default (aggressive — user explicitly named the file).
-
-    fn build_params(specs: &[(&str, Option<f64>)]) -> Vec<ir::parameter::Parameter> {
-        // Use serde so we don't track every Parameter field as the IR
-        // schema evolves. Each entry is a minimal {name, value} JSON
-        // object; serde_json fills the rest from
-        // `#[serde(default)]` on the Parameter struct.
-        specs.iter().map(|(name, value)| {
-            // `value` is the typed ParamValue ADT (gh#191): a concrete number
-            // is Fixed, absent is Required.
-            let body = match value {
-                Some(v) => format!(
-                    r#"{{"name":"{}","value":{{"mode":"fixed","value":{}}}}}"#, name, v),
-                None => format!(
-                    r#"{{"name":"{}","value":{{"mode":"required"}}}}"#, name),
-            };
-            serde_json::from_str::<ir::parameter::Parameter>(&body)
-                .expect("Parameter fixture must parse")
-        }).collect()
-    }
+    // A single-point starts rule (`from_params=FILE`, `from_mle=FIT`) loads
+    // one parameter point, which enters the resolver as its own tier. These
+    // pin what is loaded and how it is attributed; the tier's precedence is
+    // pinned by the resolver's own tests
+    // (`params_resolver::tests::starts_values_*`).
 
     fn write_toml(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
         let p = dir.join(name);
@@ -2322,52 +2302,23 @@ mod tests {
     }
 
     #[test]
-    fn seed_from_params_populates_unset_params() {
-        // Bug 3 minimal repro: model has no DSL default for beta;
-        // --init from_params --params start.toml supplies beta=0.5;
-        // the helper seeds model.parameters[beta].value = 0.5 so the
-        // resolver doesn't fire UnsetRequired.
+    fn starts_from_params_loads_the_file_named_by_its_path() {
         let tmp = tempfile::tempdir().unwrap();
         let toml_path = write_toml(tmp.path(), "start.toml",
-            "beta = 0.5\ngamma = 0.1\n");
-        let mut params = build_params(&[
-            ("beta",  None),  // no DSL default
-            ("gamma", None),
-        ]);
-        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromParams { path: toml_path });
-        seed_params_from_init_method(&mut params, &init).unwrap();
-        let beta_val  = params.iter()
-            .find(|p| p.name == "beta").unwrap().value.resolved_value();
-        let gamma_val = params.iter()
-            .find(|p| p.name == "gamma").unwrap().value.resolved_value();
-        assert_eq!(beta_val,  Some(0.5));
-        assert_eq!(gamma_val, Some(0.1));
+            "gamma = 0.1\nbeta = 0.5\n");
+        let init = crate::fit::starts::ChainStarts::Point(
+            crate::fit::starts::Point::FromParams { path: toml_path.clone() });
+        let (origin, values) = starts_values_from_init_method(&init).unwrap().unwrap();
+        assert_eq!(origin, crate::params_resolver::StartsOrigin::Params { path: toml_path });
+        assert_eq!(values, vec![("beta".to_string(), 0.5), ("gamma".to_string(), 0.1)],
+            "every value in the file, sorted by name");
     }
 
     #[test]
-    fn seed_from_params_overrides_dsl_default_file_wins() {
-        // Aggressive seeding: if the model has `beta = 0.3` and the
-        // user passes --init from_params --params with `beta = 0.5`,
-        // the file wins. User explicitly named the file as the
-        // authoritative source.
-        let tmp = tempfile::tempdir().unwrap();
-        let toml_path = write_toml(tmp.path(), "start.toml", "beta = 0.5\n");
-        let mut params = build_params(&[
-            ("beta", Some(0.3)),  // DSL default that the file should override
-        ]);
-        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromParams { path: toml_path });
-        seed_params_from_init_method(&mut params, &init).unwrap();
-        let beta_val = params.iter()
-            .find(|p| p.name == "beta").unwrap().value.resolved_value();
-        assert_eq!(beta_val, Some(0.5),
-            "file value must win over DSL default — user named the file");
-    }
-
-    #[test]
-    fn seed_from_mle_reads_the_leaf_point_estimate() {
-        // --init from_mle --mle <leaf dir>: the helper reads the stored fit's
-        // `fit_state.toml` `start_values` — the same file `fit run`'s
-        // `from_mle` reads.
+    fn starts_from_mle_reads_the_leaf_point_estimate() {
+        // `from_mle=<leaf dir>` reads the stored fit's `fit_state.toml`
+        // `start_values` — the same file `fit run`'s `from_mle` reads — and is
+        // attributed to the fit handle as given.
         let tmp = tempfile::tempdir().unwrap();
         let leaf = tmp.path().join("if2-abcdef12").join("seed_1-01234567");
         std::fs::create_dir_all(&leaf).unwrap();
@@ -2375,40 +2326,25 @@ mod tests {
             "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
              best_loglik = -311.13\ninitial_loglik = -400.0\nbest_chain = 1\nn_chains = 2\n\n\
              [start_values]\nbeta = 0.5\n\n[rw_sd]\n");
-        let mut params = build_params(&[
-            ("beta", None),
-        ]);
+        let handle = leaf.to_string_lossy().into_owned();
         let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromMle {
-            source: crate::fit::starts::Handle(leaf.to_string_lossy().into_owned()),
+            source: crate::fit::starts::Handle(handle.clone()),
         });
-        seed_params_from_init_method(&mut params, &init).unwrap();
-        let beta_val = params.iter()
-            .find(|p| p.name == "beta").unwrap().value.resolved_value();
-        assert_eq!(beta_val, Some(0.5));
+        let (origin, values) = starts_values_from_init_method(&init).unwrap().unwrap();
+        assert_eq!(origin, crate::params_resolver::StartsOrigin::Mle { fit: handle });
+        assert_eq!(values, vec![("beta".to_string(), 0.5)]);
     }
 
     #[test]
-    fn seed_noop_for_per_chain_varying_init_modes() {
-        // from_prior / from_posterior have per-chain-varying values
-        // — there's no single value to seed into model_pre. The
-        // helper must be a no-op for these modes (users are expected
-        // to supply a separate base-value source).
-        let mut params = build_params(&[
-            ("beta", Some(0.3)),
-        ]);
-        let original_beta = params.iter()
-            .find(|p| p.name == "beta").unwrap().value.resolved_value();
+    fn starts_without_a_single_point_supply_no_values() {
+        // from_prior / lhs have per-chain-varying values — there is no
+        // single point to supply to the resolver.
         let init_prior = crate::fit::starts::ChainStarts::from_prior();
-        seed_params_from_init_method(&mut params, &init_prior).unwrap();
-        assert_eq!(params.iter()
-            .find(|p| p.name == "beta").unwrap().value.resolved_value(), original_beta,
-            "from_prior must NOT seed model_pre — values are per-chain");
-
+        assert!(starts_values_from_init_method(&init_prior).unwrap().is_none(),
+            "from_prior must supply no base values — they are per-chain");
         let init_lhs = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
-        seed_params_from_init_method(&mut params, &init_lhs).unwrap();
-        assert_eq!(params.iter()
-            .find(|p| p.name == "beta").unwrap().value.resolved_value(), original_beta,
-            "Lhs must NOT seed model_pre");
+        assert!(starts_values_from_init_method(&init_lhs).unwrap().is_none(),
+            "lhs must supply no base values");
     }
 
     // ── gh#109: log_posterior surfaces in mle.toml + profile TSV ──────

@@ -261,8 +261,9 @@ pub struct ParameterProvenance {
     /// Resolved value as written into `model.parameters[i].value`.
     pub value:  f64,
     /// [`crate::params_resolver::ValueSource::tag`] string
-    /// (`"model_default" | "scenario" | "fit_toml_fixed" |
-    /// "fixed_file" | "fixed_cli"`).
+    /// (`"model_default" | "starts_from_params" | "starts_from_mle" |
+    /// "fit_toml_fixed" | "fixed_file" | "sweep_point" | "scenario" |
+    /// "fixed_cli"`).
     pub source: String,
     /// `"fixed" | "estimated"` — matches
     /// [`crate::params_resolver::ParameterRole`].
@@ -305,14 +306,19 @@ pub struct SourcedValue {
     /// The scenario's name, for a `scenario` source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scenario: Option<String>,
-    /// The file, for a `fixed_file` source (`--params` / `--fixed-file`).
+    /// The file, for a `fixed_file` source (`--params` / `--fixed-file`) or a
+    /// `starts_from_params` source (`--starts from_params=FILE`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The fit handle, for a `starts_from_mle` source
+    /// (`--starts from_mle=FIT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<String>,
 }
 
 impl SourcedValue {
     fn from_resolved(src: &crate::params_resolver::ValueSource, value: f64) -> Self {
-        use crate::params_resolver::ValueSource;
+        use crate::params_resolver::{StartsOrigin, ValueSource};
         SourcedValue {
             source: src.tag().to_string(),
             value,
@@ -321,7 +327,13 @@ impl SourcedValue {
                 _ => None,
             },
             path: match src {
-                ValueSource::FixedFile { path } => Some(path.display().to_string()),
+                ValueSource::FixedFile { path }
+                | ValueSource::Starts(StartsOrigin::Params { path }) =>
+                    Some(path.display().to_string()),
+                _ => None,
+            },
+            fit: match src {
+                ValueSource::Starts(StartsOrigin::Mle { fit }) => Some(fit.clone()),
                 _ => None,
             },
         }
@@ -353,6 +365,15 @@ pub struct ChainStartProvenance {
 }
 
 impl ParameterProvenance {
+    /// Every resolved parameter's provenance, by name: the
+    /// `parameters_provenance` block each verb records beside its run
+    /// (`run.json`'s inputs, or `fit.meta.json`). Display, never hashed.
+    pub fn of_all(
+        params: &[crate::params_resolver::ResolvedParameter],
+    ) -> BTreeMap<String, ParameterProvenance> {
+        params.iter().map(|rp| (rp.name.clone(), ParameterProvenance::from_resolved(rp))).collect()
+    }
+
     /// Build a `ParameterProvenance` entry from a
     /// [`crate::params_resolver::ResolvedParameter`].
     pub fn from_resolved(rp: &crate::params_resolver::ResolvedParameter) -> Self {
@@ -1138,10 +1159,10 @@ mod tests {
         assert_eq!(rho.overrides, vec![OverrideRecord {
             replaced: SourcedValue {
                 source: "scenario".into(), value: 0.30,
-                scenario: Some("worst_case".into()), path: None,
+                scenario: Some("worst_case".into()), path: None, fit: None,
             },
             by: SourcedValue {
-                source: "fixed_cli".into(), value: 0.50, scenario: None, path: None,
+                source: "fixed_cli".into(), value: 0.50, scenario: None, path: None, fit: None,
             },
         }]);
         assert!(meta["iota"].overrides.is_empty());

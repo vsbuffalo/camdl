@@ -333,6 +333,23 @@ pub fn emit_contrasts(
         }
     }
 
+    // Each arm resolves every forkable draw's θ under its scenario (`replay`),
+    // so a scenario `set`/`scale` replaces the draws' values. Report those
+    // replacements once, over every arm and draw, before any arm replays —
+    // the same lines `fit predict --scenario` prints for its own arms.
+    {
+        let mut parts: Vec<crate::params_resolver::NoticeParts> =
+            Vec::with_capacity(runs_union.len() * forkable.len());
+        for run in &runs_union {
+            for (params_i, _, _) in &forkable {
+                let overrides: Vec<(String, f64)> =
+                    params_i.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                parts.push(resolve_arm(model, run, &overrides)?.into_notice_parts());
+            }
+        }
+        crate::params_resolver::emit_notices_from_parts(&parts);
+    }
+
     // Every arm evaluates the WHOLE quantity list (the evaluator is built from
     // `model.quantities`), so a model with an anchored quantity and no window to
     // resolve it against cannot be replayed at all — `eval_draw` treats a missing

@@ -2138,6 +2138,14 @@ fn run_predict(args: &crate::args::FitPredictArgs) -> Result<PredictOutcome, Str
             // global pool.
             let ff_parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
+            // A swept value is written into each draw row (below), so the
+            // resolver sees one draw/sweep-tier value and records no override:
+            // the replacement of the draws' values is reported here instead,
+            // once per swept parameter over every replayed draw.
+            crate::params_resolver::sweep_over_draws_notices(
+                ff_draws.iter().copied(), &sweep_points,
+            ).emit_stderr();
+
             for sweep_pt in &sweep_points {
                 // A FRESH sink per sweep-point keeps the sink scenario-keyed (no sink
                 // rewrite); the sweep axis lives in this loop, not the sink. The
