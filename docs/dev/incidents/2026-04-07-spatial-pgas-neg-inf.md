@@ -28,11 +28,25 @@ spatial models, multiple source groups draw from overlapping compartments via
 the deferred-delta mechanism, and total withdrawals can exceed the population —
 the overdraft that triggers clamping.
 
-This is a known limitation of the Euler scheme. pomp has the same issue and
-handles it the same way (clamp negative counts). The correct fix for the
-approximation is smaller dt (subdivide each day into 4–10 substeps), which keeps
-$p_{\text{total}} < 0.3$ and makes overdrafts vanishingly rare. But smaller dt
-means more substeps, which means slower inference.
+~~This is a known limitation of the Euler scheme. pomp has the same issue and
+handles it the same way (clamp negative counts).~~
+
+**Correction (2026-10-26).** Both claims in the struck sentence are wrong. The
+overdraft is not a property of the Euler scheme: an Euler-multinomial draw
+splits one source's exits as Multinomial(N; p₀…p_K) and cannot exceed N. It
+arose here from several source groups drawing on one compartment, which camdl
+has rejected since gh#121. pomp (King, Nguyen & Ionides 2016, _J. Stat. Softw._
+69(12); source checked at v6.4.0.6) does not clamp: `reulermultinom`
+(`inst/include/pomp.h:157-189`) returns NA with the warning "NAs produced" for a
+negative or non-integer size. Its particle filter flags a NaN or +∞ log-weight
+(`src/pfilter.c:76-81` returns the offending particle's index to the caller) but
+accepts −∞ for a particle, and gives the step a log-likelihood of −∞ when every
+weight is −∞ (`:87-92`). The original sentence gave no citation.
+
+The correct fix for the approximation is smaller dt (subdivide each day into
+4–10 substeps), which keeps $p_{\text{total}} < 0.3$ and makes overdrafts
+vanishingly rare. But smaller dt means more substeps, which means slower
+inference.
 
 The `counts_before`/`counts_after` fix addresses the implementation bug. The
 Euler approximation breakdown requires either smaller dt or the
