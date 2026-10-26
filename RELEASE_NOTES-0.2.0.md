@@ -247,6 +247,18 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   `--obs-dir DIR`, and a `[design.*]` block is generated externally and passed
   as `--sweep-file`.
 
+- **Events due at the same instant follow one rule on every backend (gh#985).**
+  Inflow `add` events resolve against the state before the instant; draining
+  `transfer` events and `set` then resolve against the post-inflow state;
+  interventions follow in declaration order (language spec §13.10). This was
+  already chain-binomial's rule. On Gillespie and the ODE, an `add(X, 10)` and
+  an `{ X = 5 ... }` event at one instant gave `X = 15` (Gillespie, and the ODE
+  when the `set` was declared first) and now give `X = 5`; a draining `transfer`
+  beside an inflow into its source moved nothing and now moves its share of the
+  post-inflow count. Migration: none needed; Gillespie and ODE runs whose events
+  coincide this way give different, now backend-consistent, results.
+  Chain-binomial and every inference method are unchanged.
+
 ## Run identity
 
 - **Every stored PGAS fit, every stored PMMH fit and every stored

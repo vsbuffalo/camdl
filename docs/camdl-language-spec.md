@@ -3799,6 +3799,15 @@ discrete-time filters) the order is:
    there signals a broken model, reported separately, not by this check).
 7. The trajectory row for this step is recorded **after** all of the above.
 
+The continuous backends (ODE and Gillespie) have no transition stage at an
+effect boundary and apply the same rule there: inflow events are computed from
+the state just before the boundary, draining `transfer` events and `set` then
+apply to the **post-inflow** state, and scheduled interventions follow in
+declaration order. So an `add(X, 10)` event and an `{ X = 5 ... }` event due at
+the same instant leave `X = 5` on every backend, whichever is declared first,
+and a draining `transfer` due beside an inflow into its source moves a share of
+the post-inflow count.
+
 The consequence a modeller must know: recorded output is **post-effect**. An
 observation emitted at a time when an intervention fires — a vaccination
 `transfer`, say — sees the **post-vaccination** state, not the pre-vaccination
