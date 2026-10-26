@@ -690,6 +690,12 @@ pub fn check_model_capabilities(
         compiled
             .validate_single_source_transitions()
             .map_err(|e| e.to_string())?;
+        // A transition consuming more than one unit of its source per firing
+        // (`S + S --> D`) has no meaning in the chain-binomial kernel. Same
+        // structural-model refusal, naming the transition and the compartment.
+        compiled
+            .validate_unit_source_consumption()
+            .map_err(|e| e.to_string())?;
     }
 
     let required = compiled.required_capabilities();
@@ -986,6 +992,43 @@ mod tests {
         assert!(
             check_model_capabilities(InferenceBackend::Ode, &compiled).is_ok(),
             "ODE inference must accept a mixed deterministic source"
+        );
+    }
+
+    /// A transition consuming two units of its source per firing (`S + S --> D`,
+    /// net stoichiometry `S: -2`) is refused by the chain-binomial inference
+    /// dispatch check — the one every `fit` stage, `profile` and survey routes
+    /// through — with a message naming the transition, the units and the
+    /// compartment. ODE inference runs it as a continuous flow and accepts it.
+    #[test]
+    fn multi_unit_consumption_refused_on_chain_binomial_inference_only() {
+        // sir_basic with its infection rewritten to consume two S per firing.
+        let path = format!("{}/../../../ocaml/golden/sir_basic.ir.json", env!("CARGO_MANIFEST_DIR"));
+        let envv: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read golden")).expect("parse");
+        let mut model: ir::Model = serde_json::from_value(envv["model"].clone()).expect("deserialize");
+        for p in &mut model.parameters {
+            if p.value.resolved_value().is_none() {
+                p.value = p.value.with_value(0.5);
+            }
+        }
+        let infection = model.transitions.iter_mut().find(|t| t.name == "infection").unwrap();
+        infection.stoichiometry = vec![
+            ir::transition::StoichiometryEntry("S".into(), -2),
+            ir::transition::StoichiometryEntry("I".into(), 1),
+        ];
+        let compiled = sim::CompiledModel::new(model).expect("a multi-unit model still compiles");
+
+        let err = check_model_capabilities(InferenceBackend::ChainBinomial, &compiled)
+            .expect_err("chain_binomial inference must refuse a multi-unit transition");
+        assert!(
+            err.contains("transition 'infection' consumes 2 units of S per firing"),
+            "must name the transition, units and compartment: {err}"
+        );
+        assert!(err.contains("--backend gillespie"), "must point to gillespie: {err}");
+        assert!(
+            check_model_capabilities(InferenceBackend::Ode, &compiled).is_ok(),
+            "ODE inference runs every transition as a flow and must accept it"
         );
     }
 

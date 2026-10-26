@@ -198,6 +198,12 @@ pub fn run_chain_binomial_with_observer(
     // inference producer is gated in check_model_capabilities + pfilter.
     model.validate_single_source_transitions()?;
 
+    // Refuse a transition that removes more than one member of its source per
+    // firing (`S + S --> D`), before any stepping: the Euler-multinomial draws
+    // how many individuals leave, one at a time, so it has no multi-unit
+    // meaning. Gillespie and the ODE run such a transition.
+    model.validate_unit_source_consumption()?;
+
     // gh#125: chain_binomial is the SNAP policy — it steps a full `dt` per
     // substep and records outputs at grid times (`t_start + k*dt`); it never
     // lands on a sub-`dt` output time. An off-grid output time would therefore

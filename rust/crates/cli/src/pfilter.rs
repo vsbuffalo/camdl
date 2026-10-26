@@ -241,6 +241,12 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
     compiled
         .validate_single_source_transitions()
         .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
+    // A transition consuming more than one unit of its source per firing has no
+    // meaning in the chain-binomial kernel the filter steps with; refuse it here
+    // for the same reason.
+    compiled
+        .validate_unit_source_consumption()
+        .unwrap_or_else(|e| { eprintln!("error: {}", e); std::process::exit(1); });
     // gh#191: the particle filter is a chain_binomial INFERENCE producer — it
     // carries no real state and never advances a reservoir, so a real-coupled
     // (REAL_COMPARTMENTS) model would be filtered with its reservoir frozen at

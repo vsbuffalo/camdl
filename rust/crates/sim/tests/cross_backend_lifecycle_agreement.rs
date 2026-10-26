@@ -1231,27 +1231,25 @@ fn an_inflow_and_a_drain_at_t_start_give_the_post_inflow_split_on_every_backend(
     );
 }
 
-/// A negative left by the transition draws keeps its `BinomialOvershoot` label
-/// on chain-binomial; only effect-stage negatives became
-/// `InterventionNegative`. `pair : X + X --> Y @ 5·X` from X = 3 fires up to 3
-/// times (the draw is capped by X) but removes 2 per firing, so X goes
-/// negative in the transition stage, with no effect due.
+/// A transition that removes two members of its source per firing
+/// (`pair : X + X --> Y @ 5·X`, from X = 3) is refused by chain-binomial before
+/// any step, naming the transition and the compartment, instead of reaching the
+/// transition stage: the Euler-multinomial would cap the firings by X and then
+/// remove two per firing, driving X negative.
 #[test]
-fn a_transition_overshoot_keeps_its_binomial_overshoot_label_on_chain_binomial() {
-    use sim::error::{NegativeCountCause, SimError};
+fn a_multi_unit_transition_is_refused_on_chain_binomial_before_any_step() {
+    use sim::error::SimError;
     let mut m = zero_rate_model("self_pair", ("X", 3.0), ("Y", 0.0), vec![]).model.as_ref().clone();
     m.transitions[0].stoichiometry =
         vec![StoichiometryEntry("X".into(), -2), StoichiometryEntry("Y".into(), 1)];
     m.transitions[0].rate = Expr::bin_op(ir::expr::BinOp::Mul, Expr::const_(5.0), Expr::pop("X"));
+    let name = m.transitions[0].name.clone();
     let compiled = CompiledModel::new(m).expect("compile");
     let (_, sim, cfg) = battery_backends(0.0, 5.0).into_iter().next().unwrap();
     let res = sim.run(&compiled, &compiled.default_params.clone(), SEED, &cfg);
+    let want = format!("transition '{name}' consumes 2 units of X per firing");
     assert!(
-        matches!(
-            res,
-            Err(SimError::NegativeCount { cause: NegativeCountCause::BinomialOvershoot, ref compartment, .. })
-                if compartment == "X"
-        ),
+        matches!(res, Err(SimError::Validation(ref msg)) if msg.contains(&want)),
         "got {:?}",
         res.map(|t| t.snapshots.len())
     );

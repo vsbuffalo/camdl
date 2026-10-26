@@ -1172,6 +1172,44 @@ impl CompiledModel {
         Ok(())
     }
 
+    /// Refuse a transition that consumes more than one unit of a source
+    /// compartment per firing (`S + S --> D`, net stoichiometry `S: -2`) on the
+    /// chain-binomial paths.
+    ///
+    /// Chain-binomial is an Euler-multinomial over *individuals* (pomp's
+    /// `reulermultinom`): it turns each exit's intensity into a per-capita
+    /// hazard, draws how many of the source's `n` members leave, and splits
+    /// them across the competing exits. That kernel has no meaning for a
+    /// firing that removes two members at once — applying `stoich × count`
+    /// removes twice what was drawn, and capping the count would only hide that
+    /// the draw is of the wrong thing. Gillespie fires such a transition
+    /// correctly (one CTMC event, feasibility-guarded) and the ODE runs it as a
+    /// continuous flow, so neither calls this.
+    ///
+    /// Reads the net consumption ([`Self::transition_consumption`]), so a
+    /// hand-authored IR that repeats the source gets the same verdict as the
+    /// collapsed form. Called beside [`Self::validate_single_source_transitions`]
+    /// at the same three chain-binomial entry points: the forward run, the
+    /// inference dispatch check (`check_model_capabilities` for the
+    /// chain-binomial producer) and the standalone `pfilter` command.
+    pub fn validate_unit_source_consumption(&self) -> Result<(), SimError> {
+        for (tr_idx, consumed) in self.transition_consumption.iter().enumerate() {
+            if let Some(&(local, units)) = consumed.iter().find(|&&(_, u)| u > 1) {
+                return Err(SimError::Validation(format!(
+                    "transition '{name}' consumes {units} units of {comp} per firing; the \
+                     chain-binomial backend models individuals leaving a compartment one at \
+                     a time and supports at most 1 unit per firing from a source\n  \
+                     help: use --backend gillespie for this model (`fit` and `pfilter` have \
+                     no Gillespie backend: fit it with backend = \"ode\", or restructure \
+                     the transition)",
+                    name = self.model.transitions[tr_idx].name,
+                    comp = self.int_compartment_name(local),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Gillespie's feasibility rule: may transition `tr_idx` fire in state
     /// `counts`? True when every compartment it consumes holds at least the
     /// units one firing removes (`x_i ≥ ν⁻_i`). A firing therefore never takes a

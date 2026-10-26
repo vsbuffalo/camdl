@@ -7,6 +7,10 @@
 //!   otherwise; the declared rate is never rewritten. No firing can take a
 //!   compartment below zero.
 //!
+//! - **Chain-binomial** refuses such a transition before any step: its
+//!   Euler-multinomial draws how many individuals leave a compartment, one at a
+//!   time, and has no multi-unit meaning.
+//!
 //! The models are built as `ir::Model` structs (as in
 //! `multi_source_transition.rs`) so the stoichiometry is exact.
 
@@ -185,4 +189,47 @@ fn gillespie_constant_rate_exit_stops_at_empty_source() {
         let last = &traj.snapshots.last().unwrap().int_state.counts;
         assert_eq!(last, &vec![0, 3], "seed {seed}: expected S drained to exactly 0");
     }
+}
+
+/// Chain-binomial refuses a transition consuming two units of its source,
+/// before any step: the run returns the up-front `Validation` refusal (naming
+/// the transition, the units and the compartment), not a `NegativeCount` from
+/// the kernel. Both stoichiometry spellings get the same verdict. A
+/// single-unit model is not refused.
+#[test]
+fn chain_binomial_refuses_multi_unit_before_any_step() {
+    use sim::{config::ChainBinomialConfig, error::SimError, ChainBinomialSim};
+    let cfg = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 1.0 });
+    for stoich in [&[("S", -2), ("D", 1)][..], &[("S", -1), ("S", -1), ("D", 1)][..]] {
+        let compiled = pair_model(stoich);
+        let msg = compiled
+            .validate_unit_source_consumption()
+            .expect_err("a two-unit source must be refused")
+            .to_string();
+        assert!(
+            msg.contains("transition 'pair' consumes 2 units of S per firing"),
+            "names transition, units, compartment: {msg}"
+        );
+        assert!(msg.contains("help: use --backend gillespie"), "points to gillespie: {msg}");
+        match ChainBinomialSim.run(&compiled, &compiled.default_params, 1, &cfg) {
+            Err(SimError::Validation(m)) => assert_eq!(m, match compiled.validate_unit_source_consumption() {
+                Err(SimError::Validation(v)) => v,
+                other => panic!("unexpected {other:?}"),
+            }),
+            other => panic!("chain_binomial must refuse up front, got {other:?}"),
+        }
+    }
+    let single = build(
+        &["S", "R"],
+        vec![transition("rec", &[("S", -1), ("R", 1)], mul(param("g"), pop("S")))],
+        vec![fixed("g", 1.0)],
+        &[("S", 5.0), ("R", 0.0)],
+        3.0,
+    );
+    let single = CompiledModel::new(single).unwrap();
+    assert!(single.validate_unit_source_consumption().is_ok());
+    // dt matches the 0.25 output step (chain-binomial snaps outputs to its grid).
+    let fine = SimConfig::ChainBinomial(ChainBinomialConfig { t_start: 0.0, t_end: 3.0, dt: 0.25 });
+    let run = ChainBinomialSim.run(&single, &single.default_params, 1, &fine);
+    assert!(run.is_ok(), "a single-unit model runs on chain_binomial: {:?}", run.err());
 }
