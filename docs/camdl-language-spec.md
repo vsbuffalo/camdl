@@ -4242,6 +4242,30 @@ particle starts at the same state, the first reweight cannot discriminate, and
 `ic_free` is refused. The deterministic (ODE) fits start every compartment at
 its law's mean.
 
+**A negative starting count.** An integer compartment may not start below zero,
+and what happens when one does depends on whether its entry reads a draw:
+
+- **The entry is a function of the parameters alone** — `R = N0 - S0 - I0` with
+  `I0` large enough. Every particle starts at the same negative value, so the
+  parameters are infeasible: under `pfilter`, `pmmh` and `if2` they score a
+  log-likelihood of −∞ and the fit rejects them and continues, as it would a
+  value outside a bound. `simulate` stops with an error
+  (`NegativeCount { cause: InitialState }`) naming the compartment and its
+  value.
+- **The entry is drawn, or reads a drawn entry** — `S = N0 - I` above, when `I`
+  is drawn larger than `N0`. Some particles would start negative and others
+  not, and discarding only the negative ones would silently condition the fit
+  on "the draw was feasible", which the model does not declare. This is an
+  error on every command, `fit` and `pfilter` included
+  (`NegativeCount { cause: InitialStateDrawn }`), raised when the state is
+  drawn. The fix is to write the `init {}` so it cannot go negative — for
+  example `I ~ binomial(n = N0, p = ..)`, which never exceeds `N0`, in place of
+  a `poisson` draw subtracted from `N0`.
+
+Which case applies is read off the `init {}` block, per compartment: an entry
+depends on a draw if it is written with `~` or reads, directly or through other
+entries or `let` bindings, a compartment that is.
+
 ---
 
 ## 16. Output and Quantities

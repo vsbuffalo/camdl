@@ -474,7 +474,8 @@ pub fn run_gillespie_with_observer(
         // removes), and the selection never picks an infeasible one. So a
         // negative here was negative before this firing — the starting state,
         // since every effect stage is scanned (`InitialState`: an `init {}`
-        // that evaluates or draws below zero) — or it is a simulator bug
+        // that evaluates below zero at these parameters; `InitialStateDrawn`:
+        // one a random initial law drew below zero) — or it is a simulator bug
         // (`SimulatorInvariant`, which stops the run).
         if let Some((local, val)) = int_s.first_negative() {
             let fired_delta: i64 = model.transition_stoich[fired_idx]
@@ -486,9 +487,9 @@ pub fn run_gillespie_with_observer(
             return Err(if before < 0 {
                 SimError::NegativeCount {
                     compartment: model.int_compartment_name(local),
-                    attempted_value: val,
+                    attempted_value: before,
                     t,
-                    cause: crate::error::NegativeCountCause::InitialState,
+                    cause: model.negative_initial_state_cause(local),
                 }
             } else {
                 SimError::SimulatorInvariant {

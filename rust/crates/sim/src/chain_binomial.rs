@@ -824,9 +824,10 @@ pub fn step_one(
     // source (`validate_single_source_transitions`,
     // `validate_unit_source_consumption`), and every other delta is an inflow.
     // So a negative here was already negative when the step began — an
-    // `init {}` that evaluates or draws below zero at these parameters
-    // (`InitialState`, which depends on θ and kills the particle under
-    // inference) — or it is a simulator bug (`SimulatorInvariant`, which stops
+    // `init {}` that evaluates below zero at these parameters (`InitialState`,
+    // which depends on θ alone and kills the particle under inference) or that
+    // a random initial law drew below zero (`InitialStateDrawn`, which stops
+    // the run) — or it is a simulator bug (`SimulatorInvariant`, which stops
     // the run and is never a −∞ weight).
     let bal_idx = model.balance.as_ref().map(|b| b.local_int_idx);
     {
@@ -843,11 +844,11 @@ pub fn step_one(
             }
             match negative_count(&a.int.counts, bal_idx) {
                 None => Ok(()),
-                Some((i, c)) if at_step_start[i] < 0 => Err(SimError::NegativeCount {
+                Some((i, _)) if at_step_start[i] < 0 => Err(SimError::NegativeCount {
                     compartment: model.int_compartment_name(i),
-                    attempted_value: c,
+                    attempted_value: at_step_start[i],
                     t: t + dt,
-                    cause: NegativeCountCause::InitialState,
+                    cause: model.negative_initial_state_cause(i),
                 }),
                 Some((i, c)) => Err(SimError::SimulatorInvariant {
                     what: format!(

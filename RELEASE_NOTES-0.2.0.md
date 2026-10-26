@@ -169,6 +169,21 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   overdispersed exit group whose gamma multipliers were all drawn as 0 fell
   through to an unbounded draw and could take its source far below zero (`S = 5`
   to −3305); it now draws no exits.
+- **A random initial law that makes a starting count negative stops the run,
+  under inference too.** With `init { I ~ poisson(rate = I0)  R = 5 - I }`, a
+  particle that draws `I > 5` starts with `R < 0`. `pfilter`, PMMH, IF2 and PGAS
+  gave that particle −∞ weight and kept the others, which silently conditioned
+  the posterior on the draw being feasible — a restriction the model never
+  declared. It is now `NegativeCount { cause: InitialStateDrawn }`, a structural
+  error raised when the initial state is drawn, before any rate reads it; the
+  message names the compartment and its value and says to constrain the init
+  expression or the law. A starting count that is negative as a function of the
+  parameters alone (`R = N0 - S0 - I0` with `I0` too large) is unchanged: it is
+  still `InitialState`, and under inference the parameters score −∞ and the fit
+  continues. Which case applies is read off the `init {}` block, per
+  compartment. Migration: write the init so it cannot go negative, e.g.
+  `I ~ binomial(n = N0, p = ..)` in place of a `poisson` draw subtracted from
+  `N0`.
 - **A scenario that disagrees with a fit.toml's `[fixed]` on a parameter is
   refused.** `fit run` on such a file used to run at the `[fixed]` value while
   its notice said the scenario's value had replaced it ("scenario fastrec

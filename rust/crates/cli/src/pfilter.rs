@@ -672,7 +672,7 @@ pub fn cmd_pfilter(a: &crate::args::PfilterArgs) {
         bootstrap_filter(
             &process, &obs_model, &params, &smc_config, seed,
         ).unwrap_or_else(|e| {
-            eprintln!("pfilter error: {:?}", e);
+            eprintln!("pfilter error: {}", crate::util::sim_error_text(&e));
             std::process::exit(1);
         })
     });

@@ -3739,13 +3739,26 @@ pub fn simulate_compiled(
 /// only half of honouring `--init-state`.
 /// The message `simulate` prints for a backend error. A `Validation` error is a
 /// refusal written for the user — it names the construct and the fix — so it is
-/// printed as written. Every other error keeps its structured `Debug` form,
-/// which carries the fields (compartment, value, time) a runtime failure is
-/// diagnosed from.
+/// printed as written. Every other error is printed by [`sim_error_text`].
 pub fn simulation_error_message(e: sim::SimError) -> String {
     match e {
         sim::SimError::Validation(msg) => msg,
-        other => format!("simulation error: {other:?}"),
+        other => format!("simulation error: {}", sim_error_text(&other)),
+    }
+}
+
+/// How a runtime `SimError` is printed to the user by `simulate`, `pfilter`
+/// and the fit drivers: a negative initial state by its message, which names
+/// the compartment, its value, whether the `init {}` entry is θ-only or drawn
+/// from a random initial law, and the fix; every other error by its structured
+/// `Debug` form.
+pub fn sim_error_text(e: &sim::SimError) -> String {
+    use sim::NegativeCountCause::{InitialState, InitialStateDrawn};
+    match e {
+        sim::SimError::NegativeCount { cause: InitialState | InitialStateDrawn, .. } => {
+            e.to_string()
+        }
+        other => format!("{other:?}"),
     }
 }
 

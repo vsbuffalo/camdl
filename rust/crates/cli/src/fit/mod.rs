@@ -1778,7 +1778,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
                     let result = sim::inference::bootstrap_filter(
                         &process, &obs_model, &mle_params, &smc_config, pf_seed,
                     ).unwrap_or_else(|e| {
-                        abandon_stage(&heartbeat, format!("pfilter error: {e:?}"))
+                        abandon_stage(&heartbeat, format!("pfilter error: {}", crate::util::sim_error_text(&e)))
                     });
                     if record_preq {
                         if let Some(ref recorded) = result.prequential {

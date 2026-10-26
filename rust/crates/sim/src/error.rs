@@ -48,13 +48,18 @@ pub enum SimError {
     NumericalCollapse { kind: CollapseKind, t: f64 },
 
     /// gh#audit-C5. A compartment count is below zero, for a reason in the
-    /// model or its configuration: an initial state that evaluates or draws
-    /// negative (`InitialState`), or an effect that adds a negative amount or
+    /// model or its configuration: an initial state that evaluates negative
+    /// at these parameters (`InitialState`) or that a random initial law made
+    /// negative (`InitialStateDrawn`), or an effect that adds a negative amount or
     /// leaves a compartment negative (`InterventionAddNegative`,
     /// `InterventionNegative`); see [`NegativeCountCause`]. A *transition*
     /// never produces one — a negative left by the transition stage is a
     /// simulator bug and is reported as [`SimError::SimulatorInvariant`].
-    #[error("compartment '{compartment}' would go to {attempted_value} (cause: {cause:?}) at t={t}")]
+    ///
+    /// For the two initial-state causes `attempted_value` is the compartment's
+    /// value when the step that detected it began — its starting value — and
+    /// `t` is when it was detected.
+    #[error("{}", negative_count_message(.compartment, *.attempted_value, *.t, *.cause))]
     NegativeCount {
         compartment: String,
         attempted_value: i64,
@@ -238,22 +243,31 @@ pub enum CollapseKind {
 }
 
 /// gh#audit-C5. Cause discriminator for NegativeCount.
-/// `InitialState` depends on θ (and on the initial-state draw), and the
-/// inference layer kills the offending particle; `InterventionAddNegative`
-/// and `InterventionNegative` are configuration errors and propagate
+/// `InitialState` depends on θ alone, and the inference layer kills the
+/// offending particle — every particle, since they all start the same — which
+/// rejects θ. `InitialStateDrawn`, `InterventionAddNegative` and
+/// `InterventionNegative` are modelling or configuration errors and propagate
 /// regardless of caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegativeCountCause {
     /// A compartment was already negative when a chain-binomial step began, or
-    /// in the state Gillespie starts from. Every stage's output is scanned, so
-    /// the source is the starting state: an `init {}` entry that evaluates or
-    /// draws below zero at these parameters (`S = N - I0` with `I0 > N`, or
-    /// `S = N - I` after `I ~ poisson(...)` draws above `N`), or an injected
-    /// start state. It depends on θ and, for a drawn init, on the draw, so the
-    /// inference layer kills the offending particle (with a deterministic
-    /// `init {}` every particle starts the same, and the filter reports the θ
-    /// as degenerate).
+    /// in the state Gillespie starts from, and its `init {}` entry is a
+    /// function of the parameters alone (`S = N - I0` with `I0 > N`), or it
+    /// came from an injected start state. Every stage's output is scanned, so
+    /// the source is the starting state. Every particle starts at the same
+    /// value, so the inference layer kills them all and the filter reports
+    /// the θ as degenerate: a negative start restricts θ's domain, like a bound.
     InitialState,
+    /// As [`Self::InitialState`], but the compartment's initial value depends
+    /// on a random initial law: it reads a drawn entry (`S = N - I` after
+    /// `I ~ poisson(...)` draws above `N`). Some particles start negative and
+    /// others do not, and killing only those would condition the posterior on
+    /// "the draw was feasible", which the model never declared. Structural:
+    /// the run stops. Raised where the initial state is drawn
+    /// (`CompiledModel::initial_state_draw`), before any rate reads the
+    /// negative count, and labelled the same way by the per-step scan
+    /// ([`crate::compiled_model::CompiledModel::negative_initial_state_cause`]).
+    InitialStateDrawn,
     /// An `add()` action resolved to a negative amount — caught eagerly
     /// at the action site (you cannot add a negative number of
     /// individuals). Config bug; propagates regardless of caller.
@@ -264,6 +278,40 @@ pub enum NegativeCountCause {
     /// balance target is exempt (its negativity is a separate, warned
     /// signal). Config bug; propagates regardless of caller.
     InterventionNegative,
+}
+
+/// The `Display` text of [`SimError::NegativeCount`]. The two initial-state
+/// causes explain themselves and name the fix; an intervention cause keeps the
+/// one-line form.
+fn negative_count_message(
+    compartment: &str,
+    value: i64,
+    t: f64,
+    cause: NegativeCountCause,
+) -> String {
+    match cause {
+        NegativeCountCause::InitialState => format!(
+            "compartment '{compartment}' starts at {value} (cause: InitialState, detected at \
+             t={t}): its `init {{}}` entry is a function of the parameters alone and is \
+             negative at these parameters. Under inference every particle starts at this \
+             value, so these parameters are rejected (log-likelihood -inf) and the fit \
+             continues. To keep them out of reach, bound the parameters or set priors so the \
+             init stays non-negative (e.g. `I0 <= N`)"
+        ),
+        NegativeCountCause::InitialStateDrawn => format!(
+            "compartment '{compartment}' starts at {value} (cause: InitialStateDrawn, detected \
+             at t={t}): its `init {{}}` entry depends on a random initial law (an entry \
+             written with `~`), and that law's draw produced a negative count, which the \
+             model does not define. Discarding only the particles whose draw went negative \
+             would silently condition the fit on the draw being feasible, so the run stops. \
+             Fix: constrain the init expression or the law so it cannot go negative, e.g. \
+             draw from a `binomial(n = N0, ...)` law, which never exceeds N0, instead of \
+             subtracting a `poisson` draw from N0"
+        ),
+        NegativeCountCause::InterventionAddNegative | NegativeCountCause::InterventionNegative => {
+            format!("compartment '{compartment}' would go to {value} (cause: {cause:?}) at t={t}")
+        }
+    }
 }
 
 /// gh#110. Specific degeneracy mode that triggered the bail.
@@ -430,7 +478,7 @@ impl SimError {
     ///
     /// Recoverable: NumericalCollapse (DivByZero, PowNanInf, UnOpNan,
     /// SqrtNegative, LogNonPositive, ModByZero), NegativeCount with cause
-    /// InitialState, NonFiniteParameter (gh#81 Phase 2 — a
+    /// InitialState (θ-only; not InitialStateDrawn), NonFiniteParameter (gh#81 Phase 2 — a
     /// NUTS/PMMH proposal produced a NaN/Inf parameter), and TableLookup
     /// (gh#127 #12 — a state/parameter-dependent table index that went
     /// out of range at runtime) — these all arise from particles or
@@ -448,7 +496,10 @@ impl SimError {
     ///
     /// Not recoverable: structural errors (UnknownCompartment,
     /// UnknownParameter, ConfigMismatch, …), AbsorbingState (model-
-    /// level absorbing condition, not particle-specific), and
+    /// level absorbing condition, not particle-specific),
+    /// NegativeCount{InitialStateDrawn} (a random initial law drew a negative
+    /// start — a modelling error, and killing only those particles would
+    /// condition the fit on the draw), and
     /// NegativeCount{InterventionAddNegative} (config bug).
     pub fn is_per_particle_recoverable(&self) -> bool {
         matches!(
@@ -513,11 +564,14 @@ impl SimError {
             | SimError::PFIterationBudget { .. } => true,
 
             // A config-bug intervention (adds / leaves a compartment
-            // negative) is structural; a negative initial state depends on θ
-            // (`S = N - I0`) and the inference layer rejects that θ.
-            SimError::NegativeCount { cause, .. } => {
-                matches!(cause, InterventionAddNegative | InterventionNegative)
-            }
+            // negative) is structural, as is a negative start drawn from a
+            // random initial law (the model does not define it, and rejecting
+            // only those particles would condition on the draw); a θ-only
+            // negative initial state (`S = N - I0`) rejects that θ.
+            SimError::NegativeCount { cause, .. } => match cause {
+                InitialState => false,
+                InitialStateDrawn | InterventionAddNegative | InterventionNegative => true,
+            },
 
             // Per-θ excursions, θ-dependent runtime conditions, and the
             // whole-call PF degeneracy bail — reject this θ as −∞.
@@ -598,6 +652,14 @@ mod tests {
             t: 1.0,
         }.is_per_particle_recoverable());
         // Not recoverable
+        // A negative start drawn from a random initial law is a modelling
+        // error: killing only those particles would condition on the draw.
+        assert!(!SimError::NegativeCount {
+            compartment: "S".into(),
+            attempted_value: -1,
+            t: 1.0,
+            cause: NegativeCountCause::InitialStateDrawn,
+        }.is_per_particle_recoverable());
         assert!(!SimError::NegativeCount {
             compartment: "S".into(),
             attempted_value: -1,
@@ -678,6 +740,10 @@ mod tests {
         assert!(SimError::NegativeCount {
             compartment: "S".into(), attempted_value: -1, t: 1.0,
             cause: NegativeCountCause::InterventionAddNegative,
+        }.is_structural());
+        assert!(SimError::NegativeCount {
+            compartment: "S".into(), attempted_value: -1, t: 1.0,
+            cause: NegativeCountCause::InitialStateDrawn,
         }.is_structural());
         // A simulator bug stops the run; it is never a rejected θ.
         assert!(SimError::SimulatorInvariant { what: "x".into(), t: 1.0 }.is_structural());

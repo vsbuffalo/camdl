@@ -892,6 +892,19 @@ pub struct CompiledModel {
     /// gradient to zeros.
     pub has_init_law: bool,
 
+    /// Per **local integer** compartment: whether its initial value depends on
+    /// a random initial law — it is drawn (`I ~ poisson(...)`), or its
+    /// deterministic entry reads, directly or through other entries, a
+    /// compartment that is (`S = N0 - I`). `false` for a compartment whose
+    /// initial value is a function of the parameters alone, or that has no
+    /// `init {}` entry.
+    ///
+    /// Decides how a negative starting count is labelled
+    /// ([`Self::negative_initial_state_cause`]): a θ-only negative is the same
+    /// in every particle and rejects θ, a drawn one differs between particles
+    /// and is a modelling error.
+    pub init_depends_on_law: Vec<bool>,
+
     /// Pre-resolved expression trees for all hot-path evaluations.
     pub resolved: ResolvedModel,
 }
@@ -1020,6 +1033,22 @@ fn expr_contains_dt_memo(e: &Expr, bindings: &HashMap<&str, &Expr>, memo: &mut H
 }
 
 impl CompiledModel {
+    /// The cause for a local integer compartment that is already negative when
+    /// a step begins: [`NegativeCountCause::InitialStateDrawn`] when its initial
+    /// value depends on a random initial law, else
+    /// [`NegativeCountCause::InitialState`]. A structural property of the
+    /// model's `init {}` block, not a comparison across particles.
+    ///
+    /// [`NegativeCountCause::InitialStateDrawn`]: crate::error::NegativeCountCause::InitialStateDrawn
+    /// [`NegativeCountCause::InitialState`]: crate::error::NegativeCountCause::InitialState
+    pub fn negative_initial_state_cause(&self, local: usize) -> crate::error::NegativeCountCause {
+        if self.init_depends_on_law.get(local).copied().unwrap_or(false) {
+            crate::error::NegativeCountCause::InitialStateDrawn
+        } else {
+            crate::error::NegativeCountCause::InitialState
+        }
+    }
+
     /// Compartment name for a local **integer** state index, for
     /// diagnostics. O(n) reverse walk of `comp_index` → `global_to_int`;
     /// only used on error paths (negative-count detection), never in the
@@ -2185,6 +2214,26 @@ impl CompiledModel {
 
         let has_init_law = model.initial_conditions.iter().any(|(_, s)| s.is_law());
 
+        // Dependency order guarantees every entry an init entry reads is
+        // classified before it.
+        let mut drawn_by_name: HashMap<&str, bool> = HashMap::new();
+        for &i in &init_order {
+            let (name, spec) = model.initial_conditions.0.get_index(i)
+                .expect("init_order indexes initial_conditions");
+            let drawn = spec.is_law()
+                || spec.exprs().into_iter().any(|e| {
+                    ir::init_order::deps(e, &model.bindings)
+                        .iter()
+                        .any(|d| drawn_by_name.get(d.as_str()).copied().unwrap_or(false))
+                });
+            drawn_by_name.insert(name.as_str(), drawn);
+        }
+        let init_depends_on_law: Vec<bool> = int_local_to_global.iter()
+            .map(|&g| {
+                drawn_by_name.get(model.compartments[g].name.as_str()).copied().unwrap_or(false)
+            })
+            .collect();
+
         let resolved = ResolvedModel {
             rates,
             bindings: resolved_bindings,
@@ -2228,6 +2277,7 @@ impl CompiledModel {
             fire_times,
             init_order,
             has_init_law,
+            init_depends_on_law,
             resolved,
         })
     }
@@ -2436,6 +2486,24 @@ impl CompiledModel {
             } else if let Some(local) = self.global_to_real[global] {
                 real_s.values[local] = v;
             }
+        }
+
+        // A count that depends on a law and came out negative is a modelling
+        // error (`InitialStateDrawn`). Refused here, before any rate reads it,
+        // so it cannot surface first as a θ-dependent rate error that the
+        // inference layer would treat as a rejected θ. The balance target is
+        // exempt, as in the per-step scan. A θ-only negative is not refused
+        // here: it is the same in every particle and rejects θ downstream.
+        let bal_idx = self.balance.as_ref().map(|b| b.local_int_idx);
+        if let Some((local, &value)) = int_s.counts.iter().enumerate().find(|&(i, &c)| {
+            c < 0 && Some(i) != bal_idx && self.init_depends_on_law[i]
+        }) {
+            return Err(SimError::NegativeCount {
+                compartment: self.int_compartment_name(local),
+                attempted_value: value,
+                t: self.model.simulation.t_start,
+                cause: crate::error::NegativeCountCause::InitialStateDrawn,
+            });
         }
 
         Ok((int_s, real_s))
