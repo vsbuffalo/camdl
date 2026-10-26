@@ -231,8 +231,10 @@ pub struct ExactInferenceTimeline {
 
 impl ExactInferenceTimeline {
     /// Run the inference refusals, build the effect plan on the process's
-    /// `clock` over `[t_start, last observation]`, and build the `Schedule`
-    /// that lands on each observation and each firing instant. `model = None`
+    /// `clock` over the model's declared window `[t_start, simulation.t_end]` —
+    /// the plan `simulate` builds for the same model, so the data never move an
+    /// effect (D2) — and build the `Schedule` that lands on each observation and
+    /// each firing instant up to the last observation. `model = None`
     /// (a process with no compiled model) means no effects. `per_particle` is
     /// the set of parameter indices that vary per particle (IF2's estimated
     /// set; empty for a shared θ), see [`refuse_per_particle_schedule`].
@@ -251,7 +253,8 @@ impl ExactInferenceTimeline {
         let plan = if let Some(model) = model {
             guard_attimesexpr_exact(model, StepPolicy::Exact)?;
             refuse_per_particle_schedule(model, per_particle)?;
-            EffectPlan::build(model, params, t_start, t_end, clock, Origin::Init)?
+            let horizon = model.model.simulation.t_end;
+            EffectPlan::build(model, params, t_start, horizon, clock, Origin::Init)?
         } else {
             EffectPlan::default()
         };
