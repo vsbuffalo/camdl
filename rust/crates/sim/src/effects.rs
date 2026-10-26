@@ -677,11 +677,29 @@ fn apply_action_f64(
     Ok(())
 }
 
-/// Relative slack before a negative integer-kind compartment left by an ODE
-/// event phase is refused: a value below `-CONTINUOUS_NEG_TOL · max(1, |x|)`
-/// (x the phase snapshot) is an overdraw, while drains whose fractions sum to
-/// one can leave a few ulps below zero from rounding alone, which is not.
-const CONTINUOUS_NEG_TOL: f64 = 1e-9;
+/// Rounding slack for the ODE's negative-count refusal, as a multiple of the
+/// first-order rounding bound of the sum it guards.
+///
+/// A compartment's value after an event phase is the f64 sum of its snapshot
+/// `base` and its `n` changes. Recursive summation of those `n + 1` terms is
+/// within `n·u·S` of the exact sum, where `u = f64::EPSILON / 2` is the unit
+/// roundoff and `S = |base| + Σ|change|` (Higham, *Accuracy and Stability of
+/// Numerical Algorithms*, 2nd ed., 2002, ch. 4, the recursive-summation
+/// bound). Each change also carries one rounding of its own (`x·frac`,
+/// `v − base`), at most `u·|change|`, which adds at most `u·S`. So a sum whose
+/// exact value is ≥ 0 cannot fall below `−(n + 1)·u·S`; drains that remove
+/// exactly the snapshot (fractions summing to one) land inside that band.
+/// `K = 2` doubles the first-order bound to cover its second-order terms, and
+/// keeps the band far below one person at any realistic scale: two changes
+/// at X = 1e9 give a slack of about 1.3e-6, so an overdraw by 0.5 is refused.
+const ROUNDING_SLACK_K: f64 = 2.0;
+
+/// The most negative value the ODE's event phase lets through as rounding
+/// for a compartment with snapshot `base`, `n` changes, and
+/// `sum_abs = |base| + Σ|change|`.
+fn rounding_floor(n: usize, sum_abs: f64) -> f64 {
+    -ROUNDING_SLACK_K * (n as f64 + 1.0) * (f64::EPSILON / 2.0) * sum_abs
+}
 
 /// The ODE's arena: integer compartments held as `f64` (`int_vals`) and the
 /// real compartments, both updated exactly, with no rounding. Each phase
@@ -703,8 +721,8 @@ const CONTINUOUS_NEG_TOL: f64 = 1e-9;
 ///     to the last bit in any declaration order.
 ///
 /// Two `set`s on one compartment never reach here ([`apply_event_phases`]
-/// refuses them). An integer-kind compartment the phase leaves below zero
-/// (beyond [`CONTINUOUS_NEG_TOL`]) is refused with
+/// refuses them). An integer-kind compartment the phase leaves below zero,
+/// beyond the rounding of its own sum ([`ROUNDING_SLACK_K`]), is refused with
 /// `NegativeCountCause::InterventionNegative`, as Gillespie's post-effect scan
 /// refuses it, instead of being integrated from a negative count.
 pub struct ContinuousArena<'a> {
@@ -780,7 +798,8 @@ impl EventArena for ContinuousArena<'_> {
             }
             if let Arena::Int(i) = *target {
                 let v = self.int[i];
-                if v < -CONTINUOUS_NEG_TOL * snap_int[i].abs().max(1.0) {
+                let sum_abs = base.abs() + cs.iter().map(|c| as_delta(c).abs()).sum::<f64>();
+                if v < rounding_floor(cs.len(), sum_abs) {
                     return Err(SimError::NegativeCount {
                         compartment: model.int_compartment_name(i),
                         attempted_value: v.floor() as i64,

@@ -939,3 +939,76 @@ fn drain_and_set_phase_going_negative_is_an_error_on_every_backend() {
         failures.join("\n")
     );
 }
+
+fn count_drain_event(name: &str, count: f64) -> Intervention {
+    event(
+        name,
+        vec![3.0],
+        Action::AbsoluteTransfer(AbsoluteTransfer {
+            src: "X".into(),
+            dst: "Y".into(),
+            count: Expr::const_(count),
+        }),
+    )
+}
+
+/// An overdraw by half a person at X = 1e9 is still an overdraw. Two count
+/// transfers of 6e8 and 4e8 + 0.5 from X = 1e9 take 1000000000.5 (the integer
+/// path rounds the second to 400000001 and goes to −1). Every backend must
+/// refuse; a slack proportional to |X| alone would let the ODE print X = 0,
+/// Y = 1000000001 and grow the population by one.
+#[test]
+fn overdraw_by_half_a_person_at_1e9_is_refused_on_every_backend() {
+    use sim::error::{NegativeCountCause, SimError};
+    let results = coincident_results(
+        "gh985_overdraw_1e9",
+        ("X", 1e9),
+        ("Y", 0.0),
+        vec![count_drain_event("cull_a", 6e8), count_drain_event("cull_b", 4e8 + 0.5)],
+    );
+    let wrong: Vec<String> = results
+        .iter()
+        .filter_map(|(label, res)| {
+            let ok = match res {
+                Err(SimError::NegativeCount { compartment, cause, .. }) => {
+                    compartment == "X"
+                        && (label.starts_with("chain_binomial")
+                            || *cause == NegativeCountCause::InterventionNegative)
+                }
+                _ => false,
+            };
+            (!ok).then(|| format!("  {label}: {res:?}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "X must be refused as negative on every backend:\n{}", wrong.join("\n"));
+}
+
+/// Drains that remove exactly the snapshot are not overdraws, though the f64
+/// sum can land a few ulps below zero: a full-fraction drain from 1000003,
+/// fractions 0.3 + 0.7 + 0.0 from 1000003, and ten drains of 0.1 from
+/// 999999937. Every backend runs them.
+#[test]
+fn drains_summing_to_the_whole_compartment_are_not_refused() {
+    let cases: Vec<(&str, f64, Vec<Intervention>)> = vec![
+        ("full_fraction", 1000003.0, vec![drain_event("all", 1.0)]),
+        (
+            "point3_point7_zero",
+            1000003.0,
+            vec![drain_event("a", 0.3), drain_event("b", 0.7), drain_event("c", 0.0)],
+        ),
+        (
+            "ten_tenths",
+            999999937.0,
+            (0..10).map(|k| drain_event(&format!("d{k}"), 0.1)).collect(),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (case, x0, events) in cases {
+        for (label, res) in coincident_results(case, ("X", x0), ("Y", 0.0), events) {
+            if let Err(e) = res {
+                wrong.push(format!("  {case} / {label}: {e}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "exact drains were refused:\n{}", wrong.join("\n"));
+}
