@@ -105,6 +105,22 @@ breaking changes are still expected before 1.0.
 
 These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 
+- **A scenario that disagrees with a fit.toml's `[fixed]` on a parameter is
+  refused.** `fit run` on such a file used to run at the `[fixed]` value while
+  its notice said the scenario's value had replaced it ("scenario fastrec
+  replaced gamma = 0.2 (from fit.toml [fixed]) with 0.3"), so its estimates were
+  those of a fit without the scenario. It is now refused before anything is
+  written, naming the parameter, both values, the scenario and the fit.toml.
+  `survey --fit` and `profile --fit` refuse the same collision, whether the
+  scenario comes from the fit.toml or from `--scenario`; there the scenario's
+  value had silently won. A scenario `scale` that moves a `[fixed]` value is
+  refused the same way; an equal value is not a collision. `fit run --sweep`
+  over a parameter the scenario sets or scales is refused, as `simulate --sweep`
+  already was (gh#572). Migration: to run under the scenario, give `[fixed]` the
+  scenario's value; otherwise remove the parameter from the scenario or name one
+  that does not set it. A refit of such a file under the scenario gives
+  different estimates from the old run.
+
 - **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
   without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
   path, `run.json` and `camdl list`, and its derived labels read

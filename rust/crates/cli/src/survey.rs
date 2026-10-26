@@ -739,6 +739,16 @@ fn resolve_survey_inputs(a: &crate::args::SurveyArgs)
                 disable: &config.disable,
             },
         )?;
+        // The rule `fit run` applies to the same file: a scenario (from the
+        // fit config or `--scenario`) that moves a [fixed] parameter to another
+        // value is refused, not resolved.
+        if let Some(scenario) = scenario_opt.as_deref() {
+            if let Some(msg) = crate::params_resolver::scenario_fixed_collision(
+                &model_pre, scenario, &fixed_resolved_indexmap, &fit_path_str,
+            )? {
+                return Err(msg);
+            }
+        }
         // No `--fixed` on the survey-fit path; the inline `--fixed`
         // flag is mutually exclusive with `--fit` per SurveyArgs.
         let fixed_cli: Vec<(String, f64)> = Vec::new();

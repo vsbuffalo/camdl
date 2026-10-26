@@ -538,6 +538,46 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs) {
         }
     }
 
+    // ── Refuse a scenario that disagrees with [fixed] or the sweep ──────
+    // The resolver is the one writer of every parameter value a fit runs at,
+    // and it puts the scenario above both [fixed] and a sweep point (spec
+    // §1.3). On the same parameter that would silently discard what the user
+    // wrote, so the combination is refused before anything is generated or
+    // written: [fixed] when the scenario lands on a different value, a sweep
+    // whenever the scenario touches a swept parameter (gh#572, as `simulate`
+    // and `fit predict` refuse it).
+    if let Some(scenario) = config.problem.scenario.as_deref() {
+        let mut refusals: Vec<String> = Vec::new();
+        let fixed_clash = crate::params_resolver::scenario_fixed_collision(
+            &model, scenario, &fixed_resolved, &fit_path,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        });
+        refusals.extend(fixed_clash);
+        if !sweep_specs.is_empty() {
+            let varied = crate::params_resolver::coordinate_values(
+                sweep_specs.iter().flat_map(|(k, vs)| vs.iter().map(move |v| (k.as_str(), *v))),
+            );
+            let sweep_clash = crate::params_resolver::scenario_coordinate_collision(
+                &model,
+                &crate::sim_job::ScenarioRef::Named(scenario.to_string()),
+                crate::params_resolver::UserCoordinate::Sweep,
+                &varied,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            });
+            refusals.extend(sweep_clash);
+        }
+        if !refusals.is_empty() {
+            eprintln!("error: {}", refusals.join("\n\nerror: "));
+            std::process::exit(1);
+        }
+    }
+
     // Expand Cartesian product of sweep points
     let sweep_points: Vec<Vec<(String, f64)>> = if sweep_specs.is_empty() {
         vec![vec![]]

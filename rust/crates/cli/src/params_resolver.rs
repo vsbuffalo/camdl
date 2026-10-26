@@ -980,6 +980,118 @@ pub fn scenario_coordinate_collision(
     Ok(Some(msg))
 }
 
+/// A scenario's net value for each parameter it touches: its `set` replaces
+/// the value beneath it, then each `scale` factor multiplies, in application
+/// order. `below(name)` is the value the scenario lands on — the lower tiers'
+/// value — and a `scale` of a parameter with no value beneath it and no `set`
+/// moves nothing.
+///
+/// The one fold behind tier 4 of [`resolve_parameters`] and behind
+/// [`scenario_fixed_collision`], so the collision check sees exactly the value
+/// the resolver would write.
+fn fold_scenario_tier<'k>(
+    set: impl IntoIterator<Item = &'k (String, f64)>,
+    scale: &[(String, f64)],
+    below: impl Fn(&str) -> Option<f64>,
+) -> IndexMap<String, f64> {
+    let mut tier4: IndexMap<String, f64> = IndexMap::new();
+    for (k, v) in set {
+        tier4.insert(k.clone(), *v);
+    }
+    for (k, factor) in scale {
+        if let Some(v) = tier4.get(k).copied().or_else(|| below(k)) {
+            tier4.insert(k.clone(), v * factor);
+        }
+    }
+    tier4
+}
+
+// ─── Scenario × fit.toml [fixed] collisions ───────────────────────────────────
+
+/// Refuse a fit whose `scenario` moves a parameter off the value its `[fixed]`
+/// block gives it. `Ok(None)` when every `[fixed]` value survives the scenario
+/// unchanged (the scenario does not touch it, or lands on the same value);
+/// `Ok(Some(message))` names every colliding parameter, both values, both
+/// sources and the fix.
+///
+/// One fit.toml naming two different values for one parameter does not say
+/// which it means. Precedence would pick the scenario (tier 4 over tier 2,
+/// spec §1.3), but the `[fixed]` value is written in the same file as the
+/// scenario's name, so taking either silently is a guess. The same rule
+/// `simulate` applies to a scenario over a sweep
+/// ([`scenario_coordinate_collision`], gh#572). An equal value is not a
+/// collision: both sources agree.
+///
+/// `fixed` is the resolved `[fixed]` map (inline values, `from_file`, or an
+/// expanded `from_scenario`); `fit_toml` is the file it came from, for the
+/// message.
+pub fn scenario_fixed_collision(
+    model: &ir::Model,
+    scenario: &str,
+    fixed: &IndexMap<String, f64>,
+    fit_toml: &str,
+) -> Result<Option<String>, String> {
+    let delta = resolve_preset_delta(model, scenario).map_err(|e| e.to_string())?;
+    let set: Vec<(String, f64)> = delta.params.into_iter().collect();
+    let net = fold_scenario_tier(&set, &delta.scale, |k| fixed.get(k).copied());
+    let clash: Vec<(&str, f64, f64)> = fixed
+        .iter()
+        .filter_map(|(k, &f)| match net.get(k) {
+            Some(&s) if s.to_bits() != f.to_bits() => Some((k.as_str(), f, s)),
+            _ => None,
+        })
+        .collect();
+    if clash.is_empty() {
+        return Ok(None);
+    }
+
+    let names: Vec<String> = clash.iter().map(|(p, _, _)| format!("`{p}`")).collect();
+    let names = names.join(", ");
+    let mut msg = if clash.len() == 1 {
+        format!("parameter {names} is given two values: by scenario `{scenario}` and by \
+                 [fixed] in `{fit_toml}`")
+    } else {
+        format!("parameters {names} are given two values: by scenario `{scenario}` and by \
+                 [fixed] in `{fit_toml}`")
+    };
+    let scen = crate::sim_job::ScenarioRef::Named(scenario.to_string());
+    for &(param, fixed_v, scen_v) in &clash {
+        msg.push_str(&format!("\n  [fixed]:   {param} = {fixed_v}"));
+        let how: Vec<String> = scenario_param_actions(model, &scen, param)?
+            .iter()
+            .map(|a| {
+                let (text, preset) = match a {
+                    ScenarioParamAction::Set { value, preset } => {
+                        (format!("set {param} = {value}"), preset)
+                    }
+                    ScenarioParamAction::Scale { factor, preset } => {
+                        (format!("scale {param} \u{d7} {factor}"), preset)
+                    }
+                };
+                if preset.as_str() == scenario {
+                    text
+                } else {
+                    format!("{text} from composed preset `{preset}`")
+                }
+            })
+            .collect();
+        msg.push_str(&format!("\n  scenario:  {param} = {scen_v}    ({})", how.join(", ")));
+    }
+    let them = if clash.len() == 1 { "it" } else { "them" };
+    let agree: Vec<String> =
+        clash.iter().map(|(p, _, s)| format!("`{p} = {s}`")).collect();
+    msg.push_str(&format!(
+        "\nA fit runs at one value of each parameter, and this file names two, so which \
+         one is meant cannot be read from it.\n\
+         Fix: remove {names} from scenario `{scenario}` (or name a scenario that does not \
+         set {them}), or, to fit under the scenario, give [fixed] in `{fit_toml}` the \
+         scenario's value: {}. [fixed] cannot drop {them}: every parameter a fit does not \
+         estimate must be in [fixed].",
+        agree.join(", ")
+    ));
+    Ok(Some(msg))
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 /// Resolve a `ParameterInputs` to a `ResolvedParameters`, walking the
@@ -1200,22 +1312,13 @@ pub fn resolve_parameters_with_starts<'a>(
     // so a replacement is reported against the lower tier's value, never
     // against the scenario's own intermediate `set`.
     if let Some(name) = scenario_label.as_deref() {
-        let mut tier4: IndexMap<String, f64> = IndexMap::new();
-        for (k, v) in &scenario_params {
-            if model_param_set.contains(k) {
-                tier4.insert(k.clone(), *v);
-            }
-        }
-        for (k, factor) in &scenario_scale {
-            let base = tier4.get(k).copied().or_else(|| {
-                model.parameters.iter()
-                    .find(|p| p.name == *k)
-                    .and_then(|p| p.value.resolved_value())
-            });
-            if let Some(v) = base {
-                tier4.insert(k.clone(), v * factor);
-            }
-        }
+        let tier4 = fold_scenario_tier(
+            scenario_params.iter().filter(|(k, _)| model_param_set.contains(k)),
+            &scenario_scale,
+            |k| model.parameters.iter()
+                .find(|p| p.name == k)
+                .and_then(|p| p.value.resolved_value()),
+        );
         for (k, v) in &tier4 {
             for p in &mut model.parameters {
                 if p.name == *k {

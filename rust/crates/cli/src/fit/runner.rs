@@ -310,23 +310,21 @@ impl FitRunConfig {
             .map_err(|e| format!("compile error: {:?}", e))?;
         let mut base_params = compiled.default_params.clone();
 
-        // Priority: estimate.start > fixed > model default. `base_params` is
-        // the base point every chain-starts rule is drawn around
-        // (`chain_starts::draw_chain_starts`); a sourced rule such as
+        // `base_params` is the base point every chain-starts rule is drawn
+        // around (`chain_starts::draw_chain_starts`); a sourced rule such as
         // `from_mle` overwrites the estimated slots per chain, never this.
-
-        // 1. Apply estimate start values to base_params (override model defaults).
+        // Every non-estimated slot is the resolver's value, untouched: the
+        // resolver is the one writer of the values a fit runs at, and a
+        // scenario that disagrees with [fixed] was refused before this
+        // (`params_resolver::scenario_fixed_collision`).
+        //
+        // An estimated parameter's slot is its optimiser start, not a value
+        // the fit runs at: `[estimate].start` when given.
         for (name, spec) in &fit.estimate {
             if let Some(start) = spec.start {
                 if let Some(&idx) = compiled.param_index.get(name.as_str()) {
                     base_params[idx] = start;
                 }
-            }
-        }
-        // 2. Apply fixed numeric values (override model defaults).
-        for (name, &v) in &fixed_resolved {
-            if let Some(&idx) = compiled.param_index.get(name.as_str()) {
-                base_params[idx] = v;
             }
         }
         // Build EstimatedParam specs

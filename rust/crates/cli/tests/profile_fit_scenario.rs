@@ -7,9 +7,13 @@
 //! same rule as `survey --fit` (`util::combine_fit_scenario`): either alone
 //! selects, both must name the same scenario, anything else is refused.
 //!
-//! Scenario `Z` sets `N0 = 5000` over the config's `[fixed] N0 = 1000`; the
-//! assertions read the resolved `N0` each cell's `run.json` records, and the
-//! cell log-likelihoods.
+//! Scenario `Z` sets `N0 = 5000`. Runs under a scenario use a fit config whose
+//! `[fixed]` does not pin `N0`, so the scenario supplies it; the no-scenario
+//! run pins `[fixed] N0 = 1000`. The assertions read the resolved `N0` each
+//! cell's `run.json` records, and the cell log-likelihoods. Only `beta` is
+//! given a random-walk scale, so `N0` is neither estimated nor focal. A config
+//! that pins `N0` to another value under a scenario that sets it names two
+//! values for one parameter and is refused (run spec §1.3).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -82,8 +86,9 @@ scenarios {
 const CASES_TSV: &str = "time\tcases\n1\t10\n2\t11\n3\t10\n4\t12\n5\t11\n6\t10\n";
 
 /// Model, data and a fit config `<name>.toml` in `dir`; `top` is spliced in
-/// above `[model]` (e.g. `scenario = "Z"`). `[fixed]` pins `N0 = 1000`.
-fn setup(dir: &Path, name: &str, top: &str) -> (PathBuf, PathBuf) {
+/// above `[model]` (e.g. `scenario = "Z"`). `[fixed]` pins `N0` to `n0`
+/// (`None`: not pinned, so a scenario supplies it).
+fn setup(dir: &Path, name: &str, n0: Option<f64>, top: &str) -> (PathBuf, PathBuf) {
     let model_src = dir.join("m.camdl");
     std::fs::write(&model_src, MODEL).unwrap();
     let out = Command::new(camdlc_bin()).arg(&model_src).output().unwrap();
@@ -103,8 +108,9 @@ cases = "{data}"
 beta  = {{ bounds = [0.01, 1.0], start = 0.3 }}
 gamma = {{ bounds = [0.01, 1.0], start = 0.1 }}
 [fixed]
-N0 = 1000
-"#, ir = ir.display(), data = data.display())).unwrap();
+{n0}
+"#, ir = ir.display(), data = data.display(),
+    n0 = n0.map(|v| format!("N0 = {v}")).unwrap_or_default())).unwrap();
     (ir, fit)
 }
 
@@ -117,7 +123,7 @@ fn profile(cwd: &Path, ir: &Path, fit: &Path, extra: &[&str]) -> Output {
         .current_dir(cwd)
         .args(["profile", &ir.to_string_lossy(), "--fit", &fit.to_string_lossy()])
         .args(["--sweep", "gamma=0.1,0.5", "--particles", "50", "--iterations", "3",
-               "--n-starts", "1", "--rw-sd", "auto", "--seed", "1"])
+               "--n-starts", "1", "--rw-sd", "beta=0.02", "--seed", "1"])
         .args(extra)
         .output()
         .expect("spawn camdl profile")
@@ -167,10 +173,11 @@ fn n0_and_loglik(cwd: &Path) -> Vec<(f64, String, f64)> {
 #[test]
 fn config_scenario_is_applied() {
     let tmp = tempdir("cfg");
-    let (ir, plain) = setup(tmp.path(), "fit", "");
-    let (_, with_z) = setup(tmp.path(), "fit_z", "scenario = \"Z\"");
+    let (ir, pinned) = setup(tmp.path(), "fit_pinned", Some(1000.0), "");
+    let (_, plain) = setup(tmp.path(), "fit", None, "");
+    let (_, with_z) = setup(tmp.path(), "fit_z", None, "scenario = \"Z\"");
 
-    ok(profile(&tmp.path().join("none"), &ir, &plain, &[]));
+    ok(profile(&tmp.path().join("none"), &ir, &pinned, &[]));
     ok(profile(&tmp.path().join("cfg"), &ir, &with_z, &[]));
     ok(profile(&tmp.path().join("flag"), &ir, &plain, &["--scenario", "Z"]));
 
@@ -194,7 +201,7 @@ fn config_scenario_is_applied() {
 #[test]
 fn flag_agreeing_with_the_config_scenario_runs() {
     let tmp = tempdir("agree");
-    let (ir, with_z) = setup(tmp.path(), "fit_z", "scenario = \"Z\"");
+    let (ir, with_z) = setup(tmp.path(), "fit_z", None, "scenario = \"Z\"");
     ok(profile(&tmp.path().join("cfg"), &ir, &with_z, &[]));
     ok(profile(&tmp.path().join("both"), &ir, &with_z, &["--scenario", "Z"]));
     assert_eq!(n0_and_loglik(&tmp.path().join("cfg")),
@@ -204,7 +211,7 @@ fn flag_agreeing_with_the_config_scenario_runs() {
 #[test]
 fn flag_disagreeing_with_the_config_scenario_is_refused() {
     let tmp = tempdir("conflict");
-    let (ir, with_z) = setup(tmp.path(), "fit_z", "scenario = \"Z\"");
+    let (ir, with_z) = setup(tmp.path(), "fit_z", None, "scenario = \"Z\"");
     let cwd = tmp.path().join("run");
     let out = profile(&cwd, &ir, &with_z, &["--scenario", "W"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -213,4 +220,30 @@ fn flag_disagreeing_with_the_config_scenario_is_refused() {
     assert!(stderr.contains("`Z`") && stderr.contains("`W`"),
         "the refusal must name both scenarios; stderr:\n{stderr}");
     assert!(cells(&cwd).is_empty(), "a refused run must write no cell");
+}
+
+/// A scenario (from the config or the flag) that sets a parameter `[fixed]`
+/// pins to another value is refused, naming both values and both sources, the
+/// rule `fit run` applies to the same file.
+#[test]
+fn scenario_against_a_pinned_fixed_value_is_refused() {
+    let tmp = tempdir("collide");
+    let (ir, cfg) = setup(tmp.path(), "fit_z", Some(1000.0), "scenario = \"Z\"");
+    let (_, plain) = setup(tmp.path(), "fit", Some(1000.0), "");
+    for (what, fit, extra) in [("config scenario", &cfg, &[][..]),
+                               ("--scenario", &plain, &["--scenario", "Z"][..])] {
+        let cwd = tmp.path().join(what.replace(' ', "_"));
+        let out = profile(&cwd, &ir, fit, extra);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{what}: must be refused; stderr:\n{stderr}");
+        for line in [
+            "parameter `N0` is given two values: by scenario `Z` and by [fixed] in",
+            "[fixed]:   N0 = 1000",
+            "scenario:  N0 = 5000    (set N0 = 5000)",
+            "Fix: remove `N0` from scenario `Z`",
+        ] {
+            assert!(stderr.contains(line), "{what}: diagnostic lacks {line:?}; stderr:\n{stderr}");
+        }
+        assert!(cells(&cwd).is_empty(), "{what}: a refused run must write no cell");
+    }
 }

@@ -9,10 +9,11 @@
 //! not about printed text, except the refusals, whose messages are the
 //! user-facing contract (the declared names are listed).
 //!
-//! The model's scenario `X` sets `gamma = 0.9`, a parameter the fit config
-//! also pins in `[fixed]` at 0.1. The scenario tier sits above `[fixed]`
-//! (run spec §3, "scenario" over "fit.toml [fixed]"), so `--scenario X` must
-//! score exactly what a config pinning `gamma = 0.9` scores.
+//! The model's scenario `X` sets `gamma = 0.9`. Runs under a scenario use a
+//! fit config whose `[fixed]` does not pin `gamma`, so the scenario supplies it,
+//! and `--scenario X` must score exactly what a config pinning `gamma = 0.9`
+//! scores. A config that pins `gamma` to another value under a scenario that
+//! sets it names two values for one parameter and is refused (run spec §1.3).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -85,9 +86,9 @@ scenarios {
 const CASES_TSV: &str = "time\tcases\n1\t10\n2\t11\n3\t10\n4\t12\n5\t11\n6\t10\n";
 
 /// Lay out the model, data and a fit config `<name>.toml` in `dir`. `gamma`
-/// is the value `[fixed]` pins; `top` is spliced in above `[model]` (e.g.
-/// `scenario = "X"`).
-fn setup(dir: &Path, name: &str, gamma: f64, top: &str) -> (PathBuf, PathBuf) {
+/// is the value `[fixed]` pins (`None`: not pinned, so a scenario supplies it);
+/// `top` is spliced in above `[model]` (e.g. `scenario = "X"`).
+fn setup(dir: &Path, name: &str, gamma: Option<f64>, top: &str) -> (PathBuf, PathBuf) {
     let model_src = dir.join("m.camdl");
     std::fs::write(&model_src, MODEL).unwrap();
     let out = Command::new(camdlc_bin()).arg(&model_src).output().unwrap();
@@ -107,8 +108,9 @@ cases = "{data}"
 beta = {{ bounds = [0.01, 1.0], start = 0.3 }}
 [fixed]
 N0 = 1000
-gamma = {gamma}
-"#, ir = ir.display(), data = data.display())).unwrap();
+{gamma}
+"#, ir = ir.display(), data = data.display(),
+    gamma = gamma.map(|g| format!("gamma = {g}")).unwrap_or_default())).unwrap();
     (ir, fit)
 }
 
@@ -165,39 +167,42 @@ fn rows(leaf: &Path) -> String {
 #[test]
 fn scenario_flag_is_applied_and_keys_its_own_leaf() {
     let tmp = tempdir("apply");
-    let (ir, fit) = setup(tmp.path(), "fit", 0.1, "");
-    let (_, fit_09) = setup(tmp.path(), "fit_gamma_09", 0.9, "");
+    let (ir, fit) = setup(tmp.path(), "fit", Some(0.1), "");
+    let (_, fit_free) = setup(tmp.path(), "fit_free", None, "");
+    let (_, fit_09) = setup(tmp.path(), "fit_gamma_09", Some(0.9), "");
 
     let root_none = tmp.path().join("none");
     let root_x = tmp.path().join("x");
+    let root_y = tmp.path().join("y");
     let root_ref = tmp.path().join("ref");
     ok(survey(&root_none, &ir, &fit, &[]));
-    ok(survey(&root_x, &ir, &fit, &["--scenario", "X"]));
+    ok(survey(&root_x, &ir, &fit_free, &["--scenario", "X"]));
+    ok(survey(&root_y, &ir, &fit_free, &["--scenario", "Y"]));
     // Reference: the same problem with `[fixed] gamma = 0.9` and no scenario.
     ok(survey(&root_ref, &ir, &fit_09, &[]));
 
-    let (none, x, reference) = (only_leaf(&root_none), only_leaf(&root_x), only_leaf(&root_ref));
+    let (none, x, y, reference) =
+        (only_leaf(&root_none), only_leaf(&root_x), only_leaf(&root_y), only_leaf(&root_ref));
     assert_ne!(rows(&none), rows(&x),
-        "--scenario X scored the same landscape as no scenario");
+        "--scenario X scored the same landscape as [fixed] gamma = 0.1");
+    assert_ne!(rows(&x), rows(&y),
+        "--scenario X and --scenario Y scored the same landscape on one fit config");
     assert_eq!(rows(&x), rows(&reference),
-        "--scenario X (gamma = 0.9 over [fixed] gamma = 0.1) must score exactly \
+        "--scenario X (gamma = 0.9, unpinned in [fixed]) must score exactly \
          what [fixed] gamma = 0.9 scores");
-    assert_ne!(none.strip_prefix(&root_none).unwrap(), x.strip_prefix(&root_x).unwrap(),
-        "--scenario X landed in the same store leaf as no scenario");
 
-    // Same output root: the scenario run must not be served from the
-    // no-scenario cache; it gets its own leaf beside it.
+    // Same output root, same fit config: each scenario keys its own leaf.
     let shared = tmp.path().join("shared");
-    ok(survey(&shared, &ir, &fit, &[]));
-    ok(survey(&shared, &ir, &fit, &["--scenario", "X"]));
+    ok(survey(&shared, &ir, &fit_free, &["--scenario", "X"]));
+    ok(survey(&shared, &ir, &fit_free, &["--scenario", "Y"]));
     assert_eq!(leaves(&shared).len(), 2,
-        "no scenario and --scenario X must occupy two leaves: {:?}", leaves(&shared));
+        "--scenario X and --scenario Y must occupy two leaves: {:?}", leaves(&shared));
 }
 
 #[test]
 fn undeclared_scenario_flag_is_refused_with_the_declared_names() {
     let tmp = tempdir("typo");
-    let (ir, fit) = setup(tmp.path(), "fit", 0.1, "");
+    let (ir, fit) = setup(tmp.path(), "fit", Some(0.1), "");
     let root = tmp.path().join("results");
     let out = survey(&root, &ir, &fit, &["--scenario", "typo"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -210,9 +215,9 @@ fn undeclared_scenario_flag_is_refused_with_the_declared_names() {
 #[test]
 fn flag_agreeing_with_the_config_scenario_is_the_same_run() {
     let tmp = tempdir("agree");
-    let (ir, cfg_path) = setup(tmp.path(), "fit_x", 0.1, "scenario = \"X\"");
-    let (_, fit_plain) = setup(tmp.path(), "fit", 0.1, "");
-    let (_, fit_09) = setup(tmp.path(), "fit_gamma_09", 0.9, "");
+    let (ir, cfg_path) = setup(tmp.path(), "fit_x", None, "scenario = \"X\"");
+    let (_, fit_plain) = setup(tmp.path(), "fit", None, "");
+    let (_, fit_09) = setup(tmp.path(), "fit_gamma_09", Some(0.9), "");
 
     let root_cfg = tmp.path().join("cfg");
     let root_both = tmp.path().join("both");
@@ -229,19 +234,18 @@ fn flag_agreeing_with_the_config_scenario_is_the_same_run() {
         "the scenario's source (config or flag) is not identity");
     assert_eq!(rows(&cfg), rows(&flag));
 
-    // The config's own `scenario` key is applied over `[fixed]` too, not
-    // only the flag's.
+    // The config's own `scenario` key is applied too, not only the flag's.
     let root_ref = tmp.path().join("ref");
     ok(survey(&root_ref, &ir, &fit_09, &[]));
     assert_eq!(rows(&cfg), rows(&only_leaf(&root_ref)),
-        "config `scenario = \"X\"` (gamma = 0.9 over [fixed] gamma = 0.1) must \
+        "config `scenario = \"X\"` (gamma = 0.9, unpinned in [fixed]) must \
          score exactly what [fixed] gamma = 0.9 scores");
 }
 
 #[test]
 fn flag_disagreeing_with_the_config_scenario_is_refused() {
     let tmp = tempdir("conflict");
-    let (ir, fit) = setup(tmp.path(), "fit_x", 0.1, "scenario = \"X\"");
+    let (ir, fit) = setup(tmp.path(), "fit_x", None, "scenario = \"X\"");
     let root = tmp.path().join("results");
     let out = survey(&root, &ir, &fit, &["--scenario", "Y"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -250,4 +254,30 @@ fn flag_disagreeing_with_the_config_scenario_is_refused() {
     assert!(stderr.contains("`X`") && stderr.contains("`Y`"),
         "the refusal must name both scenarios; stderr:\n{stderr}");
     assert!(leaves(&root).is_empty(), "a refused run must write no leaf");
+}
+
+/// A scenario (from the config or the flag) that sets a parameter `[fixed]`
+/// pins to another value is refused, naming both values and both sources, the
+/// rule `fit run` applies to the same file.
+#[test]
+fn scenario_against_a_pinned_fixed_value_is_refused() {
+    let tmp = tempdir("collide");
+    let (ir, cfg) = setup(tmp.path(), "fit_x", Some(0.1), "scenario = \"X\"");
+    let (_, plain) = setup(tmp.path(), "fit", Some(0.1), "");
+    for (what, fit, extra) in [("config scenario", &cfg, &[][..]),
+                               ("--scenario", &plain, &["--scenario", "X"][..])] {
+        let root = tmp.path().join(what.replace(' ', "_"));
+        let out = survey(&root, &ir, fit, extra);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{what}: must be refused; stderr:\n{stderr}");
+        for line in [
+            "parameter `gamma` is given two values: by scenario `X` and by [fixed] in",
+            "[fixed]:   gamma = 0.1",
+            "scenario:  gamma = 0.9    (set gamma = 0.9)",
+            "Fix: remove `gamma` from scenario `X`",
+        ] {
+            assert!(stderr.contains(line), "{what}: diagnostic lacks {line:?}; stderr:\n{stderr}");
+        }
+        assert!(leaves(&root).is_empty(), "{what}: a refused run must write no leaf");
+    }
 }

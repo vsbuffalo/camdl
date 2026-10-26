@@ -131,6 +131,22 @@ replacing a value with an equal one, are not reported. A multi-cell run reports
 each (parameter, replaced source, winning source) once, with the range of values
 when they differ by cell.
 
+**Precedence orders values; it does not grant permission.** Where a scenario
+would discard a value the user wrote for the same parameter, the run is refused
+before anything is written, rather than resolved:
+
+- a scenario that `set`s or `scale`s a parameter a `--sweep`/`--sweep-file` grid
+  or a `--draws <file>` varies (`simulate`, `fit predict`, `fit run --sweep`;
+  gh#572). Generated draws (`--draws prior|uniform|posterior`) are not checked:
+  a scenario over them is the counterfactual those runs exist for;
+- a scenario that moves a parameter off the value a fit.toml's `[fixed]` gives
+  it, by `set` or `scale`: on `fit run` (the fit.toml's own `scenario`), and on
+  `survey --fit` and `profile --fit` (the scenario from the fit.toml or the
+  `--scenario` flag). The error names the parameter, both values, the scenario
+  and the fit.toml, and the fix: give `[fixed]` the scenario's value to run
+  under the scenario, or remove the parameter from the scenario. A scenario
+  landing on the `[fixed]` value is not a collision and runs.
+
 `[estimate]` membership is narrowed by the same walk: a parameter named by a
 user-explicit `--fixed`/`--fixed-file` is removed from the estimated set (with a
 warning), while a scenario patch or a draw/sweep value never kicks a parameter
@@ -168,9 +184,9 @@ parameter values," and it works on both sides. `simulate --sweep NAME=GRID`
 deterministic grid — the design axis (§5.5). `fit run --sweep NAME=SPEC` varies
 a `[fixed]` parameter, where SPEC is `V1,V2,…` | `lin(min,max,n)` |
 `log10(min,max,n)`; sweeping a parameter that is in `[estimate]`, or not in
-`[fixed]`, is an error. On the simulate side, sweeps compose with scenarios and
-seeds by Cartesian product, provided the scenario does not touch a swept
-parameter (that is refused; see §3.6).
+`[fixed]`, is an error. Sweeps compose with scenarios and seeds by Cartesian
+product, provided the scenario does not touch a swept parameter (that is refused
+on both sides; see §1.3 and §3.6).
 
 **Draws and sweeps are different operations.** A sweep is a deterministic grid
 the user designed; draws are samples from a distribution (posterior, prior, or

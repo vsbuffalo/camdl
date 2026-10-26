@@ -406,6 +406,20 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             disable: &fit_scenario.2,
         },
     ).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    // The rule `fit run` applies to the same file: a scenario (from the fit
+    // config or `--scenario`) that moves a [fixed] parameter to another value
+    // is refused, not resolved.
+    if let (Some(scenario), Some(fit_path)) = (scenario_name.as_deref(), a.fit.as_ref()) {
+        match crate::params_resolver::scenario_fixed_collision(
+            &model_pre, scenario, &fit_toml_fixed_indexmap, &fit_path.to_string_lossy(),
+        ) {
+            Ok(None) => {}
+            Ok(Some(msg)) | Err(msg) => {
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // A single-point starts rule (`--starts from_params=<toml>`,
     // `--starts from_mle=<fit>`) loads one parameter point. Its values are
