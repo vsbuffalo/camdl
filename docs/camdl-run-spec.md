@@ -161,8 +161,8 @@ before anything is written, rather than resolved:
   parameter, the scenario and the scenario's value, and the fix: define a
   scenario that does not set the estimated parameters and name it in
   `from_scenario`, or drop them from `[estimate]` to hold them at the scenario's
-  value (a scale-only parameter has the first fix only: the import carries `set`
-  values, not `scale`).
+  value (a scale-only parameter has the first fix only: the import has no value
+  for the scale to multiply).
 
 A fit.toml naming one parameter in both `[estimate]` and `[fixed]` is refused by
 every command that reads it (`fit run`, `profile --fit`, `survey --fit`);
@@ -2530,9 +2530,13 @@ and `[fixed]` must be exactly the model's parameter set:
 
 `from_scenario` is mutually exclusive with both `from_file` and inline values:
 allowing an override would make the fit a hybrid that corresponds to nothing in
-the `.camdl`. It imports every value the scenario sets, so a scenario that sets
-or scales a parameter in `[estimate]` is refused (§1.3): to estimate a parameter
-a scenario sets, name a scenario that does not set it.
+the `.camdl`. It imports the values `camdl simulate --scenario` runs at: every
+value the scenario sets, with the scenario's `scale` factors applied, through
+composed presets. A scenario that scales a parameter it does not set is refused,
+since the import has no value for the factor to multiply; set the parameter in
+the scenario as well. A scenario that sets or scales a parameter in `[estimate]`
+is refused (§1.3): to estimate a parameter a scenario sets, name a scenario that
+does not set it.
 
 ### 6.5 `[method]` — the inference method
 

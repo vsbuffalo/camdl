@@ -211,7 +211,7 @@ fn fit_run_refuses_from_scenario_that_sets_an_estimated_parameter() {
 
 /// Composed presets and `scale` are caught as on the fit's own scenario. A
 /// scale-only collision has no "drop it from [estimate]" fix: the import
-/// carries `set` values only, so the dropped parameter would have no value.
+/// would then have no value for the scale to multiply.
 #[test]
 fn fit_run_refuses_from_scenario_composed_and_scaling() {
     let tmp = tempfile::tempdir().unwrap();

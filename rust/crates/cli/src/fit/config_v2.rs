@@ -766,6 +766,16 @@ pub struct FixedParams {
     pub values: IndexMap<String, f64>,
 }
 
+/// The values `[fixed] from_scenario = "name"` imports: the scenario's
+/// composed `set` values with its composed `scale` factors applied, i.e. the
+/// values `simulate --scenario name` runs at
+/// ([`crate::params_resolver::scenario_values`], the one implementation of
+/// "what values does a scenario give"). A scenario that scales a parameter it
+/// does not set is refused: the import has no base value for the factor.
+fn scenario_import(model: &ir::Model, scen_name: &str) -> Result<IndexMap<String, f64>, String> {
+    crate::params_resolver::scenario_values(model, scen_name).map_err(|e| e.to_string())?
+}
+
 impl FixedParams {
     /// Resolve to a concrete map, with scenario lookup if needed.
     ///
@@ -850,15 +860,7 @@ impl FixedParams {
             return Err(msg);
         }
 
-        // gh#36: walk `compose = [...]` so the import inherits params from
-        // composed sub-scenarios, not just the parent's own `set`. Shared
-        // with the simulate path via `resolve_preset_params` — before this
-        // the fit path copied only `preset.params`, silently dropping every
-        // inherited param and failing with "parameters neither estimated
-        // nor fixed".
-        let preset_params = crate::params_resolver::resolve_preset_params(model, &scen_name)
-            .map_err(|e| e.to_string())?;
-        self.values.extend(preset_params);
+        self.values.extend(scenario_import(model, &scen_name)?);
         self.from_scenario = None;
         Ok(())
     }
@@ -891,11 +893,7 @@ impl FixedParams {
                     else { available.join(", ") }));
             }
 
-            // gh#36: walk compose so the resolved map inherits composed
-            // params. Shared with the simulate path via
-            // `resolve_preset_params`.
-            return crate::params_resolver::resolve_preset_params(model, scen_name)
-                .map_err(|e| e.to_string());
+            return scenario_import(model, scen_name);
         }
         self.resolve()
     }

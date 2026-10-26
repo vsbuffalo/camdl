@@ -148,7 +148,7 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   example one `baseline` composes from, minus them) and name it in
   `from_scenario`, or drop them from `[estimate]` to hold them at the scenario's
   value. A scenario that only scales an estimated parameter has the first fix
-  only: the import carries `set` values, not `scale`.
+  only: the import would have no value for the scale to multiply.
 
 - **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
   without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
@@ -533,6 +533,22 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 ## Fixed
 
 User-visible correctness fixes (selected from ~138):
+
+- **`[fixed] from_scenario` applies the scenario's `scale`.** The import copied
+  the scenario's `set` values and ignored its `scale` factors, so a fit under a
+  scenario that scales a parameter it sets held that parameter at the unscaled
+  value, with nothing said: with
+  `s { set = { gamma = 0.15 } scale = { gamma =
+  2.0 } }`,
+  `simulate --scenario s` ran at gamma = 0.3 and a `from_scenario = "s"` fit
+  held it at 0.15. The import now gives exactly the values `simulate --scenario`
+  uses (the `set` values with `scale` applied, through composed presets) on
+  `fit run`, `profile --fit` and `survey --fit`. A scenario that scales a
+  parameter it does not set is refused, since the import has no value for the
+  factor to multiply; the error names the parameter and the factor, and the fix
+  is to set the parameter in the scenario as well. Fits under a scaling
+  `from_scenario` change value and re-key (their `fit_hash` covers the fixed
+  values).
 
 - **PGAS scores an observation at `t_start`.** It kept an observation only at a
   substep after the first, so a `t_start` row was silently dropped from every

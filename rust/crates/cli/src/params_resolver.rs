@@ -508,14 +508,9 @@ pub fn fixed_estimate_overlap_message(names: &[&str]) -> String {
 /// walking `compose = [...]` left-to-right and then applying the
 /// parent's own `params` on top.
 ///
-/// Single source of truth for "what params does scenario X set",
-/// shared by [`resolve_parameters`] (the simulate / forward path) and
-/// `fit::config_v2::FixedParams::{expand_from_scenario, resolve_with_model}`
-/// (the fit `[fixed] from_scenario` path). Before gh#36 the fit path
-/// re-implemented this as a bare copy of `preset.params`, silently
-/// dropping every param inherited via `compose` — a fit against a
-/// compose-based scenario then failed with "parameters neither
-/// estimated nor fixed".
+/// Single source of truth for "what params does scenario X set", read by
+/// [`resolve_preset_delta`]. The values a scenario *gives* (its `set` with
+/// its `scale` applied) are [`scenario_values`].
 ///
 /// Semantics (matches the spec's compose ordering):
 ///   - composed sub-scenarios apply first, in list order;
@@ -1274,8 +1269,8 @@ pub fn scenario_estimate_collision(
 /// so a parameter it sets and `[estimate]` lists would be both fixed and
 /// estimated — the same contradiction as a name in both blocks, and refused
 /// the same way rather than resolved by dropping one side. A parameter the
-/// scenario only scales is refused too: the import carries `set` values only,
-/// so the scale would be discarded without a word.
+/// scenario scales is refused too: the scale would apply to a value the
+/// estimate replaces.
 pub fn from_scenario_estimate_collision(
     model: &ir::Model,
     scenario: &str,
@@ -1298,8 +1293,8 @@ pub fn from_scenario_estimate_collision(
         "\nA parameter cannot be both fixed (imported from the scenario) and estimated.",
     );
     // Dropping a parameter from [estimate] holds it at the scenario's value
-    // only if the scenario `set`s it: a scale-only parameter would be left
-    // with no value at all.
+    // only if the scenario `set`s it: a scale-only parameter is refused by
+    // `scenario_values`, which has no value for the factor to multiply.
     let infinitive = if verb == "scaled" { "scale" } else if verb == "set" { "set" } else { "set or scale" };
     let define = format!(
         "define a scenario that does not {infinitive} {names} and name it in from_scenario"
@@ -1311,6 +1306,57 @@ pub fn from_scenario_estimate_collision(
         format!("\nFix: {define}.")
     });
     Ok(Some(msg))
+}
+
+/// The parameter values scenario `scenario` gives on its own: its composed
+/// `set` values with its composed `scale` factors applied — the values
+/// `[fixed] from_scenario` imports, and the values `simulate --scenario`
+/// lands on for every parameter the scenario sets.
+///
+/// Reads [`resolve_preset_delta`] and folds it with [`fold_scenario_tier`],
+/// the same fold tier 4 of [`resolve_parameters`] applies, so the import and
+/// the forward run cannot disagree on what a scenario's values are.
+///
+/// `Ok(Err(message))` when the scenario scales a parameter it does not set.
+/// Tier 4 multiplies the value beneath the scenario; an import has no value
+/// beneath it (a camdl model declares no parameter defaults), so the factor
+/// would have nothing to multiply and is refused rather than dropped.
+pub fn scenario_values(
+    model: &ir::Model,
+    scenario: &str,
+) -> Result<Result<IndexMap<String, f64>, String>, ResolveError> {
+    let delta = resolve_preset_delta(model, scenario)?;
+    let unset: Vec<&(String, f64)> = delta.scale.iter()
+        .filter(|(k, _)| !delta.params.contains_key(k))
+        .collect();
+    if !unset.is_empty() {
+        let mut names: Vec<&str> = Vec::new();
+        for (k, _) in &unset {
+            if !names.contains(&k.as_str()) {
+                names.push(k.as_str());
+            }
+        }
+        let quoted_names =
+            |ps: &[&str]| ps.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+        let (noun, them) = if names.len() == 1 { ("parameter", "it") } else { ("parameters", "them") };
+        let mut msg = format!(
+            "scenario `{scenario}` scales {noun} {} but does not set {them}, and \
+             [fixed] from_scenario imports only the values a scenario sets: the scale \
+             has no value to multiply",
+            quoted_names(&names),
+        );
+        for (k, factor) in &unset {
+            msg.push_str(&format!("\n  scenario `{scenario}`:  scale `{k}` by {factor}"));
+        }
+        msg.push_str(&format!(
+            "\nFix: set {} in scenario `{scenario}` as well, so the scale applies to \
+             a value the scenario gives.",
+            quoted_names(&names),
+        ));
+        return Ok(Err(msg));
+    }
+    let set: Vec<(String, f64)> = delta.params.into_iter().collect();
+    Ok(Ok(fold_scenario_tier(&set, &delta.scale, |_| None)))
 }
 
 /// One info notice per focal parameter `scenario` sets or scales: `camdl
