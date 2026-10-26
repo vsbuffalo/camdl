@@ -1676,11 +1676,6 @@ Examples:
   camdl profile sir.camdl --data cases.tsv \\
       --sweep \"tau=lin(-35,-1,30)\" --fixed gamma=0.1 --rw-sd auto
 
-  # Profile-posterior sweep — PMMH per cell with priors from a fit toml
-  camdl profile sir.camdl --data cases.tsv \\
-      --sweep \"tau=lin(-35,-1,30)\" --algorithm pmmh \\
-      --fit fits/profile_tau.toml --pmmh-steps 1500
-
   # Warm-start chains from a hand-written params TOML
   camdl profile sir.camdl --data cases.tsv \\
       --sweep \"R0=lin(0.5,5,20)\" --starts from_params=truth.toml \\
@@ -1691,42 +1686,31 @@ Examples:
       --sweep \"R0=lin(0.5,5,20)\" --starts from_mle=fits/scout/ \\
       --n-starts 4 --rw-sd auto
 
-PRIORS (--algorithm pmmh)
+WHAT EACH CELL COMPUTES
 
-  The per-cell PMMH path honours priors via a three-tier precedence
-  chain:
-
-    1. --fit <toml>'s [estimate.<param>.prior] block (highest)
-    2. Model-IR `~` priors (fallback; from DSL `~` syntax)
-    3. Prior::Flat (last resort; emits a structured warning naming
-       every estimated parameter that fell through, citing the two
-       remedies)
-
-  Suppress the warning loudly with --suppress-warnings — the waiver
-  is recorded into run.json's suppressed_warnings array.
-
-  IF2 / NLopt paths ignore priors by design (they maximize the
-  likelihood). The warning fires only for --algorithm pmmh.
+  A profile likelihood: at each grid value of the swept parameter,
+  the maximum of the likelihood over the other estimated parameters.
+  Every cell is a maximization (--algorithm if2, or an nl-* optimizer
+  on --backend ode); priors are not used. For a posterior of the
+  swept parameter, fit once with `camdl fit run` (pmmh or pgas) and
+  read its marginal.
 
 OUTPUT
 
   The `--output` TSV mirrors the umbrella `summary.tsv`. Schema:
 
     <focal_1> ... <focal_N>  loglik  [<spread_cols>]  <param_1> ...
-      acc_rate_avg  acc_rate_min  loglik_spread_starts
-      loglik_rhat_starts  starts_n_completed
+      loglik_spread_starts  loglik_rhat_starts  starts_n_completed
       iterations_used  cooling_final
 
-  The trailing seven columns are gh#74 Option B per-cell convergence
+  The trailing five columns are gh#74 Option B per-cell convergence
   diagnostics. Read them by column name — order is stable per run
   but future schema additions land after this block.
 
   Per-column meaning (algorithm-specific cells render as NaN when
   the algorithm doesn't supply that value):
 
-    acc_rate_avg / acc_rate_min   PMMH MH acceptance rate, mean / min
-                                  across the K --n-starts chains.
-    loglik_spread_starts          max - min of per-start MAP
+    loglik_spread_starts          max - min of per-start final
                                   log-likelihoods. > ~5 nats means
                                   the starts disagree on the basin.
     loglik_rhat_starts            Gelman-Rubin R-hat across the K
@@ -1773,27 +1757,15 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "[NAME=]PATH")]
     pub data: Vec<DataSpec>,
 
-    /// Optional fit toml supplying priors, bounds, and fixed list for
-    /// the per-cell PMMH (gh#73). Mirrors `camdl survey --fit`'s
-    /// schema (the `[estimate]`, `[fixed]`, `[model]` blocks). When
-    /// supplied, the resolver picks priors via the chain
-    ///   `--fit toml` > model-IR `~` priors > flat (warning).
-    /// `--params` still carries values only; when both are supplied,
-    /// `--params` overrides any starting values from the fit toml but
-    /// the priors and bounds come from `--fit`. The focal swept
-    /// parameter is always removed from the estimated set, even when
-    /// it appears in the fit toml's `[estimate]` block. Without
-    /// `--fit`, the resolver falls back to model-IR priors (or flat
-    /// with a warning when none are declared).
+    /// Optional fit toml supplying the estimated set, bounds, starting
+    /// values and fixed list. Mirrors `camdl survey --fit`'s schema (the
+    /// `[estimate]`, `[fixed]`, `[model]` blocks). The focal swept
+    /// parameter is always removed from the estimated set, even when it
+    /// appears in the fit toml's `[estimate]` block. Its priors do not
+    /// enter the per-cell maximization; `--starts from_prior` draws
+    /// starting points from them.
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
-
-    /// Suppress the `profile_flat_prior_fallback` warning when any
-    /// estimated parameter resolves to a flat prior (gh#73). Use only
-    /// when flat priors are intentional — the warning is recorded in
-    /// `run.json` either way so the choice is auditable.
-    #[arg(long)]
-    pub suppress_warnings: bool,
 
     /// Profile grid (repeat for 2D+).
     /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
@@ -1835,8 +1807,12 @@ pub struct ProfileArgs {
     pub _removed_mle: Option<String>,
     #[arg(long = "params", value_name = "TOML", hide = true)]
     pub _removed_params: Option<String>,
-    // `--pmmh-rho` went with correlated pseudo-marginal PMMH; same shape, its
-    // own message (answered in `cmd_profile` before any file is read).
+    // The `--pmmh-*` flags went with per-cell PMMH; same shape, one message
+    // (answered in `cmd_profile` before any file is read).
+    #[arg(long = "pmmh-steps", value_name = "N", hide = true)]
+    pub _removed_pmmh_steps: Option<String>,
+    #[arg(long = "pmmh-particles", value_name = "N", hide = true)]
+    pub _removed_pmmh_particles: Option<String>,
     #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
     pub _removed_pmmh_rho: Option<String>,
 
@@ -1884,18 +1860,6 @@ pub struct ProfileArgs {
     /// (`nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`) for deterministic per-cell MLE.
     #[arg(long, value_name = "NAME")]
     pub backend: Option<String>,
-
-    /// PMMH only: number of MCMC steps per profile cell. Ignored
-    /// for other algorithms. Default 500 is enough for ridge-finding
-    /// at typical profile resolution; bump to 1000-2000 if a cell's
-    /// posterior is multi-modal.
-    #[arg(long, default_value_t = 500, value_name = "N")]
-    pub pmmh_steps: usize,
-
-    /// PMMH only: particles per PF evaluation. Default 500 is the
-    /// standard PMMH range.
-    #[arg(long, default_value_t = 500, value_name = "N")]
-    pub pmmh_particles: usize,
 }
 
 // ─── survey ───────────────────────────────────────────────────────────────────

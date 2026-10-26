@@ -1,26 +1,22 @@
-//! Integration tests for the `camdl profile` prior-resolution surface
-//! (gh#73). Each test drives the release binary end-to-end and asserts
-//! observable behaviour: warning text, `run.json` provenance fields,
-//! CAS-dir hashes. The unit-level counterpart in
-//! `crate::profile_priors::tests` exercises the precedence helper on
-//! synthetic `ir::Model` fixtures.
+//! Integration tests for the `camdl profile` prior-provenance surface
+//! (gh#73). Profile cells are maximizations that read no prior, but the
+//! per-parameter prior source is recorded in the profile-base sidecar and
+//! keys the base identity. Each test drives the release binary end-to-end
+//! and asserts observable behaviour: sidecar provenance fields and CAS-dir
+//! hashes. The unit-level counterpart in `crate::fit::priors_precedence`
+//! exercises the precedence helper on synthetic `ir::Model` fixtures.
 //!
 //! Assertions covered:
 //!
-//!   1. `profile_pmmh_with_neither_warns_and_uses_flat`: model has no
-//!      `~` priors, no `--fit`; warning fires on stderr naming every
-//!      estimated parameter; `run.json` records every estimated param
-//!      as `flat_fallback`.
-//!   2. `profile_pmmh_with_fit_toml_silences_flat_warning`: same
-//!      model, but a fit toml supplies priors for every estimated
-//!      param; no warning; `run.json` records source = `fit_toml` per
-//!      param.
-//!   3. `run_json_records_resolved_prior_sources`: explicit shape
-//!      assertion on the `resolved_priors` array.
-//!   4. `same_model_different_fit_toml_different_cas_dir`: hash
+//!   1. `profile_without_priors_records_flat_fallback`: model has no
+//!      `~` priors, no `--fit`; no prior warning on stderr; the sidecar
+//!      records the estimated param as `flat_fallback`.
+//!   2. `profile_with_fit_toml_records_fit_toml_priors`: a fit toml
+//!      supplies priors; the sidecar records source = `fit_toml`.
+//!   3. `same_model_different_fit_toml_different_cas_dir`: hash
 //!      provenance — two distinct fit tomls produce two distinct CAS
 //!      dirs (different `fit_toml_hash` → different inner_hash).
-//!   5. `same_model_no_fit_vs_with_fit_different_cas_dir`: same
+//!   4. `same_model_no_fit_vs_with_fit_different_cas_dir`: same
 //!      provenance with the "no fit" baseline as one of the variants.
 //!
 //! Skipped when the release binary or the `camdlc` compiler isn't
@@ -229,16 +225,12 @@ fn run_profile(
         // so the validate_parameter_values step doesn't reject the
         // run with "no value for 'beta'". This is the same way
         // `camdl profile` is invoked everywhere else in the test
-        // suite (see profile_pmmh.rs).
+        // suite.
         "--scenario".into(), "baseline".into(),
         "--data".into(), data.to_string_lossy().into_owned(),
         "--obs".into(), "cases".into(),
         "--sweep".into(), "beta=lin(0.2,0.4,2)".into(),
-        "--algorithm".into(), "pmmh".into(),
-        // Must exceed the fixed per-cell burn-in (100); 120 leaves 20
-        // post-burn-in samples — still a fast smoke run (gh#102).
-        "--pmmh-steps".into(), "120".into(),
-        "--pmmh-particles".into(), "30".into(),
+        "--algorithm".into(), "if2".into(),
         "--particles".into(), "30".into(),
         "--iterations".into(), "5".into(),
         "--n-starts".into(), "1".into(),
@@ -258,7 +250,7 @@ fn run_profile(
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn profile_pmmh_with_neither_warns_and_uses_flat() {
+fn profile_without_priors_records_flat_fallback() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("flat_warning");
@@ -271,21 +263,13 @@ fn profile_pmmh_with_neither_warns_and_uses_flat() {
         String::from_utf8_lossy(&output.stderr));
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Warning must fire.
-    assert!(stderr.contains("flat priors"),
-        "expected 'flat priors' wording in stderr, got:\n{}", stderr);
-    // Warning must name every estimated parameter (gamma in this
-    // fixture; beta is the focal sweep param so it's excluded).
-    assert!(stderr.contains("gamma"),
-        "expected 'gamma' named in warning, got:\n{}", stderr);
-    // Remediation lines must surface --fit + model-file paths.
-    assert!(stderr.contains("--fit"),
-        "expected --fit remedy in warning, got:\n{}", stderr);
-    assert!(stderr.contains("model file"),
-        "expected 'model file' remedy in warning, got:\n{}", stderr);
+    // The cells maximize the likelihood and read no prior, so a flat
+    // fallback is not something to warn about.
+    assert!(!stderr.contains("flat priors"),
+        "profile must not warn about flat priors, got:\n{}", stderr);
 
     // The profile-base sidecar must record sources = "flat_fallback"
-    // for the estimated params.
+    // for the estimated params (gamma; beta is the swept focal).
     let side = read_sidecar(&find_profile_base(&out_root));
     let resolved = side.get("resolved_priors").expect("resolved_priors");
     let arr = resolved.as_array().expect("resolved_priors array");
@@ -306,7 +290,7 @@ fn profile_pmmh_with_neither_warns_and_uses_flat() {
 }
 
 #[test]
-fn profile_pmmh_with_fit_toml_silences_flat_warning() {
+fn profile_with_fit_toml_records_fit_toml_priors() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("fit_priors");
@@ -319,13 +303,6 @@ fn profile_pmmh_with_fit_toml_silences_flat_warning() {
     assert!(output.status.success(),
         "profile run with --fit failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    // No flat-priors warning when every param has a prior.
-    assert!(!stderr.contains("flat priors"),
-        "warning must NOT fire when fit toml supplies priors. \
-         Got stderr:\n{}", stderr);
-
     // Sidecar: gamma resolved from fit_toml (beta is the swept focal).
     let side = read_sidecar(&find_profile_base(&out_root));
     let resolved = side.get("resolved_priors").expect("resolved_priors");
@@ -472,9 +449,9 @@ fn first_leaf_run_id(base: &Path) -> String {
 
 /// P1 provenance discipline (write → read → visible): the audit data the old
 /// per-run `ProfileMeta` carried must be *surfaced by the new reader*, not just
-/// present on disk. A profile run with no `--fit` (flat-prior fallback),
-/// `--suppress-warnings` (waiver trail), and `--init from_prior` (per-chain
-/// init provenance) populates all three provenance kinds; this asserts each is
+/// present on disk. A profile run with no `--fit` (flat-prior fallback) and
+/// `--starts from_prior` (per-chain init provenance) populates both
+/// provenance kinds; this asserts each is
 /// visible through `camdl show`/`list`/`cat`. The fit migration once dropped
 /// provenance silently — the round-trip is what catches that.
 #[test]
@@ -487,7 +464,6 @@ fn provenance_round_trips_through_reader() {
 
     let output = run_profile(&bin, &out_root, &ir, &data, &[
         "--fixed", "N0=1000",
-        "--suppress-warnings",
         "--starts", "from_prior",
         "--label", "round-trip prov",
     ]);
@@ -496,7 +472,7 @@ fn provenance_round_trips_through_reader() {
 
     let base = find_profile_base(&out_root);
 
-    // Write side: the leaf record carries all three provenance kinds, and the
+    // Write side: the leaf record carries both provenance kinds, and the
     // base sidecar carries the label (its single authoritative home).
     let rid = first_leaf_run_id(&base);
     let leaf_dir = {
@@ -521,10 +497,7 @@ fn provenance_round_trips_through_reader() {
         .is_some_and(|o| !o.is_empty()),
         "parameters_provenance (gh#83/85) must be recorded per leaf");
     assert!(prov.get("init_provenance").map(|v| !v.is_null()).unwrap_or(false),
-        "init_provenance must be non-null with --init from_prior. Got: {}", prov);
-    assert!(prov.get("suppressed_warnings").and_then(|s| s.as_array())
-        .is_some_and(|a| a.iter().any(|w| w.as_str() == Some("profile_flat_prior_fallback"))),
-        "suppressed-warnings waiver must be recorded per leaf");
+        "init_provenance must be non-null with --starts from_prior. Got: {}", prov);
     assert_eq!(read_sidecar(&base).get("label").and_then(|l| l.as_str()),
         Some("round-trip prov"),
         "label must live on the base sidecar (its single authoritative home)");
@@ -537,8 +510,6 @@ fn provenance_round_trips_through_reader() {
         "show must surface the gh#83/85 parameter-resolution provenance. Got:\n{}", shown);
     assert!(shown.contains("init provenance"),
         "show must surface the per-chain init provenance. Got:\n{}", shown);
-    assert!(shown.contains("profile_flat_prior_fallback"),
-        "show must surface the suppressed-warnings waiver. Got:\n{}", shown);
 
     // `camdl list` surfaces the profile with its label.
     let listed = camdl_read(&bin, &out_root, &["list"]);

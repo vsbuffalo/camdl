@@ -426,7 +426,7 @@ fn profile_reports_and_records_each_replacement_of_a_fixed_value() {
         .args(["profile", "sir.camdl", "--data", "cases.tsv", "--obs", "cases",
                "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
                "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1",
-               "--suppress-warnings", "--scenario", "base",
+               "--scenario", "base",
                "--fixed-file", "ff.toml", "--fixed", "gamma=0.15"])
         .current_dir(dir).env("CAMDL_OUTPUT_DIR", dir.join("out")).output().expect("spawn");
     let stderr = ok(&out, "profile");
@@ -481,8 +481,7 @@ fn survey_reports_fixed_over_a_scenario_and_fixes_the_winner() {
 fn profile_run(dir: &Path, store: &str, extra: &[&str]) -> (String, Vec<serde_json::Value>) {
     let mut argv = vec!["profile", "sir.camdl", "--data", "cases.tsv", "--obs", "cases",
         "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
-        "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1",
-        "--suppress-warnings"];
+        "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1"];
     argv.extend_from_slice(extra);
     let out = Command::new(binary()).args(&argv).current_dir(dir)
         .env("CAMDL_OUTPUT_DIR", dir.join(store)).output().expect("spawn");

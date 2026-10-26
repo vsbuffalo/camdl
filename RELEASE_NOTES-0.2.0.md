@@ -273,14 +273,32 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
   instruction. The `LowSwapRate` diagnostic goes with it.
 
 - **Correlated pseudo-marginal PMMH was removed.** The `rho` key under
-  `[method]` for `algorithm = "pmmh"`, the `--rho` flag on `fit run` and the
-  `--pmmh-rho` flag on `profile` are gone; `pmmh` runs the bootstrap particle
-  filter with independent likelihood evaluations, as it did with `rho` unset.
-  `camdl profile --algorithm pmmh` defaulted to a correlated filter with
-  `rho = 0.99`, so a profile user who never passed the flag sees different
-  numerics. Migration: delete the `rho` line and drop the flags. A `fit.toml`
-  that still carries the key, or a script that still passes either flag, is
-  refused with that instruction.
+  `[method]` for `algorithm = "pmmh"` and the `--rho` flag on `fit run` are
+  gone; `pmmh` runs the bootstrap particle filter with independent likelihood
+  evaluations, as it did with `rho` unset. Migration: delete the `rho` line and
+  drop the flag. A `fit.toml` that still carries the key, or a script that still
+  passes the flag, is refused with that instruction. (`--pmmh-rho` on `profile`
+  went with per-cell PMMH, below.)
+
+- **`camdl profile --algorithm pmmh` was removed.** It ran a short MCMC chain in
+  each grid cell with the swept parameter ψ pinned, and reported the
+  log-likelihood at the highest-posterior sample the chain visited as that
+  cell's profile value. That number is not the profile likelihood max_λ L(ψ, λ):
+  under an informative prior the highest-posterior sample sits below the
+  maximum, by an amount that depends on how well a short chain explored. Nor is
+  it the marginal posterior p(ψ | y), which needs each cell's marginal
+  likelihood p(y | ψ), and conditional samples do not supply it. The chain
+  itself sampled p(λ | ψ, y) correctly; the summary was wrong.
+  `--algorithm pmmh` on `profile` is now refused, as are `--pmmh-steps`,
+  `--pmmh-particles` and `--pmmh-rho`, with the alternatives.
+  `--suppress-warnings` and the `profile_flat_prior_fallback` warning it
+  silenced are gone with it, and leaf `mle.toml` files no longer carry
+  `final_log_posterior`, `acc_rate` or `log_posterior_trace` (only per-cell PMMH
+  wrote them). Migration: for a profile likelihood use `--algorithm if2`, or an
+  `nl-*` optimizer on `--backend ode`; for a posterior of ψ, fit once with
+  `camdl fit run` (`pmmh` or `pgas`) and read ψ's marginal from the draws. A
+  command that runs conditional chains over a grid with a correctly defined
+  summary may be added later under its own name.
 
 - **NUTS on the ODE backend was removed.** `algorithm = "nuts"` (with
   `backend = "ode"`) and its keys `warmup`, `samples`, `target_accept`,
@@ -411,12 +429,13 @@ These are relative to `v0.1.0-alpha`. Each carries an old → new migration.
 - **Every stored PGAS fit, every stored PMMH fit and every stored
   `camdl profile` run re-keys.** `tempering` was part of the PGAS method
   identity and `rho` of the PMMH method identity, and `camdl profile` hashed its
-  PMMH knobs, `rho` included, into the method level of every run whatever its
-  algorithm. Removing the two fields is one identity change: a new PGAS or PMMH
-  fit, or a new profile run of any algorithm, does not deduplicate against one
-  stored before this change, and an in-flight PGAS or PMMH fit cannot `--resume`
-  across it (its saved config hash no longer matches). Stored results stay
-  readable; the fits and profiles run again.
+  per-cell PMMH knobs (`steps`, `particles`, `rho`) into the method level of
+  every run whatever its algorithm, so an IF2 or `nl-*` profile was keyed on
+  settings it never read. Removing them is one identity change: a new PGAS or
+  PMMH fit, or a new profile run of any algorithm, does not deduplicate against
+  one stored before this change, and an in-flight PGAS or PMMH fit cannot
+  `--resume` across it (its saved config hash no longer matches). Stored results
+  stay readable; the fits and profiles run again.
 - **Every stored multi-cell `simulate` ensemble re-keys once.** The ensemble
   leaf (the combined `ensemble.tsv` of a `--replicates` / `--seeds` /
   multi-`--scenario` / `--draws` run) is now keyed on its cells' identities

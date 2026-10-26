@@ -1,5 +1,5 @@
 //! `camdl profile` — profile likelihood via parallel per-cell optimization
-//! (IF2, PMMH, or deterministic nl-* MLE, per `--algorithm`).
+//! (IF2 or deterministic nl-* MLE, per `--algorithm`).
 //!
 //! For one or more focal parameters, fix them at a grid of values and
 //! run IF2 to maximise over the remaining parameters at each grid
@@ -34,7 +34,6 @@ use sim::{
     inference::{
         if2::{run_if2, IF2Config},
         particle_filter::Observation,
-        pmmh::{run_pmmh, PMMHConfig, Prior},
         BoundObs, ChainBinomialProcess, MultiStreamObsModel,
     },
 };
@@ -44,31 +43,27 @@ use std::sync::Arc;
 use crate::cas::typed::ContentHash;
 use crate::run_paths::output_root;
 
-/// Burn-in discarded from each per-cell PMMH chain on the profile path.
-/// Fixed (not user-tunable) here; the cell only reports its MAP sample,
-/// so the chain just needs to clear transient. Named so the early
-/// `pmmh_steps > burn_in` validation and the `PMMHConfig` site below
-/// share one source of truth and cannot drift.
-const PROFILE_PMMH_BURN_IN: usize = 100;
-
-/// gh#102 (H10): reject a per-cell PMMH chain length that the fixed
-/// burn-in would consume entirely. With `steps <= burn_in` every
-/// sample is discarded, leaving zero post-burn-in records — the cell
-/// silently yields empty diagnostics rather than a chain to summarise.
-/// Pure (no I/O, no exit) so it is unit-testable; `cmd_profile` maps
-/// the `Err` to a stderr message + `exit(1)`.
-fn validate_profile_pmmh_steps(steps: usize, burn_in: usize) -> Result<(), String> {
-    if steps <= burn_in {
-        return Err(format!(
-            "--pmmh-steps = {} must exceed the per-cell burn-in ({}). \
-             Profile PMMH discards the first {} samples of each cell's \
-             chain; with steps <= burn-in no post-burn-in samples survive \
-             and the cell yields empty diagnostics. Re-run with \
-             `--pmmh-steps {}` or more.",
-            steps, burn_in, burn_in, burn_in + 1));
-    }
-    Ok(())
-}
+/// Why `camdl profile` has no per-cell PMMH, and what to run instead.
+///
+/// A profile is the maximum over the nuisance parameters λ of the
+/// likelihood L(ψ, λ) at each grid value of the focal parameter ψ, so each
+/// cell is an optimisation. A per-cell MCMC chain with ψ pinned samples
+/// p(λ | ψ, y) correctly, but the number it reported — the log-likelihood
+/// at the highest-posterior sample the chain visited — is neither that
+/// maximum (under an informative prior the MAP sample sits below it, by an
+/// amount that depends on how well a short chain explored) nor the marginal
+/// posterior p(ψ | y), which needs each cell's marginal likelihood
+/// p(y | ψ). Named once so the `--algorithm pmmh` refusal and the removed
+/// `--pmmh-*` flags give the same answer.
+const PROFILE_PMMH_REMOVED: &str = "per-cell PMMH was removed from `camdl profile`. \
+    A profile likelihood is a maximum over the other parameters at each grid \
+    value, so each cell is fitted by maximisation: use `--algorithm if2` \
+    (chain_binomial) or an `nl-*` optimizer (`nl-sbplx`, `nl-bobyqa`, \
+    `nl-lbfgs`; `--backend ode`). The per-cell chain reported the \
+    log-likelihood at its highest-posterior sample, which is neither the \
+    profile likelihood nor the marginal posterior of the swept parameter. For \
+    a posterior of that parameter, fit once with `camdl fit run` (PMMH or \
+    PGAS) and read its marginal from the draws.";
 
 /// Per-cell optimizer choice. `--algorithm if2 --backend chain_binomial`
 /// (the default) keeps the historical PF-based per-cell MLE; the new
@@ -78,7 +73,6 @@ fn validate_profile_pmmh_steps(steps: usize, burn_in: usize) -> Result<(), Strin
 #[derive(Debug, Clone, Copy)]
 enum ProfileAlgo {
     If2,
-    Pmmh,
     Nlopt(sim::inference::deterministic::NloptAlgorithm),
 }
 
@@ -86,7 +80,6 @@ impl ProfileAlgo {
     fn method_kind(self) -> crate::run_meta::FitAlgorithm {
         match self {
             ProfileAlgo::If2  => crate::run_meta::FitAlgorithm::If2,
-            ProfileAlgo::Pmmh => crate::run_meta::FitAlgorithm::Pmmh,
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx) =>
                 crate::run_meta::FitAlgorithm::NlSbplx,
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) =>
@@ -153,7 +146,6 @@ struct ProfileBaseLevel<'a> {
 struct ProfileMethodLevel<'a> {
     algorithm: &'a str,
     if2: ProfileIf2Knobs,
-    pmmh: ProfilePmmhKnobs,
     /// Resolved per-parameter perturbation magnitudes, sorted by name.
     rw_sd: &'a [(&'a str, Option<f64>)],
     /// `--rw-sd auto` derives magnitudes from the model rather than the flag,
@@ -172,17 +164,32 @@ struct ProfileIf2Knobs {
     starts: usize,
 }
 
-#[derive(serde::Serialize)]
-struct ProfilePmmhKnobs {
-    steps: usize,
-    particles: usize,
-}
-
 pub fn cmd_profile(a: &crate::args::ProfileArgs) {
+    // The `--pmmh-*` flags went with per-cell PMMH. They are trapped so a
+    // stale script is answered with the reason rather than clap's
+    // "unexpected argument", before any file is read.
+    for (flag, given) in [
+        ("--pmmh-steps", a._removed_pmmh_steps.as_deref()),
+        ("--pmmh-particles", a._removed_pmmh_particles.as_deref()),
+        ("--pmmh-rho", a._removed_pmmh_rho.as_deref()),
+    ] {
+        if let Some(raw) = given {
+            eprintln!("error: {flag} {raw} is no longer accepted: {PROFILE_PMMH_REMOVED}");
+            std::process::exit(1);
+        }
+    }
     // Parse the CLI strings into the typed registry entry (the string boundary);
     // all downstream dispatch reads the typed FitAlgorithm / InferenceBackend.
     let algo_name = a.algorithm.as_deref().unwrap_or("if2");
     let backend_name = a.backend.as_deref().unwrap_or("chain_binomial");
+    // Refused on any backend, before the registry's own (algorithm, backend)
+    // check, so `--algorithm pmmh --backend ode` gets the same answer.
+    if crate::fit::methods::parse_algorithm(algo_name)
+        == Some(crate::run_meta::FitAlgorithm::Pmmh)
+    {
+        eprintln!("error: --algorithm pmmh is not accepted: {PROFILE_PMMH_REMOVED}");
+        std::process::exit(1);
+    }
     let method = match crate::fit::methods::parse_combo(algo_name, backend_name) {
         Ok(m) => m,
         Err(msg) => {
@@ -190,12 +197,8 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             std::process::exit(1);
         }
     };
-    // Registry-driven caveat for methods carrying a status_note (Beta methods,
-    // plus Stable methods with usage guidance — e.g. pmmh, nl-*).
-    crate::fit::methods::emit_status_banner(method.algorithm, method.backend);
     let profile_algo = match method.algorithm {
         crate::run_meta::FitAlgorithm::If2      => ProfileAlgo::If2,
-        crate::run_meta::FitAlgorithm::Pmmh     => ProfileAlgo::Pmmh,
         crate::run_meta::FitAlgorithm::NlSbplx  =>
             ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx),
         crate::run_meta::FitAlgorithm::NlBobyqa =>
@@ -211,36 +214,17 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         other => {
             eprintln!(
                 "error: --algorithm = \"{}\" is not yet supported for `camdl profile`. \
-                 Currently supported: if2 (chain_binomial), pmmh (chain_binomial), \
+                 Currently supported: if2 (chain_binomial), \
                  nl-sbplx (ode), nl-bobyqa (ode), nl-lbfgs (ode).",
                 other
             );
             std::process::exit(1);
         }
     };
-    // PMMH on profile defaults to chain_binomial (matches `fit run --algorithm pmmh`).
-    // The `pmmh + ode` combination isn't supported on the profile path; reject early.
-    if matches!(profile_algo, ProfileAlgo::Pmmh)
-        && method.backend == crate::run_meta::InferenceBackend::Ode
-    {
-        eprintln!(
-            "error: --algorithm pmmh requires --backend chain_binomial. \
-             PMMH wraps a particle filter inside an MH step; under the ODE \
-             backend the PF wrapping is degenerate (1-particle, exact) and \
-             the algorithm collapses to vanilla MH. Re-run with \
-             `--backend chain_binomial`."
-        );
-        std::process::exit(1);
-    }
-    // gh#102 (H10): each per-cell PMMH chain discards a fixed burn-in.
-    // Reject steps <= burn_in early, before any setup (see
-    // validate_profile_pmmh_steps for the rationale).
-    if matches!(profile_algo, ProfileAlgo::Pmmh) {
-        if let Err(msg) = validate_profile_pmmh_steps(a.pmmh_steps, PROFILE_PMMH_BURN_IN) {
-            eprintln!("error: {}", msg);
-            std::process::exit(1);
-        }
-    }
+    // Registry-driven caveat for methods carrying a status_note (Beta methods,
+    // plus Stable methods with usage guidance — e.g. nl-*). After the profile
+    // dispatch, so a refused algorithm is not first shown a caveat.
+    crate::fit::methods::emit_status_banner(method.algorithm, method.backend);
 
     let ir_path = a.model.to_string_lossy().into_owned();
     let n_particles = a.inference.particles;
@@ -250,9 +234,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     let dt = a.inference.dt;
     let seed_base = a.inference.seed;
     let parallel = a.inference.parallel;
-    // PMMH per-cell knobs (ignored when --algorithm is not pmmh).
-    let pmmh_steps = a.pmmh_steps;
-    let pmmh_particles = a.pmmh_particles;
     let output_tsv_path: Option<String> = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
     let label_arg: Option<String> = match a.label.as_deref() {
         Some(raw) => match crate::fit::validate_label(raw) {
@@ -280,19 +261,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     ) {
         eprintln!("error: {msg}");
         std::process::exit(2);
-    }
-    // Correlated pseudo-marginal PMMH was removed; `--pmmh-rho` is trapped so
-    // a stale script is answered with the fix rather than clap's "unexpected
-    // argument".
-    if let Some(raw) = a._removed_pmmh_rho.as_deref() {
-        eprintln!(
-            "error: --pmmh-rho is no longer accepted on `camdl profile`: correlated \
-             pseudo-marginal PMMH was removed, and `--algorithm pmmh` runs the bootstrap \
-             particle filter with independent likelihood evaluations. Drop \
-             `--pmmh-rho {raw}`. Profile runs stored before the removal are not reused; \
-             they run again."
-        );
-        std::process::exit(1);
     }
     // `--fixed NAME=VALUE` → `fixed_cli`, `--fixed-file <toml>`
     // (repeatable, layered) → `fixed_files`. Both feed into the
@@ -849,60 +817,13 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
     let if2_params = Arc::new(if2_params);
 
-    // gh#118: focal params are pinned at grid values and excluded
-    // from `if2_params`, but their priors still contribute to the
-    // joint log-posterior. Build a parallel spec/prior set for the
-    // focal parameters so we can add the focal-prior offset to the
-    // emitted `log_posterior` column (matching `camdl fit run`'s
-    // definition: log_post = log_lik + Σ log_prior(all estimated)).
-    let focal_specs_for_priors: Vec<crate::fit::runner::ParamSpec> =
-        focal_names.iter().map(|name| {
-            let from_fit = fit_estimate.get(name);
-            crate::fit::runner::ParamSpec {
-                name: name.clone(),
-                rw_sd: rw_sd_map_raw.get(name).and_then(|v| *v)
-                    .or_else(|| from_fit.and_then(|e| e.rw_sd)),
-                transform: from_fit.and_then(|e|
-                    e.transform.as_ref().map(|t| t.as_str().to_string())),
-                perturb_only_at_t0:
-                    from_fit.map(|e| e.perturb_only_at_t0).unwrap_or(false),
-                bounds: from_fit.and_then(|e| e.bounds),
-            }
-        }).collect();
-    let focal_if2_params: Vec<sim::inference::if2::EstimatedParam> =
-        crate::fit::runner::build_if2_params_from_specs(
-            &model, &compiled, &base_params, &focal_specs_for_priors,
-        ).unwrap_or_else(|e| {
-            eprintln!("error: building focal-param specs: {}", e);
-            std::process::exit(1);
-        });
-    let focal_if2_params = Arc::new(focal_if2_params);
-    let focal_priors: Vec<sim::inference::prior::Prior> =
-        crate::fit::priors_precedence::resolve_priors_with_precedence(
-            &focal_names, &fit_estimate, &model,
-        ).into_iter().map(|r| r.prior).collect();
-    let focal_priors = Arc::new(focal_priors);
-
     // ── Prior resolution (gh#73) ─────────────────────────────────────
     //
-    // Resolve priors once, up front, for two reasons:
-    //   (a) Surface the flat-fallback warning (or its suppression)
-    //       BEFORE the parallel per-cell loop kicks off — the warning
-    //       is a property of the configuration, not of any single
-    //       cell.
-    //   (b) Record the per-parameter source (fit_toml / model_ir /
-    //       flat_fallback) into the per-seed `run.json` so the CAS
-    //       provenance captures which knob controlled each parameter.
-    //
-    // The per-cell PMMH branch *re-resolves* against the same
-    // (fit_estimate, model) inputs to get the typed `Prior` values it
-    // needs; that re-resolution is byte-identical to this one (same
-    // call into `fit::runner::resolve_prior`). Resolving here as well
-    // makes the warning/provenance flow independent of whether the
-    // PMMH branch ever runs — keeps the diagnostic surface uniform
-    // across `--algorithm` choices and supports a future extension to
-    // honour priors on IF2 too (which currently ignores them by
-    // design but should still surface what *would* be ignored).
+    // IF2 and the nl-* optimizers maximise the likelihood and read no prior.
+    // The per-parameter source (fit_toml / model_ir / flat_fallback) is still
+    // resolved once, up front, because it is provenance: it is recorded in the
+    // profile-base sidecar and folded into the base identity (it is also what
+    // keys the estimated *set*).
     let resolved_priors: Vec<crate::fit::priors_precedence::ResolvedPrior> =
         crate::fit::priors_precedence::resolve_priors_with_precedence(
             &if2_params.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
@@ -919,26 +840,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     {
         eprint!("{}", w);
     }
-    if matches!(profile_algo, ProfileAlgo::Pmmh) && !a.suppress_warnings {
-        if let Some(w) = crate::fit::priors_precedence::format_flat_fallback_warning(
-            &resolved_priors, a.fit.is_some(),
-        ) {
-            eprint!("{}", w);
-        }
-    }
-    // Suppression is loud — recorded into provenance even when the
-    // user passed `--suppress-warnings` so reviewers can audit the
-    // waiver. The `suppressed_warnings` field is empty when nothing
-    // was suppressed.
-    let suppressed_warnings: Vec<String> =
-        if a.suppress_warnings
-            && resolved_priors.iter()
-                .any(|r| r.source == crate::fit::priors_precedence::PriorSource::FlatFallback)
-        {
-            vec!["profile_flat_prior_fallback".to_string()]
-        } else {
-            Vec::new()
-        };
 
     // Per-start init draws across non-focal estimated params (gh#42).
     // Computed once, reused at every grid cell so start_idx=k means the
@@ -1137,8 +1038,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // `RunRecord.inputs` — display payload, NOT identity-bearing, so it
     // does not affect the leaf `run_id`. Folds forward the audit data
     // the old per-run `ProfileMeta` carried: per-parameter resolution
-    // provenance (gh#83/gh#85), per-chain init provenance, and the loud
-    // `--suppress-warnings` waiver trail.
+    // provenance (gh#83/gh#85) and per-chain init provenance.
     let run_provenance_json = serde_json::json!({
         "parameters_provenance":
             serde_json::to_value(&parameters_provenance).unwrap_or(serde_json::Value::Null),
@@ -1151,8 +1051,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 .unwrap_or(serde_json::Value::Null),
         "init_provenance":
             serde_json::to_value(&init_provenance).unwrap_or(serde_json::Value::Null),
-        "suppressed_warnings":
-            serde_json::to_value(&suppressed_warnings).unwrap_or(serde_json::Value::Null),
     });
 
     // gh#89: lowercased algorithm tag — a cache-key input for the
@@ -1213,7 +1111,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             particles: n_particles, iterations: n_iterations,
             cooling, dt, starts: n_starts,
         },
-        pmmh: ProfilePmmhKnobs { steps: pmmh_steps, particles: pmmh_particles },
         rw_sd: &rw_sd_blob,
         rw_sd_auto,
         init: &init_method,
@@ -1250,7 +1147,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
     // run "IF2 (N particles × M iter)" was misleading.
     let algo_label = match profile_algo {
         ProfileAlgo::If2 => "IF2",
-        ProfileAlgo::Pmmh => "PMMH",
         ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Sbplx) => "nl-sbplx",
         ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Bobyqa) => "nl-bobyqa",
         ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs) => "nl-lbfgs",
@@ -1262,9 +1158,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             "profile: IF2 per cell = {} particles × {} iterations", n_particles, n_iterations),
         ProfileAlgo::Nlopt(_) => eprintln!(
             "profile: deterministic ODE MLE per cell (no particle filter)"),
-        ProfileAlgo::Pmmh => eprintln!(
-            "profile: PMMH per cell = {} particles × {} MCMC steps",
-            pmmh_particles, pmmh_steps),
     }
 
     // ── Progress + cache scan ─────────────────────────────────────────
@@ -1435,8 +1328,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         let process = Arc::clone(&process);
         let obs_model_obj = Arc::clone(&obs_model_obj);
         let if2_params = Arc::clone(&if2_params);
-        let focal_if2_params = Arc::clone(&focal_if2_params);
-        let focal_priors = Arc::clone(&focal_priors);
         let focal_values: Vec<f64> = grid_points[grid_idx].iter().map(|&(_, v)| v).collect();
         let seed = seeds[seed_idx];
 
@@ -1460,9 +1351,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 .unwrap_or(if2_params.as_slice());
 
         // Dispatch on algorithm. IF2 keeps the historical PF-driven
-        // per-cell MLE; PMMH runs a per-cell MCMC chain and extracts
-        // the MAP as the cell's MLE (the prompt's --algorithm pmmh
-        // path for 2-D seed-timing profiles); NLopt branches into the
+        // per-cell MLE; NLopt branches into the
         // deterministic-MLE path (gh#47) — same `compute_ode_loglik`
         // closure that fit.toml stages call, with the focal grid value
         // pinned in `params` and optimization confined to the non-focal
@@ -1470,18 +1359,11 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
         //
         // gh#74 Option B: each branch also populates a
         // `PerStartDiagnostics` carrying the convergence info this
-        // start produced (acceptance rate for PMMH, cooling-end state
-        // for IF2, completion flag for everyone). The rollup phase
+        // start produced (cooling-end state for IF2, completion flag
+        // for everyone). The rollup phase
         // aggregates these across K starts → per-cell columns.
         let mut diag = crate::profile_diagnostics::PerStartDiagnostics::default();
-        // gh#109: per-cell return carries final_log_posterior alongside
-        // final_loglik. Only the PMMH branch populates it (PMMHResult
-        // already exposes map_log_posterior); IF2/NLopt are point-MLE
-        // optimisers with no posterior concept, so the field is NaN
-        // for those algorithms. Downstream (render_mle_toml, rollup
-        // TSV) skip-when-NaN so the addition is transparent for
-        // existing IF2/NLopt profiles.
-        let (final_loglik, final_log_posterior, mle_params): (f64, f64, Vec<f64>) = match profile_algo {
+        let (final_loglik, mle_params): (f64, Vec<f64>) = match profile_algo {
             ProfileAlgo::If2 => {
                 let config = IF2Config {
                     n_particles, n_iterations,
@@ -1572,178 +1454,16 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                             }
                         });
                         diag.loglik_trace = trace;
-                        // IF2 is a point-MLE optimiser; no posterior.
-                        (true_ll, f64::NAN, r.mle)
+                        (true_ll, r.mle)
                     }
                     Err(_) => {
                         // diag.completed stays false; iterations_used /
                         // cooling_final / loglik_trace stay at defaults
                         // — the aggregator records NaN for this start's
                         // contribution.
-                        (f64::NEG_INFINITY, f64::NAN, params.clone())
+                        (f64::NEG_INFINITY, params.clone())
                     }
                 }
-            }
-            ProfileAlgo::Pmmh => {
-                // Per-cell PMMH: short MCMC chain over non-focal
-                // estimated params, focal pinned via `params`. The MAP
-                // of the chain is the cell's reported MLE — matches
-                // PMMHResult.map_params, which is the highest-posterior
-                // sample seen (consistent with how fit/pmmh.rs reports
-                // MAP at end of chain).
-                //
-                // Priors (gh#73): resolved via the precedence chain
-                //   --fit toml > model IR (`~` syntax) > Prior::Flat.
-                // The resolution is shared with `fit/runner::resolve_prior`
-                // so behaviour matches `camdl fit run`. Pre-fix this
-                // path hardcoded Prior::Flat, silently downgrading the
-                // declared posterior semantics to MLE.
-                let proposal_sd: Vec<f64> = per_start_specs.iter()
-                    .map(|p| p.transformed_sd(p.rw_sd, p.initial) * 5.0)
-                    .collect();
-                let cell_names: Vec<String> = per_start_specs.iter()
-                    .map(|p| p.name.clone())
-                    .collect();
-                let resolved = crate::fit::priors_precedence::resolve_priors_with_precedence(
-                    &cell_names, &fit_estimate, &model,
-                );
-                let priors: Vec<Prior> = resolved.iter()
-                    .map(|r| r.prior.clone())
-                    .collect();
-                let pmmh_config = PMMHConfig {
-                    n_steps: pmmh_steps,
-                    n_particles: pmmh_particles,
-                    dt,
-                    proposal_sd,
-                    adapt: true,
-                    adapt_start: 50,
-                    // Same policy as `fit/pmmh.rs`: adapt over the discarded
-                    // prefix, sample from the kernel that leaves.
-                    adapt_stop: PROFILE_PMMH_BURN_IN,
-                    thin: 1,
-                    burn_in: PROFILE_PMMH_BURN_IN,
-                };
-
-                // PF process kernel + obs model for this cell. PMMH on
-                // profile is chain_binomial-only (rejected upstream for
-                // --backend ode), so wire ChainBinomialProcess directly.
-                let pf_process = ChainBinomialProcess::new(compiled.clone());
-                let pf_obs_model = Arc::clone(&obs_model_obj);
-                let smc_cfg = sim::inference::traits::SMCConfig {
-                    n_particles: pmmh_config.n_particles,
-                    dt: pmmh_config.dt,
-                    t_start: compiled.model.simulation.t_start,
-                    skip_first_obs_from_loglik: false,
-                    record_ancestry: false,
-                    record_prequential: false,
-                    record_predictions: false, // gh#520: only `.log_likelihood` is read below
-                    max_substeps: a.inference.pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
-                };
-
-                // gh#224: structural failures surface; a degenerate/recoverable
-                // PF run is a ruled-out θ (−∞).
-                let eval_loglik = |theta: &[f64], pf_seed: u64| -> Result<f64, sim::error::SimError> {
-                    match sim::inference::bootstrap_filter(
-                        &pf_process, &*pf_obs_model, theta, &smc_cfg, pf_seed,
-                    ) {
-                        Ok(r) => Ok(r.log_likelihood),
-                        Err(e) if e.is_structural() => Err(e),
-                        Err(_) => Ok(f64::NEG_INFINITY),
-                    }
-                };
-
-                // Profile has no hierarchical prior surface, so
-                // `param_names` can be empty (avoids the
-                // base_params/param_names length check inside run_pmmh
-                // when no Hierarchical priors are present).
-                // gh#224: a ruled-out θ is rejected internally as −∞; an `Err`
-                // is a structural failure (model/config can't run). Every cell
-                // would hit it identically, so abort the whole profile run
-                // rather than silently emitting degenerate per-cell MLEs.
-                let result = match run_pmmh(
-                    per_start_specs,
-                    &priors,
-                    &params,
-                    &[],
-                    &pmmh_config,
-                    &eval_loglik,
-                    job_seed,
-                    None,
-                    None,
-                    String::new(),
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("error: profile PMMH cell (grid {}, start {}) \
-                            failed with structural error: {}", grid_idx, start_idx, e);
-                        std::process::exit(1);
-                    }
-                };
-                // gh#74 Option B: PMMH diagnostics from the engine's
-                // returned result. `acceptance_rate` is already
-                // post-burn-in (see pmmh.rs:508-514). Trace carries
-                // the per-step PF loglik — the same value the chain
-                // uses for MH acceptance.
-                diag.algo = Some(crate::profile_diagnostics::DiagAlgo::Pmmh);
-                diag.acc_rate = if result.acceptance_rate.is_finite() {
-                    Some(result.acceptance_rate)
-                } else { None };
-                diag.loglik_trace = result.steps.iter()
-                    .map(|s| s.log_likelihood)
-                    .collect();
-                // gh#109: per-step joint log-posterior (log_likelihood
-                // + log_prior). Together with the loglik trace this
-                // lets the rollup compute the prior-contribution
-                // delta and lets the user compare a profile likelihood
-                // vs profile posterior.
-                //
-                // gh#118: `s.log_prior` from the PMMH engine sums over
-                // the nuisance (estimated) params only — focal params
-                // are pinned and excluded from PMMH's estimation set.
-                // Add the focal-prior contribution at the cell's fixed
-                // values so the column matches `camdl fit run`'s
-                // joint-posterior definition. The offset is constant
-                // within the cell.
-                let focal_log_prior_offset = compute_focal_log_prior_offset(
-                    &focal_if2_params, &focal_priors, &focal_values,
-                );
-                diag.log_posterior_trace = result.steps.iter()
-                    .map(|s| s.log_likelihood + s.log_prior + focal_log_prior_offset)
-                    .collect();
-                // gh#97: report the loglik that belongs to the saved
-                // MLE params. `mle_params = result.map_params` (below),
-                // and `pmmh.rs:478-483` sets `map_loglik` in lockstep
-                // with `map_params` — they are coherent by construction.
-                // The previous `result.map_loglik.max(best_ll)` reported
-                // the per-sample max loglik, which under any non-flat
-                // prior comes from a DIFFERENT θ than the MAP (the
-                // loglik-maximizing step is not the posterior-maximizing
-                // step). That paired a loglik from one θ with params
-                // from another — the same bug class f52d1ecd fixed on
-                // the IF2 path. If `map_loglik` is non-finite (the
-                // initial PF eval never reached a finite loglik), report
-                // it honestly; the renderer's `is_finite()` guard writes
-                // `-inf` rather than masking it.
-                let final_ll = result.map_loglik;
-                diag.completed = final_ll.is_finite();
-                // gh#109: PMMH carries the MAP joint log-posterior
-                // alongside the MLE-by-loglik. NaN-guard mirrors the
-                // final_ll computation above so a non-finite chain
-                // doesn't leak Inf into mle.toml.
-                //
-                // gh#118: add the focal-prior offset so the MAP
-                // log_posterior matches `camdl fit run`'s definition.
-                // If the offset itself is NEG_INFINITY (focal value
-                // outside its prior's support), the sum is non-finite
-                // and the is_finite guard surfaces NaN — semantically
-                // correct (cell at zero prior probability).
-                let final_lp = if result.map_log_posterior.is_finite() {
-                    let corrected = result.map_log_posterior + focal_log_prior_offset;
-                    if corrected.is_finite() { corrected } else { f64::NAN }
-                } else {
-                    f64::NAN
-                };
-                (final_ll, final_lp, result.map_params)
             }
             ProfileAlgo::Nlopt(nlopt_algo) => {
                 // Per-cell starting point: copy `params` (focal pinned)
@@ -1795,15 +1515,14 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                             mle[model_idx] = r.params[slot];
                         }
                         diag.completed = r.loglik.is_finite();
-                        // NLopt is a point-MLE optimiser; no posterior.
-                        (r.loglik, f64::NAN, mle)
+                        (r.loglik, mle)
                     }
                     Err(e) => {
                         eprintln!(
                             "warning: nlopt optimize_cell failed at grid {}/start {}: {}",
                             grid_idx, start_idx, e
                         );
-                        (f64::NEG_INFINITY, f64::NAN, params.clone())
+                        (f64::NEG_INFINITY, params.clone())
                     }
                 }
             }
@@ -1831,8 +1550,6 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
             ProfileAlgo::If2 => serde_json::json!({
                 "particles": n_particles, "iterations": n_iterations,
                 "cooling": cooling, "dt": dt }),
-            ProfileAlgo::Pmmh => serde_json::json!({
-                "steps": pmmh_steps, "particles": pmmh_particles, "dt": dt }),
             ProfileAlgo::Nlopt(_) => serde_json::json!({
                 "tolerance": 1e-4, "max_evals": 1500,
                 "dt": compiled.model.simulation.dt.unwrap_or(dt) }),
@@ -1910,7 +1627,7 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
 
         let mle_toml = render_mle_toml(&if2_params, &focal_values,
             &focal_grids.iter().map(|fg| fg.name.as_str()).collect::<Vec<_>>(),
-            &mle_params, final_loglik, final_log_posterior, &diag);
+            &mle_params, final_loglik, &diag);
         // Through the claim (fsync'd), error fatal: a discarded write error
         // could finalize a Completed point with no mle.toml in it.
         if let Err(e) = write.write("mle.toml", mle_toml.as_bytes()) {
@@ -2042,50 +1759,6 @@ fn starts_values_from_init_method(
     Ok(Some((origin, values)))
 }
 
-/// gh#118: focal-parameter prior contribution at the cell's fixed
-/// focal values. Profile pins focal params at grid values and
-/// estimates only the nuisance set, so the PMMH engine's
-/// `log_prior` sum covers nuisance priors only. To make the
-/// emitted `log_posterior` column comparable to `camdl fit run`'s
-/// `log_posterior` (which sums priors over the full estimated
-/// set), add this offset.
-///
-/// The offset is constant within a cell (focal values are fixed by
-/// definition) and additive: corrected `log_posterior = log_lik +
-/// nuisance_log_prior + focal_log_prior_offset`.
-///
-/// Returns `NEG_INFINITY` when any focal value sits outside its
-/// prior's support (e.g. a uniform prior whose declared bounds
-/// don't cover the cell's grid value). That's semantically correct
-/// — the cell has zero prior probability — and propagates to a NaN
-/// in the rendered `mle.toml` via the existing `is_finite()` guard.
-///
-/// Hierarchical priors on focal params are not currently supported
-/// (the env-free `Prior::log_density` falls back to `NEG_INFINITY`
-/// for the Hierarchical variant per `prior.rs:143`). In practice
-/// focal params are typically simple univariate distributions
-/// (uniform / normal / log_normal); the rare case of a
-/// hierarchical focal prior would need a separate code path that
-/// passes a `NamedParams` env into `log_density_env`.
-fn compute_focal_log_prior_offset(
-    focal_specs:  &[sim::inference::if2::EstimatedParam],
-    focal_priors: &[sim::inference::prior::Prior],
-    focal_values: &[f64],
-) -> f64 {
-    debug_assert_eq!(focal_specs.len(), focal_priors.len(),
-        "focal_specs and focal_priors must align by index");
-    debug_assert_eq!(focal_specs.len(), focal_values.len(),
-        "focal_specs and focal_values must align by index");
-    focal_specs.iter()
-        .zip(focal_priors.iter())
-        .zip(focal_values.iter())
-        .map(|((spec, prior), &val)| {
-            let z = spec.to_transformed(val);
-            prior.log_density(val, z)
-        })
-        .sum()
-}
-
 /// Render a per-start MLE TOML file. Human-readable; also the format
 /// `rewrite_rollup` reads back to reconstruct the rollup.
 ///
@@ -2101,22 +1774,11 @@ fn render_mle_toml(
     focal_names: &[&str],
     mle: &[f64],
     final_loglik: f64,
-    final_log_posterior: f64,
     diag: &crate::profile_diagnostics::PerStartDiagnostics,
 ) -> String {
     let mut body = String::new();
     body.push_str("# Per-start MLE for one profile grid point.\n\n");
     body.push_str(&format!("final_loglik = {}\n", final_loglik));
-    // gh#109: PMMH cells carry the MAP joint log-posterior. Other
-    // algorithms (IF2, NLopt) write NaN here; the rollup reads-or-NaN
-    // and the TSV column reads NaN as missing.
-    if final_log_posterior.is_finite() {
-        body.push_str(&format!("final_log_posterior = {}\n", final_log_posterior));
-    } else if final_log_posterior.is_nan() {
-        // Skip — keep mle.toml tight for IF2/NLopt cells.
-    } else {
-        body.push_str("final_log_posterior = -inf\n");
-    }
     body.push('\n');
     body.push_str("[focal]\n");
     for (name, v) in focal_names.iter().zip(focal_values.iter()) {
@@ -2134,19 +1796,16 @@ fn render_mle_toml(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim::inference::if2::EstimatedParam;
-    use sim::inference::types::Transform;
 
-    /// Byte-neutrality of the struct rewrite: `ProfileBaseLevel` /
-    /// `ProfileMethodLevel` must serialize EXACTLY as the `json!` literals
-    /// they replaced. Profile's identity was re-keyed once already (rw_sd /
-    /// init / conditioning / PF budget); this rewrite must not move it a
-    /// SECOND time, which would invalidate every leaf produced since.
+    /// `ProfileBaseLevel` / `ProfileMethodLevel` serialize exactly as these
+    /// `json!` literals: the hashed shape of each identity level, stated
+    /// once, so a field added to or dropped from either struct is a
+    /// deliberate, visible re-key rather than a silent one.
     ///
     /// `digest_value` canonicalizes (sorts keys recursively), so equality of
     /// the serialized values is what matters, not field order.
     #[test]
-    fn identity_levels_are_byte_identical_to_the_literals_they_replaced() {
+    fn identity_levels_serialize_as_the_stated_literals() {
         let fixed: Vec<String> = vec!["N0".into()];
         let priors: Vec<(String, String)> = vec![("beta".into(), "log_normal".into())];
         let fit_toml: Option<String> = Some("abc123".into());
@@ -2166,8 +1825,7 @@ mod tests {
             "priors":      priors,
         });
         assert_eq!(base_struct, base_literal,
-            "ProfileBaseLevel must reproduce the literal — otherwise every \
-             stored profile leaf re-keys a second time");
+            "ProfileBaseLevel must reproduce the literal");
 
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("N0", Some(5.0))];
         let init = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
@@ -2176,7 +1834,6 @@ mod tests {
             if2: ProfileIf2Knobs {
                 particles: 30, iterations: 5, cooling: 0.7, dt: 1.0, starts: 1,
             },
-            pmmh: ProfilePmmhKnobs { steps: 0, particles: 0 },
             rw_sd: &rw_sd,
             rw_sd_auto: false,
             init: &init,
@@ -2186,7 +1843,6 @@ mod tests {
             "algorithm": "if2",
             "if2": { "particles": 30usize, "iterations": 5usize,
                      "cooling": 0.7, "dt": 1.0, "starts": 1usize },
-            "pmmh": { "steps": 0usize, "particles": 0usize },
             "rw_sd": rw_sd,
             "rw_sd_auto": false,
             "init": init,
@@ -2195,129 +1851,6 @@ mod tests {
         assert_eq!(method_struct, method_literal,
             "ProfileMethodLevel must reproduce the literal");
     }
-
-    /// gh#118 regression: `log_posterior` in profile output was built
-    /// from the nuisance-only prior sum, silently excluding focal-
-    /// parameter prior contributions. The expected behaviour is that
-    /// `log_posterior = log_likelihood + Σ log_prior(ALL estimated
-    /// parameters)`, matching `camdl fit run`'s definition. This
-    /// regression pins the focal-prior offset computation against the
-    /// hand-computed values in the gh#118 forensic table on the
-    /// wa_weak seed-timing model.
-    #[test]
-    fn focal_log_prior_offset_matches_gh118_forensic_table() {
-        use sim::inference::prior::{Prior, Density};
-
-        // From gh#118: model has two focal params
-        //   tau:    instant ~ uniform(lower=-86, upper=0); pinned at -5
-        //   n_seed: count   ~ log_normal(mu=log 5, sigma=1); pinned at 100
-        let tau_spec = EstimatedParam {
-            name: "tau".into(), index: 0, initial: -5.0, rw_sd: 0.0,
-            transform: Transform::None,
-            lower: -86.0, upper: 0.0,
-            rw_sd_auto: false, perturb_only_at_t0: false,
-        };
-        let n_seed_spec = EstimatedParam {
-            name: "n_seed".into(), index: 1, initial: 100.0, rw_sd: 0.0,
-            transform: Transform::Log { lo: 1.0, hi: 1000.0 },
-            lower: 1.0, upper: 1000.0,
-            rw_sd_auto: false, perturb_only_at_t0: false,
-        };
-        let tau_prior = Prior::Fixed(Density::Uniform { lower: -86.0, upper: 0.0 });
-        let n_seed_prior = Prior::Fixed(Density::TransformedNormal {
-            mean: 5.0_f64.ln(), sd: 1.0,
-        });
-
-        let offset = compute_focal_log_prior_offset(
-            &[tau_spec, n_seed_spec],
-            &[tau_prior, n_seed_prior],
-            &[-5.0, 100.0],
-        );
-
-        // Hand-computed reference values from gh#118 (issue body §"Evidence"):
-        //   log_prior(τ uniform[-86, 0] at -5)         = -ln(86)
-        //                                              ≈ -4.4543
-        //   log_prior(n_seed LogN(log 5, 1) at 100)
-        //     = -ln(100) - ½ ln(2π) - ½ ((ln 100 - ln 5)/1)²
-        //     = -4.6052 - 0.9189 - 4.4878
-        //     ≈ -10.0119
-        //   total ≈ -14.4662
-        let expected = -(86.0_f64.ln())
-                     + (-(100.0_f64.ln())
-                        - 0.5 * (2.0 * std::f64::consts::PI).ln()
-                        - 0.5 * ((100.0_f64.ln() - 5.0_f64.ln()) / 1.0).powi(2));
-        assert!((offset - expected).abs() < 1e-9,
-            "offset {} does not match analytic expected {}", offset, expected);
-        // Sanity-check the analytic value lines up with the issue's
-        // reported gap (+14.467 with 3-decimal precision in the issue).
-        assert!((offset - (-14.4662)).abs() < 1e-3,
-            "offset {} does not match gh#118 forensic table -14.4662", offset);
-    }
-
-    /// Focal value outside a Uniform prior's support produces
-    /// -∞ — the cell is at zero prior probability. The wiring must
-    /// surface this as a non-finite log_posterior (NaN sentinel in
-    /// the emitted mle.toml), not a spuriously finite number.
-    #[test]
-    fn focal_log_prior_offset_out_of_support_is_neg_infinity() {
-        use sim::inference::prior::{Prior, Density};
-
-        let spec = EstimatedParam {
-            name: "tau".into(), index: 0, initial: -100.0, rw_sd: 0.0,
-            transform: Transform::None,
-            lower: -86.0, upper: 0.0,
-            rw_sd_auto: false, perturb_only_at_t0: false,
-        };
-        let prior = Prior::Fixed(Density::Uniform { lower: -86.0, upper: 0.0 });
-        let offset = compute_focal_log_prior_offset(
-            &[spec], &[prior], &[-100.0],
-        );
-        assert!(offset.is_infinite() && offset < 0.0,
-            "expected NEG_INFINITY, got {}", offset);
-    }
-
-    /// Empty focal set (1D-profile-on-the-flat-case or
-    /// no-focal-priors path): offset is exactly zero.
-    #[test]
-    fn focal_log_prior_offset_empty_is_zero() {
-        let offset = compute_focal_log_prior_offset(&[], &[], &[]);
-        assert_eq!(offset, 0.0);
-    }
-
-    // ── gh#102 (H10): profile-PMMH steps-vs-burn-in guard ─────────────
-
-    #[test]
-    fn profile_pmmh_steps_below_burn_in_rejected() {
-        // steps < burn_in: every sample is burned → empty diagnostics.
-        let err = validate_profile_pmmh_steps(50, PROFILE_PMMH_BURN_IN)
-            .expect_err("steps below burn-in must be rejected");
-        assert!(err.contains("50") && err.contains("100"),
-            "error must report the offending steps and the burn-in: {}", err);
-        assert!(err.contains("burn-in") && err.contains("--pmmh-steps"),
-            "error must name the cause and the flag to fix: {}", err);
-        // Suggested fix is burn_in + 1.
-        assert!(err.contains("101"),
-            "error must suggest a working steps value (burn_in + 1): {}", err);
-    }
-
-    #[test]
-    fn profile_pmmh_steps_equal_burn_in_rejected() {
-        // Boundary: steps == burn_in is still degenerate (0 post-burn-in).
-        assert!(validate_profile_pmmh_steps(PROFILE_PMMH_BURN_IN, PROFILE_PMMH_BURN_IN)
-            .is_err(),
-            "steps == burn-in leaves zero post-burn-in samples — must reject");
-    }
-
-    #[test]
-    fn profile_pmmh_steps_above_burn_in_ok() {
-        // Control: steps > burn_in leaves a non-empty post-burn-in chain.
-        assert!(validate_profile_pmmh_steps(PROFILE_PMMH_BURN_IN + 1, PROFILE_PMMH_BURN_IN)
-            .is_ok(),
-            "steps just above burn-in must pass");
-        assert!(validate_profile_pmmh_steps(5000, PROFILE_PMMH_BURN_IN).is_ok(),
-            "a realistic chain length must pass");
-    }
-
 
     // ── starts_values_from_init_method: the starts rule's point ───────
     //
@@ -2379,12 +1912,7 @@ mod tests {
             "lhs must supply no base values");
     }
 
-    // ── gh#109: log_posterior surfaces in mle.toml + profile TSV ──────
-    //
-    // PMMHResult exposes map_log_posterior alongside map_loglik; the
-    // pre-gh#109 profile pipeline dropped the posterior at the per-cell
-    // closure. These tests pin the new plumbing through render_mle_toml,
-    // parse_mle_toml, and the rollup TSV header.
+    // ── render_mle_toml: the per-start leaf body ──────────────────────
 
     fn estimated_param(name: &str, index: usize) -> sim::inference::if2::EstimatedParam {
         sim::inference::if2::EstimatedParam {
@@ -2397,44 +1925,20 @@ mod tests {
     }
 
     #[test]
-    fn render_mle_toml_emits_final_log_posterior_when_finite() {
-        // PMMH cell: both fields written, transparent to a TOML round-trip.
-        let if2 = vec![estimated_param("beta", 0), estimated_param("gamma", 1)];
-        let diag = crate::profile_diagnostics::PerStartDiagnostics {
-            algo: Some(crate::profile_diagnostics::DiagAlgo::Pmmh),
-            completed: true,
-            acc_rate: Some(0.3),
-            iterations_used: None,
-            cooling_final: None,
-            loglik_trace:        vec![-12.0, -11.5, -11.0],
-            log_posterior_trace: vec![-10.5, -10.0, -9.5],
-        };
-        let body = render_mle_toml(
-            &if2, &[25.0], &["R0"], &[0.42, 0.10],
-            -11.0, -9.5, &diag,
-        );
-        assert!(body.contains("final_loglik = -11"),
-            "final_loglik must appear: {}", body);
-        assert!(body.contains("final_log_posterior = -9.5"),
-            "final_log_posterior must appear with the supplied value: {}", body);
-        assert!(body.contains("log_posterior_trace ="),
-            "[diagnostics] log_posterior_trace must appear: {}", body);
-    }
-
-    #[test]
-    fn render_mle_toml_omits_final_log_posterior_when_nan() {
-        // IF2 / NLopt cell: no posterior concept. Field should be
-        // skipped entirely (mle.toml stays tight; readers fall back
-        // to NaN at parse time).
+    fn render_mle_toml_writes_loglik_focal_mle_and_diagnostics() {
+        // The whole body of one IF2 / nl-* leaf, pinned byte for byte: the
+        // leaf is what the deferred rollup (gh#154) reads back.
         let if2 = vec![estimated_param("beta", 0)];
         let diag = crate::profile_diagnostics::PerStartDiagnostics::default();
-        let body = render_mle_toml(
-            &if2, &[25.0], &["R0"], &[0.42],
-            -11.0, f64::NAN, &diag,
+        let body = render_mle_toml(&if2, &[25.0], &["R0"], &[0.42], -11.0, &diag);
+        assert_eq!(
+            body,
+            "# Per-start MLE for one profile grid point.\n\n\
+             final_loglik = -11\n\n\
+             [focal]\nR0 = 25\n\n\
+             [mle]\nbeta = 0.42\n\n\
+             [diagnostics]\ncompleted = false\n",
         );
-        assert!(body.contains("final_loglik = -11"));
-        assert!(!body.contains("final_log_posterior"),
-            "NaN log_posterior must be omitted, not emitted as 'nan': {}", body);
     }
 
 }

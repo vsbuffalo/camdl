@@ -89,7 +89,6 @@ INFERENCE_TESTS=(
     rust/crates/cli/tests/synthetic_fit_grid.rs
     rust/crates/cli/tests/profile_priors.rs
     rust/crates/cli/tests/profile_diagnostics.rs
-    rust/crates/cli/tests/profile_pmmh.rs
     rust/crates/cli/tests/profile_multi_stream.rs
     rust/crates/cli/tests/survey_top_k_pmmh.rs
     rust/crates/cli/tests/survey_top_k_pgas.rs

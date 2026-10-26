@@ -225,7 +225,7 @@ pub const NUTS_STEER: &str =
 
 /// Wire-string → [`FitAlgorithm`]; `None` for any name not in the registry
 /// vocabulary (the inverse of [`FitAlgorithm::as_str`]).
-fn parse_algorithm(s: &str) -> Option<FitAlgorithm> {
+pub(crate) fn parse_algorithm(s: &str) -> Option<FitAlgorithm> {
     Some(match s {
         "if2" => FitAlgorithm::If2,
         "pgas" => FitAlgorithm::Pgas,

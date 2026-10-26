@@ -652,13 +652,6 @@ fn show_profile_record(leaf: &cas_read::Leaf, rel_path: &str, created: SystemTim
                         if n_chains == 1 { "" } else { "s" });
                 }
             }
-            if let Some(sw) = prov.get("suppressed_warnings").and_then(|v| v.as_array()) {
-                if !sw.is_empty() {
-                    let items: Vec<&str> = sw.iter().filter_map(|v| v.as_str()).collect();
-                    println!("{}", "suppressed warnings".bright_black());
-                    println!("  {}", items.join(", "));
-                }
-            }
         }
     }
     println!("{}", "created".bright_black());

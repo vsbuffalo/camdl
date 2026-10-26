@@ -727,10 +727,11 @@ independently.
 
 ### Priors and precedence
 
-Both `camdl fit run` and `camdl profile --algorithm pmmh` resolve priors for
-each estimated parameter via a three-tier precedence chain: fit-toml > model-IR
-`~` syntax > flat. The behaviour at tier 3 differs between the two subcommands
-(warn vs error) — see below.
+`camdl fit run` resolves priors for each estimated parameter via a three-tier
+precedence chain: fit-toml > model-IR `~` syntax > flat. `camdl profile`
+resolves the same chain but only records the result: every profile cell is a
+maximization that reads no prior. The behaviour at tier 3 differs between the
+two subcommands — see below.
 
 **Tier 1 — fit-toml priors (highest).** The fit toml's
 `[estimate.<param>.prior]` block wins over any other source. For `fit run` the
@@ -759,12 +760,10 @@ out of N fit tomls and into one model file is what gh#75 unblocked.
 **Tier 3 — `Prior::Flat` (last resort).** Improper uniform. The behaviour at
 this tier is **asymmetric across subcommands**:
 
-- `camdl profile`: tier 3 is a _silent fallback_ that emits a structured warning
-  naming the affected parameters and citing the two remedies (declare in the
-  model file or supply via `--fit`). Suppress with `--suppress-warnings` (loud —
-  the waiver is recorded into `run.json`'s `suppressed_warnings`). Per-cell PMMH
-  with flat priors is recoverable by spot-checking per-cell parameter values, so
-  silent-with-warning is the right shape.
+- `camdl profile`: tier 3 is recorded as `flat_fallback` in the profile-base
+  sidecar, with no warning. The cells (`if2`, `nl-*`) maximize the likelihood,
+  so the prior changes nothing they compute; only `--starts from_prior` reads
+  it, to draw starting points.
 
 - `camdl fit run`: tier 3 is a **hard error** at config-load time (the fit
   refuses to start). The downstream interpretation of a fit-run chain —
@@ -806,14 +805,6 @@ To proceed, do one of:
 ```
 
 ```bash
-# Profile-posterior sweep: --fit supplies priors and bounds
-camdl profile model.camdl --data cases.tsv \
-    --sweep "tau=lin(-35,-1,30)" \
-    --algorithm pmmh --pmmh-steps 1500 --pmmh-particles 800 \
-    --rw-sd auto --n-starts 3 \
-    --fit fits/profile_tau.toml \
-    --output results/profile_tau_posterior.tsv
-
 # Bayesian fit with priors in the model file (no duplication in N fits)
 camdl fit run fits/synth.toml --seed 0
 ```
@@ -972,24 +963,19 @@ The full list:
 
 | Column                 | Algorithm | Meaning                                                                                                                                                                                                      |
 | ---------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `acc_rate_avg`         | PMMH      | Mean MH acceptance rate across the K `--starts` chains. Post-burn-in (matches `PMMHResult.acceptance_rate`).                                                                                                 |
-| `acc_rate_min`         | PMMH      | Minimum acceptance rate across the K chains. Surfaces "one chain stalled at 2%" failures the mean would hide.                                                                                                |
 | `loglik_spread_starts` | all       | `max − min` of per-start final log-likelihoods. > ~5 nats means the starts disagree on the basin.                                                                                                            |
-| `loglik_rhat_starts`   | PMMH, IF2 | Gelman–Rubin R̂ on the per-start log-likelihood traces (Gelman & Rubin 1992, _Statist. Sci._ 7(4); Brooks & Gelman 1998 corrected variant). > 1.05 is the conventional "chains haven't agreed yet" threshold. |
+| `loglik_rhat_starts`   | IF2       | Gelman–Rubin R̂ on the per-start log-likelihood traces (Gelman & Rubin 1992, _Statist. Sci._ 7(4); Brooks & Gelman 1998 corrected variant). > 1.05 is the conventional "chains haven't agreed yet" threshold. |
 | `starts_n_completed`   | all       | Count of starts that produced a finite final loglik (didn't diverge).                                                                                                                                        |
 | `iterations_used`      | IF2       | Final cooling-step index reached (= `--iterations` on normal completion).                                                                                                                                    |
 | `cooling_final`        | IF2       | Mean across estimated parameters of the final iteration's `effective_rw_sd` — the _actual_ ending perturbation SD, not the target.                                                                           |
 
-For algorithms that don't supply a given column (e.g. `acc_rate_avg` on an IF2
-run, `iterations_used` on a PMMH run), the cell renders as `NaN` (capital N —
-camdl's TSV NaN convention).
+For algorithms that don't supply a given column (e.g. `iterations_used` on an
+`nl-*` run), the cell renders as `NaN` (capital N — camdl's TSV NaN convention).
 
 **The K<3 rule.** `loglik_rhat_starts` is `NaN` when fewer than three of the K
 starts have a usable trace. Gelman–Rubin R̂ is undefined at K=1 and unstable at
 K=2; the rule prevents a spurious diagnostic from a single-chain spike. To get a
-finite R̂ supply `--n-starts 3` or more, _and_ run the per-cell inner loop long
-enough to produce post-burn-in samples (`--pmmh-steps` must exceed the
-hard-coded `burn_in = 100` for PMMH).
+finite R̂ supply `--n-starts 3` or more.
 
 The diagnostic R̂ is computed on log-likelihood traces, not on per-parameter
 posteriors, so it is a chain-level "are these starts walking the same basin"

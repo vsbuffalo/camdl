@@ -5438,17 +5438,12 @@ To proceed, do one of:
         likelihood (scaled-likelihood posterior).
 ```
 
-`camdl profile --algorithm pmmh`, per-cell PMMH — same first three tiers, then:
-
-```
-4. Prior::Flat  → source "flat (default)", with a WARNING naming each parameter
-```
-
-Profile warns rather than errors because a per-cell MLE-as-MAP is recoverable by
-spot-checking the per-cell values. Suppress the warning with
-`--suppress-warnings` (or
-`[diagnostics] suppress = ["profile_flat_prior_fallback"]` in a supplied fit
-toml) — the choice is recorded in `run.json` either way.
+`camdl profile` resolves the same first three tiers, then falls back to
+`Prior::Flat` (source `flat_fallback`) without a warning: every profile cell is
+a maximization (`if2` or an `nl-*` optimizer) that reads no prior, so the
+resolution is provenance only. It is written to the profile-base sidecar and
+keys the profile's base identity. `--starts from_prior` draws starting points
+from the resolved priors.
 
 Per-parameter provenance is written to `run.json` under `resolved_priors`, with
 sources `fit_toml`, `model_ir`, `flat_explicit`, `flat_fallback`.
@@ -6297,9 +6292,8 @@ mirror).
 --cooling F                 (default 0.95)          --rw-sd SPEC
 --algorithm NAME            per-cell algorithm (default if2); pair with --backend
 --backend NAME              chain_binomial (default) or ode
---pmmh-steps N / --pmmh-particles N                     (PMMH only; 500/500)
---fit PATH                  fit.toml supplying priors, bounds and the fixed list
---suppress-warnings         silence the flat-prior fallback warning
+--fit PATH                  fit.toml supplying the estimated set, bounds and the
+                            fixed list
 --seeds SPEC                run the whole grid at each seed (multi-seed sensitivity)
 --data / --obs / --time-format / --dt / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates / --pf-max-substeps

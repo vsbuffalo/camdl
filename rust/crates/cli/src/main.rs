@@ -4606,7 +4606,7 @@ fn generate_uniform_draws(
 ///
 /// gh#86: resolves priors through the three-tier precedence chain
 /// (fit_toml > model_ir > flat) shared with `camdl fit run` (gh#75) and
-/// `camdl profile --algorithm pmmh` (gh#73). This is the load-bearing
+/// `camdl profile`'s prior provenance (gh#73). This is the load-bearing
 /// change: previously the fit-toml side was the only consulted source,
 /// so a model declaring `~ <dist>` on every parameter would still be
 /// rejected if the fit toml's [estimate] blocks omitted `prior = { ... }`.

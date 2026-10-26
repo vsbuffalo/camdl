@@ -2609,10 +2609,7 @@ impl FitConfig {
     /// The error refuses to start the fit, so downstream consumers of
     /// `fit_summary.json` (which treat the chain as the canonical
     /// posterior) never see a chain that silently targeted the
-    /// unconditioned likelihood. Profile's per-cell PMMH still warns
-    /// rather than errors on flat fallback because per-cell MLE-as-MAP
-    /// is a recoverable case; `fit run` is the authoritative-posterior
-    /// surface and the bar is higher.
+    /// unconditioned likelihood.
     pub fn validate_priors_present(
         &self,
         ir_prior_params: &BTreeSet<&str>,

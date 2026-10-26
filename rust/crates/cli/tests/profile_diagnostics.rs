@@ -13,10 +13,6 @@
 //!
 //! Schema asserted in these tests:
 //!
-//! * PMMH per-cell columns:
-//!   `acc_rate_avg`, `acc_rate_min`,
-//!   `loglik_spread_starts`, `loglik_rhat_starts`,
-//!   `starts_n_completed`.
 //! * IF2 per-cell columns:
 //!   `iterations_used`, `cooling_final`,
 //!   `loglik_spread_starts`, `loglik_rhat_starts`,
@@ -161,43 +157,6 @@ fn parse_cell(s: &str) -> f64 {
     }
 }
 
-/// Common harness: run `camdl profile --algorithm <alg>` on the SIR
-/// fixture with `--n-starts <k>`. Caller picks the algorithm-specific
-/// hyperparams via `extra_args`.
-fn run_profile_pmmh(
-    bin: &Path, out_root: &Path, ir: &Path, data: &Path,
-    starts: usize, seed: u64,
-) -> std::process::Output {
-    let out_tsv = out_root.join("profile.tsv");
-    let args: Vec<String> = vec![
-        "profile".into(), ir.to_string_lossy().into_owned(),
-        "--scenario".into(), "baseline".into(),
-        "--data".into(), data.to_string_lossy().into_owned(),
-        "--obs".into(), "cases".into(),
-        "--sweep".into(), "beta=lin(0.2,0.4,2)".into(),
-        "--algorithm".into(), "pmmh".into(),
-        // PMMH config has burn_in = 100 (see cli/src/profile.rs);
-        // the loglik trace populates only post-burn-in. Use 200 so
-        // we get ~100 post-burn samples → enough for Rhat at K>=3.
-        "--pmmh-steps".into(), "200".into(),
-        "--pmmh-particles".into(), "30".into(),
-        "--particles".into(), "30".into(),
-        "--iterations".into(), "5".into(),
-        "--n-starts".into(), format!("{}", starts),
-        "--rw-sd".into(), "auto".into(),
-        "--fixed".into(), "N0=1000".into(),
-        "--output".into(), out_tsv.to_string_lossy().into_owned(),
-        "--seed".into(), format!("{}", seed),
-        "--suppress-warnings".into(),
-    ];
-    Command::new(bin)
-        .env("CAMDL_OUTPUT_DIR", out_root)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .args(args.iter().map(|s| s.as_str()))
-        .output()
-        .expect("spawn camdl profile pmmh")
-}
-
 fn run_profile_if2(
     bin: &Path, out_root: &Path, ir: &Path, data: &Path,
     starts: usize, seed: u64,
@@ -232,61 +191,7 @@ fn run_profile_if2(
 #[ignore = "gh#154: asserts the per-cell diagnostic rollup (summary.tsv), the \
             deferred M4 derived view; raw per-start [diagnostics] survive per \
             leaf (see profile_leaf_mle_carries_per_start_diagnostics)"]
-fn profile_pmmh_emits_acc_rate_columns() {
-    let bin = camdl_bin();
-    if camdlc_bin().is_none() { return }
-    let tmp = tempdir("pmmh_acc_rate");
-    let (ir, data) = write_fixture(tmp.path());
-    let out_root = tmp.path().join("out");
-
-    let output = run_profile_pmmh(&bin, &out_root, &ir, &data, 3, 1);
-    assert!(output.status.success(),
-        "profile pmmh failed: stderr=\n{}",
-        String::from_utf8_lossy(&output.stderr));
-
-    let (headers, rows) = read_summary_tsv(&out_root);
-    assert!(!rows.is_empty(), "summary.tsv has no data rows");
-
-    // Every required PMMH diagnostic column must be present.
-    for col in ["acc_rate_avg", "acc_rate_min",
-                "loglik_spread_starts", "loglik_rhat_starts",
-                "starts_n_completed"] {
-        assert!(headers.contains(&col.to_string()),
-            "summary.tsv must declare column {:?}. headers={:?}",
-            col, headers);
-    }
-
-    // Acceptance rates are finite probabilities for every cell.
-    let i_avg = col_index(&headers, "acc_rate_avg");
-    let i_min = col_index(&headers, "acc_rate_min");
-    let i_completed = col_index(&headers, "starts_n_completed");
-    for (ri, row) in rows.iter().enumerate() {
-        let avg = parse_cell(&row[i_avg]);
-        let min = parse_cell(&row[i_min]);
-        let n_completed: f64 = parse_cell(&row[i_completed]);
-        assert!(avg.is_finite() && (0.0..=1.0).contains(&avg),
-            "row {} acc_rate_avg = {} must be a finite probability", ri, avg);
-        assert!(min.is_finite() && (0.0..=1.0).contains(&min),
-            "row {} acc_rate_min = {} must be a finite probability", ri, min);
-        assert!(min <= avg + 1e-9,
-            "row {} acc_rate_min ({}) must be <= acc_rate_avg ({})",
-            ri, min, avg);
-        // 3 starts requested; with --suppress-warnings & flat priors,
-        // a 50-step PMMH chain should not diverge on this fixture.
-        // The test asserts the column populates with an integer count,
-        // not a particular value (induced-divergence is covered by a
-        // separate test).
-        assert!(n_completed >= 0.0,
-            "row {} starts_n_completed = {} must be non-negative",
-            ri, n_completed);
-    }
-}
-
-#[test]
-#[ignore = "gh#154: asserts the per-cell diagnostic rollup (summary.tsv), the \
-            deferred M4 derived view; raw per-start [diagnostics] survive per \
-            leaf (see profile_leaf_mle_carries_per_start_diagnostics)"]
-fn profile_pmmh_loglik_rhat_nan_at_k_lt_3() {
+fn profile_loglik_rhat_nan_at_k_lt_3() {
     // Gelman-Rubin R-hat is undefined / unstable for K < 3 chains.
     // With --n-starts 2 the column must hold NaN; the K<3 rule is
     // part of the documented schema.
@@ -296,9 +201,9 @@ fn profile_pmmh_loglik_rhat_nan_at_k_lt_3() {
     let (ir, data) = write_fixture(tmp.path());
     let out_root = tmp.path().join("out");
 
-    let output = run_profile_pmmh(&bin, &out_root, &ir, &data, 2, 1);
+    let output = run_profile_if2(&bin, &out_root, &ir, &data, 2, 1);
     assert!(output.status.success(),
-        "profile pmmh failed: stderr=\n{}",
+        "profile if2 failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
 
     let (headers, rows) = read_summary_tsv(&out_root);
@@ -315,7 +220,7 @@ fn profile_pmmh_loglik_rhat_nan_at_k_lt_3() {
 #[ignore = "gh#154: asserts the per-cell diagnostic rollup (summary.tsv), the \
             deferred M4 derived view; raw per-start [diagnostics] survive per \
             leaf (see profile_leaf_mle_carries_per_start_diagnostics)"]
-fn profile_pmmh_loglik_rhat_finite_at_k_3() {
+fn profile_loglik_rhat_finite_at_k_3() {
     // At K=3 starts the K<3 rule lifts and R-hat must hold a finite
     // numeric value.
     let bin = camdl_bin();
@@ -324,9 +229,9 @@ fn profile_pmmh_loglik_rhat_finite_at_k_3() {
     let (ir, data) = write_fixture(tmp.path());
     let out_root = tmp.path().join("out");
 
-    let output = run_profile_pmmh(&bin, &out_root, &ir, &data, 3, 1);
+    let output = run_profile_if2(&bin, &out_root, &ir, &data, 3, 1);
     assert!(output.status.success(),
-        "profile pmmh failed: stderr=\n{}",
+        "profile if2 failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
 
     let (headers, rows) = read_summary_tsv(&out_root);
@@ -346,8 +251,7 @@ fn profile_pmmh_loglik_rhat_finite_at_k_3() {
 fn profile_if2_emits_diagnostic_columns() {
     // IF2 path exposes per-cell iterations_used + cooling_final plus
     // the shared loglik_spread / loglik_rhat / starts_n_completed
-    // columns. acc_rate_* is NaN for IF2 (the algorithm has no MH
-    // acceptance step).
+    // columns.
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("if2_diag");
@@ -402,11 +306,11 @@ fn profile_tsv_schema_stable_across_runs() {
     let out_a = tmp.path().join("out_a");
     let out_b = tmp.path().join("out_b");
 
-    let out1 = run_profile_pmmh(&bin, &out_a, &ir, &data, 3, 1);
+    let out1 = run_profile_if2(&bin, &out_a, &ir, &data, 3, 1);
     assert!(out1.status.success(),
         "profile (seed=1) failed: stderr=\n{}",
         String::from_utf8_lossy(&out1.stderr));
-    let out2 = run_profile_pmmh(&bin, &out_b, &ir, &data, 3, 42);
+    let out2 = run_profile_if2(&bin, &out_b, &ir, &data, 3, 42);
     assert!(out2.status.success(),
         "profile (seed=42) failed: stderr=\n{}",
         String::from_utf8_lossy(&out2.stderr));
@@ -436,11 +340,8 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
     // Why we don't do better via the binary path: divergence as
     // gh#74 defines it ("a start that completed without divergence")
     // requires the per-cell inference to *return* a non-finite final
-    // loglik. For PMMH that requires every PF call across the chain
-    // to fail (the chain falls back to the initial-params loglik
-    // otherwise — see pmmh.rs:350-356). For IF2 it requires the IF2
-    // engine itself to error or the clean-PF re-eval to return
-    // -Inf. Both are rare on a small SIR fixture even with 2-particle
+    // loglik. For IF2 it requires the IF2 engine itself to error or
+    // the clean-PF re-eval to return -Inf. That is rare on a small SIR fixture even with 2-particle
     // filters and extreme sweep values, so the integration test
     // exercises the "common path" (K everywhere) and the unit test
     // covers the < K case.
@@ -457,17 +358,14 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
         "--data".into(), data.to_string_lossy().into_owned(),
         "--obs".into(), "cases".into(),
         "--sweep".into(), "beta=lin(2.5,4.5,2)".into(),
-        "--algorithm".into(), "pmmh".into(),
-        "--pmmh-steps".into(), "150".into(),
-        "--pmmh-particles".into(), "2".into(),
-        "--particles".into(), "30".into(),
+        "--algorithm".into(), "if2".into(),
+        "--particles".into(), "2".into(),
         "--iterations".into(), "5".into(),
         "--n-starts".into(), "3".into(),
         "--rw-sd".into(), "auto".into(),
         "--fixed".into(), "N0=1000".into(),
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
         "--seed".into(), "7".into(),
-        "--suppress-warnings".into(),
     ];
     let output = Command::new(&bin)
         .env("CAMDL_OUTPUT_DIR", &out_root)
@@ -520,22 +418,6 @@ fn profile_leaf_mle_carries_per_start_diagnostics() {
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("leaf_diag");
     let (ir, data) = write_fixture(tmp.path());
-
-    // PMMH: the per-start [diagnostics] carries algorithm + acc_rate.
-    let out_pmmh = tmp.path().join("out_pmmh");
-    let o = run_profile_pmmh(&bin, &out_pmmh, &ir, &data, 1, 1);
-    assert!(o.status.success(), "pmmh profile failed:\n{}",
-        String::from_utf8_lossy(&o.stderr));
-    let pmmh_mles = collect_leaf_mle(&out_pmmh);
-    assert_eq!(pmmh_mles.len(), 2, "expected 2 pmmh leaves, got {}", pmmh_mles.len());
-    for mle in &pmmh_mles {
-        assert!(mle.contains("[diagnostics]"),
-            "leaf mle.toml missing [diagnostics] block:\n{}", mle);
-        assert!(mle.contains("algorithm = \"pmmh\""),
-            "pmmh leaf [diagnostics] must tag algorithm = pmmh:\n{}", mle);
-        assert!(mle.contains("acc_rate ="),
-            "pmmh leaf [diagnostics] must record acc_rate:\n{}", mle);
-    }
 
     // IF2: the per-start [diagnostics] is present and tagged if2.
     let out_if2 = tmp.path().join("out_if2");

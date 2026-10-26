@@ -1,22 +1,5 @@
-//! Shared prior-resolution chain for `camdl profile --algorithm pmmh`
-//! (gh#73) and `camdl fit run` Bayesian stages (gh#75).
-//!
-//! Background
-//! ----------
-//!
-//! Before gh#73 the profile-PMMH path hardcoded `Prior::Flat` for every
-//! estimated parameter at `profile.rs:1013-1021`, regardless of what
-//! priors the `.camdl` model file declared via `~` syntax or what a
-//! hypothetical fit toml would supply. The net effect was that
-//! `--algorithm pmmh` silently behaved as per-cell MLE with flat
-//! priors, which both contradicted the user's expectation
-//! ("`pmmh` implies posterior semantics") and produced per-cell
-//! parameter values outside the priors' plausibility support on real
-//! models (see the camdl-book seed-timing chapter incident in gh#73's
-//! body — `t_rep = −40` at a `Normal(4, 5)` prior; `n_seed = 1000`
-//! pinned at the bound). gh#73 introduced this module to fix the
-//! profile path; gh#75 extended the same resolver to `camdl fit run`
-//! Bayesian stages, with one semantic difference (see below).
+//! Shared prior-resolution chain for `camdl fit run` Bayesian stages
+//! (gh#75) and the prior provenance `camdl profile` records (gh#73).
 //!
 //! Precedence chain
 //! ----------------
@@ -43,10 +26,9 @@
 //! Profile vs fit run semantics for tier 3
 //! ---------------------------------------
 //!
-//! `camdl profile`: tier 3 is a *silent fallback* that emits a
-//! warning naming the affected parameters (see
-//! [`format_flat_fallback_warning`]). Per-cell IF2/PMMH with flat
-//! priors is recoverable by spot-checking per-cell parameter values.
+//! `camdl profile`: each cell is a maximization (IF2 or an nl-*
+//! optimizer) that reads no prior, so tier 3 is recorded as
+//! provenance ([`PriorSource::FlatFallback`]) and nothing more.
 //!
 //! `camdl fit run`: tier 3 is reachable ONLY via an *explicit
 //! opt-in* — `prior = { flat = {} }` in the fit toml. Implicit
@@ -92,10 +74,10 @@ pub enum PriorSource {
     /// compilation).
     ModelIr,
     /// Reached tier 3 (Prior::Flat) by silent fallback — neither
-    /// the fit toml nor the model IR supplied a prior. Only fires
-    /// in `camdl profile`'s per-cell PMMH path; `camdl fit run`
-    /// treats this case as a hard validation error before the
-    /// fit starts (gh#75). Warning-emitting case in profile.
+    /// the fit toml nor the model IR supplied a prior. Recorded as
+    /// provenance by `camdl profile`, whose cells read no prior;
+    /// `camdl fit run` treats this case as a hard validation error
+    /// before the fit starts (gh#75).
     FlatFallback,
     /// User explicitly opted into a flat prior via
     /// `prior = { flat = {} }` in the fit toml (gh#75). Distinct
@@ -138,8 +120,7 @@ pub struct ResolvedPrior {
 /// precedence chain (fit toml → model IR → flat). See module docs.
 ///
 /// `names` is the ordered list of estimated parameter names — typically
-/// `per_start_specs.iter().map(|p| p.name.clone()).collect()` at the
-/// profile-PMMH call site. The returned vector is in the same order.
+/// the non-focal estimated set at the profile call site. The returned vector is in the same order.
 ///
 /// `estimate` is the fit toml's `[estimate]` map; pass an empty
 /// `IndexMap` when `--fit` was not supplied (the resolver still walks
@@ -235,77 +216,6 @@ pub fn format_prior_override_warning(overrides: &[PriorOverride]) -> Option<Stri
          per-experiment override. If this override is not deliberate, delete\n  \
          `prior` from [estimate.<param>]; if it should apply to every fit, move\n  \
          it into the model's `~` declaration.\n");
-    Some(s)
-}
-
-/// Format the user-facing warning that fires when any resolved prior
-/// ended up as `Prior::Flat`. Returns `None` if no parameters fell
-/// through (no warning needed).
-///
-/// The text is intentionally structured (parameter table, two-line
-/// remediation, suppression instructions) so a future retrofit to a
-/// typed `DiagnosticKind::ProfileFlatPriorFallback { affected: ... }`
-/// variant (gh#72) can splice the same content without reflowing the
-/// surface.
-///
-/// `fit_toml_supplied` controls the per-param "reason" column and the
-/// suppression hint at the end. When `true`, the user passed `--fit`
-/// but the toml didn't declare priors for the affected params; when
-/// `false`, no `--fit` was supplied at all.
-pub fn format_flat_fallback_warning(
-    resolved:        &[ResolvedPrior],
-    fit_toml_supplied: bool,
-) -> Option<String> {
-    let affected: Vec<&ResolvedPrior> = resolved.iter()
-        .filter(|r| r.source == PriorSource::FlatFallback)
-        .collect();
-    if affected.is_empty() {
-        return None;
-    }
-
-    // Two-column reason table. Widths derived from the affected set so
-    // the output stays compact for the typical case (1-3 params).
-    let name_width = affected.iter()
-        .map(|r| r.param.len()).max().unwrap_or(9)
-        .max("parameter".len());
-
-    let reason_for = |_r: &ResolvedPrior| -> &'static str {
-        if fit_toml_supplied {
-            "--fit toml supplied but no [estimate.<param>.prior] block"
-        } else {
-            "no prior declared in model file (no `~` syntax) and no --fit toml supplied"
-        }
-    };
-
-    let mut s = String::new();
-    s.push_str(
-        "warning: profile is using flat priors for the following estimated\n\
-         parameters in the per-cell PMMH:\n\n");
-    s.push_str(&format!("  {:<width$}   reason\n", "parameter", width = name_width));
-    s.push_str(&format!("  {:-<width$}   {:-<60}\n", "", "", width = name_width));
-    for r in &affected {
-        s.push_str(&format!(
-            "  {:<width$}   {}\n",
-            r.param, reason_for(r), width = name_width,
-        ));
-    }
-    s.push_str("\nA flat prior gives the per-cell PMMH an MLE search, not posterior\n");
-    s.push_str("sampling — even though `--algorithm pmmh` is set. To fix:\n\n");
-    s.push_str("  (i)  Declare priors in the model file via `~` syntax for each\n");
-    s.push_str("       estimated parameter, OR\n");
-    s.push_str("  (ii) Supply a fit toml with `--fit <path.toml>` that has an\n");
-    s.push_str("       [estimate.<param>.prior] block for each estimated parameter.\n\n");
-    if fit_toml_supplied {
-        s.push_str(
-            "If flat priors are intentional, suppress this warning by setting\n\
-             `[diagnostics] suppress = [\"profile_flat_prior_fallback\"]` in the\n\
-             fit toml.\n");
-    } else {
-        s.push_str(
-            "If flat priors are intentional, suppress this warning by passing\n\
-             `--suppress-warnings` (or supplying a fit toml with the same\n\
-             `[diagnostics] suppress = [\"profile_flat_prior_fallback\"]` block).\n");
-    }
     Some(s)
 }
 
@@ -449,10 +359,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prior_falls_back_to_flat_with_warning_when_both_silent() {
+    fn resolve_prior_falls_back_to_flat_when_both_silent() {
         // gamma has no IR prior and isn't in the fit-toml estimate
-        // map. Resolution must fall through to Prior::Flat and the
-        // warning text must name gamma.
+        // map. Resolution must fall through to Prior::Flat.
         let model = mk_model(vec![mk_param("gamma", None)]);
         let estimate: IndexMap<String, EstimateSpecV2> = IndexMap::new();
 
@@ -461,18 +370,6 @@ mod tests {
         );
         assert_eq!(resolved[0].source, PriorSource::FlatFallback);
         assert!(matches!(resolved[0].prior, Prior::Fixed(sim::inference::prior::Density::Flat)));
-
-        // No fit toml supplied → "no --fit toml supplied" branch.
-        let warning = format_flat_fallback_warning(&resolved, false)
-            .expect("warning must fire when any param falls through to flat");
-        assert!(warning.contains("gamma"),
-            "warning must name affected parameter `gamma`. Got:\n{}", warning);
-        assert!(warning.contains("flat priors"),
-            "warning must explain the consequence (flat-prior semantics):\n{}", warning);
-        assert!(warning.contains("--fit"),
-            "warning must suggest --fit as a remedy:\n{}", warning);
-        assert!(warning.contains("model file"),
-            "warning must mention the model-file path as a remedy:\n{}", warning);
     }
 
     #[test]
@@ -495,31 +392,6 @@ mod tests {
         assert_eq!(resolved[0].source, PriorSource::FitToml);
         assert_eq!(resolved[1].source, PriorSource::ModelIr);
         assert_eq!(resolved[2].source, PriorSource::FlatFallback);
-
-        // Warning only lists delta.
-        let w = format_flat_fallback_warning(&resolved, true).unwrap();
-        assert!(w.contains("delta"), "warning must list delta. Got:\n{}", w);
-        assert!(!w.contains("\n  beta "),
-            "warning must NOT list beta (resolved from fit toml). Got:\n{}", w);
-        assert!(!w.contains("\n  gamma "),
-            "warning must NOT list gamma (resolved from IR). Got:\n{}", w);
-        // fit-toml-supplied wording differs from the no-toml case.
-        assert!(w.contains("[estimate.<param>.prior]") || w.contains("[estimate."),
-            "warning text for the fit-toml-supplied case should reference \
-             the [estimate.<param>.prior] block. Got:\n{}", w);
-    }
-
-    #[test]
-    fn no_warning_when_every_param_has_a_prior() {
-        let model = mk_model(vec![
-            mk_param("beta", Some(PriorDist::Normal(NormalPrior { mean: 0.0, sd: 1.0 }))),
-        ]);
-        let estimate: IndexMap<String, EstimateSpecV2> = IndexMap::new();
-        let resolved = resolve_priors_with_precedence(
-            &["beta".to_string()], &estimate, &model,
-        );
-        assert!(format_flat_fallback_warning(&resolved, false).is_none(),
-            "no warning when every parameter resolves to a non-flat prior");
     }
 
     /// gh#369: an override is a fit-toml prior on a parameter the model also
