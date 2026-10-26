@@ -290,65 +290,17 @@ pub fn resolve_intervention(
     Ok(())
 }
 
-/// The single due-ness check for a substep: which interventions fire at the
-/// boundary `t_end`, pre-split by lifecycle stage into an [`EffectBatch`]. This
-/// is the ONE place `time_to_step(t_end, grid_dt) + fire_steps.contains` lives —
-/// the events path (PROPOSE) and the interventions path (INTERVENE) each consume
-/// the batch instead of re-deriving due-ness, so the two stages can never
-/// disagree about what is due (the duplication this seam removes).
-///
-/// `current_step = time_to_step(t_end, grid_dt)` is computed ONCE. Interventions
-/// are scanned in DECLARATION ORDER (`model.model.interventions`); a firing one
-/// lands in `event_idx` if `always_active`, else `intervention_idx` — preserving
-/// the historical per-stage firing order exactly.
-///
-/// `grid_dt` is the nominal model dt the `fire_steps` step-index table was built
-/// on (`resolve_fire_steps(grid_dt, …)`), so the FIRING KEY is on `grid_dt`, not
-/// the realized `dt_actual`. They are equal under Snap and for on-grid Exact
-/// substeps; they diverge only when an inference filter clips a substep to land
-/// on an off-grid observation — the `StepClock` discipline of
-/// docs/dev/proposals/2026-06-07-scheduling-spine-v2.md §A.
-///
-/// `out` is caller-provided and reused: [`EffectBatch::clear`] resets it without
-/// freeing, so the hot inference path (one batch per particle per substep)
-/// allocates nothing per call.
-pub fn due_effects(
-    model: &CompiledModel,
-    fire_steps: &[std::collections::BTreeSet<i64>],
-    t_end: f64,
-    grid_dt: f64,
-    out: &mut crate::schedule::EffectBatch,
-) {
-    out.clear();
-    let current_step = crate::time::time_to_step(t_end, grid_dt);
-    for (iv_idx, iv) in model.model.interventions.iter().enumerate() {
-        if !fire_steps[iv_idx].contains(&current_step) {
-            continue;
-        }
-        if iv.kind.is_event() {
-            out.event_idx.push(iv_idx);
-        } else {
-            out.intervention_idx.push(iv_idx);
-        }
-    }
-}
-
-/// Split a flat list of due effect indices — the batch the timeline cursor
-/// reports at one effect boundary (`timeline_effects().batches[effect_idx]`) —
-/// into the lifecycle-stage halves of an [`EffectBatch`]: always-active EVENTS
-/// fire at PROPOSE (`event_idx`, fused with the kernel draw against the
-/// start-of-step snapshot); scheduled interventions fire at INTERVENE
-/// (`intervention_idx`, applied on the post-advance state). Indices are into
+/// Split a flat list of due effect indices — one batch of the run's
+/// [`EffectPlan`](crate::effect_plan::EffectPlan), declaration order — into the
+/// lifecycle-stage halves of an [`EffectBatch`]: always-active EVENTS fire at
+/// PROPOSE (`event_idx`, fused with the kernel draw against the start-of-step
+/// snapshot); scheduled interventions fire at INTERVENE (`intervention_idx`,
+/// applied on the post-advance state). Indices are into
 /// `model.model.interventions`, declaration order preserved.
 ///
-/// This is the ONE place the kind→stage routing lives for every Exact-INFERENCE
-/// caller (bootstrap PF / IF2 / PGAS producer). It replaces the
-/// former `due_events` `round(t_end/grid_dt)` event path: once events are
-/// registered on the timeline (`timeline_effects` no longer excludes them), the
-/// integrator LANDS on each event time and the cursor reports it in the batch, so
-/// firing is cursor-keyed for every kind — no `round()` on an off-grid,
-/// obs-anchored substep end (gh#216, the events arm). The Snap-forward backends
-/// keep their on-grid `round(t/dt)` key via [`due_effects`].
+/// The ONE place the kind→stage routing lives, for every path that applies a
+/// plan batch: the forward backends, the origin batch, the inference filters
+/// and the PGAS producers.
 pub fn split_due_batch(
     model: &CompiledModel,
     due: &[usize],
@@ -374,9 +326,9 @@ pub fn split_due_batch(
 /// start-of-step snapshot, then `Residual` (draining transfers / `Set`) against
 /// the post-inflow, post-transition state.
 ///
-/// `event_idx` (from [`due_effects`]) lists exactly the firing always-active
-/// interventions in declaration order — this function does NOT re-check
-/// `always_active` or `fire_steps`; it applies the list it was handed.
+/// `event_idx` (the event half of a plan batch, via [`split_due_batch`]) lists
+/// exactly the firing always-active interventions in declaration order — this
+/// function does not re-check due-ness; it applies the list it was handed.
 ///
 /// `dt` is `dt_actual` — the realized substep length driving the rate / amount
 /// evaluation (the `EvalCtx.dt` the resolved intervention exprs see).
@@ -1358,10 +1310,9 @@ mod tests {
             compartment: "W".into(),
             count: Expr::const_(-0.3),
         })]);
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![50.0_f64];
-        let err = apply_boundary_effects_continuous(&m, &fire, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0)
+        let err = apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0)
             .unwrap_err();
         assert!(
             matches!(err, SimError::NegativeCount { cause: NegativeCountCause::InterventionAddNegative, .. }),
@@ -1427,10 +1378,9 @@ mod tests {
     #[test]
     fn continuous_set_real_negative_is_hard_error() {
         let m = model_with(vec![Action::Set(SetAction { compartment: "W".into(), value: Expr::const_(-5.0) })]);
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![50.0_f64];
-        let err = apply_boundary_effects_continuous(&m, &fire, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0)
+        let err = apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0)
             .unwrap_err();
         assert!(
             matches!(err, SimError::NegativeCount { cause: NegativeCountCause::InterventionNegative, .. }),
@@ -1515,20 +1465,26 @@ mod tests {
         assert_eq!(real_s.values, vec![52.5]);
     }
 
-    /// Test shim: compute the due batch at `t_boundary` (the seam `due_effects`
-    /// owns) and apply it as the ODE boundary does — [`apply_event_phases`] on a
+    /// Test shim: the plan batch due at `t_boundary` (an Exact plan, as on the
+    /// ODE), applied as the ODE boundary does — [`apply_event_phases`] on a
     /// [`ContinuousArena`], then [`apply_interventions_continuous`].
     fn apply_boundary_effects_continuous(
         model: &CompiledModel,
-        fire_steps: &[std::collections::BTreeSet<i64>],
         int_vals: &mut [f64],
         real_vals: &mut [f64],
         params: &[f64],
         t_boundary: f64,
         dt: f64,
     ) -> Result<(), SimError> {
+        let plan = crate::effect_plan::EffectPlan::build(
+            model, params, 0.0, t_boundary,
+            crate::effect_plan::FireClock::Exact, crate::effect_plan::Origin::Init,
+        )?;
+        let idx = plan.times().iter()
+            .position(|&t| (t - t_boundary).abs() <= crate::schedule::EFFECT_EPS)
+            .expect("an effect is due at t_boundary");
         let mut batch = crate::schedule::EffectBatch::default();
-        super::due_effects(model, fire_steps, t_boundary, dt, &mut batch);
+        split_due_batch(model, plan.batch(idx), &mut batch);
         apply_event_phases(
             model, &batch.event_idx,
             &mut ContinuousArena { int: int_vals, real: real_vals },
@@ -1552,10 +1508,9 @@ mod tests {
         let m = model_with(vec![Action::FractionTransfer(FractionTransfer {
             src: "S".into(), dst: "I".into(), fraction: Expr::const_(0.5),
         })]);
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
         let mut int_vals = vec![704.69_f64, 0.0]; // S (local int 0), I (local int 1)
         let mut real_vals = vec![50.0_f64];        // W
-        apply_boundary_effects_continuous(&m, &fire, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
+        apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
         assert_eq!(int_vals[0], 704.69 - 352.345);
         assert_eq!(int_vals[1], 352.345);
         // Discrete would floor(704*0.5)=352 after rounding S to 704 — different.
@@ -1567,10 +1522,9 @@ mod tests {
         let m = model_with(vec![Action::Set(SetAction {
             compartment: "S".into(), value: Expr::const_(70.4),
         })]);
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![50.0_f64];
-        apply_boundary_effects_continuous(&m, &fire, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
+        apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
         assert_eq!(int_vals[0], 70.4); // exact, not round(70.4)=70
     }
 
@@ -1720,10 +1674,9 @@ mod tests {
         let m = model_two_real(vec![Action::AbsoluteTransfer(AbsoluteTransfer {
             src: "W1".into(), dst: "W2".into(), count: Expr::const_(3.5),
         })]);
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![10.0_f64, 0.0]; // W1=10, W2=0
-        apply_boundary_effects_continuous(&m, &fire, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
+        apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
         assert_eq!(real_vals[0], 6.5, "W1 = 10.0 - 3.5"); // NOT round(3.5)
         assert_eq!(real_vals[1], 3.5, "W2 = 0.0 + 3.5");
 
@@ -1731,10 +1684,9 @@ mod tests {
         let m = model_two_real(vec![Action::AbsoluteTransfer(AbsoluteTransfer {
             src: "W1".into(), dst: "W2".into(), count: Expr::const_(20.0),
         })]);
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![10.0_f64, 0.0];
-        apply_boundary_effects_continuous(&m, &fire, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
+        apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
         assert_eq!(real_vals[0], 0.0, "W1 drained, clamped to src");
         assert_eq!(real_vals[1], 10.0, "W2 received the clamped 10.0, not 20.0");
     }
@@ -1748,10 +1700,9 @@ mod tests {
         let m = model_two_real(vec![Action::FractionTransfer(FractionTransfer {
             src: "W1".into(), dst: "W2".into(), fraction: Expr::const_(0.337),
         })]);
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
         let mut int_vals = vec![100.0_f64, 0.0];
         let mut real_vals = vec![10.0_f64, 0.0]; // W1=10, W2=0
-        apply_boundary_effects_continuous(&m, &fire, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
+        apply_boundary_effects_continuous(&m, &mut int_vals, &mut real_vals, &m.default_params, 1.0, 1.0).unwrap();
         let moved = 10.0_f64 * 0.337; // exact f64 product, no floor
         assert_eq!(real_vals[0], 10.0 - moved, "W1 = 10.0 - 10.0*0.337 (exact, no floor)");
         assert_eq!(real_vals[1], moved, "W2 = 10.0*0.337 (exact, no floor)");
@@ -1760,11 +1711,9 @@ mod tests {
         assert!(moved > 3.0 && moved < 3.4, "moved ≈3.37, not the floored 3: {moved}");
     }
 
-    // ── due_effects: the centralized due-check ──────────────────────────────
+    // ── split_due_batch: the kind→stage routing ─────────────────────────────
     // One model with an always-active EVENT and a scheduled INTERVENTION, both
-    // firing at t=1 (step 1 at dt=1). due_effects must route the event into
-    // event_idx and the intervention into intervention_idx, in declaration
-    // order, and produce an empty batch off-step.
+    // firing at t=1.
 
     /// S/I/W scaffold with TWO interventions, declared in this order:
     ///   [0] `evt`  — always_active EVENT, fires at t=1
@@ -1783,7 +1732,7 @@ mod tests {
         };
         let m = Model {
             ic_grad: Default::default(),
-            name: "due_effects_test".into(),
+            name: "split_due_batch_test".into(),
             version: "0.1".into(),
             time_unit: "days".into(),
             description: None,
@@ -1839,18 +1788,6 @@ mod tests {
     }
 
     #[test]
-    fn due_effects_splits_event_and_intervention_at_same_step() {
-        let m = model_event_and_intervention();
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
-        let mut batch = crate::schedule::EffectBatch::default();
-        // t_end = 1.0, grid_dt = 1.0 → step 1: both the event (iv 0) and the
-        // intervention (iv 1) fire.
-        due_effects(&m, &fire, 1.0, 1.0, &mut batch);
-        assert_eq!(batch.event_idx.as_slice(), &[0], "always_active event → event_idx");
-        assert_eq!(batch.intervention_idx.as_slice(), &[1], "scheduled → intervention_idx");
-    }
-
-    #[test]
     fn split_due_batch_routes_by_kind_and_clears_on_reuse() {
         // The shared seam every Exact-inference caller routes through (gh#216
         // events arm): a flat due list — the timeline cursor's per-boundary batch
@@ -1875,21 +1812,10 @@ mod tests {
     }
 
     #[test]
-    fn due_effects_empty_off_step() {
-        let m = model_event_and_intervention();
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
-        let mut batch = crate::schedule::EffectBatch::default();
-        // t_end = 2.0 → step 2: nothing scheduled there.
-        due_effects(&m, &fire, 2.0, 1.0, &mut batch);
-        assert!(batch.is_empty(), "no effect due at step 2");
-        assert!(batch.event_idx.is_empty() && batch.intervention_idx.is_empty());
-    }
-
-    #[test]
-    fn due_effects_preserves_declaration_order() {
+    fn a_plan_batch_splits_in_declaration_order() {
         // Two always-active events and two scheduled interventions, interleaved
-        // in declaration order, all firing at the same step. Each stage's list
-        // must come out in declaration order (the byte-identical firing order).
+        // in declaration order, all firing at the same instant. The plan's batch
+        // and each stage's list must come out in declaration order.
         let mk = |name: &str, always: bool| Intervention {
             name: name.into(),
             base_name: None,
@@ -1912,22 +1838,15 @@ mod tests {
         let mut model = (*base0.model).clone();
         model.interventions = interventions;
         let base = CompiledModel::new(model).unwrap();
-        let fire = base.resolve_fire_steps(1.0, &base.default_params);
+        let plan = crate::effect_plan::EffectPlan::build(
+            &base, &base.default_params, 0.0, 2.0,
+            crate::effect_plan::FireClock::Grid { dt: 1.0 }, crate::effect_plan::Origin::Init,
+        ).unwrap();
+        assert_eq!(plan.batch_ending_substep(0), &[0, 1, 2, 3]);
         let mut batch = crate::schedule::EffectBatch::default();
-        due_effects(&base, &fire, 1.0, 1.0, &mut batch);
+        split_due_batch(&base, plan.batch_ending_substep(0), &mut batch);
         assert_eq!(batch.event_idx.as_slice(), &[0, 2], "events in declaration order");
         assert_eq!(batch.intervention_idx.as_slice(), &[1, 3], "interventions in declaration order");
     }
 
-    #[test]
-    fn due_effects_clears_the_reused_batch() {
-        // A batch reused across substeps must not accumulate stale indices.
-        let m = model_event_and_intervention();
-        let fire = m.resolve_fire_steps(1.0, &m.default_params);
-        let mut batch = crate::schedule::EffectBatch::default();
-        due_effects(&m, &fire, 1.0, 1.0, &mut batch); // fills it
-        assert!(!batch.is_empty());
-        due_effects(&m, &fire, 2.0, 1.0, &mut batch); // off-step → must clear
-        assert!(batch.is_empty(), "reused batch must be cleared on the off-step call");
-    }
 }

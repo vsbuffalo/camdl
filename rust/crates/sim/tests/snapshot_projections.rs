@@ -394,10 +394,10 @@ fn snapshot_reads_post_intervention_state() {
     let mut scratch = StepScratch::new(&compiled);
     let mut real = sim::state::RealState::new(compiled.real_local_to_global.len());
 
-    let fire_steps = compiled.resolve_fire_steps(1.0, &[]);
+    let plan = sim::effect_plan::EffectPlan::build(&compiled, &params, 0.0, 5.0, sim::effect_plan::FireClock::Grid { dt: 1.0 }, sim::effect_plan::Origin::Init).unwrap();
     for k in 0..5 {
         let t = k as f64;
-        sim::effects::due_effects(&compiled, &fire_steps, t + 1.0, 1.0, &mut scratch.effect_batch);
+        sim::effects::split_due_batch(&compiled, plan.batch_ending_substep(k as u64), &mut scratch.effect_batch);
         step_one(&compiled, &mut counts, &mut flows, &mut real, &params, t, 1.0, None, &mut rng, &mut scratch)
             .unwrap();
     }

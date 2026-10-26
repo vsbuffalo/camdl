@@ -842,9 +842,9 @@ pub struct CompiledModel {
     /// intervention vector lists every wall time at which that
     /// intervention fires (sorted, dt-invariant).
     ///
-    /// Backends derive the runtime view (step indices) by calling
-    /// [`CompiledModel::resolve_fire_steps`] with their integrator's
-    /// `dt`. This split is load-bearing: prior to gh#53 the
+    /// Every run derives its firing instants from these through the effect
+    /// plan ([`crate::effect_plan::EffectPlan::build`]) at its own clock,
+    /// `t_start` and `dt`. This split is load-bearing: prior to gh#53 the
     /// CompiledModel stored fire **steps** baked at compile time
     /// using `model.simulation.dt`, which silently went wrong any
     /// time the runtime integrator's dt differed (every
@@ -929,8 +929,8 @@ pub struct ResolvedModel {
     pub intervention_exprs: Vec<Vec<ResolvedExpr>>,
     /// gh#69: per-intervention pre-resolved `at [...]` time expressions.
     /// `Some(exprs)` iff the schedule is `InterventionSchedule::AtTimesExpr`,
-    /// `None` otherwise. Evaluated once per simulation start in
-    /// `CompiledModel::resolve_fire_steps` against the current `params`.
+    /// `None` otherwise. Evaluated once per run in
+    /// [`CompiledModel::resolve_fire_times`] against the run's `params`.
     pub intervention_at_time_exprs: Vec<Option<Vec<ResolvedExpr>>>,
     /// gh#209: flat-bytecode VM for the propensity hot path, built once at
     /// construction. `Some` iff `CAMDL_EVAL_FLAT` is set (see
@@ -1181,7 +1181,7 @@ impl CompiledModel {
     /// Validate the runtime time-axis at simulation start (gh#126): the
     /// integrator step `dt` must be finite and positive, and every
     /// resolved fire time must be finite. Backends call this ONCE at
-    /// their entry point, before `resolve_fire_steps` and the substep
+    /// their entry point, before building the effect plan and the substep
     /// loop.
     ///
     /// The inference/fit path does NOT call this — it has no single dispatch
@@ -1392,27 +1392,6 @@ impl CompiledModel {
             }
         }
         first
-    }
-
-    /// Derive per-intervention sets of step indices for a given
-    /// integrator step `dt` and parameter vector. The returned view is
-    /// a runtime projection of `self.resolve_fire_times(params)`;
-    /// backends call this once at sim start with `cfg.dt` and `params`
-    /// and use the local result for the duration of the run. See
-    /// `crate::time::time_to_step` for the rounding semantics, and
-    /// gh#53 for the architectural motivation (don't bake dt-dependent
-    /// indices on the dt-invariant CompiledModel). gh#69 added the
-    /// `params` arg so parametric `at [...]` schedules can be resolved
-    /// against the run's parameter vector instead of silently firing
-    /// at t=0.
-    pub fn resolve_fire_steps(
-        &self,
-        dt: f64,
-        params: &[f64],
-    ) -> Vec<std::collections::BTreeSet<i64>> {
-        self.resolve_fire_times(params).iter()
-            .map(|times| crate::time::fire_times_to_steps(times, dt))
-            .collect()
     }
 
     /// Gillespie's propensity-invalidation graph: compartment (local int index) →
@@ -1813,9 +1792,8 @@ impl CompiledModel {
 
         // Precompute fire **times** (continuous, dt-invariant) for all
         // interventions/events with constant schedules. The runtime view
-        // (step indices) is derived per-simulation via
-        // `CompiledModel::resolve_fire_steps` — see the field docstring
-        // and gh#53 for why this split is load-bearing.
+        // (firing instants) is derived per run by the effect plan — see the
+        // field docstring and gh#53 for why this split is load-bearing.
         //
         // gh#69: parametric `AtTimesExpr` schedules cannot be evaluated
         // here (we don't have `params` yet). Their slot is left empty

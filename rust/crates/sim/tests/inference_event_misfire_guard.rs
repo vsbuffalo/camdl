@@ -5,12 +5,12 @@
 //! The inference filters step EXACTLY to each observation time
 //! (`StepPolicy::Exact`). When an observation is off the dt grid, the final
 //! substep of that window is shortened: the realized substep length `dt_actual`
-//! diverges from the nominal model `grid_dt`. Always-active events key their
-//! firing on a step index (`time_to_step(t_end, ·)`) into a `fire_steps` table
-//! built on the nominal `grid_dt`. The defect this fix removes was that the
-//! firing key was computed on the *clipped* `dt_actual`, so the shortened
-//! substep landed on the wrong step — the event fired on the wrong step, or not
-//! at all, a silent likelihood error.
+//! diverges from the nominal model `grid_dt`. An event's firing instant comes
+//! from the run's effect plan (on the run's grid, independent of how the
+//! observations clip the substeps), and the filter lands on it. The defect the
+//! StepClock fix removed was a firing key computed on the *clipped* `dt_actual`,
+//! so the shortened substep landed on the wrong step — the event fired on the
+//! wrong step, or not at all, a silent likelihood error.
 //!
 //! Previously this configuration (off-grid obs + always-active event under
 //! Exact) was REJECTED at filter setup by `Schedule::reject_event_misfire`. With
@@ -19,11 +19,11 @@
 //!
 //!   1. The off-grid + event case now runs and returns a finite log-likelihood
 //!      (was rejected — the red→green proof at the filter level).
-//!   2. A direct `resolve_events` check: on a CLIPPED substep whose end lands on
-//!      a nominal grid time, the event fires keyed on `grid_dt`; the (old) key on
-//!      `dt_actual` would silently SKIP it. The negative control demonstrates the
-//!      bug the fix removes.
-//!   3. The on-grid + event and no-event controls still run unchanged.
+//!   2. The on-grid + event and no-event controls still run unchanged.
+//!
+//! The firing instant itself, with an off-grid observation re-tiling the
+//! substeps, is pinned in `gh216_cursor_firing.rs`
+//! (`pf_snaps_an_off_grid_effect_time`, the invariance tests).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,8 +37,6 @@ use ir::{
 };
 use sim::{
     compiled_model::CompiledModel,
-    effects::{due_effects, resolve_event_batch, EffectDeltas, EventPhase},
-    schedule::EffectBatch,
     inference::{
         obs_loglik::poisson_logpmf,
         particle_filter::bootstrap_filter,
@@ -46,8 +44,6 @@ use sim::{
         traits::{ObservationModel, SMCConfig},
         ParticleState,
     },
-    state::{IntState, RealState},
-    time::time_to_step,
 };
 
 struct PoissonPrevalenceObs {
@@ -168,69 +164,6 @@ fn pf_runs_off_grid_obs_with_always_active_event() {
     let ll = run(true, vec![3.5, 7.5])
         .expect("off-grid obs + always-active event must RUN, not be rejected");
     assert!(ll.is_finite(), "log-likelihood should be finite, got {ll}");
-}
-
-/// The firing-key fix at the resolution layer, deterministic and hand-computed.
-///
-/// An event is scheduled at the single nominal time t = 4.0 → `fire_steps =
-/// {time_to_step(4.0, grid_dt=1) = 4}`. Consider the CLIPPED substep `t0 = 3.5`,
-/// `dt_actual = 0.5` → `t_end = 4.0` (the substep an Exact filter takes after
-/// landing on an off-grid obs at 3.5, when the next boundary is the grid time
-/// 4.0). The event must fire here, keyed on the NOMINAL grid:
-///
-///   - CORRECT (grid_dt = 1.0): `time_to_step(4.0, 1.0) = 4` ∈ {4} → fires.
-///   - BUGGY  (dt_actual = 0.5): `time_to_step(4.0, 0.5) = 8` ∉ {4} → SILENTLY
-///     SKIPS — the lost firing this fix removes.
-///
-/// We assert both: the fixed call (grid_dt) emits the `add(N, +1)` delta, and the
-/// buggy call (grid_dt = dt_actual) emits nothing. This is the red→green at the
-/// function the filters call.
-#[test]
-fn resolve_events_keys_firing_on_grid_dt_not_clipped_dt() {
-    let compiled = death_model(Some(vec![4.0])); // single event at nominal t = 4
-    let params = compiled.default_params.clone();
-    let grid_dt = 1.0_f64;
-    let dt_actual = 0.5_f64;
-    let t0 = 3.5_f64; // clipped substep start; t_end = t0 + dt_actual = 4.0
-
-    // fire_steps is built on the NOMINAL grid (what the filter resolves).
-    let fire_steps = compiled.resolve_fire_steps(grid_dt, &params);
-    // Sanity: the event keys to nominal step 4, and the buggy dt_actual key would
-    // be step 8 — distinct, and 8 is NOT in the table, so the bug is observable.
-    assert!(fire_steps[0].contains(&time_to_step(4.0, grid_dt)),
-        "event must key to nominal grid step {} ", time_to_step(4.0, grid_dt));
-    assert!(!fire_steps[0].contains(&time_to_step(4.0, dt_actual)),
-        "the buggy dt_actual key (step {}) must be absent from the table so the \
-         misfire is a SKIP, not a coincidental hit", time_to_step(4.0, dt_actual));
-
-    let snap_int = IntState::from_vec(vec![100]);
-    let snap_real = RealState::new(0);
-
-    // The boundary the clipped substep lands on: t_end = t0 + dt_actual = 4.0.
-    let t_end = t0 + dt_actual;
-
-    // FIXED: firing keyed on grid_dt → due_effects routes the event into the
-    // batch, resolve_event_batch emits +1 to N (local int 0).
-    let mut batch = EffectBatch::default();
-    due_effects(&compiled, &fire_steps, t_end, grid_dt, &mut batch);
-    assert_eq!(batch.event_idx.as_slice(), &[0],
-        "event must be due on the clipped substep keyed on grid_dt");
-    let mut out = EffectDeltas::default();
-    // gh#217: `add(N, 1)` is an inflow → the SNAPSHOT phase. This guard is about
-    // firing-key timing (grid_dt vs dt_actual), independent of the phase split.
-    resolve_event_batch(&compiled, &batch.event_idx, &snap_int, &snap_real, &params,
-                        t_end, dt_actual, EventPhase::Snapshot, &mut out).unwrap();
-    assert_eq!(out.int.len(), 1, "event must fire on the clipped substep keyed on grid_dt");
-    assert_eq!(out.int[0].idx, 0, "the firing targets N (local int 0)");
-    assert_eq!(out.int[0].delta, 1, "add(N, 1) → +1");
-    assert!(out.real.is_empty());
-
-    // NEGATIVE CONTROL (the old behaviour): keying on the clipped dt_actual lands
-    // on step 8, which is not in the table → the event is not due (silent SKIP).
-    let mut buggy_batch = EffectBatch::default();
-    due_effects(&compiled, &fire_steps, t_end, /* grid_dt = */ dt_actual, &mut buggy_batch);
-    assert!(buggy_batch.is_empty(),
-        "keying on dt_actual misfires: the event would be silently skipped — the bug this fix removes");
 }
 
 /// CONTROL: the same event model with on-grid obs runs (always-active events with

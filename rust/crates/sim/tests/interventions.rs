@@ -10,9 +10,6 @@ use ir::{
 };
 use sim::{
     compiled_model::CompiledModel,
-    effects::due_effects,
-    intervention::apply_effect_batch,
-    schedule::EffectBatch,
     state::{IntState, RealState},
 };
 
@@ -20,24 +17,40 @@ fn int_comp(name: &str) -> Compartment {
     Compartment { name: name.into(), kind: CompartmentKind::Integer }
 }
 
-/// Test adapter preserving the old `apply_interventions_at` call shape: derive
-/// the due batch at `t` (the seam `due_effects` now owns) and apply the
-/// scheduled interventions. Byte-identical to the retired entry point.
+/// Test adapter: apply the scheduled interventions the run's effect plan fires
+/// at boundary `t` (the retired `apply_interventions_at`).
 #[allow(clippy::too_many_arguments)]
 fn apply_interventions_at(
     t: f64,
     model: &CompiledModel,
-    fire_steps: &[std::collections::BTreeSet<i64>],
+    plan: &sim::effect_plan::EffectPlan,
+    t_start: f64,
     dt: f64,
-    grid_dt: f64,
-    int_s: &mut IntState,
-    real_s: &mut RealState,
+    int_s: &mut sim::state::IntState,
+    real_s: &mut sim::state::RealState,
     params: &[f64],
-    _tolerance: f64,
 ) -> Result<bool, sim::error::SimError> {
-    let mut batch = EffectBatch::default();
-    due_effects(model, fire_steps, t, grid_dt, &mut batch);
-    apply_effect_batch(t, model, &batch.intervention_idx, dt, int_s, real_s, params)
+    let mut batch = sim::schedule::EffectBatch::default();
+    sim::effects::split_due_batch(model, &plan_batch_at(plan, t_start, t), &mut batch);
+    sim::intervention::apply_effect_batch(t, model, &batch.intervention_idx, dt, int_s, real_s, params)
+}
+
+/// The batch an [`EffectPlan`] fires at the boundary `t` of a walk from
+/// `t_start` (the origin batch at `t_start` itself).
+fn plan_batch_at(plan: &sim::effect_plan::EffectPlan, t_start: f64, t: f64) -> Vec<usize> {
+    if (t - t_start).abs() < 1e-9 {
+        return plan.at_origin().to_vec();
+    }
+    plan.times().iter().position(|&x| (x - t).abs() < 1e-9).map_or(Vec::new(), |i| plan.batch(i).to_vec())
+}
+
+/// A Grid plan for `model` over `[t_start, t_end]` at step `dt`.
+fn grid_plan(model: &CompiledModel, t_start: f64, t_end: f64, dt: f64) -> sim::effect_plan::EffectPlan {
+    sim::effect_plan::EffectPlan::build(
+        model, &model.default_params, t_start, t_end,
+        sim::effect_plan::FireClock::Grid { dt }, sim::effect_plan::Origin::Init,
+    )
+    .unwrap()
 }
 
 fn minimal_model_with_interventions(
@@ -110,8 +123,8 @@ fn test_fraction_transfer_uses_floor_not_round() {
     let mut int_s = IntState::from_vec(vec![1, 0]); // S=1, V=0
     let mut real_s = RealState::new(0);
 
-    let fire_steps = model.resolve_fire_steps(1.0, &[]);
-    apply_interventions_at(30.0, &model, &fire_steps, 1.0, 1.0, &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+    let plan = grid_plan(&model, 0.0, 100.0, 1.0);
+    apply_interventions_at(30.0, &model, &plan, 0.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
 
     // floor(1 * 0.6) = floor(0.6) = 0: no transfer should happen
     assert_eq!(int_s.counts[0], 1, "S should remain 1 (no transfer)");
@@ -143,8 +156,8 @@ fn test_fraction_transfer_floor_larger() {
     let mut int_s = IntState::from_vec(vec![5, 0]); // S=5, V=0
     let mut real_s = RealState::new(0);
 
-    let fire_steps = model.resolve_fire_steps(1.0, &[]);
-    apply_interventions_at(30.0, &model, &fire_steps, 1.0, 1.0, &mut int_s, &mut real_s, &[], 1e-10).unwrap();
+    let plan = grid_plan(&model, 0.0, 100.0, 1.0);
+    apply_interventions_at(30.0, &model, &plan, 0.0, 1.0, &mut int_s, &mut real_s, &[]).unwrap();
 
     // floor(5 * 0.8) = floor(4.0) = 4
     assert_eq!(int_s.counts[0], 1, "S should be 1 after 4 transferred");

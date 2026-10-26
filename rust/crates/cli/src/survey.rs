@@ -441,8 +441,7 @@ pub fn cmd_survey(a: &crate::args::SurveyArgs) {
     );
 
     // ── Parallel evaluation loop ────────────────────────────────────
-    // gh#53: the process must be built at the same dt as the filter so its
-    // internal fire_steps resolves correctly — hence the single `SURVEY_DT`.
+    // One step for the whole survey: the filter builds its effect plan on it.
     let smc_dt = SURVEY_DT;
     let process = Arc::new(ChainBinomialProcess::new(resolved.compiled.clone()));
     let t_start = resolved.compiled.model.simulation.t_start;

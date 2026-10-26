@@ -10,11 +10,11 @@
 //! was never called in the PGAS path → a scheduled SIA transfer never fires in
 //! the PGAS-produced latent trajectory.
 //!
-//! Since that issue, the effects path was unified (`due_effects` →
-//! `apply_post_advance`): `step_one` now routes ALL due interventions through
-//! `effect_batch`, splitting `always_active` → `event_idx` and scheduled →
-//! `intervention_idx`, and applies BOTH. `simulate_reference` (the PGAS producer)
-//! resolves `fire_steps` over ALL interventions and calls the same `step_one`.
+//! Since that issue, the effects path was unified: `step_one` routes ALL due
+//! effects through `effect_batch`, splitting `always_active` → `event_idx` and
+//! scheduled → `intervention_idx`, and applies BOTH. `simulate_reference` (the
+//! PGAS producer) fills the batch from the run's effect plan, over ALL
+//! interventions, and calls the same `step_one`.
 //!
 //! This test settles the question with actual counts, not code reading.
 //!
@@ -101,7 +101,7 @@ fn gh187_pgas_applies_scheduled_intervention() {
     }
 
     // Probe the post-boundary state: the substep that advances to t=5 carries the
-    // event + scheduled-intervention application (fire keys on round(t/dt)=5).
+    // event + scheduled-intervention application (the plan's step k = 5).
     // counts_after at the substep ending at t=5 is the canonical post-lifecycle
     // state; it holds for all t >= 5 (zero rate, no further events).
     let s5 = ((5.0 - t_start) / dt - 1.0).round() as usize; // substep ending at t=5

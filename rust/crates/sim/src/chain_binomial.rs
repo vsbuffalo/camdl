@@ -68,9 +68,9 @@ pub struct StepScratch {
     /// ([`crate::effects::apply_event_phases`]). Cleared per phase.
     event_deltas: crate::effects::EffectDeltas,
     /// Reusable due-batch for this substep — the interventions/events firing at
-    /// `t + dt`. The CALLER populates it before each `step_one` (gh#216): the
-    /// Snap-forward driver via the `round(t/dt)` key, the Exact-inference callers
-    /// via cursor-keyed scheduled interventions plus `grid_dt`-keyed events.
+    /// `t + dt`. The CALLER populates it before each `step_one`, from the run's
+    /// effect plan (`effect_plan::EffectPlan`): the forward driver and the PGAS
+    /// producers by substep index, the inference filters at each landing.
     /// `step_one` consumes it at the PROPOSE (event_idx) and INTERVENE
     /// (intervention_idx) stages. Reused across substeps (one batch per particle)
     /// — no per-step allocation on the inference hot path.
@@ -311,8 +311,8 @@ pub fn run_chain_binomial_with_observer(
         // leaving the cursor pointing AT the T* output boundary, so the initial-row
         // emit below fires for T* with zeroed flows (post-fork incidence starts at
         // 0 — no extra flow-zeroing needed). The effect/obs cursors are NOT
-        // re-seated: the Snap path reads neither (fire_steps are absolute and
-        // already correct at T* = cfg.t_start; obs is inference-only).
+        // re-seated: the Snap path reads neither (the effect plan is built on
+        // this run's own window from T* = cfg.t_start; obs is inference-only).
         schedule.drain_outputs(
             &mut cursor,
             cfg.t_start - 2.0 * crate::schedule::output_tol(cfg.t_start),
@@ -543,12 +543,10 @@ pub fn trace_enabled() -> bool {
 /// `step_one` no longer DECIDES which effects fire — it APPLIES the batch the
 /// CALLER has pre-populated in `scratch.effect_batch` (`event_idx` at PROPOSE,
 /// `intervention_idx` at INTERVENE). This lifts the firing decision out of the
-/// shared step (gh#216): the Snap-forward driver fills the batch via the
-/// `round(t/dt)` key ([`crate::effects::due_effects`]); the Exact-inference
-/// callers fire EVERY effect — events and scheduled interventions alike —
-/// CURSOR-keyed from the timeline's effect boundaries, splitting the boundary's
-/// batch by kind via [`crate::effects::split_due_batch`] (no `round(t/dt)` for
-/// events; gh#216 events arm).
+/// shared step (gh#216): every caller fills the batch from the run's
+/// [`EffectPlan`](crate::effect_plan::EffectPlan), split by kind via
+/// [`crate::effects::split_due_batch`] — the forward driver and the PGAS
+/// producers by substep index, the inference filters at each landing.
 ///
 /// `scratch` holds pre-allocated buffers to avoid heap allocation per call.
 /// Create one `StepScratch` per particle and reuse across all time steps.
@@ -756,10 +754,9 @@ pub fn step_one(
     }
 
     // The due batch for this substep was pre-populated in `scratch.effect_batch`
-    // by the caller (gh#216): the Snap-forward driver via the `round(t/dt)` key,
-    // the Exact-inference callers via cursor-keyed scheduled interventions plus
-    // `grid_dt`-keyed events. Consumed by PROPOSE (event_idx) here and INTERVENE
-    // (intervention_idx) below — `step_one` never re-derives due-ness.
+    // by the caller from the run's effect plan. Consumed by PROPOSE (event_idx)
+    // here and INTERVENE (intervention_idx) below — `step_one` never re-derives
+    // due-ness.
 
     // §13.10 stages 1-3 through the shared seam (gh#985): the INFLOW phase
     // (`add`) resolves against the start-of-step snapshot; the advance hook adds

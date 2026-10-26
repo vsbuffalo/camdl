@@ -130,14 +130,9 @@ pub fn run_gillespie_with_observer(
     // Propensity buffer — allocated once, reused
     let mut propensities: Vec<f64> = Vec::with_capacity(n_transitions);
 
-    // Sorted output times
-    // gh#53: resolve fire_steps using the model's compile-time dt.
-    // Gillespie has no runtime dt of its own (continuous-time SSA); the
-    // fire_steps lookup uses model.simulation.dt as a step-rounding
-    // resolution. Pre-gh#53 this was implicit inside
-    // apply_interventions_at; making it explicit means gillespie shares
-    // the same call signature as the dt-parameterised backends without
-    // changing observed semantics.
+    // Gillespie has no step of its own (continuous-time SSA). The model's
+    // declared dt stands in for one where an expression reads `dt` (effect
+    // amounts); effects fire at their declared instants (the Exact plan below).
     let iv_resolution_dt = model.model.simulation.dt.unwrap_or(1.0);
     // gh#126: reject a non-finite/non-positive intervention-resolution dt
     // or a non-finite fire time at entry — a RELEASE-build check (the
