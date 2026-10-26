@@ -196,3 +196,58 @@ fn profile_rw_sd_auto_does_not_estimate_a_model_constant() {
     assert!(!est.contains(&"omega".to_string()),
         "omega is a model constant but was estimated: {est:?}");
 }
+
+/// A sweep value outside the parameter's bounds is refused, naming the
+/// parameter, the offending values and the bounds — the model's declared
+/// bounds, narrowed by the fit config's `[estimate]` bounds. A `--starts` value
+/// outside them already was; the sweep ran.
+#[test]
+fn profile_refuses_sweep_values_outside_bounds() {
+    let tmp = tempdir("sweep_bounds");
+    let ir = compile(tmp.path(), "m", MODEL);
+    let data = tmp.path().join("cases.tsv");
+    let fixed = tmp.path().join("fixed.toml");
+    std::fs::write(&fixed,
+        "beta = 0.3\ngamma = 0.15\nrho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
+    let run = |cwd: &Path, sweep: &str, fit: Option<&Path>| {
+        let mut args = vec![
+            "profile", ir.to_str().unwrap(),
+            "--data", data.to_str().unwrap(),
+            "--fixed-file", fixed.to_str().unwrap(),
+            "--sweep", sweep, "--rw-sd", "auto",
+        ];
+        if let Some(f) = fit { args.extend_from_slice(&["--fit", f.to_str().unwrap()]); }
+        args.extend_from_slice(PROFILE_KNOBS);
+        camdl(cwd, &args)
+    };
+
+    // Model bounds: beta in [0.05, 1].
+    let out = run(&tmp.path().join("model"), "beta=0.5,2.0,3.0", None);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a sweep to beta=2.0 must be refused:\n{err}");
+    assert!(err.contains("beta") && err.contains("2") && err.contains("3")
+        && err.contains("[0.05, 1]"),
+        "the refusal names the parameter, the values and the bounds:\n{err}");
+    assert!(find(&tmp.path().join("model"), "run.json").is_empty(),
+        "no cell may be written for a refused sweep");
+
+    // `[estimate]` bounds narrow the model's: beta in [0.1, 0.5].
+    let fit = tmp.path().join("fit.toml");
+    std::fs::write(&fit, format!(r#"[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[estimate]
+beta = {{ bounds = [0.1, 0.5] }}
+[fixed]
+gamma = 0.15
+"#, ir = ir.display(), data = data.display())).unwrap();
+    let out = run(&tmp.path().join("est"), "beta=0.3,0.7", Some(&fit));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "beta=0.7 is outside [estimate] bounds:\n{err}");
+    assert!(err.contains("0.7") && err.contains("[0.1, 0.5]"),
+        "the refusal names the narrowed bounds:\n{err}");
+
+    // Control: inside the bounds, the same profile runs.
+    ok(run(&tmp.path().join("inside"), "beta=0.2,0.4", Some(&fit)));
+}

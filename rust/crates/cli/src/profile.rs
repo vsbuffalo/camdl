@@ -707,9 +707,40 @@ pub fn cmd_profile(a: &crate::args::ProfileArgs) {
                 eprintln!("focal parameter '{}' not found", sw.name);
                 std::process::exit(1);
             });
+        let values = sw.grid.expand();
+        // A grid value outside the parameter's range would be written straight
+        // over the parameter at that cell, where no other check sees it (a
+        // `--starts` value goes through the resolver's bounds check; a sweep
+        // value does not). The range is the model's (`resolved_bounds`, read
+        // off the IR as loaded), narrowed by the fit config's `[estimate]`
+        // bounds when it gives them.
+        let model_bounds = model_pre.parameters.iter()
+            .find(|p| p.name == sw.name)
+            .and_then(crate::params_resolver::resolved_bounds);
+        let fit_bounds = fit_estimate.get(&sw.name).and_then(|e| e.bounds);
+        let bounds = match (model_bounds, fit_bounds) {
+            (Some((mlo, mhi)), Some((flo, fhi))) => Some((mlo.max(flo), mhi.min(fhi))),
+            (m, f) => f.or(m),
+        };
+        if let Some((lo, hi)) = bounds {
+            let outside: Vec<String> = values.iter()
+                .filter(|&&v| !(lo..=hi).contains(&v))
+                .map(|v| v.to_string())
+                .collect();
+            if !outside.is_empty() {
+                eprintln!(
+                    "error: --sweep {}: value(s) {} outside the parameter's bounds [{}, {}]{}. \
+                     Sweep only inside the bounds.",
+                    sw.name, outside.join(", "), lo, hi,
+                    if fit_bounds.is_some() { " (the model's, narrowed by --fit [estimate])" }
+                    else { " (the model's)" },
+                );
+                std::process::exit(1);
+            }
+        }
         focal_grids.push(FocalGrid {
             name: sw.name.clone(),
-            values: sw.grid.expand(),
+            values,
             param_idx: idx,
         });
     }
