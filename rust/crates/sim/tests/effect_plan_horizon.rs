@@ -98,3 +98,20 @@ fn the_filter_sees_an_effect_simulate_fires_at_the_last_observation() {
     assert_ne!(late[9], none[9], "the reading at 10 sees the event");
     assert_eq!(late[..9], none[..9], "no earlier reading sees it");
 }
+
+/// The PGAS producer fires on the same plan: with `add(I, 500)` at 10.3,
+/// `to = 20` and observations on 1..10, the reference walk's last substep
+/// (ending at 10) applies the event, so the path the PGAS density scores has
+/// I = 510 at t = 10. With the last observation as the horizon the event fell
+/// outside the window and the path stayed at I = 10.
+#[test]
+fn the_pgas_producer_fires_an_effect_simulate_fires_at_the_last_observation() {
+    let m = model(&[10.3], 500.0, 20.0);
+    let mut rng = sim::rng::StatefulRng::new(1);
+    let traj = sim::inference::pgas::simulate_reference(&m, &m.default_params, 10.0, 1.0, &mut rng)
+        .expect("reference walk");
+    assert_eq!(traj.substeps.len(), 10);
+    let i: Vec<i64> = traj.substeps.iter().map(|r| r.counts_after[1]).collect();
+    assert_eq!(i[8], 10, "nothing before the step ending at 10");
+    assert_eq!(i[9], 510, "the event acts on the step ending at 10");
+}

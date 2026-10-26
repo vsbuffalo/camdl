@@ -1244,7 +1244,8 @@ pub fn build_obs_at_substep(
                     "observation times {} and {} are closer than dt = {} to t_start = {}; \
                      under snap obs-alignment both are scored at t_start and one would be \
                      silently dropped from the likelihood. Use a dt finer than the \
-                     smallest observation gap, or remove the closer observation.",
+                     smallest observation gap, run with --obs-alignment exact, or remove \
+                     the closer observation.",
                     observations[prev].time, obs.time, dt, t_start
                 )));
             }
